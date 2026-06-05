@@ -42,7 +42,7 @@ export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
             {t("onboarding.heroTitleSuffix" as Parameters<typeof t>[0])}
           </h1>
 
-          <p className="mt-[5px] max-w-sm text-[15px] leading-7 text-ink-body">
+          <p className="mt-[5px] max-w-[424px] text-[15px] leading-7 text-ink-body">
             {t("onboarding.heroSubtitlePrefix" as Parameters<typeof t>[0])}
             <span className="font-medium text-ink-body">
               {t("onboarding.heroSubtitleAccent" as Parameters<typeof t>[0])}
