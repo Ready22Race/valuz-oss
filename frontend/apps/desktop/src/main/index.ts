@@ -15,6 +15,7 @@ import {
 } from "./services/system-logs";
 import { createAppTray } from "./tray";
 import { scheduleUpdateCheck, setupUpdater } from "./updater";
+import { closeUpdateWindow, createUpdateWindow, getUpdateWindow } from "./update-window";
 import { createMainWindow, getMainWindow } from "./windows";
 import { DESKTOP_CHANNELS } from "../preload/channels";
 
@@ -37,14 +38,25 @@ const bootstrap = async () => {
   startLogTail();
   await createMainWindow();
 
-  const updater = setupUpdater({ getMainWindow });
+  const updater = setupUpdater({ getMainWindow, getUpdateWindow: () => getUpdateWindow() });
   // Renderer-driven manual check + restart-to-install. setupUpdater()
   // also wires the periodic auto-check (see scheduleUpdateCheck below);
   // these handlers exist so the UI can drive it on demand.
   ipcMain.handle(DESKTOP_CHANNELS.updaterCheck, () =>
     updater.checkForUpdates(),
   );
+  ipcMain.handle(DESKTOP_CHANNELS.updaterDownload, () =>
+    updater.downloadUpdate(),
+  );
+  ipcMain.handle(DESKTOP_CHANNELS.updaterGetState, () =>
+    updater.getUpdaterState(),
+  );
+  ipcMain.handle(DESKTOP_CHANNELS.updaterShowWindow, () => {
+    const state = updater.getUpdaterState();
+    createUpdateWindow(state.version ?? "unknown");
+  });
   ipcMain.handle(DESKTOP_CHANNELS.updaterQuitAndInstall, () => {
+    closeUpdateWindow();
     updater.quitAndInstall();
   });
   Menu.setApplicationMenu(

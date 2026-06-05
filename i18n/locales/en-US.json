@@ -1649,11 +1649,16 @@
     "showWindow": "Show window"
   },
   "updater": {
+    "availableDesc": "A new version is available. Download and install it now.",
     "downloadedTitle": "Update ready",
     "downloadedDesc": "A new version has been downloaded. Restart to install.",
-    "restartNow": "Restart now",
+    "downloadNow": "Download update",
+    "downloading": "Downloading...",
+    "downloadingDesc": "Downloading update, please wait...",
     "errorTitle": "Update failed",
-    "errorUnknown": "Unknown error"
+    "errorUnknown": "Unknown error",
+    "restartNow": "Restart now",
+    "updateAvailable": "Update available"
   },
   "ui": {
     "deleteConfirm": {

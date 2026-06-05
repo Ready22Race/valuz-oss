@@ -1,7 +1,6 @@
-import { useEffect, useRef } from "react";
-import { toast } from "sonner";
-import { t as _t } from "@valuz/shared/i18n";
-import { DESKTOP_CHANNELS, DESKTOP_EVENTS } from "../../preload/channels";
+import { useEffect } from "react";
+import { DESKTOP_EVENTS } from "../../preload/channels";
+import { useUpdaterStore } from "@valuz/core";
 
 type DesktopBridge = {
   invoke: <T>(ch: string, args?: unknown) => Promise<T>;
@@ -12,6 +11,15 @@ type DesktopBridge = {
 const getBridge = (): DesktopBridge | null =>
   (window as Window & { valuzDesktop?: DesktopBridge }).valuzDesktop ?? null;
 
+interface AvailableInfo {
+  version?: string;
+}
+
+interface ProgressInfo {
+  percent?: number;
+  bytesPerSecond?: number;
+}
+
 interface DownloadedInfo {
   version?: string;
 }
@@ -21,62 +29,68 @@ interface ErrorInfo {
 }
 
 /**
- * Mounted once at the renderer root. Translates the main process's
- * autoUpdater lifecycle events into user-visible toasts:
- *
- *   - `updater:downloaded` → persistent toast with "Restart now" action
- *   - `updater:error`      → transient error toast
- *
- * `updater:checking / available / progress / not-available` are intentionally
- * silent — surfacing them as toasts would be noisy given the 30-min periodic
- * background check. Manual checks (Settings → About) can read those events
- * directly when that UI lands.
+ * Mounted once at the renderer root. Listens to the main process's
+ * autoUpdater lifecycle events and populates the updater Zustand store
+ * so the UI (UpdateButton) can react.
  */
 export const UpdaterListener = () => {
-  // sonner returns numeric/string IDs we use to dismiss the persistent
-  // "ready to install" toast if the user manually checks again later.
-  const downloadedToastId = useRef<number | string | null>(null);
+  const store = useUpdaterStore;
 
   useEffect(() => {
     const bridge = getBridge();
     if (!bridge) return;
 
+    const onChecking = () => {
+      store.getState().setChecking();
+    };
+
+    const onAvailable = (payload: unknown) => {
+      const info = (payload ?? {}) as AvailableInfo;
+      store.getState().setAvailable(info.version ?? "unknown");
+    };
+
+    const onNotAvailable = () => {
+      store.getState().setNotAvailable();
+    };
+
+    const onProgress = (payload: unknown) => {
+      const info = (payload ?? {}) as ProgressInfo;
+      store.getState().setProgress(
+        info.percent ?? 0,
+        info.bytesPerSecond ?? 0,
+      );
+    };
+
     const onDownloaded = (payload: unknown) => {
       const info = (payload ?? {}) as DownloadedInfo;
-      const version = info.version ? ` v${info.version}` : "";
-      if (downloadedToastId.current !== null) {
-        toast.dismiss(downloadedToastId.current);
+      const s = store.getState();
+      s.setDownloaded();
+      if (info.version && !s.version) {
+        store.setState({ version: info.version });
       }
-      downloadedToastId.current = toast.success(
-        _t("updater.downloadedTitle") + version,
-        {
-          description: _t("updater.downloadedDesc"),
-          duration: Number.POSITIVE_INFINITY,
-          action: {
-            label: _t("updater.restartNow"),
-            onClick: () => {
-              void bridge.invoke(DESKTOP_CHANNELS.updaterQuitAndInstall);
-            },
-          },
-        },
-      );
     };
 
     const onError = (payload: unknown) => {
       const info = (payload ?? {}) as ErrorInfo;
-      toast.error(_t("updater.errorTitle"), {
-        description: info.message ?? _t("updater.errorUnknown"),
-      });
+      store.getState().setError(info.message ?? "Unknown error");
     };
 
+    bridge.on(DESKTOP_EVENTS.updaterChecking, onChecking);
+    bridge.on(DESKTOP_EVENTS.updaterAvailable, onAvailable);
+    bridge.on(DESKTOP_EVENTS.updaterNotAvailable, onNotAvailable);
+    bridge.on(DESKTOP_EVENTS.updaterProgress, onProgress);
     bridge.on(DESKTOP_EVENTS.updaterDownloaded, onDownloaded);
     bridge.on(DESKTOP_EVENTS.updaterError, onError);
 
     return () => {
+      bridge.off(DESKTOP_EVENTS.updaterChecking, onChecking);
+      bridge.off(DESKTOP_EVENTS.updaterAvailable, onAvailable);
+      bridge.off(DESKTOP_EVENTS.updaterNotAvailable, onNotAvailable);
+      bridge.off(DESKTOP_EVENTS.updaterProgress, onProgress);
       bridge.off(DESKTOP_EVENTS.updaterDownloaded, onDownloaded);
       bridge.off(DESKTOP_EVENTS.updaterError, onError);
     };
-  }, []);
+  }, [store]);
 
   return null;
 };
