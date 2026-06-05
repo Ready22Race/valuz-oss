@@ -4,7 +4,11 @@
   "private": true,
   "version": "0.1.0",
   "description": "Electron desktop shell for Valuz Agent",
-  "author": "Valuz",
+  "author": {
+    "name": "Valuz",
+    "email": "dev@valuz.io"
+  },
+  "homepage": "https://valuz.io",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
