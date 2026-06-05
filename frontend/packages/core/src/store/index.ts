@@ -4,6 +4,7 @@ export * from "./auth-store";
 export * from "./chat-store";
 export * from "./decision-store";
 export * from "./panel-store";
+export * from "./updater-store";
 export * from "./service-store";
 export * from "./session-store";
 export * from "./settings-store";

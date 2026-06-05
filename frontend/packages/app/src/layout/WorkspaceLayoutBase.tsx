@@ -71,6 +71,7 @@ import {
   DecisionInboxProvider,
 } from "../components/DecisionInbox";
 import { usePlatform } from "../platform";
+import { UpdateButton } from "../components/UpdateButton";
 import type { WorkspaceOutletContext } from "./types";
 
 export type DirectoryFieldMode = "input" | "picker";
@@ -163,6 +164,17 @@ export function WorkspaceLayoutBase({
     () => (window.history.state as { idx?: number } | null)?.idx ?? 0,
   );
   const [historyMaxIdx, setHistoryMaxIdx] = useState<number>(historyIdx);
+
+  const updaterBridge = useMemo(() => {
+    type DesktopBridge = { invoke: <T>(ch: string, args?: unknown) => Promise<T> };
+    return (window as Window & { valuzDesktop?: DesktopBridge }).valuzDesktop ?? null;
+  }, []);
+
+  const handleOpenUpdateWindow = useCallback(() => {
+    if (!updaterBridge) return;
+    void updaterBridge.invoke("updater:show-window");
+  }, [updaterBridge]);
+
   const fetchProjects = useCallback(async () => {
     try {
       const data = await workspacesApi.list();
@@ -578,6 +590,11 @@ export function WorkspaceLayoutBase({
               </DropdownMenu>
             }
             rightControl={topbarRightControl}
+            extraLeft={
+              platform.isElectron ? (
+                <UpdateButton onClick={handleOpenUpdateWindow} />
+              ) : undefined
+            }
           />
         }
         sidebar={

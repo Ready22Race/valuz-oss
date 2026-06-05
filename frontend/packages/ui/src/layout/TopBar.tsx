@@ -28,6 +28,8 @@ export interface TopBarProps {
   canGoBack?: boolean;
   /** Disabled state for the forward button (no future entry). */
   canGoForward?: boolean;
+  /** Optional element rendered after the navigation buttons on the left. */
+  extraLeft?: ReactNode;
   /**
    * Reserve ~58px on the left for the macOS traffic-light buttons.
    * Defaults to ``true`` — Electron-rendered windows always need it.
@@ -48,6 +50,7 @@ export const TopBar = ({
   onToggleSidebar,
   logo,
   rightControl,
+  extraLeft,
   onGoBack,
   onGoForward,
   canGoBack = true,
@@ -155,6 +158,7 @@ export const TopBar = ({
             </div>
           </TooltipProvider>
         )}
+        {extraLeft}
       </div>
 
       {/* Drag spacer fills the middle so the user can drag the window from

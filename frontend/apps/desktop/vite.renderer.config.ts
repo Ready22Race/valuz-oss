@@ -13,10 +13,6 @@ export default defineConfig({
   envDir: path.resolve(__dirname, "../.."),
   define: {
     ...base.define,
-    // In production builds, the desktop app bundles its own backend on port
-    // 19100 (PERSONAL_PORTS.AGENT_SERVER). Override the default
-    // http://localhost:8000 used by @valuz/core API modules.
-    // In dev mode, keep the default so `valuz start` (which boots backend on :8000) works.
     ...(process.env.NODE_ENV === "production" ||
     !process.env.VITE_DEV_SERVER_URL
       ? {
@@ -36,5 +32,11 @@ export default defineConfig({
   base: "./",
   build: {
     outDir: "dist",
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        update: path.resolve(__dirname, "update.html"),
+      },
+    },
   },
 });

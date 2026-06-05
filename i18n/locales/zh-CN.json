@@ -1648,11 +1648,16 @@
     "showWindow": "显示窗口"
   },
   "updater": {
+    "availableDesc": "发现新版本，立即下载安装。",
     "downloadedTitle": "新版本已就绪",
     "downloadedDesc": "更新已下载完成，重启后将自动安装。",
-    "restartNow": "立即重启",
+    "downloadNow": "下载更新",
+    "downloading": "下载中...",
+    "downloadingDesc": "正在下载更新，请稍候...",
     "errorTitle": "更新失败",
-    "errorUnknown": "未知错误"
+    "errorUnknown": "未知错误",
+    "restartNow": "立即重启",
+    "updateAvailable": "发现新版本"
   },
   "ui": {
     "deleteConfirm": {

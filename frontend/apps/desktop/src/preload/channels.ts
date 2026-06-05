@@ -19,7 +19,10 @@ export const DESKTOP_CHANNELS = {
   cliInstallToPath: "cli_install_to_path",
   cliUninstallFromPath: "cli_uninstall_from_path",
   updaterCheck: "updater:check",
+  updaterDownload: "updater:download",
   updaterQuitAndInstall: "updater:quit-and-install",
+  updaterShowWindow: "updater:show-window",
+  updaterGetState: "updater:get-state",
 } as const;
 
 export const DESKTOP_EVENTS = {
