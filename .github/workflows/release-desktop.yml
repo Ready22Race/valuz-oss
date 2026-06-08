@@ -44,28 +44,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "25"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
+          cache-dependency-path: cli/go.sum
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Cache Electron binary
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/electron
+          key: electron-${{ runner.os }}-${{ hashFiles('frontend/apps/desktop/package.json') }}
+          restore-keys: electron-${{ runner.os }}-
 
       # ── Apple code-signing credentials ──────────────────────────
       # CSC_LINK: base64-encoded .p12 certificate
@@ -125,28 +138,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "25"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
+          cache-dependency-path: cli/go.sum
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Cache Electron binary
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/electron
+          key: electron-${{ runner.os }}-${{ hashFiles('frontend/apps/desktop/package.json') }}
+          restore-keys: electron-${{ runner.os }}-
 
       # ── Apple code-signing credentials ──────────────────────────
       - name: Import signing certificate
@@ -203,28 +229,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "25"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
+          cache-dependency-path: cli/go.sum
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
 
       - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Cache Electron binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/electron
+          key: electron-${{ runner.os }}-${{ hashFiles('frontend/apps/desktop/package.json') }}
+          restore-keys: electron-${{ runner.os }}-
 
       - name: Install system dependencies
         run: |
