@@ -264,7 +264,7 @@ const PresetDetail = ({
           </div>
         </div>
       )}
-      <div className="space-y-2.5">
+      <div className="overflow-hidden rounded-xl border border-surface-border bg-surface shadow-sm [&>*+*]:border-t [&>*+*]:border-[#f7f8fa]">
         {team.members.map((m) => (
           <MemberCard key={m.nameKey} member={m} />
         ))}
@@ -284,7 +284,7 @@ const PresetDetail = ({
 const MemberCard = ({ member }: { member: TeamMember }) => {
   const { t } = useTranslation();
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-surface-border bg-surface p-3.5">
+    <div className="mx-3.5 flex items-start gap-3 py-3.5">
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-[18px]">
         {member.avatar}
       </span>
@@ -294,7 +294,7 @@ const MemberCard = ({ member }: { member: TeamMember }) => {
             {t(member.nameKey as Parameters<typeof t>[0])}
           </span>
           {member.tag && (
-            <span className="rounded bg-brand-light px-1.5 text-2xs font-bold uppercase text-brand-700">
+            <span className="inline-flex h-4 items-center rounded-[4px] bg-[#725cf9]/10 px-1 text-[10px] leading-none font-normal uppercase text-[#725cf9]">
               {member.tag}
             </span>
           )}
