@@ -25,6 +25,7 @@ import {
   useTranslation,
   type SkillCreationContext,
   type SkillImportArchivePreview,
+  type SkillImportCandidate,
 } from "@valuz/core";
 import { toast } from "sonner";
 
@@ -40,12 +41,7 @@ export interface SkillAddDialogCallbacks {
   onStartAiCreate: (
     context: SkillCreationContext,
   ) => Promise<{ session_id: string }>;
-  onLinkPreview: (url: string) => Promise<{
-    preview_id: string;
-    name: string;
-    description: string;
-    file_tree: { path: string; type: string; size?: number | null }[];
-  }>;
+  onLinkPreview: (url: string) => Promise<SkillImportArchivePreview>;
   onLinkConfirm: (data: {
     preview_id: string;
     name: string;
@@ -87,6 +83,10 @@ export function SkillAddDialog({
 
   const [linkPreview, setLinkPreview] = useState<LinkPreview | null>(null);
   const [linkPreviewId, setLinkPreviewId] = useState<string | null>(null);
+  const [linkCandidates, setLinkCandidates] = useState<SkillImportCandidate[]>(
+    [],
+  );
+  const [linkSelectedIds, setLinkSelectedIds] = useState<string[]>([]);
   const [linkFetching, setLinkFetching] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
 
@@ -99,6 +99,8 @@ export function SkillAddDialog({
     setUploadPreviewing(false);
     setDragActive(false);
     setLinkPreview(null);
+    setLinkCandidates([]);
+    setLinkSelectedIds([]);
     setLinkFetching(false);
     setLinkError(null);
     setLinkPreviewId(null);
@@ -174,6 +176,8 @@ export function SkillAddDialog({
   const handleLinkFetch = async (url: string) => {
     setLinkFetching(true);
     setLinkError(null);
+    setLinkCandidates([]);
+    setLinkSelectedIds([]);
     try {
       const preview = await onLinkPreview(url);
       setLinkPreviewId(preview.preview_id);
@@ -184,6 +188,13 @@ export function SkillAddDialog({
           .filter((f) => f.type === "file")
           .map((f) => ({ path: f.path, size: f.size ?? 0 })),
       });
+      // A collection/plugin URL yields >1 skill — surface them all and
+      // default to importing every one (user can uncheck).
+      const candidates = preview.skills ?? [];
+      if (candidates.length > 1) {
+        setLinkCandidates(candidates);
+        setLinkSelectedIds(candidates.map((c) => c.preview_id));
+      }
     } catch (err) {
       setLinkError(
         err instanceof Error
@@ -195,7 +206,53 @@ export function SkillAddDialog({
     }
   };
 
+  const toggleLinkCandidate = (previewId: string) => {
+    setLinkSelectedIds((prev) =>
+      prev.includes(previewId)
+        ? prev.filter((id) => id !== previewId)
+        : [...prev, previewId],
+    );
+  };
+
   const handleLinkImport = async () => {
+    const isMulti = linkCandidates.length > 1;
+
+    if (isMulti) {
+      const chosen = linkCandidates.filter((c) =>
+        linkSelectedIds.includes(c.preview_id),
+      );
+      if (chosen.length === 0) return;
+      setSubmitting(true);
+      // Confirm is one call per skill (each candidate has its own preview_id).
+      const results = await Promise.allSettled(
+        chosen.map((c) =>
+          onLinkConfirm({ preview_id: c.preview_id, name: c.name }),
+        ),
+      );
+      const failed = results.filter((r) => r.status === "rejected").length;
+      setSubmitting(false);
+      if (failed === 0) {
+        toast.success(
+          t("skill.importedCount" as Parameters<typeof t>[0], {
+            count: chosen.length,
+          }),
+        );
+        handleClose();
+        onComplete();
+      } else if (failed < chosen.length) {
+        toast.warning(
+          t("skill.importedPartial" as Parameters<typeof t>[0], {
+            ok: chosen.length - failed,
+            failed,
+          }),
+        );
+        onComplete();
+      } else {
+        toast.error(t("skill.importAllFailed" as Parameters<typeof t>[0]));
+      }
+      return;
+    }
+
     if (!linkPreview || !linkPreviewId) return;
     setSubmitting(true);
     try {
@@ -278,6 +335,9 @@ export function SkillAddDialog({
                 onImport={handleLinkImport}
                 onCancel={handleClose}
                 preview={linkPreview}
+                candidates={linkCandidates}
+                selectedIds={linkSelectedIds}
+                onToggleCandidate={toggleLinkCandidate}
                 fetching={linkFetching}
                 importing={submitting}
                 error={linkError}

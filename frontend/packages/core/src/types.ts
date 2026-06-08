@@ -89,8 +89,10 @@ export type {
 export type {
   SkillView,
   SkillDetail,
+  SkillOrigin,
   SkillDeletePreview,
   SkillImportArchivePreview,
+  SkillImportCandidate,
   SkillCreationContext,
   SkillCreateStartResponse,
   SkillSubmissionConfirmResponse,

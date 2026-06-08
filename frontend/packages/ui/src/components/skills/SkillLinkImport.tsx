@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { Loader2, CheckCircle, AlertCircle } from "lucide-react";
+import { Loader2, CheckCircle, AlertCircle, Layers } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Checkbox } from "../ui/checkbox";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../hooks/use-i18n";
 
@@ -11,11 +12,27 @@ export interface LinkPreview {
   files: { path: string; size?: number }[];
 }
 
+/** One skill detected inside the fetched source. When the source holds more
+ * than one (a collection/plugin), the dialog passes the full list so the user
+ * can multi-select which skills to import. */
+export interface LinkSkillCandidate {
+  preview_id: string;
+  name: string;
+  description: string;
+  file_count?: number;
+  relpath?: string;
+}
+
 export interface SkillLinkImportProps {
   onFetch: (url: string) => void;
   onImport: () => void;
   onCancel: () => void;
   preview: LinkPreview | null;
+  /** Multi-skill sources (length > 1) switch the preview into a checklist.
+   * The dialog owns selection state and passes it down. */
+  candidates?: LinkSkillCandidate[];
+  selectedIds?: string[];
+  onToggleCandidate?: (previewId: string) => void;
   fetching: boolean;
   importing: boolean;
   error: string | null;
@@ -27,6 +44,9 @@ export const SkillLinkImport = ({
   onImport,
   onCancel,
   preview,
+  candidates,
+  selectedIds,
+  onToggleCandidate,
   fetching,
   importing,
   error,
@@ -34,6 +54,9 @@ export const SkillLinkImport = ({
 }: SkillLinkImportProps) => {
   const { t } = useI18n();
   const [url, setUrl] = useState("");
+
+  const isMulti = (candidates?.length ?? 0) > 1;
+  const selectedCount = selectedIds?.length ?? 0;
 
   return (
     <div className={cn("flex flex-col p-4", className)}>
@@ -71,8 +94,67 @@ export const SkillLinkImport = ({
           </div>
         )}
 
-        {/* Preview */}
-        {preview && !error && (
+        {/* Multi-skill checklist */}
+        {isMulti && !error && candidates && (
+          <div className="rounded-xl border border-surface-border bg-surface-soft p-3">
+            <div className="mb-1 flex items-center gap-2">
+              <Layers className="h-4 w-4 text-brand" />
+              <span className="text-sm font-medium text-ink-heading">
+                {t("skill.multiSkillDetected", { count: candidates.length })}
+              </span>
+            </div>
+            <p className="mb-3 text-xs text-ink-meta">
+              {t("skill.multiSkillHint")}
+            </p>
+            <div className="max-h-[260px] space-y-1.5 overflow-y-auto">
+              {candidates.map((c) => {
+                const checked = selectedIds?.includes(c.preview_id) ?? false;
+                return (
+                  <label
+                    key={c.preview_id}
+                    className={cn(
+                      "flex cursor-pointer items-start gap-2.5 rounded-lg border px-3 py-2 transition-colors",
+                      checked
+                        ? "border-brand/40 bg-brand-light/30"
+                        : "border-surface-border bg-background hover:border-brand/30",
+                    )}
+                  >
+                    <Checkbox
+                      checked={checked}
+                      onCheckedChange={() => onToggleCandidate?.(c.preview_id)}
+                      className="mt-0.5"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate text-sm font-medium text-ink-heading">
+                          {c.name}
+                        </span>
+                        {c.file_count != null && c.file_count > 0 && (
+                          <span className="shrink-0 text-xs text-ink-meta">
+                            {t("skill.fileCount", { count: c.file_count })}
+                          </span>
+                        )}
+                      </div>
+                      {c.description && (
+                        <p className="mt-0.5 line-clamp-2 text-xs text-ink-body">
+                          {c.description}
+                        </p>
+                      )}
+                      {c.relpath && (
+                        <p className="mt-0.5 truncate font-mono text-[11px] text-ink-meta">
+                          {c.relpath}
+                        </p>
+                      )}
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Single-skill preview */}
+        {!isMulti && preview && !error && (
           <div className="rounded-xl border border-surface-border bg-surface-soft p-3">
             <div className="mb-2 flex items-center gap-2">
               <CheckCircle className="h-4 w-4 text-green-500" />
@@ -111,12 +193,17 @@ export const SkillLinkImport = ({
         <Button variant="outline" onClick={onCancel}>
           {t("common.cancel")}
         </Button>
-        {preview && (
-          <Button onClick={onImport} disabled={importing}>
+        {(isMulti || preview) && (
+          <Button
+            onClick={onImport}
+            disabled={importing || (isMulti && selectedCount === 0)}
+          >
             {importing && (
               <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
             )}
-            {t("common.import")}
+            {isMulti
+              ? t("skill.importSelected", { count: selectedCount })
+              : t("common.import")}
           </Button>
         )}
       </div>

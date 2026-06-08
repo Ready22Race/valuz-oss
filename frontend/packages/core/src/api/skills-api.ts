@@ -66,12 +66,25 @@ export interface SkillView {
   creation_origin: SkillCreationOrigin;
 }
 
+/** Import provenance for a URL/GitHub-imported skill (mirrors the backend
+ * ``valuz_skill_index.origin_json``). Lets the detail UI show "Imported from …"
+ * and link back to the source. */
+export interface SkillOrigin {
+  type: "github" | "url";
+  source_url: string;
+  /** In-repo relative path when the skill came from a multi-skill
+   * collection/plugin; empty for a single-skill source. */
+  path: string;
+}
+
 export interface SkillDetail extends SkillView {
   instructions_markdown?: string | null;
   file_count?: number;
   root_path?: string | null;
   manifest_filename?: string | null;
   metadata?: Record<string, unknown>;
+  /** Null/absent for skills not imported from a URL. */
+  origin?: SkillOrigin | null;
 }
 
 export interface SkillsCatalog {
@@ -121,6 +134,19 @@ export interface SkillImportPreviewFile {
   children?: SkillImportPreviewFile[];
 }
 
+/** One skill detected inside an import source. When a URL/archive points at a
+ * collection or plugin (multiple SKILL.md), the preview lists every candidate
+ * so the user can multi-select; each carries its own ``preview_id`` and confirm
+ * is called once per chosen skill. */
+export interface SkillImportCandidate {
+  preview_id: string;
+  name: string;
+  description: string;
+  file_count: number;
+  /** Location within the fetched tree (for display). */
+  relpath: string;
+}
+
 export interface SkillImportArchivePreview {
   preview_id: string;
   name: string;
@@ -130,6 +156,10 @@ export interface SkillImportArchivePreview {
   validation_warnings: string[];
   name_conflict: boolean;
   suggested_name: string | null;
+  /** When the source contains MULTIPLE skills (a collection/plugin), this lists
+   * every detected skill (each with its own ``preview_id``). Length <= 1 → the
+   * top-level fields above ARE the single skill (backward compatible). */
+  skills: SkillImportCandidate[];
 }
 
 export interface SkillImportArchiveConfirmRequest {
