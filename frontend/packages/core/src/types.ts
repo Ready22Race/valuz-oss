@@ -91,6 +91,7 @@ export type {
   SkillDetail,
   SkillDeletePreview,
   SkillImportArchivePreview,
+  SkillImportCandidate,
   SkillCreationContext,
   SkillCreateStartResponse,
   SkillSubmissionConfirmResponse,

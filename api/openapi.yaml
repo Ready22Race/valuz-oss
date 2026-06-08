@@ -2948,6 +2948,31 @@ components:
         suggested_name:
           type: string
           nullable: true
+        skills:
+          type: array
+          description: >-
+            When the source contains multiple skills (a collection/plugin),
+            every detected skill, each with its own preview_id. Length <= 1
+            means the top-level fields above are the single skill.
+          items:
+            $ref: "#/components/schemas/SkillImportCandidate"
+
+    SkillImportCandidate:
+      type: object
+      required: [preview_id, name, description]
+      properties:
+        preview_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        file_count:
+          type: integer
+          default: 0
+        relpath:
+          type: string
+          default: ""
 
     SkillImportPreviewFile:
       type: object

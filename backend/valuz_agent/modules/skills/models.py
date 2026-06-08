@@ -254,6 +254,19 @@ class SkillImportPreviewFile(BaseModel):
     size: int | None = None
 
 
+class SkillImportCandidate(BaseModel):
+    """One skill found inside an import source. When a URL/archive points at a
+    collection or plugin (multiple ``SKILL.md`` under it), the preview lists
+    every candidate so the user can multi-select; each carries its OWN
+    ``preview_id`` and confirm is called once per chosen skill."""
+
+    preview_id: str
+    name: str
+    description: str
+    file_count: int = 0
+    relpath: str = ""  # location within the fetched tree (for display)
+
+
 class SkillImportArchivePreview(BaseModel):
     preview_id: str
     name: str
@@ -263,6 +276,10 @@ class SkillImportArchivePreview(BaseModel):
     validation_warnings: list[str] = Field(default_factory=list)
     name_conflict: bool = False
     suggested_name: str | None = None
+    # When the source contains MULTIPLE skills (a collection/plugin), this lists
+    # every detected skill (each with its own preview_id). Length <= 1 → the
+    # top-level fields above ARE the single skill (backward compatible).
+    skills: list[SkillImportCandidate] = Field(default_factory=list)
 
 
 class SkillImportDirectoryPreviewRequest(BaseModel):

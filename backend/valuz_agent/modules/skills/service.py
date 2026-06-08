@@ -40,6 +40,7 @@ from valuz_agent.modules.skills.models import (
     SkillFileNode,
     SkillImportArchiveConfirmRequest,
     SkillImportArchivePreview,
+    SkillImportCandidate,
     SkillImportDirectoryPreviewRequest,
     SkillImportPreviewFile,
     SkillImportUrlConfirmRequest,
@@ -754,15 +755,13 @@ class SkillLibraryService:
         target_scope: str = "user",
         workspace_id: str | None = None,
     ) -> SkillImportArchivePreview:
-        import time
         import urllib.request
 
-        preview_id = str(uuid4())
         staging_dir = Path(tempfile.mkdtemp(prefix="valuz-skill-url-"))
 
         try:
             if self._is_github_url(url):
-                skill_root = self._fetch_github_tree(url, staging_dir)
+                fetched_root = self._fetch_github_tree(url, staging_dir)
             else:
                 req = urllib.request.Request(url, headers={"User-Agent": "Valuz-Agent/1.0"})
                 with urllib.request.urlopen(req, timeout=30) as resp:
@@ -773,26 +772,77 @@ class SkillLibraryService:
 
                 suffix = Path(url.split("?")[0]).suffix.lower()
                 if suffix in {".zip", ".tar", ".gz", ".tgz"}:
-                    extracted = self._extract_archive(downloaded)
-                    skill_root = self._locate_skill_root(
-                        extracted,
-                        missing_manifest_message="No SKILL.md found in downloaded archive",
-                    )
+                    fetched_root = self._extract_archive(downloaded)
                 else:
                     downloaded.rename(staging_dir / "SKILL.md")
-                    skill_root = staging_dir
+                    fetched_root = staging_dir
         except Exception as e:
             from valuz_agent.modules.skills.errors import SkillImportFailed
 
             raise SkillImportFailed(f"Failed to fetch URL: {e}") from e
 
-        _import_previews[preview_id] = (skill_root, True, time.time())
-        return await self._build_import_preview(
-            preview_id=preview_id,
-            skill_root=skill_root,
+        # A URL may point at a single skill OR a collection/plugin holding many
+        # (``skills/<name>/SKILL.md`` …). Enumerate ALL of them so the caller can
+        # multi-select — never silently grab the first.
+        skill_roots = self._locate_skill_roots(fetched_root)
+        if not skill_roots:
+            from valuz_agent.modules.skills.errors import SkillImportFailed
+
+            raise SkillImportFailed("No SKILL.md found in the fetched content")
+
+        return await self._build_multi_preview(
+            skill_roots=skill_roots,
+            fetched_root=fetched_root,
             target_scope=target_scope,
             workspace_id=workspace_id,
         )
+
+    async def _build_multi_preview(
+        self,
+        *,
+        skill_roots: list[Path],
+        fetched_root: Path,
+        target_scope: str,
+        workspace_id: str | None,
+    ) -> SkillImportArchivePreview:
+        """Build a preview that lists every skill found under the source.
+
+        The FIRST skill is the top-level preview (single-skill clients keep
+        working); ``skills`` carries all candidates, each with its own
+        ``preview_id`` so confirm is called once per chosen skill.
+        """
+        import time
+
+        primary: SkillImportArchivePreview | None = None
+        candidates: list[SkillImportCandidate] = []
+        for root in skill_roots:
+            preview_id = str(uuid4())
+            _import_previews[preview_id] = (root, True, time.time())
+            preview = await self._build_import_preview(
+                preview_id=preview_id,
+                skill_root=root,
+                target_scope=target_scope,
+                workspace_id=workspace_id,
+            )
+            try:
+                relpath = str(root.relative_to(fetched_root))
+            except ValueError:
+                relpath = root.name
+            candidates.append(
+                SkillImportCandidate(
+                    preview_id=preview_id,
+                    name=preview.name,
+                    description=preview.description,
+                    file_count=len(preview.file_tree),
+                    relpath=relpath,
+                )
+            )
+            if primary is None:
+                primary = preview
+
+        assert primary is not None  # skill_roots is non-empty (checked by caller)
+        primary.skills = candidates
+        return primary
 
     async def confirm_url_import(
         self,
@@ -836,24 +886,95 @@ class SkillLibraryService:
         return "github.com" in url.lower()
 
     def _fetch_github_tree(self, url: str, staging_dir: Path) -> Path:
+        """Fetch a GitHub URL into a local dir and return that RAW tree.
 
+        Always downloads the branch **zipball via codeload** — a single request
+        that does NOT count against the GitHub REST rate limit — then descends
+        to the requested subdirectory. This replaces walking the contents API
+        file-by-file (which rate-limits on a multi-folder repo). The caller runs
+        ``_locate_skill_roots`` over the result so a collection/plugin surfaces
+        every skill, not just the first.
+
+        Handles repo-root URLs (``github.com/owner/repo``) and
+        ``/tree/<branch>/<subdir>`` / ``/blob`` / raw URLs (subdir extracted).
+        """
         parsed = self._parse_github_url(url)
         if parsed is None:
             raise ValueError(f"Could not parse GitHub URL: {url}")
 
         owner, repo, branch, dir_path = parsed
-        skill_root = staging_dir
-        self._fetch_github_directory(owner, repo, branch, dir_path, skill_root)
 
-        if not any(skill_root.iterdir()):
-            raise ValueError(f"No files found in GitHub directory: {dir_path}")
+        downloaded = staging_dir / "repo.zip"
+        branch = self._download_repo_zipball(owner, repo, branch, downloaded)
+        extracted = self._extract_archive(downloaded)
 
-        return self._locate_skill_root(
-            skill_root,
-            missing_manifest_message="Downloaded content does not contain SKILL.md",
+        # A GitHub zipball wraps everything in a single ``owner-repo-<sha>/`` dir.
+        tops = [p for p in extracted.iterdir() if p.is_dir()]
+        root = tops[0] if len(tops) == 1 else extracted
+
+        if dir_path and dir_path not in (".", ""):
+            sub = root / dir_path
+            if not sub.is_dir():
+                raise ValueError(f"Path not found in repo {owner}/{repo}@{branch}: {dir_path}")
+            return sub
+
+        return root
+
+    def _download_repo_zipball(
+        self, owner: str, repo: str, branch: str | None, target: Path
+    ) -> str:
+        """Download the repo zipball into ``target``; return the branch used.
+
+        For a known branch (from a ``/tree/<branch>/...`` URL), downloads it
+        directly. For a bare repo URL (no ref), tries the common defaults
+        ``main`` then ``master`` against **codeload** — which, unlike the GitHub
+        REST API, is not rate-limited — and only falls back to the API (to learn
+        a non-standard default branch) if neither exists. This keeps the common
+        case API-free, so bare-repo imports succeed even when the REST API is
+        rate-limited.
+        """
+        import urllib.error
+
+        codeload = "https://codeload.github.com/{o}/{r}/zip/refs/heads/{b}"
+        candidates = [branch] if branch else ["main", "master"]
+        last_http_err: urllib.error.HTTPError | None = None
+        for cand in candidates:
+            try:
+                self._download_file(codeload.format(o=owner, r=repo, b=cand), target)
+                return cand
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    last_http_err = exc
+                    continue
+                raise
+        # Bare repo whose default is neither main nor master — last resort: the
+        # API tells us the real default branch (this path can rate-limit).
+        if not branch:
+            api_branch = self._github_default_branch(owner, repo)
+            self._download_file(
+                codeload.format(o=owner, r=repo, b=api_branch), target
+            )
+            return api_branch
+        raise last_http_err if last_http_err else ValueError(
+            f"Could not download {owner}/{repo}@{branch}"
         )
 
-    def _parse_github_url(self, url: str) -> tuple[str, str, str, str] | None:
+    def _github_default_branch(self, owner: str, repo: str) -> str:
+        import json
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{owner}/{repo}",
+            headers={
+                "User-Agent": "Valuz-Agent/1.0",
+                "Accept": "application/vnd.github.v3+json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        return str(data.get("default_branch") or "main")
+
+    def _parse_github_url(self, url: str) -> tuple[str, str, str | None, str] | None:
         import re
 
         tree_match = re.match(
@@ -882,42 +1003,18 @@ class SkillLibraryService:
             dir_path = str(Path(file_path).parent)
             return owner, repo, branch, dir_path
 
-        return None
-
-    def _fetch_github_directory(
-        self,
-        owner: str,
-        repo: str,
-        branch: str,
-        path: str,
-        target_dir: Path,
-    ) -> None:
-        import json
-        import urllib.request
-
-        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}"
-        req = urllib.request.Request(
-            api_url,
-            headers={
-                "User-Agent": "Valuz-Agent/1.0",
-                "Accept": "application/vnd.github.v3+json",
-            },
+        # Bare repo URL — ``github.com/owner/repo`` (optionally ``.git`` /
+        # trailing slash). No ref or subdirectory, so branch is resolved to the
+        # repo default later and dir_path is the root ("").
+        repo_match = re.match(
+            r"https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$",
+            url,
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
+        if repo_match:
+            owner, repo = repo_match.groups()
+            return owner, repo, None, ""
 
-        if not isinstance(data, list):
-            if data.get("download_url"):
-                self._download_file(data["download_url"], target_dir / data["name"])
-            return
-
-        for entry in data:
-            if entry["type"] == "file":
-                self._download_file(entry["download_url"], target_dir / entry["name"])
-            elif entry["type"] == "dir":
-                subdir = target_dir / entry["name"]
-                subdir.mkdir(exist_ok=True)
-                self._fetch_github_directory(owner, repo, branch, entry["path"], subdir)
+        return None
 
     def _download_file(self, url: str, target: Path) -> None:
         import urllib.request
@@ -1270,6 +1367,35 @@ class SkillLibraryService:
                 if candidate.is_dir() and _detect_manifest(candidate) is not None:
                     return candidate
         raise ValueError(missing_manifest_message)
+
+    def _locate_skill_roots(self, root: Path) -> list[Path]:
+        """Every distinct skill directory under ``root`` — i.e. each directory
+        that DIRECTLY contains a SKILL.md.
+
+        Prunes: once a directory is recognised as a skill, its own subtree is
+        not re-scanned (a skill's internal folders aren't sub-skills). So a
+        collection or Claude plugin laid out as ``skills/<name>/SKILL.md`` yields
+        one entry per skill instead of the old behaviour of silently returning
+        the first SKILL.md found anywhere in the tree.
+
+        Returns ``[]`` when no SKILL.md exists; ``[root]`` when ``root`` itself
+        is a skill.
+        """
+        if _detect_manifest(root) is not None:
+            return [root]
+
+        found: list[Path] = []
+
+        def _walk(directory: Path) -> None:
+            children = sorted(p for p in directory.iterdir() if p.is_dir())
+            for child in children:
+                if _detect_manifest(child) is not None:
+                    found.append(child)  # a skill — do not descend into it
+                else:
+                    _walk(child)
+
+        _walk(root)
+        return found
 
     async def _build_import_preview(
         self,
