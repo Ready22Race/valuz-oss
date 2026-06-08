@@ -59,6 +59,12 @@ const INSTALL_CMD: Record<CliTool, string> = {
   claude: "npm install -g @anthropic-ai/claude-code",
   codex: "npm install -g @openai/codex",
 };
+const ONBOARDING_BADGE_CLASS =
+  "rounded-full text-2xs";
+const DEFAULT_BADGE_CLASS =
+  "h-4 rounded-[4px] px-1 py-0 text-[10px] leading-none font-normal";
+const AVAILABLE_BADGE_CLASS =
+  "rounded-full text-2xs";
 
 export const ConnectStep = ({
   onContinue,
@@ -427,7 +433,9 @@ const ProviderRow = ({
               {provider.name}
             </span>
             {isDefault && (
-              <Badge variant="success" className="text-2xs">
+              <Badge
+                className={`${DEFAULT_BADGE_CLASS} bg-[#898F9C]/[0.08] text-[#898f9c]`}
+              >
                 {t("onboarding.defaultBadge" as Parameters<typeof t>[0])}
               </Badge>
             )}
@@ -445,13 +453,18 @@ const ProviderRow = ({
         <div className="flex shrink-0 items-center gap-2">
           {busy && <Loader2 className="h-4 w-4 animate-spin text-brand" />}
           {!connected && loggedInNotEnabled && (
-            <Badge variant="success" className="gap-1 text-2xs">
-              <Check className="h-2.5 w-2.5" />
+            <Badge
+              className={`${AVAILABLE_BADGE_CLASS} gap-1 bg-[#f3f2ff] text-[#725cf9]`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-[#725cf9]" />
               {t("onboarding.availableBadge" as Parameters<typeof t>[0])}
             </Badge>
           )}
           {!connected && needsLogin && (
-            <Badge variant="outline" className="gap-1 text-2xs">
+            <Badge
+              variant="outline"
+              className={`${ONBOARDING_BADGE_CLASS} gap-1`}
+            >
               <Lock className="h-2.5 w-2.5" />
               {cliStatus && !cliStatus.installed
                 ? t("onboarding.notInstalledBadge" as Parameters<typeof t>[0])
@@ -461,8 +474,10 @@ const ProviderRow = ({
           {/* Connected → show 「可用」 so the user can tell at a glance which
               channels are wired up. Inline model picker reveals on click. */}
           {connected && !selected && (
-            <Badge variant="success" className="gap-1 text-2xs">
-              <Check className="h-2.5 w-2.5" />
+            <Badge
+              className={`${AVAILABLE_BADGE_CLASS} gap-1 bg-[#f3f2ff] text-[#725cf9]`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-[#725cf9]" />
               {t("onboarding.availableBadge" as Parameters<typeof t>[0])}
             </Badge>
           )}
