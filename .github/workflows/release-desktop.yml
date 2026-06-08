@@ -10,6 +10,17 @@ on:
         description: "Version tag (e.g. v0.2.0). Leave empty to use package.json version."
         required: false
         type: string
+      platform:
+        description: "Platform to build"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - mac-arm64
+          - mac-x64
+          - linux-arm64
+          - windows-x64
 
 concurrency:
   group: release-desktop-${{ github.ref }}
@@ -36,6 +47,7 @@ jobs:
   build-mac:
     name: macOS (arm64)
     needs: set-version
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'mac-arm64' }}
     runs-on: macos-14
     environment: CSC_KEY_PASSWORD
     permissions:
@@ -130,6 +142,7 @@ jobs:
   build-mac-x64:
     name: macOS (x86_64)
     needs: set-version
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'mac-x64' }}
     runs-on: macos-13
     environment: CSC_KEY_PASSWORD
     permissions:
@@ -222,6 +235,7 @@ jobs:
   build-linux-arm64:
     name: Linux (arm64)
     needs: set-version
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'linux-arm64' }}
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
@@ -297,6 +311,7 @@ jobs:
   build-windows-x64:
     name: Windows (x64)
     needs: set-version
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'windows-x64' }}
     runs-on: windows-latest
     permissions:
       contents: write
