@@ -41,6 +41,11 @@ export interface UseSessionAttachmentsResult {
 }
 
 const POLL_INTERVAL_MS = 1000;
+// After an attach, poll the server for this long even if local state shows
+// nothing parsing yet — bridges the window where a just-uploaded row hasn't
+// landed in local state (eager-create navigate/reset race) but already exists
+// server-side as ``parse_status="parsing"``.
+const POLL_GRACE_MS = 30_000;
 
 /**
  * Owns a session's attachment staging set: load-on-session-change, eager
@@ -79,10 +84,16 @@ export function useSessionAttachments(
     });
   }, []);
 
-  // Load on session change — a full replace (a fresh session has no optimistic
-  // local state to preserve). State is set only inside the async resolution
-  // (never synchronously in the effect body) — a null session resolves to an
-  // empty list rather than an inline ``setAttachments([])``.
+  // Load on session change. CRITICAL: this races with ``attachLocalFiles`` in
+  // the eager-create flow (the new-conversation composer sets ``sessionId`` to
+  // the freshly-minted session, which fires this load *before* the upload has
+  // committed its row — so the server returns an empty/stale list). We must NOT
+  // let that stale result clobber a row the upload optimistically appended, or
+  // the just-attached file silently vanishes from the composer + panel. So the
+  // load MERGES: server rows win, but any optimistic row for THIS session that
+  // the server hasn't returned yet is preserved. Rows from a previously-active
+  // session (different ``session_id``) are dropped — this still behaves like a
+  // replace across a real session switch.
   useEffect(() => {
     let cancelled = false;
     const load = async (): Promise<SessionAttachmentItem[]> => {
@@ -95,7 +106,15 @@ export function useSessionAttachments(
       }
     };
     void load().then((items) => {
-      if (!cancelled) setAttachments(items);
+      if (cancelled) return;
+      setAttachments((prev) => {
+        if (!sessionId) return [];
+        const serverIds = new Set(items.map((r) => r.id));
+        const optimistic = prev.filter(
+          (a) => a.session_id === sessionId && !serverIds.has(a.id),
+        );
+        return [...items, ...optimistic];
+      });
     });
     return () => {
       cancelled = true;
@@ -106,32 +125,57 @@ export function useSessionAttachments(
     (a) => !a.consumed_at && a.parse_status === "parsing",
   );
 
-  // Poll while ANY row (pending or already consumed) is still parsing, so the
-  // panel history stays accurate too. Stops the moment everything settles.
+  // ``pollUntil`` is bumped on every attach so the server is polled for a grace
+  // window regardless of what local state currently shows (see POLL_GRACE_MS).
+  const [pollUntil, setPollUntil] = useState(0);
+
+  // Poll while ANY row is still parsing OR we're inside the post-attach grace
+  // window. The grace window is the fix for "the attachment only shows up after
+  // parsing finishes": the eager-create flow can drop the optimistic row (the
+  // navigate re-keys the hook and a stale/empty load lands), which left the
+  // poll un-triggered (it was gated purely on local parsing state) so nothing
+  // re-fetched during the parse. Polling the server here reliably surfaces the
+  // ``parsing`` row — which exists the instant the upload POST returns — and
+  // keeps the composer/panel progress live throughout the parse.
   const anyParsing = attachments.some((a) => a.parse_status === "parsing");
   useEffect(() => {
-    if (!sessionId || !anyParsing) return;
+    if (!sessionId) return;
+    if (!anyParsing && Date.now() >= pollUntil) return;
     let cancelled = false;
-    const handle = setInterval(() => {
+    let handle: ReturnType<typeof setInterval> | undefined;
+    const tick = () => {
       sessionsApi
         .listAttachments(sessionId)
         .then((res) => {
-          if (!cancelled) mergeServer(res.items);
+          if (cancelled) return;
+          mergeServer(res.items);
+          const stillParsing = res.items.some(
+            (a) => a.parse_status === "parsing",
+          );
+          // Stop once everything has settled AND the grace window has elapsed.
+          if (!stillParsing && Date.now() >= pollUntil) {
+            cancelled = true;
+            if (handle) clearInterval(handle);
+          }
         })
         .catch(() => {
           /* transient — next tick retries */
         });
-    }, POLL_INTERVAL_MS);
+    };
+    handle = setInterval(tick, POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
-      clearInterval(handle);
+      if (handle) clearInterval(handle);
     };
-  }, [sessionId, anyParsing, mergeServer]);
+  }, [sessionId, anyParsing, pollUntil, mergeServer]);
 
   const attachLocalFiles = useCallback(
     async (files: File[], ensureSession: EnsureSession) => {
       if (files.length === 0) return;
       const session = await ensureSession();
+      // Open the grace-poll window NOW so the parsing row surfaces even if the
+      // eager-create navigate drops the optimistic append below.
+      setPollUntil(Date.now() + POLL_GRACE_MS);
       for (const file of files) {
         try {
           const item = await sessionsApi.uploadAttachment(session.id, file);
@@ -150,6 +194,7 @@ export function useSessionAttachments(
     async (docIds: string[], ensureSession: EnsureSession) => {
       if (docIds.length === 0) return;
       const session = await ensureSession();
+      setPollUntil(Date.now() + POLL_GRACE_MS);
       await sessionsApi.addKbAttachments(session.id, docIds);
       // Re-read the full list (the KB endpoint returns pending-only); merge so
       // panel history + optimistic consume survive.
