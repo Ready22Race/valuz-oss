@@ -180,6 +180,20 @@ function resolveArtifactPath(path: string, rootPath: string): string {
   return `${trimmed}${sep}${path}`;
 }
 
+function artifactIconClassName(filename: string): string {
+  const extension = filename.split(".").pop()?.toLowerCase();
+  if (extension === "md" || extension === "markdown") return "text-[#725cf9]";
+  if (extension === "html" || extension === "htm") return "text-[#ff8710]";
+  return "text-ink-muted";
+}
+
+function artifactIconBgClassName(filename: string): string {
+  const extension = filename.split(".").pop()?.toLowerCase();
+  if (extension === "md" || extension === "markdown") return "bg-[#725cf9]/10";
+  if (extension === "html" || extension === "htm") return "bg-[#ff8710]/10";
+  return "bg-ink-muted/10";
+}
+
 /** Open a file in the OS file manager (desktop only — Electron's
  *  ``shell.openPath`` via the existing ``open_in_finder`` IPC). On
  *  webui (no ``valuzDesktop`` bridge) we fall back to copying the
@@ -792,19 +806,21 @@ export const TaskDetailPage = () => {
           artifacts came with it — without that, the long body looks
           like a magic blob of text. */}
         {task.status === "completed" && completionInfo && (
-          <section className="mt-3 w-full rounded-xl border border-emerald-500/30 bg-emerald-50/60 p-4 dark:bg-emerald-500/10">
+          <section className="mt-3 w-full rounded-xl border border-[#e6e7e9] bg-[#f7f7f8] px-4 py-3">
             {/* Header: title + provenance metadata on the same row (who /
               when), matching the prototype's "✓ 交付结果 PM (lead) · 时间". */}
-            <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1">
-              <CheckCheck className="h-4 w-4 text-emerald-600" />
-              <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+            <div className="-mx-4 mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-[#e6e7e9] px-4 pb-3">
+              <CheckCheck className="h-4 w-4 text-[#725cf9]" />
+              <span className="text-xs font-semibold text-[#725cf9]">
                 {t("task.deliverableTitle" as Parameters<typeof t>[0])}
               </span>
               {leadAgentName && (
-                <span className="text-2xs text-ink-meta">{leadAgentName}</span>
+                <span className="text-xs font-medium text-ink-meta">
+                  {leadAgentName}
+                </span>
               )}
-              <span className="text-2xs tabular-nums text-ink-meta">
-                · {formatEventTime(completionInfo.completedAt)}
+              <span className="ml-auto text-2xs tabular-nums text-ink-meta">
+                {formatEventTime(completionInfo.completedAt)}
               </span>
             </div>
 
@@ -818,7 +834,7 @@ export const TaskDetailPage = () => {
               // so a 30-file deliverable doesn't push the summary
               // accordion off-screen; the user scrolls inside the list
               // instead of scrolling the whole page.
-              <ul className="mb-3 flex max-h-[240px] flex-col gap-2 overflow-y-auto pr-1">
+              <ul className="-mx-2 mb-3 flex max-h-[240px] flex-col gap-2 overflow-y-auto pr-1">
                 {completionInfo.artifacts.map((path) => {
                   const basename = path.split(/[\\/]/).pop() || path;
                   const absolute = resolveArtifactPath(path, rootPath);
@@ -834,9 +850,21 @@ export const TaskDetailPage = () => {
                             typeof t
                           >[0],
                         )}
-                        className="flex w-full items-center gap-2.5 rounded-lg border border-emerald-500/20 bg-card px-3 py-2 text-left transition-colors hover:bg-emerald-50 hover:border-emerald-500/40 dark:hover:bg-emerald-500/20"
+                        className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-[#eeeff1]"
                       >
-                        <FileText className="h-4 w-4 shrink-0 text-emerald-600" />
+                        <span
+                          className={cn(
+                            "flex h-7 w-7 shrink-0 items-center justify-center rounded-[7px]",
+                            artifactIconBgClassName(basename),
+                          )}
+                        >
+                          <FileText
+                            className={cn(
+                              "h-4 w-4",
+                              artifactIconClassName(basename),
+                            )}
+                          />
+                        </span>
                         <div className="flex min-w-0 flex-1 flex-col">
                           <span
                             className="truncate text-xs font-medium text-ink-heading"
@@ -862,14 +890,14 @@ export const TaskDetailPage = () => {
             {/* Summary accordion (bottom half). ``<details open>`` keeps
               it expanded by default — long-form lead summary is the
               actual deliverable for tasks without file artifacts. */}
-            <details className="group/d" open>
-              <summary className="flex cursor-pointer items-center gap-2 rounded-md py-1 text-xs font-medium text-emerald-700 dark:text-emerald-400">
+            <details className="-mx-2 group/d border-t border-[#e6e7e9] pt-3" open>
+              <summary className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-1 text-xs font-medium text-[#131313]">
                 <ChevronDown className="h-3.5 w-3.5 transition-transform group-open/d:rotate-0 -rotate-90" />
                 <span>
                   {t("task.completionSummary" as Parameters<typeof t>[0])}
                 </span>
               </summary>
-              <div className="mt-2 whitespace-pre-wrap rounded-lg border border-emerald-500/20 bg-card px-3 py-2.5 text-[12px] leading-6 text-ink-body">
+              <div className="mt-2 whitespace-pre-wrap px-3 py-2.5 text-[12px] leading-6 text-ink-body">
                 {completionInfo.summary}
               </div>
             </details>
