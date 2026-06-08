@@ -115,8 +115,9 @@ PLATFORM_RAW="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH_RAW="$(uname -m)"
 
 case "$PLATFORM_RAW" in
-  darwin) PLATFORM="mac";   PLATFORM_TAG="darwin" ;;
-  linux)  PLATFORM="linux"; PLATFORM_TAG="linux" ;;
+  darwin)          PLATFORM="mac";    PLATFORM_TAG="darwin" ;;
+  linux)           PLATFORM="linux";  PLATFORM_TAG="linux" ;;
+  mingw*|msys*|cygwin*) PLATFORM="win"; PLATFORM_TAG="windows"; PLATFORM_RAW="windows" ;;
   *) die "Unsupported platform: $PLATFORM_RAW" ;;
 esac
 
@@ -168,7 +169,11 @@ if ! $SKIP_BACKEND; then
     --workpath build
 
   # Verify output
-  SERVER_BIN="dist/valuz-server/valuz-server"
+  if [ "$PLATFORM_TAG" = "windows" ]; then
+    SERVER_BIN="dist/valuz-server/valuz-server.exe"
+  else
+    SERVER_BIN="dist/valuz-server/valuz-server"
+  fi
   if [ ! -f "$SERVER_BIN" ]; then
     die "PyInstaller output not found: $SERVER_BIN"
   fi
@@ -184,7 +189,11 @@ if ! $SKIP_BACKEND; then
   rm -rf "$RESOURCES_LIBEXEC/valuz-server" "$RESOURCES_LIBEXEC/_internal"
   mkdir -p "$RESOURCES_LIBEXEC"
   cp -R dist/valuz-server/. "$RESOURCES_LIBEXEC/"
-  chmod +x "$RESOURCES_LIBEXEC/valuz-server"
+  if [ "$PLATFORM_TAG" = "windows" ]; then
+    chmod +x "$RESOURCES_LIBEXEC/valuz-server.exe" 2>/dev/null || true
+  else
+    chmod +x "$RESOURCES_LIBEXEC/valuz-server"
+  fi
 
   log "Backend staged at: $RESOURCES_LIBEXEC/{valuz-server,_internal}"
 else
@@ -202,7 +211,11 @@ if ! $SKIP_CLI; then
 
   cd "$CLI_DIR"
   mkdir -p "$RESOURCES_BIN"
-  CLI_OUT="$RESOURCES_BIN/valuz"
+  if [ "$PLATFORM_TAG" = "windows" ]; then
+    CLI_OUT="$RESOURCES_BIN/valuz.exe"
+  else
+    CLI_OUT="$RESOURCES_BIN/valuz"
+  fi
 
   log "Building Go CLI → $CLI_OUT"
   go build -trimpath -ldflags "-s -w -X main.version=$BUILD_VERSION" -o "$CLI_OUT" .
