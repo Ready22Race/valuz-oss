@@ -47,7 +47,7 @@ def acquire_single_writer_lock() -> None:
     )
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = settings.data_dir / ".scheduler.lock"
+    lock_path = settings.data_dir / ".single-writer.lock"
     try:
         acquire_single_writer_lock(lock_path)
     except AnotherInstanceRunning:
