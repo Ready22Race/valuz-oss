@@ -2,17 +2,37 @@
 
 Why this exists
 ---------------
-SQLite under WAL is happy with many concurrent readers and one writer
-across processes, but a desktop app starting up twice (GUI launched
-backend + launchd auto-started backend, or the user double-clicked the
-icon) would have two processes both writing to ``~/.valuz/app/valuz.db``.
-That's not just bad for SQLite — both processes would also fight over
-port 8000, write conflicting events, and race the schedule runner's
-tick loop. Easier to refuse the second startup outright.
+SQLite is *not* the reason. Under WAL with ``busy_timeout`` (see
+``infra/database.py``) two processes writing ``~/.valuz/app/valuz.db``
+serialize on the single write slot and wait-and-retry — concurrent
+access is safe at the storage layer, not corrupting.
+
+The real hazard is duplicated *host* side-effects when a desktop app
+starts twice against one ``data_dir`` (GUI-launched backend + launchd
+auto-start, or a double-clicked icon):
+
+- Boot recovery assumes a single process. ``recover_running_sessions``
+  finalises every ``running`` session as stranded-by-the-previous-process
+  (see ``modules/sessions/recovery.py``: *"the host is single-process, so
+  any running row at startup is by definition stranded"*), and
+  ``seal_orphan_pendings`` / ``recover_active_tasks`` lean on the same
+  invariant. A second instance booting would terminate or re-drive
+  sessions the first instance is *actively* running.
+- The long-lived runners (automation runner + failure monitor, parser
+  polling, docs auto-discovery, decision aggregator) would each run
+  twice: scheduled automations firing twice, pollers double-calling
+  remote APIs, the decision inbox double-processing.
+
+Port collision is too weak a guard. uvicorn runs the whole lifespan
+startup — schema bootstrap, *all* the recovery above, and the runners —
+*before* it binds the socket, so an ``EADDRINUSE`` on port 8000 only
+fires after the damage is done; and a second instance on a different
+``VALUZ_BACKEND_PORT`` (same ``data_dir``) never collides at all. So we
+refuse the second startup outright — early, and with a clear message.
 
 How it works
 ------------
-On startup we open ``<data_dir>/.scheduler.lock`` (configurable) and try
+On startup we open ``<data_dir>/.single-writer.lock`` (configurable) and try
 ``fcntl.flock(LOCK_EX | LOCK_NB)``. Success → store the FD on the module
 to keep the lock alive for the process lifetime. Failure → ``BlockingIOError``
 means another process holds it; bail with ``sys.exit(2)``.
@@ -97,23 +117,8 @@ def release_single_writer_lock() -> None:
         _lock_fd = None
 
 
-def read_lock_holder_pid(lock_path: Path) -> int | None:
-    """Inspect the lock file for the holder's PID.
-
-    Used by ``valuz-agent doctor`` so the user can see "which process
-    has the lock" without trying to acquire it themselves.
-    """
-    try:
-        with lock_path.open("r", encoding="ascii") as f:
-            raw = f.read().strip()
-        return int(raw) if raw else None
-    except (OSError, ValueError):
-        return None
-
-
 __all__ = [
     "AnotherInstanceRunning",
     "acquire_single_writer_lock",
     "release_single_writer_lock",
-    "read_lock_holder_pid",
 ]

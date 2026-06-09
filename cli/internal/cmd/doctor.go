@@ -53,7 +53,7 @@ func newDoctorCmd() *cobra.Command {
 			printAutostartStatus()
 
 			fmt.Println()
-			printSchedulerLockStatus()
+			printWriterLockStatus()
 
 			fmt.Println()
 			printBackendProbe()
@@ -80,15 +80,15 @@ func printAutostartStatus() {
 	}
 }
 
-// printSchedulerLockStatus surfaces ~/.valuz/app/.scheduler.lock so the
-// user can see which backend process last claimed the in-process scheduler.
-func printSchedulerLockStatus() {
+// printWriterLockStatus surfaces ~/.valuz/app/.single-writer.lock so the
+// user can see which backend process currently holds the single-writer lock.
+func printWriterLockStatus() {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Printf("writer lock file: error: %v\n", err)
 		return
 	}
-	lockPath := filepath.Join(home, ".valuz", "app", ".scheduler.lock")
+	lockPath := filepath.Join(home, ".valuz", "app", ".single-writer.lock")
 	info, err := os.Stat(lockPath)
 	if err != nil {
 		fmt.Println("writer lock file: not present (no recent backend)")
