@@ -10,6 +10,17 @@ on:
         description: "Version tag (e.g. v0.2.0). Leave empty to use package.json version."
         required: false
         type: string
+      platform:
+        description: "Platform to build"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - mac-arm64
+          - mac-x64
+          - linux-arm64
+          - windows-x64
 
 concurrency:
   group: release-desktop-${{ github.ref }}
@@ -36,6 +47,7 @@ jobs:
   build-mac:
     name: macOS (arm64)
     needs: set-version
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'mac-arm64' }}
     runs-on: macos-14
     environment: CSC_KEY_PASSWORD
     permissions:
@@ -130,6 +142,7 @@ jobs:
   build-mac-x64:
     name: macOS (x86_64)
     needs: set-version
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'mac-x64' }}
     runs-on: macos-13
     environment: CSC_KEY_PASSWORD
     permissions:
@@ -222,6 +235,7 @@ jobs:
   build-linux-arm64:
     name: Linux (arm64)
     needs: set-version
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'linux-arm64' }}
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
@@ -292,4 +306,76 @@ jobs:
             frontend/apps/desktop/release/*.deb
             frontend/apps/desktop/release/*.blockmap
             frontend/apps/desktop/release/latest-linux.yml
+          if-no-files-found: warn
+
+  build-windows-x64:
+    name: Windows (x64)
+    needs: set-version
+    if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'windows-x64' }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "25"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: cli/go.sum
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache Electron binary
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/electron/Cache
+          key: electron-${{ runner.os }}-${{ hashFiles('frontend/apps/desktop/package.json') }}
+          restore-keys: electron-${{ runner.os }}-
+
+      # ── Build ──────────────────────────────────────────────────
+      - name: Build desktop app (unsigned + publish)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VALUZ_VERSION: ${{ needs.set-version.outputs.version }}
+        shell: bash
+        run: |
+          bash scripts/build-desktop.sh --publish=always
+
+      - name: List artifacts
+        shell: bash
+        run: ls -lh frontend/apps/desktop/release/
+
+      # ── Upload build log on failure ────────────────────────────
+      - name: Upload build artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-windows-x64
+          path: |
+            frontend/apps/desktop/release/*.exe
+            frontend/apps/desktop/release/*.blockmap
+            frontend/apps/desktop/release/latest.yml
           if-no-files-found: warn

@@ -3,9 +3,6 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"os/exec"
-	goruntime "runtime"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -25,8 +22,8 @@ var stopFallbackPatterns = []string{
 	"concurrently.*vite",            // dev frontend grand-child
 }
 
-// RunStop is the package-level entrypoint for “valuz stop“ /
-// “valuz restart“. force=true skips the SIGTERM grace period and
+// RunStop is the package-level entrypoint for "valuz stop" /
+// "valuz restart". force=true skips the SIGTERM grace period and
 // goes straight to SIGKILL.
 func RunStop(force bool) error {
 	paths, err := runtime.Discover()
@@ -35,11 +32,7 @@ func RunStop(force bool) error {
 		paths = &runtime.Paths{}
 	}
 
-	// Bundle mode → prefer asking Valuz.app to quit cleanly via
-	// AppleScript. Electron's sidecar then runs its own teardown and
-	// the backend exits gracefully, releasing the writer lock. The
-	// subsequent pkill sweep still runs to catch any standalone
-	// backend (e.g. launchd autostart) that's not owned by Valuz.app.
+	// Bundle mode → prefer asking Valuz.app to quit cleanly.
 	quitGUI := false
 	if paths.Mode == runtime.ModeBundle {
 		if quitValuzApp() {
@@ -53,10 +46,7 @@ func RunStop(force bool) error {
 		fmt.Printf("[valuz] warning: could not read PID file: %v\n", err)
 	}
 
-	sig := syscall.SIGTERM
-	if force {
-		sig = syscall.SIGKILL
-	}
+	sig := stopSignal(force)
 
 	signalled := 0
 	for label, pid := range map[string]int{"backend": rec.Backend, "frontend": rec.Frontend} {
@@ -82,21 +72,13 @@ func RunStop(force bool) error {
 			proc.WaitFor(ctx, rec.Frontend)
 		}
 		cancel()
-		for _, pid := range []int{rec.Backend, rec.Frontend} {
-			if pid > 0 && syscall.Kill(pid, 0) == nil {
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
-				_ = syscall.Kill(pid, syscall.SIGKILL)
-				fmt.Printf("[valuz] escalated to SIGKILL pid=%d\n", pid)
-			}
-		}
+		escalatePids(rec)
 	}
 
-	// Fallback sweep: anything matching the spawn fingerprints (covers
-	// the case where the user launched services before the PID file
-	// existed).
+	// Fallback sweep: anything matching the spawn fingerprints.
 	fallbackKilled := false
 	for _, pat := range stopFallbackPatterns {
-		if pkillPattern(pat, sig) {
+		if stopProcessByPattern(pat, force) {
 			fmt.Printf("[valuz] swept %q\n", pat)
 			fallbackKilled = true
 		}
@@ -128,39 +110,4 @@ process-name matching for any leftovers that weren't recorded.`,
 	}
 	c.Flags().BoolVar(&force, "force", false, "Skip the grace period and SIGKILL straight away")
 	return c
-}
-
-// quitValuzApp asks Valuz.app to quit via AppleScript. Returns true when
-// the app is detected and the quit message dispatched (whether or not
-// the GUI immediately accepts the quit). On non-darwin or when the
-// app isn't running, returns false. macOS only.
-func quitValuzApp() bool {
-	if goruntime.GOOS != "darwin" {
-		return false
-	}
-	// pgrep returns exit 0 on match, 1 on no match. The Electron main
-	// process command line contains "Valuz.app/Contents/MacOS/Valuz".
-	if err := exec.Command("pgrep", "-f", "Valuz.app/Contents/MacOS").Run(); err != nil {
-		return false
-	}
-	if err := exec.Command("osascript", "-e", `tell application "Valuz" to quit`).Run(); err != nil {
-		fmt.Printf("[valuz] warning: osascript quit failed: %v\n", err)
-		return false
-	}
-	return true
-}
-
-// pkillPattern returns true when pkill matched at least one process.
-func pkillPattern(pattern string, sig syscall.Signal) bool {
-	sigArg := "-TERM"
-	if sig == syscall.SIGKILL {
-		sigArg = "-KILL"
-	}
-	err := exec.Command("pkill", sigArg, "-f", pattern).Run()
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		// pkill exits 1 when no match, 0 when match — both fine, only
-		// 2+ is an actual failure we'd care about.
-		return exitErr.ExitCode() == 0
-	}
-	return err == nil
 }

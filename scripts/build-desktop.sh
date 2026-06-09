@@ -117,8 +117,9 @@ PLATFORM_RAW="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH_RAW="$(uname -m)"
 
 case "$PLATFORM_RAW" in
-  darwin) PLATFORM="mac";   PLATFORM_TAG="darwin" ;;
-  linux)  PLATFORM="linux"; PLATFORM_TAG="linux" ;;
+  darwin)          PLATFORM="mac";    PLATFORM_TAG="darwin" ;;
+  linux)           PLATFORM="linux";  PLATFORM_TAG="linux" ;;
+  mingw*|msys*|cygwin*) PLATFORM="win"; PLATFORM_TAG="windows"; PLATFORM_RAW="windows" ;;
   *) die "Unsupported platform: $PLATFORM_RAW" ;;
 esac
 
@@ -170,7 +171,11 @@ if ! $SKIP_BACKEND; then
     --workpath build
 
   # Verify output
-  SERVER_BIN="dist/valuz-server/valuz-server"
+  if [ "$PLATFORM_TAG" = "windows" ]; then
+    SERVER_BIN="dist/valuz-server/valuz-server.exe"
+  else
+    SERVER_BIN="dist/valuz-server/valuz-server"
+  fi
   if [ ! -f "$SERVER_BIN" ]; then
     die "PyInstaller output not found: $SERVER_BIN"
   fi
@@ -186,7 +191,11 @@ if ! $SKIP_BACKEND; then
   rm -rf "$RESOURCES_LIBEXEC/valuz-server" "$RESOURCES_LIBEXEC/_internal"
   mkdir -p "$RESOURCES_LIBEXEC"
   cp -R dist/valuz-server/. "$RESOURCES_LIBEXEC/"
-  chmod +x "$RESOURCES_LIBEXEC/valuz-server"
+  if [ "$PLATFORM_TAG" = "windows" ]; then
+    chmod +x "$RESOURCES_LIBEXEC/valuz-server.exe" 2>/dev/null || true
+  else
+    chmod +x "$RESOURCES_LIBEXEC/valuz-server"
+  fi
 
   log "Backend staged at: $RESOURCES_LIBEXEC/{valuz-server,_internal}"
 else
@@ -204,7 +213,11 @@ if ! $SKIP_CLI; then
 
   cd "$CLI_DIR"
   mkdir -p "$RESOURCES_BIN"
-  CLI_OUT="$RESOURCES_BIN/valuz"
+  if [ "$PLATFORM_TAG" = "windows" ]; then
+    CLI_OUT="$RESOURCES_BIN/valuz.exe"
+  else
+    CLI_OUT="$RESOURCES_BIN/valuz"
+  fi
 
   log "Building Go CLI → $CLI_OUT"
   go build -trimpath -ldflags "-s -w -X main.version=$BUILD_VERSION" -o "$CLI_OUT" .
@@ -282,25 +295,41 @@ if ! $SKIP_FRONTEND; then
   sed -i.bak -E 's/("version"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"'"$BUILD_VERSION"'"/' "$DESKTOP_PKG"
   rm -f "$DESKTOP_PKG.bak"
 
-  # When --publish is given, append the flag to the electron-builder
-  # invocation so it uploads artifacts + latest-mac.yml to GitHub Releases.
-  # We do this by exporting an env var that the package.json build script
-  # can forward (or by running electron-builder directly).
-  export ELECTRON_PUBLISH="${PUBLISH}"
-
+  # Build: typecheck + vite + electron-builder.
+  # We call each step via pnpm exec so variable expansion happens in bash,
+  # not in the npm script runner (which may not expand ${var:-default} on Windows).
   if $SIGNED; then
     ENV_FILE="$DESKTOP_DIR/.env.local"
     if [ -f "$ENV_FILE" ]; then
       log "Building desktop app (signed; sourcing $ENV_FILE)..."
-      pnpm build:signed
+      # shellcheck disable=SC1090
+      set -a && . "$ENV_FILE" && set +a
     else
       log "Building desktop app (signed; using CI environment variables)..."
-      pnpm build
     fi
   else
     log "Building desktop app (unsigned — afterSign falls back to ad-hoc)..."
-    pnpm build
   fi
+
+  log "Running typecheck..."
+  pnpm typecheck
+
+  log "Building renderer..."
+  pnpm exec vite build --config vite.renderer.config.ts
+
+  log "Building main process..."
+  pnpm exec vite build --config vite.main.config.ts
+
+  log "Building preload..."
+  pnpm exec vite build --config vite.preload.config.ts
+
+  # electron-builder: packaging + optional publish in one pass.
+  PUBLISH_FLAG=""
+  if [ "$PUBLISH" != "never" ]; then
+    PUBLISH_FLAG="--publish=$PUBLISH"
+  fi
+  log "Packaging (publish=$PUBLISH)..."
+  pnpm exec electron-builder --config build/electron-builder.yml $PUBLISH_FLAG
 
   # Verify output
   RELEASE_DIR="$DESKTOP_DIR/release"
