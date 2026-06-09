@@ -835,17 +835,11 @@ export const TaskDetailPage = () => {
                 // accordion off-screen; the user scrolls inside the list
                 // instead of scrolling the whole page.
                 <ul className="flex max-h-[280px] flex-col overflow-y-auto">
-                  {completionInfo.artifacts.map((path, index) => {
+                  {completionInfo.artifacts.map((path) => {
                     const basename = path.split(/[\\/]/).pop() || path;
                     const absolute = resolveArtifactPath(path, rootPath);
                     return (
-                      <li
-                        key={path}
-                        className={cn(
-                          index < completionInfo.artifacts.length - 1 &&
-                            "border-b border-[#f3f4f6]",
-                        )}
-                      >
+                      <li key={path}>
                         <button
                           type="button"
                           onClick={() =>
@@ -856,7 +850,7 @@ export const TaskDetailPage = () => {
                               typeof t
                             >[0],
                           )}
-                          className="group flex h-[54px] w-full items-center gap-3 px-3 text-left transition-colors hover:bg-[#fafbfd]"
+                          className="group flex h-[54px] w-full items-center gap-3 px-4 text-left transition-colors hover:bg-[#fafbfd]"
                         >
                           <span
                             className={cn(
@@ -903,7 +897,7 @@ export const TaskDetailPage = () => {
                   completionInfo.artifacts.length > 0 && "border-t border-[#f3f4f6]",
                 )}
               >
-                <summary className="flex h-12 cursor-pointer items-center gap-3 px-3 text-left list-none [&::-webkit-details-marker]:hidden">
+                <summary className="flex h-12 cursor-pointer items-center gap-3 px-4 text-left list-none [&::-webkit-details-marker]:hidden">
                   <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#98a1b2] transition-transform group-open/d:rotate-90" />
                   <span className="min-w-0 flex-1 text-[13px] font-semibold leading-5 text-[#131313]">
                     {t("task.completionSummary" as Parameters<typeof t>[0])}
