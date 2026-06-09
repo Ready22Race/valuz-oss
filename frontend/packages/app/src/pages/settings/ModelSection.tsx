@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import {
-  Check,
   Cpu,
   FilePenLine,
   Lock,
@@ -65,6 +64,13 @@ const CLI_TOOL_BY_PROVIDER_KIND: Record<string, CliTool> = {
   "claude-subscription": "claude",
   "codex-subscription": "codex",
 };
+
+const ModelAvailableBadge = ({ label }: { label: string }) => (
+  <Badge className="gap-1 rounded-full bg-[#f3f2ff] text-[#725cf9]">
+    <span className="h-1.5 w-1.5 rounded-full bg-[#725cf9]" />
+    {label}
+  </Badge>
+);
 
 export const ModelSection = () => {
   const { t } = useTranslation();
@@ -748,10 +754,7 @@ export const ModelSection = () => {
 
                     {/* Status badge */}
                     {isSystem && provider.enabled && (
-                      <Badge variant="success" className="gap-1">
-                        <Check className="h-2.5 w-2.5" />{" "}
-                        {t("common.available")}
-                      </Badge>
+                      <ModelAvailableBadge label={t("common.available")} />
                     )}
                     {isSystem && !provider.enabled && (
                       <Badge variant="outline" className="gap-1">
@@ -767,16 +770,10 @@ export const ModelSection = () => {
                       </Badge>
                     )}
                     {isManaged && isConfigured && (
-                      <Badge variant="success">
-                        <Check className="h-2.5 w-2.5" />{" "}
-                        {t("common.available")}
-                      </Badge>
+                      <ModelAvailableBadge label={t("common.available")} />
                     )}
                     {!isManaged && provider.test_status === "success" && (
-                      <Badge variant="success">
-                        <Check className="h-2.5 w-2.5" />{" "}
-                        {t("common.available")}
-                      </Badge>
+                      <ModelAvailableBadge label={t("common.available")} />
                     )}
                     {!isManaged &&
                       provider.auth_type !== "oauth" &&
@@ -846,10 +843,7 @@ export const ModelSection = () => {
                           );
                         }
                         return (
-                          <Badge variant="success" className="gap-1">
-                            <Check className="h-2.5 w-2.5" />{" "}
-                            {t("common.available")}
-                          </Badge>
+                          <ModelAvailableBadge label={t("common.available")} />
                         );
                       })()}
 
