@@ -133,6 +133,8 @@ def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
             # gained a required user_id via a regenerated baseline (no ALTER),
             # so a pre-cutover DB must be wiped + rebuilt — see the host
             # counterpart boot.schema.drop_stale_host_tables.
+            ("sessions", "agent_config"),  # embedded agent snapshot (kernel
+            # de-projectization: sessions carry their AgentConfig inline)
         ]
         for table, col in kernel_column_fingerprints:
             if table in existing and not _has_col(table, col):

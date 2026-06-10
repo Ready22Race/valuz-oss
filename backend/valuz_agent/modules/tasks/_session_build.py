@@ -71,14 +71,14 @@ async def _credential_gap(session: Any, agent_slug: str, *, db: Any | None = Non
         try:
             from valuz_agent.modules.providers.datastore import ProviderDatastore
 
-            agent_id = getattr(session, "agent_id", None)
-            if agent_id:
-                agent = await kernel_store.load_agent(agent_id)
-                provider_id = (
-                    (getattr(agent, "metadata", None) or {}).get("provider_id")
-                    if agent is not None
-                    else None
-                )
+            # Prefer the session's embedded agent snapshot; legacy rows
+            # fall back to the agents table referenced by agent_id.
+            agent = getattr(session, "agent_config", None)
+            if agent is None:
+                agent_id = getattr(session, "agent_id", None)
+                agent = await kernel_store.load_agent(agent_id) if agent_id else None
+            if agent is not None:
+                provider_id = (getattr(agent, "metadata", None) or {}).get("provider_id")
                 if provider_id:
                     provider = await ProviderDatastore(db).get_by_id(provider_id)
                     if provider is not None and provider.auth_type == "oauth":

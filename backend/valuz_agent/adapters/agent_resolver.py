@@ -718,6 +718,7 @@ async def build_member_session(
         id=session_id,
         project_id=project_id,
         agent_id=agent.id,
+        agent_config=agent,
         cwd=run_dir,
         mode=session_mode,
         runtime_provider=agent.runtime_provider,

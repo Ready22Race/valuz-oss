@@ -602,9 +602,10 @@ async def test_materialize_lead_agent_builds_clone_with_dispatch_tools() -> None
     try:
         base = AgentConfig(id="base1", name="lead", tools=())
         orch = TaskOrchestrator()
-        clone_id = await orch._materialize_lead_agent(base, dispatch_mode="async")
-        assert clone_id == "base1__lead__async"
-        names = {t.name for t in saved[clone_id].tools}
+        clone = await orch._materialize_lead_agent(base, dispatch_mode="async")
+        assert clone.id == "base1__lead__async"
+        assert saved[clone.id] is clone  # dual-track row mirrors the snapshot
+        names = {t.name for t in clone.tools}
         assert "dispatch" in names
         assert "await_members" in names
         assert "send" in names
@@ -705,8 +706,8 @@ async def test_orchestration_tools_include_list_and_get() -> None:
     orig = kernel_store.save_agent
     kernel_store.save_agent = _save  # type: ignore[assignment]
     try:
-        cid = await TaskOrchestrator()._materialize_lead_agent(conv, dispatch_mode="async")
-        clone_tool_names = [t.name for t in saved[cid].tools]
+        clone = await TaskOrchestrator()._materialize_lead_agent(conv, dispatch_mode="async")
+        clone_tool_names = [t.name for t in clone.tools]
         clone_names = set(clone_tool_names)
         # Launcher / draft-mode tools stripped:
         for stripped in (

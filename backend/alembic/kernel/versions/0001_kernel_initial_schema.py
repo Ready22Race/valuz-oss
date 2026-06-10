@@ -133,6 +133,7 @@ def upgrade() -> None:
         sa.Column("user_id", sa.String(length=64), nullable=False),
         sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("agent_id", sa.String(length=36), nullable=False),
+        sa.Column("agent_config", sa.JSON(), nullable=True),
         sa.Column("cwd", sa.Text(), nullable=False),
         sa.Column("runtime_provider", sa.String(length=20), nullable=False),
         sa.Column("model", sa.String(length=100), nullable=False),

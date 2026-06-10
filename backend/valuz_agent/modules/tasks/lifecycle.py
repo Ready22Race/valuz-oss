@@ -202,9 +202,9 @@ class LifecycleService:
                     f"lead agent {lead_agent_slug!r} is not a member of project {project_id!r}"
                 )
             lead_agent = await kernel_store.load_agent(lead_member.kernel_agent_id)
-            lead_clone_id: str | None = None
+            lead_clone = None
             if lead_agent is not None:
-                lead_clone_id = await self._materialize_lead_agent(
+                lead_clone = await self._materialize_lead_agent(
                     lead_agent, dispatch_mode=dispatch_mode
                 )
 
@@ -249,10 +249,12 @@ class LifecycleService:
             # surfaces the dispatch tools (build_member_session set agent_id to
             # the base agent; everything else on the session — instructions /
             # skills / model / provider — already came from the base).
-            if lead_clone_id is not None:
+            if lead_clone is not None:
                 from dataclasses import replace as _replace
 
-                lead_session = _replace(lead_session, agent_id=lead_clone_id)
+                lead_session = _replace(
+                    lead_session, agent_id=lead_clone.id, agent_config=lead_clone
+                )
 
             # Fail fast: don't spawn a lead that has no usable credentials —
             # it would only fail mid-turn with a cryptic "Not logged in".
@@ -527,9 +529,9 @@ class LifecycleService:
             lead_cwd = str(project_cwd)
 
             lead_agent = await kernel_store.load_agent(lead_member.kernel_agent_id)
-            lead_clone_id: str | None = None
+            lead_clone = None
             if lead_agent is not None:
-                lead_clone_id = await self._materialize_lead_agent(
+                lead_clone = await self._materialize_lead_agent(
                     lead_agent, dispatch_mode="async"
                 )
 
@@ -568,10 +570,12 @@ class LifecycleService:
             )
             if lead_session is None:
                 return {"error": f"could not build lead session for {lead_slug!r}"}
-            if lead_clone_id is not None:
+            if lead_clone is not None:
                 from dataclasses import replace as _replace
 
-                lead_session = _replace(lead_session, agent_id=lead_clone_id)
+                lead_session = _replace(
+                    lead_session, agent_id=lead_clone.id, agent_config=lead_clone
+                )
 
             gap = await _credential_gap(lead_session, lead_slug, db=db)
             if gap is not None:
@@ -1125,7 +1129,7 @@ class LifecycleService:
 
     async def _materialize_lead_agent(
         self, base_agent: Any, dispatch_mode: Literal["sync", "async"] = "sync"
-    ) -> str:  # returns the lead-clone AgentConfig id
+    ) -> Any:  # returns the lead-clone AgentConfig
         """Materialize a per-task **lead clone** of *base_agent* and return its id.
 
         Tools live only on ``AgentConfig`` (the kernel has no per-session tool
@@ -1180,8 +1184,10 @@ class LifecycleService:
         clone = _ensure_global_tools_declared(
             replace(base_agent, id=clone_id, tools=base_tools + tuple(declarations))
         )
+        # Dual-track: the clone row keeps legacy sessions resumable; new lead
+        # sessions embed the clone as their agent_config snapshot.
         await kernel_store.save_agent(clone)
-        return clone_id
+        return clone
 
 
 __all__ = ["LifecycleService"]

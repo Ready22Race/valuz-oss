@@ -193,14 +193,18 @@ class AgentService:
     # Shared kernel AgentConfig (v2 live-reference)
     # ------------------------------------------------------------------
 
-    async def _build_kernel_config(self, row: AgentRow, kernel_agent_id: str) -> AgentConfig:
-        """Build the shared kernel ``AgentConfig`` from an AgentRow's fields.
+    async def build_agent_config(self, row: AgentRow, agent_id: str | None = None) -> AgentConfig:
+        """Build an in-memory kernel ``AgentConfig`` from an AgentRow's fields.
 
-        One config per AgentRow (cross-project shared). Connectors are resolved
-        from the row's ``connector_types``; provider pin + bindings ride
-        ``metadata`` exactly like the v1 instance config so downstream
-        adapters (mcp_resolver / provider_resolver) see an identical shape.
+        This is the single AgentRow→AgentConfig constructor: session-creation
+        paths embed the result as the session's ``agent_config`` snapshot
+        (live-reference semantics: every NEW session picks up the row's
+        latest fields; existing sessions keep the snapshot they were created
+        with). Connectors are resolved from the row's ``connector_types``;
+        provider pin + bindings ride ``metadata`` so downstream adapters
+        (mcp_resolver / provider_resolver) see an identical shape.
         """
+        kernel_agent_id = agent_id or row.kernel_agent_id or f"agent:{row.slug}"[:36]
         metadata: dict[str, Any] = {}
         connector_bindings = [{"type": s} for s in (row.connector_types or [])] or None
         if connector_bindings:
@@ -233,7 +237,7 @@ class AgentService:
         from valuz_agent.adapters import kernel_store
 
         kernel_agent_id = row.kernel_agent_id or uuid4().hex
-        agent = await self._build_kernel_config(row, kernel_agent_id)
+        agent = await self.build_agent_config(row, kernel_agent_id)
         await kernel_store.save_agent(agent)
         if row.kernel_agent_id != kernel_agent_id:
             await self._agents.update_fields(row.slug, {"kernel_agent_id": kernel_agent_id})

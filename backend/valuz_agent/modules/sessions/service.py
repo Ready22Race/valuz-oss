@@ -24,6 +24,9 @@ import asyncio
 import logging
 from uuid import uuid4
 
+from src.core.agent_config import (
+    AgentConfig as KernelAgentConfig,
+)
 from src.core.types import (  # type: ignore[import-not-found]
     Attachment,
     ModelSettings,
@@ -324,8 +327,13 @@ class SessionService:
     # Commands
     # ------------------------------------------------------------------ #
 
-    async def _resolve_bound_kernel_agent_id(self, project_id: str, agent_slug: str) -> str:
-        """Resolve a session's bound agent to a kernel ``AgentConfig`` id.
+    async def _resolve_bound_agent(
+        self, project_id: str, agent_slug: str
+    ) -> tuple[str, KernelAgentConfig]:
+        """Resolve a session's bound agent to ``(kernel_agent_id, AgentConfig)``.
+
+        The returned config is built in memory from the host AgentRow and is
+        embedded into the session as its ``agent_config`` snapshot.
 
         Two binding sources, tried in order:
 
@@ -345,12 +353,33 @@ class SessionService:
             AgentDatastore,
             ProjectMemberDatastore,
         )
-        from valuz_agent.modules.agents.service import AgentService
+        from valuz_agent.modules.agents.service import (
+            AgentService,
+            _prepare_conversation_tools,
+        )
 
-        async with async_unit_of_work(commit=False) as _db:
+        async with async_unit_of_work() as _db:
             member = await ProjectMemberDatastore(_db).get(project_id, agent_slug)
             if member is not None:
-                return member.kernel_agent_id
+                # Live reference: the member points at a library AgentRow via
+                # ``source_agent_slug`` — build the snapshot from the row's
+                # CURRENT fields so every new session picks up library edits.
+                if member.source_agent_slug:
+                    row = await AgentDatastore(_db).get_agent(member.source_agent_slug)
+                    if row is not None:
+                        config = await AgentService(_db).build_agent_config(
+                            row, member.kernel_agent_id
+                        )
+                        return member.kernel_agent_id, config
+                # Legacy member without provenance — dual-track fallback to the
+                # kernel agents row it references.
+                agent = await kernel_store.load_agent(member.kernel_agent_id)
+                if agent is None:
+                    raise SessionNotRunnable(
+                        f"agent '{agent_slug}' has no kernel config (id "
+                        f"{member.kernel_agent_id}) — re-create the agent"
+                    )
+                return member.kernel_agent_id, _prepare_conversation_tools(agent)
 
         # Not a project member → resolve as a global library agent. Use a
         # committed unit of work so a lazy kernel_agent_id backfill persists.
@@ -360,9 +389,10 @@ class SessionService:
                 raise SessionNotRunnable(
                     f"agent '{agent_slug}' not found — pick a configured agent or add one first"
                 )
-            if row.kernel_agent_id:
-                return row.kernel_agent_id
-            return await AgentService(_db).ensure_kernel_agent(row)
+            svc = AgentService(_db)
+            kernel_agent_id = row.kernel_agent_id or await svc.ensure_kernel_agent(row)
+            config = await svc.build_agent_config(row, kernel_agent_id)
+            return kernel_agent_id, config
 
     async def _create_agent_bound_session(
         self,
@@ -394,7 +424,7 @@ class SessionService:
 
         ``agent_slug`` resolves to a project member for project conversations,
         or to a global library agent (the seeded default-assistant) for temp /
-        quick-chat conversations — see ``_resolve_bound_kernel_agent_id``.
+        quick-chat conversations — see ``_resolve_bound_agent``.
         """
         from valuz_agent.adapters.provider_resolver import (
             ProviderNotResolvable,
@@ -416,14 +446,7 @@ class SessionService:
             fresh_ws = await self._project_svc.create_chat_project_for_session()
             project_id = fresh_ws.id
 
-        kernel_agent_id = await self._resolve_bound_kernel_agent_id(project_id, agent_slug)
-
-        agent = await kernel_store.load_agent(kernel_agent_id)
-        if agent is None:
-            raise SessionNotRunnable(
-                f"agent '{agent_slug}' has no kernel config (id "
-                f"{kernel_agent_id}) — re-create the agent"
-            )
+        kernel_agent_id, agent = await self._resolve_bound_agent(project_id, agent_slug)
 
         # v3 (M10 附录 E): the launcher/observability tools (create_task /
         # list_tasks / get_task) and the dispatch-tool stripping are applied at
@@ -540,13 +563,6 @@ class SessionService:
             always_on_skill_paths,
             resolve_skill_slugs_to_paths,
         )
-        from valuz_agent.modules.agents.service import _prepare_conversation_tools
-
-        prepared = _prepare_conversation_tools(agent)
-        if tuple(getattr(prepared, "tools", ()) or ()) != tuple(agent.tools or ()):
-            await kernel_store.save_agent(prepared)
-            agent = prepared
-
         existing_mcp_names = {getattr(m, "name", None) for m in (agent.mcp_servers or ())}
         session_mcp = tuple(agent.mcp_servers or ()) + tuple(
             m for m in always_on_http_mcp_servers(session_id) if m.name not in existing_mcp_names
@@ -580,6 +596,7 @@ class SessionService:
             id=session_id,
             project_id=project_id,
             agent_id=kernel_agent_id,
+            agent_config=agent,
             runtime_provider=runtime_provider,
             model=effective_model,
             model_provider=model_provider,
@@ -809,6 +826,27 @@ class SessionService:
             caps_mcp = caps.mcp_servers
 
         agent_id = ProjectService._kernel_agent_id(project_id)
+        # Synthetic per-project assistant config, built in memory and embedded
+        # as the session's snapshot (mirrors what the kernel mirror used to
+        # store in the agents table: identity + the conversation tool set).
+        from valuz_agent.modules.projects.service import (
+            _ensure_memory_tools_declared,
+            _ensure_orchestration_declared,
+            _ensure_submit_skill_declared,
+        )
+
+        synthetic_tools = _ensure_orchestration_declared(
+            _ensure_memory_tools_declared(_ensure_submit_skill_declared(()))
+        )
+        agent_config = KernelAgentConfig(
+            id=agent_id,
+            name=title or "Assistant",
+            model=resolution.model,
+            runtime_provider=runtime_provider,
+            instructions="",  # the session field below is the source of truth
+            tools=synthetic_tools,
+            permission_mode="full_access",
+        )
 
         # Per ADR-008: snapshot the project's current ``instructions_md``
         # into ``Session.instructions`` at create time. The runtime reads
@@ -875,6 +913,7 @@ class SessionService:
             id=session_id,
             project_id=project_id,
             agent_id=agent_id,
+            agent_config=agent_config,
             runtime_provider=runtime_provider,
             model=resolution.model,
             model_provider=model_provider,

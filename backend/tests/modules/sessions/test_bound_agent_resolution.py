@@ -62,9 +62,10 @@ def patch_uow(db, monkeypatch):
 
 async def _resolve(project_id: str, agent_slug: str) -> str:
     # The resolver reads no instance state — a bare stand-in for ``self`` is fine.
-    return await SessionService._resolve_bound_kernel_agent_id(
+    kernel_agent_id, _config = await SessionService._resolve_bound_agent(
         SimpleNamespace(), project_id, agent_slug
     )
+    return kernel_agent_id
 
 
 async def test_should_resolve_global_library_agent_when_not_a_project_member(db, patch_uow) -> None:
@@ -104,6 +105,7 @@ async def test_should_prefer_project_member_over_library_agent(db, patch_uow) ->
             project_id="ws-proj",
             agent_slug="architect",
             kernel_agent_id="ker-member",
+            source_agent_slug="architect",
         )
     )
 
@@ -115,3 +117,39 @@ async def test_should_prefer_project_member_over_library_agent(db, patch_uow) ->
 async def test_should_raise_when_slug_is_neither_member_nor_library_agent(db, patch_uow) -> None:
     with pytest.raises(SessionNotRunnable):
         await _resolve("chat-default", "ghost-agent")
+
+
+async def test_member_resolution_builds_snapshot_from_library_row(db, patch_uow) -> None:
+    """Live-reference semantics: the member's config snapshot is built from
+    the CURRENT library row fields, keyed to the member's kernel id."""
+    await AgentDatastore(db).create(
+        AgentRow(
+            slug="researcher",
+            name="研究员",
+            source="custom",
+            runtime="claude_agent",
+            model="claude-opus-4-8",
+            instructions="dig deep",
+            kernel_agent_id="ker-lib-researcher",
+        )
+    )
+    await ProjectMemberDatastore(db).create(
+        ProjectMemberRow(
+            project_id="ws-x",
+            agent_slug="researcher",
+            kernel_agent_id="ker-member-researcher",
+            source_agent_slug="researcher",
+        )
+    )
+
+    kernel_agent_id, config = await SessionService._resolve_bound_agent(
+        SimpleNamespace(), "ws-x", "researcher"
+    )
+
+    assert kernel_agent_id == "ker-member-researcher"
+    assert config.id == "ker-member-researcher"
+    assert config.name == "研究员"
+    assert config.model == "claude-opus-4-8"
+    assert config.instructions == "dig deep"
+    # Conversation tool set is applied by build_agent_config.
+    assert any(t.name == "create_task" for t in config.tools)

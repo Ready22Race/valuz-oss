@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from src.core.agent_config import AgentConfig
 
 from src.core.time_utils import now_ms
 
@@ -228,6 +231,12 @@ class Session:
     id: str
     project_id: str
     agent_id: str
+    # Embedded snapshot of the agent configuration this session runs with.
+    # When present it is the source of truth the orchestrator binds the
+    # runtime to — the ``agents`` table row referenced by ``agent_id`` is
+    # not consulted. ``None`` = legacy row from before the snapshot column
+    # (the orchestrator falls back to loading ``agent_id``).
+    agent_config: AgentConfig | None = None
     # Per-session working directory override. Empty ("") = fall back to the
     # parent project's cwd. Set to give a session an isolated workdir.
     cwd: str = ""

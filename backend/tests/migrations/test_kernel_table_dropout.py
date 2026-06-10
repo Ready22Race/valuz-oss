@@ -94,7 +94,7 @@ def test_should_leave_modern_schema_alone_when_events_already_has_message_id(tmp
             text(
                 "CREATE TABLE sessions (id TEXT PRIMARY KEY, model_provider TEXT, "
                 "todos TEXT, runtime_provider TEXT, permission_mode TEXT, mode TEXT, "
-                "user_id TEXT)"
+                "user_id TEXT, agent_config TEXT)"
             )
         )
         conn.execute(
@@ -231,6 +231,33 @@ def test_should_cascade_drop_messages_table_when_sessions_marked_stale(tmp_path)
         # A stray ``messages`` table from a half-applied upgrade — must
         # also be dropped or the next CREATE TABLE messages fails.
         conn.execute(text("CREATE TABLE messages (id TEXT PRIMARY KEY)"))
+
+    drop_stale_kernel_tables(engine)
+
+    assert _kernel_tables_present(engine) == set()
+
+
+def test_should_drop_kernel_quartet_when_sessions_lacks_agent_config(tmp_path):
+    """Pre-snapshot DB has sessions without ``agent_config`` → drop everything
+    (the embedded-config cutover regenerated the baseline, no ALTER shipped)."""
+    db_url = f"sqlite:///{tmp_path / 'pre_snapshot.db'}"
+    engine = create_engine(db_url)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE projects (id TEXT PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE agents (id TEXT PRIMARY KEY, instructions TEXT)"))
+        conn.execute(
+            text(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, model_provider TEXT, "
+                "todos TEXT, runtime_provider TEXT, permission_mode TEXT, mode TEXT, "
+                "user_id TEXT)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE TABLE events (id INTEGER PRIMARY KEY, "
+                "session_id TEXT, message_id TEXT, type TEXT)"
+            )
+        )
 
     drop_stale_kernel_tables(engine)
 

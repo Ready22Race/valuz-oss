@@ -551,7 +551,12 @@ class SessionOrchestrator:
         if project.status == "deleted":
             raise ProjectDeletedError(session.project_id)
 
-        agent = await self._store.load_agent(session.agent_id)
+        # Dual-track: the embedded snapshot (sessions.agent_config) is the
+        # source of truth when present; legacy rows fall back to the agents
+        # table referenced by ``agent_id``.
+        agent = session.agent_config
+        if agent is None:
+            agent = await self._store.load_agent(session.agent_id)
         if agent is None:
             raise AgentNotFoundError(f"Agent {session.agent_id} not found for session {session_id}")
 

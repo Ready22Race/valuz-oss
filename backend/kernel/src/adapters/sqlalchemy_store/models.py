@@ -100,6 +100,10 @@ class SessionModel(Base):
     user_id: Mapped[str] = _owner_column()
     project_id: Mapped[str] = mapped_column(String(36))
     agent_id: Mapped[str] = mapped_column(String(36))
+    # Embedded AgentConfig snapshot (see ``core.types.Session.agent_config``).
+    # Nullable during the dual-track transition; becomes the sole source of
+    # agent configuration once the ``agents`` table is removed.
+    agent_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # Per-session cwd override; "" = fall back to project.cwd.
     cwd: Mapped[str] = mapped_column(Text, default="")
     runtime_provider: Mapped[str] = mapped_column(String(20))
