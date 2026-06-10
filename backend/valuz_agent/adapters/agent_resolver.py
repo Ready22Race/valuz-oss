@@ -407,9 +407,7 @@ async def _member_agent_config(member, members: ProjectMemberDatastore):  # noqa
             member.source_agent_slug,
         )
         return None
-    return await AgentService(db).build_agent_config(
-        row, member.kernel_agent_id or row.kernel_agent_id
-    )
+    return await AgentService(db).build_agent_config(row)
 
 
 async def build_member_roster(

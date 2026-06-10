@@ -2103,13 +2103,6 @@ components:
           description: >-
             Preset icon key or uploaded asset URL for the agent's avatar.
             v1 supports preset keys only. null = no avatar set.
-        kernel_agent_id:
-          type: string
-          nullable: true
-          description: >-
-            Shared kernel AgentConfig id (v2 live-reference). null until first
-            deploy (built lazily). Lets a project member map back to its
-            library agent (member.kernel_agent_id == agent.kernel_agent_id).
     CreateAgentRequest:
       type: object
       required: [name]
@@ -2192,12 +2185,11 @@ components:
         agent_slug: {type: string, nullable: true}
     ProjectMember:
       type: object
-      required: [id, project_id, agent_slug, kernel_agent_id]
+      required: [id, project_id, agent_slug]
       properties:
         id: {type: string}
         project_id: {type: string}
         agent_slug: {type: string}
-        kernel_agent_id: {type: string}
         source_agent_slug: {type: string, nullable: true}
     AgentSummary:
       type: object

@@ -30,18 +30,6 @@ class AgentDatastore:
     async def get_agent(self, slug: str) -> AgentRow | None:
         return (await self._db.execute(select(AgentRow).filter_by(slug=slug))).scalars().first()
 
-    async def get_by_kernel_agent_id(self, kernel_agent_id: str) -> AgentRow | None:
-        """Resolve the library AgentRow backing a shared kernel config id.
-
-        Powers the v2 cascade: a project-side member edit resolves through its
-        ``kernel_agent_id`` back to the AgentRow, then edits the agent globally.
-        """
-        return (
-            (await self._db.execute(select(AgentRow).filter_by(kernel_agent_id=kernel_agent_id)))
-            .scalars()
-            .first()
-        )
-
     async def create(self, row: AgentRow) -> AgentRow:
         self._db.add(row)
         await self._db.commit()
@@ -122,17 +110,17 @@ class ProjectMemberDatastore:
     async def get_by_id(self, member_id: str) -> ProjectMemberRow | None:
         return await self._db.get(ProjectMemberRow, member_id)
 
-    async def list_by_kernel_agent(self, kernel_agent_id: str) -> list[ProjectMemberRow]:
-        """Every派驻 (across all projects) of one shared kernel agent.
+    async def list_by_source_agent_slug(self, source_agent_slug: str) -> list[ProjectMemberRow]:
+        """Every membership row deployed from the given library agent.
 
-        Powers the delete guard (block deleting a still-deployed agent) and the
-        agent detail page's「派驻于 N 个项目」panel.
+        Powers the delete guard (block deleting a still-deployed agent) and
+        the agent detail page's「派驻于 N 个项目」panel.
         """
         return list(
             (
                 await self._db.execute(
                     select(ProjectMemberRow)
-                    .filter_by(kernel_agent_id=kernel_agent_id)
+                    .filter_by(source_agent_slug=source_agent_slug)
                     .order_by(ProjectMemberRow.created_at)
                 )
             )

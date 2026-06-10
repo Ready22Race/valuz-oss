@@ -77,14 +77,13 @@ async def test_should_resolve_global_library_agent_when_not_a_project_member(db,
             deletable=False,
             runtime="claude_agent",
             model="claude-sonnet-4-6",
-            kernel_agent_id="ker-default-assistant",
         )
     )
 
     # chat-default project has no members → falls back to the library agent.
     resolved = await _resolve("chat-default", DEFAULT_ASSISTANT_SLUG)
 
-    assert resolved == "ker-default-assistant"
+    assert resolved == "agent:default-assistant"
 
 
 async def test_should_prefer_project_member_over_library_agent(db, patch_uow) -> None:
@@ -97,21 +96,19 @@ async def test_should_prefer_project_member_over_library_agent(db, patch_uow) ->
             source="custom",
             runtime="claude_agent",
             model="claude-sonnet-4-6",
-            kernel_agent_id="ker-library",
         )
     )
     await ProjectMemberDatastore(db).create(
         ProjectMemberRow(
             project_id="ws-proj",
             agent_slug="architect",
-            kernel_agent_id="ker-member",
             source_agent_slug="architect",
         )
     )
 
     resolved = await _resolve("ws-proj", "architect")
 
-    assert resolved == "ker-member"
+    assert resolved == "agent:architect"
 
 
 async def test_should_raise_when_slug_is_neither_member_nor_library_agent(db, patch_uow) -> None:
@@ -130,14 +127,12 @@ async def test_member_resolution_builds_snapshot_from_library_row(db, patch_uow)
             runtime="claude_agent",
             model="claude-opus-4-8",
             instructions="dig deep",
-            kernel_agent_id="ker-lib-researcher",
         )
     )
     await ProjectMemberDatastore(db).create(
         ProjectMemberRow(
             project_id="ws-x",
             agent_slug="researcher",
-            kernel_agent_id="ker-member-researcher",
             source_agent_slug="researcher",
         )
     )
@@ -146,8 +141,8 @@ async def test_member_resolution_builds_snapshot_from_library_row(db, patch_uow)
         SimpleNamespace(), "ws-x", "researcher"
     )
 
-    assert kernel_agent_id == "ker-member-researcher"
-    assert config.id == "ker-member-researcher"
+    assert kernel_agent_id == "agent:researcher"
+    assert config.id == "agent:researcher"
     assert config.name == "研究员"
     assert config.model == "claude-opus-4-8"
     assert config.instructions == "dig deep"

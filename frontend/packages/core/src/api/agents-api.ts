@@ -29,10 +29,6 @@ export interface Agent {
   deletable: boolean;
   /** Preset icon key or uploaded asset URL (08-agents-module v2); null = unset. */
   avatar: string | null;
-  /** Shared kernel AgentConfig id (v2 live-reference); null until first deploy.
-   *  Maps a project member back to its library agent
-   *  (member.kernel_agent_id === agent.kernel_agent_id). */
-  kernel_agent_id: string | null;
 }
 
 /** One派驻 of an agent — the project (project) it's deployed into. */
@@ -47,7 +43,6 @@ export interface ProjectMember {
   id: string;
   project_id: string;
   agent_slug: string;
-  kernel_agent_id: string;
   source_agent_slug: string | null;
 }
 

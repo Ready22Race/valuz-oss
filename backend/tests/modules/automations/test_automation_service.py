@@ -163,8 +163,8 @@ class FakeProjectService:
 
 
 class FakeMember:
-    def __init__(self, kernel_agent_id: str = "kernel-agent-1") -> None:
-        self.kernel_agent_id = kernel_agent_id
+    def __init__(self, source_agent_slug: str = "demo-agent") -> None:
+        self.source_agent_slug = source_agent_slug
 
 
 class FakeMemberDatastore:

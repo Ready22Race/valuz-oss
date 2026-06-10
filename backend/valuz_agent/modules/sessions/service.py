@@ -353,10 +353,8 @@ class SessionService:
            NOT a member of any project. The 09-assistant design has no agentless
            path, so every chat-default session carries such a slug.
 
-        For a library agent the kernel ``AgentConfig`` is built lazily; we
-        materialize it on first use (committing the ``kernel_agent_id`` backfill)
-        and reuse it thereafter — no per-send re-save (Settings changes keep the
-        kernel config in sync via ``AgentService.update_agent``).
+        Either way the config is built in memory from the library AgentRow's
+        current fields and embedded into the session as its snapshot.
         """
         from valuz_agent.modules.agents.datastore import (
             AgentDatastore,
@@ -375,10 +373,8 @@ class SessionService:
                 if member.source_agent_slug:
                     row = await AgentDatastore(_db).get_agent(member.source_agent_slug)
                     if row is not None:
-                        config = await AgentService(_db).build_agent_config(
-                            row, member.kernel_agent_id
-                        )
-                        return member.kernel_agent_id, config
+                        config = await AgentService(_db).build_agent_config(row)
+                        return config.id, config
                 # Member without provenance (pre-0003 row whose backfill found
                 # no matching library agent) — nothing to build a config from.
                 raise SessionNotRunnable(
@@ -386,18 +382,15 @@ class SessionService:
                     "re-deploy it from the agent library"
                 )
 
-        # Not a project member → resolve as a global library agent. Use a
-        # committed unit of work so a lazy kernel_agent_id backfill persists.
+        # Not a project member → resolve as a global library agent.
         async with async_unit_of_work() as _db:
             row = await AgentDatastore(_db).get_agent(agent_slug)
             if row is None:
                 raise SessionNotRunnable(
                     f"agent '{agent_slug}' not found — pick a configured agent or add one first"
                 )
-            svc = AgentService(_db)
-            kernel_agent_id = row.kernel_agent_id or await svc.ensure_kernel_agent(row)
-            config = await svc.build_agent_config(row, kernel_agent_id)
-            return kernel_agent_id, config
+            config = await AgentService(_db).build_agent_config(row)
+            return config.id, config
 
     async def _create_agent_bound_session(
         self,

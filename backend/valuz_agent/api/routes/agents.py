@@ -82,8 +82,6 @@ class AgentResponse(BaseModel):
     avatar: str | None = None
     # Shared kernel AgentConfig id (v2 live-reference). null until first deploy
     # (built lazily). Surfaced so the frontend can map a project member back to
-    # its library agent (member.kernel_agent_id == agent.kernel_agent_id).
-    kernel_agent_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -122,7 +120,6 @@ class ProjectMemberResponse(BaseModel):
     id: str
     project_id: str
     agent_slug: str
-    kernel_agent_id: str
     source_agent_slug: str | None
 
     model_config = {"from_attributes": True}

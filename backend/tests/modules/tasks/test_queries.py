@@ -214,7 +214,6 @@ async def test_list_members_degrades_when_agent_not_loadable(db_factory, tmp_pat
             ProjectMemberRow(
                 project_id="w1",
                 agent_slug="researcher",
-                kernel_agent_id="ka-1",
                 source_agent_slug="researcher-template",
             )
         )

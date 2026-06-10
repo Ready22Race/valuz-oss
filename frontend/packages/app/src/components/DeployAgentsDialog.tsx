@@ -39,7 +39,7 @@ export interface DeployAgentsDialogProps {
  * v2 派驻 picker — multi-select deploy/undeploy of library agents into a
  * project. Each toggle is a live reference (deploy) or its removal (undeploy);
  * NO copy. The已派驻 state is derived by mapping a member back to its library
- * agent via the shared ``kernel_agent_id``.
+ * agent via the member's ``source_agent_slug``.
  */
 export const DeployAgentsDialog = ({
   open,
@@ -55,10 +55,7 @@ export const DeployAgentsDialog = ({
   const [busySlug, setBusySlug] = useState<string | null>(null);
 
   // The library agents are kept as local state and refreshed after every
-  // deploy/undeploy. A freshly-created-then-deployed agent only gets its
-  // ``kernel_agent_id`` backfilled on first deploy, so the prop snapshot (taken
-  // before the deploy) would still show it unchecked — letting the user select
-  // it again and hit a duplicate error. Re-fetching keeps the已派驻 state honest.
+  // deploy/undeploy so the已派驻 state stays honest against concurrent edits.
   const [liveAgents, setLiveAgents] = useState<Agent[]>(agents);
   useEffect(() => {
     setLiveAgents(agents);
@@ -72,12 +69,17 @@ export const DeployAgentsDialog = ({
     setLiveAgents(agentsRes.agents);
   };
 
-  const deployedKernelIds = useMemo(
-    () => new Set(members.map((m) => m.member.kernel_agent_id)),
+  const deployedSourceSlugs = useMemo(
+    () => new Set(members.map((m) => m.member.source_agent_slug).filter(Boolean)),
     [members],
   );
-  const memberByKernelId = useMemo(
-    () => new Map(members.map((m) => [m.member.kernel_agent_id, m])),
+  const memberBySourceSlug = useMemo(
+    () =>
+      new Map(
+        members
+          .filter((m) => m.member.source_agent_slug)
+          .map((m) => [m.member.source_agent_slug as string, m]),
+      ),
     [members],
   );
 
@@ -99,9 +101,7 @@ export const DeployAgentsDialog = ({
           source_agent_slug: agent.slug,
         });
       } else {
-        const m = agent.kernel_agent_id
-          ? memberByKernelId.get(agent.kernel_agent_id)
-          : undefined;
+        const m = memberBySourceSlug.get(agent.slug);
         if (m) await agentsApi.deleteMember(projectId, m.member.agent_slug);
       }
       await refresh();
@@ -136,9 +136,7 @@ export const DeployAgentsDialog = ({
           <div className="-mr-1 max-h-[48vh] min-h-0 flex-1 overflow-y-auto pr-1">
             <div className="flex flex-col gap-0.5">
               {filtered.map((agent) => {
-                const isDeployed =
-                  !!agent.kernel_agent_id &&
-                  deployedKernelIds.has(agent.kernel_agent_id);
+                const isDeployed = deployedSourceSlugs.has(agent.slug);
                 const icon = pickAgentIcon(agent);
                 return (
                   <label

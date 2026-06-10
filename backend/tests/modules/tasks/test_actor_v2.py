@@ -26,12 +26,12 @@ from valuz_agent.modules.tasks.orchestrator import (
 )
 
 
-def _async_member_get(kernel_agent_id: str = "kernel-agent-1"):
+def _async_member_get(source_agent_slug: str = "lead-agent"):
     """A fake ProjectMemberDatastore.get — async, since the real one is async
     (build_member_session awaits it)."""
 
     async def _get(ws: str, slug: str) -> SimpleNamespace:
-        return SimpleNamespace(kernel_agent_id=kernel_agent_id)
+        return SimpleNamespace(source_agent_slug=source_agent_slug)
 
     return _get
 

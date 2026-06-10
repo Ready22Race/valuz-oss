@@ -106,8 +106,6 @@ async def _seed_project_and_agent() -> tuple[str, str]:
 
     # Library agent — the member references it via source_agent_slug; the
     # session-creation path builds the embedded snapshot from this row.
-    kernel_agent_id = f"kernel-agent-{uuid.uuid4().hex[:8]}"
-
     async with async_unit_of_work() as db:
         agent_ds = AgentDatastore(db)
         await agent_ds.create(
@@ -118,7 +116,6 @@ async def _seed_project_and_agent() -> tuple[str, str]:
                 runtime="claude_agent",
                 model="claude-sonnet-4-6",
                 instructions="You are the lead agent for chat-plan E2E.",
-                kernel_agent_id=kernel_agent_id,
             )
         )
 
@@ -135,7 +132,6 @@ async def _seed_project_and_agent() -> tuple[str, str]:
         member = ProjectMemberRow(
             project_id=ws_id,
             agent_slug=slug,
-            kernel_agent_id=kernel_agent_id,
             source_agent_slug=slug,
         )
         await member_ds.create(member)

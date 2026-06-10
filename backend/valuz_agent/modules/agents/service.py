@@ -172,7 +172,7 @@ class AgentService:
         provider pin + bindings ride ``metadata`` so downstream adapters
         (mcp_resolver / provider_resolver) see an identical shape.
         """
-        kernel_agent_id = agent_id or row.kernel_agent_id or f"agent:{row.slug}"[:36]
+        kernel_agent_id = agent_id or f"agent:{row.slug}"[:36]
         metadata: dict[str, Any] = {}
         connector_bindings = [{"type": s} for s in (row.connector_types or [])] or None
         if connector_bindings:
@@ -192,23 +192,6 @@ class AgentService:
             metadata=metadata,
         )
         return _prepare_conversation_tools(agent)
-
-    async def ensure_kernel_agent(self, row: AgentRow) -> str:
-        """Ensure the row carries a stable snapshot identity and return it.
-
-        Historically this materialized a shared kernel ``AgentConfig`` row;
-        the kernel no longer has an agents table — sessions embed their
-        config snapshot instead. What remains is the stable id stamped into
-        snapshots (``config.id``) and referenced by project members. Minted
-        lazily and backfilled onto the AgentRow, exactly as before.
-        """
-        from uuid import uuid4
-
-        kernel_agent_id = row.kernel_agent_id or uuid4().hex
-        if row.kernel_agent_id != kernel_agent_id:
-            await self._agents.update_fields(row.slug, {"kernel_agent_id": kernel_agent_id})
-            row.kernel_agent_id = kernel_agent_id
-        return kernel_agent_id
 
     # ------------------------------------------------------------------
     # Agent reads (MVP agents are read-only)
@@ -253,10 +236,8 @@ class AgentService:
             avatar=payload.get("avatar") or None,
             source="custom",
         )
-        # v2 live-reference: the shared kernel AgentConfig is built LAZILY on
-        # first派驻 (``ensure_kernel_agent`` in ``deploy_agent``) — a
-        # never-deployed agent needs no kernel config. Keeps create cheap and
-        # kernel-store-free.
+        # Live-reference: sessions snapshot the row at creation time, so a
+        # fresh agent needs no extra materialization step.
         return await self._agents.create(row)
 
     async def update_agent(self, slug: str, patch: dict[str, Any]) -> AgentRow:
@@ -310,8 +291,8 @@ class AgentService:
             raise AgentNotDeletableError(slug)
         # v2 派驻 guard: block deleting an agent still referenced by any project
         # member (would orphan a task holder). Caller must解除派驻 first.
-        if existing.kernel_agent_id:
-            deployments = await self._members.list_by_kernel_agent(existing.kernel_agent_id)
+        deployments = await self._members.list_by_source_agent_slug(existing.slug)
+        if deployments:
             if deployments:
                 raise AgentStillDeployedError(slug, len(deployments))
         if not await self._agents.delete(slug):
@@ -330,9 +311,7 @@ class AgentService:
         when the agent has never been deployed (no shared kernel config yet).
         """
         row = await self.get_agent(slug)
-        if not row.kernel_agent_id:
-            return []
-        members = await self._members.list_by_kernel_agent(row.kernel_agent_id)
+        members = await self._members.list_by_source_agent_slug(row.slug)
         return [{"project_id": m.project_id, "agent_slug": m.agent_slug} for m in members]
 
     async def list_members(self, project_id: str) -> list[dict[str, Any]]:
@@ -350,24 +329,14 @@ class AgentService:
                 if m.source_agent_slug:
                     src_row = await self._agents.get_agent(m.source_agent_slug)
                     if src_row is not None:
-                        agent = await self.build_agent_config(
-                            src_row, m.kernel_agent_id or src_row.kernel_agent_id
-                        )
+                        agent = await self.build_agent_config(src_row)
             except Exception:
                 logger.warning(
-                    "list_members: could not build agent config %s for member %s/%s",
-                    m.kernel_agent_id,
+                    "list_members: could not build agent config for member %s/%s (src=%s)",
                     project_id,
                     m.agent_slug,
                 )
                 agent = None
-            # Backfill source_agent_slug for legacy members that were派驻ed
-            # before deploy_agent started persisting it. Reverse-lookup by
-            # kernel_agent_id — the live link is still valid.
-            if m.source_agent_slug is None and m.kernel_agent_id:
-                lib_row = await self._agents.get_by_kernel_agent_id(m.kernel_agent_id)
-                if lib_row is not None:
-                    m.source_agent_slug = lib_row.slug
             result.append({"member": m, "agent": agent})
         return result
 
@@ -382,11 +351,12 @@ class AgentService:
         agent_slug: str | None = None,
         dedupe: bool = True,
     ) -> dict[str, Any]:
-        """v2 DEPLOY (派驻): reference the source agent's SHARED kernel config.
+        """v2 DEPLOY (派驻): live-reference the source library agent.
 
-        Live-reference — NO per-project copy. The member's ``kernel_agent_id``
-        points at the one shared ``AgentConfig`` backing the source AgentRow, so
-        editing the agent (library or project side) propagates to every project.
+        NO per-project copy. The member row records ``source_agent_slug``;
+        every new session builds its embedded config snapshot from the source
+        AgentRow's CURRENT fields, so editing the agent (library or project
+        side) propagates to every project automatically.
         Configuration lives on the agent, not the派驻 — to pin a provider on a
         seeded official agent, copy it to your own agent (复制为我的) and set the
         provider there (大脑 tab).
@@ -413,16 +383,12 @@ class AgentService:
                 f"agent '{agent_slug}' already exists in project '{project_id}'"
             )
 
-        # Lazily build the shared kernel config (backfills seeded rows) and
-        # reference it — no copy, no new kernel agent.
-        kernel_agent_id = await self.ensure_kernel_agent(source_agent)
-
-        # v2 dedup: ONE派驻 per agent per project (live reference — deploying the
-        # same agent twice into one project is meaningless). Keyed on the shared
-        # ``kernel_agent_id``. Skipped for the automation runner (see ``dedupe``).
+        # v2 dedup: ONE派驻 per agent per project (live reference — deploying
+        # the same agent twice into one project is meaningless). Keyed on the
+        # source library slug. Skipped for the automation runner (``dedupe``).
         if dedupe:
             existing_members = await self._members.list_by_project(project_id)
-            if any(m.kernel_agent_id == kernel_agent_id for m in existing_members):
+            if any(m.source_agent_slug == source_agent.slug for m in existing_members):
                 raise MemberAlreadyExistsError(
                     f"agent '{source_agent_slug}' is already deployed to project '{project_id}'"
                 )
@@ -430,15 +396,13 @@ class AgentService:
         member = ProjectMemberRow(
             project_id=project_id,
             agent_slug=agent_slug,
-            kernel_agent_id=kernel_agent_id,
-            # Provenance: keep the library agent slug so the UI can open the
-            # shared agent's detail from a member row (overlay in project page).
-            # The kernel_agent_id is still the live link; this is a UX shortcut.
+            # Provenance IS the live link: sessions build their snapshot from
+            # the source library row at creation time.
             source_agent_slug=source_agent.slug,
         )
         await self._members.create(member)
 
-        agent = await self.build_agent_config(source_agent, kernel_agent_id)
+        agent = await self.build_agent_config(source_agent)
         return {"member": member, "agent": agent}
 
     # ------------------------------------------------------------------
