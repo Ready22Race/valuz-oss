@@ -4,6 +4,8 @@ package cmd
 
 import "errors"
 
+func launchdPlistPath() (string, error) { return "", nil }
+
 func installAutostartPlatform(exe string, port int, logDir string) error {
 	return errors.New("install-autostart on Linux is not yet implemented (systemd template pending)")
 }
