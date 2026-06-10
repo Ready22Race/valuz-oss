@@ -8,7 +8,7 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from valuz_agent.adapters import kernel_store
+from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.event_sse_adapter import iter_events_sse
 from valuz_agent.api.deps import get_current_user, get_session_service
 from valuz_agent.infra.db import get_async_session
@@ -42,7 +42,7 @@ class SessionCreateRequest(SessionModelSelection):
     live-reconcilable (kernel V5+bba3014) via dedicated PATCH routes.
     """
 
-    workspace_id: str
+    project_id: str
     title: str | None = None
     # Slugs of MCP data sources to enable for this session (e.g. ["reportify"]).
     # The frontend's data-source picker provides them; ``adapters.mcp_resolver``
@@ -182,20 +182,20 @@ class SessionEventWindowResponse(BaseModel):
 
 
 @router.get("")
-def list_sessions(
-    workspace_id: str | None = None,
+async def list_sessions(
+    project_id: str | None = None,
     q: str | None = None,
     svc: SessionService = Depends(get_session_service),
 ) -> dict[str, list[SessionListItem]]:
-    return {"sessions": svc.list_sessions(workspace_id=workspace_id, query=q)}
+    return {"sessions": await svc.list_sessions(project_id=project_id, query=q)}
 
 
 @router.get("/{session_id}")
-def get_session(
+async def get_session(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.get_session(session_id)
+    return await svc.get_session(session_id)
 
 
 @router.post("", status_code=201)
@@ -204,7 +204,7 @@ async def create_session(
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
     return await svc.create_session(
-        body.workspace_id,
+        body.project_id,
         title=body.title,
         model_id=body.model_id,
         provider_id=body.provider_id,
@@ -217,17 +217,17 @@ async def create_session(
 
 
 @router.get("/{session_id}/events")
-def list_events(
+async def list_events(
     session_id: str,
     after_seq: int = 0,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionEventsResponse:
-    items = svc.list_events(session_id, after_seq=after_seq)
+    items = await svc.list_events(session_id, after_seq=after_seq)
     return SessionEventsResponse(session_id=session_id, items=items)
 
 
 @router.get("/{session_id}/events/window")
-def list_events_window(
+async def list_events_window(
     session_id: str,
     before_seq: int | None = None,
     turn_limit: int = 20,
@@ -242,7 +242,7 @@ def list_events_window(
     ``before_seq=items[0].seq, turn_limit=N`` → server returns the next
     older N turns. Loop terminates when ``has_more=false``.
     """
-    items, has_more = svc.list_events_window(
+    items, has_more = await svc.list_events_window(
         session_id,
         before_seq=before_seq,
         turn_limit=turn_limit,
@@ -311,19 +311,19 @@ async def send_message_sync(
 
 
 @router.post("/{session_id}/interrupt")
-def interrupt(
+async def interrupt(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.interrupt(session_id)
+    return await svc.interrupt(session_id)
 
 
 @router.post("/{session_id}/cancel")
-def cancel(
+async def cancel(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.cancel(session_id)
+    return await svc.cancel(session_id)
 
 
 @router.post("/{session_id}/regenerate")
@@ -336,24 +336,24 @@ async def regenerate(
 
 
 @router.patch("/{session_id}")
-def rename_session(
+async def rename_session(
     session_id: str,
     name: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.rename_session(session_id, name)
+    return await svc.rename_session(session_id, name)
 
 
 @router.delete("/{session_id}", status_code=204)
-def delete_session(
+async def delete_session(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> None:
-    svc.delete_session(session_id)
+    await svc.delete_session(session_id)
 
 
 @router.patch("/{session_id}/permission-mode")
-def update_permission_mode(
+async def update_permission_mode(
     session_id: str,
     body: SessionPermissionModeRequest,
     svc: SessionService = Depends(get_session_service),
@@ -371,13 +371,13 @@ def update_permission_mode(
     only the Claude tier ships the LLM classifier today).
     """
     try:
-        return svc.set_permission_mode(session_id, body.permission_mode)
+        return await svc.set_permission_mode(session_id, body.permission_mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/{session_id}/effort")
-def update_session_effort(
+async def update_session_effort(
     session_id: str,
     body: SessionEffortRequest,
     svc: SessionService = Depends(get_session_service),
@@ -401,7 +401,7 @@ def update_session_effort(
     ``effort=null`` resets to the SDK default.
     """
     try:
-        return svc.set_session_effort(session_id, body.effort)
+        return await svc.set_session_effort(session_id, body.effort)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -430,20 +430,7 @@ async def submit_session_action(
         ``orchestrator.submit_action``; that error becomes a 400 here.
     """
 
-    # Import the kernel orchestrator's exception types here so the route
-    # file doesn't pull in kernel internals at module load (keeps the
-    # import surface narrow + matches existing patterns elsewhere).
-    from src.core.orchestrator import (  # type: ignore[import-not-found]
-        ApprovalNotImplementedError,
-        PendingActionConflictError,
-        PendingActionDecisionMismatchError,
-        PendingActionExpiredError,
-        PendingActionNotFoundError,
-        ProjectDeletedError,
-        ProjectNotFoundError,
-        RuntimeUnavailableError,
-        SessionNotFoundError,
-    )
+    from valuz_agent.adapters.kernel_client import KernelClientError
 
     try:
         result = await svc.submit_action(
@@ -454,52 +441,10 @@ async def submit_session_action(
             answers=body.answers,
             modified_input=body.modified_input,
         )
-    except SessionNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Session not found") from exc
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Project not found") from exc
-    except ProjectDeletedError as exc:
-        raise HTTPException(status_code=410, detail="Project deleted") from exc
-    except PendingActionNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Pending action {body.pending_id} not found",
-        ) from exc
-    except PendingActionDecisionMismatchError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Pending {exc.pending_id} subject={exc.subject!r} "
-                f"cannot accept decision={exc.decision!r}"
-            ),
-        ) from exc
-    except PendingActionConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Pending {exc.pending_id} already resolved as "
-                f"{exc.previous_decision}; cannot replace with "
-                f"{exc.requested_decision}"
-            ),
-        ) from exc
-    except PendingActionExpiredError as exc:
-        raise HTTPException(
-            status_code=410,
-            detail=f"Pending {exc.pending_id} already {exc.reason}; cannot decide",
-        ) from exc
-    except RuntimeUnavailableError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"No live runtime is awaiting decision for session {session_id}; "
-                "the turn has ended or the host restarted."
-            ),
-        ) from exc
-    except ApprovalNotImplementedError as exc:
-        raise HTTPException(
-            status_code=501,
-            detail=f"Runtime has not implemented the approval bridge: {exc}",
-        ) from exc
+    except KernelClientError as exc:
+        # The kernel seam already shaped the error HTTP-wise (the kernel
+        # route mapped its orchestrator exceptions); re-surface verbatim.
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
     rule_id_raw = result.get("rule_id")
     return SessionActionResponse(
@@ -521,15 +466,15 @@ class SessionExtraSkillsResponse(BaseModel):
 
 
 @router.get("/{session_id}/skills")
-def get_session_extra_skills(
+async def get_session_extra_skills(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionExtraSkillsResponse:
-    return SessionExtraSkillsResponse(skill_ids=svc.get_extra_skills(session_id))
+    return SessionExtraSkillsResponse(skill_ids=await svc.get_extra_skills(session_id))
 
 
 @router.put("/{session_id}/skills")
-def set_session_extra_skills(
+async def set_session_extra_skills(
     session_id: str,
     body: SessionExtraSkillsRequest,
     svc: SessionService = Depends(get_session_service),
@@ -538,8 +483,8 @@ def set_session_extra_skills(
 
     skill-creator is always active and does not need to be listed here.
     """
-    svc.set_extra_skills(session_id, body.skill_ids)
-    return SessionExtraSkillsResponse(skill_ids=svc.get_extra_skills(session_id))
+    await svc.set_extra_skills(session_id, body.skill_ids)
+    return SessionExtraSkillsResponse(skill_ids=await svc.get_extra_skills(session_id))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -620,7 +565,7 @@ async def list_attachments(
     client-side. The runtime path uses ``_load_pending_attachments``
     instead, which is pending-only.
     """
-    if await kernel_store.load_session(session_id) is None:
+    if await kernel_client.get_session(session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     rows = await SessionDatastore(db).list_attachments(session_id, include_consumed=True)
     return AttachmentListResponse(items=[_row_to_item(r) for r in rows])
@@ -641,7 +586,7 @@ async def upload_attachment(
     copies bytes — valuz holds the canonical store and the kernel only
     references it.
     """
-    if await kernel_store.load_session(session_id) is None:
+    if await kernel_client.get_session(session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
 
     # Session-wide attachment cap (local + KB-sourced counted together).
@@ -862,7 +807,7 @@ async def add_kb_attachments(
     docs return 400 with the offending id so the picker can surface
     the conflict instead of silently dropping the selection.
     """
-    if await kernel_store.load_session(session_id) is None:
+    if await kernel_client.get_session(session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     if not body.doc_ids:
         # Empty list is a no-op (picker confirmed with nothing
@@ -959,7 +904,7 @@ async def delete_attachment(
     """
     import os
 
-    if await kernel_store.load_session(session_id) is None:
+    if await kernel_client.get_session(session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     ds = SessionDatastore(db)
     row = await ds.get_attachment(attachment_id)

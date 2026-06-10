@@ -18,12 +18,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from src.core import ToolDef, ToolResult  # type: ignore[import-not-found]
-from src.core.tool_registry import register_tool  # type: ignore[import-not-found]
-from src.core.tools import ExecContext  # type: ignore[import-not-found]
+from src.core import ToolDef, ToolResult
+from src.core.tool_registry import register_tool
+from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401
-from valuz_agent.adapters import kernel_sync
+from valuz_agent.adapters import kernel_client
 from valuz_agent.modules.memory.models import MEM_TYPES, MemoryScope, Scope
 from valuz_agent.modules.memory.service import MemoryError, memory_service
 
@@ -36,18 +36,28 @@ MEMORY_WRITE_TOOL_NAME = "memory_write"
 # --- context resolution (module-level so tests can monkeypatch) -------------
 
 
-def _resolve_project_cwd(project_id: str) -> str | None:
-    if not project_id:
-        return None
-    proj = kernel_sync.load_project_sync(project_id)
-    cwd = getattr(proj, "cwd", "") if proj else ""
-    return cwd or None
-
-
-def _resolve_task_id(session_id: str) -> str | None:
+async def _resolve_project_cwd(session_id: str) -> str | None:
+    """Project-root cwd for the session's project — resolved through the
+    session's host-stamped ``metadata.valuz.project_id`` (the kernel knows
+    no projects). NOT ``session.cwd``: task sub-runs execute in their own
+    run_dir while memory scopes must anchor at the project root."""
     if not session_id:
         return None
-    sess = kernel_sync.load_session_sync(session_id)
+    sess = await kernel_client.get_session(session_id)
+    if sess is None:
+        return None
+    project_id = ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or ""
+    if not project_id:
+        return None
+    from valuz_agent.modules.projects.service import project_cwd_by_id
+
+    return await project_cwd_by_id(str(project_id))
+
+
+async def _resolve_task_id(session_id: str) -> str | None:
+    if not session_id:
+        return None
+    sess = await kernel_client.get_session(session_id)
     if sess is None:
         return None
     valuz = (sess.metadata or {}).get("valuz", {}) or {}
@@ -58,10 +68,10 @@ class ScopeResolver:
     """Resolve a requested scope name into a concrete MemoryScope for a session,
     enforcing visibility (chat → global only; project/task sessions → all)."""
 
-    def resolve(self, scope: Scope, ctx: ExecContext) -> MemoryScope:
+    async def resolve(self, scope: Scope, ctx: ExecContext) -> MemoryScope:
         if scope == "global":
             return MemoryScope("global")
-        cwd = _resolve_project_cwd(ctx.project_id)
+        cwd = await _resolve_project_cwd(ctx.session_id)
         if not cwd:
             raise MemoryError(
                 f"scope {scope!r} unavailable: this session has no project cwd "
@@ -70,7 +80,7 @@ class ScopeResolver:
         if scope == "project":
             return MemoryScope("project", project_cwd=cwd)
         if scope == "task":
-            task_id = _resolve_task_id(ctx.session_id)
+            task_id = await _resolve_task_id(ctx.session_id)
             if not task_id:
                 raise MemoryError("scope 'task' unavailable: this session is not bound to a task")
             return MemoryScope("task", project_cwd=cwd, task_id=task_id)
@@ -89,7 +99,7 @@ async def _memory_get_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRes
     if scope not in ("global", "project", "task") or not name:
         return ToolResult(content="memory_get: 'scope' and 'name' are required", is_error=True)
     try:
-        ms = _scope_resolver.resolve(scope, ctx)
+        ms = await _scope_resolver.resolve(scope, ctx)
         body = memory_service.get(ms, name=str(name))
     except MemoryError as exc:
         return ToolResult(content=f"memory_get: {exc}", is_error=True)
@@ -117,7 +127,7 @@ async def _memory_write_handler(args: dict[str, Any], ctx: ExecContext) -> ToolR
             is_error=True,
         )
     try:
-        ms = _scope_resolver.resolve(scope, ctx)
+        ms = await _scope_resolver.resolve(scope, ctx)
         entry = memory_service.write(
             ms, name=str(name), type=mtype, content=str(content), source="agent"
         )
@@ -134,7 +144,7 @@ async def _memory_write_handler(args: dict[str, Any], ctx: ExecContext) -> ToolR
 _SCOPE_PROP = {
     "type": "string",
     "enum": ["global", "project", "task"],
-    "description": "global=cross-project user memory; project=this workspace; task=this task.",
+    "description": "global=cross-project user memory; project=this project; task=this task.",
 }
 
 _GET_PARAMS = {

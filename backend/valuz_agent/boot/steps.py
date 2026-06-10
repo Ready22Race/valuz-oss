@@ -6,9 +6,13 @@ Bodies are moved verbatim from the former ``@app.on_event`` hooks in
 expressed explicitly in ``boot/lifespan.py``.
 """
 
+import logging
+
 from fastapi import FastAPI
 
 from valuz_agent.infra.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def configure_structured_logging() -> None:
@@ -101,6 +105,16 @@ async def bootstrap_schema() -> None:
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
+    # One-shot courtesy rename from the workspace→project naming cutover:
+    # managed chat cwds moved from ``data_dir/workspaces/`` to
+    # ``data_dir/projects/``. The DB is wiped by the cutover fingerprint,
+    # but the directories hold user files — carry them over instead of
+    # orphaning them. No-op once the new directory exists.
+    legacy_dir = settings.data_dir / "workspaces"
+    target_dir = settings.data_dir / "projects"
+    if legacy_dir.is_dir() and not target_dir.exists():
+        legacy_dir.rename(target_dir)
+
     # 1. Kernel alembic (its own ``alembic_version`` row).
     run_kernel_migrations()
 
@@ -112,6 +126,13 @@ async def bootstrap_schema() -> None:
     # 3. Host alembic (``alembic_version_host`` row). Async env.py, driven
     #    on a dedicated thread (see ``run_host_migrations``).
     run_host_migrations()
+
+    # 3.5 Re-install logging AGAIN — the host chain's ``fileConfig`` clears
+    #     the root handlers exactly like the kernel chain's did in step 1,
+    #     which previously killed the JSON file handler the 服务 log panel
+    #     tails (and, before ``disable_existing_loggers=False`` landed in
+    #     both env.py files, silenced every already-imported valuz logger).
+    configure_logging()
 
     # 4. Pure-insert seeds for built-in rows.
     async with async_unit_of_work() as db:
@@ -168,44 +189,13 @@ async def init_kernel(app: FastAPI) -> None:
 
     register_memory_tools()
 
-    # One-time backfill of the always-on in-process baseline tools (memory +
-    # submit_skill). These bind via the persisted AgentConfig.tools, so
-    # agents created before a baseline tool landed carry no declaration
-    # until re-saved. Re-save any active agent missing one so the baseline
-    # is universal regardless of agent age (idempotent — runs after the
-    # tools are registered above so handlers resolve).
-    from valuz_agent.modules.agents.service import backfill_global_agent_tools
-
-    backfill_global_agent_tools()
-
-
-async def ensure_workspace_kernel_mirrors() -> None:
-    """Boot-time safety net: every valuz workspace must have a kernel
-    project + agent row, otherwise ``orchestrator.run_turn`` raises
-    ``ProjectNotFoundError`` on the first message and the user sees the
-    session fail with no clear cause. Idempotent — re-mirrors existing
-    rows, creates the chat-default row when missing.
-
-    Runs after ``init_kernel`` so the kernel store is initialized.
-    """
-    from valuz_agent.infra.db import async_unit_of_work
-    from valuz_agent.infra.eventbus import event_bus
-    from valuz_agent.modules.projects.datastore import (
-        WorkspaceDatastore,
-    )
-    from valuz_agent.modules.projects.service import WorkspaceService
-
-    async with async_unit_of_work() as db:
-        svc = WorkspaceService(WorkspaceDatastore(db), event_bus)
-        await svc.ensure_all_kernel_mirrors()
-
 
 def install_binding_change_listener() -> None:
-    """Wire ``workspace.bindings.changed`` → docs caps refresh.
+    """Wire ``project.bindings.changed`` → docs caps refresh.
 
     DocumentLibraryService publishes this event whenever a project's
     KB bindings are added / removed (see docs/service.py:742). The
-    subscriber walks every active session in that workspace and
+    subscriber walks every active session in that project and
     re-evaluates its docs skill+MCP slice — so binding a document
     to a project propagates to all open sessions immediately,
     rather than only to whatever new session the user creates next.
@@ -216,27 +206,42 @@ def install_binding_change_listener() -> None:
     """
     from valuz_agent.infra.eventbus import event_bus
     from valuz_agent.modules.sessions.capabilities import (
-        refresh_docs_capabilities_for_workspace,
+        refresh_docs_capabilities_for_project,
     )
+
+    def _on_bindings_changed(**kwargs: object) -> None:
+        # The eventbus is synchronous but publishes from coroutine code on
+        # the running loop; the refresher is async — schedule it instead of
+        # blocking the loop. Fire-and-forget: the lazy refresh in
+        # ``send_message`` converges any missed/failed run on the next turn.
+        import asyncio
+
+        coro = refresh_docs_capabilities_for_project(**kwargs)  # type: ignore[arg-type]
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+        else:
+            task = loop.create_task(coro)
+            task.add_done_callback(lambda t: t.exception())
 
     event_bus.subscribe(
-        "workspace.bindings.changed",
-        refresh_docs_capabilities_for_workspace,
+        "project.bindings.changed",
+        _on_bindings_changed,
     )
 
 
-def recover_stranded_sessions() -> None:
+async def recover_stranded_sessions() -> None:
     """Clear ``running`` sessions left over from a previous process.
 
     See ``domains.execution.sessions.recovery`` for rationale. Runs
-    after ``init_kernel`` so the kernel store is reachable. Sync def
-    because the recovery helper is sync (uses ``kernel_sync``).
+    after ``init_kernel`` so the kernel store is reachable.
     """
     from valuz_agent.modules.sessions.recovery import (
         recover_running_sessions,
     )
 
-    recover_running_sessions()
+    await recover_running_sessions()
 
 
 async def seal_orphan_pendings() -> None:
@@ -257,10 +262,10 @@ async def seal_orphan_pendings() -> None:
     """
     import logging
 
-    from app.dependencies import get_orchestrator  # type: ignore[import-not-found]
+    from valuz_agent.adapters import kernel_client
 
     try:
-        sealed = await get_orchestrator().scan_orphan_pendings()
+        sealed = await kernel_client.scan_orphan_pendings()
     except Exception:  # noqa: BLE001 — startup must not block on bookkeeping
         logging.getLogger(__name__).exception("scan_orphan_pendings failed")
         return

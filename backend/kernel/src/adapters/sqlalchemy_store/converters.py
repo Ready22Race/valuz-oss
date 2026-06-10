@@ -6,15 +6,12 @@ from dataclasses import asdict
 from typing import Any, Literal
 
 from src.adapters.sqlalchemy_store.models import (
-    AgentModel,
     EventModel,
     MessageModel,
-    ProjectModel,
     SessionModel,
 )
 from src.core.agent_config import AgentConfig, SubAgentDef
 from src.core.events import Event
-from src.core.project import Project, ProjectStatus
 from src.core.tools import ToolDef
 from src.core.types import (
     Attachment,
@@ -46,7 +43,6 @@ _VALID_SESSION_MODES = {"default", "plan", "goal"}
 _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _VALID_SESSION_STATUSES = {"created", "idle", "running", "terminated"}
 _VALID_RUNTIME_PROVIDERS = {"claude_agent", "codex", "deepagents"}
-_VALID_ENTITY_STATUSES = {"active", "deleted"}
 _VALID_MESSAGE_STATUSES = {"running", "completed", "errored", "cancelled"}
 
 
@@ -95,43 +91,10 @@ def _validate_runtime_provider(
     return value  # type: ignore[return-value]
 
 
-def _validate_entity_status(
-    value: str,
-) -> Literal["active", "deleted"]:
-    if value not in _VALID_ENTITY_STATUSES:
-        return "active"
-    return value  # type: ignore[return-value]
-
-
 def _validate_message_status(value: str) -> MessageStatus:
     if value not in _VALID_MESSAGE_STATUSES:
         return "running"
     return value  # type: ignore[return-value]
-
-
-# -- Project --
-
-
-def project_to_model(project: Project) -> ProjectModel:
-    return ProjectModel(
-        id=project.id,
-        name=project.name,
-        cwd=project.cwd,
-        status=project.status,
-        metadata_=project.metadata,
-    )
-
-
-def model_to_project(model: ProjectModel) -> Project:
-    status: ProjectStatus = _validate_entity_status(model.status)
-    return Project(
-        id=model.id,
-        name=model.name,
-        cwd=model.cwd,
-        status=status,
-        created_at=model.created_at,
-        metadata=model.metadata_,
-    )
 
 
 # -- StopReason --
@@ -159,8 +122,8 @@ def dict_to_stop_reason(data: dict[str, Any] | None) -> StopReason | None:
 # -- Agent --
 
 
-def agent_to_model(agent: AgentConfig) -> AgentModel:
-    tools_data = [
+def _tools_to_json(tools: tuple[ToolDef, ...]) -> list[dict[str, Any]]:
+    return [
         {
             "name": t.name,
             "description": t.description,
@@ -168,32 +131,12 @@ def agent_to_model(agent: AgentConfig) -> AgentModel:
             "read_only": t.read_only,
             "permission": t.permission,
         }
-        for t in agent.tools
+        for t in tools
     ]
-    callable_agents_data = [asdict(a) for a in agent.callable_agents]
-
-    return AgentModel(
-        id=agent.id,
-        name=agent.name,
-        model=agent.model,
-        runtime_provider=agent.runtime_provider,
-        instructions=agent.instructions,
-        tools=tools_data,
-        callable_agents=callable_agents_data,
-        skills=list(agent.skills),
-        mcp_servers=[mcp_to_dict(c) for c in agent.mcp_servers],
-        permission_mode=agent.permission_mode,
-        max_turns=agent.max_turns,
-        max_cost_usd=agent.max_cost_usd,
-        effort=agent.effort,
-        thinking=agent.thinking,
-        status=agent.status,
-        metadata_=agent.metadata,
-    )
 
 
-def model_to_agent(model: AgentModel) -> AgentConfig:
-    tools = tuple(
+def _tools_from_json(data: list[dict[str, Any]] | None) -> tuple[ToolDef, ...]:
+    return tuple(
         ToolDef(
             name=t["name"],
             description=t.get("description", ""),
@@ -201,9 +144,16 @@ def model_to_agent(model: AgentModel) -> AgentConfig:
             read_only=t.get("read_only", False),
             permission=t.get("permission", "auto"),
         )
-        for t in (model.tools or [])
+        for t in (data or [])
     )
-    callable_agents = tuple(
+
+
+def _subagents_to_json(agents: tuple[SubAgentDef, ...]) -> list[dict[str, Any]]:
+    return [asdict(a) for a in agents]
+
+
+def _subagents_from_json(data: list[dict[str, Any]] | None) -> tuple[SubAgentDef, ...]:
+    return tuple(
         SubAgentDef(
             name=a["name"],
             description=a.get("description", ""),
@@ -213,27 +163,56 @@ def model_to_agent(model: AgentModel) -> AgentConfig:
             skills=tuple(a["skills"]) if a.get("skills") is not None else None,
             metadata=a.get("metadata", {}),
         )
-        for a in (model.callable_agents or [])
+        for a in (data or [])
     )
 
+
+def agent_config_to_dict(agent: AgentConfig) -> dict[str, Any]:
+    """Serialize an AgentConfig for embedding in ``sessions.agent_config``.
+
+    Persists the identity + runtime-consumed fields (tools / callable_agents /
+    budgets); ``status`` / ``created_at`` are row-lifecycle fields of the
+    agents table and are deliberately not part of the snapshot. ``hooks`` are
+    runtime-attached callables and never persisted.
+    """
+    return {
+        "id": agent.id,
+        "name": agent.name,
+        "model": agent.model,
+        "runtime_provider": agent.runtime_provider,
+        "instructions": agent.instructions,
+        "tools": _tools_to_json(agent.tools),
+        "callable_agents": _subagents_to_json(agent.callable_agents),
+        "skills": list(agent.skills),
+        "mcp_servers": [mcp_to_dict(c) for c in agent.mcp_servers],
+        "permission_mode": agent.permission_mode,
+        "max_turns": agent.max_turns,
+        "max_cost_usd": agent.max_cost_usd,
+        "effort": agent.effort,
+        "thinking": agent.thinking,
+        "metadata": agent.metadata,
+    }
+
+
+def dict_to_agent_config(data: dict[str, Any] | None) -> AgentConfig | None:
+    if not data:
+        return None
     return AgentConfig(
-        id=model.id,
-        name=model.name,
-        model=model.model,
-        runtime_provider=_validate_runtime_provider(model.runtime_provider),
-        instructions=model.instructions,
-        tools=tools,
-        callable_agents=callable_agents,
-        skills=tuple(model.skills or []),
-        mcp_servers=tuple(dict_to_mcp(d) for d in (model.mcp_servers or [])),
-        permission_mode=_validate_permission_mode(model.permission_mode),
-        max_turns=model.max_turns,
-        max_cost_usd=model.max_cost_usd,
-        effort=_validate_effort(model.effort),
-        thinking=model.thinking,
-        status=_validate_entity_status(model.status),
-        created_at=model.created_at,
-        metadata=model.metadata_,
+        id=data.get("id", ""),
+        name=data.get("name", ""),
+        model=data.get("model", "claude-sonnet-4-6"),
+        runtime_provider=_validate_runtime_provider(data.get("runtime_provider", "claude_agent")),
+        instructions=data.get("instructions", ""),
+        tools=_tools_from_json(data.get("tools")),
+        callable_agents=_subagents_from_json(data.get("callable_agents")),
+        skills=tuple(data.get("skills") or []),
+        mcp_servers=tuple(dict_to_mcp(d) for d in (data.get("mcp_servers") or [])),
+        permission_mode=_validate_permission_mode(data.get("permission_mode", "full_access")),
+        max_turns=data.get("max_turns", 50),
+        max_cost_usd=data.get("max_cost_usd", 10.0),
+        effort=_validate_effort(data.get("effort")),
+        thinking=data.get("thinking"),
+        metadata=data.get("metadata") or {},
     )
 
 
@@ -243,8 +222,7 @@ def model_to_agent(model: AgentModel) -> AgentConfig:
 def session_to_model(session: Session) -> SessionModel:
     return SessionModel(
         id=session.id,
-        project_id=session.project_id,
-        agent_id=session.agent_id,
+        agent_config=agent_config_to_dict(session.agent_config),
         cwd=session.cwd,
         runtime_provider=session.runtime_provider,
         model=session.model,
@@ -267,8 +245,7 @@ def session_to_model(session: Session) -> SessionModel:
 def model_to_session(model: SessionModel) -> Session:
     return Session(
         id=model.id,
-        project_id=model.project_id,
-        agent_id=model.agent_id,
+        agent_config=dict_to_agent_config(model.agent_config) or AgentConfig(id="", name=""),
         cwd=model.cwd or "",
         runtime_provider=_validate_runtime_provider(model.runtime_provider),
         model=model.model,

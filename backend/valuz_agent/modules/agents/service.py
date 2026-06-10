@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 import valuz_agent.boot.kernel  # noqa: F401 — ensures sys.path has kernel root
 
-from src.core import AgentConfig  # type: ignore[import-not-found]
+from src.core import AgentConfig
 
 from valuz_agent.modules.agents.datastore import (
     AgentDatastore,
@@ -86,38 +86,6 @@ def _ensure_global_tools_declared(agent: AgentConfig) -> AgentConfig:
     return replace(agent, tools=tuple(agent.tools or ()) + missing)
 
 
-def backfill_global_agent_tools() -> int:
-    """Re-save every active kernel agent missing a baseline tool declaration.
-
-    In-process tools bind via the persisted ``AgentConfig.tools`` (unlike HTTP
-    MCP / skills, which are recomputed per session), so an agent created before
-    a baseline tool landed carries no declaration until re-saved. This boot-time
-    backfill walks every active agent and appends any missing baseline:
-
-    - **All agents** get the always-on in-process tools (memory + submit_skill).
-    - **Non-lead-clone agents** (the conversation/base agents — workspace
-      synthetic + members) additionally get the task launcher/observability
-      tools (create_task / list_tasks / get_task) so a project conversation can
-      spawn + track tasks. Lead clones (``…__lead__…``) are skipped for these —
-      ``_materialize_lead_agent`` deliberately strips them.
-
-    Idempotent — fully-declared agents are skipped. Returns the count patched.
-    """
-    from valuz_agent.adapters import kernel_sync
-    from valuz_agent.modules.tasks.dispatch_mcp import ensure_orchestration_tools_on_agent
-
-    patched = 0
-    for agent in kernel_sync.list_agents_sync():
-        updated = _ensure_global_tools_declared(agent)
-        if "__lead__" not in (getattr(agent, "id", "") or ""):
-            updated = ensure_orchestration_tools_on_agent(updated)
-        if updated is not agent:
-            kernel_sync.save_agent_sync(updated)
-            patched += 1
-    logger.info("global-tools backfill: patched %d agent(s)", patched)
-    return patched
-
-
 class MemberNotFoundError(Exception):
     pass
 
@@ -133,7 +101,7 @@ class MemberAlreadyExistsError(Exception):
 class AgentStillDeployedError(Exception):
     """Raised when deleting an agent that is still派驻'd into one or more projects.
 
-    v2 delete guard: prevents orphaning a task holder. Carries the workspace
+    v2 delete guard: prevents orphaning a task holder. Carries the project
     count so the UI can prompt "解除派驻 first".
     """
 
@@ -187,20 +155,52 @@ class AgentService:
         slugs = [b["type"] for b in connector_bindings if b.get("type")]
         if not slugs:
             return ()
-        return tuple(await self._connectors.resolve_mcp_servers(slugs))
+        # The connector module hands back wire schemas; the agent snapshot is
+        # a domain object (tool/agent-prep cluster), so convert here.
+        from src.core import (
+            McpHttpServerConfig,
+            McpStdioServerConfig,
+        )
+
+        out = []
+        for cfg in await self._connectors.resolve_mcp_servers(slugs):
+            if getattr(cfg, "transport", None) == "stdio" or hasattr(cfg, "command"):
+                out.append(
+                    McpStdioServerConfig(
+                        name=cfg.name,
+                        command=cfg.command,
+                        args=tuple(cfg.args),
+                        env=dict(cfg.env),
+                        env_vars=tuple(cfg.env_vars),
+                    )
+                )
+            else:
+                out.append(
+                    McpHttpServerConfig(
+                        name=cfg.name,
+                        url=cfg.url,
+                        transport=cfg.transport,
+                        headers=dict(cfg.headers),
+                    )
+                )
+        return tuple(out)
 
     # ------------------------------------------------------------------
     # Shared kernel AgentConfig (v2 live-reference)
     # ------------------------------------------------------------------
 
-    async def _build_kernel_config(self, row: AgentRow, kernel_agent_id: str) -> AgentConfig:
-        """Build the shared kernel ``AgentConfig`` from an AgentRow's fields.
+    async def build_agent_config(self, row: AgentRow, agent_id: str | None = None) -> AgentConfig:
+        """Build an in-memory kernel ``AgentConfig`` from an AgentRow's fields.
 
-        One config per AgentRow (cross-project shared). Connectors are resolved
-        from the row's ``connector_types``; provider pin + bindings ride
-        ``metadata`` exactly like the v1 instance config so downstream
-        adapters (mcp_resolver / provider_resolver) see an identical shape.
+        This is the single AgentRow→AgentConfig constructor: session-creation
+        paths embed the result as the session's ``agent_config`` snapshot
+        (live-reference semantics: every NEW session picks up the row's
+        latest fields; existing sessions keep the snapshot they were created
+        with). Connectors are resolved from the row's ``connector_types``;
+        provider pin + bindings ride ``metadata`` so downstream adapters
+        (mcp_resolver / provider_resolver) see an identical shape.
         """
+        kernel_agent_id = agent_id or f"agent:{row.slug}"[:36]
         metadata: dict[str, Any] = {}
         connector_bindings = [{"type": s} for s in (row.connector_types or [])] or None
         if connector_bindings:
@@ -220,25 +220,6 @@ class AgentService:
             metadata=metadata,
         )
         return _prepare_conversation_tools(agent)
-
-    async def ensure_kernel_agent(self, row: AgentRow) -> str:
-        """Build/sync the shared kernel ``AgentConfig`` for an AgentRow; return id.
-
-        Idempotent: reuses ``row.kernel_agent_id`` when present (re-syncing the
-        config to the row's current fields — this is the global-edit cascade),
-        else mints one and backfills the column (lazy build for seeded rows).
-        """
-        from uuid import uuid4
-
-        from valuz_agent.adapters import kernel_store
-
-        kernel_agent_id = row.kernel_agent_id or uuid4().hex
-        agent = await self._build_kernel_config(row, kernel_agent_id)
-        await kernel_store.save_agent(agent)
-        if row.kernel_agent_id != kernel_agent_id:
-            await self._agents.update_fields(row.slug, {"kernel_agent_id": kernel_agent_id})
-            row.kernel_agent_id = kernel_agent_id
-        return kernel_agent_id
 
     # ------------------------------------------------------------------
     # Agent reads (MVP agents are read-only)
@@ -283,10 +264,8 @@ class AgentService:
             avatar=payload.get("avatar") or None,
             source="custom",
         )
-        # v2 live-reference: the shared kernel AgentConfig is built LAZILY on
-        # first派驻 (``ensure_kernel_agent`` in ``deploy_agent``) — a
-        # never-deployed agent needs no kernel config. Keeps create cheap and
-        # kernel-store-free.
+        # Live-reference: sessions snapshot the row at creation time, so a
+        # fresh agent needs no extra materialization step.
         return await self._agents.create(row)
 
     async def update_agent(self, slug: str, patch: dict[str, Any]) -> AgentRow:
@@ -323,12 +302,9 @@ class AgentService:
         row = await self._agents.update_fields(slug, fields)
         if row is None:
             raise AgentNotFoundError(slug)
-        # v2 live-reference: re-sync the shared kernel AgentConfig so the edit
-        # propagates to EVERY project this agent is派驻'd into (global cascade).
-        # Only when a config already exists (agent has been deployed at least
-        # once); a never-deployed agent has nothing to propagate to yet.
-        if row.kernel_agent_id:
-            await self.ensure_kernel_agent(row)
+        # Live-reference semantics need no kernel cascade anymore: sessions
+        # snapshot the row's fields at creation, so every NEW session (in any
+        # project the agent is deployed to) picks the edit up automatically.
         return row
 
     async def delete_agent(self, slug: str) -> None:
@@ -343,8 +319,8 @@ class AgentService:
             raise AgentNotDeletableError(slug)
         # v2 派驻 guard: block deleting an agent still referenced by any project
         # member (would orphan a task holder). Caller must解除派驻 first.
-        if existing.kernel_agent_id:
-            deployments = await self._members.list_by_kernel_agent(existing.kernel_agent_id)
+        deployments = await self._members.list_by_source_agent_slug(existing.slug)
+        if deployments:
             if deployments:
                 raise AgentStillDeployedError(slug, len(deployments))
         if not await self._agents.delete(slug):
@@ -355,48 +331,40 @@ class AgentService:
     # ------------------------------------------------------------------
 
     async def list_deployments(self, slug: str) -> list[dict[str, Any]]:
-        """List every派驻 of an agent — the workspaces it's deployed into.
+        """List every派驻 of an agent — the projects it's deployed into.
 
         Powers the agent detail page's「派驻于 N 个项目」panel + the delete-guard
-        UX. Returns ``[{workspace_id, agent_slug}]`` (the project-local handle);
-        the frontend resolves workspace display names from its own store. Empty
+        UX. Returns ``[{project_id, agent_slug}]`` (the project-local handle);
+        the frontend resolves project display names from its own store. Empty
         when the agent has never been deployed (no shared kernel config yet).
         """
         row = await self.get_agent(slug)
-        if not row.kernel_agent_id:
-            return []
-        members = await self._members.list_by_kernel_agent(row.kernel_agent_id)
-        return [{"workspace_id": m.workspace_id, "agent_slug": m.agent_slug} for m in members]
+        members = await self._members.list_by_source_agent_slug(row.slug)
+        return [{"project_id": m.project_id, "agent_slug": m.agent_slug} for m in members]
 
-    async def list_members(self, workspace_id: str) -> list[dict[str, Any]]:
+    async def list_members(self, project_id: str) -> list[dict[str, Any]]:
         """Return members with their resolved kernel agent summary.
 
         Each item: {member: ProjectMemberRow, agent: AgentConfig | None}
         Kernel load failures are surfaced as agent=None so the list still
         returns even when a kernel row is missing.
         """
-        from valuz_agent.adapters import kernel_store
-
-        members = await self._members.list_by_workspace(workspace_id)
+        members = await self._members.list_by_project(project_id)
         result: list[dict[str, Any]] = []
         for m in members:
             try:
-                agent = await kernel_store.load_agent(m.kernel_agent_id)
+                agent = None
+                if m.source_agent_slug:
+                    src_row = await self._agents.get_agent(m.source_agent_slug)
+                    if src_row is not None:
+                        agent = await self.build_agent_config(src_row)
             except Exception:
                 logger.warning(
-                    "list_members: could not load kernel agent %s for member %s/%s",
-                    m.kernel_agent_id,
-                    workspace_id,
+                    "list_members: could not build agent config for member %s/%s (src=%s)",
+                    project_id,
                     m.agent_slug,
                 )
                 agent = None
-            # Backfill source_agent_slug for legacy members that were派驻ed
-            # before deploy_agent started persisting it. Reverse-lookup by
-            # kernel_agent_id — the live link is still valid.
-            if m.source_agent_slug is None and m.kernel_agent_id:
-                lib_row = await self._agents.get_by_kernel_agent_id(m.kernel_agent_id)
-                if lib_row is not None:
-                    m.source_agent_slug = lib_row.slug
             result.append({"member": m, "agent": agent})
         return result
 
@@ -406,16 +374,17 @@ class AgentService:
 
     async def deploy_agent(
         self,
-        workspace_id: str,
+        project_id: str,
         source_agent_slug: str,
         agent_slug: str | None = None,
         dedupe: bool = True,
     ) -> dict[str, Any]:
-        """v2 DEPLOY (派驻): reference the source agent's SHARED kernel config.
+        """v2 DEPLOY (派驻): live-reference the source library agent.
 
-        Live-reference — NO per-project copy. The member's ``kernel_agent_id``
-        points at the one shared ``AgentConfig`` backing the source AgentRow, so
-        editing the agent (library or project side) propagates to every project.
+        NO per-project copy. The member row records ``source_agent_slug``;
+        every new session builds its embedded config snapshot from the source
+        AgentRow's CURRENT fields, so editing the agent (library or project
+        side) propagates to every project automatically.
         Configuration lives on the agent, not the派驻 — to pin a provider on a
         seeded official agent, copy it to your own agent (复制为我的) and set the
         provider there (大脑 tab).
@@ -423,53 +392,45 @@ class AgentService:
         ``dedupe`` (default True) enforces ONE派驻 per agent per project — the
         project-member UX. The automation runner passes ``dedupe=False`` because
         it intentionally creates a distinct member handle per automation that may
-        reference the same source agent in the same workspace.
+        reference the same source agent in the same project.
         """
         from valuz_agent.modules.agents.slug import derive_slug, ensure_unique_slug
 
         source_agent = await self.get_agent(source_agent_slug)
 
         # Project-local handle: derive from the source agent's display name,
-        # unique within THIS workspace (CJK-preserving). The handle is a
+        # unique within THIS project (CJK-preserving). The handle is a
         # per-project path component; the underlying agent is shared.
         agent_slug = (agent_slug or "").strip()
         if not agent_slug:
-            taken = {m.agent_slug for m in await self._members.list_by_workspace(workspace_id)}
+            taken = {m.agent_slug for m in await self._members.list_by_project(project_id)}
             agent_slug = ensure_unique_slug(derive_slug(source_agent.name), taken)
 
-        if await self._members.get(workspace_id, agent_slug) is not None:
+        if await self._members.get(project_id, agent_slug) is not None:
             raise MemberAlreadyExistsError(
-                f"agent '{agent_slug}' already exists in workspace '{workspace_id}'"
+                f"agent '{agent_slug}' already exists in project '{project_id}'"
             )
 
-        # Lazily build the shared kernel config (backfills seeded rows) and
-        # reference it — no copy, no new kernel agent.
-        kernel_agent_id = await self.ensure_kernel_agent(source_agent)
-
-        # v2 dedup: ONE派驻 per agent per project (live reference — deploying the
-        # same agent twice into one project is meaningless). Keyed on the shared
-        # ``kernel_agent_id``. Skipped for the automation runner (see ``dedupe``).
+        # v2 dedup: ONE派驻 per agent per project (live reference — deploying
+        # the same agent twice into one project is meaningless). Keyed on the
+        # source library slug. Skipped for the automation runner (``dedupe``).
         if dedupe:
-            existing_members = await self._members.list_by_workspace(workspace_id)
-            if any(m.kernel_agent_id == kernel_agent_id for m in existing_members):
+            existing_members = await self._members.list_by_project(project_id)
+            if any(m.source_agent_slug == source_agent.slug for m in existing_members):
                 raise MemberAlreadyExistsError(
-                    f"agent '{source_agent_slug}' is already deployed to workspace '{workspace_id}'"
+                    f"agent '{source_agent_slug}' is already deployed to project '{project_id}'"
                 )
 
         member = ProjectMemberRow(
-            workspace_id=workspace_id,
+            project_id=project_id,
             agent_slug=agent_slug,
-            kernel_agent_id=kernel_agent_id,
-            # Provenance: keep the library agent slug so the UI can open the
-            # shared agent's detail from a member row (overlay in project page).
-            # The kernel_agent_id is still the live link; this is a UX shortcut.
+            # Provenance IS the live link: sessions build their snapshot from
+            # the source library row at creation time.
             source_agent_slug=source_agent.slug,
         )
         await self._members.create(member)
 
-        from valuz_agent.adapters import kernel_store
-
-        agent = await kernel_store.load_agent(kernel_agent_id)
+        agent = await self.build_agent_config(source_agent)
         return {"member": member, "agent": agent}
 
     # ------------------------------------------------------------------
@@ -478,7 +439,7 @@ class AgentService:
 
     async def create_blank_agent(
         self,
-        workspace_id: str,
+        project_id: str,
         agent_slug: str | None,
         name: str,
         instructions: str,
@@ -513,7 +474,7 @@ class AgentService:
             }
         )
         return await self.deploy_agent(
-            workspace_id=workspace_id,
+            project_id=project_id,
             source_agent_slug=row.slug,
             agent_slug=agent_slug or None,
         )
@@ -526,15 +487,15 @@ class AgentService:
     # Delete member
     # ------------------------------------------------------------------
 
-    async def delete_member(self, workspace_id: str, agent_slug: str) -> None:
+    async def delete_member(self, project_id: str, agent_slug: str) -> None:
         """解除派驻: delete ONLY the membership row.
 
         v2 live-reference: the kernel ``AgentConfig`` is SHARED across projects,
         so undeploying must NOT delete it (other projects may still派驻 it). The
         agent itself lives on in the library;真删 happens via ``delete_agent``.
         """
-        member = await self._members.get(workspace_id, agent_slug)
+        member = await self._members.get(project_id, agent_slug)
         if member is None:
             raise MemberNotFoundError(agent_slug)
 
-        await self._members.delete(workspace_id, agent_slug)
+        await self._members.delete(project_id, agent_slug)

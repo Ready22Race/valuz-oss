@@ -2,13 +2,13 @@
 
 Agent (valuz_agent):
   Stateless blueprint layer — method, default runtime/model, skill refs,
-  connector type declarations. Global across workspaces; MVP is official
+  connector type declarations. Global across projects; MVP is official
   (read-only seed). Source-of-truth for ``deploy_agent``.
 
 Project Member (valuz_project_member):
-  Per-workspace mapping of a project-local handle ("agent_slug") to a
-  kernel AgentConfig row. Created when a source agent is instantiated or
-  when a blank agent is added to a workspace.
+  Per-project mapping of a project-local handle ("agent_slug") to its
+  source library agent (``source_agent_slug``). Sessions build their
+  embedded config snapshot from the source row at creation time.
 """
 
 from __future__ import annotations
@@ -53,27 +53,19 @@ class AgentRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
     # v2). v1 supports preset keys only; nullable, no default. Surfaced on the
     # agent identity panel + list cards.
     avatar: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    # v2 live-reference: the SHARED kernel ``AgentConfig`` id backing this agent.
-    # One kernel config per AgentRow (cross-project shared); every派驻
-    # (ProjectMemberRow) references this id rather than a per-project copy, so
-    # editing the agent propagates globally. Nullable: built lazily on first
-    # create/deploy (``ensure_kernel_agent``); seeded rows backfill on first use.
-    kernel_agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class ProjectMemberRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
-    """Per-workspace agent membership row — maps a slug handle to a kernel agent."""
+    """Per-project agent membership row — maps a slug handle to a library agent."""
 
     __tablename__ = "valuz_project_member"
 
     __table_args__ = (
-        UniqueConstraint("workspace_id", "agent_slug", name="uq_project_member_ws_slug"),
+        UniqueConstraint("project_id", "agent_slug", name="uq_project_member_ws_slug"),
     )
 
-    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
     # Project-local human handle — used as the ``agent`` param in dispatch calls
     agent_slug: Mapped[str] = mapped_column(String(128))
-    # References kernel ``agents.id`` — business key, NO FK constraint (per repo convention)
-    kernel_agent_id: Mapped[str] = mapped_column(String(36))
     # Provenance: which source agent was instantiated (NULL = created from blank)
     source_agent_slug: Mapped[str | None] = mapped_column(String(128), nullable=True)

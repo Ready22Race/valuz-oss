@@ -61,25 +61,25 @@ def _write_skill(
     (dir_path / "SKILL.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def test_scan_returns_no_slugs_when_session_dir_missing(staging_root: Path) -> None:
-    result = scan_staging("never-seen")
+async def test_scan_returns_no_slugs_when_session_dir_missing(staging_root: Path) -> None:
+    result = await scan_staging("never-seen")
     assert result.slugs == []
     assert result.session_id == "never-seen"
 
 
-def test_scan_skips_dirs_without_skill_md(staging_root: Path) -> None:
-    session_dir = staging.staging_dir_for_session("sess-1", mkdir=True)
+async def test_scan_skips_dirs_without_skill_md(staging_root: Path) -> None:
+    session_dir = await staging.staging_dir_for_session("sess-1", mkdir=True)
     (session_dir / "garbage").mkdir()
     (session_dir / "garbage" / "notes.txt").write_text("hi", encoding="utf-8")
 
-    assert scan_staging("sess-1").slugs == []
+    assert (await scan_staging("sess-1")).slugs == []
 
 
-def test_scan_reports_no_conflict_when_target_absent(staging_root: Path) -> None:
-    session_dir = staging.staging_dir_for_session("sess-1", mkdir=True)
+async def test_scan_reports_no_conflict_when_target_absent(staging_root: Path) -> None:
+    session_dir = await staging.staging_dir_for_session("sess-1", mkdir=True)
     _write_skill(session_dir / "weekly-report", name="weekly-report", description="Weekly report.")
 
-    result = scan_staging("sess-1")
+    result = await scan_staging("sess-1")
     assert len(result.slugs) == 1
     s = result.slugs[0]
     assert s.slug == "weekly-report"
@@ -90,26 +90,26 @@ def test_scan_reports_no_conflict_when_target_absent(staging_root: Path) -> None
     assert s.suggested_new_slug is None
 
 
-def test_scan_detects_diverged_and_suggests_fork(staging_root: Path, tmp_path: Path) -> None:
+async def test_scan_detects_diverged_and_suggests_fork(staging_root: Path, tmp_path: Path) -> None:
     user_skills = tmp_path / "user-skills"
-    session_dir = staging.staging_dir_for_session("sess-2", mkdir=True)
+    session_dir = await staging.staging_dir_for_session("sess-2", mkdir=True)
 
     # User already has a skill at the target slug, with different content.
     _write_skill(user_skills / "weekly-report", name="weekly-report", description="Old version.")
     _write_skill(session_dir / "weekly-report", name="weekly-report", description="New rewrite.")
 
-    result = scan_staging("sess-2")
+    result = await scan_staging("sess-2")
     s = result.slugs[0]
     assert s.conflict_kind == "diverged"
     assert s.suggested_strategy == "fork"
     assert s.suggested_new_slug == "weekly-report-v2"
 
 
-def test_scan_reports_same_source_when_meta_hash_matches(
+async def test_scan_reports_same_source_when_meta_hash_matches(
     staging_root: Path, tmp_path: Path
 ) -> None:
     user_skills = tmp_path / "user-skills"
-    session_dir = staging.staging_dir_for_session("sess-3", mkdir=True)
+    session_dir = await staging.staging_dir_for_session("sess-3", mkdir=True)
 
     _write_skill(user_skills / "weekly-report", name="weekly-report", description="Original.")
     source_hash = hash_skill_directory(user_skills / "weekly-report")
@@ -125,34 +125,36 @@ def test_scan_reports_same_source_when_meta_hash_matches(
         ),
     )
 
-    s = scan_staging("sess-3").slugs[0]
+    s = (await scan_staging("sess-3")).slugs[0]
     assert s.conflict_kind == "same_source"
     assert s.suggested_strategy == "overwrite"
     assert s.source_skill_id == "user:weekly-report"
 
 
-def test_sync_slug_overwrite_writes_to_user_skill_root(staging_root: Path, tmp_path: Path) -> None:
+async def test_sync_slug_overwrite_writes_to_user_skill_root(
+    staging_root: Path, tmp_path: Path
+) -> None:
     user_skills = tmp_path / "user-skills"
-    session_dir = staging.staging_dir_for_session("sess-4", mkdir=True)
+    session_dir = await staging.staging_dir_for_session("sess-4", mkdir=True)
     _write_skill(session_dir / "weekly-report", name="weekly-report")
 
-    result = sync_slug("sess-4", "weekly-report", "overwrite")
+    result = await sync_slug("sess-4", "weekly-report", "overwrite")
     assert result.skipped is False
     assert result.written_path == str(user_skills / "weekly-report")
     assert (user_skills / "weekly-report" / "SKILL.md").is_file()
 
 
-def test_sync_slug_fork_auto_picks_v2_and_bumps_frontmatter(
+async def test_sync_slug_fork_auto_picks_v2_and_bumps_frontmatter(
     staging_root: Path, tmp_path: Path
 ) -> None:
     user_skills = tmp_path / "user-skills"
-    session_dir = staging.staging_dir_for_session("sess-5", mkdir=True)
+    session_dir = await staging.staging_dir_for_session("sess-5", mkdir=True)
     # Original v1 already in library
     _write_skill(user_skills / "weekly-report", name="weekly-report", version=1)
     # New variant in staging — same slug
     _write_skill(session_dir / "weekly-report", name="weekly-report")
 
-    result = sync_slug("sess-5", "weekly-report", "fork")
+    result = await sync_slug("sess-5", "weekly-report", "fork")
     assert result.new_slug == "weekly-report-v2"
     assert result.written_path == str(user_skills / "weekly-report-v2")
 
@@ -160,59 +162,63 @@ def test_sync_slug_fork_auto_picks_v2_and_bumps_frontmatter(
     assert "version: 2" in forked_md
 
 
-def test_sync_slug_fork_auto_picks_v3_when_v2_exists(staging_root: Path, tmp_path: Path) -> None:
+async def test_sync_slug_fork_auto_picks_v3_when_v2_exists(
+    staging_root: Path, tmp_path: Path
+) -> None:
     user_skills = tmp_path / "user-skills"
-    session_dir = staging.staging_dir_for_session("sess-6", mkdir=True)
+    session_dir = await staging.staging_dir_for_session("sess-6", mkdir=True)
     _write_skill(user_skills / "weekly-report", name="weekly-report", version=1)
     _write_skill(user_skills / "weekly-report-v2", name="weekly-report", version=2)
     _write_skill(session_dir / "weekly-report", name="weekly-report")
 
-    result = sync_slug("sess-6", "weekly-report", "fork")
+    result = await sync_slug("sess-6", "weekly-report", "fork")
     assert result.new_slug == "weekly-report-v3"
     assert "version: 3" in (user_skills / "weekly-report-v3" / "SKILL.md").read_text("utf-8")
 
 
-def test_sync_slug_fork_with_explicit_new_slug(staging_root: Path, tmp_path: Path) -> None:
+async def test_sync_slug_fork_with_explicit_new_slug(staging_root: Path, tmp_path: Path) -> None:
     user_skills = tmp_path / "user-skills"
-    session_dir = staging.staging_dir_for_session("sess-7", mkdir=True)
+    session_dir = await staging.staging_dir_for_session("sess-7", mkdir=True)
     _write_skill(user_skills / "weekly-report", name="weekly-report", version=1)
     _write_skill(session_dir / "weekly-report", name="weekly-report")
 
-    result = sync_slug("sess-7", "weekly-report", "fork", new_slug="weekly-report-experimental")
+    result = await sync_slug(
+        "sess-7", "weekly-report", "fork", new_slug="weekly-report-experimental"
+    )
     assert result.new_slug == "weekly-report-experimental"
     assert (user_skills / "weekly-report-experimental" / "SKILL.md").is_file()
 
 
-def test_sync_slug_fork_rejects_existing_target(staging_root: Path, tmp_path: Path) -> None:
+async def test_sync_slug_fork_rejects_existing_target(staging_root: Path, tmp_path: Path) -> None:
     user_skills = tmp_path / "user-skills"
-    session_dir = staging.staging_dir_for_session("sess-8", mkdir=True)
+    session_dir = await staging.staging_dir_for_session("sess-8", mkdir=True)
     _write_skill(user_skills / "weekly-report-v2", name="anything")
     _write_skill(session_dir / "weekly-report", name="weekly-report")
 
     with pytest.raises(FileExistsError):
-        sync_slug("sess-8", "weekly-report", "fork", new_slug="weekly-report-v2")
+        await sync_slug("sess-8", "weekly-report", "fork", new_slug="weekly-report-v2")
 
 
-def test_sync_slug_abort_returns_skipped_marker(staging_root: Path) -> None:
-    session_dir = staging.staging_dir_for_session("sess-9", mkdir=True)
+async def test_sync_slug_abort_returns_skipped_marker(staging_root: Path) -> None:
+    session_dir = await staging.staging_dir_for_session("sess-9", mkdir=True)
     _write_skill(session_dir / "weekly-report", name="weekly-report")
 
-    result = sync_slug("sess-9", "weekly-report", "abort")
+    result = await sync_slug("sess-9", "weekly-report", "abort")
     assert result.skipped is True
     assert result.written_path is None
 
 
-def test_sync_slug_raises_when_staging_slug_missing(staging_root: Path) -> None:
-    staging.staging_dir_for_session("sess-10", mkdir=True)
+async def test_sync_slug_raises_when_staging_slug_missing(staging_root: Path) -> None:
+    await staging.staging_dir_for_session("sess-10", mkdir=True)
     with pytest.raises(FileNotFoundError):
-        sync_slug("sess-10", "weekly-report", "overwrite")
+        await sync_slug("sess-10", "weekly-report", "overwrite")
 
 
-def test_prepare_optimize_copies_and_writes_meta(staging_root: Path, tmp_path: Path) -> None:
+async def test_prepare_optimize_copies_and_writes_meta(staging_root: Path, tmp_path: Path) -> None:
     source = tmp_path / "external-skill"
     _write_skill(source, name="external-skill", description="Pre-existing.")
 
-    dest = prepare_optimize("sess-11", source, "user:external-skill")
+    dest = await prepare_optimize("sess-11", source, "user:external-skill")
     assert dest.is_dir()
     assert (dest / "SKILL.md").is_file()
 
@@ -223,39 +229,41 @@ def test_prepare_optimize_copies_and_writes_meta(staging_root: Path, tmp_path: P
     assert meta.source_content_hash is not None
 
 
-def test_prepare_optimize_then_scan_reports_same_source(staging_root: Path, tmp_path: Path) -> None:
+async def test_prepare_optimize_then_scan_reports_same_source(
+    staging_root: Path, tmp_path: Path
+) -> None:
     user_skills = tmp_path / "user-skills"
     _write_skill(user_skills / "external-skill", name="external-skill")
 
-    prepare_optimize("sess-12", user_skills / "external-skill", "user:external-skill")
-    s = scan_staging("sess-12").slugs[0]
+    await prepare_optimize("sess-12", user_skills / "external-skill", "user:external-skill")
+    s = (await scan_staging("sess-12")).slugs[0]
     assert s.conflict_kind == "same_source"
     assert s.source_skill_id == "user:external-skill"
 
 
-def test_scan_reports_version_from_frontmatter(staging_root: Path) -> None:
-    session_dir = staging.staging_dir_for_session("sess-13", mkdir=True)
+async def test_scan_reports_version_from_frontmatter(staging_root: Path) -> None:
+    session_dir = await staging.staging_dir_for_session("sess-13", mkdir=True)
     _write_skill(session_dir / "weekly-report", name="weekly-report", version=4)
 
-    s = scan_staging("sess-13").slugs[0]
+    s = (await scan_staging("sess-13")).slugs[0]
     assert s.version == 4
 
 
-def test_invalid_session_id_rejected(staging_root: Path) -> None:
+async def test_invalid_session_id_rejected(staging_root: Path) -> None:
     with pytest.raises(ValueError):
-        staging.staging_dir_for_session("../escape")
+        await staging.staging_dir_for_session("../escape")
     with pytest.raises(ValueError):
-        staging.staging_dir_for_session(".dotfile")
+        await staging.staging_dir_for_session(".dotfile")
 
 
-def test_remove_slug_and_session(staging_root: Path) -> None:
-    session_dir = staging.staging_dir_for_session("sess-14", mkdir=True)
+async def test_remove_slug_and_session(staging_root: Path) -> None:
+    session_dir = await staging.staging_dir_for_session("sess-14", mkdir=True)
     _write_skill(session_dir / "alpha", name="alpha")
     _write_skill(session_dir / "beta", name="beta")
 
-    staging.remove_slug("sess-14", "alpha")
+    await staging.remove_slug("sess-14", "alpha")
     assert not (session_dir / "alpha").exists()
     assert (session_dir / "beta").exists()
 
-    staging.remove_session_staging("sess-14")
+    await staging.remove_session_staging("sess-14")
     assert not session_dir.exists()

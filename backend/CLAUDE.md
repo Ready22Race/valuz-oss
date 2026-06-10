@@ -8,10 +8,11 @@
 > wins on backend mechanics.
 
 Python/FastAPI on an Agent Harness kernel. The **host**
-(`valuz_agent/`) owns the workspace UX, skill catalog, KB, providers, MCP
-catalog, scheduling, tasks, and OAuth; the **kernel** (`kernel/`) owns
-Project/Agent/Session/Event persistence and the runtime adapters. The two meet
-only at the adapter seam (§6).
+(`valuz_agent/`) owns the project UX, agent library, skill catalog, KB,
+providers, MCP catalog, scheduling, tasks, and OAuth; the **kernel**
+(`kernel/`) owns Session/Message/Event persistence (each session embeds its
+AgentConfig snapshot and cwd — the kernel knows no projects or agents) and
+the runtime adapters. The two meet only at the adapter seam (§6).
 
 ## Layout
 
@@ -39,7 +40,7 @@ backend/
 ```
 
 A single SQLite file at `~/.valuz/app/valuz.db` carries both layers:
-4 unprefixed kernel tables (`projects` / `agents` / `sessions` / `events`),
+3 unprefixed kernel tables (`sessions` / `messages` / `events`),
 the `valuz_*`-prefixed business tables, and two alembic heads
 (`alembic_version` kernel + `alembic_version_host` host). Both layers run
 **async** SQLAlchemy on aiosqlite; WAL + per-connection `busy_timeout` make
@@ -55,14 +56,17 @@ collaboration goes through the sibling's **service** API or a `ports/`
 protocol. Enforced by `scripts/check_module_boundaries.py` (wired into
 `make lint`).
 
-**Kernel boundary** — the host consumes the kernel **only through its declared
-public API**: `from src.core import …` (domain types/protocols), `from
-app.dependencies import …` (singletons + lifecycle), `from app.config import
-AppConfig`, and `from app.routes.* import router`. `from src.adapters.*` /
-`from src.runtimes.*` are forbidden **outside**
-`valuz_agent/adapters/kernel_sync.py` — the single sanctioned escape hatch.
-Keep host code talking to the kernel through its public API above rather than
-reaching into kernel internals.
+**Kernel boundary** — every host *operation* on kernel state goes through
+`adapters/kernel_client.py` (the `KernelClient` protocol: API-shaped, typed
+with the kernel's wire schemas from `app.schemas`). `from src.adapters.*` /
+`from src.runtimes.*` are forbidden everywhere; `from app.dependencies` is
+restricted to the seam, `boot/kernel.py`, and the documented in-process
+run-driver exemptions — all mechanically enforced by
+`scripts/check_module_boundaries.py`. Declared in-process integration points
+that bypass the client (each with its remote-phase replacement): tool-handler
+registration (→ MCP-over-HTTP toolkit), `broadcast_sink` (→ WS/SSE
+subscription), `event_sse_adapter` raw SQL + `analytics` ORM (TD-007 →
+kernel query APIs), and the run-driver (→ the WS run channel).
 
 ## Anatomy of a business module
 
@@ -151,12 +155,12 @@ session-creation time:
 
 | Adapter | Job |
 |---------|-----|
-| `kernel_sync` | sync facade over the kernel's async `StorePort` (only importer of `src.adapters` / `src.runtimes`) |
-| `capability_resolver` | workspace + extras → kernel skills / MCP set |
+| `kernel_client` | `KernelClient` protocol + in-process impl — API-shaped seam, wire-schema typed (swap for HTTP in remote mode) |
+| `capability_resolver` | project + extras → kernel skills / MCP set |
 | `model_resolver` | request + provider + default → concrete model id |
 | `mcp_resolver` | slug + creds → `list[McpServerConfig]` |
 | `event_sse_adapter` | kernel `events` table → SSE frames |
-| `system_prompt_builder` | agent instructions + workspace context → system prompt |
+| `system_prompt_builder` | agent instructions + project context → system prompt |
 
 If you need kernel behavior, add it behind an adapter — do not import kernel
 internals from `api/`, `modules/`, or `integrations/`.
@@ -184,7 +188,7 @@ code. Add a capability by defining a port, then a default integration.
 - `infra/fs_registry.FsRegistry` is the single gate for host filesystem writes.
   Hardcoded `~/.claude/...` or ad-hoc `Path.home()` outside `config.py` and the
   registry are forbidden. The kernel manages its own subtree under each
-  `project.cwd`; get the cwd from `workspace_cwd(...)` and let the kernel take
+  `project.cwd`; get the cwd from `project_cwd(...)` and let the kernel take
   it from there.
 
 ## Adding an endpoint (contract-first recipe)

@@ -7,7 +7,7 @@ orchestration logic; ``service`` and the route layer both import from here.
 
 from __future__ import annotations
 
-from src.core.types import (  # type: ignore[import-not-found]
+from src.core.types import (
     Session as KernelSession,
 )
 
@@ -26,7 +26,7 @@ def _copy_session(session: KernelSession, /, **overrides: object) -> KernelSessi
     status-only updates would re-break runtime dispatch). V5+messages
     drops ``total_turns`` / ``total_cost_usd`` (now on Message) and adds
     ``todos`` (latest TodoWrite snapshot) and ``runtime_session_id``.
-    ADR-008 (V5+e8d6c87) adds ``instructions`` — the workspace system
+    ADR-008 (V5+e8d6c87) adds ``instructions`` — the project system
     prompt is now session-level state, so dropping it on status copies
     would leave the runtime with an empty prompt mid-session.
     V5+1aae940 (approval contract slice 1) sinks ``permission_mode`` to
@@ -34,12 +34,12 @@ def _copy_session(session: KernelSession, /, **overrides: object) -> KernelSessi
     update silently demotes the session back to ``full_access`` and the
     approval bridge for the next turn never wires.
     """
-    from src.core.types import Session as KS  # type: ignore[import-not-found]
+    from src.core.types import Session as KS
 
     fields: dict[str, object] = {
         "id": session.id,
-        "project_id": session.project_id,
-        "agent_id": session.agent_id,
+        "agent_config": session.agent_config,
+        "cwd": session.cwd,
         "runtime_provider": getattr(session, "runtime_provider", "claude_agent"),
         "model": session.model,
         "model_provider": session.model_provider,
@@ -70,7 +70,7 @@ def _session_to_list_item(session: KernelSession) -> SessionListItem:
     raw_task_id = meta.get("task_id")
     return SessionListItem(
         id=session.id,
-        workspace_id=str(session.project_id),
+        project_id=str(meta.get("project_id") or ""),
         name=meta.get("name") or None,  # type: ignore[arg-type]
         status=_map_kernel_status(session.status),
         origin=str(meta.get("origin") or "user"),
@@ -109,7 +109,7 @@ def _session_to_detail(session: KernelSession) -> SessionDetail:
     effort = settings.effort if settings is not None else None
     return SessionDetail(
         id=session.id,
-        workspace_id=str(session.project_id),
+        project_id=str(meta.get("project_id") or ""),
         name=meta.get("name") or None,  # type: ignore[arg-type]
         status=_map_kernel_status(session.status),
         origin=str(meta.get("origin") or "user"),

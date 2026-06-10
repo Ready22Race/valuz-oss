@@ -318,8 +318,6 @@ class ClaudeAgentRuntime:
         # Identity of the session currently being run — exposed to
         # custom-tool handlers through ExecContext.
         self._cur_session_id: str = ""
-        self._cur_agent_id: str = ""
-        self._cur_project_id: str = ""
         # The task running ``run()``. Cancelled by ``interrupt()`` so the
         # iterator unblocks even when ``receive_response().__anext__`` is
         # waiting on the SDK subprocess for the next chunk.
@@ -461,8 +459,6 @@ class ClaudeAgentRuntime:
         self._workflow_pollers = []
         self._active_workflows = []
         self._cur_session_id = session.id
-        self._cur_agent_id = session.agent_id
-        self._cur_project_id = session.project_id
         self._cancelled = False
         # Reset stderr buffer so any ``session_error`` from this turn
         # carries only this turn's CLI output, not noise from prior
@@ -1431,8 +1427,6 @@ class ClaudeAgentRuntime:
                 ExecContext(
                     workspace=self.workspace_root,
                     session_id=self._cur_session_id,
-                    agent_id=self._cur_agent_id,
-                    project_id=self._cur_project_id,
                 ),
             )
             return {

@@ -35,7 +35,7 @@ user configures (and, optionally, to the Reportify cloud for research data).
   ┌───────────┐      ┌───────────────┐      ┌──────────────┐
   │ SQLite    │      │ Local FS       │      │ LLM provider  │
   │ (app db)  │      │ (~/.valuz,     │      │ + optional    │
-  │           │      │  workspaces)   │      │ Reportify     │
+  │           │      │  projects)   │      │ Reportify     │
   └───────────┘      └───────────────┘      └──────────────┘
 ```
 
@@ -71,30 +71,32 @@ single adapter seam.
 │        ▲   all kernel coupling crosses this seam   ▲               │
 │        │                                                           │
 │  adapters/                                                         │
-│   ├── kernel_sync          sync facade over the async StorePort    │
-│   ├── capability_resolver  workspace + extras → kernel skills/MCP  │
+│   ├── kernel_client        API-shaped client seam (wire schemas)   │
+│   ├── capability_resolver  project + extras → kernel skills/MCP  │
 │   ├── model_resolver       request + provider + default → model id │
 │   ├── mcp_resolver         slug + creds → MCP server configs       │
 │   ├── event_sse_adapter    kernel events table → SSE frames        │
-│   └── system_prompt_builder workspace context → agent prompt       │
+│   └── system_prompt_builder project context → agent prompt       │
 └───────────────────────────────────┬────────────────────────────────┘
                                     ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  Agent Harness Kernel  (backend/kernel)                            │
 │                                                                    │
-│  app/      routes mounted at /api/v1/{projects,agents,sessions,…}  │
+│  app/      routes mounted at /api/v1/{sessions,messages,…}        │
 │            StorePort + SessionOrchestrator singletons              │
-│  src/core/      Project, AgentConfig, Session, Event, McpServer…   │
+│  src/core/      AgentConfig, Session, Event, McpServer…            │
 │  src/adapters/  SQLAlchemyStore (async)                            │
 │  src/runtimes/  ClaudeAgentRuntime, DeepAgentsRuntime, Codex,      │
 │                 skills materialization                             │
 │                                                                    │
-│  Tables (unprefixed): projects · agents · sessions · events        │
+│  Tables (unprefixed): sessions · messages · events                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-**Kernel** owns the `Project ↔ Agent ↔ Session ↔ Event` persistence model and
-runtime orchestration.
+**Kernel** owns the `Session ↔ Message ↔ Event` persistence model and runtime
+orchestration. Sessions are self-sufficient: each embeds its agent
+configuration snapshot (`agent_config`) and working directory (`cwd`) — the
+kernel holds no project or agent tables.
 
 **Host** owns everything else — the agent library, project membership, the task
 orchestrator, providers, the MCP catalog, scheduling, attachments, OAuth pages,
@@ -152,7 +154,7 @@ through the seam:
 
 - **Identity** — name, description, avatar (host-side metadata).
 - **Working method** — the system prompt, assembled by `system_prompt_builder`
-  from the agent's instructions plus workspace context.
+  from the agent's instructions plus project context.
 - **Brain** — runtime + model, resolved by `model_resolver` from the agent's
   declared runtime/provider and the request.
 - **Equipment** — skills and connectors, resolved by `capability_resolver` and
@@ -198,7 +200,7 @@ Domain) with a state-first `LiveMemberRegistry` as its keystone.
 All host-owned writes flow through `valuz_agent.infra.fs_registry.FsRegistry`. Direct `Path.home()` or hardcoded `~/.claude/...` strings outside
 `infra/config.py` and the registry are forbidden. The kernel manages its own
 subtree under each `project.cwd`; the registry hands the kernel that cwd via
-`workspace_cwd(...)` and the kernel takes it from there.
+`project_cwd(...)` and the kernel takes it from there.
 
 Secrets (API keys, OAuth tokens) are stored in the OS keychain through a secret
 store, never in plaintext on disk.

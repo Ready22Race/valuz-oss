@@ -39,7 +39,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from valuz_agent.adapters import kernel_store
+from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import messaging, planning
 from valuz_agent.modules.tasks.actor_runner import collect_manifest
@@ -78,7 +78,7 @@ class CoordinationService:
         self,
         *,
         lead_session_id: str,
-        workspace_id: str,
+        project_id: str,
         task_id: str,
         keys: list[str] | None = None,
         mode: str = "all",
@@ -111,7 +111,7 @@ class CoordinationService:
             target: set[str] = {k for k in keys if k}
         else:
             async with async_unit_of_work(commit=False) as db:
-                row = await TaskDatastore(db).get_task_by_workspace(workspace_id, task_id)
+                row = await TaskDatastore(db).get_task_by_project(project_id, task_id)
                 plan = TaskPlan.from_dict(row.plan) if row else TaskPlan()
             target = {n.key for n in plan.nodes if n.status in ("in_progress", "in_review")}
 
@@ -150,7 +150,7 @@ class CoordinationService:
                 collected.update(
                     await self._heartbeat_pending(
                         task_id=task_id,
-                        workspace_id=workspace_id,
+                        project_id=project_id,
                         pending_keys=pending_now,
                     )
                 )
@@ -180,7 +180,7 @@ class CoordinationService:
             if run and run.subtask_key:
                 await planning.mark_in_review(
                     task_id=task_id,
-                    workspace_id=workspace_id,
+                    project_id=project_id,
                     member_session_id=from_sid,
                 )
             m = msg.payload or {}
@@ -214,7 +214,7 @@ class CoordinationService:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         pending_keys: set[str],
     ) -> dict[str, dict[str, Any]]:
         """Backstop for bad-case #3 (VALUZ-RESUME §5.4): a member whose kernel
@@ -243,14 +243,14 @@ class CoordinationService:
             }
             if not any(k in runs_by_key for k in pending_keys):
                 return {}  # nothing in-flight for these keys — don't touch the plan
-            task = await task_ds.get_task_by_workspace(workspace_id, task_id)
+            task = await task_ds.get_task_by_project(project_id, task_id)
             plan = TaskPlan.from_dict(task.plan) if task is not None else None
             plan_dirty = False
             for key in pending_keys:
                 run = runs_by_key.get(key)
                 if run is None:
                     continue
-                ks = await kernel_store.load_session(run.session_id)
+                ks = await kernel_client.get_session(run.session_id)
                 if getattr(ks, "status", None) == "running":
                     continue  # genuinely in flight — keep waiting
                 disp = classify_member(
@@ -260,7 +260,7 @@ class CoordinationService:
                 node = plan.get(key) if plan is not None else None
                 if disp == "completed":
                     try:
-                        manifest = collect_manifest(
+                        manifest = await collect_manifest(
                             run.session_id,
                             Path(run.run_dir) if run.run_dir else Path(),
                             "idle",
@@ -308,7 +308,7 @@ class CoordinationService:
                 await task_ds.update_task(task)
                 await planning.emit_plan_update(
                     event_ds,
-                    workspace_id=workspace_id,
+                    project_id=project_id,
                     task_id=task_id,
                     plan=plan,
                     actor="system",
@@ -338,10 +338,10 @@ class CoordinationService:
             lead_session_id = run.dispatched_by or ""
             run_dir = Path(run.run_dir) if run.run_dir else Path()
             since = self._members.dispatch_started_at(session_id)
-            manifest = collect_manifest(session_id, run_dir, status, since_epoch=since)
+            manifest = await collect_manifest(session_id, run_dir, status, since_epoch=since)
             manifest["agent"] = run.agent_slug
             await event_ds.append_event(
-                workspace_id=run.workspace_id,
+                project_id=run.project_id,
                 task_id=run.task_id or "",
                 type="subtask_message",
                 actor=run.agent_slug,
@@ -364,7 +364,7 @@ class CoordinationService:
                 ),
             )
 
-    async def _lead_idle_with_no_pending(self, task_id: str, workspace_id: str) -> bool:
+    async def _lead_idle_with_no_pending(self, task_id: str, project_id: str) -> bool:
         """True when a lead has nothing left to wait for after a turn.
 
         The actor loop normally parks on the mailbox for LEAD_IDLE_TTL_S between
@@ -376,7 +376,7 @@ class CoordinationService:
         if self._members.has_live_members(task_id):
             return False  # a member is still running — keep waiting for its result
         async with async_unit_of_work(commit=False) as db:
-            task = await TaskDatastore(db).get_task_by_workspace(workspace_id, task_id)
+            task = await TaskDatastore(db).get_task_by_project(project_id, task_id)
             if task is None or task.status != "active":
                 return True  # already closed (finish_task/stop) — let the loop end
             try:
@@ -409,7 +409,7 @@ class CoordinationService:
         from_session_id: str,
         to_session_id: str,
         text: str,
-        workspace_id: str,
+        project_id: str,
         task_id: str,
     ) -> dict[str, Any]:
         """Deliver a free-text follow-up from the lead to a running member.
@@ -421,7 +421,7 @@ class CoordinationService:
             from_session_id=from_session_id,
             to_session_id=to_session_id,
             text=text,
-            workspace_id=workspace_id,
+            project_id=project_id,
             task_id=task_id,
         )
 
@@ -429,7 +429,7 @@ class CoordinationService:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         text: str,
         from_session_id: str,
     ) -> dict[str, Any]:
@@ -440,7 +440,7 @@ class CoordinationService:
         """
         return await messaging.inject_into_task(
             task_id=task_id,
-            workspace_id=workspace_id,
+            project_id=project_id,
             text=text,
             from_session_id=from_session_id,
         )
@@ -449,7 +449,7 @@ class CoordinationService:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         new_goal: str,
     ) -> dict[str, Any]:
         """Wake a running task's lead after the user revised ``task.goal``.
@@ -459,7 +459,7 @@ class CoordinationService:
         """
         return await messaging.notify_lead_goal_revised(
             task_id=task_id,
-            workspace_id=workspace_id,
+            project_id=project_id,
             new_goal=new_goal,
         )
 

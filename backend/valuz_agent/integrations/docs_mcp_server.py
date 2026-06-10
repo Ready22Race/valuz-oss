@@ -66,14 +66,15 @@ def _current_session_id() -> str:
     return sid
 
 
-def _resolve_workspace_id(session_id: str) -> str | None:
+async def _resolve_project_id(session_id: str) -> str | None:
     """Map ``session_id`` → ``project_id`` via the kernel store."""
-    from valuz_agent.adapters import kernel_sync
+    from valuz_agent.adapters import kernel_client
 
-    session = kernel_sync.load_session_sync(session_id)
+    session = await kernel_client.get_session(session_id)
     if session is None:
         return None
-    return str(session.project_id)
+    project_id = ((session.metadata or {}).get("valuz", {}) or {}).get("project_id")
+    return str(project_id) if project_id else None
 
 
 def _build_doc_service(db: Any) -> Any:  # type: ignore[no-untyped-def]
@@ -130,13 +131,13 @@ async def doc_search(
     from valuz_agent.infra.db import async_unit_of_work
 
     session_id = _current_session_id()
-    workspace_id = _resolve_workspace_id(session_id)
-    if workspace_id is None:
+    project_id = await _resolve_project_id(session_id)
+    if project_id is None:
         return []
     async with async_unit_of_work(commit=False) as db:
         svc = _build_doc_service(db)
         hits = await svc.search_docs(
-            workspace_id=workspace_id,
+            project_id=project_id,
             query=query,
             folder_ids=folder_ids or None,
             document_ids=document_ids or None,
@@ -172,12 +173,12 @@ async def list_doc_scope(folder_id: str | None = None) -> dict[str, Any]:
 
     del folder_id  # full-tree view is enough today; folder drilldown is a TODO.
     session_id = _current_session_id()
-    workspace_id = _resolve_workspace_id(session_id)
-    if workspace_id is None:
+    project_id = await _resolve_project_id(session_id)
+    if project_id is None:
         return {"knowledge_bases": [], "total_documents": 0}
     async with async_unit_of_work(commit=False) as db:
         svc = _build_doc_service(db)
-        tree = await svc.build_doc_scope_tree(workspace_id)
+        tree = await svc.build_doc_scope_tree(project_id)
     return _scope_tree_to_dict(tree)
 
 

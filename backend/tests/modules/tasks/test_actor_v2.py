@@ -26,19 +26,39 @@ from valuz_agent.modules.tasks.orchestrator import (
 )
 
 
-def _async_member_get(kernel_agent_id: str = "kernel-agent-1"):
+def _fake_agent_config(**kw):
+    """Real AgentConfig for resolver fakes — serializer needs full fields."""
+    from src.core import AgentConfig  # type: ignore[import-not-found]
+
+    kw.setdefault("id", "fake-agent")
+    kw.setdefault("name", "fake")
+    kw.setdefault("skills", tuple(kw.get("skills", ())))
+    kw.setdefault("mcp_servers", ())
+    kw.pop("metadata", None) if False else None
+    allowed = {
+        "id", "name", "model", "runtime_provider", "instructions", "tools",
+        "callable_agents", "skills", "mcp_servers", "permission_mode",
+        "max_turns", "max_cost_usd", "effort", "thinking", "metadata",
+    }
+    kw = {k: v for k, v in kw.items() if k in allowed}
+    if isinstance(kw.get("skills"), list):
+        kw["skills"] = tuple(kw["skills"])
+    return AgentConfig(**kw)
+
+
+def _async_member_get(source_agent_slug: str = "lead-agent"):
     """A fake ProjectMemberDatastore.get — async, since the real one is async
     (build_member_session awaits it)."""
 
     async def _get(ws: str, slug: str) -> SimpleNamespace:
-        return SimpleNamespace(kernel_agent_id=kernel_agent_id)
+        return SimpleNamespace(source_agent_slug=source_agent_slug)
 
     return _get
 
 
 def _as_async(fn):
     """Wrap a sync callable as a coroutine fn for monkeypatching the async
-    ``kernel_store`` facade (its methods are awaited by the code under test)."""
+    ``kernel_client`` facade (its methods are awaited by the code under test)."""
 
     async def _f(*args, **kwargs):
         return fn(*args, **kwargs)
@@ -114,7 +134,7 @@ async def test_lead_loop_runs_turns_until_shutdown() -> None:
             initial_prompt="initial brief",
             role="lead",
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
         ),
         timeout=2.0,
     )
@@ -152,7 +172,7 @@ async def test_member_loop_notifies_lead_and_self_reaps_on_ttl() -> None:
             initial_prompt="do the thing",
             role="subtask",
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             idle_ttl=0.05,
         ),
         timeout=2.0,
@@ -183,7 +203,7 @@ async def test_terminal_turn_status_breaks_loop_immediately() -> None:
             initial_prompt="brief",
             role="lead",
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
         ),
         timeout=2.0,
     )
@@ -238,7 +258,7 @@ def test_build_member_session_injects_skill_scoping(
 
     from valuz_agent.adapters import agent_resolver
 
-    fake_agent = SimpleNamespace(
+    fake_agent = _fake_agent_config(
         id="kernel-agent-1",
         name="writer",
         instructions="be a writer",
@@ -251,7 +271,7 @@ def test_build_member_session_injects_skill_scoping(
     )
     fake_members = SimpleNamespace(get=_async_member_get())
     monkeypatch.setattr(
-        agent_resolver.kernel_store, "load_agent", _as_async(lambda _id: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
     )
     # Hermetic: don't resolve skill slugs against the real skill-index DB — this
     # test only asserts the prompt-scoping block (built from the agent's own
@@ -262,7 +282,7 @@ def test_build_member_session_injects_skill_scoping(
 
     session = asyncio.run(
         agent_resolver.build_member_session(
-            workspace_id="w1",
+            project_id="w1",
             agent_slug="writer",
             members=fake_members,  # type: ignore[arg-type]
             is_lead=False,
@@ -289,7 +309,7 @@ def test_build_member_session_carries_agent_effort(
 
     from valuz_agent.adapters import agent_resolver
 
-    fake_agent = SimpleNamespace(
+    fake_agent = _fake_agent_config(
         id="kernel-agent-1",
         name="writer",
         instructions="be a writer",
@@ -303,12 +323,12 @@ def test_build_member_session_carries_agent_effort(
     )
     fake_members = SimpleNamespace(get=_async_member_get())
     monkeypatch.setattr(
-        agent_resolver.kernel_store, "load_agent", _as_async(lambda _id: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
     )
 
     session = asyncio.run(
         agent_resolver.build_member_session(
-            workspace_id="w1",
+            project_id="w1",
             agent_slug="writer",
             members=fake_members,  # type: ignore[arg-type]
             is_lead=False,
@@ -330,7 +350,7 @@ def test_build_member_session_no_effort_leaves_model_settings_unset(
 
     from valuz_agent.adapters import agent_resolver
 
-    fake_agent = SimpleNamespace(
+    fake_agent = _fake_agent_config(
         id="kernel-agent-1",
         name="writer",
         instructions="be a writer",
@@ -344,12 +364,12 @@ def test_build_member_session_no_effort_leaves_model_settings_unset(
     )
     fake_members = SimpleNamespace(get=_async_member_get())
     monkeypatch.setattr(
-        agent_resolver.kernel_store, "load_agent", _as_async(lambda _id: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
     )
 
     session = asyncio.run(
         agent_resolver.build_member_session(
-            workspace_id="w1",
+            project_id="w1",
             agent_slug="writer",
             members=fake_members,  # type: ignore[arg-type]
             is_lead=False,
@@ -368,7 +388,7 @@ def _fake_goal_mode_setup(monkeypatch: pytest.MonkeyPatch, runtime_provider: str
 
     from valuz_agent.adapters import agent_resolver
 
-    fake_agent = SimpleNamespace(
+    fake_agent = _fake_agent_config(
         id="kernel-agent-1",
         name="writer",
         instructions="be a writer",
@@ -382,7 +402,7 @@ def _fake_goal_mode_setup(monkeypatch: pytest.MonkeyPatch, runtime_provider: str
     )
     fake_members = SimpleNamespace(get=_async_member_get())
     monkeypatch.setattr(
-        agent_resolver.kernel_store, "load_agent", _as_async(lambda _id: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
     )
     return agent_resolver, fake_members
 
@@ -394,7 +414,7 @@ def test_build_member_session_sets_goal_mode_for_claude_agent(
     agent_resolver, fake_members = _fake_goal_mode_setup(monkeypatch, "claude_agent")
     session = asyncio.run(
         agent_resolver.build_member_session(
-            workspace_id="w1",
+            project_id="w1",
             agent_slug="writer",
             members=fake_members,  # type: ignore[arg-type]
             is_lead=False,
@@ -415,7 +435,7 @@ def test_build_member_session_goal_mode_falls_back_to_default_for_deepagents(
     agent_resolver, fake_members = _fake_goal_mode_setup(monkeypatch, "deepagents")
     session = asyncio.run(
         agent_resolver.build_member_session(
-            workspace_id="w1",
+            project_id="w1",
             agent_slug="writer",
             members=fake_members,  # type: ignore[arg-type]
             is_lead=False,
@@ -436,7 +456,7 @@ def test_build_member_session_default_when_goal_mode_off(
     agent_resolver, fake_members = _fake_goal_mode_setup(monkeypatch, "claude_agent")
     session = asyncio.run(
         agent_resolver.build_member_session(
-            workspace_id="w1",
+            project_id="w1",
             agent_slug="writer",
             members=fake_members,  # type: ignore[arg-type]
             is_lead=False,
@@ -449,7 +469,7 @@ def test_build_member_session_default_when_goal_mode_off(
     assert session.mode == "default"
 
 
-def test_collect_manifest_attributes_by_mtime(tmp_path: object) -> None:
+async def test_collect_manifest_attributes_by_mtime(tmp_path: object) -> None:
     import os
     from pathlib import Path
 
@@ -462,13 +482,13 @@ def test_collect_manifest_attributes_by_mtime(tmp_path: object) -> None:
     os.utime(new, (5000.0, 5000.0))  # mtime after dispatch
 
     # since_epoch between the two → only the member's post-dispatch file.
-    m = collect_manifest("s1", d, "idle", since_epoch=3000.0)
+    m = await collect_manifest("s1", d, "idle", since_epoch=3000.0)
     paths = [a["path"] for a in m["artifacts"]]
     assert str(new) in paths
     assert str(old) not in paths
 
     # since_epoch=0 → include everything (worktree / private-dir behaviour).
-    m_all = collect_manifest("s1", d, "idle", since_epoch=0.0)
+    m_all = await collect_manifest("s1", d, "idle", since_epoch=0.0)
     paths_all = [a["path"] for a in m_all["artifacts"]]
     assert str(old) in paths_all and str(new) in paths_all
 
@@ -529,26 +549,26 @@ def test_create_task_gate_rejects_task_sessions(
 
     # run_kind="lead" → rejected before any DB lookup.
     monkeypatch.setattr(
-        dispatch_mcp.kernel_store,
-        "load_session",
-        _as_async(lambda _sid: _sess({"run_kind": "lead", "workspace_id": "w1"})),
+        dispatch_mcp.kernel_client,
+        "get_session",
+        _as_async(lambda _sid: _sess({"run_kind": "lead", "project_id": "w1"})),
     )
     res = asyncio.run(dispatch_mcp._check_orchestration_gate(ctx))  # type: ignore[arg-type]
     assert isinstance(res, ToolResult) and res.is_error
 
     # run_kind="subtask" → rejected.
     monkeypatch.setattr(
-        dispatch_mcp.kernel_store,
-        "load_session",
-        _as_async(lambda _sid: _sess({"run_kind": "subtask", "workspace_id": "w1"})),
+        dispatch_mcp.kernel_client,
+        "get_session",
+        _as_async(lambda _sid: _sess({"run_kind": "subtask", "project_id": "w1"})),
     )
     res = asyncio.run(dispatch_mcp._check_orchestration_gate(ctx))  # type: ignore[arg-type]
     assert isinstance(res, ToolResult) and res.is_error
 
-    # plain conversation but no workspace_id → rejected.
+    # plain conversation but no project_id → rejected.
     monkeypatch.setattr(
-        dispatch_mcp.kernel_store,
-        "load_session",
+        dispatch_mcp.kernel_client,
+        "get_session",
         _as_async(lambda _sid: _sess({"agent_slug": "x"})),
     )
     res = asyncio.run(dispatch_mcp._check_orchestration_gate(ctx))  # type: ignore[arg-type]
@@ -585,29 +605,22 @@ def test_strip_dispatch_tools_removes_lead_only() -> None:
     assert again is stripped
 
 
-def test_materialize_lead_agent_builds_clone_with_dispatch_tools() -> None:
+async def test_materialize_lead_agent_builds_clone_with_dispatch_tools() -> None:
     """The lead clone has a deterministic id and carries the mode's dispatch tools."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.adapters import kernel_sync
     from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 
-    saved: dict[str, AgentConfig] = {}
-    orig = kernel_sync.save_agent_sync
-    kernel_sync.save_agent_sync = lambda a: saved.__setitem__(a.id, a)  # type: ignore[assignment]
-    try:
-        base = AgentConfig(id="base1", name="lead", tools=())
-        orch = TaskOrchestrator()
-        clone_id = orch._materialize_lead_agent(base, dispatch_mode="async")
-        assert clone_id == "base1__lead__async"
-        names = {t.name for t in saved[clone_id].tools}
-        assert "dispatch" in names
-        assert "await_members" in names
-        assert "send" in names
-        assert "finish_task" in names
-        assert "create_task" not in names
-    finally:
-        kernel_sync.save_agent_sync = orig  # type: ignore[assignment]
+    base = AgentConfig(id="base1", name="lead", tools=())
+    orch = TaskOrchestrator()
+    clone = await orch._materialize_lead_agent(base, dispatch_mode="async")
+    assert clone.id == "base1__lead__async"
+    names = {t.name for t in clone.tools}
+    assert "dispatch" in names
+    assert "await_members" in names
+    assert "send" in names
+    assert "finish_task" in names
+    assert "create_task" not in names
 
 
 def test_send_to_member_rejects_cross_task(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -618,7 +631,7 @@ def test_send_to_member_rejects_cross_task(monkeypatch: pytest.MonkeyPatch) -> N
 
     from valuz_agent.modules.tasks import messaging
 
-    other_run = SimpleNamespace(task_id="OTHER", workspace_id="w1")
+    other_run = SimpleNamespace(task_id="OTHER", project_id="w1")
 
     async def _get_run(_sid):
         return other_run
@@ -640,7 +653,7 @@ def test_send_to_member_rejects_cross_task(monkeypatch: pytest.MonkeyPatch) -> N
             from_session_id="lead-T1",
             to_session_id="member-of-OTHER",
             text="hi",
-            workspace_id="w1",
+            project_id="w1",
             task_id="T1",
         )
     )
@@ -648,14 +661,13 @@ def test_send_to_member_rejects_cross_task(monkeypatch: pytest.MonkeyPatch) -> N
     assert "not a member of this task" in res["error"]
 
 
-def test_orchestration_tools_include_list_and_get() -> None:
+async def test_orchestration_tools_include_list_and_get() -> None:
     """Conversation agents carry the launcher + observability + chat-plan
     surface (VALUZ-CHATPLAN S2); the per-task lead clone drops launcher /
     draft-state tools but keeps the plan-write tools (plan_task / modify_plan
     / get_plan) via DISPATCH_TOOL_DECLARATIONS."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.adapters import kernel_sync
     from valuz_agent.modules.tasks.dispatch_mcp import (
         ORCHESTRATION_TOOL_DECLARATIONS,
         ensure_orchestration_tools_on_agent,
@@ -693,43 +705,38 @@ def test_orchestration_tools_include_list_and_get() -> None:
     # DISPATCH_TOOL_DECLARATIONS). Names should appear exactly once on the
     # clone — the new dedup in _materialize_lead_agent prevents duplicates
     # when a tool sits in both ORCHESTRATION and DISPATCH declarations.
-    saved: dict[str, AgentConfig] = {}
-    orig = kernel_sync.save_agent_sync
-    kernel_sync.save_agent_sync = lambda x: saved.__setitem__(x.id, x)  # type: ignore[assignment]
-    try:
-        cid = TaskOrchestrator()._materialize_lead_agent(conv, dispatch_mode="async")
-        clone_tool_names = [t.name for t in saved[cid].tools]
-        clone_names = set(clone_tool_names)
-        # Launcher / draft-mode tools stripped:
-        for stripped in (
-            "create_task",
-            "list_tasks",
-            "get_task",
-            "draft_task",
-            "commit_task",
-            "abandon_task",
-            "inject_into_task",
-        ):
-            assert stripped not in clone_names, f"{stripped} should be dropped from lead"
-        # Lead toolset present:
-        for kept in (
-            "dispatch",
-            "await_members",
-            "send",
-            "finish_task",
-            "list_members",
-            "review_subtask",
-            "plan_task",
-            "modify_plan",
-            "get_plan",
-        ):
-            assert kept in clone_names, f"{kept} should be on lead clone"
-        # No duplicates (every name appears at most once).
-        assert len(clone_tool_names) == len(clone_names), (
-            f"lead clone has duplicate tools: {clone_tool_names}"
-        )
-    finally:
-        kernel_sync.save_agent_sync = orig  # type: ignore[assignment]
+    clone = await TaskOrchestrator()._materialize_lead_agent(conv, dispatch_mode="async")
+    clone_tool_names = [t.name for t in clone.tools]
+    clone_names = set(clone_tool_names)
+    # Launcher / draft-mode tools stripped:
+    for stripped in (
+        "create_task",
+        "list_tasks",
+        "get_task",
+        "draft_task",
+        "commit_task",
+        "abandon_task",
+        "inject_into_task",
+    ):
+        assert stripped not in clone_names, f"{stripped} should be dropped from lead"
+    # Lead toolset present:
+    for kept in (
+        "dispatch",
+        "await_members",
+        "send",
+        "finish_task",
+        "list_members",
+        "review_subtask",
+        "plan_task",
+        "modify_plan",
+        "get_plan",
+    ):
+        assert kept in clone_names, f"{kept} should be on lead clone"
+    # No duplicates (every name appears at most once).
+    assert len(clone_tool_names) == len(clone_names), (
+        f"lead clone has duplicate tools: {clone_tool_names}"
+    )
+
 
 
 def test_build_member_session_carries_effort_for_deepagents(
@@ -745,7 +752,7 @@ def test_build_member_session_carries_effort_for_deepagents(
 
     from valuz_agent.adapters import agent_resolver
 
-    fake_agent = SimpleNamespace(
+    fake_agent = _fake_agent_config(
         id="da-1",
         name="da-writer",
         instructions="be brief",
@@ -759,12 +766,12 @@ def test_build_member_session_carries_effort_for_deepagents(
     )
     fake_members = SimpleNamespace(get=_async_member_get("da-1"))
     monkeypatch.setattr(
-        agent_resolver.kernel_store, "load_agent", _as_async(lambda _id: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
     )
 
     session = asyncio.run(
         agent_resolver.build_member_session(
-            workspace_id="w1",
+            project_id="w1",
             agent_slug="quickbot",
             members=fake_members,  # type: ignore[arg-type]
             is_lead=False,
@@ -835,7 +842,7 @@ async def test_await_members_all_returns_when_all_keys_done(monkeypatch) -> None
         )
         res = await orch.await_member_results(
             lead_session_id=lead,
-            workspace_id="w1",
+            project_id="w1",
             task_id="t1",
             keys=["A", "B"],
             mode="all",
@@ -864,7 +871,7 @@ async def test_await_members_any_returns_on_first(monkeypatch) -> None:
         mailbox_registry.put(lead, InboxMsg(kind="member_done", from_session="sA", payload={}))
         res = await orch.await_member_results(
             lead_session_id=lead,
-            workspace_id="w1",
+            project_id="w1",
             task_id="t1",
             keys=["A", "B"],
             mode="any",
@@ -892,7 +899,7 @@ async def test_await_members_timeout_returns_partial_with_pending(monkeypatch) -
         mailbox_registry.put(lead, InboxMsg(kind="member_done", from_session="sA", payload={}))
         res = await orch.await_member_results(
             lead_session_id=lead,
-            workspace_id="w1",
+            project_id="w1",
             task_id="t1",
             keys=["A", "B"],
             mode="all",
