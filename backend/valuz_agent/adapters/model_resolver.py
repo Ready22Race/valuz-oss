@@ -168,6 +168,13 @@ def _model_ids_of(provider: object) -> set[str]:
     Tolerates malformed JSON — returns an empty set so the caller falls
     through to "treat as custom" rather than raising. The provider row is
     the source of truth; we don't second-guess its content.
+
+    ``model_ids IS NULL`` (no user-customised list — notably the OAuth
+    subscription rows, which track the live recommended catalog instead
+    of snapshotting it) also yields the empty set: with no stored list
+    there is nothing to flag a request against, so no ``custom_model_id``
+    warning fires. Deliberate — the recommended catalog is a suggestion,
+    not an allowlist.
     """
     raw = getattr(provider, "model_ids", None)
     if not raw:
