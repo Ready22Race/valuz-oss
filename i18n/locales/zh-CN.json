@@ -215,6 +215,7 @@
     "cannotLoadKb": "无法加载知识库文档",
     "clickEditTitle": "点击编辑标题",
     "collapsePanel": "收起 Panel",
+    "contextCompacted": "上下文已压缩",
     "copy": "复制",
     "copyFailed": "复制失败",
     "copyLink": "复制链接",

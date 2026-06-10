@@ -19,6 +19,13 @@ OutboundEventType = Literal[
     "session_idle",
     "session_error",
     "session_update",
+    # Context compaction marker, emitted by both runtimes when the context
+    # window is summarized. ``data`` is passed through raw, not normalized:
+    # Claude forwards the CLI's ``compact_boundary`` ``compact_metadata`` dict
+    # verbatim (e.g. ``{trigger, pre_tokens}``); codex runs ``/compact`` as a
+    # real turn but has no metadata of its own, so its marker is ``{}`` (the
+    # real token counts ride the following ``usage_update``). The upper layer
+    # decides how/whether to render it.
     "compaction",
     "usage_update",
     "todo_update",

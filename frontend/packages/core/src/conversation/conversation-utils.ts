@@ -221,6 +221,7 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       return `ts::${p.id || p.tool_use_id || p.call_id || ""}`;
     if (type === "tool.call.completed")
       return `tc::${p.id || p.tool_use_id || p.call_id || ""}`;
+    if (type === "session.compaction") return `cmp::${p.message_id ?? ""}`;
     return null;
   };
 
@@ -295,6 +296,16 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     }
 
     const turn = ensureTurn();
+
+    if (eventType === "session.compaction") {
+      // A context compaction happened in this turn (``/compact`` or
+      // autocompact). Push a single label-only marker block; the event's
+      // raw data is intentionally NOT parsed for display. For codex's
+      // ``/compact`` the "Compacted." reply is suppressed upstream, so this
+      // marker is the only visible artifact of the turn.
+      turn.blocks.push({ kind: "compaction", messageId: payload.message_id });
+      continue;
+    }
 
     if (eventType === "message.assistant.text_delta") {
       appendDelta(turn, "assistant", payload.text ?? "", payload.message_id);
