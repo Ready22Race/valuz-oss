@@ -296,6 +296,7 @@ def detect_system_timezone() -> str:
     persist it — auto-detection is a UX nicety, not a contract.
     """
     import os
+    import sys
     from pathlib import Path
 
     if sys.platform == "win32":
