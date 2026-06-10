@@ -3,6 +3,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { Composer, type RuntimeSelectorItem } from "./Composer";
+import type { SkillSearchItem } from "./conversation/SkillSearchMenu";
 
 const sampleRuntimes: RuntimeSelectorItem[] = [
   { id: "claude_agent", displayName: "Claude Agent", available: true },
@@ -146,5 +147,45 @@ describe("Composer IME submission guard", () => {
     fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
 
     expect(onSend).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Composer slash-command pass-through", () => {
+  const SKILLS: SkillSearchItem[] = [
+    { id: "1", name: "deep-research", description: "research deeply" },
+  ];
+
+  /** Drive the ``/`` trigger the way real typing does: the picker only opens
+   *  when the *last* keystroke is the bare ``/``, then subsequent input feeds
+   *  the query. So set ``/`` first, then the full token. */
+  const typeSlashToken = (editor: HTMLElement, token: string) => {
+    editor.textContent = "/";
+    fireEvent.input(editor);
+    editor.textContent = token;
+    fireEvent.input(editor);
+  };
+
+  it("sends a /command that matches no skill on Enter (no longer swallowed)", () => {
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} skills={SKILLS} />);
+    const editor = screen.getByRole("textbox");
+
+    typeSlashToken(editor, "/compact");
+    // No skill matches "compact" → picker closed → Enter sends.
+    fireEvent.keyDown(editor, { key: "Enter" });
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT send while the skill picker is open with matches", () => {
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} skills={SKILLS} />);
+    const editor = screen.getByRole("textbox");
+
+    typeSlashToken(editor, "/deep");
+    // "deep" matches deep-research → picker open → Enter is captured by it.
+    fireEvent.keyDown(editor, { key: "Enter" });
+
+    expect(onSend).not.toHaveBeenCalled();
   });
 });
