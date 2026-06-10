@@ -51,14 +51,20 @@ _third_party_pkgs = [
     "uvicorn", "sse_starlette", "multipart",
     "sqlalchemy", "aiosqlite", "alembic",
     "httpx",
+    "anthropic", "openai",
     "markitdown", "pymupdf4llm", "pymupdf",
+    "html_to_markdown", "rapidocr",
     "deepagents", "claude_agent_sdk",
     "codex_cli_bin", "openai_codex",
+    "langchain", "langchain_core",
     "langchain_openai", "langchain_mcp_adapters",
+    "langchain_anthropic", "langchain_google_genai",
+    "langgraph",
     "mcp",
     "croniter", "cron_descriptor", "pytz",
     "jinja2",
     "dotenv", "typer", "watchfiles",
+    "yaml",
 ]
 _auto_hidden = []
 for _pkg in _third_party_pkgs:
