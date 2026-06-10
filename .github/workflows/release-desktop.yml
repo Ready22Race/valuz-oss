@@ -317,7 +317,10 @@ jobs:
       contents: write
     steps:     
       - name: Configure Git Mirror for Checkout
-        run: git config --global url."https://gh-proxy.org/".insteadOf "https://github.com/"
+        run: |
+          echo "GIT_CONFIG_COUNT=1" >> $env:GITHUB_ENV
+          echo "GIT_CONFIG_KEY_1=url.https://gh-proxy.org/.insteadOf" >> $env:GITHUB_ENV
+          echo "GIT_CONFIG_VALUE_1=https://github.com/" >> $env:GITHUB_ENV
 
       - name: Checkout
         uses: actions/checkout@v4
