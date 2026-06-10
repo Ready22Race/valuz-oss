@@ -416,6 +416,7 @@ export type KnownI18nKey =
   | "conversation.cannotLoadKb"
   | "conversation.clickEditTitle"
   | "conversation.collapsePanel"
+  | "conversation.contextCompacted"
   | "conversation.copy"
   | "conversation.copyFailed"
   | "conversation.copyLink"

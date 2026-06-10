@@ -1995,7 +1995,15 @@ class ClaudeAgentRuntime:
                 if sdk_session_id:
                     session.runtime_session_id = str(sdk_session_id)
             elif message.subtype == "compact_boundary":
-                await self.event_sink.emit(Event(type="compaction", data={}))
+                # Forward the SDK's ``compact_metadata`` verbatim (e.g.
+                # ``{trigger, pre_tokens}``) — no reshaping. The upper layer
+                # decides how to render it; we only surface the raw signal.
+                meta = (
+                    message.data.get("compact_metadata")
+                    or message.data.get("compactMetadata")
+                    or {}
+                )
+                await self.event_sink.emit(Event(type="compaction", data=dict(meta)))
 
         elif isinstance(message, AssistantMessage):
             for block in message.content:

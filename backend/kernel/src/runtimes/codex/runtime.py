@@ -260,6 +260,18 @@ class CodexRuntime:
             await self._ensure_thread(session)
             assert self._thread is not None
 
+            # ``/compact`` sent as a normal turn IS a real codex compaction:
+            # the app-server reads the full context and summarizes it (the turn
+            # reports the pre-compaction token count as ``input_tokens`` and
+            # replies "Compacted."). We keep that real execution and only
+            # re-label the output to match ClaudeAgentRuntime: suppress the
+            # "Compacted." assistant text and emit a ``compaction`` event
+            # instead, then let the real ``usage_update`` flow through. (Do NOT
+            # call ``AsyncThread.compact()`` here — that only fires
+            # ``thread/compact/start`` and returns before the work happens; see
+            # ``_is_compact_command``.)
+            is_compact = _is_compact_command(user_message)
+
             # Slice 6 follow-up of session-modes: user-initiated goal
             # exit. Codex's slice-6 listener catches the
             # ``thread/goal/cleared`` notification when the model
@@ -357,6 +369,13 @@ class CodexRuntime:
                         break
 
                     for event in map_notification(notification):
+                        # On a ``/compact`` turn, swallow the model's
+                        # "Compacted." text — it's re-surfaced as a single
+                        # ``compaction`` event after the turn (parity with the
+                        # Claude runtime, which emits no assistant bubble for
+                        # ``/compact``).
+                        if is_compact and event.type in ("text_delta", "assistant_message"):
+                            continue
                         await self.event_sink.emit(event)
 
                     mcp_status = extract_mcp_server_status(notification)
@@ -451,6 +470,17 @@ class CodexRuntime:
             else:
                 session.status = "idle"
                 session.stop_reason = EndTurn()
+
+            # ``/compact`` turn: re-surface the (suppressed) "Compacted." as a
+            # ``compaction`` event before the usage update, matching the Claude
+            # runtime's ordering (compaction -> usage_update). Codex's turn
+            # carries no compaction metadata of its own (unlike Claude's
+            # ``compact_metadata``), so the marker is empty — we don't
+            # synthesize trigger/pre_tokens. The real token counts are already
+            # in the ``usage_update`` that follows; the upper layer can read
+            # them there if it wants.
+            if is_compact and completed is not None:
+                await self.event_sink.emit(Event(type="compaction", data={}))
 
             if usage_payload is not None:
                 await self.event_sink.emit(Event(type="usage_update", data=usage_payload))
@@ -1086,6 +1116,20 @@ class CodexRuntime:
         from src.runtimes.skills_materialize import prepare_codex_skills
 
         prepare_codex_skills(self.workspace_root, list(session.skills))
+
+
+def _is_compact_command(user_message: UserMessage) -> bool:
+    """True iff the user turn is the bare ``/compact`` slash command.
+
+    Codex has no native ``/compact`` interception in its turn input, so the
+    runtime detects it here and runs it as an ordinary turn: the app-server
+    reads the full context and summarizes it (replying "Compacted."). The
+    caller suppresses that reply and re-labels it as a ``compaction`` event —
+    parity with the Claude runtime. We deliberately do NOT route to
+    ``AsyncThread.compact()``: that fire-and-ack only starts the work and
+    returns before it happens, with no observable completion.
+    """
+    return (user_message.text or "").strip() == "/compact"
 
 
 def _resolve_codex_bin() -> str | None:

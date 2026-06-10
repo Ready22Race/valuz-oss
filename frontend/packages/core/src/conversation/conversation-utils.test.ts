@@ -450,3 +450,42 @@ describe("buildTurns — attachment names", () => {
     expect(turns[0]!.attachments).toEqual([{ name: "old", size: 0 }]);
   });
 });
+
+describe("buildTurns — compaction marker", () => {
+  it("appends a compaction block when a session.compaction event lands", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "/compact", message_id: "u1" }),
+      evt(2, "session.compaction", { message_id: "a1" }),
+    ]);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.blocks).toEqual([{ kind: "compaction", messageId: "a1" }]);
+  });
+
+  it("places the marker inline between assistant blocks (autocompact mid-turn)", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "go", message_id: "u1" }),
+      evt(2, "message.assistant.delta", { text: "before", message_id: "a1" }),
+      evt(3, "session.compaction", { message_id: "a1" }),
+      evt(4, "message.assistant.delta", { text: "after", message_id: "a2" }),
+    ]);
+
+    expect(turns[0]!.blocks).toEqual([
+      { kind: "assistant", text: "before", messageId: "a1", sealed: true },
+      { kind: "compaction", messageId: "a1" },
+      { kind: "assistant", text: "after", messageId: "a2", sealed: true },
+    ]);
+  });
+
+  it("dedups a compaction event delivered twice (live broadcast + persisted replay)", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "/compact", message_id: "u1" }),
+      // Live broadcast frame (seq 0) and its persisted replay carry the same
+      // stamped message_id — only one divider should result.
+      evt(0, "session.compaction", { message_id: "a1" }),
+      evt(2, "session.compaction", { message_id: "a1" }),
+    ]);
+
+    expect(turns[0]!.blocks).toEqual([{ kind: "compaction", messageId: "a1" }]);
+  });
+});

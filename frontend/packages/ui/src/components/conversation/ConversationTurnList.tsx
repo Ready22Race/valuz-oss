@@ -15,6 +15,7 @@ import {
   Copy,
   FileText,
   Globe,
+  Minimize2,
   RotateCw,
   Sparkles,
   Terminal,
@@ -212,7 +213,11 @@ type DisplayBlock =
   // Aggregated per-turn file-change card. Always sits at the END of the
   // turn (after every segment) and replaces the per-tool ToolCallCard
   // rendering for Edit / MultiEdit / Write blocks within that turn.
-  | { kind: "turn-diff-summary"; summary: TurnDiffSummary };
+  | { kind: "turn-diff-summary"; summary: TurnDiffSummary }
+  // Context-compaction divider (``/compact`` or autocompact). Meta, like the
+  // diff summary: renders inline at the point compaction occurred, always
+  // visible (never folded), and transparent to the fold-boundary walk.
+  | { kind: "compaction" };
 
 /**
  * Foldable strip showing the segment's tool/thinking trail. The trigger
@@ -313,6 +318,26 @@ const SegmentDetails = ({
           )}
         </div>
       ) : null}
+    </div>
+  );
+};
+
+/** Single unified marker for a context compaction (``/compact`` or
+ *  autocompact), for either runtime. Intentionally label-only — the kernel
+ *  ``compaction`` event's raw data is not parsed for display here. */
+const CompactionDivider = () => {
+  const { t } = useI18n();
+  return (
+    <div
+      className="flex items-center gap-2 py-1 text-xs text-[#6e7481]"
+      role="status"
+    >
+      <span className="h-px flex-1 bg-border" />
+      <span className="inline-flex shrink-0 items-center gap-1.5">
+        <Minimize2 className="h-3 w-3" aria-hidden="true" />
+        <span>{t("conversation.contextCompacted")}</span>
+      </span>
+      <span className="h-px flex-1 bg-border" />
     </div>
   );
 };
@@ -425,6 +450,15 @@ const buildDisplayBlocks = (
       if (block.elapsedMs !== undefined) {
         cur.elapsedMs = Math.max(cur.elapsedMs ?? 0, block.elapsedMs);
       }
+      continue;
+    }
+
+    if (block.kind === "compaction") {
+      // Break the segment so the divider renders inline at the point the
+      // context was compacted, then leave ``cur`` empty so the next
+      // assistant/tool opens a fresh segment after it.
+      flush();
+      result.push({ kind: "compaction" });
       continue;
     }
   }
@@ -649,6 +683,9 @@ const TurnRow = memo(
         // boundary would land at ``displayBlocks.length`` and the actual
         // answer segment(s) before it would get folded away.
         if (b.kind === "turn-diff-summary") continue;
+        // The compaction divider is meta — always visible, never folded —
+        // so it must be transparent to this walk (same as the diff summary).
+        if (b.kind === "compaction") continue;
         if (b.kind !== "segment") return i + 1;
         if (b.header === null) return i + 1;
         if (b.items.some((item) => item.kind === "tool")) return i + 1;
@@ -772,6 +809,13 @@ const TurnRow = memo(
 
             {displayBlocks.map((block, blockIndex) => {
               const isLastBlock = blockIndex === displayBlocks.length - 1;
+              if (block.kind === "compaction") {
+                // Meta marker — render the divider before the fold check so
+                // it stays visible even when the process trail is folded.
+                return (
+                  <CompactionDivider key={`compaction-${turn.id}-${blockIndex}`} />
+                );
+              }
               // When the turn-level header is folded, hide every block
               // before ``trailingContentStart`` — that's the process
               // work (tool calls + their narration). Blocks at or after
