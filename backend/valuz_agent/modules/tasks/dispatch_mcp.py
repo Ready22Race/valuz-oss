@@ -10,7 +10,7 @@ mechanism (same pattern as ``providers/tools_skill_creator.py``):
   (+ send / plan_task / get_plan / modify_plan / review_subtask)
 
 The lead-only tools enforce the **lead gate** (§S0①): handlers inspect
-``session.metadata["valuz"]["run_kind"]`` via ``kernel_sync`` and return
+``session.metadata["valuz"]["run_kind"]`` via ``kernel_store`` and return
 an error ToolResult when the caller is not the lead session. This is the
 only enforcement point — kernel Session has no ``tools`` field, so we
 cannot restrict tool availability at the session level.
@@ -40,7 +40,7 @@ from __future__ import annotations
 # Re-export the adapter the gate helpers use, so test monkeypatching of
 # ``dispatch_mcp.kernel_store.load_session`` keeps targeting the same object
 # the handlers reach (it is the shared adapter module object).
-from valuz_agent.adapters import kernel_store, kernel_sync
+from valuz_agent.adapters import kernel_store
 from valuz_agent.modules.tasks.tools.declarations import (
     ABANDON_TASK_TOOL_DECLARATION,
     ABANDON_TASK_TOOL_NAME,
@@ -145,7 +145,6 @@ __all__ = [
     # Gate helpers + adapters re-exported for tests / internal callers that
     # reference them through the ``dispatch_mcp`` module path.
     "kernel_store",
-    "kernel_sync",
     "_check_lead_gate",
     "_check_orchestration_gate",
     "_check_plan_writer_gate",

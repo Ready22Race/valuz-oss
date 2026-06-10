@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await steps.ensure_project_kernel_mirrors()
     steps.install_binding_change_listener()
     # ── recovery（依赖 kernel store 已就绪）──
-    steps.recover_stranded_sessions()
+    await steps.recover_stranded_sessions()
     await steps.seal_orphan_pendings()
     await steps.recover_active_tasks()
     # ── long-lived runners ──

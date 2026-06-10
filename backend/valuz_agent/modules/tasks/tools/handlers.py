@@ -25,7 +25,7 @@ from src.core import ToolDef, ToolResult  # type: ignore[import-not-found]
 from src.core.tool_registry import register_tool  # type: ignore[import-not-found]
 from src.core.tools import ExecContext  # type: ignore[import-not-found]
 
-from valuz_agent.adapters import kernel_store, kernel_sync
+from valuz_agent.adapters import kernel_store
 from valuz_agent.modules.tasks import messaging, planning, queries
 
 from valuz_agent.modules.tasks.tools.declarations import (
@@ -97,12 +97,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
+async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
     """Verify the caller is a lead session and return (task_id, project_id).
 
     Returns a ToolResult(is_error=True) when the check fails.
     """
-    sess = kernel_sync.load_session_sync(ctx.session_id)
+    sess = await kernel_store.load_session(ctx.session_id)
     if sess is None:
         return ToolResult(content="dispatch: caller session not found", is_error=True)
 
@@ -362,7 +362,7 @@ def register_dispatch_tools(orchestrator: TaskOrchestrator) -> None:
     import json
 
     async def _dispatch_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
-        gate = _check_lead_gate(ctx)
+        gate = await _check_lead_gate(ctx)
         if isinstance(gate, ToolResult):
             return gate
         task_id, project_id = gate
@@ -392,7 +392,7 @@ def register_dispatch_tools(orchestrator: TaskOrchestrator) -> None:
             return ToolResult(content=f"dispatch failed: {exc}", is_error=True)
 
     async def _await_members_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
-        gate = _check_lead_gate(ctx)
+        gate = await _check_lead_gate(ctx)
         if isinstance(gate, ToolResult):
             return gate
         task_id, project_id = gate
@@ -414,7 +414,7 @@ def register_dispatch_tools(orchestrator: TaskOrchestrator) -> None:
             return ToolResult(content=f"await_members failed: {exc}", is_error=True)
 
     async def _send_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
-        gate = _check_lead_gate(ctx)
+        gate = await _check_lead_gate(ctx)
         if isinstance(gate, ToolResult):
             return gate
         task_id, project_id = gate
@@ -749,7 +749,7 @@ def register_dispatch_tools(orchestrator: TaskOrchestrator) -> None:
             return ToolResult(content=f"list_members failed: {exc}", is_error=True)
 
     async def _finish_task_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
-        gate = _check_lead_gate(ctx)
+        gate = await _check_lead_gate(ctx)
         if isinstance(gate, ToolResult):
             return gate
         task_id, project_id = gate
@@ -857,7 +857,7 @@ def register_dispatch_tools(orchestrator: TaskOrchestrator) -> None:
             return ToolResult(content=f"modify_plan failed: {exc}", is_error=True)
 
     async def _review_subtask_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
-        gate = _check_lead_gate(ctx)
+        gate = await _check_lead_gate(ctx)
         if isinstance(gate, ToolResult):
             return gate
         task_id, project_id = gate
@@ -893,7 +893,7 @@ def register_dispatch_tools(orchestrator: TaskOrchestrator) -> None:
         ``orchestrator.stop_member`` (which was reachable only from the user
         ``:intervene`` HTTP route) so the lead can cancel a member from inside
         its own turn."""
-        gate = _check_lead_gate(ctx)
+        gate = await _check_lead_gate(ctx)
         if isinstance(gate, ToolResult):
             return gate
         task_id, project_id = gate

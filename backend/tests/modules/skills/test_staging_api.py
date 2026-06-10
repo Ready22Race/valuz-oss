@@ -184,9 +184,11 @@ def _session_staging_root(session_id: str) -> Path:
     legacy ``{staging_root}/{session_id}/`` layout, so tests must write the
     agent's staged slugs to the same place the route reads them from.
     """
+    import asyncio
+
     from valuz_agent.modules.skills.staging import staging_dir_for_session
 
-    return staging_dir_for_session(session_id, mkdir=True)
+    return asyncio.run(staging_dir_for_session(session_id, mkdir=True))
 
 
 def _write_staging_skill(

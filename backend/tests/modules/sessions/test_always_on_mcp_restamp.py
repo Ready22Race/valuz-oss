@@ -56,7 +56,7 @@ def _stale_trio(token: str):
     )
 
 
-def test_restamps_stale_token_and_preserves_external(monkeypatch):
+async def test_restamps_stale_token_and_preserves_external(monkeypatch):
     """A stale always-on token is rewritten to the current one; external MCP kept."""
     from src.core.types import McpHttpServerConfig  # type: ignore[import-not-found]
 
@@ -70,13 +70,19 @@ def test_restamps_stale_token_and_preserves_external(monkeypatch):
     )
     session = _make_session(mcp_servers=(external, *_stale_trio("OLDTOKEN")))
 
-    from valuz_agent.adapters import kernel_sync
+    from valuz_agent.adapters import kernel_store
 
     saved: list = []
-    monkeypatch.setattr(kernel_sync, "load_session_sync", lambda _sid: session)
-    monkeypatch.setattr(kernel_sync, "save_session_sync", lambda s: saved.append(s))
+    async def _load(_sid):
+        return session
 
-    changed = capabilities.refresh_always_on_mcp_for_session("sess-1")
+    monkeypatch.setattr(kernel_store, "load_session", _load)
+    async def _save(s):
+        saved.append(s)
+
+    monkeypatch.setattr(kernel_store, "save_session", _save)
+
+    changed = await capabilities.refresh_always_on_mcp_for_session("sess-1")
 
     assert changed is True
     assert len(saved) == 1
@@ -88,18 +94,24 @@ def test_restamps_stale_token_and_preserves_external(monkeypatch):
     assert by_name["valuz-search"].headers == {"Authorization": "Bearer xyz"}
 
 
-def test_noop_when_token_already_current(monkeypatch):
+async def test_noop_when_token_already_current(monkeypatch):
     """No save (prompt cache stays warm) when the token already matches."""
     monkeypatch.setattr(settings, "internal_mcp_token_override", "CURRENT")
     session = _make_session(mcp_servers=_stale_trio("CURRENT"))
 
-    from valuz_agent.adapters import kernel_sync
+    from valuz_agent.adapters import kernel_store
 
     saved: list = []
-    monkeypatch.setattr(kernel_sync, "load_session_sync", lambda _sid: session)
-    monkeypatch.setattr(kernel_sync, "save_session_sync", lambda s: saved.append(s))
+    async def _load(_sid):
+        return session
 
-    changed = capabilities.refresh_always_on_mcp_for_session("sess-1")
+    monkeypatch.setattr(kernel_store, "load_session", _load)
+    async def _save(s):
+        saved.append(s)
+
+    monkeypatch.setattr(kernel_store, "save_session", _save)
+
+    changed = await capabilities.refresh_always_on_mcp_for_session("sess-1")
 
     assert changed is False
     assert saved == []

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from valuz_agent.adapters import kernel_store, kernel_sync
+from valuz_agent.adapters import kernel_store
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.integrations.tools_skill_creator import (
@@ -174,11 +174,11 @@ class ProjectService:
     async def ensure_chat_project(self) -> None:
         existing = await self._ds.get_chat_project()
         if existing:
-            self._ensure_kernel_mirror(existing, instructions_md=None)
+            await self._ensure_kernel_mirror(existing, instructions_md=None)
             return
         row = ProjectRow(name="Chat", kind="chat", sort_order=0)
         await self._ds.create(row)
-        self._ensure_kernel_mirror(row, instructions_md=None)
+        await self._ensure_kernel_mirror(row, instructions_md=None)
 
     async def create_chat_project_for_session(self, name: str = "Chat") -> ProjectRow:
         """Materialize a fresh, ephemeral chat project for one chat-kind context.
@@ -203,7 +203,7 @@ class ProjectService:
         """
         row = ProjectRow(name=name, kind="chat", sort_order=100)
         await self._ds.create(row)
-        self._ensure_kernel_mirror(row, instructions_md=None)
+        await self._ensure_kernel_mirror(row, instructions_md=None)
         return row
 
     async def ensure_all_kernel_mirrors(self) -> None:
@@ -226,7 +226,7 @@ class ProjectService:
         await self.ensure_chat_project()
         # Then walk every other project and re-mirror.
         for row in await self._ds.list_projects():
-            self._ensure_kernel_mirror(row, instructions_md=row.instructions_md)
+            await self._ensure_kernel_mirror(row, instructions_md=row.instructions_md)
 
     async def list_projects(self) -> list[ProjectListItem]:
         rows = await self._ds.list_projects()
@@ -262,7 +262,7 @@ class ProjectService:
             raise ValueError(f"Directory already bound to project '{existing.name}'")
         row = ProjectRow(name=name, kind="project", root_path=abs_path, sort_order=10)
         await self._ds.create(row)
-        self._ensure_kernel_mirror(row, instructions_md=None)
+        await self._ensure_kernel_mirror(row, instructions_md=None)
         return _row_to_detail(row, cwd=self._resolve_kernel_cwd(row))
 
     async def rename_project(self, project_id: str, name: str) -> ProjectDetail:
@@ -274,8 +274,8 @@ class ProjectService:
         row.name = name
         await self._ds.update(row)
         # Keep the kernel project's display name in lock-step. Pass the row we
-        # already loaded so the sync ``kernel_sync`` helper needs no host-DB read.
-        self._rename_kernel_mirror(project_id, name, row)
+        # already loaded so the kernel helper needs no host-DB read.
+        await self._rename_kernel_mirror(project_id, name, row)
         return _row_to_detail(row, cwd=self._resolve_kernel_cwd(row))
 
     async def update_instructions(self, project_id: str, instructions_md: str) -> None:
@@ -365,16 +365,16 @@ class ProjectService:
         except Exception:  # noqa: BLE001
             pass
         if self._docs:
-            self._docs.remove_all_bindings(project_id)
+            await self._docs.remove_all_bindings(project_id)
         if self._automations:
             await self._automations.delete_all_for_project(project_id)
         if self._skills:
-            self._skills.set_project_skills(project_id, [])
+            await self._skills.set_project_skills(project_id, [])
         # Soft-delete the matching kernel Project (and its Agent) so kernel
         # listing endpoints stop showing this project. The kernel only soft-
         # deletes by default; existing sessions remain readable for audit.
-        self._delete_kernel_mirror(project_id)
-        self._ds.delete(project_id)
+        await self._delete_kernel_mirror(project_id)
+        await self._ds.delete(project_id)
 
     # ------------------------------------------------------------------
     # Kernel mirror — every valuz project must back a V5 kernel Project +
@@ -395,7 +395,7 @@ class ProjectService:
         kind = row.kind if row.kind in ("chat", "project") else "chat"
         return str(fs_registry.project_cwd(row.id, kind, row.root_path))  # type: ignore[arg-type]
 
-    def _ensure_kernel_mirror(self, row: ProjectRow, *, instructions_md: str | None) -> None:
+    async def _ensure_kernel_mirror(self, row: ProjectRow, *, instructions_md: str | None) -> None:
         """Create or reconcile the kernel Project + Agent for ``row``.
 
         Idempotent: re-running updates the kernel rows in place.
@@ -416,7 +416,7 @@ class ProjectService:
         cwd = self._resolve_kernel_cwd(row)
         agent_id = self._kernel_agent_id(row.id)
 
-        existing_agent = kernel_sync.load_agent_sync(agent_id)
+        existing_agent = await kernel_store.load_agent(agent_id)
         # Ensure ``submit_skill`` is declared on the agent so the runtime
         # advertises it to the model. Idempotent — re-mirroring an agent
         # that already has the declaration leaves the tuple unchanged.
@@ -452,9 +452,9 @@ class ProjectService:
             effort=existing_agent.effort if existing_agent else None,
             thinking=existing_agent.thinking if existing_agent else None,
         )
-        kernel_sync.save_agent_sync(agent)
+        await kernel_store.save_agent(agent)
 
-        existing_project = kernel_sync.load_project_sync(row.id)
+        existing_project = await kernel_store.load_project(row.id)
         project = KernelProject(
             id=row.id,
             name=row.name,
@@ -462,9 +462,9 @@ class ProjectService:
             status="active",
             metadata=existing_project.metadata if existing_project else {},
         )
-        kernel_sync.save_project_sync(project)
+        await kernel_store.save_project(project)
 
-    def _rename_project_kernel_agent(
+    async def _rename_project_kernel_agent(
         self, project_id: str, new_name: str, row: ProjectRow | None
     ) -> None:
         """Keep the synthetic agent's ``name`` in lock-step with the project.
@@ -474,20 +474,20 @@ class ProjectService:
         stay readable for ops). If the agent doesn't exist yet we bootstrap it
         via ``_ensure_kernel_mirror`` — ``row`` is the already-fetched project
         row threaded down from the async caller (so this stays a pure
-        ``kernel_sync`` helper with no host-DB access).
+        ``kernel_store`` helper with no host-DB access).
         """
         agent_id = self._kernel_agent_id(project_id)
-        existing = kernel_sync.load_agent_sync(agent_id)
+        existing = await kernel_store.load_agent(agent_id)
         if existing is None:
             if row is not None:
-                self._ensure_kernel_mirror(row, instructions_md=None)
+                await self._ensure_kernel_mirror(row, instructions_md=None)
             return
 
         from src.core.agent_config import (
             AgentConfig as KernelAgentConfig,  # type: ignore[import-not-found]
         )
 
-        kernel_sync.save_agent_sync(
+        await kernel_store.save_agent(
             KernelAgentConfig(
                 id=existing.id,
                 name=new_name,
@@ -510,15 +510,15 @@ class ProjectService:
             )
         )
 
-    def _rename_kernel_mirror(
+    async def _rename_kernel_mirror(
         self, project_id: str, new_name: str, row: ProjectRow | None
     ) -> None:
-        existing_project = kernel_sync.load_project_sync(project_id)
+        existing_project = await kernel_store.load_project(project_id)
         if existing_project is None:
             return
         from src.core.project import Project as KernelProject  # type: ignore[import-not-found]
 
-        kernel_sync.save_project_sync(
+        await kernel_store.save_project(
             KernelProject(
                 id=existing_project.id,
                 name=new_name,
@@ -528,12 +528,12 @@ class ProjectService:
                 metadata=existing_project.metadata,
             )
         )
-        self._rename_project_kernel_agent(project_id, new_name, row)
+        await self._rename_project_kernel_agent(project_id, new_name, row)
 
-    def _delete_kernel_mirror(self, project_id: str) -> None:
+    async def _delete_kernel_mirror(self, project_id: str) -> None:
         # Kernel does soft-delete (status = "deleted"); the agent stays so
         # historical sessions remain readable.
-        kernel_sync.delete_project_sync(project_id)
+        await kernel_store.delete_project(project_id)
 
     async def list_files(
         self,

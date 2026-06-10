@@ -13,6 +13,20 @@ from valuz_agent.modules.memory import MemoryScope, MemoryService
 from valuz_agent.modules.memory.injection import InjectionAssembler
 from valuz_agent.modules.memory.service import MemoryError
 
+def _async_const(value):  # noqa: ANN001, ANN202 — async stub factory for monkeypatch
+    async def _stub(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        return value
+
+    return _stub
+
+
+def _coro(value):  # noqa: ANN001, ANN202 — awaitable wrapper for lambda stubs
+    async def _inner():  # noqa: ANN202
+        return value
+
+    return _inner()
+
+
 
 @pytest.fixture
 def svc(tmp_path, monkeypatch):
@@ -109,8 +123,10 @@ def test_tool_handlers_closed_loop(svc, tmp_path, monkeypatch):
     proj = _proj(tmp_path)
     # route tools at the same svc + resolvers at our tmp project
     monkeypatch.setattr(mem_tools, "memory_service", svc)
-    monkeypatch.setattr(mem_tools, "_resolve_project_cwd", lambda pid: proj)
-    monkeypatch.setattr(mem_tools, "_resolve_task_id", lambda sid: "t1" if sid == "task" else None)
+    monkeypatch.setattr(mem_tools, "_resolve_project_cwd", _async_const(proj))
+    monkeypatch.setattr(
+        mem_tools, "_resolve_task_id", lambda sid: _coro("t1" if sid == "task" else None)
+    )
 
     ctx = ExecContext(session_id="proj", project_id="ws")
     r = asyncio.run(
@@ -123,7 +139,7 @@ def test_tool_handlers_closed_loop(svc, tmp_path, monkeypatch):
     assert r.content == "use PG"
 
     # chat session (no cwd) cannot write project, can write global
-    monkeypatch.setattr(mem_tools, "_resolve_project_cwd", lambda pid: None)
+    monkeypatch.setattr(mem_tools, "_resolve_project_cwd", _async_const(None))
     chat = ExecContext(session_id="chat", project_id="ws")
     r = asyncio.run(
         mem_tools._memory_write_handler(

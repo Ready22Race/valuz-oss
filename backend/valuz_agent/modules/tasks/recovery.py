@@ -253,7 +253,7 @@ class RecoveryService:
                 manifest: dict[str, Any] | None = None
                 if rec.disposition == "completed":
                     try:
-                        manifest = collect_manifest(
+                        manifest = await collect_manifest(
                             run.session_id, Path(run.run_dir) if run.run_dir else Path(), "idle"
                         )
                     except Exception:  # noqa: BLE001

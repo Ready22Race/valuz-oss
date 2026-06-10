@@ -66,11 +66,11 @@ def _current_session_id() -> str:
     return sid
 
 
-def _resolve_project_id(session_id: str) -> str | None:
+async def _resolve_project_id(session_id: str) -> str | None:
     """Map ``session_id`` → ``project_id`` via the kernel store."""
-    from valuz_agent.adapters import kernel_sync
+    from valuz_agent.adapters import kernel_store
 
-    session = kernel_sync.load_session_sync(session_id)
+    session = await kernel_store.load_session(session_id)
     if session is None:
         return None
     return str(session.project_id)

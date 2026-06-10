@@ -33,12 +33,12 @@ from __future__ import annotations
 
 import logging
 
-from valuz_agent.adapters import kernel_sync
+from valuz_agent.adapters import kernel_store
 
 logger = logging.getLogger(__name__)
 
 
-def recover_running_sessions(*, batch_limit: int = 500) -> int:
+async def recover_running_sessions(*, batch_limit: int = 500) -> int:
     """Scan for stranded running sessions and finalise them.
 
     Returns the number of sessions transitioned to terminated. Logs
@@ -49,7 +49,7 @@ def recover_running_sessions(*, batch_limit: int = 500) -> int:
     raises; the caller (startup hook) treats it as best-effort.
     """
     try:
-        sessions = kernel_sync.list_sessions_sync(limit=batch_limit)
+        sessions = await kernel_store.list_sessions(limit=batch_limit)
     except Exception:  # noqa: BLE001 — startup must not block on bookkeeping
         logger.exception("recover_running_sessions: failed to list kernel sessions")
         return 0
@@ -59,7 +59,7 @@ def recover_running_sessions(*, batch_limit: int = 500) -> int:
         if session.status != "running":
             continue
         try:
-            _finalise_one(session)
+            await _finalise_one(session)
             recovered += 1
         except Exception:  # noqa: BLE001
             logger.exception(
@@ -75,7 +75,7 @@ def recover_running_sessions(*, batch_limit: int = 500) -> int:
     return recovered
 
 
-def _finalise_one(session: object) -> None:
+async def _finalise_one(session: object) -> None:
     """Flip one session from ``running`` to ``terminated`` + emit an event.
 
     Imports are deferred so this module doesn't load the kernel SDK at
@@ -113,7 +113,7 @@ def _finalise_one(session: object) -> None:
         runtime_session_id=getattr(session, "runtime_session_id", None),
         todos=getattr(session, "todos", None),
     )
-    kernel_sync.save_session_sync(updated)
+    await kernel_store.save_session(updated)
 
     # SSE replay needs *something* in the events table — otherwise a
     # client reconnecting with after_seq=last would see the stream end
@@ -123,7 +123,7 @@ def _finalise_one(session: object) -> None:
     # latest message for the session; if none exists (session was created
     # but never ran a turn), the error is silently dropped — there's
     # nothing for SSE to replay anyway.
-    persisted = kernel_sync.append_session_scoped_event_sync(
+    persisted = await kernel_store.append_session_scoped_event(
         sid,
         KernelEvent(
             type="session_error",

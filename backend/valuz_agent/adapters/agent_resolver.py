@@ -8,7 +8,7 @@ Slice 2 scope (lead-dispatch-mvp §S3 / H-T6):
   build_member_session — constructs a full kernel Session dataclass ready for
     save_session_sync. Lead sessions receive the dispatch playbook; member sessions
     receive only the scoped brief. Caller is responsible for saving the returned
-    Session via kernel_sync.save_session_sync.
+    Session via ``kernel_store.save_session``.
 
 Boundary notes (§S0):
   - kernel Session has NO ``tools`` field — tools live on AgentConfig only.
@@ -537,7 +537,7 @@ async def build_member_session(
     """Construct a kernel Session dataclass for a dispatch member or lead.
 
     Returns None when the member cannot be resolved (orphaned slug).
-    Caller must persist the returned Session via ``kernel_sync.save_session_sync``.
+    Caller must persist the returned Session via ``kernel_store.save_session``.
 
     Args:
         project_id: The valuz project id (= kernel project id).

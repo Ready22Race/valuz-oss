@@ -292,11 +292,11 @@ def _slug_view_to_model(view) -> StagingSlugViewModel:  # type: ignore[no-untype
     "/v1/skills/staging/{session_id}/scan",
     response_model=StagingScanResponse,
 )
-def scan_staging_endpoint(
+async def scan_staging_endpoint(
     session_id: str,
     svc: SkillLibraryService = Depends(get_skill_service),
 ) -> StagingScanResponse:
-    result = svc.scan_staging(session_id)
+    result = await svc.scan_staging(session_id)
     return StagingScanResponse(
         session_id=result.session_id,
         staging_path=result.staging_path,
@@ -313,7 +313,7 @@ class StagingFileContent(BaseModel):
     "/v1/skills/staging/{session_id}/file",
     response_model=StagingFileContent,
 )
-def read_staging_file_endpoint(
+async def read_staging_file_endpoint(
     session_id: str,
     slug: str = Query(..., description="Slug under the session staging dir"),
     path: str = Query(..., description="File path relative to the slug dir"),
@@ -327,7 +327,7 @@ def read_staging_file_endpoint(
     from valuz_agent.modules.skills.staging import staging_dir_for_session
 
     try:
-        base = staging_dir_for_session(session_id)
+        base = await staging_dir_for_session(session_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     slug_dir = (base / slug).resolve()
@@ -466,7 +466,7 @@ async def confirm_skill_submission(
     "/v1/skills/submissions/{session_id}/{slug}/dismiss",
     response_model=SkillSubmissionDismissResponse,
 )
-def dismiss_skill_submission(
+async def dismiss_skill_submission(
     session_id: str,
     slug: str,
     svc: SkillLibraryService = Depends(get_skill_service),
@@ -476,7 +476,7 @@ def dismiss_skill_submission(
     Cleans up the staged slug; no library write. Idempotent — calling
     twice returns ``removed=False`` on the second call.
     """
-    removed = svc.dismiss_submission(session_id=session_id, slug=slug)
+    removed = await svc.dismiss_submission(session_id=session_id, slug=slug)
     return SkillSubmissionDismissResponse(session_id=session_id, slug=slug, removed=removed)
 
 

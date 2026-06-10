@@ -86,7 +86,7 @@ def _ensure_global_tools_declared(agent: AgentConfig) -> AgentConfig:
     return replace(agent, tools=tuple(agent.tools or ()) + missing)
 
 
-def backfill_global_agent_tools() -> int:
+async def backfill_global_agent_tools() -> int:
     """Re-save every active kernel agent missing a baseline tool declaration.
 
     In-process tools bind via the persisted ``AgentConfig.tools`` (unlike HTTP
@@ -103,16 +103,16 @@ def backfill_global_agent_tools() -> int:
 
     Idempotent — fully-declared agents are skipped. Returns the count patched.
     """
-    from valuz_agent.adapters import kernel_sync
+    from valuz_agent.adapters import kernel_store
     from valuz_agent.modules.tasks.dispatch_mcp import ensure_orchestration_tools_on_agent
 
     patched = 0
-    for agent in kernel_sync.list_agents_sync():
+    for agent in await kernel_store.list_agents():
         updated = _ensure_global_tools_declared(agent)
         if "__lead__" not in (getattr(agent, "id", "") or ""):
             updated = ensure_orchestration_tools_on_agent(updated)
         if updated is not agent:
-            kernel_sync.save_agent_sync(updated)
+            await kernel_store.save_agent(updated)
             patched += 1
     logger.info("global-tools backfill: patched %d agent(s)", patched)
     return patched

@@ -97,7 +97,7 @@ async def _seed_project_and_agent() -> tuple[str, str]:
     just-bootstrapped DB. Returns (project_id, agent_slug)."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.adapters import kernel_sync
+    from valuz_agent.adapters import kernel_store
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
     from valuz_agent.modules.agents.models import ProjectMemberRow
@@ -116,7 +116,7 @@ async def _seed_project_and_agent() -> tuple[str, str]:
         runtime_provider="claude_agent",
         instructions="You are the lead agent for chat-plan E2E.",
     )
-    await asyncio.to_thread(kernel_sync.save_agent_sync, cfg)
+    await kernel_store.save_agent(cfg)
 
     async with async_unit_of_work() as db:
         ws_ds = ProjectDatastore(db)

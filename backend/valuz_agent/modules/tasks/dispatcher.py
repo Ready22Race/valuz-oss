@@ -250,7 +250,9 @@ class DispatcherService:
 
         # Collect manifest (attribute artifacts by mtime since dispatch — the
         # member shares the project cwd under v2.1).
-        manifest = collect_manifest(member_session.id, run_dir, final_status, since_epoch=started)
+        manifest = await collect_manifest(
+            member_session.id, run_dir, final_status, since_epoch=started
+        )
 
         # Persist result
         async with async_unit_of_work() as db2:

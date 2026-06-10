@@ -20,7 +20,7 @@ import os
 import time
 from pathlib import Path
 
-from valuz_agent.adapters import kernel_sync
+from valuz_agent.adapters import kernel_store
 from valuz_agent.infra.config import settings
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.system.schemas import SystemStatusResponse
@@ -98,9 +98,9 @@ def _read_kernel_pin() -> str:
     return pin
 
 
-def _count_active_sessions() -> int:
+async def _count_active_sessions() -> int:
     try:
-        sessions = kernel_sync.list_sessions_sync(limit=500)
+        sessions = await kernel_store.list_sessions(limit=500)
         return sum(1 for s in sessions if s.status == "running")
     except Exception:  # noqa: BLE001 — status must never throw
         return 0
@@ -120,7 +120,7 @@ def _runtimes_available() -> list[str]:
 # ── Public API ─────────────────────────────────────────────────────────
 
 
-def collect_system_status(*, port: int) -> SystemStatusResponse:
+async def collect_system_status(*, port: int) -> SystemStatusResponse:
     """Build the ``SystemStatusResponse`` payload for one HTTP call.
 
     ``port`` is passed in by the router because uvicorn picks it from
@@ -148,7 +148,7 @@ def collect_system_status(*, port: int) -> SystemStatusResponse:
         version=_read_app_version(),
         kernel_pin=_read_kernel_pin(),
         port=port,
-        active_session_count=_count_active_sessions(),
+        active_session_count=await _count_active_sessions(),
         db_path=str(settings.db_path),
         log_path=str(log_file),
         log_dir=str(log_dir),

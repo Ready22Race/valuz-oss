@@ -449,7 +449,7 @@ def test_build_member_session_default_when_goal_mode_off(
     assert session.mode == "default"
 
 
-def test_collect_manifest_attributes_by_mtime(tmp_path: object) -> None:
+async def test_collect_manifest_attributes_by_mtime(tmp_path: object) -> None:
     import os
     from pathlib import Path
 
@@ -462,13 +462,13 @@ def test_collect_manifest_attributes_by_mtime(tmp_path: object) -> None:
     os.utime(new, (5000.0, 5000.0))  # mtime after dispatch
 
     # since_epoch between the two → only the member's post-dispatch file.
-    m = collect_manifest("s1", d, "idle", since_epoch=3000.0)
+    m = await collect_manifest("s1", d, "idle", since_epoch=3000.0)
     paths = [a["path"] for a in m["artifacts"]]
     assert str(new) in paths
     assert str(old) not in paths
 
     # since_epoch=0 → include everything (worktree / private-dir behaviour).
-    m_all = collect_manifest("s1", d, "idle", since_epoch=0.0)
+    m_all = await collect_manifest("s1", d, "idle", since_epoch=0.0)
     paths_all = [a["path"] for a in m_all["artifacts"]]
     assert str(old) in paths_all and str(new) in paths_all
 
@@ -585,20 +585,24 @@ def test_strip_dispatch_tools_removes_lead_only() -> None:
     assert again is stripped
 
 
-def test_materialize_lead_agent_builds_clone_with_dispatch_tools() -> None:
+async def test_materialize_lead_agent_builds_clone_with_dispatch_tools() -> None:
     """The lead clone has a deterministic id and carries the mode's dispatch tools."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.adapters import kernel_sync
+    from valuz_agent.adapters import kernel_store
     from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 
     saved: dict[str, AgentConfig] = {}
-    orig = kernel_sync.save_agent_sync
-    kernel_sync.save_agent_sync = lambda a: saved.__setitem__(a.id, a)  # type: ignore[assignment]
+
+    async def _save(a):  # noqa: ANN001, ANN202
+        saved[a.id] = a
+
+    orig = kernel_store.save_agent
+    kernel_store.save_agent = _save  # type: ignore[assignment]
     try:
         base = AgentConfig(id="base1", name="lead", tools=())
         orch = TaskOrchestrator()
-        clone_id = orch._materialize_lead_agent(base, dispatch_mode="async")
+        clone_id = await orch._materialize_lead_agent(base, dispatch_mode="async")
         assert clone_id == "base1__lead__async"
         names = {t.name for t in saved[clone_id].tools}
         assert "dispatch" in names
@@ -607,7 +611,7 @@ def test_materialize_lead_agent_builds_clone_with_dispatch_tools() -> None:
         assert "finish_task" in names
         assert "create_task" not in names
     finally:
-        kernel_sync.save_agent_sync = orig  # type: ignore[assignment]
+        kernel_store.save_agent = orig  # type: ignore[assignment]
 
 
 def test_send_to_member_rejects_cross_task(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -648,14 +652,14 @@ def test_send_to_member_rejects_cross_task(monkeypatch: pytest.MonkeyPatch) -> N
     assert "not a member of this task" in res["error"]
 
 
-def test_orchestration_tools_include_list_and_get() -> None:
+async def test_orchestration_tools_include_list_and_get() -> None:
     """Conversation agents carry the launcher + observability + chat-plan
     surface (VALUZ-CHATPLAN S2); the per-task lead clone drops launcher /
     draft-state tools but keeps the plan-write tools (plan_task / modify_plan
     / get_plan) via DISPATCH_TOOL_DECLARATIONS."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
 
-    from valuz_agent.adapters import kernel_sync
+    from valuz_agent.adapters import kernel_store
     from valuz_agent.modules.tasks.dispatch_mcp import (
         ORCHESTRATION_TOOL_DECLARATIONS,
         ensure_orchestration_tools_on_agent,
@@ -694,10 +698,14 @@ def test_orchestration_tools_include_list_and_get() -> None:
     # clone — the new dedup in _materialize_lead_agent prevents duplicates
     # when a tool sits in both ORCHESTRATION and DISPATCH declarations.
     saved: dict[str, AgentConfig] = {}
-    orig = kernel_sync.save_agent_sync
-    kernel_sync.save_agent_sync = lambda x: saved.__setitem__(x.id, x)  # type: ignore[assignment]
+
+    async def _save(x):  # noqa: ANN001, ANN202
+        saved[x.id] = x
+
+    orig = kernel_store.save_agent
+    kernel_store.save_agent = _save  # type: ignore[assignment]
     try:
-        cid = TaskOrchestrator()._materialize_lead_agent(conv, dispatch_mode="async")
+        cid = await TaskOrchestrator()._materialize_lead_agent(conv, dispatch_mode="async")
         clone_tool_names = [t.name for t in saved[cid].tools]
         clone_names = set(clone_tool_names)
         # Launcher / draft-mode tools stripped:
@@ -729,7 +737,7 @@ def test_orchestration_tools_include_list_and_get() -> None:
             f"lead clone has duplicate tools: {clone_tool_names}"
         )
     finally:
-        kernel_sync.save_agent_sync = orig  # type: ignore[assignment]
+        kernel_store.save_agent = orig  # type: ignore[assignment]
 
 
 def test_build_member_session_carries_effort_for_deepagents(

@@ -260,7 +260,7 @@ class CoordinationService:
                 node = plan.get(key) if plan is not None else None
                 if disp == "completed":
                     try:
-                        manifest = collect_manifest(
+                        manifest = await collect_manifest(
                             run.session_id,
                             Path(run.run_dir) if run.run_dir else Path(),
                             "idle",
@@ -338,7 +338,7 @@ class CoordinationService:
             lead_session_id = run.dispatched_by or ""
             run_dir = Path(run.run_dir) if run.run_dir else Path()
             since = self._members.dispatch_started_at(session_id)
-            manifest = collect_manifest(session_id, run_dir, status, since_epoch=since)
+            manifest = await collect_manifest(session_id, run_dir, status, since_epoch=since)
             manifest["agent"] = run.agent_slug
             await event_ds.append_event(
                 project_id=run.project_id,

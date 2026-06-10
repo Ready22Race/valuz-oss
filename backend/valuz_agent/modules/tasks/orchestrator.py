@@ -44,7 +44,7 @@ from uuid import uuid4
 
 import valuz_agent.boot.kernel  # noqa: F401
 
-from valuz_agent.adapters import kernel_store, kernel_sync
+from valuz_agent.adapters import kernel_store
 from valuz_agent.adapters.agent_resolver import build_member_session
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus, event_bus as _global_bus
@@ -398,7 +398,9 @@ class TaskOrchestrator:
             lead_agent = await kernel_store.load_agent(lead_member.kernel_agent_id)
             lead_clone_id: str | None = None
             if lead_agent is not None:
-                lead_clone_id = self._materialize_lead_agent(lead_agent, dispatch_mode="async")
+                lead_clone_id = await self._materialize_lead_agent(
+                    lead_agent, dispatch_mode="async"
+                )
 
             refs = (task_row.metadata_ or {}).get("refs") or []
             refs_text = "\n".join(f"- {r}" for r in refs) if refs else ""
@@ -678,10 +680,10 @@ class TaskOrchestrator:
         return await self._coordination._lead_idle_with_no_pending(task_id, project_id)
 
     @staticmethod
-    def _last_assistant_summary(session_id: str) -> str:
+    async def _last_assistant_summary(session_id: str) -> str:
         """Best-effort last assistant-message text, for an auto-finalize summary."""
         try:
-            events = kernel_sync.get_events_sync(session_id, limit=200)
+            events = await kernel_store.get_events(session_id, limit=200)
             for event in reversed(events):
                 payload = event.data if hasattr(event, "data") else {}
                 if event.type in ("assistant_message", "text_delta", "content_block"):
@@ -838,7 +840,7 @@ class TaskOrchestrator:
                 )
                 return
 
-            summary = self._last_assistant_summary(lead_session_id) or (
+            summary = await self._last_assistant_summary(lead_session_id) or (
                 "(auto-finalized) Lead ended its turn with no pending subtasks; "
                 "task closed automatically."
             )
@@ -930,7 +932,7 @@ class TaskOrchestrator:
                 manifest: dict[str, Any] | None = None
                 if rec.disposition == "completed":
                     try:
-                        manifest = collect_manifest(
+                        manifest = await collect_manifest(
                             run.session_id, Path(run.run_dir) if run.run_dir else Path(), "idle"
                         )
                     except Exception:  # noqa: BLE001
@@ -1370,7 +1372,7 @@ class TaskOrchestrator:
 
                 # Manifest is best-effort — never let it block the terminal write.
                 try:
-                    manifest = collect_manifest(
+                    manifest = await collect_manifest(
                         session_id, run_dir, final_status, since_epoch=since
                     )
                 except Exception:  # noqa: BLE001
@@ -1656,7 +1658,7 @@ class TaskOrchestrator:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _materialize_lead_agent(
+    async def _materialize_lead_agent(
         self, base_agent: Any, dispatch_mode: Literal["sync", "async"] = "sync"
     ) -> str:  # returns the lead-clone AgentConfig id
         """Materialize a per-task **lead clone** of *base_agent* and return its id.
@@ -1713,7 +1715,7 @@ class TaskOrchestrator:
         clone = _ensure_global_tools_declared(
             replace(base_agent, id=clone_id, tools=base_tools + tuple(declarations))
         )
-        kernel_sync.save_agent_sync(clone)
+        await kernel_store.save_agent(clone)
         return clone_id
 
 

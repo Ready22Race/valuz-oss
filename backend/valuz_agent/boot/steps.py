@@ -186,7 +186,7 @@ async def init_kernel(app: FastAPI) -> None:
     # tools are registered above so handlers resolve).
     from valuz_agent.modules.agents.service import backfill_global_agent_tools
 
-    backfill_global_agent_tools()
+    await backfill_global_agent_tools()
 
 
 async def ensure_project_kernel_mirrors() -> None:
@@ -229,24 +229,39 @@ def install_binding_change_listener() -> None:
         refresh_docs_capabilities_for_project,
     )
 
+    def _on_bindings_changed(**kwargs: object) -> None:
+        # The eventbus is synchronous but publishes from coroutine code on
+        # the running loop; the refresher is async — schedule it instead of
+        # blocking the loop. Fire-and-forget: the lazy refresh in
+        # ``send_message`` converges any missed/failed run on the next turn.
+        import asyncio
+
+        coro = refresh_docs_capabilities_for_project(**kwargs)  # type: ignore[arg-type]
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+        else:
+            task = loop.create_task(coro)
+            task.add_done_callback(lambda t: t.exception())
+
     event_bus.subscribe(
         "project.bindings.changed",
-        refresh_docs_capabilities_for_project,
+        _on_bindings_changed,
     )
 
 
-def recover_stranded_sessions() -> None:
+async def recover_stranded_sessions() -> None:
     """Clear ``running`` sessions left over from a previous process.
 
     See ``domains.execution.sessions.recovery`` for rationale. Runs
-    after ``init_kernel`` so the kernel store is reachable. Sync def
-    because the recovery helper is sync (uses ``kernel_sync``).
+    after ``init_kernel`` so the kernel store is reachable.
     """
     from valuz_agent.modules.sessions.recovery import (
         recover_running_sessions,
     )
 
-    recover_running_sessions()
+    await recover_running_sessions()
 
 
 async def seal_orphan_pendings() -> None:

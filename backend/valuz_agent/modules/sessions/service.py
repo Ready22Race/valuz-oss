@@ -35,7 +35,7 @@ from src.core.types import (
 
 # Kernel types (resolved via sys.path injection from kernel_bootstrap).
 import valuz_agent.boot.kernel  # noqa: F401 — side-effect: puts kernel on sys.path
-from valuz_agent.adapters import kernel_store, kernel_sync
+from valuz_agent.adapters import kernel_store
 from valuz_agent.adapters.capability_resolver import resolve_session_capabilities
 from valuz_agent.adapters.model_resolver import resolve_model
 from valuz_agent.adapters.system_prompt_builder import build_project_system_prompt
@@ -198,7 +198,7 @@ class SessionService:
     # Queries
     # ------------------------------------------------------------------ #
 
-    def get_project_last_pick(self, project_id: str) -> dict[str, str | None] | None:
+    async def get_project_last_pick(self, project_id: str) -> dict[str, str | None] | None:
         """Return the most recent (runtime, provider, model) the user picked
         in this project.
 
@@ -216,7 +216,7 @@ class SessionService:
         Scans a small recent window in case the very latest is one of
         those incomplete rows.
         """
-        sessions = kernel_sync.list_sessions_sync(
+        sessions = await kernel_store.list_sessions(
             project_id=project_id,
             limit=10,
         )
@@ -232,7 +232,7 @@ class SessionService:
             }
         return None
 
-    def list_sessions(
+    async def list_sessions(
         self,
         project_id: str | None = None,
         query: str | None = None,
@@ -243,7 +243,7 @@ class SessionService:
         # (json_extract on metadata.valuz.task_id) applies LIMIT *after*
         # excluding task sessions, so we get exactly N chats — no over-
         # fetching, no chat/task ratio assumptions.
-        sessions = kernel_sync.list_user_sessions_sync(
+        sessions = await kernel_store.list_user_sessions(
             project_id=project_id,
             limit=200,
         )
@@ -253,13 +253,13 @@ class SessionService:
             items = [i for i in items if i.name and q in i.name.lower()]
         return items
 
-    def get_session(self, session_id: str) -> SessionDetail:
-        session = kernel_sync.load_session_sync(session_id)
+    async def get_session(self, session_id: str) -> SessionDetail:
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
         return _session_to_detail(session)
 
-    def list_events(
+    async def list_events(
         self,
         session_id: str,
         after_seq: int = 0,
@@ -272,15 +272,13 @@ class SessionService:
         events that have no legacy counterpart are filtered.
         """
         # Verify session exists.
-        session = kernel_sync.load_session_sync(session_id)
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
         from valuz_agent.adapters.event_sse_adapter import list_events_after
 
-        frames = kernel_sync._run_in_thread(  # noqa: SLF001
-            lambda: list_events_after(session_id, after_seq=after_seq, limit=2000)
-        )
+        frames = await list_events_after(session_id, after_seq=after_seq, limit=2000)
         return [
             SessionEventEnvelope(
                 seq=frame.seq,
@@ -290,7 +288,7 @@ class SessionService:
             for frame in frames
         ]
 
-    def list_events_window(
+    async def list_events_window(
         self,
         session_id: str,
         before_seq: int | None = None,
@@ -304,14 +302,14 @@ class SessionService:
         turns"); the linear ``list_events`` / SSE path stays for
         incremental delivery.
         """
-        session = kernel_sync.load_session_sync(session_id)
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
         from valuz_agent.adapters.event_sse_adapter import list_events_window
 
-        window = kernel_sync._run_in_thread(  # noqa: SLF001
-            lambda: list_events_window(session_id, before_seq=before_seq, turn_limit=turn_limit)
+        window = await list_events_window(
+            session_id, before_seq=before_seq, turn_limit=turn_limit
         )
         items = [
             SessionEventEnvelope(
@@ -895,7 +893,7 @@ class SessionService:
         detail = _session_to_detail(kernel_session)
         return detail
 
-    def send_message(
+    async def send_message(
         self,
         session_id: str,
         content: str,
@@ -912,7 +910,7 @@ class SessionService:
         # here is a belt-and-braces guarantee — by the time the user
         # actually types a message, the docs caps are present.
         try:
-            refresh_docs_capabilities_for_session(session_id)
+            await refresh_docs_capabilities_for_session(session_id)
         except Exception:  # noqa: BLE001 — never block send on refresh
             logger.exception(
                 "send_message: docs capability refresh failed for %s",
@@ -924,14 +922,14 @@ class SessionService:
         # stale X-Valuz-Internal → gate 403 → Claude Code parks the server in
         # needsAuth (only OAuth stubs, real tools hidden). Self-heals here.
         try:
-            refresh_always_on_mcp_for_session(session_id)
+            await refresh_always_on_mcp_for_session(session_id)
         except Exception:  # noqa: BLE001 — never block send on refresh
             logger.exception(
                 "send_message: always-on MCP re-stamp failed for %s",
                 session_id,
             )
 
-        session = kernel_sync.load_session_sync(session_id)
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -963,7 +961,7 @@ class SessionService:
             status="running",
             metadata=meta,
         )
-        kernel_sync.save_session_sync(updated)
+        await kernel_store.save_session(updated)
 
         self._bus.publish(
             SESSION_STATUS_CHANGED,
@@ -997,7 +995,7 @@ class SessionService:
         # subscriber on bind-time) also pick up KB bindings added since
         # the session was created.
         try:
-            refresh_docs_capabilities_for_session(session_id)
+            await refresh_docs_capabilities_for_session(session_id)
         except Exception:  # noqa: BLE001
             logger.exception(
                 "send_message_sync: docs capability refresh failed for %s",
@@ -1007,7 +1005,7 @@ class SessionService:
         # See send_message: re-stamp always-on MCP token so scheduled/automation
         # runs resuming across a backend restart don't hit the stale-token 403.
         try:
-            refresh_always_on_mcp_for_session(session_id)
+            await refresh_always_on_mcp_for_session(session_id)
         except Exception:  # noqa: BLE001
             logger.exception(
                 "send_message_sync: always-on MCP re-stamp failed for %s",
@@ -1179,16 +1177,15 @@ class SessionService:
         detail = _session_to_detail(reloaded2) if reloaded2 else _session_to_detail(session)
         return SessionRunResponse(session=detail, events=[])
 
-    def interrupt(self, session_id: str) -> SessionDetail:
+    async def interrupt(self, session_id: str) -> SessionDetail:
         """Stop the in-flight agent turn and flip the session to idle.
 
         Three-step approach so the user always gets a responsive UI even
         when the kernel-side interrupt can't be delivered (runtime
         already exited, orchestrator never registered the session, etc.):
 
-        1. Best-effort ``orchestrator.interrupt(session_id)`` in a
-           background thread — this is the *clean* path that asks the
-           runtime to stop emitting tokens.
+        1. Best-effort ``await orchestrator.interrupt(session_id)`` —
+           the *clean* path that asks the runtime to stop emitting tokens.
         2. Whatever happens to step 1, flip the kernel session row to
            ``status=idle`` with ``stop_reason=UserInterrupt`` so future
            ``send_message`` calls don't 409 with "already running".
@@ -1200,7 +1197,7 @@ class SessionService:
         a stranded ``running`` row wedges the session forever (same
         failure mode ``recover_running_sessions`` cleans up at boot).
         """
-        session = kernel_sync.load_session_sync(session_id)
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1210,23 +1207,8 @@ class SessionService:
             from app.dependencies import get_orchestrator  # type: ignore[import-not-found]
 
             orchestrator = get_orchestrator()
-            # Fire-and-forget in a thread since we're in a sync context.
-            # ``daemon=True`` so a stuck interrupt doesn't block process
-            # shutdown — recover_running_sessions catches the leftover.
-            import threading
-
-            def _interrupt() -> None:
-                try:
-                    asyncio.run(orchestrator.interrupt(session_id))
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "orchestrator.interrupt failed for session %s",
-                        session_id,
-                        exc_info=True,
-                    )
-
-            threading.Thread(target=_interrupt, daemon=True).start()
-        except Exception:  # noqa: BLE001 — kernel module import failure
+            await orchestrator.interrupt(session_id)
+        except Exception:  # noqa: BLE001 — runtime gone / never registered
             logger.warning(
                 "Could not reach orchestrator to interrupt session %s",
                 session_id,
@@ -1244,7 +1226,7 @@ class SessionService:
             status="idle",
             stop_reason=UserInterrupt(),
         )
-        kernel_sync.save_session_sync(updated)
+        await kernel_store.save_session(updated)
 
         # Step 3 — surface a kernel event when step 1 failed so the SSE
         # client doesn't see a silent stream cut. Try to anchor it onto
@@ -1268,7 +1250,7 @@ class SessionService:
                 },
             )
             try:
-                persisted = kernel_sync.append_session_scoped_event_sync(session_id, err_event)
+                persisted = await kernel_store.append_session_scoped_event(session_id, err_event)
             except Exception:  # noqa: BLE001
                 persisted = False
                 logger.exception(
@@ -1277,10 +1259,7 @@ class SessionService:
                 )
             if not persisted:
                 try:
-                    asyncio.run(broadcast_event(session_id, err_event))
-                except RuntimeError:
-                    # Already inside a loop — schedule it.
-                    asyncio.get_event_loop().create_task(broadcast_event(session_id, err_event))
+                    await broadcast_event(session_id, err_event)
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "Failed to broadcast session_error after interrupt for %s",
@@ -1295,8 +1274,8 @@ class SessionService:
         )
         return _session_to_detail(updated)
 
-    def cancel(self, session_id: str) -> SessionDetail:
-        session = kernel_sync.load_session_sync(session_id)
+    async def cancel(self, session_id: str) -> SessionDetail:
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1306,7 +1285,7 @@ class SessionService:
             session,
             status="terminated",
         )
-        kernel_sync.save_session_sync(updated)
+        await kernel_store.save_session(updated)
 
         self._bus.publish(
             SESSION_STATUS_CHANGED,
@@ -1316,18 +1295,18 @@ class SessionService:
         )
         return _session_to_detail(updated)
 
-    def regenerate(self, session_id: str) -> SessionDetail:
-        session = kernel_sync.load_session_sync(session_id)
+    async def regenerate(self, session_id: str) -> SessionDetail:
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
         meta = _valuz_meta(session)
         last_msg = meta.get("last_user_message_text")
         if not last_msg:
             raise SessionNotRunnable("No user message to regenerate from")
-        return self.send_message(session_id, str(last_msg))
+        return await self.send_message(session_id, str(last_msg))
 
-    def rename_session(self, session_id: str, name: str) -> SessionDetail:
-        session = kernel_sync.load_session_sync(session_id)
+    async def rename_session(self, session_id: str, name: str) -> SessionDetail:
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1340,17 +1319,17 @@ class SessionService:
             session,
             metadata=meta,
         )
-        kernel_sync.save_session_sync(updated)
+        await kernel_store.save_session(updated)
         return _session_to_detail(updated)
 
-    def delete_session(self, session_id: str) -> None:
-        session = kernel_sync.load_session_sync(session_id)
+    async def delete_session(self, session_id: str) -> None:
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
-        kernel_sync.delete_session_sync(session_id)
+        await kernel_store.delete_session(session_id)
 
-    def get_extra_skills(self, session_id: str) -> list[str]:
-        session = kernel_sync.load_session_sync(session_id)
+    async def get_extra_skills(self, session_id: str) -> list[str]:
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
         meta = _valuz_meta(session)
@@ -1359,8 +1338,8 @@ class SessionService:
             return []
         return [str(s) for s in raw if isinstance(s, str)]
 
-    def set_extra_skills(self, session_id: str, skill_ids: list[str]) -> SessionDetail:
-        session = kernel_sync.load_session_sync(session_id)
+    async def set_extra_skills(self, session_id: str, skill_ids: list[str]) -> SessionDetail:
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1374,10 +1353,10 @@ class SessionService:
             session,
             metadata=meta,
         )
-        kernel_sync.save_session_sync(updated)
+        await kernel_store.save_session(updated)
         return _session_to_detail(updated)
 
-    def set_permission_mode(self, session_id: str, permission_mode: str) -> SessionDetail:
+    async def set_permission_mode(self, session_id: str, permission_mode: str) -> SessionDetail:
         """Update the session's approval mode in the DB.
 
         Live-reconcile (kernel V5+bba3014): the new mode applies on the
@@ -1394,7 +1373,7 @@ class SessionService:
 
         A turn already in flight keeps the mode it started with.
         """
-        session = kernel_sync.load_session_sync(session_id)
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1406,10 +1385,10 @@ class SessionService:
             )
 
         updated = _copy_session(session, permission_mode=target)
-        kernel_sync.save_session_sync(updated)
+        await kernel_store.save_session(updated)
         return _session_to_detail(updated)
 
-    def set_session_effort(self, session_id: str, effort: str | None) -> SessionDetail:
+    async def set_session_effort(self, session_id: str, effort: str | None) -> SessionDetail:
         """Update the session's reasoning-effort budget in the DB.
 
         Live-reconcile (kernel V5+bba3014): the new effort applies on the
@@ -1427,7 +1406,7 @@ class SessionService:
         ``ValueError`` on an unknown effort value so the route layer
         can 400.
         """
-        session = kernel_sync.load_session_sync(session_id)
+        session = await kernel_store.load_session(session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1439,7 +1418,7 @@ class SessionService:
             effort=target_effort,
         )
         updated = _copy_session(session, model_settings=new_settings)
-        kernel_sync.save_session_sync(updated)
+        await kernel_store.save_session(updated)
         return _session_to_detail(updated)
 
     async def submit_action(
@@ -1499,14 +1478,14 @@ class SessionService:
             "rule_id": result.rule_id,
         }
 
-    def count_sessions_for_project(self, project_id: str) -> int:
+    async def count_sessions_for_project(self, project_id: str) -> int:
         """Return the number of kernel sessions for this project (project_id)."""
-        sessions = kernel_sync.list_sessions_sync(project_id=project_id, limit=1000)
+        sessions = await kernel_store.list_sessions(project_id=project_id, limit=1000)
         return len(sessions)
 
-    def delete_sessions_for_project(self, project_id: str) -> int:
+    async def delete_sessions_for_project(self, project_id: str) -> int:
         """Delete all kernel sessions (and their events) for this project."""
-        sessions = kernel_sync.list_sessions_sync(project_id=project_id, limit=1000)
+        sessions = await kernel_store.list_sessions(project_id=project_id, limit=1000)
         for s in sessions:
-            kernel_sync.delete_session_sync(s.id)
+            await kernel_store.delete_session(s.id)
         return len(sessions)

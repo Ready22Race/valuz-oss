@@ -1,20 +1,10 @@
-"""Async facade over the V5 kernel's async StorePort.
+"""Async facade over the V5 kernel's async StorePort — the host's single
+kernel seam.
 
-This is the **event-loop-native** counterpart to ``kernel_sync``. Async host
-code (route handlers, orchestrator methods, MCP tool handlers) MUST use this
-facade — it ``await``s the kernel store on the running loop, so the loop is
-never blocked.
-
-``kernel_sync`` (the sync facade) spins a throwaway thread + event loop per
-call and ``join()``s it, which **blocks the calling event loop** when invoked
-from ``async def`` — defeating the ADR-020 async migration on the kernel half.
-It remains valid ONLY for genuinely synchronous seams (background threads, sync
-eventbus handlers, CLI, startup). See ``kernel_sync`` docstring.
-
-Migration rule (async contexts only)::
-
-    kernel_sync.load_session_sync(x)   ->   await kernel_store.load_session(x)
-    kernel_sync.save_session_sync(s)   ->   await kernel_store.save_session(s)
+Every host access to kernel state goes through this module, awaited on the
+running event loop. The former sync facade (``kernel_sync``, a
+thread-per-call bridge) is gone: all call sites are async now, so blocking
+bridges are no longer needed anywhere.
 
 Keeping all kernel coupling behind ``adapters/`` means the rest of valuz never
 imports ``app.dependencies`` directly.
@@ -26,14 +16,13 @@ from __future__ import annotations
 # The kernel boundary is configured ``follow_imports = "skip"`` (see pyproject
 # [tool.mypy] overrides for ``src.*``), so ``StorePort`` and its return types
 # resolve to ``Any``. Every ``return await _store().<m>(...)`` therefore trips
-# ``no-any-return`` despite correct annotations. ``kernel_sync`` carries the
-# same unavoidable pattern; we silence it here at module scope instead of
-# scattering per-line ignores.
+# ``no-any-return`` despite correct annotations; we silence it here at module
+# scope instead of scattering per-line ignores.
 
 # ruff: noqa: I001
 # Custom import order: the kernel side-effect import MUST run before any
 # ``from src.core ...`` so ``sys.path`` has the kernel root by the time we
-# resolve those names (mirrors ``kernel_sync``).
+# resolve those names.
 
 import valuz_agent.boot.kernel  # noqa: F401  (sys.path side-effect)
 
@@ -88,8 +77,8 @@ async def delete_agent(agent_id: str) -> bool:
 async def list_agents(*, status: str = "active") -> list[AgentConfig]:
     """List kernel AgentConfig rows, post-filtered by status client-side.
 
-    Mirrors ``kernel_sync.list_agents_sync``: ``StorePort.list_agents`` has no
-    status filter, so we paginate (limit=200, MVP-sufficient) and filter here.
+    ``StorePort.list_agents`` has no status filter, so we paginate
+    (limit=200, MVP-sufficient) and filter here.
     """
     agents = await _store().list_agents(limit=200, offset=0)
     return [a for a in agents if a.status == status]
@@ -119,6 +108,45 @@ async def delete_session(session_id: str) -> bool:
     return await _store().delete_session(session_id)
 
 
+async def list_user_sessions(
+    *,
+    project_id: str | None = None,
+    limit: int = 50,
+) -> list[Session]:
+    """``list_sessions`` variant that excludes task-internal sessions
+    (lead / dispatched sub-runs) at the SQL layer.
+
+    The kernel's own ``list_sessions`` has no metadata filter, so we run a
+    filtered SELECT here — the single sanctioned place for deep kernel
+    coupling — with a json_extract predicate on
+    ``metadata.valuz.task_id IS NULL``, reusing the kernel's own row→domain
+    converter so results are byte-for-byte identical to ``list_sessions``.
+    The ``LIMIT`` applies *after* the filter so callers get exactly N user
+    sessions. Slated for removal once the host-side project↔session index
+    replaces it.
+    """
+    from sqlalchemy import func, select  # type: ignore[import-not-found]
+
+    from src.adapters.sqlalchemy_store.converters import (  # type: ignore[import-not-found]
+        model_to_session,
+    )
+    from src.adapters.sqlalchemy_store.models import (  # type: ignore[import-not-found]
+        SessionModel,
+    )
+
+    store = _store()
+    session_factory = store._session_factory  # type: ignore[attr-defined]  # noqa: SLF001
+    async with session_factory() as db:
+        stmt = select(SessionModel).where(
+            func.json_extract(SessionModel.metadata_, "$.valuz.task_id").is_(None)
+        )
+        if project_id is not None:
+            stmt = stmt.where(SessionModel.project_id == project_id)
+        stmt = stmt.order_by(SessionModel.created_at.desc()).limit(limit)
+        result = await db.execute(stmt)
+        return [model_to_session(m) for m in result.scalars()]
+
+
 # ---- Event operations ----
 
 
@@ -142,10 +170,7 @@ async def list_messages_for_session(
 
 
 async def latest_message_id(session_id: str) -> str | None:
-    """Id of the most recent Message for ``session_id``, or None if none yet.
-
-    Mirrors ``kernel_sync.latest_message_id_sync``.
-    """
+    """Id of the most recent Message for ``session_id``, or None if none yet."""
     messages = await _store().list_messages_for_session(session_id, limit=1)
     if not messages:
         return None
@@ -156,7 +181,7 @@ async def append_session_scoped_event(session_id: str, event: Event) -> bool:
     """Append an out-of-band event onto the session's latest message.
 
     Returns ``True`` if persisted, ``False`` if the session has no messages
-    yet (event dropped). Mirrors ``kernel_sync.append_session_scoped_event_sync``.
+    yet (event dropped).
     """
     message_id = await latest_message_id(session_id)
     if message_id is None:
@@ -176,6 +201,7 @@ __all__ = [
     "list_agents",
     "list_messages_for_session",
     "list_sessions",
+    "list_user_sessions",
     "load_agent",
     "load_project",
     "load_session",

@@ -312,10 +312,10 @@ class SkillLibraryService:
 
     # ── Staging (Scenario B + D3 accept) ──────────────────────────────────
 
-    def scan_staging(self, session_id: str):  # type: ignore[no-untyped-def]
+    async def scan_staging(self, session_id: str):  # type: ignore[no-untyped-def]
         from valuz_agent.modules.skills import staging
 
-        return staging.scan_staging(session_id)
+        return await staging.scan_staging(session_id)
 
     async def sync_staging(
         self,
@@ -329,7 +329,7 @@ class SkillLibraryService:
         target_root = await self._target_root_for_scope(target_scope, project_id)
         results = []
         for item in items:
-            result = staging.sync_slug(
+            result = await staging.sync_slug(
                 session_id=session_id,
                 slug=item.slug,
                 strategy=item.strategy,
@@ -379,7 +379,7 @@ class SkillLibraryService:
         path = await self._resolve_skill_path_by_id(source_skill_id)
         if path is None:
             raise KeyError(f"Skill not found: {source_skill_id!r}")
-        dest = staging.prepare_optimize(
+        dest = await staging.prepare_optimize(
             session_id=session_id,
             source_skill_dir=path,
             source_skill_id=source_skill_id,
@@ -1254,7 +1254,7 @@ class SkillLibraryService:
         # so reaching this code path with the slug missing means either
         # the staging was wiped between submission and confirm or the
         # tool's validator was bypassed.
-        canonical_dir = staging.staging_dir_for_session(session_id) / slug
+        canonical_dir = await staging.staging_dir_for_session(session_id) / slug
         if not canonical_dir.is_dir():
             raise KeyError(
                 f"no staging slug {slug!r} for session {session_id!r} at "
@@ -1265,7 +1265,7 @@ class SkillLibraryService:
 
         # Always promote into the user library — agentskills.io standard
         # location managed by ``fs_registry.user_skill_root()``.
-        result = staging.sync_slug(
+        result = await staging.sync_slug(
             session_id=session_id,
             slug=slug,
             strategy="overwrite",
@@ -1290,7 +1290,7 @@ class SkillLibraryService:
 
         # Best-effort cleanup of the staging slug after promotion.
         try:
-            staging.remove_slug(session_id, slug)
+            await staging.remove_slug(session_id, slug)
         except Exception:  # noqa: BLE001
             pass
 
@@ -1319,7 +1319,7 @@ class SkillLibraryService:
 
         return skill, creation_context, bound_project_id
 
-    def dismiss_submission(self, session_id: str, slug: str) -> bool:
+    async def dismiss_submission(self, session_id: str, slug: str) -> bool:
         """Discard the staged slug — no library write, no DB write.
 
         Returns ``True`` when something was actually removed; ``False``
@@ -1327,10 +1327,10 @@ class SkillLibraryService:
         """
         from valuz_agent.modules.skills import staging
 
-        staging_slug_dir = staging.staging_dir_for_session(session_id) / slug
+        staging_slug_dir = await staging.staging_dir_for_session(session_id) / slug
         existed = staging_slug_dir.is_dir()
         if existed:
-            staging.remove_slug(session_id, slug)
+            await staging.remove_slug(session_id, slug)
         return existed
 
     # ------------------------------------------------------------------

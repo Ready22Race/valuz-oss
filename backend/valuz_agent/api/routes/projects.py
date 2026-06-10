@@ -130,7 +130,7 @@ class McpServersPayload(BaseModel):
 
 
 @router.get("/{project_id}/last-session-pick")
-def get_last_session_pick(
+async def get_last_session_pick(
     project_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> LastSessionPickResponse:
@@ -141,7 +141,7 @@ def get_last_session_pick(
     session in this project pre-fills the picker with whatever the
     user last picked here, rather than the global Settings default.
     """
-    pick = svc.get_project_last_pick(project_id)
+    pick = await svc.get_project_last_pick(project_id)
     if pick is None:
         return LastSessionPickResponse(
             runtime_provider=None,

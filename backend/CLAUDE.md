@@ -60,7 +60,7 @@ public API**: `from src.core import …` (domain types/protocols), `from
 app.dependencies import …` (singletons + lifecycle), `from app.config import
 AppConfig`, and `from app.routes.* import router`. `from src.adapters.*` /
 `from src.runtimes.*` are forbidden **outside**
-`valuz_agent/adapters/kernel_sync.py` — the single sanctioned escape hatch.
+`valuz_agent/adapters/kernel_store.py` — the single sanctioned escape hatch.
 Keep host code talking to the kernel through its public API above rather than
 reaching into kernel internals.
 
@@ -151,7 +151,7 @@ session-creation time:
 
 | Adapter | Job |
 |---------|-----|
-| `kernel_sync` | sync facade over the kernel's async `StorePort` (only importer of `src.adapters` / `src.runtimes`) |
+| `kernel_store` | async facade over the kernel's async `StorePort` (only importer of `src.adapters` / `src.runtimes`) |
 | `capability_resolver` | project + extras → kernel skills / MCP set |
 | `model_resolver` | request + provider + default → concrete model id |
 | `mcp_resolver` | slug + creds → `list[McpServerConfig]` |

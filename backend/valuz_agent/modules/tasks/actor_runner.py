@@ -38,7 +38,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 
 from src.core import UserMessage  # type: ignore[import-not-found]
 
-from valuz_agent.adapters import kernel_sync
+from valuz_agent.adapters import kernel_store
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
 
@@ -226,7 +226,7 @@ _ARTIFACT_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "dist", "build",
 _ARTIFACT_LIMIT = 200
 
 
-def collect_manifest(
+async def collect_manifest(
     session_id: str,
     run_dir: Path,
     status: str,
@@ -247,7 +247,7 @@ def collect_manifest(
     # Extract summary from the last assistant event
     summary = ""
     try:
-        events = kernel_sync.get_events_sync(session_id, limit=200)
+        events = await kernel_store.get_events(session_id, limit=200)
         # Walk backwards: find last assistant_message text
         for event in reversed(events):
             payload = event.data if hasattr(event, "data") else {}

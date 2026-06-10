@@ -182,20 +182,20 @@ class SessionEventWindowResponse(BaseModel):
 
 
 @router.get("")
-def list_sessions(
+async def list_sessions(
     project_id: str | None = None,
     q: str | None = None,
     svc: SessionService = Depends(get_session_service),
 ) -> dict[str, list[SessionListItem]]:
-    return {"sessions": svc.list_sessions(project_id=project_id, query=q)}
+    return {"sessions": await svc.list_sessions(project_id=project_id, query=q)}
 
 
 @router.get("/{session_id}")
-def get_session(
+async def get_session(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.get_session(session_id)
+    return await svc.get_session(session_id)
 
 
 @router.post("", status_code=201)
@@ -217,17 +217,17 @@ async def create_session(
 
 
 @router.get("/{session_id}/events")
-def list_events(
+async def list_events(
     session_id: str,
     after_seq: int = 0,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionEventsResponse:
-    items = svc.list_events(session_id, after_seq=after_seq)
+    items = await svc.list_events(session_id, after_seq=after_seq)
     return SessionEventsResponse(session_id=session_id, items=items)
 
 
 @router.get("/{session_id}/events/window")
-def list_events_window(
+async def list_events_window(
     session_id: str,
     before_seq: int | None = None,
     turn_limit: int = 20,
@@ -242,7 +242,7 @@ def list_events_window(
     ``before_seq=items[0].seq, turn_limit=N`` → server returns the next
     older N turns. Loop terminates when ``has_more=false``.
     """
-    items, has_more = svc.list_events_window(
+    items, has_more = await svc.list_events_window(
         session_id,
         before_seq=before_seq,
         turn_limit=turn_limit,
@@ -295,7 +295,7 @@ async def send_message(
     budget = billing.check_budget(user.user_id, estimated_cost=0.0)
     if not budget.allowed:
         raise HTTPException(status_code=402, detail=budget.reason or "Budget exceeded")
-    return svc.send_message(
+    return await svc.send_message(
         session_id, body.prompt, provider_id=body.provider_id, model_id=body.model_id
     )
 
@@ -311,19 +311,19 @@ async def send_message_sync(
 
 
 @router.post("/{session_id}/interrupt")
-def interrupt(
+async def interrupt(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.interrupt(session_id)
+    return await svc.interrupt(session_id)
 
 
 @router.post("/{session_id}/cancel")
-def cancel(
+async def cancel(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.cancel(session_id)
+    return await svc.cancel(session_id)
 
 
 @router.post("/{session_id}/regenerate")
@@ -332,28 +332,28 @@ async def regenerate(
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
     """Regenerate re-sends the last user message. Returns immediately."""
-    return svc.regenerate(session_id)
+    return await svc.regenerate(session_id)
 
 
 @router.patch("/{session_id}")
-def rename_session(
+async def rename_session(
     session_id: str,
     name: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.rename_session(session_id, name)
+    return await svc.rename_session(session_id, name)
 
 
 @router.delete("/{session_id}", status_code=204)
-def delete_session(
+async def delete_session(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> None:
-    svc.delete_session(session_id)
+    await svc.delete_session(session_id)
 
 
 @router.patch("/{session_id}/permission-mode")
-def update_permission_mode(
+async def update_permission_mode(
     session_id: str,
     body: SessionPermissionModeRequest,
     svc: SessionService = Depends(get_session_service),
@@ -371,13 +371,13 @@ def update_permission_mode(
     only the Claude tier ships the LLM classifier today).
     """
     try:
-        return svc.set_permission_mode(session_id, body.permission_mode)
+        return await svc.set_permission_mode(session_id, body.permission_mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/{session_id}/effort")
-def update_session_effort(
+async def update_session_effort(
     session_id: str,
     body: SessionEffortRequest,
     svc: SessionService = Depends(get_session_service),
@@ -401,7 +401,7 @@ def update_session_effort(
     ``effort=null`` resets to the SDK default.
     """
     try:
-        return svc.set_session_effort(session_id, body.effort)
+        return await svc.set_session_effort(session_id, body.effort)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -521,15 +521,15 @@ class SessionExtraSkillsResponse(BaseModel):
 
 
 @router.get("/{session_id}/skills")
-def get_session_extra_skills(
+async def get_session_extra_skills(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionExtraSkillsResponse:
-    return SessionExtraSkillsResponse(skill_ids=svc.get_extra_skills(session_id))
+    return SessionExtraSkillsResponse(skill_ids=await svc.get_extra_skills(session_id))
 
 
 @router.put("/{session_id}/skills")
-def set_session_extra_skills(
+async def set_session_extra_skills(
     session_id: str,
     body: SessionExtraSkillsRequest,
     svc: SessionService = Depends(get_session_service),
@@ -538,8 +538,8 @@ def set_session_extra_skills(
 
     skill-creator is always active and does not need to be listed here.
     """
-    svc.set_extra_skills(session_id, body.skill_ids)
-    return SessionExtraSkillsResponse(skill_ids=svc.get_extra_skills(session_id))
+    await svc.set_extra_skills(session_id, body.skill_ids)
+    return SessionExtraSkillsResponse(skill_ids=await svc.get_extra_skills(session_id))
 
 
 # ──────────────────────────────────────────────────────────────────────
