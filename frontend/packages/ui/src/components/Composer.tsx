@@ -129,6 +129,7 @@ import {
   SkillSearchMenu,
   type SkillSearchItem,
 } from "./conversation/SkillSearchMenu";
+import { filterSkillItems } from "./conversation/skill-search-filter";
 import { cn } from "../lib/cn";
 import { useI18n } from "../hooks/use-i18n";
 
@@ -520,6 +521,18 @@ export const Composer = ({
     active: boolean;
     query: string;
   }>({ active: false, query: "" });
+  // Skills matching the live ``/`` query. Empty means the user is typing a
+  // slash *command* (e.g. ``/compact``) — not a skill name — so we let it pass
+  // through: the picker closes and Enter sends the command verbatim, rather
+  // than dead-ending on "no matching skill" while the runtime would happily
+  // run it. ``skillMenuOpen`` is the single gate for both the popup's
+  // visibility and the Enter-capture below, using the same predicate the menu
+  // renders with so the two can't drift apart.
+  const skillMatches =
+    showSkillButton && skillSearch.active
+      ? filterSkillItems(skills, skillSearch.query)
+      : [];
+  const skillMenuOpen = skillMatches.length > 0;
   const [attachments, setAttachments] = useState<File[]>([]);
   const [dragOver, setDragOver] = useState(false);
 
@@ -632,7 +645,10 @@ export const Composer = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (skillSearch.active) return;
+    // Only yield Enter/arrows to the skill picker while it's actually open with
+    // matches. A ``/command`` that matches no skill keeps normal composer keys,
+    // so Enter sends it instead of inserting a newline.
+    if (skillMenuOpen) return;
     if (e.key === "Enter" && !e.shiftKey && !isImeCompositionEvent(e)) {
       e.preventDefault();
       handleSend();
@@ -726,6 +742,10 @@ export const Composer = ({
     onSend?.();
     setAttachments([]);
     onAttachmentsChange?.([]);
+    // Pass-through commands send with the picker still in its ``active`` state
+    // (no match closed the popup, not a selection). Reset it so the next ``/``
+    // starts clean.
+    setSkillSearch({ active: false, query: "" });
   };
 
   // Insert a chip at the caret. If the caret immediately follows a
@@ -1276,7 +1296,7 @@ export const Composer = ({
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
             />
-            {showSkillButton && skillSearch.active && skills.length > 0 && (
+            {skillMenuOpen && (
               <SkillSearchMenu
                 skills={skills}
                 query={skillSearch.query}
