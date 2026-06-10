@@ -1032,7 +1032,14 @@ class ProviderService:
         # channel they can't use. Built-ins go through /v1/models
         # discovery (also hydrates ``model_ids``); custom channels go
         # through ``ping_credentials`` (validates auth + endpoint + model).
-        model_ids_list: list[str] = list(user_models) if is_custom else list(fallback_models)
+        # OAuth subscription kinds never snapshot the recommended list —
+        # ``model_ids`` stays NULL so the row tracks the live descriptor
+        # (mirrors ``seeds/providers.py``; the empty list also keeps the
+        # default_model chain below on the descriptor default).
+        if provider.auth_type == "oauth":
+            model_ids_list: list[str] = []
+        else:
+            model_ids_list = list(user_models) if is_custom else list(fallback_models)
         if api_key:
             stripped_key = api_key.strip()
             # HTTP Authorization is latin-1 only; non-ASCII (e.g. user
@@ -1443,19 +1450,16 @@ class ProviderService:
                 continue
             return row
         # 2) Otherwise the first enabled provider that lists the model id in
-        #    its options AND has credentials.
+        #    its options AND has credentials. Goes through
+        #    ``_resolve_model_options`` (same resolution as the list/detail
+        #    endpoints) so rows with ``model_ids IS NULL`` — notably the
+        #    OAuth subscription rows, which never snapshot their recommended
+        #    list — fall back to the live descriptor instead of becoming
+        #    unresolvable: whatever the picker shows must bind here too.
         for row in rows:
             if not row.enabled or not _has_creds(row):
                 continue
-            options: list[str] = []
-            if row.model_ids:
-                try:
-                    parsed = json.loads(row.model_ids)
-                    if isinstance(parsed, list):
-                        options = [str(o) for o in parsed]
-                except json.JSONDecodeError:
-                    options = []
-            if model_id in options:
+            if model_id in _resolve_model_options(row):
                 return row
         return None
 
