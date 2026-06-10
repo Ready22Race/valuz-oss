@@ -10,6 +10,8 @@ import (
 
 const taskName = "ValuzBackend"
 
+func launchdPlistPath() (string, error) { return "", nil }
+
 func installAutostartPlatform(exe string, port int, logDir string) error {
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return err
