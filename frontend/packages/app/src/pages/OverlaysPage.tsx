@@ -21,6 +21,7 @@ import {
   DialogTitle,
   CommandPalette,
   PermissionRequestDialog,
+  IconBox,
 } from '@valuz/ui'
 import { toast } from 'sonner'
 
@@ -46,9 +47,9 @@ export const OverlaysPage = () => {
           <h2 className="label-mono mb-3 font-heading">命令面板（⌘K）</h2>
           <Card>
             <CardContent className="flex items-start gap-4 py-5">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-brand-light text-brand">
+              <IconBox size="lg" variant="brand">
                 <Search className="h-5 w-5" />
-              </div>
+              </IconBox>
               <div className="min-w-0 flex-1">
                 <div className="mb-1 text-sm font-medium text-ink-heading">快速命令面板</div>
                 <p className="mb-3 text-sm leading-relaxed text-ink-body">

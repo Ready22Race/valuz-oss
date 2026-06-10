@@ -15,7 +15,7 @@ import {
   Radio,
   Settings,
 } from "lucide-react";
-import { cn } from "@valuz/ui";
+import { SettingsNav, cn } from "@valuz/ui";
 import { useTranslation } from "@valuz/core";
 import { useRegistryStore } from "@valuz/core";
 import { useProjectOutlet } from "@valuz/app/layout";
@@ -120,70 +120,7 @@ export const SettingsPage = () => {
 
   return (
     <div className="flex h-full min-h-0 overflow-hidden bg-card">
-      {/* Desktop sidebar */}
-      <aside className="hidden w-[240px] shrink-0 overflow-y-auto border-r border-surface-border bg-surface-soft p-4 md:block">
-        <div>
-          <div className="space-y-0.5">
-            {nav.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setTab(item.id)}
-                className={cn(
-                  "w-full rounded-lg px-2.5 py-2 text-left transition-all",
-                  tab === item.id
-                    ? "bg-[#F1F2F4] dark:bg-surface-muted"
-                    : "hover:bg-surface-muted",
-                )}
-              >
-                <div className="flex items-center gap-2.5">
-                  <span
-                    className={cn(
-                      "shrink-0",
-                      tab === item.id
-                        ? "text-[#725cf9] dark:text-brand"
-                        : "text-ink-body",
-                    )}
-                  >
-                    {item.icon}
-                  </span>
-                  <span
-                    className={cn(
-                      "text-sm",
-                      tab === item.id
-                        ? "text-[#725cf9] dark:text-brand"
-                        : "text-ink-heading",
-                    )}
-                  >
-                    {item.label}
-                  </span>
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-      </aside>
-
-      {/* Mobile tab bar */}
-      <div className="flex flex-1 flex-col md:hidden">
-        <div className="flex items-center gap-1 overflow-x-auto border-b border-surface-border px-3 py-2">
-          {nav.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setTab(item.id)}
-              className={cn(
-                "whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium transition-colors",
-                tab === item.id
-                  ? "bg-brand text-white"
-                  : "text-ink-body hover:bg-surface-muted",
-              )}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      </div>
+      <SettingsNav items={nav} value={tab} onValueChange={setTab} />
 
       <div className="min-h-0 flex-1 overflow-y-auto bg-[linear-gradient(180deg,#FFFFFF_0%,#FBFBFD_100%)] dark:bg-[linear-gradient(180deg,#131418_0%,#0f1012_100%)]">
         <div
