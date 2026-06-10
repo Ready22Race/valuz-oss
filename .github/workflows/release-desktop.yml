@@ -317,9 +317,7 @@ jobs:
       contents: write
     steps:
       - name: Configure Git Mirror for Checkout
-        shell: bash
-        run: |
-          git config --global url."https://gh-proxy.org".insteadOf "https://github.com/"
+        run: git config --global url."https://gh-proxy.org".insteadOf "https://github.com/"
 
       - name: Checkout
         uses: actions/checkout@v4
