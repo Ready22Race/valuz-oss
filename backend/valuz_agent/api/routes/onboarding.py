@@ -48,11 +48,15 @@ from valuz_agent.modules.connectors.service import ConnectorService
 from valuz_agent.modules.projects.datastore import ProjectDatastore
 from valuz_agent.modules.projects.service import ProjectService
 from valuz_agent.modules.providers.datastore import ProviderDatastore
-from valuz_agent.modules.providers.service import _resolve_model_options
+from valuz_agent.modules.providers.service import (
+    _resolve_model_options,
+    derive_runtime_provider,
+)
 from valuz_agent.modules.settings.preferences import (
     get_default_effort,
     get_default_model,
     get_default_provider_id,
+    get_default_runtime,
 )
 
 logger = logging.getLogger(__name__)
@@ -118,24 +122,32 @@ def _resolve_project_name() -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_deploy_target(db) -> tuple[str, str]:  # type: ignore[no-untyped-def]
-    """Return ``(provider_id, model)`` to assign to onboarding's deployed agents.
+async def _resolve_deploy_target(db) -> tuple[str, str, str]:  # type: ignore[no-untyped-def]
+    """Return ``(runtime, provider_id, model)`` to assign to onboarding's deployed agents.
 
     Resolution order (see endpoint comment for rationale):
-      1. user's explicit defaults (``model.default_provider_id`` +
-         ``model.default_model``) — set when the user picks a model in the
-         ConnectStep or in Settings → Models.
+      1. user's explicit defaults (``model.default_runtime`` +
+         ``model.default_provider_id`` + ``model.default_model``) — all set
+         together when the user picks a model in the ConnectStep or in
+         Settings → Models. The runtime rides along so the deployed agent runs
+         on the runtime the user actually chose, not a hard-coded
+         ``claude_agent``.
       2. fallback: first enabled provider row, with that row's
-         ``default_model`` (or the first id from its discovered options).
-         This keeps the deploy aligned with what the user has actually
-         configured — Claude, OpenAI, GLM, anything — instead of forcing a
-         hard-coded model id that wouldn't match a non-Claude setup.
+         ``default_model`` (or the first id from its discovered options) and a
+         runtime *derived from that provider's kind* so the
+         ``(runtime, provider, model)`` triple stays internally consistent —
+         Claude, OpenAI, GLM, anything — instead of forcing a hard-coded
+         runtime/model that wouldn't match a non-Claude setup.
       3. 422 when no provider is configured at all.
     """
     default_provider_id = await get_default_provider_id(db)
     default_model = await get_default_model(db)
     if default_provider_id and default_model:
-        return default_provider_id, default_model
+        # ConnectStep / Settings → Models always persist the runtime alongside
+        # the provider+model, so the user's chosen runtime is authoritative
+        # here. Without this the team's agents silently landed on claude_agent.
+        runtime = await get_default_runtime(db)
+        return runtime, default_provider_id, default_model
 
     # Fallback to the first enabled provider. Order is by created_at so we
     # pick the user's earliest deliberate choice, not whatever the seeder
@@ -164,13 +176,18 @@ async def _resolve_deploy_target(db) -> tuple[str, str]:  # type: ignore[no-unty
                 ),
             )
         model = options[0]
+    # Derive a runtime compatible with the fallback provider's kind rather than
+    # blindly using claude_agent (which would mismatch an OpenAI/Gemini channel).
+    runtime = derive_runtime_provider(row.provider_kind)
     logger.warning(
-        "onboarding: no explicit default set; falling back to provider %s (%s) with model %r",
+        "onboarding: no explicit default set; falling back to provider %s (%s) "
+        "with model %r on runtime %r",
         row.id,
         row.name,
         model,
+        runtime,
     )
-    return row.id, model
+    return runtime, row.id, model
 
 
 # ---------------------------------------------------------------------------
@@ -191,8 +208,8 @@ async def _ensure_valuz_helper(db) -> str:  # type: ignore[no-untyped-def]
     """Idempotently create the Valuz Helper in the user's agent library.
 
     Returns its slug. Reuses the existing one on re-run (no model resolution
-    needed then). On first creation, model / provider / effort follow the
-    user's global defaults — the same resolver the team deploy uses, so a
+    needed then). On first creation, runtime / model / provider / effort follow
+    the user's global defaults — the same resolver the team deploy uses, so a
     user with no model configured hits the same 422 guard.
     """
     connector_svc = ConnectorService(
@@ -205,7 +222,7 @@ async def _ensure_valuz_helper(db) -> str:  # type: ignore[no-untyped-def]
         if existing.slug == _VALUZ_HELPER_SLUG:
             return _VALUZ_HELPER_SLUG
 
-    provider_id, model = await _resolve_deploy_target(db)
+    runtime, provider_id, model = await _resolve_deploy_target(db)
     effort = await get_default_effort(db)
     await agent_svc.create_agent(
         {
@@ -213,6 +230,7 @@ async def _ensure_valuz_helper(db) -> str:  # type: ignore[no-untyped-def]
             "name": t("onboarding.valuzHelper.name"),
             "description": t("onboarding.valuzHelper.description"),
             "instructions": t("onboarding.valuzHelper.instructions"),
+            "runtime": runtime,
             "model": model,
             "provider_id": provider_id,
             "effort": effort,
@@ -315,19 +333,24 @@ async def create_example_project(
         # them — re-creating would duplicate.
         created = 0
         if created_new:
-            # Resolve the model + provider to deploy with. Three-tier:
-            #   1. user's explicit defaults (set in ConnectStep / Settings)
-            #   2. first enabled provider's first model — picks whatever the
-            #      user actually wired up (GPT / DeepSeek / GLM / …),
-            #      avoiding the old hard-coded Claude id that silently broke
-            #      non-Claude users
+            # Resolve the runtime + model + provider to deploy with. Three-tier:
+            #   1. user's explicit defaults (set in ConnectStep / Settings) —
+            #      runtime included, so the team runs on the runtime the user
+            #      picked instead of a hard-coded claude_agent
+            #   2. first enabled provider's first model + a runtime derived
+            #      from that provider — picks whatever the user actually wired
+            #      up (GPT / DeepSeek / GLM / …), avoiding the old hard-coded
+            #      Claude runtime/model that silently broke non-Claude users
             #   3. 422 if no provider is configured at all (the frontend
             #      TeamStep guard banner catches this first; this is the
             #      authoritative fallback when the guard is bypassed)
-            default_provider_id, default_model = await _resolve_deploy_target(db)
+            default_runtime, default_provider_id, default_model = (
+                await _resolve_deploy_target(db)
+            )
             logger.info(
-                "onboarding: deploying team %r with model=%r provider=%r",
+                "onboarding: deploying team %r with runtime=%r model=%r provider=%r",
                 body.team_id,
+                default_runtime,
                 default_model,
                 default_provider_id,
             )
@@ -339,6 +362,7 @@ async def create_example_project(
                         name=role["name"],
                         description=role["description"],
                         instructions=role["instructions"],
+                        runtime=default_runtime,
                         model=default_model,
                         provider_id=default_provider_id,
                     )
