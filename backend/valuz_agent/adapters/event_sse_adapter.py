@@ -221,10 +221,11 @@ def _translate_kernel_event(
         # (both callers are async), so fire-and-forget via ``create_task`` —
         # metering must never block or break the SSE stream.
         try:
-            from valuz_agent.ports.billing import MeterEvent, get_billing_port
+            from valuz_agent.ports.billing import MeterEvent
+            from valuz_agent.ports.extensions import ext
 
             cost_usd = (input_tokens * 3 + output_tokens * 15) / 1_000_000
-            coro = get_billing_port().meter(
+            coro = ext.billing.meter(
                 MeterEvent(
                     user_id=data.get("user_id", "local-user"),
                     event_type="llm_call",

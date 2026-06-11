@@ -151,13 +151,16 @@ _registry: LLMProviderRegistry = _InMemoryRegistry()
 
 
 def get_llm_registry() -> LLMProviderRegistry:
-    return _registry
+    from valuz_agent.ports.extensions import ext
+
+    return ext.llm_registry
 
 
 def set_llm_registry(reg: LLMProviderRegistry) -> None:
     """Replace the registry (tests + advanced overlays)."""
-    global _registry
-    _registry = reg
+    from valuz_agent.ports.extensions import ext
+
+    ext.llm_registry = reg
 
 
 __all__ = [

@@ -33,13 +33,16 @@ _enhancer: ResourceListEnhancer = NoopResourceEnhancer()
 
 
 def get_resource_enhancer() -> ResourceListEnhancer:
-    return _enhancer
+    from valuz_agent.ports.extensions import ext
+
+    return ext.resource_enhancer
 
 
 def set_resource_enhancer(enhancer: ResourceListEnhancer) -> None:
     """Replace the enhancer (called by commercial app at startup)."""
-    global _enhancer
-    _enhancer = enhancer
+    from valuz_agent.ports.extensions import ext
+
+    ext.resource_enhancer = enhancer
 
 
 __all__ = [

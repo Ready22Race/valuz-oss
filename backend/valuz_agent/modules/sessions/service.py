@@ -315,9 +315,7 @@ class SessionService:
 
         from valuz_agent.adapters.event_sse_adapter import list_events_window
 
-        window = await list_events_window(
-            session_id, before_seq=before_seq, turn_limit=turn_limit
-        )
+        window = await list_events_window(session_id, before_seq=before_seq, turn_limit=turn_limit)
         items = [
             SessionEventEnvelope(
                 seq=frame.seq,
@@ -566,6 +564,7 @@ class SessionService:
             always_on_skill_paths,
             resolve_skill_slugs_to_paths,
         )
+
         existing_mcp_names = {getattr(m, "name", None) for m in (agent.mcp_servers or ())}
         from app.serializers import mcp_to_schema
 
@@ -996,11 +995,10 @@ class SessionService:
         if status in ("cancelled", "archived"):
             raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
 
-        from valuz_agent.ports.billing import get_billing_port
+        from valuz_agent.ports.extensions import ext
 
-        billing = get_billing_port()
         uid = session.metadata.get("owner_user_id", "local-user")
-        budget = await billing.check_budget(uid)
+        budget = await ext.billing.check_budget(uid)
         if not budget.allowed:
             raise BudgetExceeded(budget.reason or "insufficient credits")
 
@@ -1077,11 +1075,10 @@ class SessionService:
         if status in ("cancelled", "archived"):
             raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
 
-        from valuz_agent.ports.billing import get_billing_port
+        from valuz_agent.ports.extensions import ext
 
-        billing = get_billing_port()
         uid = session.metadata.get("owner_user_id", "local-user")
-        budget = await billing.check_budget(uid)
+        budget = await ext.billing.check_budget(uid)
         if not budget.allowed:
             raise BudgetExceeded(budget.reason or "insufficient credits")
 
@@ -1186,11 +1183,12 @@ class SessionService:
                 await store.save_session(final_session)
 
                 if message.input_tokens is not None or message.output_tokens is not None:
-                    from valuz_agent.ports.billing import MeterEvent, get_billing_port
+                    from valuz_agent.ports.billing import MeterEvent
+                    from valuz_agent.ports.extensions import ext
 
                     uid = meta.get("owner_user_id", "local-user")
                     try:
-                        await get_billing_port().meter(
+                        await ext.billing.meter(
                             MeterEvent(
                                 user_id=uid,
                                 event_type="llm_call",

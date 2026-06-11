@@ -70,13 +70,16 @@ _billing_port: BillingPort = NoopBillingProvider()
 
 
 def get_billing_port() -> BillingPort:
-    return _billing_port
+    from valuz_agent.ports.extensions import ext
+
+    return ext.billing
 
 
 def set_billing_port(port: BillingPort) -> None:
     """Replace the billing provider (called by commercial app at startup)."""
-    global _billing_port
-    _billing_port = port
+    from valuz_agent.ports.extensions import ext
+
+    ext.billing = port
 
 
 __all__ = [

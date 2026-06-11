@@ -29,10 +29,10 @@ from valuz_agent.modules.providers.errors import (
     ProviderNotFound,
 )
 from valuz_agent.modules.providers.models import ProviderRow
+from valuz_agent.ports.extensions import ext
 from valuz_agent.ports.llm_provider import (
     SystemLLMProvider,
     SystemProviderImmutable,
-    get_llm_registry,
 )
 
 logger = logging.getLogger(__name__)
@@ -777,10 +777,8 @@ class ProviderService:
     # ── Queries ──────────────────────────────────────────────────
 
     async def list_providers(self) -> list[ProviderListItem]:
-        from valuz_agent.ports.provider_policy import get_provider_policy
-
         rows = await self._ds.list_providers()
-        policy = get_provider_policy()
+        policy = ext.policy
         # When the caller's org locks custom models, hide their own
         # (``source="user"``) providers so they can't be selected — the
         # "禁止使用" half of the lock. Managed/system rows are unaffected.
@@ -801,7 +799,7 @@ class ProviderService:
         # ``list_models`` source — like the commercial 组织模型 card — that
         # has no model of that protocol for the current org).
         system_items = []
-        for d in get_llm_registry().all():
+        for d in ext.llm_registry.all():
             opts = await _resolve_descriptor_model_options(d)
             if not opts:
                 continue
@@ -821,7 +819,7 @@ class ProviderService:
         return combined
 
     async def get_provider(self, provider_id: str) -> ProviderDetail:
-        descriptor = get_llm_registry().get(provider_id)
+        descriptor = ext.llm_registry.get(provider_id)
         if descriptor is not None:
             return _descriptor_to_detail(
                 descriptor,
@@ -841,7 +839,7 @@ class ProviderService:
         providers can't be edited / deleted / tested via the user CRUD
         path. The route layer maps this to HTTP 409.
         """
-        if get_llm_registry().get(provider_id) is not None:
+        if ext.llm_registry.get(provider_id) is not None:
             raise SystemProviderImmutable(provider_id)
 
     def list_provider_descriptors(self) -> list[ProviderDescriptor]:

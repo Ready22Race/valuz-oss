@@ -54,13 +54,17 @@ _identity_resolver: IdentityResolver = LocalIdentityResolver()
 
 def set_identity_resolver(resolver: IdentityResolver) -> None:
     """Replace the identity resolver (called by commercial app at startup)."""
-    global _identity_resolver
-    _identity_resolver = resolver
+    from valuz_agent.ports.extensions import ext
+
+    ext.identity = resolver
 
 
 async def get_current_user(request: Request) -> UserIdentity:
     """Resolve the current user from the request. OSS → ANONYMOUS."""
-    result = await _identity_resolver.resolve(request)
+    from valuz_agent.ports.extensions import ext
+
+    resolver = ext.identity or _identity_resolver
+    result = await resolver.resolve(request)
     return result or ANONYMOUS
 
 

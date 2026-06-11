@@ -44,11 +44,12 @@ async def _run_agent_background(
 
     async def _meter(message: Any, after_run: Any) -> None:
         if message.input_tokens is not None or message.output_tokens is not None:
-            from valuz_agent.ports.billing import MeterEvent, get_billing_port
+            from valuz_agent.ports.billing import MeterEvent
+            from valuz_agent.ports.extensions import ext
 
             uid = (after_run.metadata if after_run else {}).get("owner_user_id", "local-user")
             try:
-                await get_billing_port().meter(
+                await ext.billing.meter(
                     MeterEvent(
                         user_id=uid,
                         event_type="llm_call",
