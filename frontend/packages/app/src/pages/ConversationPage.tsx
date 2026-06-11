@@ -1952,10 +1952,10 @@ export const ConversationPage = () => {
       // For the fresh-draft case we set ``selectedProjectId`` to the
       // ``"chat-default"`` sentinel so skill autocomplete still loads
       // (the backend skills router treats it as the global chat-scope
-      // key); the file tree 404s and renders empty — correct for a
-      // not-yet-allocated workdir. The real project materializes
-      // when the user sends the first message and ``ensureSession``
-      // navigates us to ``/conversation/{real-id}``.
+      // key); ``refreshFileTree`` skips the sentinel (no project row /
+      // workdir exists yet) and renders an empty tree. The real project
+      // materializes when the user sends the first message and
+      // ``ensureSession`` navigates us to ``/conversation/{real-id}``.
       if (id === NEW_SESSION_ID) {
         setSessionTriggerMode(null);
         setSessionAgentSlug(null);
@@ -2147,8 +2147,11 @@ export const ConversationPage = () => {
   // Loaded for both project AND chat projects — chat sessions write
   // generated artifacts into their managed cwd, and the user wants
   // those visible in the right rail too (under the "Generated files" label).
+  // The ``"chat-default"`` sentinel is NOT a real project (no row, no cwd —
+  // the backend materializes a fresh chat project only when the first
+  // session is created), so fetching its tree would just 404.
   const refreshFileTree = useCallback(() => {
-    if (!selectedProjectId) {
+    if (!selectedProjectId || selectedProjectId === "chat-default") {
       setFileTree([]);
       return;
     }
