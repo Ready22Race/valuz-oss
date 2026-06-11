@@ -23,7 +23,7 @@ from valuz_agent.modules.sessions.dto import (
 from valuz_agent.modules.sessions.models import SessionAttachmentRow
 from valuz_agent.modules.sessions.schemas import SessionEffortRequest, SessionModelSelection
 from valuz_agent.modules.sessions.service import SessionService
-from valuz_agent.ports.billing import get_billing_port
+from valuz_agent.ports.extensions import ext
 from valuz_agent.ports.identity import UserIdentity
 
 logger = logging.getLogger(__name__)
@@ -291,8 +291,7 @@ async def send_message(
     user: UserIdentity = Depends(get_current_user),
 ) -> SessionDetail:
     """Start agent execution in background. Returns immediately with running status."""
-    billing = get_billing_port()
-    budget = await billing.check_budget(user.user_id, estimated_cost=0.0)
+    budget = await ext.billing.check_budget(user.user_id, estimated_cost=0.0)
     if not budget.allowed:
         raise HTTPException(status_code=402, detail=budget.reason or "Budget exceeded")
     return await svc.send_message(
@@ -755,9 +754,7 @@ def _spawn_attachment_parse(
                 # Bound concurrent CPU-bound local parses (see semaphore note).
                 async with _LOCAL_PARSE_SEMAPHORE:
                     result = await asyncio.to_thread(router.parse_sync, source_path)
-            parsed_path, parse_status, engine = _write_parse_result(
-                result, dest_dir, base_name
-            )
+            parsed_path, parse_status, engine = _write_parse_result(result, dest_dir, base_name)
         except Exception as exc:  # noqa: BLE001 — contain; never crash the loop
             logger.exception("Background parse failed for attachment %s", attachment_id)
             error_message = str(exc)

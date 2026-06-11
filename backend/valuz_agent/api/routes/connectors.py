@@ -310,11 +310,11 @@ async def list_connectors(
     UI locale wouldn't re-localize already-installed connectors. Custom
     connectors keep the user-supplied display_name/description.
     """
-    from valuz_agent.ports.resource_enhancer import get_resource_enhancer
+    from valuz_agent.ports.extensions import ext
 
     locale = _parse_accept_language(accept_language)
     items = [_view_to_item(v, locale).model_dump() for v in await svc.list_connectors()]
-    items = await get_resource_enhancer().enhance("connector", items)
+    items = await ext.resource_enhancer.enhance("connector", items)
     return {"connectors": items}
 
 

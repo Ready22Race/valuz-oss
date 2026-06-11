@@ -182,11 +182,11 @@ async def list_agents(
     svc: AgentService = Depends(_get_agent_service),
 ) -> dict:
     """List agents, optionally filtered by source (official|custom)."""
-    from valuz_agent.ports.resource_enhancer import get_resource_enhancer
+    from valuz_agent.ports.extensions import ext
 
     rows = await svc.list_agents(source=source)
     items = [AgentResponse.model_validate(r).model_dump() for r in rows]
-    items = await get_resource_enhancer().enhance("agent", items)
+    items = await ext.resource_enhancer.enhance("agent", items)
     return {"agents": items}
 
 

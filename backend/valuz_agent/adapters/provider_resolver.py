@@ -75,7 +75,8 @@ import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.models import ProviderRow
-from valuz_agent.ports.llm_provider import SystemLLMProvider, get_llm_registry
+from valuz_agent.ports.extensions import ext
+from valuz_agent.ports.llm_provider import SystemLLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +162,7 @@ async def resolve_model_provider(
     # Overlay-contributed system providers (ADR-007) live in a
     # process-level registry, not the user table. Check first so an
     # overlay can shadow a colliding user id deterministically.
-    descriptor = get_llm_registry().get(provider_id)
+    descriptor = ext.llm_registry.get(provider_id)
     if descriptor is not None:
         return _resolve_system_provider(descriptor)
 
@@ -360,7 +361,7 @@ async def resolve_runtime_provider(
     # System provider (ADR-007): the overlay descriptor pins the runtime
     # directly. Check the registry before the user table so a colliding
     # id resolves consistently with ``resolve_model_provider``.
-    descriptor = get_llm_registry().get(provider_id)
+    descriptor = ext.llm_registry.get(provider_id)
     if descriptor is not None:
         if descriptor.runtime_provider not in _VALID_RUNTIME_PROVIDERS:
             raise ProviderNotResolvable(

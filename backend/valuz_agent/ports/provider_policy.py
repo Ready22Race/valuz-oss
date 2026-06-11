@@ -101,13 +101,16 @@ _provider_policy: ProviderPolicyPort = AllowAllProviderPolicy()
 
 
 def get_provider_policy() -> ProviderPolicyPort:
-    return _provider_policy
+    from valuz_agent.ports.extensions import ext
+
+    return ext.policy
 
 
 def set_provider_policy(policy: ProviderPolicyPort) -> None:
     """Replace the provider policy (called by the commercial app at startup)."""
-    global _provider_policy
-    _provider_policy = policy
+    from valuz_agent.ports.extensions import ext
+
+    ext.policy = policy
 
 
 __all__ = [

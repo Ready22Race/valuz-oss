@@ -14,11 +14,11 @@ from valuz_agent.modules.providers.service import (
     ProviderService,
     reset_providers,
 )
+from valuz_agent.ports.extensions import ext
 from valuz_agent.ports.identity import UserIdentity
 from valuz_agent.ports.llm_provider import SystemProviderImmutable
 from valuz_agent.ports.provider_policy import (
     ProviderWriteContext,
-    get_provider_policy,
 )
 
 router = APIRouter(prefix="/v1/providers", tags=["providers"])
@@ -30,7 +30,7 @@ async def _enforce_provider_policy(user: UserIdentity, action: str) -> None:
     OSS default permits everything; the commercial overlay denies user-provider
     writes when the caller's org has ``lock_member_custom_models`` enabled.
     """
-    decision = await get_provider_policy().authorize_write(
+    decision = await ext.policy.authorize_write(
         ProviderWriteContext(user=user, action=action, provider_source="user")  # type: ignore[arg-type]
     )
     if not decision.allowed:

@@ -73,14 +73,11 @@ async def create_kb(
 async def list_kbs(
     svc: DocumentLibraryService = Depends(get_document_service),
 ) -> dict:
-    from valuz_agent.ports.resource_enhancer import get_resource_enhancer
+    from valuz_agent.ports.extensions import ext
 
     rows = await svc.list_kbs()
-    items = [
-        item.model_dump() if hasattr(item, "model_dump") else item
-        for item in rows
-    ]
-    items = await get_resource_enhancer().enhance("kb", items)
+    items = [item.model_dump() if hasattr(item, "model_dump") else item for item in rows]
+    items = await ext.resource_enhancer.enhance("kb", items)
     return {"knowledge_bases": items}
 
 
