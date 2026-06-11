@@ -439,10 +439,50 @@ class EventData(BaseModel):
     type: str
     data: dict[str, Any] = Field(default_factory=dict)
     timestamp: int  # Unix epoch milliseconds (UTC)
+    # Storage coordinates — populated on cursor reads (``after_seq`` /
+    # window queries) and on stream frames sourced from the DB. ``None``
+    # for live (non-persisted) frames and legacy offset reads.
+    seq: int | None = None
+    message_id: str | None = None
+    # Populated on the global (all-sessions) stream so subscribers don't
+    # re-derive routing; ``None`` on session-scoped reads.
+    session_id: str | None = None
 
 
 class EventListResponse(BaseModel):
     data: list[EventData]
+    error: ApiError | None = None
+
+
+class EventWindowData(BaseModel):
+    """Turn-aligned page of events (see ``GET /sessions/{id}/events/window``)."""
+
+    items: list[EventData]
+    has_more: bool
+
+
+class EventWindowResponse(BaseModel):
+    data: EventWindowData
+    error: ApiError | None = None
+
+
+# -- Usage aggregates --
+
+
+class UsageRollupData(BaseModel):
+    """Per-(UTC day, model) usage aggregate over completed messages."""
+
+    day: str
+    model: str
+    request_count: int
+    input_tokens: int
+    output_tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+
+
+class UsageRollupResponse(BaseModel):
+    data: list[UsageRollupData]
     error: ApiError | None = None
 
 

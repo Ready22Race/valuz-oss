@@ -24,7 +24,10 @@ EXPECTED_ROUTES: dict[str, tuple[str, str] | None] = {
     "set_mode": ("POST", "/api/v1/sessions/{session_id}/mode"),
     "finalize_session": ("POST", "/api/v1/sessions/{session_id}/finalize"),
     "append_event": ("POST", "/api/v1/sessions/{session_id}/events"),
+    "emit_live_event": ("POST", "/api/v1/sessions/{session_id}/events"),  # ?live_only=true
     "get_events": ("GET", "/api/v1/sessions/{session_id}/events"),
+    "get_events_window": ("GET", "/api/v1/sessions/{session_id}/events/window"),
+    "usage_rollup": ("GET", "/api/v1/usage"),
     "list_messages": ("GET", "/api/v1/sessions/{session_id}/messages"),
     "submit_action": ("POST", "/api/v1/sessions/{session_id}/actions"),
     "interrupt": ("POST", "/api/v1/sessions/{session_id}/interrupt"),
@@ -32,6 +35,13 @@ EXPECTED_ROUTES: dict[str, tuple[str, str] | None] = {
     "scan_orphan_pendings": None,
     "scan_orphan_runs": None,
     "cleanup_runtime": None,
+}
+
+# Streaming subscriptions are async-generator functions (not coroutine
+# functions), pinned separately: each must have its SSE endpoint mounted.
+EXPECTED_STREAMS: dict[str, tuple[str, str]] = {
+    "subscribe_session_events": ("GET", "/api/v1/sessions/{session_id}/events/stream"),
+    "subscribe_all_events": ("GET", "/api/v1/events/stream"),
 }
 
 
@@ -57,6 +67,13 @@ def test_every_client_method_maps_to_a_kernel_endpoint() -> None:
 def test_ws_run_channel_is_mounted() -> None:
     paths = {getattr(r, "path", "") for r in kernel_app.routes}
     assert "/api/v1/sessions/{session_id}/run" in paths
+
+
+def test_every_stream_method_maps_to_a_kernel_sse_endpoint() -> None:
+    routes = _kernel_routes()
+    for method, expected in EXPECTED_STREAMS.items():
+        assert hasattr(kernel_client, method), f"client lacks {method}"
+        assert expected in routes, f"{method} expects kernel route {expected}, not mounted"
 
 
 def test_client_surface_has_no_undeclared_kernel_ops() -> None:

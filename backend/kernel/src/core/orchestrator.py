@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from src.core.agent_config import AgentConfig
-from src.core.events import Event, EventSink
+from src.core.events import Event, EventSink, GlobalEventTap
 from src.core.prompt_builder import wrap_for_mode
 from src.core.runtime_port import RuntimePort
 from src.core.session_approval_cache import SessionApprovalCache, SessionRule
@@ -116,6 +116,27 @@ class SubmitActionResult:
     # Set when ``decision == "approve_for_session"`` — the UUID assigned to
     # the rule the user just attached. ``None`` for every other verb.
     rule_id: str | None = None
+
+
+class _GlobalForwardTap:
+    """Per-bus tap fanning every emit out to the orchestrator's global taps.
+
+    Holds the orchestrator's tap list *by reference*, so taps registered
+    after this bus was created still receive its events. A failing global
+    tap is logged and skipped — never detached here, since the same tap
+    object is shared across every session's forwarder.
+    """
+
+    def __init__(self, session_id: str, taps: list[GlobalEventTap]) -> None:
+        self._session_id = session_id
+        self._taps = taps
+
+    async def emit(self, event: Event) -> None:
+        for tap in list(self._taps):
+            try:
+                await tap.emit_session(self._session_id, event)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Global event tap failed for %s: %s", self._session_id, exc)
 
 
 class _MessageIdStampSink:
@@ -241,6 +262,12 @@ class SessionOrchestrator:
         # runtimes — see ``docs/design/approve-for-session.md`` §4.1.
         # Cleared on ``cleanup(session_id)``; not persisted to DB in v2.
         self._session_approval_cache = SessionApprovalCache()
+        # Process-wide event taps: each receives ``(session_id, event)``
+        # for every event emitted on ANY session bus. The list object is
+        # shared by reference with the per-bus forwarders created in
+        # ``_get_or_create_bus``, so registration is effective for buses
+        # created both before and after the tap was added.
+        self._global_taps: list[GlobalEventTap] = []
 
     @property
     def active_sessions(self) -> set[str]:
@@ -252,11 +279,51 @@ class SessionOrchestrator:
     def _get_or_create_bus(self, session_id: str) -> SessionEventBus:
         bus = self._buses.get(session_id)
         if bus is None:
-            bus = SessionEventBus()
+            bus = SessionEventBus(taps=[_GlobalForwardTap(session_id, self._global_taps)])
             self._buses[session_id] = bus
         return bus
 
-    async def emit_session_event(self, session_id: str, event: Event) -> None:
+    async def attach_session_tap(
+        self, session_id: str, sink: EventSink, *, replay: bool = False
+    ) -> None:
+        """Register a passive multi-subscriber tap on a session's live stream.
+
+        Unlike :meth:`attach_session_sink` (the single client slot used by
+        the WS run channel), taps coexist: any number of observers — SSE
+        streams, host aggregators — can tap one session without displacing
+        the client or each other. ``replay=True`` first delivers the events
+        of the in-progress message so a mid-turn tap sees a coherent view.
+        """
+        bus = self._get_or_create_bus(session_id)
+        replay_events = await self._build_replay(session_id) if replay else []
+        await bus.add_tap(sink, replay=replay_events)
+
+    async def detach_session_tap(self, session_id: str, sink: EventSink) -> None:
+        """Unregister a tap added via :meth:`attach_session_tap`."""
+        bus = self._buses.get(session_id)
+        if bus is not None:
+            await bus.remove_tap(sink)
+
+    def attach_global_tap(self, tap: GlobalEventTap) -> None:
+        """Register a process-wide tap receiving ``(session_id, event)``
+        for every event on every session bus.
+
+        Intended for singleton host-level aggregators (decision inbox,
+        remote event streams). Synchronous on purpose — registration is a
+        list append on the shared tap list, effective immediately for all
+        existing and future buses.
+        """
+        self._global_taps.append(tap)
+
+    def detach_global_tap(self, tap: GlobalEventTap) -> None:
+        try:
+            self._global_taps.remove(tap)
+        except ValueError:
+            pass
+
+    async def emit_session_event(
+        self, session_id: str, event: Event, *, create_bus: bool = False
+    ) -> None:
         """Emit an event onto a session's bus from outside a turn.
 
         Used by the API layer for session-state notifications that are not
@@ -267,8 +334,16 @@ class SessionOrchestrator:
         is purely a live-notification channel for currently-attached
         clients. No DB persistence — by design (see
         ``docs/design/session-modes.md`` §Events).
+
+        ``create_bus=True`` forces bus creation so the event reaches
+        global taps (and any tap registered between turns) even when no
+        client has ever attached — used for synthetic notifications like
+        the interrupt-fallback ``session_error``.
         """
-        bus = self._buses.get(session_id)
+        if create_bus:
+            bus: SessionEventBus | None = self._get_or_create_bus(session_id)
+        else:
+            bus = self._buses.get(session_id)
         if bus is None:
             return
         await bus.emit(event)

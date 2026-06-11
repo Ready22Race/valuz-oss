@@ -4,9 +4,10 @@ Runtime layer (ADR-023). Owns the agent-turn engine that drives a kernel
 session through one or more turns:
 
   * :func:`run_session_to_idle` — one-shot turn-to-idle (dispatch sync path,
-    sync-kickoff lead, chat ``send`` path). Attaches a BroadcastEventSink,
-    runs the turn, reads back the final status, finalizes, consumes
-    attachments, detaches, cleans up, publishes ``SESSION_FINISHED``.
+    sync-kickoff lead, chat ``send`` path). Runs the turn through the
+    kernel seam, reads back the final status, finalizes, consumes
+    attachments, publishes ``SESSION_FINISHED``. (Live events reach SSE
+    followers via the kernel's bus taps — no per-run sink to manage.)
   * :class:`ActorRunner` — the persistent v2 actor loop (``run_actor_loop``)
     plus its per-turn primitive (``_run_turn_with_sink``) and the member_done
     prompt renderer (``_format_member_done``).
@@ -33,10 +34,6 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any, Literal
-
-import valuz_agent.boot.kernel  # noqa: F401
-
-from src.core import UserMessage
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.eventbus import EventBus
@@ -81,20 +78,9 @@ async def run_session_to_idle(
     final_status: str = "idle"
     encountered_error = False
 
-    sink = None
-    orchestrator = None
     consumed_attachment_ids: list[str] = []
 
     try:
-        from app.dependencies import get_orchestrator, get_store
-        from valuz_agent.adapters.broadcast_sink import BroadcastEventSink, broadcast
-
-        store = get_store()
-        orchestrator = get_orchestrator()
-
-        sink = BroadcastEventSink(session_id)
-        await orchestrator.attach_session_sink(session_id, sink)
-
         # Dispatch sessions have no pending attachments (they are built
         # fresh by build_member_session), so the pending attachment block
         # is a no-op for subtasks. Keep it for lead sessions started via
@@ -114,11 +100,12 @@ async def run_session_to_idle(
             consumed_attachment_ids = []
             attachment_specs = ()
 
-        loaded_session = await store.load_session(session_id)
+        loaded_session = await kernel_client.get_session(session_id)
         # Kernel ``run_turn`` persists ``session.status="running"`` to the DB
         # before handing off to the runtime (agent-harness 3e742fc), so the
         # detail fetch returns ``running`` and the frontend live view engages
-        # on open. No host-side pre-persist needed.
+        # on open. No host-side pre-persist needed. Live events reach SSE
+        # followers through the kernel's bus taps — no per-run sink attach.
         project_id = str(
             (((loaded_session.metadata or {}).get("valuz", {}) or {}).get("project_id") or "")
             if loaded_session
@@ -131,20 +118,17 @@ async def run_session_to_idle(
         except Exception:  # noqa: BLE001
             additional_context = ""
 
-        from src.core.types import Attachment
-
-        user_msg = UserMessage(
-            text=content,
-            attachments=tuple(
-                Attachment(source_path=source, parsed_path=parsed)
-                for source, parsed in attachment_specs
-            ),
-            additional_context=additional_context,
-        )
-
         try:
-            message = await orchestrator.run_turn(session_id, user_msg)
-            after_run = await store.load_session(session_id)
+            message = await kernel_client.run_turn(
+                session_id,
+                content,
+                attachments=[
+                    {"source_path": source, "parsed_path": parsed}
+                    for source, parsed in attachment_specs
+                ],
+                additional_context=additional_context,
+            )
+            after_run = await kernel_client.get_session(session_id)
             final_status = after_run.status if after_run is not None else "idle"
             if on_message is not None:
                 await on_message(message, after_run)
@@ -157,17 +141,13 @@ async def run_session_to_idle(
             final_status = "terminated"
             encountered_error = True
             try:
-                from src.core.events import Event as KernelEvent
-
-                await broadcast(
+                await kernel_client.emit_live_event(
                     session_id,
-                    KernelEvent(
-                        type="session_error",
-                        data={
-                            "category": type(exc).__name__,
-                            "message": str(exc) or "agent turn failed",
-                        },
-                    ),
+                    "session_error",
+                    {
+                        "category": type(exc).__name__,
+                        "message": str(exc) or "agent turn failed",
+                    },
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -193,21 +173,6 @@ async def run_session_to_idle(
             await _mark_attachments_consumed(consumed_attachment_ids)
         except Exception:  # noqa: BLE001
             pass
-
-    # Detach broadcast sink
-    if orchestrator is not None and sink is not None:
-        try:
-            await orchestrator.detach_session_sink(session_id, sink)
-        except Exception:  # noqa: BLE001
-            pass
-
-    # Cleanup broadcast channel
-    try:
-        from valuz_agent.adapters.broadcast_sink import cleanup_session
-
-        await cleanup_session(session_id)
-    except Exception:  # noqa: BLE001
-        pass
 
     event_bus.publish(
         SESSION_FINISHED,
@@ -361,30 +326,18 @@ class ActorRunner:
         """Run ONE turn on a persistent session and return its final status.
 
         Unlike :func:`run_session_to_idle`, this does NOT finalize or clean up
-        the session — the actor loop owns that, once, at loop exit. Attaches a
-        broadcast sink for the turn so SSE followers still see live events.
+        the session — the actor loop owns that, once, at loop exit. Live
+        events reach SSE followers through the kernel's bus taps.
         """
-        from app.dependencies import get_orchestrator, get_store
-        from valuz_agent.adapters.broadcast_sink import BroadcastEventSink
-
-        store = get_store()
-        orchestrator = get_orchestrator()
-        sink = BroadcastEventSink(session_id)
-        await orchestrator.attach_session_sink(session_id, sink)
         try:
             # Kernel ``run_turn`` persists ``status="running"`` to the DB
             # itself (agent-harness 3e742fc) — no host pre-persist needed.
-            await orchestrator.run_turn(session_id, UserMessage(text=content))
-            loaded = await store.load_session(session_id)
+            await kernel_client.run_turn(session_id, content)
+            loaded = await kernel_client.get_session(session_id)
             return loaded.status if loaded is not None else "idle"
         except Exception as exc:  # noqa: BLE001
             logger.warning("actor turn failed for session %s: %s", session_id, exc)
             return "terminated"
-        finally:
-            try:
-                await orchestrator.detach_session_sink(session_id, sink)
-            except Exception:  # noqa: BLE001
-                pass
 
     async def run_actor_loop(
         self,

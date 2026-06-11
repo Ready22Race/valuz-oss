@@ -18,6 +18,7 @@ from app.schemas import (
     SubAgentDefSchema,
     TodoItem,
     ToolDefSchema,
+    UsageRollupData,
 )
 from src.core import (
     AgentConfig,
@@ -139,3 +140,38 @@ def session_to_data(session: Session) -> SessionData:
 
 def event_to_data(event: Event) -> EventData:
     return EventData(type=event.type, data=event.data, timestamp=event.timestamp)
+
+
+def stored_event_to_data(ev: Any, *, include_session_id: bool = False) -> EventData:
+    """Project a ``StoredEvent`` (store read with coordinates) to the wire."""
+    return EventData(
+        type=ev.type,
+        data=ev.data,
+        timestamp=ev.timestamp,
+        seq=ev.seq,
+        message_id=ev.message_id,
+        session_id=ev.session_id if include_session_id else None,
+    )
+
+
+def live_event_to_data(event: Event, *, session_id: str | None = None) -> EventData:
+    """Project a live (bus) event to the wire. No ``seq`` — not persisted yet
+    (or never, for delta types)."""
+    return EventData(
+        type=event.type,
+        data=event.data,
+        timestamp=event.timestamp,
+        session_id=session_id,
+    )
+
+
+def usage_row_to_data(row: Any) -> UsageRollupData:
+    return UsageRollupData(
+        day=row.day,
+        model=row.model,
+        request_count=row.request_count,
+        input_tokens=row.input_tokens,
+        output_tokens=row.output_tokens,
+        cache_read_tokens=row.cache_read_tokens,
+        cache_write_tokens=row.cache_write_tokens,
+    )

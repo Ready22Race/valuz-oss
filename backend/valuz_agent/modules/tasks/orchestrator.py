@@ -1327,13 +1327,6 @@ class TaskOrchestrator:
         except Exception:  # noqa: BLE001
             logger.exception("_finalize_actor: finalize failed for %s", session_id)
 
-        try:
-            from valuz_agent.adapters.broadcast_sink import cleanup_session
-
-            await cleanup_session(session_id)
-        except Exception:  # noqa: BLE001
-            pass
-
         if role == "lead":
             # A ``shutdown``-triggered exit (pause / stop / finish_task
             # broadcast) is externally managed: stop_task already set the task

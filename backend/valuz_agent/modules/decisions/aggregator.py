@@ -40,7 +40,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 from app.schemas import EventData as Event
 from app.schemas import SessionData as Session
 
-from valuz_agent.adapters.broadcast_sink import subscribe_all, unsubscribe_all
+from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.decisions.schemas import (
     DecisionEntry,
@@ -91,7 +91,6 @@ class DecisionAggregator:
         self._subscribers: list[asyncio.Queue[DecisionStreamEvent]] = []
         self._lock = asyncio.Lock()
         self._sub_task: asyncio.Task[None] | None = None
-        self._sub_queue: asyncio.Queue[tuple[str, Event]] | None = None
         self._stopped = False
 
     # ---- Lifecycle --------------------------------------------------
@@ -104,7 +103,6 @@ class DecisionAggregator:
         if self._sub_task is not None:
             return
         await self._hydrate_from_history()
-        self._sub_queue = await subscribe_all()
         self._sub_task = asyncio.create_task(self._broadcast_loop(), name="decisions-aggregator")
         logger.info(
             "DecisionAggregator started; hydrated %d pending entries",
@@ -125,9 +123,6 @@ class DecisionAggregator:
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
-        if self._sub_queue is not None:
-            await unsubscribe_all(self._sub_queue)
-            self._sub_queue = None
         async with self._lock:
             # Signal any live subscribers to drain — they'll exit on the
             # sentinel and clean themselves up via unsubscribe().
@@ -256,17 +251,13 @@ class DecisionAggregator:
     # ---- Internal: live broadcast loop ------------------------------
 
     async def _broadcast_loop(self) -> None:
-        assert self._sub_queue is not None
-        q = self._sub_queue
         try:
-            while not self._stopped:
-                try:
-                    item = await q.get()
-                except asyncio.CancelledError:
-                    raise
-                if item is None:
+            async for event in kernel_client.subscribe_all_events():
+                if self._stopped:
+                    break
+                session_id = event.session_id or ""
+                if not session_id:
                     continue
-                session_id, event = item
                 try:
                     await self._handle_event(session_id, event)
                 except Exception:  # noqa: BLE001 — broad-catch keeps loop alive
