@@ -148,6 +148,50 @@ export const registerIpcHandlers = () => {
     child.unref();
   });
 
+  // Window control IPC — minimze, maximize/restore, close, and state query.
+  // Used by the custom WindowControls component in the renderer TopBar on
+  // Windows and Linux (macOS uses native traffic-light buttons instead).
+  ipcMain.handle("window_minimize", async () => {
+    getMainWindow()?.minimize();
+  });
+
+  ipcMain.handle("window_maximize", async () => {
+    const win = getMainWindow();
+    if (!win) return false;
+    if (win.isMaximized()) {
+      win.unmaximize();
+      return false;
+    }
+    win.maximize();
+    return true;
+  });
+
+  ipcMain.handle("window_close", async () => {
+    getMainWindow()?.close();
+  });
+
+  ipcMain.handle("window_is_maximized", async () => {
+    return getMainWindow()?.isMaximized() ?? false;
+  });
+
+  ipcMain.handle("window_reload", async () => {
+    getMainWindow()?.reload();
+  });
+
+  ipcMain.handle("window_toggle_devtools", async () => {
+    const win = getMainWindow();
+    if (win) {
+      win.webContents.toggleDevTools();
+    }
+  });
+
+  ipcMain.handle("window_toggle_fullscreen", async () => {
+    const win = getMainWindow();
+    if (win) {
+      win.setFullScreen(!win.isFullScreen());
+    }
+  });
+
   ipcMain.handle(
     "cli_login_status",
     async (_event, args: { tool?: CliTool }) => {

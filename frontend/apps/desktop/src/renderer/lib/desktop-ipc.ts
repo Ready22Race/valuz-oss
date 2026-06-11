@@ -140,3 +140,83 @@ export const launchCliLogin = async (
   if (!bridge) return { launched: false, error: "unsupported_platform" };
   return bridge.invoke<CliLoginLaunchResult>("cli_login_launch", { tool });
 };
+
+/**
+ * Window control helpers — minimize, maximize/restore, close, and
+ * state query.  Used by the custom WindowControls component in the
+ * TopBar on Windows and Linux (macOS keeps native traffic-light buttons).
+ */
+export const windowMinimize = async (): Promise<void> => {
+  const bridge = getBridge();
+  if (!bridge) return;
+  await bridge.invoke("window_minimize");
+};
+
+export const windowMaximize = async (): Promise<boolean> => {
+  const bridge = getBridge();
+  if (!bridge) return false;
+  return bridge.invoke<boolean>("window_maximize");
+};
+
+export const windowClose = async (): Promise<void> => {
+  const bridge = getBridge();
+  if (!bridge) return;
+  await bridge.invoke("window_close");
+};
+
+export const windowIsMaximized = async (): Promise<boolean> => {
+  const bridge = getBridge();
+  if (!bridge) return false;
+  return bridge.invoke<boolean>("window_is_maximized");
+};
+
+export const windowReload = async (): Promise<void> => {
+  const bridge = getBridge();
+  if (!bridge) return;
+  await bridge.invoke("window_reload");
+};
+
+export const windowToggleDevTools = async (): Promise<void> => {
+  const bridge = getBridge();
+  if (!bridge) return;
+  await bridge.invoke("window_toggle_devtools");
+};
+
+export const windowToggleFullscreen = async (): Promise<void> => {
+  const bridge = getBridge();
+  if (!bridge) return;
+  await bridge.invoke("window_toggle_fullscreen");
+};
+
+export const cliInstallToPath = async (): Promise<{
+  success: boolean;
+  error?: string;
+}> => {
+  const bridge = getBridge();
+  if (!bridge) return { success: false, error: "Not in Electron" };
+  return bridge.invoke<{ success: boolean; error?: string }>(
+    "cli_install_to_path",
+  );
+};
+
+export const cliUninstallFromPath = async (): Promise<{
+  success: boolean;
+  error?: string;
+}> => {
+  const bridge = getBridge();
+  if (!bridge) return { success: false, error: "Not in Electron" };
+  return bridge.invoke<{ success: boolean; error?: string }>(
+    "cli_uninstall_from_path",
+  );
+};
+
+export const cliInstallStatus = async (): Promise<{
+  installed: boolean;
+  path?: string;
+}> => {
+  const bridge = getBridge();
+  if (!bridge) return { installed: false };
+  return bridge.invoke<{ installed: boolean; path?: string }>(
+    "cli_install_status",
+  );
+};

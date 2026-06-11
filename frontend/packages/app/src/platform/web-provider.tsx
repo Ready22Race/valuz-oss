@@ -27,6 +27,7 @@ const webCapabilities: PlatformCapabilities = {
     /* no-op */
   },
   isElectron: false,
+  isMac: false,
 };
 
 export function WebPlatformProvider({ children }: { children: ReactNode }) {

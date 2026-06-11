@@ -1,7 +1,8 @@
 import type { ServiceInfo, ServiceStatusType } from "@valuz/shared";
 import { t } from "@valuz/shared/i18n";
-import { WindowDragRegion } from "@valuz/ui";
-import { useMemo } from "react";
+import { WindowDragRegion, WindowControls } from "@valuz/ui";
+import { useEffect, useMemo, useState } from "react";
+import { usePlatform } from "@valuz/app/platform";
 
 interface StartupScreenProps {
   services: ServiceInfo[];
@@ -23,6 +24,17 @@ export const StartupScreen = ({
   onRetry,
   services,
 }: StartupScreenProps) => {
+  const platform = usePlatform();
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  useEffect(() => {
+    if (platform.isElectron && !platform.isMac && platform.windowIsMaximized) {
+      void platform.windowIsMaximized().then(setIsMaximized);
+    }
+  }, [platform.isElectron, platform.isMac, platform.windowIsMaximized]);
+
+  const showWindowControls = platform.isElectron && !platform.isMac;
+
   const total = services.length;
   const ready = services.filter((s) => s.status === "running").length;
   const erroring = services.filter((s) => s.status === "error").length;
@@ -39,6 +51,21 @@ export const StartupScreen = ({
     <div className="splash-root">
       <style>{SPLASH_CSS}</style>
       <WindowDragRegion />
+      {showWindowControls && (
+        <div
+          className="fixed right-0 top-0 z-50"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+        >
+          <WindowControls
+            onMinimize={() => void platform.windowMinimize?.()}
+            onMaximize={() =>
+              void platform.windowMaximize?.().then(setIsMaximized)
+            }
+            onClose={() => void platform.windowClose?.()}
+            isMaximized={isMaximized}
+          />
+        </div>
+      )}
 
 
       {/* Layer 1 — animated aurora */}

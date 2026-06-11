@@ -52,6 +52,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
   TopBar,
+  WindowControls,
   type DesktopSidebarBottomItem,
   type DesktopSidebarProjectGroup,
   type DesktopSidebarRecentItem,
@@ -62,8 +63,12 @@ import {
   HelpCircle,
   Home,
   LogOut,
+  Maximize,
+  Menu,
   MessageCirclePlus,
+  RefreshCw,
   Settings,
+  Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -165,6 +170,16 @@ export function ProjectLayoutBase({
     () => (window.history.state as { idx?: number } | null)?.idx ?? 0,
   );
   const [historyMaxIdx, setHistoryMaxIdx] = useState<number>(historyIdx);
+
+  // Window maximize state for the custom window controls (Windows/Linux).
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  // Query initial maximize state on mount (non-mac Electron only).
+  useEffect(() => {
+    if (platform.isElectron && !platform.isMac && platform.windowIsMaximized) {
+      void platform.windowIsMaximized().then(setIsMaximized);
+    }
+  }, [platform.isElectron, platform.isMac, platform.windowIsMaximized]);
 
   // Re-show the in-app update toast (bottom-left floating card) if the user
   // dismissed it. The standalone update window is no longer used.
@@ -524,7 +539,7 @@ export function ProjectLayoutBase({
             onGoForward={() => navigate(1)}
             canGoBack={historyIdx > 0}
             canGoForward={historyIdx < historyMaxIdx}
-            trafficLightPad={platform.isElectron}
+            trafficLightPad={platform.isMac}
             logo={
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -588,8 +603,73 @@ export function ProjectLayoutBase({
             }
             rightControl={topbarRightControl}
             extraLeft={
-              platform.isElectron ? (
-                <UpdateButton onClick={handleOpenUpdateWindow} />
+              <>
+                {platform.isElectron && (
+                  <UpdateButton onClick={handleOpenUpdateWindow} />
+                )}
+                {platform.isElectron && !platform.isMac && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label={t("cli.menuLabel" as Parameters<typeof t>[0])}
+                        className="flex h-[22px] w-[22px] items-center justify-center rounded-[5px] text-ink-body transition-colors hover:bg-surface-muted"
+                      >
+                        <Menu className="h-4 w-4" />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="start"
+                      className="min-w-[180px]"
+                      style={logoMenuContentStyle}
+                    >
+                      <DropdownMenuItem
+                        onSelect={() => void platform.windowReload?.()}
+                      >
+                        <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                        {t("common.reload" as Parameters<typeof t>[0])}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onSelect={() => void platform.windowToggleDevTools?.()}
+                      >
+                        <Terminal className="mr-2 h-3.5 w-3.5" />
+                        Toggle DevTools
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onSelect={() => void platform.windowToggleFullscreen?.()}
+                      >
+                        <Maximize className="mr-2 h-3.5 w-3.5" />
+                        Toggle Fullscreen
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        onSelect={() => void platform.cliInstallToPath?.()}
+                      >
+                        <Terminal className="mr-2 h-3.5 w-3.5" />
+                        {t("cli.installToPath" as Parameters<typeof t>[0])}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onSelect={() => void platform.cliUninstallFromPath?.()}
+                      >
+                        <Terminal className="mr-2 h-3.5 w-3.5" />
+                        {t("cli.uninstallFromPath" as Parameters<typeof t>[0])}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
+              </>
+            }
+            windowControls={
+              platform.isElectron && !platform.isMac ? (
+                <WindowControls
+                  onMinimize={() => void platform.windowMinimize?.()}
+                  onMaximize={() =>
+                    void platform.windowMaximize?.().then(setIsMaximized)
+                  }
+                  onClose={() => void platform.windowClose?.()}
+                  isMaximized={isMaximized}
+                />
               ) : undefined
             }
           />

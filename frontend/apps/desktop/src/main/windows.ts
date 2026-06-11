@@ -30,10 +30,12 @@ export const createMainWindow = async () => {
     },
   };
 
-  // macOS: hidden title bar with inline traffic lights.
-  // Windows/Linux: use the default system title bar.
+  // All platforms: hidden title bar for a unified custom TopBar.
+  // macOS keeps native traffic-light buttons at a custom position.
+  // Windows/Linux rely on custom window control buttons rendered in the
+  // renderer TopBar.
+  windowOptions.titleBarStyle = "hidden";
   if (process.platform === "darwin") {
-    windowOptions.titleBarStyle = "hidden";
     windowOptions.trafficLightPosition = { x: 10, y: 12 };
   }
 

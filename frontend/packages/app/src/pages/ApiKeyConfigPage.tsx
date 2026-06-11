@@ -11,14 +11,26 @@ import {
   SelectTrigger,
   SelectValue,
   WindowDragRegion,
+  WindowControls,
 } from "@valuz/ui";
 import { providersApi, type ProviderDescriptor } from "@valuz/core";
 import { useTranslation } from "@valuz/core";
+import { usePlatform } from "../platform";
 
 export const ApiKeyConfigPage = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const platform = usePlatform();
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  const showWindowControls = platform.isElectron && !platform.isMac;
+
+  useEffect(() => {
+    if (showWindowControls && platform.windowIsMaximized) {
+      void platform.windowIsMaximized().then(setIsMaximized);
+    }
+  }, [showWindowControls, platform.windowIsMaximized]);
   const [providers, setProviders] = useState<ProviderDescriptor[]>([]);
   const [providerKind, setProviderKind] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -164,6 +176,21 @@ export const ApiKeyConfigPage = () => {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-background">
       <WindowDragRegion />
+      {showWindowControls && (
+        <div
+          className="fixed right-0 top-0 z-50"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+        >
+          <WindowControls
+            onMinimize={() => void platform.windowMinimize?.()}
+            onMaximize={() =>
+              void platform.windowMaximize?.().then(setIsMaximized)
+            }
+            onClose={() => void platform.windowClose?.()}
+            isMaximized={isMaximized}
+          />
+        </div>
+      )}
       <div className="w-full max-w-[420px] px-6">
         <button
           type="button"
