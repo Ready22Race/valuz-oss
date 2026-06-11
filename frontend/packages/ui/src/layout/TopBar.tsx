@@ -38,6 +38,13 @@ export interface TopBarProps {
    * against the window edge instead of leaving a gap.
    */
   trafficLightPad?: boolean;
+  /**
+   * Window control buttons (minimize / maximize / close) rendered at the
+   * far right of the bar, flush with the window edge.  Pass
+   * ``<WindowControls />`` on Windows/Linux; leave ``undefined`` on
+   * macOS (native traffic lights are used instead).
+   */
+  windowControls?: ReactNode;
 }
 
 /**
@@ -56,6 +63,7 @@ export const TopBar = ({
   canGoBack = true,
   canGoForward = true,
   trafficLightPad = true,
+  windowControls,
 }: TopBarProps) => {
   const { t } = useI18n();
 
@@ -63,7 +71,9 @@ export const TopBar = ({
     // Root is NOT drag — only the middle spacer is. This guarantees both
     // toggle buttons are click-targets without relying on child no-drag
     // overrides (which Electron 36 occasionally swallows).
-    <div className="flex h-[36px] shrink-0 items-center px-4">
+    <div
+      className={`flex h-[36px] shrink-0 items-center pl-4 ${windowControls ? "pr-0" : "pr-4"}`}
+    >
       {/* Left: traffic light spacer + brand logo + collapse toggle */}
       <div
         className={`flex items-center gap-2 pt-[4px] ${trafficLightPad ? "ml-[58px]" : ""}`}
@@ -169,7 +179,11 @@ export const TopBar = ({
       />
 
       {/* Right: optional control (e.g. right-panel toggle). */}
-      <div className="mr-[4px] flex items-center pt-[4px]">{rightControl}</div>
+      <div className="mr-[4px] flex items-center pt-[0px]">{rightControl}</div>
+
+      {/* Window controls (minimize / maximize / close) — flush right,
+          rendered only on Windows/Linux. macOS uses native traffic lights. */}
+      {windowControls}
     </div>
   );
 };

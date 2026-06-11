@@ -320,6 +320,7 @@ export type KnownI18nKey =
   | "common.previousStep"
   | "common.processing"
   | "common.refresh"
+  | "common.reload"
   | "common.remove"
   | "common.rename"
   | "common.retry"

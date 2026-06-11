@@ -326,6 +326,7 @@ I18nKey = Literal[
     "common.previousStep",
     "common.processing",
     "common.refresh",
+    "common.reload",
     "common.remove",
     "common.rename",
     "common.retry",

@@ -1,18 +1,43 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { MessageSquare, FolderOpen } from "lucide-react";
-import { Button, WindowDragRegion } from "@valuz/ui";
+import { Button, WindowDragRegion, WindowControls } from "@valuz/ui";
 import { useTranslation } from "@valuz/core";
+import { usePlatform } from "../platform";
 import { markOnboarded } from "../lib/onboarding";
 
 export const OnboardingPage = () => {
   const { t } = useTranslation();
   const [step, setStep] = useState<1 | 2>(1);
   const navigate = useNavigate();
+  const platform = usePlatform();
+  const [isMaximized, setIsMaximized] = useState(false);
+  const showWindowControls = platform.isElectron && !platform.isMac;
+
+  useEffect(() => {
+    if (showWindowControls && platform.windowIsMaximized) {
+      void platform.windowIsMaximized().then(setIsMaximized);
+    }
+  }, [showWindowControls, platform.windowIsMaximized]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background">
       <WindowDragRegion />
+      {showWindowControls && (
+        <div
+          className="fixed right-0 top-0 z-50"
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+        >
+          <WindowControls
+            onMinimize={() => void platform.windowMinimize?.()}
+            onMaximize={() =>
+              void platform.windowMaximize?.().then(setIsMaximized)
+            }
+            onClose={() => void platform.windowClose?.()}
+            isMaximized={isMaximized}
+          />
+        </div>
+      )}
       <div className="w-full max-w-[460px] px-6">
         {/* Step 1: File parsing info */}
         {step === 1 && (
@@ -104,12 +129,6 @@ export const OnboardingPage = () => {
             <Button
               className="w-full"
               onClick={() => {
-                // The user has finished the connection wizard — persist
-                // the marker so the setup gate stops bouncing them back
-                // to /welcome on every relaunch. (Subscription provider
-                // creds live in the CLI keychain and are invisible to
-                // the providers API, so we need this localStorage flag
-                // to know the user has gotten past welcome.)
                 markOnboarded();
                 navigate("/");
               }}
