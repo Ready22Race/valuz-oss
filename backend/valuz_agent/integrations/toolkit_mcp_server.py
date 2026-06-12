@@ -204,10 +204,16 @@ def build_toolkit_mcp_asgi(toolset: str) -> Any:
 
 
 def toolkit_mcp_url(*, base_url: str, toolset: str) -> str:
-    """Compose the toolkit MCP endpoint a session's MCP client should call."""
+    """Compose the toolkit MCP endpoint a session's MCP client should call.
+
+    The ``/mcp`` inner path keeps the request strictly inside the Starlette
+    mount — a bare mount-root URL would draw a 307 redirect, which MCP
+    clients don't reliably follow on POST. The stateless session manager
+    itself is path-agnostic.
+    """
     if toolset not in TOOLSET_NAMES:
         raise ValueError(f"unknown toolkit toolset: {toolset}")
-    return f"{base_url.rstrip('/')}/internal/mcp/toolkit/{toolset}"
+    return f"{base_url.rstrip('/')}/internal/mcp/toolkit/{toolset}/mcp"
 
 
 __all__ = [

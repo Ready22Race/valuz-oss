@@ -55,7 +55,7 @@ def _stale_trio(token: str):
     )
     harness = McpHttpServerConfigSchema(
         name="harness",
-        url=f"{base}/toolkit/base",
+        url=f"{base}/toolkit/base/mcp",
         transport="http",
         headers={"X-Valuz-Internal": token, "X-Valuz-Session-Id": "sess-1"},
     )

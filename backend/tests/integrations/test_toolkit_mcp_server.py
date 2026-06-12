@@ -201,13 +201,13 @@ def test_always_on_set_includes_harness_per_toolkit() -> None:
 
     base_set = always_on_http_mcp_servers("sess-1")
     by_name = {m.name: m for m in base_set}
-    assert by_name["harness"].url.endswith("/internal/mcp/toolkit/base")
+    assert by_name["harness"].url.endswith("/internal/mcp/toolkit/base/mcp")
     assert by_name["harness"].headers["X-Valuz-Session-Id"] == "sess-1"
 
     lead_set = always_on_http_mcp_servers("sess-1", toolkit="lead")
     assert {m.name for m in lead_set} == set(by_name)
     assert next(m for m in lead_set if m.name == "harness").url.endswith(
-        "/internal/mcp/toolkit/lead"
+        "/internal/mcp/toolkit/lead/mcp"
     )
 
     assert harness_toolkit_for_run_kind("lead") == "lead"
