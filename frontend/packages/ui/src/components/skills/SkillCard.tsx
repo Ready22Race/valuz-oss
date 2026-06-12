@@ -92,14 +92,14 @@ export const SkillCard = ({
     <Card
       onClick={onClick}
       className={cn(
-        "cursor-default border-surface-border transition-all duration-150 select-none",
+        "cursor-default rounded-lg border-surface-border bg-surface py-0 shadow-xs transition-[border-color,box-shadow] select-none",
         active
-          ? "border-brand/60"
-          : "hover:border-surface-border-hover hover:shadow-sm",
+          ? "border-brand bg-surface shadow-sm"
+          : "card-interactive",
         skill.locked && "opacity-60",
       )}
     >
-      <CardContent className="flex items-start gap-2 px-4 py-1">
+      <CardContent className="flex items-start gap-2 px-4 py-3">
         <div
           className={cn(
             "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-transparent text-lg font-semibold",

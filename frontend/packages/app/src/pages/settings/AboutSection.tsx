@@ -1,9 +1,5 @@
 import { Check, Loader2, RefreshCw, ArrowUpRight } from "lucide-react";
-import {
-  Button,
-  MetricStrip,
-  SettingsSection,
-} from "@valuz/ui";
+import { Button, MetricStrip, SettingsSection } from "@valuz/ui";
 import { useTranslation, useUpdaterStore } from "@valuz/core";
 import { useCallback, useMemo } from "react";
 
@@ -51,19 +47,19 @@ export const AboutSection = () => {
         ]}
       />
       <div className="mb-4 mt-4 rounded-xl bg-card px-4 py-3 shadow-sm">
-          <div className="flex items-center gap-3">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-brand-light">
-              <img src="./logo.png" alt="Valuz" className="h-9 w-9" />
+        <div className="flex items-center gap-3">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-surface-soft">
+            <img src="./logo.png" alt="Valuz" className="h-9 w-9" />
+          </div>
+          <div>
+            <div className="text-sm font-medium text-ink-heading">
+              Valuz Desktop
             </div>
-            <div>
-              <div className="text-sm font-medium text-ink-heading">
-                Valuz Desktop
-              </div>
-              <div className="tabular mt-0.5 text-xs text-ink-meta">
-                v0.1.0 · Build 2026.04
-              </div>
+            <div className="tabular mt-0.5 text-xs text-ink-meta">
+              v0.1.0 · Build 2026.04
             </div>
           </div>
+        </div>
       </div>
       <div className="mb-4 flex items-center gap-2">
         <Button

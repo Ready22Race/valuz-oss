@@ -1,604 +1,187 @@
-# Valuz Design Spec
+# Valuz Design Spec v2
 
-当前页面的视觉规范整理如下。这份文档的目的不是“描述大概风格”，而是把已经落地在页面里的规则固化成后续页面可复用的标准，避免相同元素在不同页面出现字号、颜色、圆角、图标或间距不一致。
+> 2026-06-11 · 替代 `frontend/docs/design/DESIGN.md`（v1）
+> 配套文件：[tokens.css](tokens.css)（可直接替换 project.css 的 token 段）· [spec.html](spec.html)（可视化规范页）
+> 本文档锚定 **`packages/ui` 真实组件代码**，不再锚定原型 `app.jsx`。
 
-## 1. 使用原则
+---
 
-- 这份文档以当前 `Valuz.html` + `app.jsx` 为准。
-- 后续新页面优先复用这里的 token、字号层级、组件尺寸和交互状态，不要重新发明一套近似样式。
-- 如果后续确实要调整全局样式，应同时更新页面代码和这份文档，避免文档与实现脱节。
-- 相同语义的元素必须复用相同样式。例如：
-  `Sidebar` 列表项、弹层菜单项、下拉菜单项、右侧上下文分组、工具卡片状态、输入框、图标按钮。
+## 0. 裁决记录
 
-### 1.1 代码入口
+v1 时期 Figma 色板、DESIGN.md、代码 token 三方互相矛盾。以下裁决为最终值，三端（Figma Variables / 本文档 / tokens.css）同步生效：
 
-当前规范已经落到代码里，后续新增页面或新组件时，优先从这些入口复用，而不是重新手写一套样式：
+| 项 | 裁决值 | 废止值 | 说明 |
+|---|---|---|---|
+| 品牌主色 | **#725cf9** | #6d5cff、#533afd、#965cf9 | Figma 色板钦定主色；代码端改 `--brand` 一行全局生效 |
+| Warning 橙 | **#ef8b0c**（v2.4） | #ff8710、#d97706 | 三件套架构后基色卸下文字职责，按设计反馈提亮去棕褐感；文字场景一律用派生的 warning-text |
+| 状态绿 | **#16a34a** | — | 连接成功、完成态、checkmark |
+| 财务绿（跌） | **#53bc76** | **#53cb76** | #53cb76 确认为 Figma 色板标签笔误（b/c 颠倒），代码中 9 处需替换 |
+| 财务红（涨） | **#f54b4b** | — | 与 error #dc2626 语义分离，不得混用 |
+| Accent 粉 | **#ec4899** | #ef5da8 | 色板色块误填，以标签与代码为准 |
+| Error 红 | **#e5484d** | #dc2626 | 与品牌紫等相对亮度（≈0.18），视觉重量一致；白字对比度 4.5:1 压线 AA |
+| Disabled 文字 | **fg-30 (≈#b6b7bc)** | #e6e7e9 | v1 值对比度 1.3:1 不可读；划线完成态仍可用 fg-30+line-through |
 
-- `DESIGN_TOKENS`
-- `SHARED_STYLES`
-- `panelShellStyle()`
-- `floatingShellStyle()`
-- `menuShellStyle()`
-- `popoverShellStyle()`
-- `sidebarRowStyle()`
-- `sectionLabelStyle()`
-- `panelHeaderStyle()`
+---
 
-这些入口位于 [app.jsx](app.jsx) 顶部常量区，后续同类元素默认先复用这里。
+## 1. 架构原则
 
-## 2. Foundations
+```
+原语层（手选）   每个模式只允许 18 个手选颜色：9 基色 + 1 蓝灰极 + 8 点缀色
+    ↓ color-mix 派生
+语义层（派生）   灰阶 fg-1~80、状态三件套、品牌色阶、阴影
+    ↓ 引用
+组件层           button/popover/card… 只引用语义层，禁止引用原语或字面量
+```
 
-### 2.1 字体
+**三条铁律：**
+1. 任何新颜色必须能回答"从哪个基色派生"。答不上来 = 不准进代码。
+2. 同语义必须同 token：次级文字只有 `ink-body`（即 fg-60）一个名字。
+3. 新组件先查 `packages/ui/components/ui/`，第二次出现的样式组合必须上提为组件。
 
-- 主字体：`"PingFang SC"`
-- 等宽字体：`monospace`
-- 如特殊运行环境覆盖不到上述字体，需在实现前单独确认补充字体策略。
-- 默认页面基础字号：`14px`
-- 默认抗锯齿：`-webkit-font-smoothing: antialiased`
+---
 
-### 2.2 字号层级
+## 2. 颜色
 
-以下字号已经在当前页面里形成稳定层级，后续页面尽量只在这组里选：
+### 2.1 基色（唯一手选区）
 
-| Size | Weight | 用途 |
-|---|---:|---|
-| `9.5px` | `700` | 文件类型 Badge 文案 |
-| `10px` | `600` | Skill 状态标签、极小辅助标识 |
-| `10.5px` | `500/600` | Sidebar 分组小标题、Popover Header、文件尺寸、辅助说明 |
-| `11px` | `400/600` | Sidebar Section Label、表头、工具状态标签 |
-| `11.5px` | `400/500` | 下拉菜单副描述、Section Label、工具详情文本 |
-| `12px` | `400/500/600` | Header 辅助信息、按钮标签、meta 信息、内联 code、快捷键 |
-| `12.5px` | `400/500` | 下拉选项主文本、文件名、Todo 文本、数据表正文 |
-| `13px` | `400/500` | Sidebar Row、Composer 文本、Context 分组标题 |
-| `13.5px` | `400/600` | 主消息文本、用户气泡正文 |
-| `14px` | `500` | 主内容标题栏标题、页面常规 UI 基准字号 |
-| `15px` | `500` | 右侧面板主标题 |
+| Token | Light | Dark | 用途 |
+|---|---|---|---|
+| `--background` | `#f8f9fb` | `#0f1012` | 页面大背景 |
+| `--foreground` | `#131313` | `#e4e4e7` | 一级文字、灰阶派生源 |
+| `--surface` | `#ffffff` | `#17181c` | 面板、卡片、弹层 |
+| `--brand` | `#725cf9` | `#8b7afc` | 主 CTA、品牌强调、focus ring、Info |
+| `--success` | `#16a34a` | `#22c55e` | 状态绿 |
+| `--warning` | `#ef8b0c` | `#f59e0b` | 警示（实底/图标须配文字，独立传达信息用 warning-text） |
+| `--error` | `#e5484d` | `#ef4444` | 错误、危险操作 |
+| `--finance-up` | `#f54b4b` | `#ff6b6b` | 涨（仅财务数据） |
+| `--finance-down` | `#53bc76` | `#5fd389` | 跌（仅财务数据） |
+| `--slate` | `#444b54` | `#a8b1bf` | 蓝灰极（=v1 neutral/700），灰阶中段的派生轴 |
 
-### 2.3 字重
+点缀/图表分类色（8 个，暗色用对应 400 档）：
+`1 sky #0ea5e9 · 2 teal #14b8a6 · 3 amber #eab308 · 4 pink #ec4899 · 5 blue #3b82f6 · 6 lime #84cc16 · 7 orange #f97316 · 8 fuchsia #d946ef`
+规则：图表系列严格按此顺序取色（保证跨页面同一序号同色）；超过 8 个系列用 `fg-50` 归并为"其他"；amber 是点缀不得当 warning 用；扩展时同亮度饱和度只动色相。
 
-- `400`：正文、Sidebar row、一般说明文字
-- `500`：面板标题、分组标题、文件名、表格关键字段
-- `600`：Section Label、Popover Header、状态标签、小范围强调
-- `700`：极小 badge 文案
+### 2.2 灰阶（派生，禁止手选）
 
-### 2.4 颜色 Token
+双轴结构：浅端（1~12）沿 foreground 派生保持中性；中段（30~80）沿蓝灰极 `slate` 派生——冷调在中间最饱满、两端归零，与 v1 色板的冷灰气质一致。档位名表示深度，不等于混合百分比。
 
-#### 基础背景
+| Token | 配方 | ≈v1 值 | 用途 |
+|---|---|---|---|
+| `fg-1` | fg 1% → bg | `#f7f8fa` | hover 底、工具卡片底 |
+| `fg-3` | fg 3% | `#f3f4f6` | 分割线、内卡边界 |
+| `fg-5` | fg 5% | `#f5f5f4` | 次级浅底 |
+| `fg-8` | fg 8% | `#e6e7e9` | 常规边框 |
+| `fg-12` | fg 12% | `#dbdbdb` | 强边界 |
+| `fg-30` | slate 37% → bg | `#b6b7bc` | 弱辅助文字、disabled |
+| `fg-50` | slate 60% | `#898f9c` | 图标次级（v1 漏收，曾被硬编码） |
+| `fg-60` | slate 75% | `#6e7481` | **次级文字唯一 token**（ink-body） |
+| `fg-80` | = slate | `#444b54` | 强次级（v1 漏收） |
 
-| Token / Color | 值 | 用途 |
-|---|---|---|
-| `--bg` | `#F8F9FB` | 页面大背景 |
-| `--surface` | `#FFFFFF` | 主面板、侧栏按钮、弹层底色 |
-| `--surface-2` | `#F5F5F4` | 次级浅底、轻量分组背景 |
-| `#F7F8FA` | 固定值 | hover 背景、工具卡片底色、上下文分组底色 |
-| `#E0E1EA` | 固定值 | 主区域 radial gradient 的浅灰高光 |
+### 2.3 状态色三件套
 
-#### 边框 / 分割线
+每个状态色固定三个派生角色，**禁止手配浅底/深字**：
 
-| Token / Color | 值 | 用途 |
-|---|---|---|
-| `--border` | `#E6E7E9` | 常规边框 |
-| `--border-strong` | `#DBDBDB` | scrollbar thumb、较强边界 |
-| `#F3F4F6` | 固定值 | 分割线、卡片顶部边界、工具卡片内分割 |
-| `#D9D9DD` | 固定值 | 工具状态 `running` 的边框 |
+```
+X-soft   = mix(X 10%, background)   浅底（badge、toast 背景）
+X-border = mix(X 35%, background)   边框
+X-text   = mix(X 65%, foreground)   该底色上的文字
+```
 
-#### 文字
+Info 复用品牌紫（裁决：不引入第五个状态色相）。
 
-| Token / Color | 值 | 用途 |
-|---|---|---|
-| `TEXT_PRIMARY_COLOR` | `#131313` | 一级文字、选中内容、主要 icon |
-| `TEXT_SECONDARY_COLOR` | `#6E7481` | 二级文字、辅助说明、Section Label、普通 icon |
-| `TEXT_DISABLED_COLOR` | `#E6E7E9` | 已完成 Todo、禁用态 |
-| `--text` | `#131313` | 通用正文 token |
-| `--text-2` | `#6E7481` | 通用次级文本 token |
-| `--text-3` | `#b6b7bc` | 更弱的辅助信息 |
+### 2.4 品牌色阶
 
-说明：
+`50 #f3f2ff · 100 #eae6ff · 200 #d1c8ff · 300 #b29ff7 · 500 #725cf9 · 600 #5d46e8(hover) · 700 #4936c2(active/深字)`
+渐变统一为 `--brand-gradient`（600→300），废止手写 `#533afd→#965cf9`。
 
-- 当前页面里既有 CSS 变量，也有部分组件直接写死 `#131313` / `#6E7481`。后续页面应优先复用统一语义：
-  一级文本统一到 `#131313` 或 `var(--text)`；
-  二级文本统一到 `#6E7481` 或 `var(--text-2)`；
-  更弱辅助统一到 `var(--text-3)`。
-- 不要继续引入新的灰阶近似色。
+---
 
-#### 强调 / 状态
+## 3. 字体排印
 
-| Token / Color | 值 | 用途 |
-|---|---|---|
-| `--accent` | 默认 `#6D5CFF` | 主行动按钮、品牌强调 |
-| `--accent-2` | 默认 `#8B7FFF` | 辅助强调 |
-| `--accent-soft` | 默认 `#EDE9FF` | 强调色浅背景 |
-| `--accent-sky` / `text-accent-sky` | `#0EA5E9` | 点缀色 1；Context 列表第 1 项 icon |
-| `--accent-teal` / `text-accent-teal` | `#14B8A6` | 点缀色 2；Context 列表第 2 项 icon |
-| `--accent-amber` / `text-accent-amber` | `#EAB308` | 点缀色 3；Context 列表第 3 项 icon |
-| `--accent-pink` / `text-accent-pink` | `#EC4899` | 点缀色 4；Context 列表第 4 项 icon |
-| `--context-icon` / `text-context-icon` | `#725CF9` | 右侧 Context 列表 icon |
-| `DISCLOSURE_CHEVRON_COLOR` | `#94A3B8` | 所有折叠箭头 |
-| `FINANCE_UP_COLOR` | `#F54B4B` | 财务正向值 |
-| `FINANCE_DOWN_COLOR` | `#53BC76` | 财务负向值 |
-| `--success` | `#16A34A` | 成功状态 |
-| `--success-soft` | `#DCFCE7` | 成功浅底 |
-| `--warn` | `#D97706` | 警示状态 |
-| `--warn-soft` | `#FEF3C7` | 警示浅底 |
-| `--danger` | `#DC2626` | 危险状态 |
+- 主字体 `PingFang SC`；等宽 `ui-monospace/SF Mono/Menlo`；`Newsreader + Noto Serif SC` 仅限 onboarding 大标题。
+- 注意：PingFang 无真斜体、字重档只有 Regular/Medium/Semibold 可用——**禁用 italic 和 700 以上字重**（700 仅限 ≤10px badge 的 Latin/数字）。
 
-#### macOS Window Chrome
+### 字阶（8 档整数，0.5px 档全部废止）
 
-- 红灯：`#FF5F57`
-- 黄灯：`#FEBC2E`
-- 绿灯：`#28C840`
+| Token | 字号 | 行高 | 字重 | 用途 |
+|---|---|---|---|---|
+| `micro` | 10px | 1.2 | 600/700 | 文件 badge、极小标识（仅图形场景，不做正文） |
+| `2xs` | 11px | 1.4 | 400/600 | Section Label、表头、状态标签 |
+| `xs` | 12px | 1.5 | 400/500 | meta、按钮标签、inline code、菜单副文案 |
+| `sm` | 13px | 1.55 | 400/500 | Sidebar 行、Composer、列表主文案、菜单主文案 |
+| `base` | 14px | 1.7 | 400/500 | **消息正文**、标题栏标题、页面基准 |
+| `lg` | 15px | 1.5 | 500 | 右侧面板主标题 |
+| `xl` | 18px | 1.4 | 500/600 | 页面标题 |
+| `2xl` | 24px | 1.3 | 500 | onboarding、大数字 |
 
-### 2.5 圆角体系
+字重：400 正文 / 500 标题、关键字段 / 600 Label、强调 / 700 仅 micro badge。
 
-| Radius | 用途 |
+---
+
+## 4. 间距 · 圆角 · 阴影 · 层级 · 动效
+
+- **间距**：4px 网格 `4 / 8 / 12 / 16 / 20 / 24 / 32`（v1 的 6/9/10/14/28 就近归档）。
+- **圆角**：`sm 4 / md 6 / lg 8 / xl 10 / 2xl 12 / full`（2/3/7/14px 废止）。同层级容器共享同一档。
+- **阴影**：4 级 elevation，从前景色派生（暗色自动加深）：
+  `shadow-1` 卡片 · `shadow-2` 悬浮卡片/sidebar active · `shadow-3` popover/dropdown · `shadow-4` modal/浮层/应用外壳。
+- **z-index**：`base 0 · sticky 20 · titlebar 40 · panel 50 · dropdown 100 · tooltip 150 · modal 200 · toast 300`。
+- **动效**：`fast 120ms`（hover）· `base 200ms`（折叠/滑入）· `slow 250ms`（布局），easing 统一 `cubic-bezier(0.4,0,0.2,1)`。
+
+## 5. 图标
+
+- Lucide 风格，viewBox 24，round cap/join。
+- **stroke 只有 2 档**：默认 `2`，≥18px 大图标 `1.5`（v1 的 1.9/1.8/1.7/1.6 全部归 2，未选中 checkbox 的 1 归 1.5）。
+- 尺寸 3 档：`12 / 14 / 16`。
+- 颜色：一级 `foreground`，二级 `fg-60`，折叠箭头 `fg-50`；同一行 ≤2 种图标色；普通图标禁用品牌色。
+
+## 6. 无障碍底线
+
+- 正文/标签文字 ≥ AA（4.5:1）：`foreground`、`fg-60`、`fg-80`、各 `X-text` 达标。
+- `fg-50` 仅限 ≥18px 或图标；`fg-30` 仅限 disabled 与已完成划线，不承载必读信息。
+- focus-visible：所有可交互元素 `2px var(--brand)` ring + 2px offset，禁止 `outline: none` 裸奔。
+
+## 7. 组件层对齐规则
+
+- 设计稿变体名 = 代码 props 名，逐字一致：Button 为 `default(主紫) / outline(次要) / ghost / destructive / link` × `xs / sm / default / lg / icon*`。Figma 现有 Primary/Secondary 命名按此重命名。
+- **`secondary` 变体废止，并入 `outline`**（裁决：一个强调层级只配一个变体，消除"用哪个"的歧义；代码实测 outline 102 处 vs secondary 4 处，outline 已是事实上的次要按钮，且在灰底面板上白底+边框比灰填充更清晰）。迁移：cva 里将 `secondary` 设为 `outline` 的 deprecated 别名 → 改掉 4 处调用（其中 MultiSelect 把按钮当标签用，应改 Badge）→ 删除别名。强调阶梯固定为：`default > outline > ghost > link`。
+- 状态全集：`default / hover / active / focus-visible / disabled / loading`，新组件缺一不交付。
+- DESIGN.md v1 §5 的组件像素规格（Sidebar/Composer/Popover/ToolCard/ContextPanel）仍然有效，但其中色值/字号/圆角一律按本文档 token 替换字面量。
+
+## 8. 暗色模式
+
+只重定义 §2.1 的基色暗列，全部派生值自动重算。**禁止在 .dark 里写任何非基色覆盖**——若暗色下某处不对，修的是派生配方而不是加特例。
+
+## 9. 迁移对照（codemod 清单）
+
+| 旧值（代码中实测存在） | → 新 token |
 |---|---|
-| `3px` | 极小标签、`kbd` |
-| `4px` | 小型状态标签、文件 badge、小 icon action |
-| `6px` | 轻量按钮、小行项、SegmentedControl |
-| `7px` | Sidebar Row |
-| `8px` | 新建对话按钮、Composer 容器、小 icon button、工具卡片、表格卡片 |
-| `10px` | Popover、下拉项容器、Composer 输入框内层 |
-| `12px` | 主面板、右侧面板、浮层、上下文分组、用户首条气泡、下拉菜单 |
-| `14px` | 页面级 token，保留给更大的容器 |
-
-原则：
-
-- 同层级组件尽量共享同一圆角。
-- 不要出现 `9px`、`11px`、`13px` 这类新的随机值。
-
-### 2.6 阴影体系
-
-| Shadow | 用途 |
-|---|---|
-| `0 50px 100px -20px rgba(0, 0, 0, 0.45), 0 30px 60px -30px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(0,0,0,0.06)` | 应用外壳 |
-| `0 24px 48px rgba(28, 25, 23, 0.14)` | 侧栏浮层 |
-| `0 18px 40px -18px rgba(17,24,39,0.28), 0 8px 16px -12px rgba(17,24,39,0.18)` | 下拉菜单 |
-| `0 12px 32px -8px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.04)` | Popover |
-| `0 4px 10px rgba(217, 221, 224, 0.8)` | Sidebar active row |
-| `0 20px 40px -10px rgba(0,0,0,0.15)` | Tweaks 调试面板 |
-
-### 2.7 间距体系
-
-后续页面优先复用下列间距档位：
-
-| Spacing | 常见用途 |
-|---|---|
-| `4px` | 微间距、最小 hover 容错、点状 loading 间距 |
-| `6px` | Header 内边距、小分组内边距 |
-| `8px` | 常规行间距、按钮上下间距、Composer 水平内边距 |
-| `9px` | 行项内部 icon + text 的常见 gap |
-| `10px` | 卡片内容基础内边距 |
-| `12px` | 面板内容内边距、下拉菜单项 |
-| `14px` | 较宽的容器内边距 |
-| `16px` | 页面级左右 padding |
-| `20px` | 主面板 header 左右 padding、标题栏 |
-| `24px` | 主消息区左右内边距 |
-| `28px` | 主消息区上下内边距 |
-
-## 3. 图标规范
-
-### 3.1 基础规则
-
-- 当前页面使用本地 Lucide 风格 SVG 图标。
-- 默认 viewBox：`24 x 24`
-- 默认 linecap / linejoin：`round`
-- 仅在特殊图标中使用实心填充，例如 `play`、`pause`、`stop`、`checkboxFilled`。
-
-### 3.2 常用尺寸
-
-| Size | 用途 |
-|---|---|
-| `12px` | 小型说明、表格 title icon、Slash icon、Popover icon |
-| `13px` | 小按钮 icon、下拉选中勾、发送箭头 |
-| `14px` | Sidebar icon、标题栏文件 icon、Context 分组 icon、新建对话 icon |
-| `15px` | 顶部 chrome 上的面板切换 icon、附件 icon |
-| `16px` | 收起态侧栏 icon |
-| `18px` | Todo checkbox |
-
-### 3.3 描边粗细
-
-| Stroke | 用途 |
-|---|---|
-| `2` | Sidebar icon、主折叠箭头、主操作 icon |
-| `1.9` | Context 分组 icon、附件 icon |
-| `1.8` | 模型切换 globe icon |
-| `1.7` | 勾选后的 checkbox |
-| `1.6` | 项目区加号按钮 |
-| `1` | 未完成 checkbox |
-
-### 3.4 图标颜色规则
-
-- 一级 icon：`#131313`
-- 二级 icon：`#6E7481`
-- 折叠箭头统一：`#94A3B8`
-- 不要让同一行里出现 3 种以上 icon 颜色。
-- 普通功能 icon 不要随意引入品牌色，除非是主 CTA 或状态提示。
-
-## 4. Layout
-
-### 4.1 应用外壳
-
-- 画布容器：`1440 x 900`
-- 页面外层背景：`#5A5866`
-- 应用背景：`#F8F9FB`
-- 主内容背景附带 radial gradient：
-  `radial-gradient(ellipse 62% 74% at calc(25% + 50px) calc(35% + 300px), #E0E1EA 0%, transparent 72%)`
-
-### 4.2 顶部 chrome
-
-- 红绿灯行距顶部：`4px`
-- 控制行高度：`28px`
-- 左侧起点：`18px`
-- 右侧起点：`20px`
-- 红绿灯与内容区顶部间距：`4px`
-
-### 4.3 栅格
-
-- Sidebar 宽：`220px`
-- Context Panel 宽：`345px`
-- 主消息内容最大宽：`760px`
-- 主消息内容左右内边距：`24px`
-- 当左侧侧栏收起时，主内容不保留固定侧栏占位。
-
-### 4.4 收起态侧栏浮层
-
-- 仅在 hover 顶部菜单开关 icon 时出现，不常驻页面左侧。
-- 浮层顶部与内容区顶部对齐。
-- 浮层整体外壳：
-  `border: 1px solid #E6E7E9`
-  `border-radius: 12px`
-  `box-shadow: 0 24px 48px rgba(28, 25, 23, 0.14)`
-  `backdrop-filter: blur(10px)`
-- 浮层左右留白：`8px`
-- 浮层内容不改变展开态侧栏内部组件的样式，只调整浮层外壳位置和留白。
-
-## 5. Component Specs
-
-### 5.1 Sidebar
-
-#### 新建对话按钮
-
-- 高度由 `padding: 8px 11px` 决定
-- 字号：`13px`
-- 圆角：`8px`
-- 背景：`var(--surface)`
-- 边框：`1px solid var(--border)`
-- 底部间距：`8px`
-- icon：`message-circle-plus`, `14px`, `stroke 2`, `#131313`
-- hover 背景：`rgba(0,0,0,0.03)`
-
-#### Section Header
-
-- 内边距：`6px 8px 4px 10px`
-- 字号：`11.5px`
-- 字重：`400`
-- 字距：`0.06em`
-- 颜色：`#6E7481`
-- 折叠箭头：`12px`, `stroke 2`, `#94A3B8`
-
-#### Subheader
-
-- 内边距：`8px 10px 4px`
-- 字号：`10.5px`
-- 字重：`500`
-- 颜色：`#6E7481`
-
-#### Sidebar Row
-
-- 内边距：`7px 10px`
-- gap：`9px`
-- 字号：`13px`
-- 字重：`400`
-- 圆角：`7px`
-- 默认背景：透明
-- 选中背景：`var(--surface)`
-- 选中阴影：`0 4px 10px rgba(217, 221, 224, 0.8)`
-- hover 背景：`rgba(0,0,0,0.03)`
-- icon 容器宽：`16px`
-
-#### 收起态图标栏
-
-- 单个图标按钮：`36 x 36`
-- 圆角：`8px`
-- icon 尺寸：`16px`
-- 默认文本色：`var(--text-2)`
-
-### 5.2 Main Panel
-
-- 容器背景：`var(--surface)`
-- 边框：`1px solid #E6E7E9`
-- 圆角：`12px`
-- Header 高度：`48px`
-- Header 左右 padding：`20px`
-- Header 标题字号：`14px`
-- Header 标题字重：`500`
-- Header icon：`fileText`, `14px`
-
-### 5.3 Message
-
-#### 用户消息
-
-- 最大宽：`78%`
-- 首条消息气泡：`padding 12px 14px`
-- 首条消息背景：`#F7F8FA`
-- 首条消息圆角：`12px`
-- 字号：`13.5px`
-- 行高：`1.6`
-- 颜色：`#131313`
-
-#### Agent 消息
-
-- 不显示左侧头像
-- 字号：`13.5px`
-- 行高：`1.7`
-- 颜色：`#131313`
-- 列表 bullet 颜色：`#6E7481`
-- 空行高度：`6px`
-- inline code：
-  `font-family: var(--mono)`
-  `font-size: 12px`
-  `padding: 1px 5px`
-  `border-radius: 4px`
-  `border: 1px solid var(--border)`
-  `background: var(--surface-2)`
-
-#### Message Actions
-
-- 按钮尺寸：`26 x 26`
-- 圆角：`6px`
-- 默认颜色：`var(--text-3)`
-- hover 背景：`var(--surface-2)`
-- hover 文字色：`var(--text-2)`
-
-#### Thinking Indicator
-
-- 仅保留三颗点，不显示头像
-- 点尺寸：`6px`
-- 点颜色：`var(--text-3)`
-- 容器内边距：`10px 0`
-
-### 5.4 Tool Call Card
-
-- 容器背景：`#F7F8FA`
-- 外边框：`1px solid #F3F4F6`
-- 圆角：`8px`
-- Header 内边距：`9px 12px`
-- Tool name：
-  `font-family: var(--mono)`
-  `font-size: 12px`
-  `font-weight: 500`
-- Tool label：
-  `font-size: 12px`
-  `color: #6E7481`
-- Tool detail：
-  `font-family: var(--mono)`
-  `font-size: 11.5px`
-  `line-height: 1.6`
-  `padding: 10px 12px 12px 32px`
-
-#### Tool Status Tag
-
-- 高度：`17px`
-- 内边距：`0 8px`
-- 圆角：`4px`
-- 字号：`11px`
-- `done`：
-  文字 `#131313`
-  背景 `rgba(83, 188, 118, 0.15)`
-  边框 `rgba(83, 188, 118, 0.5)`
-- `running`：
-  文字 `#131313`
-  背景 `rgba(114, 92, 249, 0.08)`
-  边框 `#D9D9DD`
-- `queued`：
-  文字 `var(--text-3)`
-  背景 `var(--surface-2)`
-
-### 5.5 Revenue Table
-
-- 外层卡片：
-  `border 1px solid #F3F4F6`
-  `border-radius 8px`
-  `background var(--surface)`
-- 标题栏：
-  `padding 9px 14px`
-  `font-size 11px`
-  `font-weight 600`
-  `letter-spacing 0.06em`
-  `color #6E7481`
-  `background #F7F8FA`
-- 表格正文：
-  `font-size 12.5px`
-  单元格 padding：`9px 14px`
-
-### 5.6 Composer
-
-#### 外层区域
-
-- 外层 padding：`10px 20px 16px`
-- 内层容器：
-  `border 1px solid #E6E7E9`
-  `border-radius 10px`
-  `padding 12px 8px 8px`
-
-#### 输入框
-
-- 内容区左右间距：`8px`
-- 字号：`13px`
-- 行高：`1.55`
-- 最小高度：`48px`
-- placeholder 颜色：`#6E7481`
-
-#### 附件按钮 / icon button
-
-- 尺寸：`28 x 28`
-- 圆角：`8px`
-- hover 背景：`#F7F8FA`
-
-#### 模型切换按钮
-
-- 高度：`28px`
-- padding：`0 8px`
-- 圆角：`8px`
-- 字号：`12px`
-- 打开态 / hover 背景：`#F7F8FA`
-
-#### 发送按钮
-
-- 尺寸：`28 x 28`
-- 圆角：`8px`
-- 背景：`var(--accent)`
-- icon：`heroArrowUp`, `13px`, `stroke 2`
-- 文字色：`#FFFFFF`
-
-### 5.7 Popover / Dropdown
-
-#### 通用 Popover
-
-- 背景：`var(--surface)`
-- 边框：`1px solid var(--border)`
-- 圆角：`10px`
-- 阴影：`0 12px 32px -8px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.04)`
-- Header：
-  `padding 8px 12px`
-  `font-size 10.5px`
-  `font-weight 600`
-  `letter-spacing 0.08em`
-  `color var(--text-3)`
-  `background var(--surface-2)`
-- Item：
-  `padding 8px 12px`
-  `gap 10px`
-  hover 背景：`var(--surface-2)`
-
-#### 模型菜单 / 推理菜单
-
-- 背景：`#FFFFFF`
-- 边框：`1px solid #E6E7E9`
-- 圆角：`12px`
-- 阴影：`0 18px 40px -18px rgba(17,24,39,0.28), 0 8px 16px -12px rgba(17,24,39,0.18)`
-- 菜单项：
-  `padding 10px 12px`
-  `border-radius 10px`
-  主文案：`12.5px`
-  副文案：`11.5px`
-  active / hover 背景：`#F7F8FA`
-
-### 5.8 Context Panel
-
-- 容器背景：`#FFFFFF`
-- 边框：`1px solid #E6E7E9`
-- 圆角：`12px`
-- Header 高度：`48px`
-- Header 左右 padding：`20px`
-- 标题：`15px`, `500`, `#131313`
-- 内容区 padding：`8px 8px 0`
-
-#### Context Section
-
-- 外层背景：`#F7F8FA`
-- 边框：`1px solid #F3F4F6`
-- 圆角：`12px`
-- 底部间距：`8px`
-- Header：
-  `min-height 40px`
-  `padding 10px 14px`
-  `gap 9px`
-- Header 标题：
-  `font-size 13px`
-  `font-weight 500`
-  `#131313`
-- Meta：
-  `font-size 12px`
-  `#6E7481`
-
-#### Todo Row
-
-- 字号：`12.5px`
-- 行高：`20px`
-- 最小高度：`28px`
-- checkbox 尺寸：`18px`
-- 已完成文字：`#E6E7E9` + `line-through`
-
-#### File Row
-
-- `padding 6px 4px`
-- `gap 9px`
-- `border-radius 6px`
-- 文件名：`12.5px`
-- 文件大小：`10.5px`, `#6E7481`
-
-#### File Badge
-
-- 尺寸：`26 x 20`
-- 圆角：`4px`
-- 字号：`9.5px`
-- 字重：`700`
-- 字体：`var(--mono)`
-
-颜色映射：
-
-| Kind | BG | FG |
-|---|---|---|
-| MD | `#EEF2FF` | `#4338CA` |
-| CSV | `#ECFDF5` | `#059669` |
-| XLS | `#ECFDF5` | `#047857` |
-| IMG | `#FEF3C7` | `#B45309` |
-| PDF | `#FEE2E2` | `#B91C1C` |
-
-### 5.9 Tweaks Panel
-
-- 调试面板属于内部工具态，不直接外溢到业务页面
-- 容器：
-  `width 280px`
-  `border 1px solid var(--border)`
-  `border-radius 12px`
-  `box-shadow 0 20px 40px -10px rgba(0,0,0,0.15)`
-  `padding 14px`
-
-## 6. Motion & Interaction
-
-- 常规 hover 背景统一优先使用 `#F7F8FA`
-- hover / 背景切换 transition：`.12s`
-- 折叠箭头 rotation transition：`.15s`
-- 主内容列切换 transition：`grid-template-columns .25s ease`
-- Thinking dots 使用轻量 bounce，不扩展到其他业务组件
-
-## 7. Scrollbar
-
-- 默认浏览器 scrollbar 宽：`4px`
-- `sidebar-scroll` 默认隐藏 thumb，hover / focus / active 时显示：
-  `rgba(137, 143, 156, 0.12)`
-- `chat-scroll` thumb：
-  `rgba(137, 143, 156, 0.12)`
-  `border-radius: 999px`
-
-## 8. Reuse Rules For Future Pages
-
-- 新页面如果出现左侧导航列表，直接复用 Sidebar 的字号、行高、选中态、Section Header 和 icon 规则。
-- 新页面如果出现右侧辅助信息面板，优先复用 `ContextPanel` 的 48px header、高度层级、分组卡片背景与边框规则。
-- 新页面如果出现对话输入框，复用 Composer 的边框、圆角、8px 水平内边距、28px icon button、accent 发送按钮。
-- 新页面如果出现下拉菜单或建议框，优先复用现有 `Popover` / `ComposerModelMenu` 的圆角、阴影、标题和 hover 状态。
-- 新页面正文里不要重新定义一套 message text 样式。正文统一沿用：
-  `13.5px`
-  `line-height 1.7`
-  `#131313`
-- 新页面如果出现财务、涨跌、同比、环比等数据，继续沿用：
-  正值 `#F54B4B`
-  负值 `#53BC76`
-
-## 9. 禁止事项
-
-- 不要新增接近 `#131313` / `#6E7481` 的相似灰色。
-- 不要在相同层级的面板里混用 `8px`、`9px`、`11px` 这类随机圆角。
-- 不要给普通二级按钮上品牌色填充背景。
-- 不要让同一类组件在不同页面出现不同字号，仅因为“看起来差不多”。
-- 不要把收起态浮层和展开态 Sidebar 写成两套不同视觉体系。浮层只调外壳，不重定义内部组件。
-
-## 10. 后续建议
-
-当前规范已经足够支持后续页面统一，但代码层面仍可以继续收束：
-
-- 把现在散落在 `app.jsx` 里的硬编码颜色继续提取成更稳定的 design token。
-- 把 `SidebarRow`、`ContextSection`、`PopoverItem`、`ToolCall` 的样式抽成可复用 helper，减少新页面手写偏差。
-- 如果后续页面会继续增加，建议补一份 `component inventory`，把哪些组件允许复用、哪些只能派生，也一起写清楚。
+| `#6d5cff` `#533afd` `#965cf9`（品牌紫） | `var(--brand)` / `--brand-gradient` |
+| `#53cb76`（9 处笔误绿） | `var(--finance-down)` 或 `var(--success)` 按语义 |
+| `#9aa3b2` `#898f9c` | `fg-50` |
+| `#525860` `#444b54` `#1f2937` | `fg-80` |
+| `#f7f7f8` `#F0F1F3` | `fg-1` / `fg-3` |
+| `text-[13.5px]` | `text-base`（14px） |
+| `text-[12.5px]` | `text-sm`（13px） |
+| `text-[11.5px]` `text-[10.5px]` | `text-xs` / `text-2xs` |
+| `rounded-[7px]` | `rounded-md` |
+| `rounded-[14px]` `rounded-[18px]` | `rounded-2xl` |
+| `text-muted-foreground`（63 处） | 保留可用（已 alias 到 fg-60），新代码统一 `text-ink-body` |
+| `variant="secondary"`（4 处） | `variant="outline"`（MultiSelect 处改用 Badge） |
+
+## 10. 治理
+
+1. ESLint：tsx 禁 hex 字面量、禁 `text-[npx]` 任意值（CI 红灯）。
+2. `scripts/design-audit.sh` 棘轮：违规计数只许减不许增。
+3. `frontend/CLAUDE.md` 写入："颜色只用语义 token；新 UI 先查 packages/ui；变体/状态全集见 DESIGN-v2 §7"。
+4. CODEOWNERS：`packages/ui/src/styles/**` 由设计负责人 review。
+5. 本文档新增模式走文末 changelog：记"新增了什么、从哪个基色派生、为何现有组件不够"。
+
+---
+
+## Changelog
+
+- **2026-06-11 v2**：三方裁决（§0）；token 架构改派生制；字阶/圆角/阴影/图标收敛；新增状态三件套、z-index、动效、无障碍、暗色规则。
+- **2026-06-11 v2.1**：error 红 #dc2626 → #e5484d（设计评审反馈：与品牌紫明度不齐，提亮至等亮度）。
+- **2026-06-11 v2.2**：灰阶改双轴派生——新增蓝灰极 `slate #444b54`，中段（fg-30~80）沿其派生恢复 v1 冷灰气质；手选色 13 → 14。
+- **2026-06-11 v2.3**：Button `secondary` 变体废止并入 `outline`（outline 102 处 vs secondary 4 处，已是事实标准）；强调阶梯固定为 default > outline > ghost > link。
+- **2026-06-11 v2.4**：warning #d97706 → #ef8b0c（设计反馈发脏；基色已卸下文字职责）；点缀色 4 → 8（投研图表多系列需要），定固定取色顺序；手选色 14 → 18。

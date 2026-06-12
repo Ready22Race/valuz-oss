@@ -132,7 +132,7 @@ export const SettingsPage = () => {
                 className={cn(
                   "w-full rounded-lg px-2.5 py-2 text-left transition-all",
                   tab === item.id
-                    ? "bg-[#F1F2F4] dark:bg-surface-muted"
+                    ? "bg-[#E8EAEE] dark:bg-surface-muted"
                     : "hover:bg-surface-muted",
                 )}
               >
