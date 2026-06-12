@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sse_starlette.sse import EventSourceResponse
 
 from app._validators import validate_mcp_servers, validate_registered_tools, validate_skills
 from app.dependencies import get_orchestrator, get_store
+from app.event_stream import QueueEventSink
 from app.serializers import (
     agent_config_from_schema as _agent_config_from_schema,
 )
@@ -17,7 +21,13 @@ from app.serializers import (
     event_to_data as _event_to_data,
 )
 from app.serializers import (
+    live_event_to_data as _live_event_to_data,
+)
+from app.serializers import (
     session_to_data as _session_to_data,
+)
+from app.serializers import (
+    stored_event_to_data as _stored_event_to_data,
 )
 from app.schemas import (
     AppendEventData,
@@ -27,6 +37,8 @@ from app.schemas import (
     FinalizeSessionRequest,
     DataResponse,
     EventListResponse,
+    EventWindowData,
+    EventWindowResponse,
     ModelProviderInputSchema,
     ModelProviderUpdateSchema,
     ModelSettingsSchema,
@@ -60,6 +72,9 @@ from src.runtimes.factory import validate_api_protocol
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 StoreDep = Annotated[StorePort, Depends(get_store)]
+
+# Idle keep-alive cadence for the events SSE stream.
+STREAM_HEARTBEAT_SECONDS = 15.0
 OrchestratorDep = Annotated[SessionOrchestrator, Depends(get_orchestrator)]
 
 
@@ -333,16 +348,29 @@ async def append_session_event(
     session_id: str,
     body: EventPayload,
     store: StoreDep,
+    orchestrator: Annotated[Any, Depends(get_orchestrator)],
+    live_only: Annotated[bool, Query()] = False,
 ) -> dict[str, Any]:
     """Append an out-of-band event onto the session's latest message.
 
     For supervisors that aren't driving a turn (recovery, interrupt
     fallback, after-the-fact detectors). ``persisted=false`` when the
     session has no messages yet to anchor onto (the event is dropped).
+
+    ``live_only=true`` skips persistence entirely and emits the event
+    onto the session's live bus instead (taps + attached client), for
+    synthetic notifications like the interrupt-fallback ``session_error``.
     """
     session = await store.load_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    if live_only:
+        await orchestrator.emit_session_event(
+            session_id,
+            Event(type=body.type, data=body.data),  # type: ignore[arg-type]
+            create_bus=True,
+        )
+        return {"data": AppendEventData(persisted=False)}
     messages = await store.list_messages_for_session(session_id, limit=1)
     if not messages:
         return {"data": AppendEventData(persisted=False)}
@@ -410,9 +438,94 @@ async def get_session_events(
     store: StoreDep,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
+    after_seq: Annotated[int | None, Query(ge=0)] = None,
 ) -> dict[str, Any]:
+    if after_seq is not None:
+        stored = await store.get_events_after(session_id, after_seq=after_seq, limit=limit)
+        return {"data": [_stored_event_to_data(e) for e in stored]}
     events = await store.get_events(session_id, limit=limit, offset=offset)
     return {"data": [_event_to_data(e) for e in events]}
+
+
+@router.get("/{session_id}/events/window", response_model=EventWindowResponse)
+async def get_session_events_window(
+    session_id: str,
+    store: StoreDep,
+    before_seq: Annotated[int | None, Query(ge=0)] = None,
+    turn_limit: Annotated[int, Query(ge=1, le=200)] = 20,
+) -> dict[str, Any]:
+    """Turn-aligned history page: the most recent ``turn_limit`` turns
+    strictly before ``before_seq`` (or session end), in full, ascending."""
+    items, has_more = await store.get_events_window(
+        session_id, before_seq=before_seq, turn_limit=turn_limit
+    )
+    return {
+        "data": EventWindowData(
+            items=[_stored_event_to_data(e) for e in items],
+            has_more=has_more,
+        )
+    }
+
+
+@router.get("/{session_id}/events/stream")
+async def stream_session_events(
+    session_id: str,
+    request: Request,
+    store: StoreDep,
+    orchestrator: Annotated[Any, Depends(get_orchestrator)],
+    after_seq: Annotated[int | None, Query(ge=0)] = None,
+) -> EventSourceResponse:
+    """Live event stream for one session, as Server-Sent Events.
+
+    With ``after_seq`` the stream first replays persisted events with id
+    greater than the cursor (frames carry ``seq``), then switches to the
+    live bus tap (frames carry ``seq: null`` — including delta types the
+    kernel never persists). Without it the stream is live-only.
+
+    This is the remote analog of the in-process
+    ``attach_session_tap`` — the subscription primitive behind the host's
+    SSE surface and a future HttpKernelClient.
+    """
+
+    async def _frames() -> AsyncIterator[dict[str, Any]]:
+        sink = QueueEventSink()
+        # Tap first, then backfill: an event persisted between the
+        # backfill read and the tap registration would be lost with the
+        # opposite order. The seq-bearing backfill lets clients dedup.
+        await orchestrator.attach_session_tap(session_id, sink)
+        try:
+            cursor = after_seq
+            if cursor is not None:
+                while True:
+                    page = await store.get_events_after(
+                        session_id, after_seq=cursor, limit=500
+                    )
+                    if not page:
+                        break
+                    for stored in page:
+                        yield {
+                            "event": "event",
+                            "data": _stored_event_to_data(stored).model_dump_json(),
+                        }
+                        cursor = stored.seq
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(
+                        sink.queue.get(), timeout=STREAM_HEARTBEAT_SECONDS
+                    )
+                except TimeoutError:
+                    yield {"event": "heartbeat", "data": "{}"}
+                    continue
+                yield {
+                    "event": "event",
+                    "data": _live_event_to_data(event).model_dump_json(),
+                }
+        finally:
+            await orchestrator.detach_session_tap(session_id, sink)
+
+    return EventSourceResponse(_frames())
 
 
 @router.post("/{session_id}/actions", response_model=SubmitActionResponse)

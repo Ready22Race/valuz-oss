@@ -102,11 +102,14 @@ kernel holds no project or agent tables.
 orchestrator, providers, the MCP catalog, scheduling, attachments, OAuth pages,
 and the public HTTP surface. Host-owned tables are prefixed `valuz_*`.
 
-**Adapters** are the only place the two layers meet. Examples: `kernel_sync`
-wraps the kernel's async store behind a synchronous facade; `model_resolver`
-turns a request plus a configured provider into a concrete model id;
-`event_sse_adapter` projects the kernel `events` table into Server-Sent-Events
-frames for the clients.
+**Adapters** are the only place the two layers meet. Examples:
+`kernel_client` is the operational seam — a `KernelClient` protocol whose
+method surface mirrors the kernel HTTP API 1:1, with two swappable
+transports (in-process by default; HTTP for a kernel running as a separate
+process, selected by `VALUZ_KERNEL_MODE`); `model_resolver` turns a request
+plus a configured provider into a concrete model id; `event_sse_adapter`
+projects the kernel's event read/subscribe API into the legacy
+Server-Sent-Events frames the clients consume.
 
 ### Runtimes
 

@@ -13,23 +13,28 @@ Errors surface as ``Kernel*Error`` types owned by this module; the
 in-process implementation maps the routes' ``HTTPException``s onto them
 (an HTTP implementation would map status codes identically).
 
-| method                | kernel endpoint                                |
-|-----------------------|------------------------------------------------|
-| create_session        | POST   /api/v1/sessions                        |
-| get_session           | GET    /api/v1/sessions/{id}                   |
-| list_sessions         | GET    /api/v1/sessions[?status=&ids=]         |
-| update_session        | PATCH  /api/v1/sessions/{id}                   |
-| delete_session        | DELETE /api/v1/sessions/{id}                   |
-| set_mode              | POST   /api/v1/sessions/{id}/mode              |
-| finalize_session      | POST   /api/v1/sessions/{id}/finalize          |
-| append_event          | POST   /api/v1/sessions/{id}/events            |
-| get_events            | GET    /api/v1/sessions/{id}/events            |
-| list_messages         | GET    /api/v1/sessions/{id}/messages          |
-| submit_action         | POST   /api/v1/sessions/{id}/actions           |
-| interrupt             | POST   /api/v1/sessions/{id}/interrupt         |
-| run_turn              | WS     /api/v1/sessions/{id}/run               |
-| scan_orphan_*         | (in-process only — no remote analog; the      |
-|                       |  kernel runs these itself at startup)          |
+| method                   | kernel endpoint                                   |
+|--------------------------|---------------------------------------------------|
+| create_session           | POST   /api/v1/sessions                           |
+| get_session              | GET    /api/v1/sessions/{id}                      |
+| list_sessions            | GET    /api/v1/sessions[?status=&ids=]            |
+| update_session           | PATCH  /api/v1/sessions/{id}                      |
+| delete_session           | DELETE /api/v1/sessions/{id}                      |
+| set_mode                 | POST   /api/v1/sessions/{id}/mode                 |
+| finalize_session         | POST   /api/v1/sessions/{id}/finalize             |
+| append_event             | POST   /api/v1/sessions/{id}/events               |
+| emit_live_event          | POST   /api/v1/sessions/{id}/events?live_only=true|
+| get_events               | GET    /api/v1/sessions/{id}/events[?after_seq=]  |
+| get_events_window        | GET    /api/v1/sessions/{id}/events/window        |
+| subscribe_session_events | SSE    /api/v1/sessions/{id}/events/stream        |
+| subscribe_all_events     | SSE    /api/v1/events/stream                      |
+| usage_rollup             | GET    /api/v1/usage                              |
+| list_messages            | GET    /api/v1/sessions/{id}/messages             |
+| submit_action            | POST   /api/v1/sessions/{id}/actions              |
+| interrupt                | POST   /api/v1/sessions/{id}/interrupt            |
+| run_turn                 | WS     /api/v1/sessions/{id}/run                  |
+| scan_orphan_*            | (in-process only — no remote analog; the         |
+|                          |  kernel runs these itself at startup)             |
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from __future__ import annotations
 
 # ruff: noqa: I001 — the kernel side-effect import must precede ``app.*``.
 
+from collections.abc import AsyncIterator
 from typing import Any, NoReturn, Protocol
 
 import valuz_agent.boot.kernel  # noqa: F401  (sys.path side-effect)
@@ -51,12 +57,14 @@ from app.schemas import (  # noqa: E402
     CreateSessionRequest,
     EventData,
     EventPayload,
+    EventWindowData,
     FinalizeSessionRequest,
     MessageData,
     SessionData,
     SetSessionModeRequest,
     SubmitActionRequest,
     UpdateSessionRequest,
+    UsageRollupData,
 )
 
 
@@ -146,9 +154,28 @@ class KernelClient(Protocol):
 
     async def append_event(self, session_id: str, event: EventPayload) -> bool: ...
 
+    async def emit_live_event(
+        self, session_id: str, type: str, data: dict[str, Any]
+    ) -> None: ...
+
     async def get_events(
-        self, session_id: str, *, limit: int = 200, offset: int = 0
+        self,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        after_seq: int | None = None,
     ) -> list[EventData]: ...
+
+    async def get_events_window(
+        self, session_id: str, *, before_seq: int | None = None, turn_limit: int = 20
+    ) -> EventWindowData: ...
+
+    def subscribe_session_events(self, session_id: str) -> AsyncIterator[EventData]: ...
+
+    def subscribe_all_events(self) -> AsyncIterator[EventData]: ...
+
+    async def usage_rollup(self, start_ms: int, end_ms: int) -> list[UsageRollupData]: ...
 
     async def list_messages(
         self, session_id: str, *, limit: int = 50, offset: int = 0
@@ -159,8 +186,12 @@ class KernelClient(Protocol):
     async def interrupt(self, session_id: str) -> None: ...
 
     async def run_turn(
-        self, session_id: str, text: str, attachments: list[dict[str, Any]] | None = None
-    ) -> None: ...
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
+        additional_context: str = "",
+    ) -> MessageData: ...
 
 
 # ---------------------------------------------------------------------------
@@ -275,18 +306,97 @@ class InProcessKernelClient:
         from app.routes.sessions import append_session_event
 
         try:
-            result = await append_session_event(session_id, event, _store())
+            result = await append_session_event(
+                session_id, event, _store(), _orchestrator(), live_only=False
+            )
         except HTTPException as exc:
             _raise_mapped(exc)
         return bool(result["data"].persisted)
 
+    async def emit_live_event(self, session_id: str, type: str, data: dict[str, Any]) -> None:
+        from app.routes.sessions import append_session_event
+
+        try:
+            await append_session_event(
+                session_id,
+                EventPayload(type=type, data=data),
+                _store(),
+                _orchestrator(),
+                live_only=True,
+            )
+        except HTTPException as exc:
+            _raise_mapped(exc)
+
     async def get_events(
-        self, session_id: str, *, limit: int = 200, offset: int = 0
+        self,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        after_seq: int | None = None,
     ) -> list[EventData]:
         from app.routes.sessions import get_session_events
 
         try:
-            result = await get_session_events(session_id, _store(), limit=limit, offset=offset)
+            result = await get_session_events(
+                session_id, _store(), limit=limit, offset=offset, after_seq=after_seq
+            )
+        except HTTPException as exc:
+            _raise_mapped(exc)
+        return result["data"]
+
+    async def get_events_window(
+        self, session_id: str, *, before_seq: int | None = None, turn_limit: int = 20
+    ) -> EventWindowData:
+        from app.routes.sessions import get_session_events_window
+
+        try:
+            result = await get_session_events_window(
+                session_id, _store(), before_seq=before_seq, turn_limit=turn_limit
+            )
+        except HTTPException as exc:
+            _raise_mapped(exc)
+        return result["data"]
+
+    async def subscribe_session_events(self, session_id: str) -> AsyncIterator[EventData]:
+        """Live tap on one session's event stream (no replay, no backfill —
+        pair with ``get_events(after_seq=...)`` for catch-up reads).
+
+        Remote analog: SSE /api/v1/sessions/{id}/events/stream."""
+        from app.event_stream import QueueEventSink
+        from app.serializers import live_event_to_data
+
+        sink = QueueEventSink()
+        orch = _orchestrator()
+        await orch.attach_session_tap(session_id, sink)
+        try:
+            while True:
+                event = await sink.queue.get()
+                yield live_event_to_data(event)
+        finally:
+            await orch.detach_session_tap(session_id, sink)
+
+    async def subscribe_all_events(self) -> AsyncIterator[EventData]:
+        """Live tap on EVERY session's event stream; frames carry
+        ``session_id``. Remote analog: SSE /api/v1/events/stream."""
+        from app.event_stream import GlobalQueueTap
+        from app.serializers import live_event_to_data
+
+        tap = GlobalQueueTap()
+        orch = _orchestrator()
+        orch.attach_global_tap(tap)
+        try:
+            while True:
+                session_id, event = await tap.queue.get()
+                yield live_event_to_data(event, session_id=session_id)
+        finally:
+            orch.detach_global_tap(tap)
+
+    async def usage_rollup(self, start_ms: int, end_ms: int) -> list[UsageRollupData]:
+        from app.routes.usage import get_usage_rollup
+
+        try:
+            result = await get_usage_rollup(_store(), start_ms=start_ms, end_ms=end_ms)
         except HTTPException as exc:
             _raise_mapped(exc)
         return result["data"]
@@ -317,10 +427,17 @@ class InProcessKernelClient:
         await _orchestrator().interrupt(session_id)
 
     async def run_turn(
-        self, session_id: str, text: str, attachments: list[dict[str, Any]] | None = None
-    ) -> None:
+        self,
+        session_id: str,
+        text: str,
+        attachments: list[dict[str, Any]] | None = None,
+        additional_context: str = "",
+    ) -> MessageData:
         # Remote analog: the WS /run channel. The wire shape is
-        # {"type": "user_message", "text": ..., "attachments": [...]}.
+        # {"message": {"text": ..., "attachments": [...],
+        #              "additional_context": ...}}; the returned MessageData
+        # mirrors the channel's final message frame.
+        from app.routes.messages import _message_to_data
         from src.core.types import Attachment, UserMessage
 
         atts = tuple(
@@ -330,7 +447,11 @@ class InProcessKernelClient:
             )
             for a in (attachments or [])
         )
-        await _orchestrator().run_turn(session_id, UserMessage(text=text, attachments=atts))
+        message = await _orchestrator().run_turn(
+            session_id,
+            UserMessage(text=text, attachments=atts, additional_context=additional_context),
+        )
+        return _message_to_data(message)
 
     # -- In-process-only supervision hooks (no remote analog: a standalone
     # kernel runs its own orphan scans at startup; see app.dependencies). --
@@ -347,12 +468,29 @@ class InProcessKernelClient:
         await _orchestrator().cleanup(session_id)
 
 
-client: KernelClient = InProcessKernelClient()
+def _make_client() -> KernelClient:
+    """Bind the transport for this process from settings.
+
+    ``inprocess`` (default) — the kernel lives in this process.
+    ``http`` — the kernel runs as a separate process (bare subprocess,
+    sandbox, or remote) at ``settings.kernel_url``; see
+    ``adapters/kernel_client_http.py``.
+    """
+    from valuz_agent.infra.config import settings
+
+    if settings.kernel_mode == "http":
+        from valuz_agent.adapters.kernel_client_http import HttpKernelClient
+
+        return HttpKernelClient(settings.kernel_url, token=settings.kernel_token)
+    return InProcessKernelClient()
+
+
+client: KernelClient = _make_client()
 
 
 # Module-level facade — call-site ergonomics match the former kernel_store
 # (``await kernel_client.get_session(...)``), while the swappable object
-# lives behind ``client`` for a future HTTP transport.
+# lives behind ``client`` for the HTTP transport.
 
 
 async def create_session(req: CreateSessionRequest) -> SessionData:
@@ -393,8 +531,38 @@ async def append_event(session_id: str, event: EventPayload) -> bool:
     return await client.append_event(session_id, event)
 
 
-async def get_events(session_id: str, *, limit: int = 200, offset: int = 0) -> list[EventData]:
-    return await client.get_events(session_id, limit=limit, offset=offset)
+async def emit_live_event(session_id: str, type: str, data: dict[str, Any]) -> None:
+    await client.emit_live_event(session_id, type, data)
+
+
+async def get_events(
+    session_id: str,
+    *,
+    limit: int = 200,
+    offset: int = 0,
+    after_seq: int | None = None,
+) -> list[EventData]:
+    return await client.get_events(session_id, limit=limit, offset=offset, after_seq=after_seq)
+
+
+async def get_events_window(
+    session_id: str, *, before_seq: int | None = None, turn_limit: int = 20
+) -> EventWindowData:
+    return await client.get_events_window(
+        session_id, before_seq=before_seq, turn_limit=turn_limit
+    )
+
+
+def subscribe_session_events(session_id: str) -> AsyncIterator[EventData]:
+    return client.subscribe_session_events(session_id)
+
+
+def subscribe_all_events() -> AsyncIterator[EventData]:
+    return client.subscribe_all_events()
+
+
+async def usage_rollup(start_ms: int, end_ms: int) -> list[UsageRollupData]:
+    return await client.usage_rollup(start_ms, end_ms)
 
 
 async def list_messages(
@@ -417,9 +585,12 @@ async def interrupt(session_id: str) -> None:
 
 
 async def run_turn(
-    session_id: str, text: str, attachments: list[dict[str, Any]] | None = None
-) -> None:
-    await client.run_turn(session_id, text, attachments)
+    session_id: str,
+    text: str,
+    attachments: list[dict[str, Any]] | None = None,
+    additional_context: str = "",
+) -> MessageData:
+    return await client.run_turn(session_id, text, attachments, additional_context)
 
 
 async def scan_orphan_pendings() -> int:

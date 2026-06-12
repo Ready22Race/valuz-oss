@@ -35,10 +35,6 @@ from app.schemas import (
 from src.core.agent_config import (
     AgentConfig as KernelAgentConfig,
 )
-from src.core.types import (
-    Attachment,
-    UserMessage,
-)
 
 # Kernel wire schemas + the in-process run-driver's domain types
 # (resolved via sys.path injection from kernel bootstrap).
@@ -87,7 +83,6 @@ from valuz_agent.modules.sessions.events import (
 from valuz_agent.modules.sessions.mappers import (
     _coerce_session_effort,
     _coerce_session_permission_mode,
-    _copy_session,
     _kernel_session_not_found,
     _map_kernel_status,
     _session_to_detail,
@@ -1115,21 +1110,8 @@ class SessionService:
         )
 
         try:
-            from app.dependencies import (
-                get_orchestrator,
-                get_store,
-            )
-
-            from valuz_agent.adapters.broadcast_sink import BroadcastEventSink
-
-            store = get_store()
-            orchestrator = get_orchestrator()
-            # V5+SessionEventBus: attach our broadcast sink to the
-            # session's bus so live token deltas reach SSE subscribers,
-            # then run the turn (no sink arg). Detach in a finally below
-            # so the bus doesn't hold a reference across runs.
-            sink = BroadcastEventSink(session_id)
-            await orchestrator.attach_session_sink(session_id, sink)
+            # Live token deltas reach SSE subscribers through the kernel's
+            # bus taps — no per-run sink to attach/detach.
             # Per-turn attachments — capture the pending set once,
             # ship it, then stamp it consumed in the ``finally`` so a
             # scheduled run doesn't keep re-attaching the same files
@@ -1146,26 +1128,18 @@ class SessionService:
                 project_id,
                 pending_attachments,
             )
-            user_msg = UserMessage(
-                text=content,
-                attachments=tuple(
-                    Attachment(source_path=source, parsed_path=parsed)
-                    for source, parsed in attachment_specs
-                ),
-                additional_context=additional_context,
-            )
 
             try:
-                message = await orchestrator.run_turn(session_id, user_msg)
+                message = await kernel_client.run_turn(
+                    session_id,
+                    content,
+                    attachments=[
+                        {"source_path": source, "parsed_path": parsed}
+                        for source, parsed in attachment_specs
+                    ],
+                    additional_context=additional_context,
+                )
             finally:
-                try:
-                    await orchestrator.detach_session_sink(session_id, sink)
-                except Exception:  # noqa: BLE001
-                    logger.debug(
-                        "detach_session_sink failed for %s",
-                        session_id,
-                        exc_info=True,
-                    )
                 try:
                     await _mark_attachments_consumed(consumed_attachment_ids)
                 except Exception:  # noqa: BLE001
@@ -1175,7 +1149,7 @@ class SessionService:
                     )
 
             # Update valuz metadata.
-            reloaded = await store.load_session(session_id)
+            reloaded = await kernel_client.get_session(session_id)
             if reloaded is not None:
                 meta = dict(reloaded.metadata)
                 valuz = dict(meta.get("valuz") or {})
@@ -1184,11 +1158,10 @@ class SessionService:
                     valuz["name"] = content[:40].replace("\n", " ").strip()
                 meta["valuz"] = valuz
 
-                final_session = _copy_session(
-                    reloaded,
-                    metadata=meta,
+                final_session = await kernel_client.update_session(
+                    session_id,
+                    UpdateSessionRequest(metadata=meta),
                 )
-                await store.save_session(final_session)
 
                 if message.input_tokens is not None or message.output_tokens is not None:
                     from valuz_agent.infra.auth_context import get_current_user_id
@@ -1252,12 +1225,12 @@ class SessionService:
         when the kernel-side interrupt can't be delivered (runtime
         already exited, orchestrator never registered the session, etc.):
 
-        1. Best-effort ``await orchestrator.interrupt(session_id)`` —
+        1. Best-effort ``kernel_client.interrupt(session_id)`` —
            the *clean* path that asks the runtime to stop emitting tokens.
         2. Whatever happens to step 1, flip the kernel session row to
            ``status=idle`` with ``stop_reason=UserInterrupt`` so future
            ``send_message`` calls don't 409 with "already running".
-        3. Append a ``session_error`` event when the orchestrator path
+        3. Append a ``session_error`` event when the interrupt path
            failed, so SSE subscribers see an explanation rather than a
            silent end-of-stream.
 
@@ -1270,19 +1243,16 @@ class SessionService:
             raise _kernel_session_not_found(session_id)
 
         # Step 1 — best-effort kernel interrupt.
-        orchestrator_failed = False
+        interrupt_failed = False
         try:
-            from app.dependencies import get_orchestrator
-
-            orchestrator = get_orchestrator()
-            await orchestrator.interrupt(session_id)
+            await kernel_client.interrupt(session_id)
         except Exception:  # noqa: BLE001 — runtime gone / never registered
             logger.warning(
-                "Could not reach orchestrator to interrupt session %s",
+                "Could not reach kernel to interrupt session %s",
                 session_id,
                 exc_info=True,
             )
-            orchestrator_failed = True
+            interrupt_failed = True
 
         # Step 2 — flip status to idle (always runs).
         old_status = _map_kernel_status(session.status)
@@ -1296,11 +1266,9 @@ class SessionService:
         # client doesn't see a silent stream cut. Try to anchor it onto
         # the session's latest message; if no message exists yet the
         # event can't be persisted (kernel V5+messages requires every
-        # event row to carry a message_id), so we fall back to an
-        # in-memory broadcast that still reaches live SSE subscribers.
-        if orchestrator_failed:
-            from valuz_agent.adapters.broadcast_sink import broadcast as broadcast_event
-
+        # event row to carry a message_id), so we fall back to a
+        # live-only emit that still reaches live SSE subscribers.
+        if interrupt_failed:
             err_event = EventPayload(
                 type="session_error",
                 data={
@@ -1321,12 +1289,8 @@ class SessionService:
                 )
             if not persisted:
                 try:
-                    from src.core.events import (
-                        Event as _KernelEvent,
-                    )
-
-                    await broadcast_event(
-                        session_id, _KernelEvent(type=err_event.type, data=err_event.data)
+                    await kernel_client.emit_live_event(
+                        session_id, err_event.type, err_event.data
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception(

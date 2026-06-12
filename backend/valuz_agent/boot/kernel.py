@@ -61,7 +61,7 @@ def _set_kernel_env() -> None:
     ``sessions/messages/events`` or valuz's ``valuz_*`` namespaces;
     setdefault honours an external override.
     """
-    os.environ["DATABASE_URL"] = settings.db_url_async
+    os.environ["DATABASE_URL"] = settings.kernel_db_url_async
     os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.db_path))
 
 
@@ -92,7 +92,7 @@ def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
 
     owns_engine = engine is None
     if engine is None:
-        engine = create_engine(settings.db_url)
+        engine = create_engine(settings.kernel_db_url)
     try:
         inspector = inspect(engine)
         existing = set(inspector.get_table_names())
@@ -288,8 +288,10 @@ def get_kernel_routers() -> list:
     user-facing agent gallery yet. If/when product introduces agent
     presets, this decision is revisited in a new ADR.
     """
+    from app.routes.events import router as events_router
     from app.routes.messages import router as messages_router
     from app.routes.run import router as run_router
     from app.routes.sessions import router as sessions_router
+    from app.routes.usage import router as usage_router
 
-    return [sessions_router, messages_router, run_router]
+    return [sessions_router, messages_router, run_router, events_router, usage_router]

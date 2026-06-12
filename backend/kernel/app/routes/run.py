@@ -86,7 +86,20 @@ def _parse_user_message(msg: dict[str, Any]) -> UserMessage:
 
 @router.websocket("/{session_id}/run")
 async def run_session(websocket: WebSocket, session_id: str) -> None:
+    # Standalone-kernel auth (HTTP middleware doesn't cover websockets):
+    # same bearer token contract as the REST surface. AppConfig re-reads
+    # env per construction — negligible cost, avoids importing app.main.
+    # Accept first so the close code (4401) reaches the client as a WS
+    # frame instead of an opaque HTTP 403 handshake rejection.
+    from app.config import AppConfig
+
     await websocket.accept()
+    auth_token = AppConfig().auth_token
+    if auth_token:
+        supplied = websocket.headers.get("authorization", "")
+        if supplied != f"Bearer {auth_token}":
+            await websocket.close(code=4401, reason="Unauthorized")
+            return
 
     store = get_store()
     session = await store.load_session(session_id)

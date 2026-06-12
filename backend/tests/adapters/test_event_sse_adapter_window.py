@@ -1,9 +1,12 @@
-"""Tests for ``list_events_window`` — turn-aligned pagination over the events table.
+"""Tests for turn-aligned event-window pagination.
 
-Each test seeds a fresh on-disk SQLite file with hand-crafted ``events`` rows
-mirroring the kernel V5+messages schema, monkeypatches the adapter's
-``async_engine`` reference at the rows it actually consumes, and asserts the
-returned window is whole-turn aligned.
+The window query lives in the kernel store (``get_events_window``); the
+host adapter (``list_events_window``) is a translation shim over the
+``KernelClient`` seam. These tests run the REAL kernel store + wire
+serializer + host translation as one stack: a tmp-file SQLite is seeded
+with hand-crafted ``events`` rows (kernel schema), the seam facade is
+pointed at a store over that file, and assertions check the returned
+window is whole-turn aligned.
 
 A "turn" here = one ``user_message`` row plus every event that follows
 until the next ``user_message`` (or session end). The pagination contract
@@ -16,46 +19,55 @@ pytest-asyncio / pytest-anyio — keeps the suite runnable end-to-end
 without adding a plugin dep.
 """
 
+# ruff: noqa: I001 — kernel bootstrap side-effect import must precede src/app
 from __future__ import annotations
 
 import asyncio
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
+
+from app.schemas import EventWindowData
+from app.serializers import stored_event_to_data
+from src.adapters.sqlalchemy_store.models import Base
+from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
 
 from valuz_agent.adapters import event_sse_adapter
 from valuz_agent.adapters.event_sse_adapter import list_events_window
 
 
 @pytest.fixture
-def patched_async_engine(tmp_path, monkeypatch):
-    """Swap the adapter module's ``async_engine`` for a tmp-file engine.
+def seeded_engine(tmp_path, monkeypatch):
+    """Kernel store over a tmp-file SQLite, wired behind the seam facade.
 
-    Tests share this fixture so the adapter sees a private DB per test.
-    Returns the engine so the test can seed rows into it before calling
-    the helper under test.
+    The adapter calls ``kernel_client.get_events_window``; we substitute an
+    implementation backed by a real ``SQLAlchemyStore`` on a private DB so
+    every test exercises the genuine window SQL + wire projection.
+    Returns the engine so tests can seed rows before calling the helper.
     """
     db_path = tmp_path / "events.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
-    monkeypatch.setattr(event_sse_adapter, "async_engine", engine)
+    store = SQLAlchemyStore(async_sessionmaker(engine, expire_on_commit=False))
+
+    async def _window(session_id: str, *, before_seq=None, turn_limit=20) -> EventWindowData:
+        items, has_more = await store.get_events_window(
+            session_id, before_seq=before_seq, turn_limit=turn_limit
+        )
+        return EventWindowData(
+            items=[stored_event_to_data(e) for e in items], has_more=has_more
+        )
+
+    monkeypatch.setattr(event_sse_adapter.kernel_client, "get_events_window", _window)
     yield engine
     asyncio.run(engine.dispose())
 
 
-async def _create_table(engine):
+async def _create_tables(engine):
     async with engine.begin() as conn:
-        await conn.execute(
-            text(
-                "CREATE TABLE events ("
-                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "session_id TEXT NOT NULL, "
-                "message_id TEXT, "
-                "type TEXT NOT NULL, "
-                "data TEXT, "
-                "timestamp TEXT)"
-            )
-        )
+        await conn.run_sync(Base.metadata.create_all)
 
 
 async def _seed_events(engine, session_id: str, rows: list[tuple[str, str | None]]) -> list[int]:
@@ -66,15 +78,16 @@ async def _seed_events(engine, session_id: str, rows: list[tuple[str, str | None
     autoincrement ids in insertion order so tests can refer to specific
     rows by index.
     """
-    await _create_table(engine)
+    await _create_tables(engine)
     async with engine.begin() as conn:
         ids: list[int] = []
         for idx, (event_type, text_payload) in enumerate(rows):
             data_blob = f'{{"text": "{text_payload}"}}' if text_payload is not None else "{}"
             result = await conn.execute(
                 text(
-                    "INSERT INTO events (session_id, message_id, type, data, timestamp) "
-                    "VALUES (:sid, :mid, :type, :data, '2026-05-02T00:00:00')"
+                    "INSERT INTO events "
+                    "(user_id, session_id, message_id, type, data, timestamp) "
+                    "VALUES ('test-user', :sid, :mid, :type, :data, 1714600000000)"
                 ),
                 {
                     "sid": session_id,
@@ -99,8 +112,8 @@ def _build_turns(count: int) -> list[tuple[str, str | None]]:
 # ── Empty / degenerate inputs ──────────────────────────────────────────
 
 
-def test_should_return_empty_window_when_session_has_no_events(patched_async_engine):
-    asyncio.run(_create_table(patched_async_engine))
+def test_should_return_empty_window_when_session_has_no_events(seeded_engine):
+    asyncio.run(_create_tables(seeded_engine))
 
     window = asyncio.run(list_events_window("missing-session", turn_limit=10))
 
@@ -108,8 +121,8 @@ def test_should_return_empty_window_when_session_has_no_events(patched_async_eng
     assert window.has_more is False
 
 
-def test_should_return_empty_window_when_turn_limit_is_zero(patched_async_engine):
-    asyncio.run(_seed_events(patched_async_engine, "sess-1", _build_turns(3)))
+def test_should_return_empty_window_when_turn_limit_is_zero(seeded_engine):
+    asyncio.run(_seed_events(seeded_engine, "sess-1", _build_turns(3)))
 
     window = asyncio.run(list_events_window("sess-1", turn_limit=0))
 
@@ -118,7 +131,7 @@ def test_should_return_empty_window_when_turn_limit_is_zero(patched_async_engine
 
 
 def test_should_return_empty_window_when_session_has_no_user_message(
-    patched_async_engine,
+    seeded_engine,
 ):
     # Edge case: a session full of system / tool events with zero
     # ``user_message`` rows (e.g. a half-broken seed). The window query
@@ -126,7 +139,7 @@ def test_should_return_empty_window_when_session_has_no_user_message(
     # rather than returning every row.
     asyncio.run(
         _seed_events(
-            patched_async_engine,
+            seeded_engine,
             "sess-1",
             [("session_update", None), ("session_idle", None)],
         )
@@ -142,9 +155,9 @@ def test_should_return_empty_window_when_session_has_no_user_message(
 
 
 def test_should_return_all_turns_when_session_smaller_than_turn_limit(
-    patched_async_engine,
+    seeded_engine,
 ):
-    asyncio.run(_seed_events(patched_async_engine, "sess-1", _build_turns(3)))
+    asyncio.run(_seed_events(seeded_engine, "sess-1", _build_turns(3)))
 
     window = asyncio.run(list_events_window("sess-1", turn_limit=10))
 
@@ -161,9 +174,9 @@ def test_should_return_all_turns_when_session_smaller_than_turn_limit(
 
 
 def test_should_return_exactly_n_turns_when_session_matches_turn_limit(
-    patched_async_engine,
+    seeded_engine,
 ):
-    asyncio.run(_seed_events(patched_async_engine, "sess-1", _build_turns(5)))
+    asyncio.run(_seed_events(seeded_engine, "sess-1", _build_turns(5)))
 
     window = asyncio.run(list_events_window("sess-1", turn_limit=5))
 
@@ -176,10 +189,10 @@ def test_should_return_exactly_n_turns_when_session_matches_turn_limit(
 
 
 def test_should_truncate_to_latest_n_turns_when_session_exceeds_turn_limit(
-    patched_async_engine,
+    seeded_engine,
 ):
     # 10 turns total, ask for the latest 3 → window contains turns 7..9.
-    ids = asyncio.run(_seed_events(patched_async_engine, "sess-1", _build_turns(10)))
+    ids = asyncio.run(_seed_events(seeded_engine, "sess-1", _build_turns(10)))
 
     window = asyncio.run(list_events_window("sess-1", turn_limit=3))
 
@@ -191,12 +204,12 @@ def test_should_truncate_to_latest_n_turns_when_session_exceeds_turn_limit(
 
 
 def test_should_walk_full_session_via_repeated_before_seq_calls(
-    patched_async_engine,
+    seeded_engine,
 ):
     # Three pages of 4 turns each over a 12-turn session, walking upward.
     # Concatenating the three responses in reverse order must reproduce
     # the full event list exactly — no gaps, no overlaps.
-    asyncio.run(_seed_events(patched_async_engine, "sess-1", _build_turns(12)))
+    asyncio.run(_seed_events(seeded_engine, "sess-1", _build_turns(12)))
 
     page1 = asyncio.run(list_events_window("sess-1", turn_limit=4))
     assert page1.has_more is True
@@ -217,11 +230,11 @@ def test_should_walk_full_session_via_repeated_before_seq_calls(
 
 
 def test_should_signal_no_more_when_first_user_message_is_in_window(
-    patched_async_engine,
+    seeded_engine,
 ):
     # Session has exactly 5 turns, ask for 10 — every event returned and
     # ``has_more`` is false because no older user_message exists.
-    asyncio.run(_seed_events(patched_async_engine, "sess-1", _build_turns(5)))
+    asyncio.run(_seed_events(seeded_engine, "sess-1", _build_turns(5)))
 
     window = asyncio.run(list_events_window("sess-1", turn_limit=10))
 
@@ -232,7 +245,7 @@ def test_should_signal_no_more_when_first_user_message_is_in_window(
 
 
 def test_should_return_all_events_when_a_single_turn_has_thousands(
-    patched_async_engine,
+    seeded_engine,
 ):
     # Tool-heavy skill sessions can produce thousands of events per turn.
     # The window endpoint must return them all — the previous event cap
@@ -242,7 +255,7 @@ def test_should_return_all_events_when_a_single_turn_has_thousands(
         rows.append(("tool_use", f"t{tool_idx}"))
     rows.append(("assistant_message", "a0"))
 
-    asyncio.run(_seed_events(patched_async_engine, "sess-1", rows))
+    asyncio.run(_seed_events(seeded_engine, "sess-1", rows))
 
     window = asyncio.run(list_events_window("sess-1", turn_limit=1))
 
@@ -253,19 +266,20 @@ def test_should_return_all_events_when_a_single_turn_has_thousands(
 
 
 def test_should_isolate_session_when_other_sessions_exist_in_same_table(
-    patched_async_engine,
+    seeded_engine,
 ):
     # Two sessions side-by-side — the window query must scope to the
     # passed session_id only.
-    ids_a = asyncio.run(_seed_events(patched_async_engine, "sess-A", _build_turns(2)))
+    ids_a = asyncio.run(_seed_events(seeded_engine, "sess-A", _build_turns(2)))
 
     async def _add_b():
-        async with patched_async_engine.begin() as conn:
+        async with seeded_engine.begin() as conn:
             for i in range(3):
                 await conn.execute(
                     text(
-                        "INSERT INTO events (session_id, message_id, type, data, timestamp) "
-                        "VALUES ('sess-B', :mid, :type, '{}', '2026-05-02T00:00:00')"
+                        "INSERT INTO events "
+                        "(user_id, session_id, message_id, type, data, timestamp) "
+                        "VALUES ('test-user', 'sess-B', :mid, :type, '{}', 1714600000000)"
                     ),
                     {"mid": f"b-{i}", "type": "user_message"},
                 )
@@ -278,10 +292,10 @@ def test_should_isolate_session_when_other_sessions_exist_in_same_table(
     assert window.has_more is False
 
 
-def test_should_exclude_before_seq_row_itself_from_window(patched_async_engine):
+def test_should_exclude_before_seq_row_itself_from_window(seeded_engine):
     # ``before_seq`` is exclusive — the cursor row from the previous page
     # must not appear in the next page (would render a duplicate turn).
-    ids = asyncio.run(_seed_events(patched_async_engine, "sess-1", _build_turns(5)))
+    ids = asyncio.run(_seed_events(seeded_engine, "sess-1", _build_turns(5)))
 
     cursor_seq = ids[6]  # 4th user_message
     window = asyncio.run(list_events_window("sess-1", before_seq=cursor_seq, turn_limit=10))

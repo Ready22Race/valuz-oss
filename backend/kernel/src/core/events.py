@@ -134,3 +134,13 @@ class EventSink(Protocol):
     """Outbound event push — shared by all Runtimes."""
 
     async def emit(self, event: Event) -> None: ...
+
+
+class GlobalEventTap(Protocol):
+    """Process-wide observer of every session's live event stream.
+
+    Registered via ``SessionOrchestrator.attach_global_tap``; receives the
+    session id alongside each event so subscribers don't re-derive routing.
+    """
+
+    async def emit_session(self, session_id: str, event: Event) -> None: ...

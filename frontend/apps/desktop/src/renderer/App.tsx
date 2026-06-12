@@ -57,12 +57,14 @@ export const App = () => {
     };
   }, [ready]);
 
+  // The platform provider wraps EVERY branch — StartupScreen calls
+  // usePlatform() (frameless-window controls), so rendering it outside
+  // the provider crashes the renderer before the backend is ready.
+  let content = null;
   if (checking || (ready && !setupChecked)) {
-    return null;
-  }
-
-  if (!ready) {
-    return (
+    content = null;
+  } else if (!ready) {
+    content = (
       <StartupScreen
         services={services}
         logs={logs}
@@ -71,13 +73,15 @@ export const App = () => {
         onRetry={retry}
       />
     );
+  } else {
+    content = (
+      <>
+        <UpdaterListener />
+        <UpdateToast />
+        <AppRouter />
+      </>
+    );
   }
 
-  return (
-    <ElectronPlatformProvider>
-      <UpdaterListener />
-      <UpdateToast />
-      <AppRouter />
-    </ElectronPlatformProvider>
-  );
+  return <ElectronPlatformProvider>{content}</ElectronPlatformProvider>;
 };

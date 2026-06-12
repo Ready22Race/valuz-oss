@@ -58,15 +58,23 @@ protocol. Enforced by `scripts/check_module_boundaries.py` (wired into
 
 **Kernel boundary** — every host *operation* on kernel state goes through
 `adapters/kernel_client.py` (the `KernelClient` protocol: API-shaped, typed
-with the kernel's wire schemas from `app.schemas`). `from src.adapters.*` /
-`from src.runtimes.*` are forbidden everywhere; `from app.dependencies` is
-restricted to the seam, `boot/kernel.py`, and the documented in-process
-run-driver exemptions — all mechanically enforced by
-`scripts/check_module_boundaries.py`. Declared in-process integration points
-that bypass the client (each with its remote-phase replacement): tool-handler
-registration (→ MCP-over-HTTP toolkit), `broadcast_sink` (→ WS/SSE
-subscription), `event_sse_adapter` raw SQL + `analytics` ORM (TD-007 →
-kernel query APIs), and the run-driver (→ the WS run channel).
+with the kernel's wire schemas from `app.schemas`). Two transports implement
+it: `InProcessKernelClient` (default) and `HttpKernelClient`
+(`adapters/kernel_client_http.py`) for a kernel running as a separate
+process — selected by `VALUZ_KERNEL_MODE=inprocess|http`
+(+ `VALUZ_KERNEL_URL` / `VALUZ_KERNEL_TOKEN`); `VALUZ_KERNEL_DATABASE_URL`
+gives the kernel its own database file. Import rules, all mechanically
+enforced by `scripts/check_module_boundaries.py`:
+`src.adapters` / `src.runtimes` (and their `kernel.`-prefixed spellings)
+are forbidden everywhere; `app.dependencies` / `app.routes` /
+`app.event_stream` are restricted to the seam + `boot/kernel.py`;
+`src.core` domain types are restricted to the documented exemption files
+(`SRC_CORE_ALLOWLIST` — AgentConfig builders + tool registration).
+Event reads/subscriptions, usage aggregates and the run-drivers all go
+through the client (the former `broadcast_sink` / raw-SQL SSE adapter /
+analytics-ORM bypasses are retired). The one remaining declared
+in-process integration point is tool-handler registration
+(→ remote phase replaces it with the MCP-over-HTTP toolkit).
 
 ## Anatomy of a business module
 

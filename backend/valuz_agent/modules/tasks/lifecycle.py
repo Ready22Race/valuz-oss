@@ -905,13 +905,6 @@ class LifecycleService:
         except Exception:  # noqa: BLE001
             logger.exception("_finalize_actor: finalize failed for %s", session_id)
 
-        try:
-            from valuz_agent.adapters.broadcast_sink import cleanup_session
-
-            await cleanup_session(session_id)
-        except Exception:  # noqa: BLE001
-            pass
-
         if role == "lead":
             # Host-side terminal fallback: a lead loop can end (goal auto-exit
             # to default, idle-TTL, normal end_turn) WITHOUT the model calling
