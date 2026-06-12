@@ -27,18 +27,30 @@ def _live(seq: int | None, *, type: str = "session_idle") -> EventData:
     return EventData(type=type, data={"stop_reason": "end_turn"}, timestamp=1, seq=seq)
 
 
-def _drive(monkeypatch, *, backfill: list[EventData], live: list[EventData], polls: list):
+def _drive(
+    monkeypatch,
+    *,
+    backfill: list[EventData],
+    live: list[EventData],
+    polls: list,
+    min_polls: int = 0,
+):
     """Run iter_events_sse against a fake seam; return delivered frames.
 
     ``polls`` records the ``after_seq`` of every DB poll; each poll
-    returns [] (the live path is what's under test).
+    returns [] (the live path is what's under test). With ``min_polls``
+    the run is held open until that many polls fired — deterministic
+    cursor-advance assertions without timing sensitivity.
     """
+    polls_reached = asyncio.Event()
 
     async def _fake_get_events(session_id, *, limit=200, offset=0, after_seq=None):
         if after_seq == 0 and backfill:
             page, backfill[:] = list(backfill), []
             return page
         polls.append(after_seq)
+        if len(polls) >= min_polls:
+            polls_reached.set()
         return []
 
     async def _fake_subscribe(session_id):
@@ -59,6 +71,8 @@ def _drive(monkeypatch, *, backfill: list[EventData], live: list[EventData], pol
             while True:
                 frame = await asyncio.wait_for(gen.__anext__(), timeout=2)
                 if frame.get("event") == "heartbeat":
+                    if min_polls and not polls_reached.is_set():
+                        continue  # hold open until the poll quota is met
                     break  # idle reached — everything deliverable was delivered
                 frames.append(frame)
         except TimeoutError:
@@ -99,11 +113,14 @@ def test_repeated_live_seq_is_delivered_exactly_once(monkeypatch) -> None:
 
 def test_live_frames_advance_the_poll_cursor(monkeypatch) -> None:
     polls: list = []
-    _drive(monkeypatch, backfill=[], live=[_live(9)], polls=polls)
+    # min_polls=3 holds the stream open until the initial backfill read
+    # plus at least two idle polls fired — the assertions below can never
+    # pass vacuously on a short run.
+    _drive(monkeypatch, backfill=[], live=[_live(9)], polls=polls, min_polls=3)
     # polls[0] is the initial (empty) backfill read at after_seq=0; every
     # idle poll AFTER the live frame starts at 9 — the legacy
     # double-delivery (poll re-reading live-delivered events) is gone.
-    assert len(polls) >= 2
+    assert len(polls) >= 3
     assert polls[0] == 0
     assert all(p == 9 for p in polls[1:])
 

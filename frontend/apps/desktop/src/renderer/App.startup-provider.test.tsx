@@ -13,10 +13,10 @@
  * sequencing evolves.
  */
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 
-const startupState = {
+const initialStartupState = {
   services: [],
   logs: [],
   loading: false,
@@ -25,6 +25,7 @@ const startupState = {
   error: null,
   retry: () => undefined,
 };
+let startupState = { ...initialStartupState };
 
 vi.mock("./hooks/use-desktop-startup", () => ({
   useDesktopStartup: () => startupState,
@@ -39,6 +40,10 @@ vi.mock("@valuz/app/lib/onboarding", () => ({
 }));
 
 describe("startup screen under the platform provider", () => {
+  beforeEach(() => {
+    startupState = { ...initialStartupState };
+  });
+
   it("renders the not-ready branch without a usePlatform provider crash", async () => {
     // A bare render throwing "usePlatform() must be used inside
     // <PlatformProvider>" is exactly the regression this guards against.

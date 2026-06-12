@@ -29,7 +29,7 @@ from src.core.events import Event, EventSink
 logger = logging.getLogger(__name__)
 
 
-class PersistThenBroadcastSink:
+class PersistThenBroadcastSink(EventSink):
     """EventSink: DB write first, ``seq``-stamped live broadcast second."""
 
     def __init__(self, db_sink: DatabaseEventSink, live_sink: EventSink) -> None:

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 from typing import Any
 
 import pytest
@@ -25,12 +24,6 @@ from app.schemas import MessageData, UserMessageSchema
 
 from valuz_agent.adapters.kernel_client import KernelClientError, KernelUnavailableError
 from valuz_agent.adapters.kernel_client_http import HttpKernelClient
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 def _fake_message(session_id: str) -> MessageData:
@@ -51,7 +44,7 @@ class _FakeKernelWs:
     def __init__(self, frames: list[dict[str, Any]]) -> None:
         self.frames = frames
         self.received: list[dict[str, Any]] = []
-        self.port = _free_port()
+        self.port: int = 0  # assigned by the OS at serve() time — no TOCTOU
         self._server: Any = None
 
     async def _handler(self, ws: Any) -> None:
@@ -66,12 +59,13 @@ class _FakeKernelWs:
         # terminal frame; the empty-frames case ends via wait_closed too,
         # mapping to KernelUnavailableError client-side.)
         try:
-            await asyncio.wait_for(ws.wait_closed(), timeout=10)
+            await asyncio.wait_for(ws.wait_closed(), timeout=3)
         except TimeoutError:
             pass
 
     async def __aenter__(self) -> _FakeKernelWs:
-        self._server = await websockets.serve(self._handler, "127.0.0.1", self.port)
+        self._server = await websockets.serve(self._handler, "127.0.0.1", 0)
+        self.port = self._server.sockets[0].getsockname()[1]
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
