@@ -132,3 +132,33 @@ def test_unstamped_delta_frames_always_flow(monkeypatch) -> None:
     ]
     frames = _drive(monkeypatch, backfill=[], live=live, polls=[])
     assert len(frames) == 2
+
+
+def test_list_events_after_pages_under_the_kernel_cap(monkeypatch) -> None:
+    """A >1000 request pages in chunks of 1000 so it returns the full set
+    over HTTP — where the route's Query(le=1000) would reject a single
+    limit=2000 call (the in-process client silently dodged that)."""
+    import asyncio
+
+    from valuz_agent.adapters import event_sse_adapter as adp
+
+    calls: list[tuple] = []
+
+    async def _fake_get_events(session_id, *, limit=200, offset=0, after_seq=None):
+        calls.append((after_seq, limit))
+        assert limit <= 1000, "host must never ask the kernel for >1000"
+        # 2500 total events (seq 1..2500); page from after_seq.
+        start = (after_seq or 0) + 1
+        end = min(start + limit, 2501)
+        return [
+            EventData(type="tool_use", data={}, timestamp=1, seq=s, message_id="m")
+            for s in range(start, end)
+        ]
+
+    monkeypatch.setattr(adp.kernel_client, "get_events", _fake_get_events)
+    frames = asyncio.run(adp.list_events_after("s", after_seq=0, limit=2000))
+
+    # Got the full 2000 (not truncated at 1000), in three ≤1000 pages.
+    assert len(frames) == 2000
+    assert all(limit <= 1000 for _, limit in calls)
+    assert len(calls) == 2  # 1000 + 1000

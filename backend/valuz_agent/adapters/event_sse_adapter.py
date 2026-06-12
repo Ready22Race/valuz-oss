@@ -482,14 +482,39 @@ class TurnWindow:
     has_more: bool
 
 
+# The kernel's GET events route caps ``limit`` at 1000 (FastAPI Query
+# le=1000). Page under that so callers can ask for more without tripping
+# the cap — which the in-process client silently dodged (it called the
+# route function directly, skipping Query validation) but the HTTP
+# transport rightly rejects.
+_EVENTS_PAGE = 1000
+
+
 async def list_events_after(
     session_id: str,
     *,
     after_seq: int = 0,
     limit: int = 200,
 ) -> list[SessionEventFrame]:
-    """Return the session's events with ``seq > after_seq``, translated."""
-    items = await kernel_client.get_events(session_id, after_seq=after_seq, limit=limit)
+    """Return the session's events with ``seq > after_seq``, translated.
+
+    Pages in chunks of ``_EVENTS_PAGE`` so a request larger than the
+    kernel's per-call cap returns the full set (not a silently truncated
+    first page) over both transports.
+    """
+    items: list = []
+    cursor = after_seq
+    while len(items) < limit:
+        want = min(_EVENTS_PAGE, limit - len(items))
+        page = await kernel_client.get_events(session_id, after_seq=cursor, limit=want)
+        if not page:
+            break
+        items.extend(page)
+        last_seq = page[-1].seq
+        if last_seq is None or len(page) < want:
+            break  # drained (or no advanceable cursor — persisted events
+            # always carry a seq, but guard against a non-advancing loop)
+        cursor = last_seq
     return _items_to_frames(items)
 
 
