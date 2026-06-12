@@ -160,7 +160,7 @@ function PluginCard({ plugin, onConfigure, onTested, t }: PluginCardProps) {
   );
 
   return (
-    <Card className="rounded-xl">
+    <Card className="rounded-xl border-0 bg-card shadow-sm">
       <CardContent className="space-y-2 px-5 py-4">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -182,7 +182,7 @@ function PluginCard({ plugin, onConfigure, onTested, t }: PluginCardProps) {
           <div className="flex shrink-0 items-center gap-2">
             <Button
               size="sm"
-              variant="secondary"
+              variant="outline"
               className="w-20"
               onClick={handleTest}
               disabled={testing}
@@ -672,7 +672,7 @@ export function ParserSettingsSection() {
             )}
           </div>
         </div>
-        <Card className="rounded-xl">
+        <Card className="rounded-xl border-0 bg-card shadow-sm">
           <CardContent className="space-y-4 px-5 py-4">
             <div className="-mx-5 border-b border-surface-border px-5 pb-4">
               <div className="flex items-center justify-between gap-3">

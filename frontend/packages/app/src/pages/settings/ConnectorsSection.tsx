@@ -875,7 +875,7 @@ export const ConnectorsSection = () => {
                     return (
                       <Card
                         key={connector.slug}
-                        className="rounded-xl shadow-xs"
+                        className="rounded-xl border-0 bg-card shadow-sm"
                       >
                         <CardContent className="py-3">
                           <div className="flex items-start gap-3">
@@ -986,7 +986,7 @@ export const ConnectorsSection = () => {
             <div className="mb-3 text-sm font-medium text-ink-heading">
               {t("settings.connectors.installedConnectors")}
             </div>
-            <Card className="rounded-xl shadow-xs">
+            <Card className="rounded-xl border-0 bg-card shadow-sm">
               <CardContent className="px-5 py-0">
                 {connectorsList.map((connector) => {
                   const dirItem = directoryItems.find((d) =>

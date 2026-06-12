@@ -162,7 +162,7 @@ export const DeployAgentsDialog = ({
                         </span>
                         {isDeployed && (
                           <Badge
-                            variant="secondary"
+                            variant="outline"
                             className="shrink-0 px-1.5 py-0 text-[10px] font-normal"
                           >
                             {t("agent.deployed")}

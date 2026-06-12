@@ -143,7 +143,7 @@ export const SystemLogsSection = () => {
         onRefresh={() => void refreshStatus()}
       />
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-surface-border bg-card">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card shadow-sm">
         <SystemLogToolbar
           searchQuery={view.searchQuery}
           onSearchChange={setSearchQuery}

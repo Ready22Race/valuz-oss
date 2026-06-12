@@ -19,6 +19,8 @@
     --accent: #7c6af5;
     --accent-soft: #ede9ff;
     --accent-2: #9084f8;
+    --ghost-hover-bg: var(--surface-2);
+    --ghost-hover-text: var(--text);
     --success: #16a34a;
     --success-soft: #dcfce7;
     --warn: #d97706;
@@ -42,6 +44,15 @@
   }
   #root { height: 100%; }
   button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+  button[data-variant="ghost"],
+  .btn-ghost {
+    transition: background .12s, color .12s;
+  }
+  button[data-variant="ghost"]:hover,
+  .btn-ghost:hover {
+    background: var(--ghost-hover-bg);
+    color: var(--ghost-hover-text);
+  }
   input, textarea { font-family: inherit; color: inherit; }
   ::-webkit-scrollbar { width: 4px; height: 4px; }
   ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 8px; }

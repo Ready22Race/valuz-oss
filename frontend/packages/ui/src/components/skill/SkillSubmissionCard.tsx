@@ -254,7 +254,7 @@ export const SkillSubmissionCard = memo(function SkillSubmissionCard({
             onClick={onConfirm}
             className={cn(
               "inline-flex h-7 items-center rounded-md px-3 text-xs font-medium",
-              "bg-brand text-white hover:bg-brand/90",
+              "bg-brand text-white hover:bg-brand-hover",
               "disabled:cursor-not-allowed disabled:opacity-50",
             )}
             title={

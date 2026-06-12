@@ -418,7 +418,7 @@ function KbTreeRow({
             >
               <span className={checkboxClass}>
                 {direct ? (
-                  <Check className="h-2.5 w-2.5" strokeWidth={3} />
+                  <Check className="h-2.5 w-2.5" strokeWidth={2} />
                 ) : null}
               </span>
             </button>
@@ -435,7 +435,7 @@ function KbTreeRow({
             >
               <span className={checkboxClass}>
                 {direct ? (
-                  <Check className="h-2.5 w-2.5" strokeWidth={3} />
+                  <Check className="h-2.5 w-2.5" strokeWidth={2} />
                 ) : null}
               </span>
             </span>
@@ -694,7 +694,7 @@ export function AccordionSection({
               "h-3.5 w-3.5 shrink-0",
               iconClassName ?? "text-ink-body",
             )}
-            strokeWidth={1.9}
+            strokeWidth={2}
           />
           <span className="flex-1 text-left text-[13px] font-medium text-ink-heading">
             {title}

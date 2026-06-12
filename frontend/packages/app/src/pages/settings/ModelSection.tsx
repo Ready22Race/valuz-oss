@@ -455,7 +455,7 @@ export const ModelSection = () => {
               const selectedOption =
                 allOptions.find((o) => o.key === selectedKey) ?? null;
               return (
-                <Card className="rounded-xl shadow-xs">
+                <Card className="rounded-xl border-0 bg-card shadow-sm">
                   <CardContent className="px-5 py-0">
                     {/* Runtime */}
                     <div className="flex items-center gap-4 border-b border-[#f7f8fa] px-0 py-3 dark:border-surface-border">
@@ -643,7 +643,7 @@ export const ModelSection = () => {
           )}
         </div>
 
-        <Card className="rounded-xl shadow-xs">
+        <Card className="rounded-xl border-0 bg-card shadow-sm">
           <CardContent className="px-5 py-0">
             {providersList
               // Hide Valuz managed providers (Reportify) -- these are

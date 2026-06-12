@@ -428,7 +428,7 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
                 type="button"
                 disabled={busy !== null || subtasks.length === 0}
                 onClick={handleExecute}
-                className="rounded-md bg-brand px-3.5 py-1.5 text-xs font-medium text-white shadow-sm transition-all hover:bg-brand/90 hover:shadow disabled:cursor-not-allowed disabled:opacity-40"
+                className="rounded-md bg-brand px-3.5 py-1.5 text-xs font-medium text-white shadow-sm transition-all hover:bg-brand-hover hover:shadow disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {busy === "commit"
                   ? t("common.processing" as Parameters<typeof t>[0])

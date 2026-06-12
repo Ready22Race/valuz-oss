@@ -317,7 +317,7 @@ export const ApprovalCard = memo(function ApprovalCard({
                 size="sm"
                 onClick={onApprove}
                 disabled={submitting}
-                className="bg-brand text-white hover:bg-brand/90"
+                className="bg-brand text-white hover:bg-brand-hover"
               >
                 {submitting ? (
                   <Loader2 className="mr-1.5 h-3 w-3 animate-spin" />

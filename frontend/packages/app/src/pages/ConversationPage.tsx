@@ -3994,7 +3994,7 @@ export const ConversationPage = () => {
               <button
                 type="button"
                 onClick={() => navigate("/settings")}
-                className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+                className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-hover"
               >
                 {t("conversation.goToSettings" as Parameters<typeof t>[0])}
               </button>

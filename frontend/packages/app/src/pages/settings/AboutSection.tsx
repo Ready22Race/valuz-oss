@@ -1,8 +1,6 @@
 import { Check, Loader2, RefreshCw, ArrowUpRight } from "lucide-react";
 import {
   Button,
-  Card,
-  CardContent,
   MetricStrip,
   SettingsSection,
 } from "@valuz/ui";
@@ -52,12 +50,13 @@ export const AboutSection = () => {
           },
         ]}
       />
-      <Card className="mb-4 mt-4 rounded-xl shadow-xs">
-        <CardContent className="py-3">
-          <div className="flex items-center gap-4">
-            <img src="./logo.png" alt="Valuz" className="h-14 w-14 shrink-0" />
+      <div className="mb-4 mt-4 rounded-xl bg-card px-4 py-3 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-brand-light">
+              <img src="./logo.png" alt="Valuz" className="h-9 w-9" />
+            </div>
             <div>
-              <div className="text-base font-medium text-ink-heading">
+              <div className="text-sm font-medium text-ink-heading">
                 Valuz Desktop
               </div>
               <div className="tabular mt-0.5 text-xs text-ink-meta">
@@ -65,8 +64,7 @@ export const AboutSection = () => {
               </div>
             </div>
           </div>
-        </CardContent>
-      </Card>
+      </div>
       <div className="mb-4 flex items-center gap-2">
         <Button
           variant="outline"

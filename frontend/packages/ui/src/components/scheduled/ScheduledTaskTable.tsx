@@ -202,13 +202,13 @@ export const ScheduledTaskTable = ({
                 <span
                   className={
                     task.status === "on"
-                      ? "inline-flex items-center gap-1.5 rounded-full bg-[#53cb76]/10 px-2 py-0.5 text-[11px] font-medium text-[#53cb76]"
+                      ? "inline-flex items-center gap-1.5 rounded-full bg-success-light px-2 py-0.5 text-[11px] font-medium text-success-text"
                       : "inline-flex items-center gap-1.5 rounded-full bg-surface-soft px-2 py-0.5 text-[11px] font-medium text-ink-meta"
                   }
                 >
                   <StatusDot
                     status={task.status}
-                    className={task.status === "on" ? "bg-[#53cb76]" : ""}
+                    className={task.status === "on" ? "bg-success" : ""}
                   />
                   {statusLabel(task.status)}
                 </span>
@@ -247,13 +247,13 @@ export const ScheduledTaskTable = ({
                 <span
                   className={
                     task.status === "on"
-                      ? "inline-flex items-center gap-1.5 rounded-full bg-[#53cb76]/10 px-2 py-0.5 text-[11px] font-medium text-[#53cb76]"
+                      ? "inline-flex items-center gap-1.5 rounded-full bg-success-light px-2 py-0.5 text-[11px] font-medium text-success-text"
                       : "inline-flex items-center gap-1.5 rounded-full bg-surface-soft px-2 py-0.5 text-[11px] font-medium text-ink-meta"
                   }
                 >
                   <StatusDot
                     status={task.status}
-                    className={task.status === "on" ? "bg-[#53cb76]" : ""}
+                    className={task.status === "on" ? "bg-success" : ""}
                   />
                   {statusLabel(task.status)}
                 </span>

@@ -1153,7 +1153,7 @@ export const Composer = ({
           dragOver
             ? "border-brand/50"
             : mode === "task"
-              ? "border-[#725cf9] bg-surface"
+              ? "border-brand bg-surface"
               : "border-surface-border bg-surface",
         )}
         style={
@@ -1313,7 +1313,7 @@ export const Composer = ({
                         "flex h-6 items-center rounded-md px-2 font-medium transition-colors duration-[120ms]",
                         active
                           ? m === "task"
-                            ? "bg-[#725cf9] text-white shadow-sm"
+                            ? "bg-brand text-white shadow-sm"
                             : "bg-card text-ink-heading shadow-sm"
                           : "text-ink-body hover:text-ink-heading",
                       )}
@@ -1339,7 +1339,7 @@ export const Composer = ({
                     >
                       <Paperclip
                         className="h-[15px] w-[15px]"
-                        strokeWidth={1.9}
+                        strokeWidth={2}
                       />
                     </button>
                   </TooltipTrigger>
@@ -1388,7 +1388,7 @@ export const Composer = ({
                         editorRef.current?.focus();
                       }}
                     >
-                      <Zap className="h-[15px] w-[15px]" strokeWidth={1.9} />
+                      <Zap className="h-[15px] w-[15px]" strokeWidth={2} />
                     </button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom">Skill</TooltipContent>
@@ -1697,7 +1697,7 @@ export const Composer = ({
                               the task detail page uses (TaskContextPanel
                               + sub-sidebar). */}
                           {mode === "task" && (
-                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-[#725cf9]/10 px-1 text-[10px] leading-none font-normal text-[#725cf9]">
+                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand/10 px-1 text-[10px] leading-none font-normal text-brand">
                               {t("task.runLead" as Parameters<typeof t>[0])}
                             </span>
                           )}
@@ -2328,7 +2328,7 @@ export const Composer = ({
             {sending ? (
               <button
                 type="button"
-                className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-white transition-opacity duration-[120ms] hover:opacity-90"
+                className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-white transition-colors duration-[120ms] hover:bg-brand-hover"
                 onClick={() => onStop?.()}
                 title={t("conversation.stop")}
                 aria-label={t("conversation.stop")}
@@ -2347,11 +2347,11 @@ export const Composer = ({
               <button
                 type="button"
                 className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
+                  "flex h-7 w-7 items-center justify-center rounded-lg transition-colors duration-[120ms]",
                   "@min-[500px]/composer:w-auto @min-[500px]/composer:gap-1 @min-[500px]/composer:px-2 @min-[500px]/composer:text-xs @min-[500px]/composer:font-medium",
                   hasContent && !sendDisabled
-                    ? "bg-[#725cf9] text-white"
-                    : "bg-[#725cf9]/40 text-white/70",
+                    ? "bg-brand text-white hover:bg-brand-hover"
+                    : "bg-brand/40 text-white/70",
                 )}
                 onClick={handleSend}
                 disabled={!hasContent || sendDisabled}
@@ -2367,9 +2367,9 @@ export const Composer = ({
               <button
                 type="button"
                 className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
+                  "flex h-7 w-7 items-center justify-center rounded-lg transition-colors duration-[120ms]",
                   hasContent && !sendDisabled
-                    ? "bg-brand text-white"
+                    ? "bg-brand text-white hover:bg-brand-hover"
                     : "bg-brand/40 text-white/60",
                 )}
                 onClick={handleSend}

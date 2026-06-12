@@ -90,7 +90,7 @@ export const MultiSelect = ({
                 return (
                   <Badge
                     key={v}
-                    variant="secondary"
+                    variant="outline"
                     className="group/badge gap-1 pr-1 font-normal [&>svg]:!size-2.5"
                     onClick={(e) => {
                       e.preventDefault();

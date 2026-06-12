@@ -98,20 +98,20 @@ export const ProviderConnectionPicker: FC<ProviderConnectionPickerProps> = ({
         </DialogHeader>
         <div className="mt-1 flex flex-col gap-2">
           <ConnectionCard
-            icon={<Sparkles className="h-4 w-4" strokeWidth={1.8} />}
+            icon={<Sparkles className="h-4 w-4" strokeWidth={2} />}
             title={t("ui.providerConnection.claudeTitle")}
             description={t("ui.providerConnection.claudeDesc")}
             recommended
             onClick={() => onSelect("claude-subscription")}
           />
           <ConnectionCard
-            icon={<Cpu className="h-4 w-4" strokeWidth={1.8} />}
+            icon={<Cpu className="h-4 w-4" strokeWidth={2} />}
             title={t("ui.providerConnection.codexTitle")}
             description={t("ui.providerConnection.codexDesc")}
             onClick={() => onSelect("codex-subscription")}
           />
           <ConnectionCard
-            icon={<KeyRound className="h-4 w-4" strokeWidth={1.8} />}
+            icon={<KeyRound className="h-4 w-4" strokeWidth={2} />}
             title={t("ui.providerConnection.customTitle")}
             description={t("onboarding.compatibleApi")}
             onClick={() => onSelect("api-key")}

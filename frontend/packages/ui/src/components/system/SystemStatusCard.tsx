@@ -106,7 +106,7 @@ export const SystemStatusCard = ({
   const stateStyle = status ? STATE_STYLES[status.status] : null;
 
   return (
-    <Card className="p-4">
+    <Card className="border-0 bg-card p-4 shadow-sm">
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <span
@@ -121,7 +121,7 @@ export const SystemStatusCard = ({
           </h2>
           {stateStyle && (
             <Badge
-              variant="secondary"
+              variant="outline"
               className="font-normal text-xs tabular-nums"
             >
               {t(stateStyle.label)}

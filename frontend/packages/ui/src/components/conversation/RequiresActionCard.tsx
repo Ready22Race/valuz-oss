@@ -258,7 +258,7 @@ export const RequiresActionCard = memo(function RequiresActionCard({
               onClick={onApprove}
               className={cn(
                 "inline-flex h-7 items-center rounded-md px-3 text-xs font-medium",
-                "bg-brand text-white hover:bg-brand/90",
+                "bg-brand text-white hover:bg-brand-hover",
                 "disabled:cursor-not-allowed disabled:opacity-50",
               )}
             >

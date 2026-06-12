@@ -40,7 +40,7 @@ export interface ExecutionLogProps {
 
 function cnStatus(status: string) {
   if (status === "ok")
-    return "bg-[#53cb76]/10 text-[#53cb76] [&_[data-slot=status-dot]]:bg-[#53cb76]";
+    return "bg-success-light text-success-text [&_[data-slot=status-dot]]:bg-success";
   if (status === "err")
     return "bg-[#f54b4b]/10 text-[#f54b4b] [&_[data-slot=status-dot]]:bg-[#f54b4b]";
   if (status === "pending")
