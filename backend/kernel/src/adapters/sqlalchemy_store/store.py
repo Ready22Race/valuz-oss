@@ -120,7 +120,10 @@ class SQLAlchemyStore:
             model = event_to_model(session_id, message_id, event)
             db.add(model)
             await db.commit()
-            return int(model.id) if model.id is not None else None
+            # The autoincrement PK is always populated after a successful
+            # commit; the assert narrows the Optional for type checkers.
+            assert model.id is not None
+            return int(model.id)
 
     async def get_events(
         self, session_id: str, *, limit: int = 200, offset: int = 0

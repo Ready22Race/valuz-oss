@@ -95,3 +95,32 @@ def test_live_event_to_data_lifts_seq_to_wire_field() -> None:
 
     unstamped = Event(type="text_delta", data={"text": "t"}, timestamp=1)
     assert live_event_to_data(unstamped).seq is None
+
+
+def test_payload_seq_on_non_persisted_event_is_stripped() -> None:
+    """The security-load-bearing branch: an agent-controllable ``seq`` in a
+    live-only event's payload must NOT reach consumers — it would advance
+    their dedup cursor past legitimate events."""
+    store, live, sink = _sink_pair()
+    asyncio.run(sink.emit(Event(type="text_delta", data={"text": "t", "seq": 999})))
+
+    assert store.appended == []  # still live-only
+    assert "seq" not in live.events[0].data
+    assert live.events[0].data["text"] == "t"
+
+
+def test_payload_seq_on_persisted_event_is_overwritten_by_row_id() -> None:
+    """A persisted event can't choose its own seq either — the DB row id
+    wins over whatever the payload carried."""
+    store, live, sink = _sink_pair()
+    asyncio.run(sink.emit(Event(type="tool_use", data={"name": "x", "seq": 999})))
+
+    assert live.events[0].data["seq"] == 101  # the fake store's row id
+
+
+def test_payload_seq_stripped_even_when_db_fails() -> None:
+    """DB-failure fallback must not leak the payload seq unstamped."""
+    _, live, sink = _sink_pair(store_fail=True)
+    asyncio.run(sink.emit(Event(type="tool_use", data={"seq": 999})))
+
+    assert "seq" not in live.events[0].data

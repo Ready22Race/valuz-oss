@@ -608,7 +608,7 @@ async def iter_events_sse(
             if translated is not None:
                 legacy_type, legacy_payload = translated
                 frame = SessionEventFrame(
-                    seq=event.seq or 0,
+                    seq=event.seq if event.seq is not None else 0,
                     event_type=legacy_type,
                     payload=legacy_payload,
                     timestamp=event.timestamp,  # Unix epoch ms (UTC)

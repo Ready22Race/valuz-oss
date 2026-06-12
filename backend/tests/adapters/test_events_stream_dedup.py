@@ -19,6 +19,12 @@ The route function is driven directly and its ``body_iterator`` consumed
 (with a stub ``Request``): sse-starlette's disconnect listener doesn't
 cooperate with httpx's ASGITransport, and the unit under test is the
 frame generator's dedup logic, not the SSE envelope.
+
+Scope note (conscious trade-off): events are injected via
+``append_event`` / ``emit_session_event``, NOT by running a real turn —
+the ``run_turn`` → ``PersistThenBroadcastSink`` wiring is covered by the
+sink's unit tests (``test_persist_then_broadcast.py``); stitching a live
+runtime into this test would buy little for its cost.
 """
 
 # ruff: noqa: I001 — kernel bootstrap side-effect import must precede src/app

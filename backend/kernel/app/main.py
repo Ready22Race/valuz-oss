@@ -40,8 +40,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # The unauthenticated opt-in is loopback-only — and that must be
         # ENFORCED, not documented: AppConfig.host defaults to 0.0.0.0, so
         # a bare opt-in would otherwise expose session mutation, the full
-        # event stream and the usage surface on every interface.
-        if config.host not in ("127.0.0.1", "localhost", "::1"):
+        # event stream and the usage surface on every interface. IP
+        # literals ONLY: a hostname like ``localhost`` resolves through
+        # DNS/hosts at bind time and could be mapped to a non-loopback
+        # address while a string check passes.
+        if config.host not in ("127.0.0.1", "::1"):
             raise RuntimeError(
                 "KERNEL_ALLOW_UNAUTHENTICATED=1 requires a loopback bind: "
                 f"set HOST=127.0.0.1 (got {config.host!r})."

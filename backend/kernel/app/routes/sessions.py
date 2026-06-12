@@ -501,6 +501,10 @@ async def stream_session_events(
         try:
             cursor = after_seq
             if cursor is not None:
+                # INVARIANT the live-loop dedup below depends on: this
+                # backfill loop advances the SHARED ``cursor`` per row, so
+                # by the time the live loop runs, ``cursor`` == the last
+                # backfilled seq (not the caller's ``after_seq``).
                 while True:
                     page = await store.get_events_after(
                         session_id, after_seq=cursor, limit=500
