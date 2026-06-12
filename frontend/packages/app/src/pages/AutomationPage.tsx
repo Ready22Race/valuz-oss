@@ -21,6 +21,7 @@ import {
   DeleteConfirmDialog,
   EmptyState,
   ExecutionLog,
+  PageHeader,
   PageLoader,
   ScheduledTaskTable,
 } from "@valuz/ui";
@@ -288,45 +289,41 @@ export const AutomationPage = () => {
 
   const pageHeader = useMemo(
     () => (
-      <div className="flex w-full items-center justify-between gap-4">
-        <div className="flex min-w-0 flex-col justify-center">
-          <span className="text-base font-semibold leading-5 text-ink-heading">
-            {t(k("automation.title"))}
-          </span>
-          <span className="truncate text-xs leading-4 text-ink-body">
-            {t(k("automation.subtitle"))}
-          </span>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <div className="hidden h-8 items-center gap-2 rounded-lg border border-surface-border bg-surface-soft px-3 text-xs md:flex">
-            <span className="font-medium text-ink-heading">
-              {t(
-                k(
-                  totalCount === 1
-                    ? "automation.headerCount"
-                    : "automation.headerCountPlural",
-                ),
-                { count: totalCount },
-              )}
-            </span>
-            <span className="text-ink-meta">·</span>
-            <span className="text-ink-meta">
-              {t(k("automation.headerEnabled"), { count: enabledCount })}
-            </span>
+      <PageHeader
+        title={t(k("automation.title"))}
+        description={t(k("automation.subtitle"))}
+        action={
+          <div className="flex shrink-0 items-center gap-2">
+            <div className="hidden h-8 items-center gap-2 rounded-lg border border-surface-border bg-surface-soft px-3 text-xs md:flex">
+              <span className="font-medium text-ink-heading">
+                {t(
+                  k(
+                    totalCount === 1
+                      ? "automation.headerCount"
+                      : "automation.headerCountPlural",
+                  ),
+                  { count: totalCount },
+                )}
+              </span>
+              <span className="text-ink-meta">·</span>
+              <span className="text-ink-meta">
+                {t(k("automation.headerEnabled"), { count: enabledCount })}
+              </span>
+            </div>
+            <Button
+              variant="default"
+              size="sm"
+              className="shrink-0"
+              onClick={openCreate}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              {hasAutomations
+                ? t(k("automation.actionNew"))
+                : t(k("automation.actionCreate"))}
+            </Button>
           </div>
-          <Button
-            variant="default"
-            size="sm"
-            className="shrink-0"
-            onClick={openCreate}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {hasAutomations
-              ? t(k("automation.actionNew"))
-              : t(k("automation.actionCreate"))}
-          </Button>
-        </div>
-      </div>
+        }
+      />
     ),
     [totalCount, enabledCount, hasAutomations, openCreate, t],
   );
