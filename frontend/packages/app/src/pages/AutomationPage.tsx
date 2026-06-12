@@ -19,7 +19,9 @@ import { toast } from "sonner";
 import {
   Button,
   DeleteConfirmDialog,
+  EmptyState,
   ExecutionLog,
+  PageHeader,
   PageLoader,
   ScheduledTaskTable,
 } from "@valuz/ui";
@@ -287,45 +289,41 @@ export const AutomationPage = () => {
 
   const pageHeader = useMemo(
     () => (
-      <div className="flex w-full items-center justify-between gap-4">
-        <div className="flex min-w-0 flex-col justify-center">
-          <span className="text-base font-semibold leading-5 text-ink-heading">
-            {t(k("automation.title"))}
-          </span>
-          <span className="truncate text-xs leading-4 text-ink-body">
-            {t(k("automation.subtitle"))}
-          </span>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <div className="hidden h-8 items-center gap-2 rounded-lg border border-surface-border bg-surface-soft px-3 text-xs md:flex">
-            <span className="font-medium text-ink-heading">
-              {t(
-                k(
-                  totalCount === 1
-                    ? "automation.headerCount"
-                    : "automation.headerCountPlural",
-                ),
-                { count: totalCount },
-              )}
-            </span>
-            <span className="text-ink-meta">·</span>
-            <span className="text-ink-meta">
-              {t(k("automation.headerEnabled"), { count: enabledCount })}
-            </span>
+      <PageHeader
+        title={t(k("automation.title"))}
+        description={t(k("automation.subtitle"))}
+        action={
+          <div className="flex shrink-0 items-center gap-2">
+            <div className="hidden h-8 items-center gap-2 rounded-lg border border-surface-border bg-surface-soft px-3 text-xs md:flex">
+              <span className="font-medium text-ink-heading">
+                {t(
+                  k(
+                    totalCount === 1
+                      ? "automation.headerCount"
+                      : "automation.headerCountPlural",
+                  ),
+                  { count: totalCount },
+                )}
+              </span>
+              <span className="text-ink-meta">·</span>
+              <span className="text-ink-meta">
+                {t(k("automation.headerEnabled"), { count: enabledCount })}
+              </span>
+            </div>
+            <Button
+              variant="default"
+              size="sm"
+              className="shrink-0"
+              onClick={openCreate}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              {hasAutomations
+                ? t(k("automation.actionNew"))
+                : t(k("automation.actionCreate"))}
+            </Button>
           </div>
-          <Button
-            variant="default"
-            size="sm"
-            className="shrink-0"
-            onClick={openCreate}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {hasAutomations
-              ? t(k("automation.actionNew"))
-              : t(k("automation.actionCreate"))}
-          </Button>
-        </div>
-      </div>
+        }
+      />
     ),
     [totalCount, enabledCount, hasAutomations, openCreate, t],
   );
@@ -591,26 +589,22 @@ export const AutomationPage = () => {
       <div className="flex min-h-full flex-col px-5 pb-5 pt-3">
         {!hasAutomations ? (
           <div className="flex flex-1 justify-center pt-[160px]">
-            <div className="flex flex-col items-center px-5 text-center">
-              <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-[#f7f8fa] text-[#444b54] dark:bg-surface-soft dark:text-ink-body">
-                <Clock3 className="h-5 w-5" />
-              </div>
-              <div className="mt-3 text-sm font-medium text-ink-heading">
-                {t(k("automation.emptyTitle"))}
-              </div>
-              <div className="mt-1 max-w-[460px] text-xs leading-5 text-ink-body">
-                {t(k("automation.emptyDesc"))}
-              </div>
-              <Button
-                className="mt-4"
-                variant="default"
-                size="sm"
-                onClick={openCreate}
-              >
-                <Plus className="h-3 w-3" />
-                {t(k("automation.emptyAction"))}
-              </Button>
-            </div>
+            <EmptyState
+              variant="plain"
+              title={t(k("automation.emptyTitle"))}
+              description={t(k("automation.emptyDesc"))}
+              icon={<Clock3 className="h-5 w-5" />}
+              action={
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={openCreate}
+                >
+                  <Plus className="h-3 w-3" />
+                  {t(k("automation.emptyAction"))}
+                </Button>
+              }
+            />
           </div>
         ) : (
           <>
@@ -670,13 +664,12 @@ export const AutomationPage = () => {
                   }
                 />
               ) : (
-                <div className="flex flex-col items-center justify-center px-5 py-8 text-center">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-[#f7f8fa] text-[#444b54] dark:bg-surface-soft dark:text-ink-body">
-                    <Clock3 className="h-5 w-5" />
-                  </div>
-                  <p className="mt-3 text-sm font-medium text-ink-heading">
-                    {t(k("automation.noExecutions"))}
-                  </p>
+                <div className="flex flex-1 justify-center py-8">
+                  <EmptyState
+                    variant="plain"
+                    title={t(k("automation.noExecutions"))}
+                    icon={<Clock3 className="h-5 w-5" />}
+                  />
                 </div>
               )}
             </section>

@@ -204,3 +204,285 @@ The canonical design doc is `docs/desktop/FRONTEND-ARCH.md` in the sibling `repo
 - App directory is `apps/desktop` (not `apps/tauri`).
 - Tailwind v4 CSS-based config instead of v3 JS preset — `tailwind.preset.ts` keeps the token surface but is not consumed by Tailwind itself.
 - Enterprise modules (PG / RustFS / Redis / rapiline / LibreOffice / ParadeDB) are declared as seams only; none are implemented.
+
+## UI Component Spec
+
+> Mandatory conventions for the `@valuz/ui` component library. All tokens are defined in `packages/ui/src/styles/project.css`.
+
+### Border Radius
+
+| Element | Tailwind | Token |
+|---------|----------|-------|
+| Button / Input / Textarea / Select / TabsTrigger / Checkbox | `rounded-md` | 6px |
+| Dialog / Drawer / IconBox(md) / code blocks | `rounded-lg` | 8px |
+| Card / DropdownMenu / Popover / EmptyState / IconBox(lg) | `rounded-xl` | 10px |
+| SectionCard / ActionCardGrid icon | `rounded-2xl` | 12px |
+| Badge / Switch / Avatar / StatusPill | `rounded-full` | — |
+
+Rule: do not use arbitrary values (e.g. `rounded-[7px]`). When no case matches, pick the next smaller adjacent value.
+
+### Semantic Colors
+
+**Text:** `text-ink-heading` (titles) / `text-ink-label` (form labels, buttons) / `text-ink-body` (body copy, descriptions) / `text-ink-meta` (timestamps, metadata) / `text-ink-muted` (placeholder icons) / `text-ink-disabled` (disabled state)
+
+**Surface / background:** `bg-surface` (cards) / `bg-surface-soft` (hover background) / `bg-surface-2` (secondary background) / `bg-surface-muted` (dividers, SegmentedControl)
+
+**Border:** `border-surface-border` (default) / `border-surface-border-strong` (strong border) / `border-surface-border-hover` (hover state)
+
+**Status colors:** use paired `bg-success-light` + `text-success-text`; the same applies to warning / error / info.
+
+**Brand:** `bg-brand` / `text-brand` (CTA, active state) / `bg-brand-light` (light brand background) / `text-brand-secondary`
+
+Rule: hardcoding hex colors is forbidden. All colors must be referenced through semantic tokens.
+
+### Interaction States
+
+- **Focus:** `focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50`. Use `focus-visible`, not `focus`.
+- **Hover:** Button default `hover:bg-primary/90`; outline `hover:bg-surface-2`; ghost `hover:bg-accent`; interactive Cards use the `card-interactive` utility class.
+- **Active (Radix):** use the `data-[state=active]` selector.
+- **Disabled:** `disabled:pointer-events-none disabled:opacity-50`.
+
+### Primitive Index
+
+| Component | Location | Notes |
+|-----------|----------|--------|
+| Button | `ui/button` | variant: default/destructive/outline/secondary/ghost/link · size: default/xs/sm/lg/icon · `loading`/`asChild` |
+| Card | `ui/card` | compound: CardHeader/CardTitle/CardDescription/CardAction/CardContent/CardFooter · add `card-interactive` for interactive use |
+| Tabs | `ui/tabs` | variant: default (pill) / line (underline) · orientation: horizontal/vertical |
+| Dialog | `ui/dialog` | compound: DialogHeader/DialogContent/DialogFooter · `showCloseButton` · long content uses `flex-1 overflow-y-auto` |
+| Badge | `ui/badge` | variant: default/secondary/outline/ghost/brand/success/warning/error/destructive |
+| Item | `ui/item` | compound: ItemMedia/ItemContent/ItemTitle/ItemDescription/ItemActions · variant: default/outline/muted · `asChild` |
+| Other primitives | `ui/*` | Input · Textarea · Select(sm/default) · Switch(sm/default) · Checkbox · SegmentedControl · Tooltip · Popover · DropdownMenu · Sheet · Drawer · ScrollArea · Skeleton · Spinner · Avatar |
+
+### Business Component Reference
+
+#### IconBox — icon container
+
+Unifies the size, radius, and background of every icon container. Variants managed with CVA.
+
+```tsx
+import { IconBox } from "@valuz/ui"
+
+<IconBox size="md" variant="brand"><FolderIcon /></IconBox>
+```
+
+| size | dimensions | radius | typical use |
+|------|------------|--------|-------------|
+| `sm` | 7×7 | md | icon container for action buttons |
+| `md` | 9×9 | lg | **default**. list-item icons, settings-page icons |
+| `lg` | 10×10 | xl | ActionCardGrid icons |
+| `xl` | 11×11 | xl | empty-state icons, onboarding icons |
+
+| variant | background | use |
+|---------|------------|-----|
+| `default` | surface-soft | generic icon container |
+| `brand` | brand-light + border | brand-accent icons |
+| `muted` | surface-soft + ink-muted | secondary icons |
+| `outline` | surface-soft + border | bordered icon (common in settings pages) |
+
+#### EmptyState — empty state
+
+Two variants cover every empty-state case:
+
+```tsx
+import { EmptyState } from "@valuz/ui"
+
+// Inline empty list (dashed-border card)
+<EmptyState message={t("common.noData")} />
+
+// Full-page centered empty state (no background)
+<EmptyState
+  variant="plain"
+  title={t("project.createTitle")}
+  description={t("project.emptyState")}
+  icon={<FolderKanban />}
+  action={<Button size="sm">Create</Button>}
+/>
+```
+
+- `dashed` (default): dashed border + background, for inline empty states inside lists
+- `plain`: centered layout, for full-page empty states. Icon rendered with `IconBox size="xl"`
+
+#### FormDialog — form dialog template
+
+Auto-generates DialogHeader + content area + DialogFooter, eliminating the boilerplate of 20+ dialogs.
+
+```tsx
+import { FormDialog, DialogField } from "@valuz/ui"
+import { Input } from "@valuz/ui"
+
+<FormDialog
+  open={open} onOpenChange={setOpen}
+  title={t("common.create")}
+  description={t("project.instruction")}
+  onSubmit={handleSubmit}
+  submitLabel={t("common.submit")}
+  cancelLabel={t("common.cancel")}
+  loading={busy}
+>
+  <DialogField label={t("common.name")} required>
+    <Input value={name} onChange={e => setName(e.target.value)} />
+  </DialogField>
+</FormDialog>
+```
+
+- `onSubmit`: when set, a Submit button is rendered automatically (`variant="default"`)
+- `destructive`: switches the Submit button to `variant="destructive"`
+- `loading`: Submit shows a spinner and is disabled; Cancel is also disabled
+- `footer`: pass a custom node to fully replace the default footer
+- `maxWidthClass`: overrides the dialog width, e.g. `"sm:max-w-xl"`
+- Fields inside the dialog should uniformly use `DialogField` (supports required/help/helpUrl)
+
+#### PageHeader — page header
+
+```tsx
+import { PageHeader } from "@valuz/ui"
+
+<PageHeader
+  title={t("sidebar.projects")}
+  description={t("project.createDesc")}
+  action={<Button size="sm"><Plus /> Create</Button>}
+/>
+```
+
+- Layout: title + description left-aligned, action right-aligned
+- Usage: mount into the page header slot via `setHeader()` (see ProjectsPage)
+
+#### SectionCard — content section
+
+```tsx
+import { SectionCard } from "@valuz/ui"
+
+<SectionCard
+  eyebrow="Brand"       // optional, shown as a Badge
+  title="Title"
+  description="Description"
+  accent={<Button>Action</Button>}  // optional, top-right
+>
+  {/* child content */}
+</SectionCard>
+```
+
+#### SettingsNav — settings navigation
+
+Adapts to a desktop sidebar or mobile pill buttons. Replaces SettingsPage's hand-written nav.
+
+```tsx
+import { SettingsNav } from "@valuz/ui"
+
+<SettingsNav
+  items={[
+    { id: "general", icon: <Palette />, label: t("...") },
+    { id: "model", icon: <Cpu />, label: t("...") },
+  ]}
+  value={tab}
+  onValueChange={setTab}
+/>
+```
+
+#### CategorizedList — categorized list
+
+Reused across 4+ pages (Agents/Skills/Connectors/Knowledge). Collapsible groups + custom filter/sort + empty state.
+
+```tsx
+import { CategorizedList } from "@valuz/ui"
+
+<CategorizedList
+  items={items}
+  categories={categories}
+  renderItem={(item) => <MyItemRow ... />}
+  emptyState={<EmptyState message={t("common.noData")} />}
+/>
+```
+
+#### DeleteConfirmDialog — delete confirmation
+
+Used in 15+ places. Built-in AlertTriangle icon, loading state, and i18n.
+
+```tsx
+import { DeleteConfirmDialog } from "@valuz/ui"
+
+<DeleteConfirmDialog
+  open={!!deleteTarget}
+  onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}
+  itemName={deleteTarget?.name}
+  onConfirm={() => void handleDelete()}
+/>
+```
+
+#### Other business components
+
+| Component | Use |
+|-----------|-----|
+| `StatusPill` | Status label. Auto-pulses for `running`. Color mapped via `status-tone.ts` |
+| `ActionCardGrid` | Action card grid (2 columns). Onboarding entry picker |
+| `CatalogPickerDialog` | Multi-select picker. Bulk selection for skills/connectors |
+| `BackLink` | Back navigation. ArrowLeft + configurable label |
+| `PageLoader` | Page loading state. Logo shimmer |
+| `SearchInput` | Search input. Built-in Search icon |
+| `ResourceActionSlot` | Plugin extension point. OSS renders nothing; commercial injects action buttons |
+
+### Form Conventions
+
+**Field wrappers at a glance:**
+
+| Component | Use | label style | special capability |
+|-----------|-----|-------------|--------------------|
+| `DialogField` | forms inside a dialog | `text-xs text-ink-meta` | required, help, helpUrl |
+| `FormField` | generic forms | `text-xs font-medium text-ink-label` | error message |
+| `SettingsRow` | settings page, label + control side-by-side | `text-sm font-medium text-ink-heading` | desc, `grid-cols-[1fr_auto]` |
+
+**Control selection:** Input(h-9) / Textarea(auto-grow, max-h-[40vh]) / Select(sm/default) / Switch(on/off) / Checkbox(multi-select) / SegmentedControl(2-4 mutually exclusive options). All controls share `rounded-md` + `border-input` + `focus-visible:ring` + `disabled:opacity-50`.
+
+### Page-Level Composition Patterns
+
+**List pages** (AgentsPage / SkillsPage / ConnectorsPage / KnowledgePage):
+```
+PageHeader(title + desc + action)           ← mounted into the header slot
+  └─ CategorizedList                         ← grouped list
+       ├─ ResourceActionSlot                 ← plugin extension
+       └─ EmptyState(variant="dashed")       ← empty state
+PageLoader                                   ← loading state
+```
+
+**Settings page** (SettingsPage):
+```
+SettingsNav(items, value, onValueChange)     ← left nav + mobile pills
+  └─ right content area
+       └─ SettingsSection(title + desc)
+            └─ SettingsRow(label + control)
+```
+
+**Detail pages** (AgentDetailPage / SkillDetailPage):
+```
+BackLink                                     ← back navigation
+Tabs(variant="line")                         ← tab switching
+  └─ per-tab content
+```
+
+**Form dialogs** (all create/edit dialogs):
+```
+FormDialog(title + onSubmit + loading)
+  └─ DialogField(label + required + help)
+       └─ Input / Select / SegmentedControl
+```
+
+### Composition & Extension
+
+- **className merging:** all components merge via `cn()`; later props win
+- **asChild:** Radix Slot pattern — applies styles to a child element (Link, etc.). Under `asChild`, Button's loading spinner is not rendered
+- **data-slot:** every component's root sets `data-slot`. Components with variant/size also set `data-variant` / `data-size`
+- **CVA:** new components with variants use `class-variance-authority`
+- **Utility classes:** `card-interactive` / `hover-lift` / `section-card` / `label-mono` / `tabular`
+
+### New Component Checklist
+
+- [ ] Placement: base primitives in `ui/`, shared business components in `common/`
+- [ ] `data-slot` attribute set
+- [ ] Border radius follows the table above
+- [ ] Colors use semantic tokens, no hardcoded color values
+- [ ] Focus state: `focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50`
+- [ ] Disabled state: `disabled:pointer-events-none disabled:opacity-50`
+- [ ] `className` merged via `cn()`, supports external override
+- [ ] When variants exist, manage them with CVA
+- [ ] i18n: all user-visible text uses `t()` calls
