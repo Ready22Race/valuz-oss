@@ -145,6 +145,16 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
     os.environ["VALUZ_KERNEL_TOKEN"] = endpoint.token
     kernel_client.rebind_client()
 
+    # Register the live sandbox so session creation can dynamically grant
+    # external project paths into it (② dynamic mount). The static mounts
+    # are already reachable; this covers folders bound after boot. A
+    # reload child that skipped provisioning lazily activates from env.
+    from valuz_agent.integrations import sandbox_runtime
+
+    sandbox_runtime.activate(
+        provider, "host-kernel", tuple(m.source for m in mounts)
+    )
+
     atexit.register(lambda: asyncio.run(provider.destroy("host-kernel")))
 
 
