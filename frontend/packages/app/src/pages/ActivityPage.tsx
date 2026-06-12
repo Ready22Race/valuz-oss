@@ -596,14 +596,6 @@ export const ActivityPage = () => {
         )}
       </section>
 
-      {/* Truly empty (nothing matches the filter, nothing running). Falls
-          through to here only when there's neither a running nor a history
-          entry matching the current filter. */}
-      {!hasAny && filter !== "all" && (
-        <div className="px-3 py-12 text-center text-sm text-ink-meta">
-          {t(tk("activity.noHistory"))}
-        </div>
-      )}
       <DeleteConfirmDialog
         open={deletingChat !== null}
         onOpenChange={(open) => {
