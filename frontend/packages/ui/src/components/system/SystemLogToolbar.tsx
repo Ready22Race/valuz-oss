@@ -50,6 +50,9 @@ const LEVEL_TEXT_COLOR: Record<LogLevel, string> = {
   RAW: "text-ink-meta",
 };
 
+const toolbarToggleClassName =
+  "text-ink-meta hover:bg-surface-2 hover:text-ink-heading data-[state=on]:bg-surface-2 data-[state=on]:text-ink-heading data-[state=on]:shadow-xs";
+
 export interface SystemLogToolbarProps {
   searchQuery: string;
   onSearchChange: (q: string) => void;
@@ -138,6 +141,7 @@ export const SystemLogToolbar = ({
           size="sm"
           pressed={collapseRepeats}
           onPressedChange={onToggleCollapseRepeats}
+          className={toolbarToggleClassName}
           title={
             collapseRepeats
               ? t("system.expandRepeats", { count: "0" })
@@ -151,6 +155,7 @@ export const SystemLogToolbar = ({
           size="sm"
           pressed={followTail}
           onPressedChange={onToggleFollowTail}
+          className={toolbarToggleClassName}
           title={
             followTail ? t("system.stopAutoScroll") : t("system.autoScroll")
           }
