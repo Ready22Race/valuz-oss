@@ -44,6 +44,7 @@ import httpx
 
 from valuz_agent.boot.kernel import KERNEL_DIR
 from valuz_agent.ports.sandbox_provider import (
+    MountSpec,
     SandboxEndpoint,
     SandboxProvisionError,
     SandboxSpec,
@@ -73,6 +74,50 @@ def seatbelt_preflight() -> list[str]:
     if not (KERNEL_DIR / "app" / "main.py").exists():
         problems.append(f"kernel artifact missing: {KERNEL_DIR / 'app' / 'main.py'}")
     return problems
+
+
+def host_sandbox_rw_mounts() -> tuple[MountSpec, ...]:
+    """The writable dirs a host-wide kernel sandbox needs — enumerated from
+    ``fs_registry``/``settings`` so the manifest stays complete as paths
+    evolve, rather than hardcoded in the boot wiring.
+
+    Skill materialization writes symlinks into ``<cwd>/.agents/skills`` and
+    ``<cwd>/.claude/skills`` under each project root, and skill *creation*
+    writes new packs into the user/official skill roots — all of which must
+    be writable or the runtime fails with "Operation not permitted" the
+    moment it tries to set a skill up (the reported bug).
+
+    "Dynamic" coverage by construction: we write-allow the ROOTS (the user
+    project root, the chat-cwd root, every skill root), so any project or
+    skill created UNDER them after provision works without re-provisioning.
+    A project bound OUTSIDE these roots (an arbitrary folder) is the one
+    case a single host-wide sandbox can't reach — that needs a per-project
+    sandbox (design §3.5) and is logged, not silently dropped.
+
+    Read access to skill *sources* is already granted by the profile's
+    broad ``(allow file-read*)``; this list is strictly the write set.
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.infra.fs_registry import fs_registry as fr
+
+    dirs: list[Path] = [
+        settings.data_dir / "sandbox",  # the kernel's private DB
+        settings.data_dir / "projects",  # managed chat cwds
+        settings.user_project_root,  # real projects + their .agents|.claude/skills
+        fr.official_skill_root(),  # official skill bootstrap
+        fr.user_skill_root("claude"),  # user skill creation / submit
+        *fr.legacy_user_skill_roots(),  # ~/.claude/skills, ~/.codex/skills
+    ]
+    seen: set[str] = set()
+    mounts: list[MountSpec] = []
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        key = os.path.realpath(str(d))
+        if key in seen:
+            continue
+        seen.add(key)
+        mounts.append(MountSpec(target=str(d), source=str(d), mode="rw"))
+    return tuple(mounts)
 
 
 def build_seatbelt_profile(spec: SandboxSpec) -> str:

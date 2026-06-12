@@ -76,7 +76,7 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
         SeatbeltSandboxProvider,
         seatbelt_preflight,
     )
-    from valuz_agent.ports.sandbox_provider import MountSpec, SandboxSpec
+    from valuz_agent.ports.sandbox_provider import SandboxSpec
 
     log = logging.getLogger("valuz_agent.sandbox")
 
@@ -102,8 +102,6 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
     data_dir = settings.data_dir
     sandbox_dir = data_dir / "sandbox"
     sandbox_dir.mkdir(parents=True, exist_ok=True)
-    projects_dir = data_dir / "projects"
-    projects_dir.mkdir(parents=True, exist_ok=True)
     host_db = data_dir / settings.db_filename
 
     # Pass through LLM credentials the sandboxed kernel needs (⑥ L1).
@@ -113,13 +111,17 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
         if (v := os.environ.get(k)) is not None
     }
 
+    # Writable manifest enumerated from fs_registry — project roots + all
+    # skill dependency dirs — so skill materialization (symlinks into a
+    # project's .agents|.claude/skills) and skill creation don't hit
+    # "Operation not permitted". See host_sandbox_rw_mounts.
+    from valuz_agent.integrations.sandbox_seatbelt import host_sandbox_rw_mounts
+
+    mounts = host_sandbox_rw_mounts()
     spec = SandboxSpec(
         sandbox_id="host-kernel",
         kernel_db_path=str(sandbox_dir / "kernel.db"),
-        mounts=(
-            MountSpec(target=str(sandbox_dir), source=str(sandbox_dir), mode="rw"),
-            MountSpec(target=str(projects_dir), source=str(projects_dir), mode="rw"),
-        ),
+        mounts=mounts,
         env=passthrough,
         host_callback_url=os.environ.get("VALUZ_BACKEND_BASE_URL", ""),
         # RED LINE: host business DB (+ wal/shm) and secret store.

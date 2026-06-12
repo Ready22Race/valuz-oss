@@ -678,6 +678,19 @@ class SandboxProvider(Protocol):
 (allow network-outbound (remote tcp "*:443"))        ; LLM（最小版宽松）
 ```
 
+**技能与项目依赖目录（挂载清单完整性）**：rw 白名单由
+`host_sandbox_rw_mounts()` 从 fs_registry 枚举 —— 项目根（`~/Valuz`）、
+聊天 cwd 根、以及全部技能根（`~/.agents/skills`、`official_skill_root`、
+`~/.claude/skills`、`~/.codex/skills`）。技能物化把符号链接写进
+`<cwd>/.agents/skills` 与 `.claude/skills`，技能创建写进技能根 —— 漏掉
+任一目录，runtime 一旦 set up 技能就 "Operation not permitted"。
+
+**动态覆盖（按根授权）**：Seatbelt profile 在进程启动时一次性固定，无法对
+运行中的沙箱追加规则。因此 write-allow 的是**根目录**而非具体项目 —— 在
+`~/Valuz` 和各技能根**之下**动态新建的项目/技能无需重新 provision 即生效。
+唯一不覆盖的是绑定到这些根**之外**的任意文件夹项目，那是单一 host-wide
+沙箱的固有边界，需 per-project 沙箱（§3.5）。
+
 **红线（强制）**：host 的 `valuz.db` 所在目录与 `secrets_dir` 显式
 `deny`，`~/.valuz` 不整体放行 —— 这正是沙箱化的意义。
 
