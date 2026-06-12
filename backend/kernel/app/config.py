@@ -20,3 +20,8 @@ class AppConfig:
     port: int = field(default_factory=lambda: int(os.getenv("PORT", "8000")))
     cors_origins: list[str] = field(default_factory=_get_cors_origins)
     debug: bool = field(default_factory=lambda: os.getenv("DEBUG", "false").lower() == "true")
+    # Bearer token required on every request when the kernel runs as a
+    # standalone process (``KERNEL_AUTH_TOKEN``). Empty/None = open —
+    # acceptable only for the in-process mount, where the host's own
+    # auth fronts these routes. Applies to HTTP and the WS run channel.
+    auth_token: str | None = field(default_factory=lambda: os.getenv("KERNEL_AUTH_TOKEN") or None)

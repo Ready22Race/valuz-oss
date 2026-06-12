@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import AppConfig
 from app.dependencies import init_dependencies, shutdown_dependencies
@@ -41,6 +43,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+if config.auth_token:
+
+    @app.middleware("http")
+    async def _require_bearer_token(request: Request, call_next: Any) -> Any:
+        """Standalone-kernel auth: every route except /health requires the
+        configured bearer token. The WS run channel enforces the same token
+        inside its handler (HTTP middleware doesn't cover websockets)."""
+        if request.url.path != "/health":
+            supplied = request.headers.get("authorization", "")
+            if supplied != f"Bearer {config.auth_token}":
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        return await call_next(request)
 
 
 @app.get("/health")

@@ -13,6 +13,26 @@ class Settings(BaseSettings):
     # Accepts postgresql://... for multi-user deployments.
     database_url: str | None = None
 
+    # Separate kernel database — when set, the kernel's three tables
+    # (sessions / messages / events + its ``alembic_version``) live in
+    # their own file/database instead of sharing ``valuz.db``. This is
+    # the storage-separation knob behind kernel independent deployment:
+    # the host carries only ``valuz_*`` tables and reaches kernel state
+    # exclusively through the ``KernelClient`` seam. Default ``None``
+    # keeps the legacy single-file layout. Override with
+    # ``VALUZ_KERNEL_DATABASE_URL`` (e.g. ``sqlite:///.../kernel.db``).
+    kernel_database_url: str | None = None
+
+    # Kernel transport mode — which ``KernelClient`` implementation the
+    # host binds at import. ``inprocess`` (default) drives the kernel's
+    # route functions in this process; ``http`` addresses a kernel
+    # running as a separate process at ``kernel_url`` (bare subprocess,
+    # sandbox, or remote), authenticated by ``kernel_token``. Override
+    # with VALUZ_KERNEL_MODE / VALUZ_KERNEL_URL / VALUZ_KERNEL_TOKEN.
+    kernel_mode: str = "inprocess"
+    kernel_url: str = "http://127.0.0.1:8400"
+    kernel_token: str | None = None
+
     # ── Backend self-URL ─────────────────────────────────────────────
     # Where the host's own FastAPI is reachable from inside the same
     # process / container. Used to inject the in-process docs MCP server
@@ -61,6 +81,18 @@ class Settings(BaseSettings):
         if self.database_url:
             return self._to_async_url(self.database_url)
         return f"sqlite+aiosqlite:///{self.db_path}"
+
+    @property
+    def kernel_db_url(self) -> str:
+        """Sync-driver URL for the kernel's database (defaults to the
+        shared host database when no separate kernel DB is configured)."""
+        return self.kernel_database_url or self.db_url
+
+    @property
+    def kernel_db_url_async(self) -> str:
+        if self.kernel_database_url:
+            return self._to_async_url(self.kernel_database_url)
+        return self.db_url_async
 
     @property
     def is_sqlite(self) -> bool:

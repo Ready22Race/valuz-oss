@@ -61,7 +61,7 @@ def _set_kernel_env() -> None:
     ``sessions/messages/events`` or valuz's ``valuz_*`` namespaces;
     setdefault honours an external override.
     """
-    os.environ["DATABASE_URL"] = settings.db_url_async
+    os.environ["DATABASE_URL"] = settings.kernel_db_url_async
     os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.db_path))
 
 
@@ -92,7 +92,7 @@ def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
 
     owns_engine = engine is None
     if engine is None:
-        engine = create_engine(settings.db_url)
+        engine = create_engine(settings.kernel_db_url)
     try:
         inspector = inspect(engine)
         existing = set(inspector.get_table_names())

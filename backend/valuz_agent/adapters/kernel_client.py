@@ -468,12 +468,29 @@ class InProcessKernelClient:
         await _orchestrator().cleanup(session_id)
 
 
-client: KernelClient = InProcessKernelClient()
+def _make_client() -> KernelClient:
+    """Bind the transport for this process from settings.
+
+    ``inprocess`` (default) — the kernel lives in this process.
+    ``http`` — the kernel runs as a separate process (bare subprocess,
+    sandbox, or remote) at ``settings.kernel_url``; see
+    ``adapters/kernel_client_http.py``.
+    """
+    from valuz_agent.infra.config import settings
+
+    if settings.kernel_mode == "http":
+        from valuz_agent.adapters.kernel_client_http import HttpKernelClient
+
+        return HttpKernelClient(settings.kernel_url, token=settings.kernel_token)
+    return InProcessKernelClient()
+
+
+client: KernelClient = _make_client()
 
 
 # Module-level facade — call-site ergonomics match the former kernel_store
 # (``await kernel_client.get_session(...)``), while the swappable object
-# lives behind ``client`` for a future HTTP transport.
+# lives behind ``client`` for the HTTP transport.
 
 
 async def create_session(req: CreateSessionRequest) -> SessionData:

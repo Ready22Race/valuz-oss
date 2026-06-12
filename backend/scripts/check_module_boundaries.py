@@ -92,24 +92,54 @@ def _imported_dotted_paths(tree: ast.AST):
 
 
 # ── Kernel boundary ─────────────────────────────────────────────────
-# The host consumes the kernel only through declared seams. Deep imports
-# (``src.adapters`` / ``src.runtimes``) are forbidden everywhere; the kernel
-# singletons (``app.dependencies``) are restricted to the seam itself, the
-# boot lifecycle, and the in-process run-driver exemptions documented in
-# ``adapters/kernel_client.py``.
+# The host consumes the kernel only through declared seams:
+#
+#   operations    → adapters/kernel_client (API-shaped, wire-schema typed)
+#   wire schemas  → app.schemas / app.serializers (allowed everywhere)
+#   domain types  → src.core, ONLY in the documented exemption files below
+#
+# Deep imports (``src.adapters`` / ``src.runtimes`` — including their
+# ``kernel.``-prefixed spellings) are forbidden everywhere. The kernel
+# singletons (``app.dependencies``), route functions (``app.routes``) and
+# stream plumbing (``app.event_stream``) are restricted to the seam itself
+# and the boot lifecycle.
 
 HOST_ROOT = MODULES_ROOT.parent
 
-FORBIDDEN_KERNEL_PREFIXES = ("src.adapters", "src.runtimes")
+FORBIDDEN_KERNEL_PREFIXES = (
+    "src.adapters",
+    "src.runtimes",
+    # The same modules reachable under the repo-level package name — the
+    # spelling the retired analytics ORM import used to slip through.
+    "kernel.src",
+    "kernel.app",
+)
 
-APP_DEPENDENCIES_ALLOWLIST = {
+# Kernel singletons / route functions / stream plumbing: the seam + boot only.
+SEAM_ONLY_PREFIXES = ("app.dependencies", "app.routes", "app.event_stream")
+SEAM_ONLY_ALLOWLIST = {
     "adapters/kernel_client.py",  # the seam itself
-    "boot/kernel.py",  # kernel lifecycle owner
-    # In-process run-driver exemptions (the host half of the WS run channel:
-    # sink attach/detach + turn driving). Remote mode replaces these with the
-    # WS transport, not with more app.dependencies callers.
-    "modules/tasks/actor_runner.py",
+    "boot/kernel.py",  # kernel lifecycle owner (mounts routers, runs migrations)
+}
+
+# ``src.core`` domain types — type-level coupling tolerated only in the
+# declared integration points. Everything else speaks wire schemas.
+SRC_CORE_ALLOWLIST = {
+    "adapters/kernel_client.py",  # seam: schema↔domain conversion lives here
+    "boot/kernel.py",  # lifecycle: owner_context seeding
+    # AgentConfig builders — construct the session's embedded config
+    # snapshot; serialized to the wire via app.serializers at the seam.
+    "adapters/agent_resolver.py",
+    "modules/agents/service.py",
     "modules/sessions/service.py",
+    "modules/sessions/mappers.py",
+    # Tool-handler registration (ToolDef/ToolResult/ExecContext): the
+    # declared in-process integration point. Remote phase replaces this
+    # with the host-MCP toolkit (see backend/CLAUDE.md §kernel boundary).
+    "modules/tasks/tools/handlers.py",
+    "modules/tasks/tools/declarations.py",
+    "modules/memory/tools.py",
+    "integrations/tools_skill_creator.py",
 }
 
 
@@ -125,11 +155,20 @@ def check_kernel_boundary() -> list[str]:
                     "(kernel internals — use the kernel_client seam)"
                 )
             if (
-                dotted == "app.dependencies" or dotted.startswith("app.dependencies.")
-            ) and rel not in APP_DEPENDENCIES_ALLOWLIST:
+                any(dotted == p or dotted.startswith(p + ".") for p in SEAM_ONLY_PREFIXES)
+                and rel not in SEAM_ONLY_ALLOWLIST
+            ):
                 problems.append(
-                    f"  valuz_agent/{rel}:{lineno}  imports app.dependencies "
-                    "(kernel singletons — go through adapters/kernel_client)"
+                    f"  valuz_agent/{rel}:{lineno}  imports {dotted} "
+                    "(kernel seam plumbing — go through adapters/kernel_client)"
+                )
+            if (
+                dotted == "src.core" or dotted.startswith("src.core.")
+            ) and rel not in SRC_CORE_ALLOWLIST:
+                problems.append(
+                    f"  valuz_agent/{rel}:{lineno}  imports {dotted} "
+                    "(kernel domain types — use app.schemas wire models, or add "
+                    "the file to SRC_CORE_ALLOWLIST with a documented reason)"
                 )
     return problems
 
