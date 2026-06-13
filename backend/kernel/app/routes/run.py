@@ -102,11 +102,8 @@ async def run_session(websocket: WebSocket, session_id: str) -> None:
             return
 
     # Owner id (HTTP middleware / Header-Depends don't cover websockets):
-    # the host sends ``X-Valuz-Owner-Id``; a standalone single-user kernel
-    # falls back to the boot-seeded owner_context default.
-    from src.core.owner_context import get_owner_id as _default_owner
-
-    owner = websocket.headers.get("x-valuz-owner-id") or _default_owner()
+    # the host sends ``X-Valuz-Owner-Id``. No header = an owner-less call → close.
+    owner = websocket.headers.get("x-valuz-owner-id")
     if not owner:
         await websocket.close(code=4403, reason="owner id required")
         return

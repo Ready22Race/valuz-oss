@@ -237,10 +237,9 @@ class Session:
     # is self-sufficient.
     cwd: str
     runtime_provider: RuntimeProvider = "claude_agent"
-    # Owner id, stamped from ``owner_context`` on insert (see
-    # ``sqlalchemy_store.models._owner_column``). Populated on read by
-    # ``model_to_session``; left at its default on the write path so the ORM
-    # column default stays the single stamp source.
+    # Owner id (``user_id``). Set explicitly on the create route from the
+    # resolved owner and round-tripped by ``model_to_session`` on read;
+    # ``session_to_model`` stamps it on every write (no ORM column default).
     user_id: str = ""
     model: str = ""
     model_provider: ModelProvider | None = None

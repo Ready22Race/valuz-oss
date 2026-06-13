@@ -63,20 +63,15 @@ async def shutdown_dependencies() -> None:
 def get_owner_id(x_valuz_owner_id: Annotated[str | None, Header()] = None) -> str:
     """FastAPI dependency — the request's owner id (``user_id``).
 
-    The host (valuz / commercial overlay) sends the resolved per-request owner
-    in the ``X-Valuz-Owner-Id`` header; the in-process seam passes it directly
-    as an argument instead. When absent (a standalone single-user OSS kernel),
-    fall back to the boot-seeded ``owner_context`` default. A genuinely-unset
-    owner is a 403 — the kernel never serves owner-scoped data without one.
+    The host (valuz / commercial overlay) sends the resolved per-request owner in
+    the ``X-Valuz-Owner-Id`` header. The in-process seam never reaches this
+    dependency — it passes the owner to the route functions as an explicit
+    argument. So an absent header means a direct, owner-less HTTP call: 403, the
+    kernel never serves owner-scoped data without one.
     """
-    if x_valuz_owner_id:
-        return x_valuz_owner_id
-    from src.core.owner_context import get_owner_id as _default_owner
-
-    uid = _default_owner()
-    if not uid:
+    if not x_valuz_owner_id:
         raise HTTPException(status_code=403, detail="owner id required")
-    return uid
+    return x_valuz_owner_id
 
 
 def get_store() -> StorePort:
