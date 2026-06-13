@@ -88,7 +88,7 @@ async def _build_additional_context(
         attachments = (
             attachment_rows
             if attachment_rows is not None
-            else await SessionDatastore(db).list_attachments(session_id)
+            else await SessionDatastore(db).list_attachments(require_current_user_id(), session_id)
         )
         if attachments:
             lines = [f"Uploaded attachments ({len(attachments)} this turn):"]
