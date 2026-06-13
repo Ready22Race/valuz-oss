@@ -10,6 +10,7 @@ import { useNavigate } from "react-router-dom";
 import { ArrowRight, ListChecks, MessageSquare, Trash2 } from "lucide-react";
 import {
   DeleteConfirmDialog,
+  PageHeader,
   StatusPill,
   Tabs,
   TabsList,
@@ -263,7 +264,8 @@ const RunningCard = ({
 export const ActivityPage = () => {
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { setHeader, setContentInnerClassName } = useProjectOutlet();
+  const { setHeader, setHeaderClassName, setContentInnerClassName } =
+    useProjectOutlet();
   const { runs: running } = useRunningRuns();
   const projects = useProjectStore((s) => s.projects);
 
@@ -278,10 +280,9 @@ export const ActivityPage = () => {
 
   useEffect(() => {
     setHeader(
-      <span className="text-base font-medium text-ink-heading">
-        {t(tk("nav.activity"))}
-      </span>,
+      <PageHeader title={t(tk("nav.activity"))} />,
     );
+    setHeaderClassName("h-auto px-5 py-5");
     // Drop the AppShell's default vertical padding for this page —
     // the page already self-manages top/bottom space (``pt-4`` on the
     // tab strip, ``pb-12`` at the bottom) and the outer ``py-7`` was
@@ -290,9 +291,10 @@ export const ActivityPage = () => {
     setContentInnerClassName("px-6 sm:px-7");
     return () => {
       setHeader(null);
+      setHeaderClassName(undefined);
       setContentInnerClassName(undefined);
     };
-  }, [setHeader, setContentInnerClassName, t]);
+  }, [setHeader, setHeaderClassName, setContentInnerClassName, t]);
 
   // Load finished runs on mount + refresh whenever a session leaves the
   // running set (i.e., a run just finished). Without this, a run that

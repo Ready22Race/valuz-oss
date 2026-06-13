@@ -27,6 +27,7 @@ import {
   SelectValue,
   SettingsSection,
   cn,
+  IconBox,
 } from "@valuz/ui";
 import { useCapabilities, useTranslation } from "@valuz/core";
 import {
@@ -678,9 +679,9 @@ export const ModelSection = () => {
                         className="h-9 w-9 shrink-0 object-contain"
                       />
                     ) : (
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-surface-border bg-surface-soft text-brand">
+                      <IconBox variant="outline" className="text-brand">
                         <Cpu className="h-4 w-4" />
-                      </div>
+                      </IconBox>
                     )}
 
                     {/* Info */}

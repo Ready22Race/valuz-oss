@@ -29,9 +29,27 @@ class Settings(BaseSettings):
     # running as a separate process at ``kernel_url`` (bare subprocess,
     # sandbox, or remote), authenticated by ``kernel_token``. Override
     # with VALUZ_KERNEL_MODE / VALUZ_KERNEL_URL / VALUZ_KERNEL_TOKEN.
+    #
+    # ENV CONTRACT (two sides, one secret): the standalone kernel
+    # *server* reads ``KERNEL_AUTH_TOKEN`` from its own process env and
+    # refuses to start without it (unless KERNEL_ALLOW_UNAUTHENTICATED=1);
+    # the *host* sends ``VALUZ_KERNEL_TOKEN`` as the bearer. Whoever
+    # provisions the kernel process must set both to the same secret —
+    # see tests/adapters/test_http_kernel_client_subprocess.py for the
+    # canonical wiring.
     kernel_mode: str = "inprocess"
     kernel_url: str = "http://127.0.0.1:8400"
     kernel_token: str | None = None
+
+    @property
+    def is_http_kernel(self) -> bool:
+        """True when the kernel runs as a SEPARATE process (subprocess /
+        sandbox / remote) and the host drives it over HTTP. Boot must then
+        skip the in-process kernel bootstrap — migrations, store/orchestrator
+        singletons, kernel router mounting, and orphan scans — because the
+        standalone kernel owns all of that (see
+        ``docs/design/kernel-sandbox-deployment.md`` §B.6 / B2–B5)."""
+        return self.kernel_mode == "http"
 
     # ── Backend self-URL ─────────────────────────────────────────────
     # Where the host's own FastAPI is reachable from inside the same

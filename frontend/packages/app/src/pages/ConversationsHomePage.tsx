@@ -6,6 +6,7 @@ import {
   Composer,
   DataSourcePicker,
   SuggestionList,
+  IconBox,
   type DataSourceOption,
   type SkillSearchItem,
 } from "@valuz/ui";
@@ -337,9 +338,9 @@ export const ConversationsHomePage = () => {
         <div className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[680px] px-8 pt-4 pb-16">
             <div className="mb-10">
-              <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-xl bg-brand-light text-brand">
+              <IconBox size="xl" variant="brand" className="mb-4">
                 <Sparkles className="h-6 w-6" />
-              </div>
+              </IconBox>
               <h1 className="mb-2 text-2xl font-heading font-semibold text-ink-heading">
                 {t("conversation.newChat" as Parameters<typeof t>[0])}
               </h1>
