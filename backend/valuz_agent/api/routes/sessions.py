@@ -843,7 +843,9 @@ async def add_kb_attachments(
     for doc_id in body.doc_ids:
         if doc_id in already_attached:
             continue
-        doc = await doc_ds.get_by_id(doc_id)
+        from valuz_agent.infra.auth_context import require_current_user_id
+
+        doc = await doc_ds.get_by_id(require_current_user_id(), doc_id)
         if doc is None:
             raise HTTPException(
                 status_code=400,
