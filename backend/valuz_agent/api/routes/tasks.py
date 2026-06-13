@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
 from valuz_agent.infra.sse import shielded
 from valuz_agent.modules.tasks import messaging, planning
@@ -204,7 +205,7 @@ async def kickoff_task(project_id: str, payload: KickoffTaskRequest) -> TaskResp
 async def list_tasks(
     project_id: str, db: AsyncSession = Depends(get_async_session)
 ) -> dict[str, list[TaskResponse]]:
-    rows = await TaskDatastore(db).list_tasks(project_id)
+    rows = await TaskDatastore(db).list_tasks(require_current_user_id(), project_id)
     return {"tasks": [TaskResponse.model_validate(r) for r in rows]}
 
 
@@ -215,7 +216,7 @@ async def list_all_tasks(
     """Global cross-project task list, newest activity first. Powers the
     sidebar TASKS section so users see what's running regardless of which
     project page they're on."""
-    rows = await TaskDatastore(db).list_all(limit=limit)
+    rows = await TaskDatastore(db).list_all(require_current_user_id(), limit=limit)
     return {"tasks": [TaskResponse.model_validate(r) for r in rows]}
 
 
@@ -223,11 +224,13 @@ async def list_all_tasks(
 async def get_task(
     task_id: str, db: AsyncSession = Depends(get_async_session)
 ) -> TaskDetailResponse:
-    task = await TaskDatastore(db).get_task(task_id)
+    task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    runs = await TaskSessionDatastore(db).list_runs(task_id)
-    events = await TaskEventDatastore(db).list_events(task.project_id, task_id)
+    runs = await TaskSessionDatastore(db).list_runs(require_current_user_id(), task_id)
+    events = await TaskEventDatastore(db).list_events(
+        require_current_user_id(), task.project_id, task_id
+    )
     return TaskDetailResponse(
         task=TaskResponse.model_validate(task),
         runs=[RunResponse.model_validate(r) for r in runs],
@@ -239,10 +242,12 @@ async def get_task(
 async def list_task_events(
     task_id: str, db: AsyncSession = Depends(get_async_session)
 ) -> dict[str, list[EventResponse]]:
-    task = await TaskDatastore(db).get_task(task_id)
+    task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    events = await TaskEventDatastore(db).list_events(task.project_id, task_id)
+    events = await TaskEventDatastore(db).list_events(
+        require_current_user_id(), task.project_id, task_id
+    )
     return {"events": [EventResponse.model_validate(e) for e in events]}
 
 
@@ -292,7 +297,9 @@ async def _iter_task_events_sse(
         # connection down mid-checkin (see ``infra.sse.shielded``).
         async def _tick_read(after: int) -> list[TaskEventRow]:
             async with async_unit_of_work(commit=False) as db:
-                return await TaskEventDatastore(db).list_events_after(project_id, task_id, after)
+                return await TaskEventDatastore(db).list_events_after(
+                    require_current_user_id(), project_id, task_id, after
+                )
 
         rows = await shielded(_tick_read(cursor))
         if rows:
@@ -333,7 +340,7 @@ async def stream_task_events(
     optimization candidate) this endpoint can switch to push.
     """
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(task_id)
+        task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     # ``request.is_disconnected`` is async; sse-starlette wraps the
@@ -367,14 +374,19 @@ async def intervene(
     """
     task_ds = TaskDatastore(db)
     event_ds = TaskEventDatastore(db)
-    task = await task_ds.get_task(task_id)
+    task = await task_ds.get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     ws = task.project_id
 
     if payload.action == "note":
         await event_ds.append_event(
-            ws, task_id, "user_note", actor="user", payload={"text": payload.text or ""}
+            require_current_user_id(),
+            ws,
+            task_id,
+            "user_note",
+            actor="user",
+            payload={"text": payload.text or ""},
         )
     elif payload.action == "revise_goal":
         if not payload.goal:
@@ -389,6 +401,7 @@ async def intervene(
             task_id=task_id, project_id=ws, new_goal=payload.goal
         )
         await event_ds.append_event(
+            require_current_user_id(),
             ws,
             task_id,
             "goal_revised",
@@ -405,7 +418,7 @@ async def intervene(
         await task_orchestrator.resume_task(task_id, ws)
 
     db.expire_all()  # drop cached rows so we see the orchestrator's committed write
-    refreshed = await task_ds.get_task(task_id)
+    refreshed = await task_ds.get_task(require_current_user_id(), task_id)
     assert refreshed is not None
     return TaskResponse.model_validate(refreshed)
 
@@ -456,7 +469,7 @@ async def draft_task(project_id: str, payload: DraftTaskRequest) -> DraftTaskRes
 async def commit_task(task_id: str, payload: CommitTaskRequest) -> dict[str, Any]:
     """Promote a draft task to active by spawning its lead session."""
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(task_id)
+        task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     result = await task_orchestrator.commit_task(
@@ -474,7 +487,7 @@ async def commit_task(task_id: str, payload: CommitTaskRequest) -> dict[str, Any
 async def abandon_task(task_id: str, payload: AbandonTaskRequest) -> dict[str, Any]:
     """Discard a draft task. Terminal (cannot be resurrected)."""
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(task_id)
+        task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     result = await task_orchestrator.abandon_task(
@@ -493,7 +506,7 @@ async def inject_into_task(task_id: str, payload: InjectTaskRequest) -> InjectTa
     """Push a user instruction into the lead session's mailbox. Returns
     delivered=False with reason when the lead is offline / task not active."""
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(task_id)
+        task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     if not payload.text or not payload.text.strip():
@@ -515,7 +528,7 @@ async def inject_into_task(task_id: str, payload: InjectTaskRequest) -> InjectTa
 async def plan_task_route(task_id: str, payload: PlanTaskRequest) -> PlanResponse:
     """Lay down the initial plan (errors if a plan with progress already exists)."""
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(task_id)
+        task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     if not payload.subtasks:
@@ -540,7 +553,7 @@ async def modify_plan_route(task_id: str, payload: PlanTaskRequest) -> PlanRespo
     """Patch the plan: add nodes / update existing nodes. CAS via
     ``expected_version`` — returns 409 on conflict."""
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(task_id)
+        task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     result = await planning.modify_plan(
@@ -566,7 +579,7 @@ async def modify_plan_route(task_id: str, payload: PlanTaskRequest) -> PlanRespo
 async def get_plan_route(task_id: str) -> PlanResponse:
     """Read the plan snapshot + ready keys + counts + current_version."""
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(task_id)
+        task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
     if task is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     result = await planning.get_plan(

@@ -36,9 +36,21 @@ def _fake_agent_config(**kw):
     kw.setdefault("mcp_servers", ())
     kw.pop("metadata", None) if False else None
     allowed = {
-        "id", "name", "model", "runtime_provider", "instructions", "tools",
-        "callable_agents", "skills", "mcp_servers", "permission_mode",
-        "max_turns", "max_cost_usd", "effort", "thinking", "metadata",
+        "id",
+        "name",
+        "model",
+        "runtime_provider",
+        "instructions",
+        "tools",
+        "callable_agents",
+        "skills",
+        "mcp_servers",
+        "permission_mode",
+        "max_turns",
+        "max_cost_usd",
+        "effort",
+        "thinking",
+        "metadata",
     }
     kw = {k: v for k, v in kw.items() if k in allowed}
     if isinstance(kw.get("skills"), list):
@@ -789,7 +801,7 @@ def _patch_await_deps(monkeypatch, key_by_session: dict[str, str]):
             sk = key_by_session.get(sid)
             return SimpleNamespace(subtask_key=sk) if sk else None
 
-        async def list_runs(self, _task_id):
+        async def list_runs(self, _user_id, _task_id):
             # No in-flight runs in these unit tests → heartbeat is a no-op.
             return []
 

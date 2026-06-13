@@ -527,7 +527,9 @@ class InProcessAutomationRunner:
             lead_session_id: str | None = None
             try:
                 async with async_unit_of_work(commit=False) as ts_db:
-                    runs = await TaskSessionDatastore(ts_db).list_runs(task.id)
+                    runs = await TaskSessionDatastore(ts_db).list_runs(
+                        require_current_user_id(), task.id
+                    )
                     lead_run = next(
                         (r for r in runs if r.kind == "lead"),
                         None,

@@ -109,7 +109,9 @@ class DispatcherService:
             run_ds = TaskSessionDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            task_row = await task_ds.get_task_by_project(project_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found", "status": "failed"}
 
@@ -186,6 +188,7 @@ class DispatcherService:
             gap = await _credential_gap(member_session, agent, db=db)
             if gap is not None:
                 await event_ds.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type="subtask_failed",
@@ -215,10 +218,11 @@ class DispatcherService:
                 run_dir=str(run_dir),
                 subtask_key=subtask_key,
             )
-            await run_ds.create_run(run_row)
+            await run_ds.create_run(require_current_user_id(), run_row)
 
             # Append spawned event
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="subtask_spawned",
@@ -275,7 +279,9 @@ class DispatcherService:
             # completion — the lead decides via review_subtask. A genuine run
             # failure (terminated/error) still fails the node so the lead sees
             # it; otherwise the node goes to in_review awaiting the lead's call.
-            task_row2 = await task_ds2.get_task_by_project(project_id, task_id)
+            task_row2 = await task_ds2.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             plan2 = TaskPlan.from_dict(task_row2.plan) if task_row2 else None
             if plan2 is not None and plan2.get(subtask_key) is not None:
                 plan2.update_node(subtask_key, status="failed" if failed else "in_review")
@@ -291,6 +297,7 @@ class DispatcherService:
                 )
             if failed:
                 await event_ds2.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type="subtask_failed",
@@ -326,7 +333,9 @@ class DispatcherService:
 
         # Resolve each key's agent from the plan for skill grouping.
         async with async_unit_of_work(commit=False) as db0:
-            task_row0 = await TaskDatastore(db0).get_task_by_project(project_id, task_id)
+            task_row0 = await TaskDatastore(db0).get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             plan0 = TaskPlan.from_dict(task_row0.plan) if task_row0 else TaskPlan()
 
         async def _skill_key(agent_slug: str) -> str:
@@ -403,7 +412,9 @@ class DispatcherService:
             run_ds = TaskSessionDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            task_row = await task_ds.get_task_by_project(project_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found", "status": "failed"}
 
@@ -485,6 +496,7 @@ class DispatcherService:
             gap = await _credential_gap(member_session, agent, db=db)
             if gap is not None:
                 await event_ds.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type="subtask_failed",
@@ -500,6 +512,7 @@ class DispatcherService:
             )
 
             await run_ds.create_run(
+                require_current_user_id(),
                 TaskSessionRow(
                     project_id=project_id,
                     task_id=task_id,
@@ -513,9 +526,10 @@ class DispatcherService:
                     project_mode=mode,
                     run_dir=str(run_dir),
                     subtask_key=subtask_key,
-                )
+                ),
             )
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="subtask_spawned",

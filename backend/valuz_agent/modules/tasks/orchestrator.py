@@ -51,7 +51,11 @@ from valuz_agent.adapters.agent_resolver import (
     build_member_session,
     embed_agent_config,
 )
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.infra.auth_context import (
+    require_current_user_id,
+    reset_current_user_id,
+    set_current_user_id,
+)
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus, event_bus as _global_bus
 from valuz_agent.infra.fs_registry import fs_registry
@@ -316,9 +320,10 @@ class TaskOrchestrator:
                 plan_version=0,
                 committed_at=None,
             )
-            await task_ds.create_task(task_row)
+            await task_ds.create_task(require_current_user_id(), task_row)
 
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="task_drafted",
@@ -362,7 +367,9 @@ class TaskOrchestrator:
             run_ds = TaskSessionDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            task_row = await task_ds.get_task_by_project(project_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -465,7 +472,7 @@ class TaskOrchestrator:
                 project_mode="shared",
                 run_dir=lead_cwd,
             )
-            await run_ds.create_run(lead_run)
+            await run_ds.create_run(require_current_user_id(), lead_run)
 
             committed_at = now_ms()
             task_row.status = "active"
@@ -481,6 +488,7 @@ class TaskOrchestrator:
             await task_ds.update_task(task_row)
 
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="committed",
@@ -533,7 +541,9 @@ class TaskOrchestrator:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
 
-            task_row = await task_ds.get_task_by_project(project_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -547,6 +557,7 @@ class TaskOrchestrator:
             task_row.status = "abandoned"
             await task_ds.update_task(task_row)
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="abandoned",
@@ -727,7 +738,7 @@ class TaskOrchestrator:
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
 
-            task = await task_ds.get_task_by_project(project_id, task_id)
+            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
             if task is None or task.status != "active":
                 return  # already closed by finish_task / stop / intervene
             if self._members.has_live_members(task_id):
@@ -806,8 +817,9 @@ class TaskOrchestrator:
                 # creating a new lead session). The ``reason`` payload tags
                 # this as a lead-turn-error to distinguish from the
                 # unresolved-subtasks-no-error blocked case below.
-                await task_ds.update_task_status(task_id, "blocked")
+                await task_ds.update_task_status(require_current_user_id(), task_id, "blocked")
                 await event_ds.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type="task_blocked",
@@ -826,8 +838,9 @@ class TaskOrchestrator:
             if unresolved:
                 # Lead stopped with planned work undispatched — surface as blocked
                 # (not a hard error, but not done either).
-                await task_ds.update_task_status(task_id, "blocked")
+                await task_ds.update_task_status(require_current_user_id(), task_id, "blocked")
                 await event_ds.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type="task_blocked",
@@ -847,13 +860,14 @@ class TaskOrchestrator:
                 "(auto-finalized) Lead ended its turn with no pending subtasks; "
                 "task closed automatically."
             )
-            await task_ds.update_task_status(task_id, "completed")
+            await task_ds.update_task_status(require_current_user_id(), task_id, "completed")
             await run_ds.update_run_by_session(
                 session_id=lead_session_id,
                 status="completed",
                 ended_at=now_ms(),
             )
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="task_completed",
@@ -879,14 +893,22 @@ class TaskOrchestrator:
         Best-effort + idempotent (re-running converges on current run/node state).
         """
         async with async_unit_of_work(commit=False) as db:
-            task_ids = [(t.id, t.project_id) for t in await TaskDatastore(db).list_active()]
+            # Cross-owner boot sweep: capture each task's owner so per-task
+            # recovery runs under that owner (downstream reads are owner-scoped
+            # via require_current_user_id()).
+            active = [
+                (t.id, t.project_id, t.user_id) for t in await TaskDatastore(db).list_active()
+            ]
         recovered = 0
-        for task_id, project_id in task_ids:
+        for task_id, project_id, user_id in active:
+            token = set_current_user_id(user_id)
             try:
                 if await self._recover_one_task(task_id, project_id):
                     recovered += 1
             except Exception:  # noqa: BLE001
                 logger.exception("recover_active_tasks: failed for task %s", task_id)
+            finally:
+                reset_current_user_id(token)
         if recovered:
             logger.warning(
                 "recover_active_tasks: reconciled + re-drove %d active task(s)", recovered
@@ -911,10 +933,10 @@ class TaskOrchestrator:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)
             event_ds = TaskEventDatastore(db)
-            task = await task_ds.get_task_by_project(project_id, task_id)
+            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
             if task is None or task.status not in ("active", "paused"):
                 return False
-            runs = await run_ds.list_runs(task_id)
+            runs = await run_ds.list_runs(require_current_user_id(), task_id)
             lead_run = next((r for r in runs if r.kind == "lead"), None)
             if lead_run is None:
                 return False
@@ -1072,14 +1094,14 @@ class TaskOrchestrator:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)
             event_ds = TaskEventDatastore(db)
-            task = await task_ds.get_task_by_project(project_id, task_id)
+            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
             if task is None:
                 return False
             # pause: only an active task. stop: an active OR already-paused task.
             allowed_from = ("active",) if target_status == "paused" else ("active", "paused")
             if task.status not in allowed_from:
                 return False
-            runs = await run_ds.list_runs(task_id)
+            runs = await run_ds.list_runs(require_current_user_id(), task_id)
             lead_session_id: str | None = next(
                 (r.session_id for r in runs if r.kind == "lead"), None
             )
@@ -1116,6 +1138,7 @@ class TaskOrchestrator:
                     session_id=lead_session_id,
                 )
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id,
                 task_id,
                 target_status,  # "paused" | "stopped" — drives UI status + timer
@@ -1185,7 +1208,7 @@ class TaskOrchestrator:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
-            task = await task_ds.get_task_by_project(project_id, task_id)
+            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
             if task is None:
                 return {"ok": False, "error": f"task {task_id!r} not found", "prior_status": None}
             prior_status = task.status
@@ -1206,14 +1229,14 @@ class TaskOrchestrator:
             # Belt-and-suspenders: confirm the transition the state machine
             # accepts. paused/blocked/stopped/completed → active are all legal.
             assert_transition(prior_status, "active")
-            await task_ds.update_task_status(task_id, "active")
+            await task_ds.update_task_status(require_current_user_id(), task_id, "active")
             # When reviving a stopped OR completed task: finish_task previously
             # marked the lead run as "completed" and broadcast shutdown to
             # members. _recover_one_task respawns the lead unconditionally, but
             # the run row still showing "completed" would lie about reality —
             # fix it so listings + UI reflect the live state.
             if prior_status in ("stopped", "completed"):
-                runs = await run_ds.list_runs(task_id)
+                runs = await run_ds.list_runs(require_current_user_id(), task_id)
                 lead_run = next((r for r in runs if r.kind == "lead"), None)
                 if lead_run is not None and lead_run.status != "active":
                     await run_ds.update_run_by_session(
@@ -1222,7 +1245,12 @@ class TaskOrchestrator:
                         ended_at=None,
                     )
             await event_ds.append_event(
-                project_id, task_id, "resumed", actor=actor, payload={"from": prior_status}
+                require_current_user_id(),
+                project_id,
+                task_id,
+                "resumed",
+                actor=actor,
+                payload={"from": prior_status},
             )
         ok = await self._recover_one_task(task_id, project_id)
         return {"ok": ok, "prior_status": prior_status, "resumed": ok}
@@ -1251,7 +1279,9 @@ class TaskOrchestrator:
             agent_slug = run.agent_slug
             await run_ds.update_run_by_session(session_id=session_id, status="rejected")
             if subtask_key:
-                task = await task_ds.get_task_by_project(project_id, task_id)
+                task = await task_ds.get_task_by_project(
+                    require_current_user_id(), project_id, task_id
+                )
                 if task is not None:
                     plan = TaskPlan.from_dict(task.plan)
                     if plan.get(subtask_key) is not None:
@@ -1271,6 +1301,7 @@ class TaskOrchestrator:
                             session_id=lead_session_id or None,
                         )
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id,
                 task_id,
                 "subtask_stopped",
@@ -1387,7 +1418,9 @@ class TaskOrchestrator:
                     key = run.subtask_key if run else None
                     if key:
                         task_ds = TaskDatastore(db)
-                        task_row = await task_ds.get_task_by_project(project_id, task_id)
+                        task_row = await task_ds.get_task_by_project(
+                            require_current_user_id(), project_id, task_id
+                        )
                         if task_row is not None:
                             plan = TaskPlan.from_dict(task_row.plan)
                             if plan.get(key) is not None:
@@ -1403,6 +1436,7 @@ class TaskOrchestrator:
                                     session_id=session_id,
                                 )
                     await event_ds.append_event(
+                        require_current_user_id(),
                         project_id=project_id,
                         task_id=task_id,
                         type="subtask_failed",
@@ -1562,7 +1596,9 @@ class TaskOrchestrator:
 
             # Guard: don't let a "completed" finish leave planned work behind.
             if final_status == "completed":
-                task_row = await task_ds.get_task_by_project(project_id, task_id)
+                task_row = await task_ds.get_task_by_project(
+                    require_current_user_id(), project_id, task_id
+                )
                 if task_row is not None:
                     plan = TaskPlan.from_dict(task_row.plan)
                     unresolved = [
@@ -1585,7 +1621,7 @@ class TaskOrchestrator:
                         }
 
             if rejected is None:
-                await task_ds.update_task_status(task_id, final_status)
+                await task_ds.update_task_status(require_current_user_id(), task_id, final_status)
 
                 # Mark lead run as completed
                 await run_ds.update_run_by_session(
@@ -1595,6 +1631,7 @@ class TaskOrchestrator:
                 )
 
                 await event_ds.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type=event_type,

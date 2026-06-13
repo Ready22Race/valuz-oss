@@ -196,7 +196,7 @@ class LifecycleService:
                     ),
                 },
             )
-            await task_ds.create_task(task_row)
+            await task_ds.create_task(require_current_user_id(), task_row)
 
             # Resolve lead agent and materialize a per-task lead clone that
             # carries the dispatch tools (base agent stays clean — see
@@ -263,8 +263,9 @@ class LifecycleService:
             # it would only fail mid-turn with a cryptic "Not logged in".
             gap = await _credential_gap(lead_session, lead_agent_slug, db=db)
             if gap is not None:
-                await task_ds.update_task_status(task_id, "failed")
+                await task_ds.update_task_status(require_current_user_id(), task_id, "failed")
                 await event_ds.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type="kickoff_failed",
@@ -291,10 +292,11 @@ class LifecycleService:
                 project_mode="shared",
                 run_dir=lead_cwd,
             )
-            await run_ds.create_run(lead_run)
+            await run_ds.create_run(require_current_user_id(), lead_run)
 
             # Append kickoff event
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="kickoff",
@@ -444,9 +446,10 @@ class LifecycleService:
                 plan_version=0,
                 committed_at=None,
             )
-            await task_ds.create_task(task_row)
+            await task_ds.create_task(require_current_user_id(), task_row)
 
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="task_drafted",
@@ -490,7 +493,9 @@ class LifecycleService:
             run_ds = TaskSessionDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            task_row = await task_ds.get_task_by_project(project_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -593,7 +598,7 @@ class LifecycleService:
                 project_mode="shared",
                 run_dir=lead_cwd,
             )
-            await run_ds.create_run(lead_run)
+            await run_ds.create_run(require_current_user_id(), lead_run)
 
             committed_at = now_ms()
             task_row.status = "active"
@@ -609,6 +614,7 @@ class LifecycleService:
             await task_ds.update_task(task_row)
 
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="committed",
@@ -661,7 +667,9 @@ class LifecycleService:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
 
-            task_row = await task_ds.get_task_by_project(project_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -675,6 +683,7 @@ class LifecycleService:
             task_row.status = "abandoned"
             await task_ds.update_task(task_row)
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="abandoned",
@@ -733,7 +742,7 @@ class LifecycleService:
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
 
-            task = await task_ds.get_task_by_project(project_id, task_id)
+            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
             if task is None or task.status != "active":
                 return  # already closed by finish_task / stop / intervene
             if self._members.has_live_members(task_id):
@@ -812,8 +821,9 @@ class LifecycleService:
                 # creating a new lead session). The ``reason`` payload tags
                 # this as a lead-turn-error to distinguish from the
                 # unresolved-subtasks-no-error blocked case below.
-                await task_ds.update_task_status(task_id, "blocked")
+                await task_ds.update_task_status(require_current_user_id(), task_id, "blocked")
                 await event_ds.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type="task_blocked",
@@ -832,8 +842,9 @@ class LifecycleService:
             if unresolved:
                 # Lead stopped with planned work undispatched — surface as blocked
                 # (not a hard error, but not done either).
-                await task_ds.update_task_status(task_id, "blocked")
+                await task_ds.update_task_status(require_current_user_id(), task_id, "blocked")
                 await event_ds.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type="task_blocked",
@@ -853,13 +864,14 @@ class LifecycleService:
                 "(auto-finalized) Lead ended its turn with no pending subtasks; "
                 "task closed automatically."
             )
-            await task_ds.update_task_status(task_id, "completed")
+            await task_ds.update_task_status(require_current_user_id(), task_id, "completed")
             await run_ds.update_run_by_session(
                 session_id=lead_session_id,
                 status="completed",
                 ended_at=now_ms(),
             )
             await event_ds.append_event(
+                require_current_user_id(),
                 project_id=project_id,
                 task_id=task_id,
                 type="task_completed",
@@ -955,7 +967,9 @@ class LifecycleService:
                     key = run.subtask_key if run else None
                     if key:
                         task_ds = TaskDatastore(db)
-                        task_row = await task_ds.get_task_by_project(project_id, task_id)
+                        task_row = await task_ds.get_task_by_project(
+                            require_current_user_id(), project_id, task_id
+                        )
                         if task_row is not None:
                             plan = TaskPlan.from_dict(task_row.plan)
                             if plan.get(key) is not None:
@@ -971,6 +985,7 @@ class LifecycleService:
                                     session_id=session_id,
                                 )
                     await event_ds.append_event(
+                        require_current_user_id(),
                         project_id=project_id,
                         task_id=task_id,
                         type="subtask_failed",
@@ -1036,7 +1051,9 @@ class LifecycleService:
 
             # Guard: don't let a "completed" finish leave planned work behind.
             if final_status == "completed":
-                task_row = await task_ds.get_task_by_project(project_id, task_id)
+                task_row = await task_ds.get_task_by_project(
+                    require_current_user_id(), project_id, task_id
+                )
                 if task_row is not None:
                     plan = TaskPlan.from_dict(task_row.plan)
                     unresolved = [
@@ -1059,7 +1076,7 @@ class LifecycleService:
                         }
 
             if rejected is None:
-                await task_ds.update_task_status(task_id, final_status)
+                await task_ds.update_task_status(require_current_user_id(), task_id, final_status)
 
                 # Mark lead run as completed
                 await run_ds.update_run_by_session(
@@ -1069,6 +1086,7 @@ class LifecycleService:
                 )
 
                 await event_ds.append_event(
+                    require_current_user_id(),
                     project_id=project_id,
                     task_id=task_id,
                     type=event_type,

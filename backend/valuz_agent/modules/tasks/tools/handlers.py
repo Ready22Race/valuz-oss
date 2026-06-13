@@ -24,6 +24,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 from src.core import ToolDef, ToolResult
 from src.core.tools import ExecContext
 
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.adapters import kernel_client
 from valuz_agent.modules.tasks import messaging, planning, queries
 
@@ -163,7 +164,7 @@ async def _resolve_plan_writer_task(
 
     async with async_unit_of_work(commit=False) as db:
         task_ds = TaskDatastore(db)
-        task = await task_ds.get_task(task_id)
+        task = await task_ds.get_task(require_current_user_id(), task_id)
     if task is None:
         return ToolResult(content=f"plan tool: task {task_id!r} not found", is_error=True)
 
@@ -195,7 +196,7 @@ async def _resolve_plan_reader_task(
 
     async with async_unit_of_work(commit=False) as db:
         task_ds = TaskDatastore(db)
-        task = await task_ds.get_task(task_id)
+        task = await task_ds.get_task(require_current_user_id(), task_id)
     if task is None:
         return ToolResult(content=f"plan tool: task {task_id!r} not found", is_error=True)
 
@@ -553,7 +554,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         from valuz_agent.modules.tasks.datastore import TaskDatastore
 
         async with async_unit_of_work(commit=False) as db:
-            task = await TaskDatastore(db).get_task(task_id)
+            task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
         if task is None:
             return ToolResult(
                 content=f"inject_into_task: task {task_id!r} not found", is_error=True
@@ -607,7 +608,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         from valuz_agent.modules.tasks.datastore import TaskDatastore
 
         async with async_unit_of_work(commit=False) as db:
-            task = await TaskDatastore(db).get_task(task_id)
+            task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
         if task is None:
             return ToolResult(content=f"resume_task: task {task_id!r} not found", is_error=True)
 
@@ -919,7 +920,9 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
             from valuz_agent.modules.tasks.plan import TaskPlan
 
             async with async_unit_of_work(commit=False) as db:
-                task = await TaskDatastore(db).get_task_by_project(project_id, task_id)
+                task = await TaskDatastore(db).get_task_by_project(
+                    require_current_user_id(), project_id, task_id
+                )
             if task is None:
                 return ToolResult(
                     content=f"stop_subtask: task {task_id!r} not found", is_error=True

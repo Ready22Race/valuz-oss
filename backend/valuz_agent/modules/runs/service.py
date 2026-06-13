@@ -157,10 +157,10 @@ class RunsService:
             str(r.id): r for r in await self._projects.list_projects(require_current_user_id())
         }
         ts_map: dict[str, TaskSessionRow] = {
-            r.session_id: r for r in await self._task_sessions.list_all()
+            r.session_id: r for r in await self._task_sessions.list_all(require_current_user_id())
         }
         task_map: dict[str, TaskRow] = {
-            str(r.id): r for r in await self._tasks.list_all(limit=None)
+            str(r.id): r for r in await self._tasks.list_all(require_current_user_id(), limit=None)
         }
 
         out: list[RunSummary] = []
@@ -266,7 +266,7 @@ class RunsService:
     async def _latest_task_event(self, task_id: str | None) -> dict[str, Any] | None:
         if not task_id:
             return None
-        row = await self._task_events.latest_event(task_id)
+        row = await self._task_events.latest_event(require_current_user_id(), task_id)
         if row is None:
             return None
         return {"type": row.type, "payload": row.payload or {}}
