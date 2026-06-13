@@ -183,7 +183,7 @@ async def resolve_session_capabilities(
     #    on top of whatever the project already enables. Look each one up in
     #    the skill index to recover its source_path.
     for skill_id in extra_skill_ids or []:
-        row = await skills.get_by_id(skill_id)
+        row = await skills.get_by_id(require_current_user_id(), skill_id)
         if row is None:
             warnings.append(f"extra skill id not found: {skill_id!r}")
             continue
@@ -422,7 +422,7 @@ async def resolve_skill_slugs_to_paths(
     # ``await`` this.
     by_slug: dict[str, str] = {}
     async with async_unit_of_work(commit=False) as db:
-        for row in await SkillDatastore(db).list_skills():
+        for row in await SkillDatastore(db).list_skills(require_current_user_id()):
             if row.slug and row.source_path:
                 by_slug.setdefault(row.slug, row.source_path)
 

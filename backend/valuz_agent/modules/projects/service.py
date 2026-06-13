@@ -292,7 +292,7 @@ class ProjectService:
             await self._automations.count_by_project(project_id) if self._automations else 0
         )
         skill_config_count = (
-            len(await self._skills.list_project_skills(project_id)) if self._skills else 0
+            len(await self._skills.list_project_skills(user_id, project_id)) if self._skills else 0
         )
 
         return ProjectDeletePreview(
@@ -321,7 +321,7 @@ class ProjectService:
         if self._automations:
             await self._automations.delete_all_for_project(project_id)
         if self._skills:
-            await self._skills.set_project_skills(project_id, [])
+            await self._skills.set_project_skills(user_id, project_id, [])
         await self._ds.delete(user_id, project_id)
 
     # ------------------------------------------------------------------

@@ -38,10 +38,11 @@ class ResourceFacade:
 
             await conn_svc.delete_connector(require_current_user_id(), resource_id)
         elif resource_type == "skill":
+            from valuz_agent.infra.auth_context import require_current_user_id
             from valuz_agent.modules.skills.datastore import SkillDatastore
 
             ds = SkillDatastore(self._db)
-            await ds.delete(resource_id)
+            await ds.delete(require_current_user_id(), resource_id)
         else:
             raise ValueError(f"Unknown resource type: {resource_type}")
 

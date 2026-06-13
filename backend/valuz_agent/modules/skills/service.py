@@ -108,7 +108,10 @@ class SkillLibraryService:
         # missing row (skill on disk but not yet indexed) or a NULL value
         # (legacy row seeded before the column landed) coalesces to
         # ``"discovered"`` so the field is always a real enum value.
-        origin_by_id = {row.id: row.creation_origin for row in await self._ds.list_skills()}
+        origin_by_id = {
+            row.id: row.creation_origin
+            for row in await self._ds.list_skills(require_current_user_id())
+        }
 
         def _origin(skill_id: str) -> str:
             return origin_by_id.get(skill_id) or "discovered"
@@ -243,11 +246,12 @@ class SkillLibraryService:
             if manifest.id in seen_ids:
                 continue
             seen_ids.add(manifest.id)
-            existing = await self._ds.get_by_id(manifest.id)
+            existing = await self._ds.get_by_id(require_current_user_id(), manifest.id)
             from valuz_agent.modules.skills.models import SkillIndexRow
 
             if existing is None:
                 await self._ds.create(
+                    require_current_user_id(),
                     SkillIndexRow(
                         id=manifest.id,
                         slug=manifest.slug or manifest.id,
@@ -291,7 +295,7 @@ class SkillLibraryService:
                 existing.creation_origin = existing.creation_origin or "discovered"
                 await self._ds.update(existing)
 
-        for row in await self._ds.list_skills():
+        for row in await self._ds.list_skills(require_current_user_id()):
             if row.id not in seen_ids:
                 row.status = "unavailable"
                 await self._ds.update(row)
@@ -361,7 +365,7 @@ class SkillLibraryService:
                 )
             except KeyError:
                 continue
-            await self._ds.set_creation_origin(written.id, "created")
+            await self._ds.set_creation_origin(require_current_user_id(), written.id, "created")
 
         # Notify any subscribers (frontend uses /v1/skills/events/stream).
         self._bus.publish(SKILL_CHANGED, skill_id="*", reason="staging-sync")
@@ -389,7 +393,7 @@ class SkillLibraryService:
 
     async def _resolve_skill_path_by_id(self, skill_id: str):  # type: ignore[no-untyped-def]
         # Try DB first.
-        row = await self._ds.get_by_id(skill_id)
+        row = await self._ds.get_by_id(require_current_user_id(), skill_id)
         if row is not None and row.source_path:
             return Path(row.source_path)
         # Fall back to scanning all sources (covers fresh installs / official).
@@ -782,7 +786,7 @@ class SkillLibraryService:
 
     async def _load_origin(self, skill_id: str) -> SkillOrigin | None:
         """Read import provenance off the ``valuz_skill_index`` row, if any."""
-        row = await self._ds.get_by_id(skill_id)
+        row = await self._ds.get_by_id(require_current_user_id(), skill_id)
         if row is None or not row.origin_json:
             return None
         try:
@@ -960,7 +964,9 @@ class SkillLibraryService:
         # imports — host bookkeeping in valuz_skill_index, never SKILL.md.
         skill = await self._finalize_origin(target_dir, "imported", payload.project_id)
         if origin is not None:
-            await self._ds.set_origin_metadata(skill.id, origin.model_dump_json())
+            await self._ds.set_origin_metadata(
+                require_current_user_id(), skill.id, origin.model_dump_json()
+            )
         return skill
 
     def _enforce_import_caps(self, skill_root: Path) -> None:
@@ -1293,7 +1299,7 @@ class SkillLibraryService:
         # The skill-creator AI flow landing a skill is a "created" act.
         # creation_origin is host bookkeeping in valuz_skill_index — the
         # startup_scan above created the row as "discovered"; overwrite it.
-        await self._ds.set_creation_origin(skill.id, "created")
+        await self._ds.set_creation_origin(require_current_user_id(), skill.id, "created")
         skill.creation_origin = "created"
 
         # Notify subscribers — frontend reloads the catalog & cards.
@@ -1398,7 +1404,7 @@ class SkillLibraryService:
         except Exception:  # noqa: BLE001
             pass
         skill = await self._resolve_created_skill(skill_dir, project_id=project_id)
-        await self._ds.set_creation_origin(skill.id, origin)
+        await self._ds.set_creation_origin(require_current_user_id(), skill.id, origin)
         skill.creation_origin = origin
         return skill
 

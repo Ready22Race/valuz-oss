@@ -90,15 +90,15 @@ class FakeSkillDatastore:
     def scan(self, project, source):
         return len(self.list_project_skill_manifests(project, source))
 
-    async def get_by_id(self, skill_id):
+    async def get_by_id(self, user_id, skill_id):
         return self._rows.get(skill_id)
 
-    async def set_creation_origin(self, skill_id, origin):
+    async def set_creation_origin(self, user_id, skill_id, origin):
         row = self._rows.get(skill_id)
         if row is not None:
             row.creation_origin = origin
 
-    async def create(self, row):
+    async def create(self, user_id, row):
         self._rows[row.id] = row
         return row
 
@@ -106,7 +106,7 @@ class FakeSkillDatastore:
         self._rows[row.id] = row
         return row
 
-    async def list_skills(self):
+    async def list_skills(self, user_id):
         return list(self._rows.values())
 
     def add_ignore(self, skill_id, content_hash=None):
@@ -115,7 +115,7 @@ class FakeSkillDatastore:
     def is_ignored(self, skill_id, content_hash=None):
         return False
 
-    def set_project_skills(self, project_id, rows):
+    def set_project_skills(self, user_id, project_id, rows):
         self._enabled[project_id] = set()
 
 

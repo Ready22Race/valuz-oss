@@ -64,7 +64,7 @@ class _FakeSkillDatastore:
             return set()
         return self._enabled_paths
 
-    def get_by_id(self, skill_id: str):  # noqa: ANN201 — matches real signature
+    def get_by_id(self, user_id: str, skill_id: str):  # noqa: ANN201 — matches real signature
         return None
 
 

@@ -369,6 +369,13 @@ def test_optimize_copies_existing_skill_into_staging(isolated_app):  # type: ign
     from valuz_agent.api.deps import get_skill_service
 
     async def _refresh_index() -> None:
+        # Run the scan under the SAME owner the TestClient's AuthMiddleware
+        # resolves (the local install id), so the owner-scoped index lookups
+        # match the subsequent HTTP calls instead of the conftest test owner.
+        from valuz_agent.infra import auth_context
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
+        token = auth_context.set_current_user_id(resolve_local_user_id())
         gen = get_skill_service()
         svc = await gen.__anext__()
         try:
@@ -376,6 +383,7 @@ def test_optimize_copies_existing_skill_into_staging(isolated_app):  # type: ign
         finally:
             with contextlib.suppress(StopAsyncIteration):
                 await gen.__anext__()
+            auth_context.reset_current_user_id(token)
 
     asyncio.run(_refresh_index())
 
