@@ -24,6 +24,7 @@ from app.schemas import SessionData as KernelSession
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel on sys.path
 from valuz_agent.adapters import kernel_client
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.modules.projects.datastore import ProjectDatastore
 from valuz_agent.modules.projects.models import ProjectRow
 from valuz_agent.modules.sessions import project_index
@@ -153,7 +154,7 @@ class RunsService:
             ids=[r.session_id for r in index_rows], limit=200
         )
         ws_map: dict[str, ProjectRow] = {
-            str(r.id): r for r in await self._projects.list_projects()
+            str(r.id): r for r in await self._projects.list_projects(require_current_user_id())
         }
         ts_map: dict[str, TaskSessionRow] = {
             r.session_id: r for r in await self._task_sessions.list_all()
@@ -230,9 +231,7 @@ class RunsService:
             last_event = await self._latest_task_event(task_id)
         else:
             source = (
-                "project_chat"
-                if project is not None and project.kind == "project"
-                else "assistant"
+                "project_chat" if project is not None and project.kind == "project" else "assistant"
             )
             last_output = _truncate_output(await self._latest_assistant_text(sess.id))
         return RunSummary(

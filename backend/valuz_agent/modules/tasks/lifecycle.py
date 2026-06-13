@@ -49,6 +49,7 @@ from valuz_agent.adapters.agent_resolver import (
     build_member_session,
     embed_agent_config,
 )
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
@@ -148,7 +149,7 @@ class LifecycleService:
             from valuz_agent.modules.projects.datastore import ProjectDatastore
 
             ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(project_id)
+            ws_row = await ws_ds.get_by_id(require_current_user_id(), project_id)
             if ws_row is None:
                 raise ValueError(f"project {project_id!r} not found")
             project_cwd = fs_registry.project_cwd(
@@ -226,7 +227,7 @@ class LifecycleService:
             from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
 
             ws_ds2 = WsDs(db)
-            ws_ctx = await ws_ds2.get_context(project_id)
+            ws_ctx = await ws_ds2.get_context(require_current_user_id(), project_id)
             project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
 
             lead_session = await build_member_session(
@@ -272,9 +273,7 @@ class LifecycleService:
                 raise ValueError(gap)
 
             await kernel_client.create_session(lead_session)
-            await project_index.record(
-                project_id, lead_session.id, kind="task_lead", origin="task"
-            )
+            await project_index.record(project_id, lead_session.id, kind="task_lead", origin="task")
 
             # Record the lead run in valuz_task_session
             lead_run = TaskSessionRow(
@@ -393,7 +392,7 @@ class LifecycleService:
             from valuz_agent.modules.projects.datastore import ProjectDatastore
 
             ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(project_id)
+            ws_row = await ws_ds.get_by_id(require_current_user_id(), project_id)
             if ws_row is None:
                 raise ValueError(f"project {project_id!r} not found")
             lead_member = await member_ds.get(project_id, lead_agent_slug)
@@ -507,15 +506,13 @@ class LifecycleService:
             lead_member = await member_ds.get(project_id, lead_slug)
             if lead_member is None:
                 return {
-                    "error": (
-                        f"lead agent {lead_slug!r} is not a member of project {project_id!r}"
-                    )
+                    "error": (f"lead agent {lead_slug!r} is not a member of project {project_id!r}")
                 }
 
             from valuz_agent.modules.projects.datastore import ProjectDatastore
 
             ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(project_id)
+            ws_row = await ws_ds.get_by_id(require_current_user_id(), project_id)
             if ws_row is None:
                 return {"error": f"project {project_id!r} not found"}
             project_cwd = fs_registry.project_cwd(
@@ -531,9 +528,7 @@ class LifecycleService:
             lead_agent = await _member_agent_config(lead_member, member_ds)
             lead_clone = None
             if lead_agent is not None:
-                lead_clone = await self._materialize_lead_agent(
-                    lead_agent, dispatch_mode="async"
-                )
+                lead_clone = await self._materialize_lead_agent(lead_agent, dispatch_mode="async")
 
             refs = (task_row.metadata_ or {}).get("refs") or []
             refs_text = "\n".join(f"- {r}" for r in refs) if refs else ""
@@ -550,7 +545,7 @@ class LifecycleService:
             from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
 
             ws_ds2 = WsDs(db)
-            ws_ctx = await ws_ds2.get_context(project_id)
+            ws_ctx = await ws_ds2.get_context(require_current_user_id(), project_id)
             project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
 
             lead_session = await build_member_session(
@@ -578,9 +573,7 @@ class LifecycleService:
                 return {"error": f"commit_task: {gap}"}
 
             await kernel_client.create_session(lead_session)
-            await project_index.record(
-                project_id, lead_session.id, kind="task_lead", origin="task"
-            )
+            await project_index.record(project_id, lead_session.id, kind="task_lead", origin="task")
 
             # DB writes: create lead run row + flip task status + append event
             lead_run = TaskSessionRow(

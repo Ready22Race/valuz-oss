@@ -146,12 +146,12 @@ class FakeProjectService:
         self._projects = projects
         self._counter = 0
 
-    async def get_project(self, project_id: str) -> FakeProject:
+    async def get_project(self, user_id: str, project_id: str) -> FakeProject:
         if project_id not in self._projects:
             raise KeyError(project_id)
         return self._projects[project_id]
 
-    async def list_projects(self) -> list[FakeProject]:
+    async def list_projects(self, user_id: str) -> list[FakeProject]:
         return list(self._projects.values())
 
     async def create_chat_project_for_session(self, name: str = "Chat") -> FakeProject:
@@ -309,15 +309,11 @@ class TestProjectCreateResolution:
         detail = await service.create(_project_payload())
         assert detail.project_id == "ws-proj"
 
-    async def test_should_reject_missing_project(
-        self, service: AutomationService
-    ) -> None:
+    async def test_should_reject_missing_project(self, service: AutomationService) -> None:
         with pytest.raises(AutomationProjectNotFound):
             await service.create(_project_payload(project_id="ghost"))
 
-    async def test_should_reject_when_project_id_omitted(
-        self, service: AutomationService
-    ) -> None:
+    async def test_should_reject_when_project_id_omitted(self, service: AutomationService) -> None:
         with pytest.raises(AutomationProjectNotFound):
             await service.create(_project_payload(project_id=None))
 

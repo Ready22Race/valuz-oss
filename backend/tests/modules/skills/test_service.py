@@ -36,13 +36,13 @@ class FakeProjectService:
     def __init__(self, projects: list | None = None):
         self._projects = projects or [FakeProject(), FakeProject(id="chat-default")]
 
-    async def get_project(self, project_id: str):
+    async def get_project(self, user_id: str, project_id: str):
         for ws in self._projects:
             if ws.id == project_id:
                 return ws
         raise KeyError(project_id)
 
-    async def list_projects(self):
+    async def list_projects(self, user_id: str):
         return self._projects
 
 
@@ -439,9 +439,7 @@ class TestImportFromSessionConfirm:
         monkeypatch.setattr(kernel_client, "get_events", fake_get_events)
         return seen
 
-    async def test_should_build_skill_body_from_persisted_assistant_events(
-        self, svc, monkeypatch
-    ):
+    async def test_should_build_skill_body_from_persisted_assistant_events(self, svc, monkeypatch):
         service, _ = svc
         seen = self._patch_events(
             monkeypatch,
@@ -461,9 +459,7 @@ class TestImportFromSessionConfirm:
         assert "Second answer." in body
         assert "tool noise" not in body
 
-    async def test_should_fall_back_to_description_when_no_assistant_text(
-        self, svc, monkeypatch
-    ):
+    async def test_should_fall_back_to_description_when_no_assistant_text(self, svc, monkeypatch):
         service, _ = svc
         self._patch_events(monkeypatch, [])
         result = await service.import_from_session_confirm(

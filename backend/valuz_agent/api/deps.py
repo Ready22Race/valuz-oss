@@ -47,6 +47,17 @@ async def get_current_user_id() -> str | None:
     return auth_context.get_current_user_id()
 
 
+async def require_current_user_id() -> str:
+    """FastAPI dependency: the request owner, required.
+
+    Routes that perform owner-scoped work inject this and thread the value down
+    as the first argument (``user_id``) of the service/datastore methods they
+    call. ``AuthMiddleware`` sets the owner for every request, so this is always
+    present in practice; an unset context raises (mirrors the write path).
+    """
+    return auth_context.require_current_user_id()
+
+
 @lru_cache
 def _secret_store() -> FileSecretStore:
     from valuz_agent.infra.config import settings

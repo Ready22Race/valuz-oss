@@ -47,7 +47,7 @@ class _FakeProjectDatastore:
     def __init__(self, project: _FakeProject) -> None:
         self._project = project
 
-    async def get_by_id(self, project_id: str) -> _FakeProject | None:
+    async def get_by_id(self, user_id: str, project_id: str) -> _FakeProject | None:
         if project_id != self._project.id:
             return None
         return self._project

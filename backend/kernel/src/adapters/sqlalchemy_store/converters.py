@@ -245,6 +245,7 @@ def session_to_model(session: Session) -> SessionModel:
 def model_to_session(model: SessionModel) -> Session:
     return Session(
         id=model.id,
+        user_id=model.user_id,
         agent_config=dict_to_agent_config(model.agent_config) or AgentConfig(id="", name=""),
         cwd=model.cwd or "",
         runtime_provider=_validate_runtime_provider(model.runtime_provider),

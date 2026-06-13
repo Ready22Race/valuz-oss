@@ -20,9 +20,10 @@ from __future__ import annotations
 import logging
 from typing import Literal, TypedDict, cast
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from valuz_agent.api.deps import require_current_user_id
 from valuz_agent.generated.i18n_keys import I18nKey
 from valuz_agent.i18n import t
 from valuz_agent.modules.agents.seed import VALUZ_HELPER_SLUG
@@ -268,6 +269,7 @@ class AssistantResponse(BaseModel):
 @router.post("/example-project", response_model=ExampleProjectResponse)
 async def create_example_project(
     body: ExampleProjectRequest,
+    user_id: str = Depends(require_current_user_id),
 ) -> ExampleProjectResponse:
     """Create (or reuse) the onboarding example project and its team's agents.
 
@@ -300,6 +302,7 @@ async def create_example_project(
         created_new = False
         try:
             project = await project_svc.create_project(
+                user_id,
                 name=project_name,
                 root_path=root_path_str,
             )
@@ -313,7 +316,7 @@ async def create_example_project(
         except ValueError as exc:
             msg = str(exc)
             if "already bound" in msg:
-                existing = await ProjectDatastore(db).get_by_root_path(root_path_str)
+                existing = await ProjectDatastore(db).get_by_root_path(user_id, root_path_str)
                 if existing is None:
                     raise HTTPException(
                         status_code=500,
@@ -321,8 +324,7 @@ async def create_example_project(
                     ) from exc
                 project_id = existing.id
                 logger.info(
-                    "onboarding: reusing existing example project %s "
-                    "(skipping agent creation)",
+                    "onboarding: reusing existing example project %s (skipping agent creation)",
                     project_id,
                 )
             else:
@@ -344,9 +346,7 @@ async def create_example_project(
             #   3. 422 if no provider is configured at all (the frontend
             #      TeamStep guard banner catches this first; this is the
             #      authoritative fallback when the guard is bypassed)
-            default_runtime, default_provider_id, default_model = (
-                await _resolve_deploy_target(db)
-            )
+            default_runtime, default_provider_id, default_model = await _resolve_deploy_target(db)
             logger.info(
                 "onboarding: deploying team %r with runtime=%r model=%r provider=%r",
                 body.team_id,

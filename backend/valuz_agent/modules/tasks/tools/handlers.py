@@ -302,7 +302,7 @@ async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolR
     from valuz_agent.modules.projects.datastore import ProjectDatastore
 
     async with async_unit_of_work(commit=False) as db:
-        ws = await ProjectDatastore(db).get_by_id(project_id)
+        ws = await ProjectDatastore(db).get_by_id(sess.user_id, project_id)
     if ws is None or ws.kind != "project":
         return ToolResult(
             content="create_task is only available inside a project",
@@ -733,9 +733,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
         project_id = v.get("project_id", "") or getattr(sess, "project_id", "")
         if not project_id:
-            return ToolResult(
-                content="list_members: caller session has no project", is_error=True
-            )
+            return ToolResult(content="list_members: caller session has no project", is_error=True)
 
         try:
             members = await queries.list_members(project_id)

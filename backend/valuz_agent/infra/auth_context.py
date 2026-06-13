@@ -33,6 +33,23 @@ def get_current_user_id() -> str | None:
     return _current_user_id.get()
 
 
+def require_current_user_id() -> str:
+    """Return the request-scoped owner id, or raise if it is absent.
+
+    The read-side companion to the ``UserMixin`` write-stamp: every owner-scoped
+    query needs a concrete ``user_id`` to filter on. Like the write path, this
+    has NO implicit fallback — an unset context (or one explicitly set to
+    ``None``) raises ``LookupError`` so a query that would otherwise read across
+    every owner fails loudly instead of silently. Background paths acting for a
+    specific owner must ``set_current_user_id(owner)`` (or thread the recovered
+    owner explicitly) before calling owner-scoped reads.
+    """
+    uid = _current_user_id.get()
+    if uid is None:
+        raise LookupError("current_user_id is unset; owner-scoped reads require an owner")
+    return uid
+
+
 def set_current_user_id(user_id: str | None) -> Token[str | None]:
     """Set the owner id for the current context; returns a reset token."""
     return _current_user_id.set(user_id)
@@ -42,4 +59,9 @@ def reset_current_user_id(token: Token[str | None]) -> None:
     _current_user_id.reset(token)
 
 
-__all__ = ["get_current_user_id", "set_current_user_id", "reset_current_user_id"]
+__all__ = [
+    "get_current_user_id",
+    "require_current_user_id",
+    "set_current_user_id",
+    "reset_current_user_id",
+]

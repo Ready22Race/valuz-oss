@@ -124,7 +124,7 @@ async def _resolve_session_context(session_id: str) -> tuple[str | None, str, st
             bound_agent_slug = slug
 
     async with async_unit_of_work(commit=False) as db:
-        ws = await ProjectDatastore(db).get_by_id(project_id)
+        ws = await ProjectDatastore(db).get_by_id(kernel_session.user_id, project_id)
     if ws is None:
         return None, "chat", bound_agent_slug
     return ws.id, ws.kind, bound_agent_slug

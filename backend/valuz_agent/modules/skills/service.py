@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.integrations.skills_filesystem import (
     FilesystemSkillSource,
@@ -99,7 +100,7 @@ class SkillLibraryService:
     async def list_catalog(
         self, project_id: str, *, user_id: str = "", org_id: str | None = None
     ) -> SkillsCatalog:
-        project = await self._projects.get_project(project_id)
+        project = await self._projects.get_project(require_current_user_id(), project_id)
         items = self._ds.list_project_skill_manifests(project, self._source)
         # ``creation_origin`` is host bookkeeping kept only in
         # ``valuz_skill_index`` (never SKILL.md), so it isn't on the
@@ -223,7 +224,7 @@ class SkillLibraryService:
         for source in self._extra_sources:
             all_manifests.extend(source.list_skills(ctx))
 
-        for project in await self._projects.list_projects():
+        for project in await self._projects.list_projects(require_current_user_id()):
             if project.kind == "project" and project.root_path:
                 from valuz_agent.modules.skills.contracts import ProjectRef
 
@@ -301,7 +302,7 @@ class SkillLibraryService:
         skill_path: str,
         enabled: bool,
     ) -> SkillsCatalog:
-        project = await self._projects.get_project(project_id)
+        project = await self._projects.get_project(require_current_user_id(), project_id)
         self._ds.set_skill_enabled(project, skill_path, enabled)
         self._bus.publish(PROJECT_SKILLS_CHANGED, project_id=project_id)
         return await self.list_catalog(project_id)
@@ -419,7 +420,7 @@ class SkillLibraryService:
         if target_scope == "project":
             if not project_id:
                 raise ValueError("project_id required when target_scope='project'")
-            project = await self._projects.get_project(project_id)
+            project = await self._projects.get_project(require_current_user_id(), project_id)
             if project.kind != "project" or not project.root_path:
                 raise ValueError("target project is not a project")
             return Path(project.root_path) / ".claude" / "skills"
@@ -539,7 +540,7 @@ class SkillLibraryService:
         skill_dir = Path(skill.path)
         if skill_dir.exists():
             shutil.rmtree(skill_dir)
-        for project in await self._projects.list_projects():
+        for project in await self._projects.list_projects(require_current_user_id()):
             if project.kind == "project":
                 self._ds.remove_skill_path_from_project(project, skill.path)
         self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="deleted")
@@ -1332,7 +1333,7 @@ class SkillLibraryService:
     async def _resolve_project(self, project_id: str | None):  # type: ignore[no-untyped-def]
         if project_id is None:
             return None
-        return await self._projects.get_project(project_id)
+        return await self._projects.get_project(require_current_user_id(), project_id)
 
     async def _check_entitlement(self, entitlement: str) -> bool:
         if self._auth is None:
@@ -1361,7 +1362,11 @@ class SkillLibraryService:
             if str(Path(skill.path).resolve(strict=False)) == resolved:
                 return skill
         fallback_project = next(
-            (item.id for item in await self._projects.list_projects() if item.kind == "chat"),
+            (
+                item.id
+                for item in await self._projects.list_projects(require_current_user_id())
+                if item.kind == "chat"
+            ),
             "chat-default",
         )
         catalog = await self.list_catalog(fallback_project)
@@ -1418,7 +1423,7 @@ class SkillLibraryService:
             return _default_user_skill_root()
         if project_id is None:
             raise ValueError("project_id is required for project-scoped skills")
-        project = await self._projects.get_project(project_id)
+        project = await self._projects.get_project(require_current_user_id(), project_id)
         if project.kind != "project":
             raise ValueError("project-scoped skills require a project")
         return Path(project.root_path) / ".claude" / "skills"
@@ -1474,7 +1479,7 @@ class SkillLibraryService:
     async def _affected_projects(self, skill_path: str) -> list[SkillDeleteAffectedProject]:
         resolved = str(Path(skill_path).expanduser().resolve(strict=False))
         affected: list[SkillDeleteAffectedProject] = []
-        for project in await self._projects.list_projects():
+        for project in await self._projects.list_projects(require_current_user_id()):
             if project.kind != "project":
                 continue
             if resolved in self._ds.enabled_skill_paths(project):

@@ -124,7 +124,7 @@ class DispatcherService:
             from valuz_agent.modules.projects.datastore import ProjectDatastore
 
             ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(project_id)
+            ws_row = await ws_ds.get_by_id(task_row.user_id, project_id)
             if ws_row is None:
                 return {"error": f"project {project_id!r} not found", "status": "failed"}
             project_cwd = fs_registry.project_cwd(
@@ -143,9 +143,7 @@ class DispatcherService:
             # ``repo-worktree`` mode shells out to ``git worktree add`` (blocking
             # subprocess); offload so dispatch never blocks the event loop. The
             # default ``shared`` mode is a no-op Path() and stays instant.
-            run_dir = await asyncio.to_thread(
-                _member_run_dir, project_cwd, task_id, run_seq, mode
-            )
+            run_dir = await asyncio.to_thread(_member_run_dir, project_cwd, task_id, run_seq, mode)
             started = time.time()
 
             # Build brief for the member
@@ -155,7 +153,7 @@ class DispatcherService:
             member_brief = goal + (f"\n\n## References\n\n{refs_text}" if refs_text else "")
 
             # Fetch project context
-            ws_ctx = await ws_ds.get_context(project_id)
+            ws_ctx = await ws_ds.get_context(task_row.user_id, project_id)
             project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
 
             # Build and save member session
@@ -419,7 +417,7 @@ class DispatcherService:
             from valuz_agent.modules.projects.datastore import ProjectDatastore
 
             ws_ds = ProjectDatastore(db)
-            ws_row = await ws_ds.get_by_id(project_id)
+            ws_row = await ws_ds.get_by_id(task_row.user_id, project_id)
             if ws_row is None:
                 return {"error": f"project {project_id!r} not found", "status": "failed"}
             project_cwd = fs_registry.project_cwd(
@@ -436,9 +434,7 @@ class DispatcherService:
             # ``repo-worktree`` mode shells out to ``git worktree add`` (blocking
             # subprocess); offload so dispatch never blocks the event loop. The
             # default ``shared`` mode is a no-op Path() and stays instant.
-            run_dir = await asyncio.to_thread(
-                _member_run_dir, project_cwd, task_id, run_seq, mode
-            )
+            run_dir = await asyncio.to_thread(_member_run_dir, project_cwd, task_id, run_seq, mode)
 
             refs_text = "\n".join(f"- {r}" for r in (refs or []))
             # Goal mode prepends ``/goal `` (wrap_for_mode); drop the redundant
@@ -456,7 +452,7 @@ class DispatcherService:
                 )
             )
 
-            ws_ctx = await ws_ds.get_context(project_id)
+            ws_ctx = await ws_ds.get_context(task_row.user_id, project_id)
             project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
 
             member_session = await build_member_session(

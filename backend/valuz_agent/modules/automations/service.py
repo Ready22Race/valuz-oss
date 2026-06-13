@@ -27,6 +27,7 @@ from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.i18n import t
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.agents.datastore import (
@@ -141,7 +142,7 @@ class AutomationService:
         if self._ws is None:
             raise AutomationProjectNotFound()
         try:
-            ws = await self._ws.get_project(project_id)
+            ws = await self._ws.get_project(require_current_user_id(), project_id)
             return ws.name, ws.kind
         except AutomationProjectNotFound:
             raise
@@ -319,7 +320,7 @@ class AutomationService:
         ]
         if self._ws is None:
             return targets
-        for ws in await self._ws.list_projects():
+        for ws in await self._ws.list_projects(require_current_user_id()):
             if ws.kind == "project":
                 targets.append(
                     AutomationProjectTarget(
@@ -333,9 +334,7 @@ class AutomationService:
 
     # ── Listing ───────────────────────────────────────────────────────
 
-    async def list_automations_in_project(
-        self, project_id: str
-    ) -> list[AutomationItemResponse]:
+    async def list_automations_in_project(self, project_id: str) -> list[AutomationItemResponse]:
         return [await self._row_to_item(r) for r in await self._ds.list_automations(project_id)]
 
     async def list_all_automations(self) -> list[AutomationItemResponse]:

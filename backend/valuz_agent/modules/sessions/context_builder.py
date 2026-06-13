@@ -126,9 +126,10 @@ async def _build_additional_context(
             g = injection_assembler.global_block()
             if g.strip():
                 mem_parts.append(g.strip())
+            from valuz_agent.infra.auth_context import require_current_user_id
             from valuz_agent.modules.projects.service import project_cwd_by_id
 
-            project_cwd = await project_cwd_by_id(project_id) or ""
+            project_cwd = await project_cwd_by_id(require_current_user_id(), project_id) or ""
             task_id = None
             sess = await kernel_client.get_session(session_id)
             if sess is not None:

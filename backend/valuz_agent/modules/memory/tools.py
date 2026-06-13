@@ -50,7 +50,7 @@ async def _resolve_project_cwd(session_id: str) -> str | None:
         return None
     from valuz_agent.modules.projects.service import project_cwd_by_id
 
-    return await project_cwd_by_id(str(project_id))
+    return await project_cwd_by_id(sess.user_id, str(project_id))
 
 
 async def _resolve_task_id(session_id: str) -> str | None:

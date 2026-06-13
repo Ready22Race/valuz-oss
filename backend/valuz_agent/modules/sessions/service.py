@@ -43,6 +43,7 @@ from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.capability_resolver import resolve_session_capabilities
 from valuz_agent.adapters.model_resolver import resolve_model
 from valuz_agent.adapters.system_prompt_builder import build_project_system_prompt
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.secret_store import FileSecretStore
@@ -182,7 +183,7 @@ class SessionService:
         if self._connectors is None:
             return []
 
-        project_row = await self._projects.get_by_id(project_id)
+        project_row = await self._projects.get_by_id(require_current_user_id(), project_id)
         is_project = project_row is not None and project_row.kind == "project"
 
         try:
@@ -507,8 +508,8 @@ class SessionService:
             raise SessionNotRunnable(str(exc)) from exc
 
         # Snapshot the project prompt + the agent's persona instructions.
-        project_row = await self._projects.get_by_id(project_id)
-        project_ctx = await self._projects.get_context(project_id)
+        project_row = await self._projects.get_by_id(require_current_user_id(), project_id)
+        project_ctx = await self._projects.get_context(require_current_user_id(), project_id)
         project_prompt = build_project_system_prompt(
             project_name=project_row.name if project_row else "",
             instructions_md=project_ctx.instructions_md if project_ctx else None,
@@ -591,7 +592,7 @@ class SessionService:
         if creation_context:
             valuz_meta["creation_context"] = {str(k): str(v) for k, v in creation_context.items()}
 
-        project_row = await self._projects.get_by_id(project_id)
+        project_row = await self._projects.get_by_id(require_current_user_id(), project_id)
         if project_row is None:
             raise SessionNotRunnable(f"project '{project_id}' not found")
         from app.serializers import agent_config_to_schema
@@ -712,7 +713,7 @@ class SessionService:
                     effort = await _prefs.get_default_effort(_pref_db)
 
         # Resolve model.
-        project_row = await self._projects.get_by_id(project_id)
+        project_row = await self._projects.get_by_id(require_current_user_id(), project_id)
         resolution = await resolve_model(
             providers=self._providers,
             request_model_id=model_id,
@@ -849,8 +850,8 @@ class SessionService:
         # the session field, not the agent — so this is the moment that
         # locks the system prompt for the session's lifetime. Project
         # edits after this point apply only to *future* sessions.
-        project_row = await self._projects.get_by_id(project_id)
-        project_ctx = await self._projects.get_context(project_id)
+        project_row = await self._projects.get_by_id(require_current_user_id(), project_id)
+        project_ctx = await self._projects.get_context(require_current_user_id(), project_id)
         session_instructions = build_project_system_prompt(
             project_name=project_row.name if project_row else "",
             instructions_md=project_ctx.instructions_md if project_ctx else None,
@@ -1282,9 +1283,7 @@ class SessionService:
                 )
             if not persisted:
                 try:
-                    await kernel_client.emit_live_event(
-                        session_id, err_event.type, err_event.data
-                    )
+                    await kernel_client.emit_live_event(session_id, err_event.type, err_event.data)
                 except Exception:  # noqa: BLE001
                     logger.exception(
                         "Failed to broadcast session_error after interrupt for %s",

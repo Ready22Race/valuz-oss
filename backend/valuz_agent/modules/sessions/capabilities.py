@@ -76,7 +76,7 @@ async def refresh_docs_capabilities_for_session(session_id: str) -> bool:
     #
     async def _load_project():  # type: ignore[no-untyped-def]
         async with async_unit_of_work(commit=False) as db:
-            return await ProjectDatastore(db).get_by_id(project_id)
+            return await ProjectDatastore(db).get_by_id(session.user_id, project_id)
 
     project = await _load_project()
     if project is None:
@@ -157,9 +157,7 @@ async def refresh_always_on_mcp_for_session(session_id: str) -> bool:
         return False
 
     run_kind = ((session.metadata or {}).get("valuz", {}) or {}).get("run_kind")
-    fresh = always_on_http_mcp_servers(
-        session_id, toolkit=harness_toolkit_for_run_kind(run_kind)
-    )
+    fresh = always_on_http_mcp_servers(session_id, toolkit=harness_toolkit_for_run_kind(run_kind))
     fresh_names = {m.name for m in fresh}
     current = list(session.mcp_servers or ())
     # Drop any existing always-on entry (stale token/url), keep everything
@@ -172,9 +170,7 @@ async def refresh_always_on_mcp_for_session(session_id: str) -> bool:
     if new_mcp == tuple(current):
         return False
 
-    await kernel_client.update_session(
-        session_id, UpdateSessionRequest(mcp_servers=list(new_mcp))
-    )
+    await kernel_client.update_session(session_id, UpdateSessionRequest(mcp_servers=list(new_mcp)))
     logger.info("Re-stamped always-on MCP token on session %s", session_id)
     return True
 

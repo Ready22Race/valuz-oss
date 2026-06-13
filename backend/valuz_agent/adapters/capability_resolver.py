@@ -35,6 +35,7 @@ from app.schemas import (
 # Side-effect import — surfaces ``src.core...`` on sys.path.
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters.mcp_resolver import resolve_mcp_servers
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
@@ -99,7 +100,7 @@ async def resolve_session_capabilities(
     the corresponding ``McpServerConfig`` list.
     """
 
-    project = await projects.get_by_id(project_id)
+    project = await projects.get_by_id(require_current_user_id(), project_id)
     if project is None:
         raise KeyError(project_id)
 

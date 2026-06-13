@@ -133,7 +133,7 @@ async def enrich_pending(
         project_emoji: str | None = None
         project_id = task.project_id
         if project_id:
-            ws = await ProjectDatastore(db).get_by_id(project_id)
+            ws = await ProjectDatastore(db).get_by_id(task.user_id, project_id)
             if ws is not None:
                 project_title = ws.name
                 project_emoji = ws.icon

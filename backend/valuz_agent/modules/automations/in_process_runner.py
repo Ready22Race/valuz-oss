@@ -32,6 +32,11 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from valuz_agent.i18n import t
+from valuz_agent.infra.auth_context import (
+    require_current_user_id,
+    reset_current_user_id,
+    set_current_user_id,
+)
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.automations.models import AutomationRow, AutomationRunRow
 from valuz_agent.modules.automations.triggers import TriggerEvaluator
@@ -333,6 +338,12 @@ class InProcessAutomationRunner:
                 logger.warning("Run %s for automation %s not found", run_id, automation_id)
                 return
 
+            # Owner boundary: an automation fires from the background scheduler
+            # with no request context. Publish the automation's owner so the
+            # session it creates and every owner-scoped read below attribute to
+            # the user who owns the automation (mirrors AuthMiddleware on the
+            # request path).
+            owner_token = set_current_user_id(row.user_id) if row.user_id else None
             self._active_ids.add(automation_id)
             try:
                 project_name = await self._resolve_project_name(db, row.project_id)
@@ -461,6 +472,8 @@ class InProcessAutomationRunner:
                 logger.info("Run %s completed: %s", run_id, run.status)
             finally:
                 self._active_ids.discard(automation_id)
+                if owner_token is not None:
+                    reset_current_user_id(owner_token)
 
     # ── Task-mode execution ────────────────────────────────────────
 
@@ -604,7 +617,7 @@ class InProcessAutomationRunner:
         from valuz_agent.modules.projects.datastore import ProjectDatastore
 
         try:
-            row = await ProjectDatastore(db).get_by_id(project_id)
+            row = await ProjectDatastore(db).get_by_id(require_current_user_id(), project_id)
             if row is not None:
                 return row.name
         except Exception:
