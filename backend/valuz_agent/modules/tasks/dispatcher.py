@@ -198,7 +198,7 @@ class DispatcherService:
                 )
                 return {"error": gap, "status": "failed", "agent": agent}
 
-            await kernel_client.create_session(member_session)
+            await kernel_client.create_session(require_current_user_id(), member_session)
             await project_index.record(
                 project_id, member_session.id, kind="task_subtask", origin="task"
             )
@@ -506,7 +506,7 @@ class DispatcherService:
                 )
                 return {"error": gap, "status": "failed", "agent": agent}
 
-            await kernel_client.create_session(member_session)
+            await kernel_client.create_session(require_current_user_id(), member_session)
             await project_index.record(
                 project_id, member_session.id, kind="task_subtask", origin="task"
             )

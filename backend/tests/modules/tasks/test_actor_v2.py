@@ -563,7 +563,7 @@ def test_create_task_gate_rejects_task_sessions(
     monkeypatch.setattr(
         dispatch_mcp.kernel_client,
         "get_session",
-        _as_async(lambda _sid: _sess({"run_kind": "lead", "project_id": "w1"})),
+        _as_async(lambda _uid, _sid: _sess({"run_kind": "lead", "project_id": "w1"})),
     )
     res = asyncio.run(dispatch_mcp._check_orchestration_gate(ctx))  # type: ignore[arg-type]
     assert isinstance(res, ToolResult) and res.is_error
@@ -572,7 +572,7 @@ def test_create_task_gate_rejects_task_sessions(
     monkeypatch.setattr(
         dispatch_mcp.kernel_client,
         "get_session",
-        _as_async(lambda _sid: _sess({"run_kind": "subtask", "project_id": "w1"})),
+        _as_async(lambda _uid, _sid: _sess({"run_kind": "subtask", "project_id": "w1"})),
     )
     res = asyncio.run(dispatch_mcp._check_orchestration_gate(ctx))  # type: ignore[arg-type]
     assert isinstance(res, ToolResult) and res.is_error
@@ -581,7 +581,7 @@ def test_create_task_gate_rejects_task_sessions(
     monkeypatch.setattr(
         dispatch_mcp.kernel_client,
         "get_session",
-        _as_async(lambda _sid: _sess({"agent_slug": "x"})),
+        _as_async(lambda _uid, _sid: _sess({"agent_slug": "x"})),
     )
     res = asyncio.run(dispatch_mcp._check_orchestration_gate(ctx))  # type: ignore[arg-type]
     assert isinstance(res, ToolResult) and res.is_error

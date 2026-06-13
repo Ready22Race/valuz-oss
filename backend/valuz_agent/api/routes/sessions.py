@@ -568,7 +568,7 @@ async def list_attachments(
     client-side. The runtime path uses ``_load_pending_attachments``
     instead, which is pending-only.
     """
-    if await kernel_client.get_session(session_id) is None:
+    if await kernel_client.get_session(user_id, session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     rows = await SessionDatastore(db).list_attachments(user_id, session_id, include_consumed=True)
     return AttachmentListResponse(items=[_row_to_item(r) for r in rows])
@@ -590,7 +590,7 @@ async def upload_attachment(
     copies bytes — valuz holds the canonical store and the kernel only
     references it.
     """
-    if await kernel_client.get_session(session_id) is None:
+    if await kernel_client.get_session(user_id, session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
 
     # Session-wide attachment cap (local + KB-sourced counted together).
@@ -810,7 +810,7 @@ async def add_kb_attachments(
     docs return 400 with the offending id so the picker can surface
     the conflict instead of silently dropping the selection.
     """
-    if await kernel_client.get_session(session_id) is None:
+    if await kernel_client.get_session(user_id, session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     if not body.doc_ids:
         # Empty list is a no-op (picker confirmed with nothing
@@ -908,7 +908,7 @@ async def delete_attachment(
     """
     import os
 
-    if await kernel_client.get_session(session_id) is None:
+    if await kernel_client.get_session(user_id, session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     ds = SessionDatastore(db)
     row = await ds.get_attachment(user_id, attachment_id)

@@ -59,7 +59,11 @@ from collections.abc import AsyncIterator
 
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 
-from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
+from valuz_agent.infra.auth_context import (
+    require_current_user_id,
+    reset_current_user_id,
+    set_current_user_id,
+)
 
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
@@ -114,7 +118,7 @@ async def _resolve_session_owner(session_id: str) -> str | None:
     from valuz_agent.adapters import kernel_client
 
     try:
-        sess = await kernel_client.get_session(session_id)
+        sess = await kernel_client.get_session(require_current_user_id(), session_id)
     except Exception:  # noqa: BLE001 — owner resolution is best-effort; never block the tool
         logger.warning("toolkit: failed to resolve owner for session %s", session_id, exc_info=True)
         return None

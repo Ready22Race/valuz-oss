@@ -253,7 +253,7 @@ class CoordinationService:
                 run = runs_by_key.get(key)
                 if run is None:
                     continue
-                ks = await kernel_client.get_session(run.session_id)
+                ks = await kernel_client.get_session(require_current_user_id(), run.session_id)
                 if getattr(ks, "status", None) == "running":
                     continue  # genuinely in flight — keep waiting
                 disp = classify_member(

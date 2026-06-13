@@ -186,9 +186,21 @@ def _session_staging_root(session_id: str) -> Path:
     """
     import asyncio
 
+    from valuz_agent.infra import auth_context
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.modules.skills.staging import staging_dir_for_session
 
-    return asyncio.run(staging_dir_for_session(session_id, mkdir=True))
+    async def _resolve() -> Path:
+        # Resolve under the SAME owner the TestClient's AuthMiddleware uses, so
+        # the kernel session created via the API is visible here (get_session is
+        # owner-scoped) and write/read land in the same staging dir.
+        token = auth_context.set_current_user_id(resolve_local_user_id())
+        try:
+            return await staging_dir_for_session(session_id, mkdir=True)
+        finally:
+            auth_context.reset_current_user_id(token)
+
+    return asyncio.run(_resolve())
 
 
 def _write_staging_skill(

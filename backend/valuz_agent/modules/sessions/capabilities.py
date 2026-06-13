@@ -17,6 +17,7 @@ from app.schemas import UpdateSessionRequest
 
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect for app.schemas
 from valuz_agent.adapters import kernel_client
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ async def refresh_docs_capabilities_for_session(session_id: str) -> bool:
     from valuz_agent.integrations.docs_mcp_server import docs_mcp_url
     from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-    session = await kernel_client.get_session(session_id)
+    session = await kernel_client.get_session(require_current_user_id(), session_id)
     if session is None:
         return False
     # Sessions that have already finished don't run new turns; capability
@@ -109,6 +110,7 @@ async def refresh_docs_capabilities_for_session(session_id: str) -> bool:
             )
         )
     await kernel_client.update_session(
+        require_current_user_id(),
         session_id,
         UpdateSessionRequest(skills=list(new_skills), mcp_servers=list(new_mcp)),
     )
@@ -152,7 +154,7 @@ async def refresh_always_on_mcp_for_session(session_id: str) -> bool:
         harness_toolkit_for_run_kind,
     )
 
-    session = await kernel_client.get_session(session_id)
+    session = await kernel_client.get_session(require_current_user_id(), session_id)
     if session is None or session.status in ("terminated",):
         return False
 
@@ -170,7 +172,9 @@ async def refresh_always_on_mcp_for_session(session_id: str) -> bool:
     if new_mcp == tuple(current):
         return False
 
-    await kernel_client.update_session(session_id, UpdateSessionRequest(mcp_servers=list(new_mcp)))
+    await kernel_client.update_session(
+        require_current_user_id(), session_id, UpdateSessionRequest(mcp_servers=list(new_mcp))
+    )
     logger.info("Re-stamped always-on MCP token on session %s", session_id)
     return True
 
@@ -188,7 +192,7 @@ async def refresh_docs_capabilities_for_project(project_id: str) -> int:
 
     try:
         ids = await project_index.list_session_ids(project_id, limit=500)
-        sessions = await kernel_client.list_sessions(ids=ids, limit=500)
+        sessions = await kernel_client.list_sessions(require_current_user_id(), ids=ids, limit=500)
     except Exception:  # noqa: BLE001 — never raise into eventbus handlers
         logger.exception(
             "refresh_docs_capabilities_for_project: failed to list sessions for %s",

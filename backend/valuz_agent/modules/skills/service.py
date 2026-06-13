@@ -275,7 +275,7 @@ class SkillLibraryService:
                         # import flows overwrite this via set_creation_origin
                         # right after they call startup_scan.
                         creation_origin="discovered",
-                    )
+                    ),
                 )
             else:
                 existing.name = manifest.name
@@ -562,7 +562,7 @@ class SkillLibraryService:
         from valuz_agent.adapters import kernel_client
 
         assistant_text = self._collect_session_assistant_text(
-            await kernel_client.get_events(payload.session_id)
+            await kernel_client.get_events(require_current_user_id(), payload.session_id)
         )
         description = payload.description or "Imported from session output"
         body = assistant_text or description
@@ -1222,7 +1222,7 @@ class SkillLibraryService:
         from valuz_agent.adapters import kernel_client
         from valuz_agent.modules.skills import staging
 
-        kernel_session = await kernel_client.get_session(session_id)
+        kernel_session = await kernel_client.get_session(require_current_user_id(), session_id)
         if kernel_session is None:
             raise KeyError(f"session not found: {session_id!r}")
         valuz_meta = (kernel_session.metadata or {}).get("valuz") or {}

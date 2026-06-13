@@ -318,7 +318,7 @@ class ProjectService:
         # come from the host index, which is cleared in the same sweep.
         try:
             for sid in await project_index.remove_for_project(project_id):
-                await kernel_client.delete_session(sid)
+                await kernel_client.delete_session(require_current_user_id(), sid)
         except Exception:  # noqa: BLE001
             pass
         if self._docs:

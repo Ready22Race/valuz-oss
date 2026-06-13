@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from typing import Annotated
 
 from app.config import AppConfig
+from fastapi import Header, HTTPException
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from src.adapters.sqlalchemy_store.engine import create_engine, create_session_factory
 from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
 from src.core import StorePort
@@ -57,6 +58,25 @@ async def shutdown_dependencies() -> None:
     _session_factory = None
     _store = None
     _orchestrator = None
+
+
+def get_owner_id(x_valuz_owner_id: Annotated[str | None, Header()] = None) -> str:
+    """FastAPI dependency — the request's owner id (``user_id``).
+
+    The host (valuz / commercial overlay) sends the resolved per-request owner
+    in the ``X-Valuz-Owner-Id`` header; the in-process seam passes it directly
+    as an argument instead. When absent (a standalone single-user OSS kernel),
+    fall back to the boot-seeded ``owner_context`` default. A genuinely-unset
+    owner is a 403 — the kernel never serves owner-scoped data without one.
+    """
+    if x_valuz_owner_id:
+        return x_valuz_owner_id
+    from src.core.owner_context import get_owner_id as _default_owner
+
+    uid = _default_owner()
+    if not uid:
+        raise HTTPException(status_code=403, detail="owner id required")
+    return uid
 
 
 def get_store() -> StorePort:

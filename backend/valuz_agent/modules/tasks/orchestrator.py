@@ -455,7 +455,7 @@ class TaskOrchestrator:
             if gap is not None:
                 return {"error": f"commit_task: {gap}"}
 
-            await kernel_client.create_session(lead_session)
+            await kernel_client.create_session(require_current_user_id(), lead_session)
             await project_index.record(project_id, lead_session.id, kind="task_lead", origin="task")
 
             # DB writes: create lead run row + flip task status + append event
@@ -697,7 +697,9 @@ class TaskOrchestrator:
     async def _last_assistant_summary(session_id: str) -> str:
         """Best-effort last assistant-message text, for an auto-finalize summary."""
         try:
-            events = await kernel_client.get_events(session_id, limit=200)
+            events = await kernel_client.get_events(
+                require_current_user_id(), session_id, limit=200
+            )
             for event in reversed(events):
                 payload = event.data if hasattr(event, "data") else {}
                 if event.type in ("assistant_message", "text_delta", "content_block"):
@@ -764,7 +766,9 @@ class TaskOrchestrator:
                 error_msg = f"lead turn ended with status={final_status}"
             else:
                 try:
-                    sess = await kernel_client.get_session(lead_session_id)
+                    sess = await kernel_client.get_session(
+                        require_current_user_id(), lead_session_id
+                    )
                     sr = getattr(sess, "stop_reason", None) if sess is not None else None
                     if sr:
                         typ = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
@@ -947,7 +951,7 @@ class TaskOrchestrator:
             for run in runs:
                 if run.kind != "subtask" or run.status not in ("active", "paused"):
                     continue
-                ks = await kernel_client.get_session(run.session_id)
+                ks = await kernel_client.get_session(require_current_user_id(), run.session_id)
                 node = plan.get(run.subtask_key) if run.subtask_key else None
                 rec = reconcile(
                     getattr(ks, "status", None) if ks is not None else None,
@@ -1065,7 +1069,7 @@ class TaskOrchestrator:
         ``shutdown`` mailbox message is what stops its actor loop instead.
         """
         try:
-            await kernel_client.interrupt(session_id)
+            await kernel_client.interrupt(require_current_user_id(), session_id)
         except Exception:  # noqa: BLE001
             logger.warning("interrupt failed for session %s", session_id, exc_info=True)
 
@@ -1653,9 +1657,9 @@ class TaskOrchestrator:
         # and so a re-opened conversation on this session isn't stuck in
         # goal mode. Best-effort — a missing session is not fatal here.
         try:
-            lead_sess = await kernel_client.get_session(lead_session_id)
+            lead_sess = await kernel_client.get_session(require_current_user_id(), lead_session_id)
             if lead_sess is not None and getattr(lead_sess, "mode", "default") != "default":
-                await kernel_client.set_mode(lead_session_id, "default")
+                await kernel_client.set_mode(require_current_user_id(), lead_session_id, "default")
         except Exception:  # noqa: BLE001 — terminal bookkeeping, never block close
             logger.warning(
                 "finish_task: could not reset lead session %s mode to default",

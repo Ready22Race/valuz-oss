@@ -432,7 +432,7 @@ class TestImportFromSessionConfirm:
 
         seen: list[str] = []
 
-        async def fake_get_events(session_id, **kwargs):
+        async def fake_get_events(_user_id, session_id, **kwargs):
             seen.append(session_id)
             return events
 

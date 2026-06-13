@@ -151,7 +151,7 @@ class RunsService:
         index_rows = await project_index.list_recent(limit=200)
         proj_by_session = {r.session_id: r.project_id for r in index_rows}
         sessions: list[KernelSession] = await kernel_client.list_sessions(
-            ids=[r.session_id for r in index_rows], limit=200
+            require_current_user_id(), ids=[r.session_id for r in index_rows], limit=200
         )
         ws_map: dict[str, ProjectRow] = {
             str(r.id): r for r in await self._projects.list_projects(require_current_user_id())
@@ -257,7 +257,7 @@ class RunsService:
         the last round's content. Scans a few recent messages because the
         in-flight turn's message may not have its ``assistant_message`` set yet.
         """
-        messages = await kernel_client.list_messages(session_id, limit=3)
+        messages = await kernel_client.list_messages(require_current_user_id(), session_id, limit=3)
         for message in messages:  # most-recent first
             if message.assistant_message:
                 return str(message.assistant_message)

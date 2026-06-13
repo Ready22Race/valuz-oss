@@ -220,8 +220,14 @@ def dict_to_agent_config(data: dict[str, Any] | None) -> AgentConfig | None:
 
 
 def session_to_model(session: Session) -> SessionModel:
+    # Stamp the owner explicitly. When ``user_id`` is empty (a Session built
+    # without an owner — the create route sets it, so this is the defensive
+    # path) omit the kwarg so the column ``default=get_owner_id`` fail-safe
+    # fires instead of writing an empty owner.
+    owner_kwargs = {"user_id": session.user_id} if session.user_id else {}
     return SessionModel(
         id=session.id,
+        **owner_kwargs,
         agent_config=agent_config_to_dict(session.agent_config),
         cwd=session.cwd,
         runtime_provider=session.runtime_provider,
@@ -418,8 +424,12 @@ def dict_to_user_message(data: dict[str, Any]) -> UserMessage:
 # -- Message --
 
 
-def message_to_model(message: Message) -> MessageModel:
+def message_to_model(user_id: str, message: Message) -> MessageModel:
+    # Owner stamped explicitly from the caller; empty → let the column default
+    # fail-safe fire (see ``session_to_model``).
+    owner_kwargs = {"user_id": user_id} if user_id else {}
     return MessageModel(
+        **owner_kwargs,
         id=message.id,
         session_id=message.session_id,
         user_message=user_message_to_dict(message.user_message),
@@ -475,8 +485,12 @@ def model_to_message(model: MessageModel) -> Message:
 # -- Event --
 
 
-def event_to_model(session_id: str, message_id: str, event: Event) -> EventModel:
+def event_to_model(user_id: str, session_id: str, message_id: str, event: Event) -> EventModel:
+    # Owner stamped explicitly from the caller; empty → let the column default
+    # fail-safe fire (see ``session_to_model``).
+    owner_kwargs = {"user_id": user_id} if user_id else {}
     return EventModel(
+        **owner_kwargs,
         session_id=session_id,
         message_id=message_id,
         type=event.type,

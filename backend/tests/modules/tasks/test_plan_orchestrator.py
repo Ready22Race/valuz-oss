@@ -591,7 +591,9 @@ def test_auto_finalize_stays_active_on_stop_reason_error_with_empty_plan(
     fake_sess = SimpleNamespace(
         stop_reason={"type": "error", "category": "execution_error", "message": "boom: skill x"}
     )
-    monkeypatch.setattr(orch_mod.kernel_client, "get_session", _as_async(lambda _sid: fake_sess))
+    monkeypatch.setattr(
+        orch_mod.kernel_client, "get_session", _as_async(lambda _uid, _sid: fake_sess)
+    )
     orch = TaskOrchestrator()
     asyncio.run(
         orch._auto_finalize_lead_task(
@@ -786,7 +788,7 @@ def test_recover_one_task_reconciles_members_and_redrives_lead(
         ),
     }
     monkeypatch.setattr(
-        orch_mod.kernel_client, "get_session", _as_async(lambda sid: sessions.get(sid))
+        orch_mod.kernel_client, "get_session", _as_async(lambda _uid, sid: sessions.get(sid))
     )
 
     orch = TaskOrchestrator()
@@ -955,7 +957,7 @@ def test_resume_task_only_paused_flips_active_and_redrives(
         orch_mod.kernel_client,
         "get_session",
         _as_async(
-            lambda sid: SimpleNamespace(status="idle", stop_reason={"type": "user_interrupt"})
+            lambda _uid, sid: SimpleNamespace(status="idle", stop_reason={"type": "user_interrupt"})
         ),
     )
     orch = TaskOrchestrator()
@@ -1010,7 +1012,7 @@ def test_resume_task_accepts_blocked(db_factory, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         orch_mod.kernel_client,
         "get_session",
-        _as_async(lambda sid: SimpleNamespace(status="idle", stop_reason={"type": "error"})),
+        _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason={"type": "error"})),
     )
     orch = TaskOrchestrator()
     spawned: list[tuple[str, str]] = []
@@ -1041,7 +1043,7 @@ def test_resume_task_accepts_stopped(db_factory, tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(
         orch_mod.kernel_client,
         "get_session",
-        _as_async(lambda sid: SimpleNamespace(status="idle", stop_reason=None)),
+        _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason=None)),
     )
     orch = TaskOrchestrator()
     spawned: list[tuple[str, str]] = []
@@ -1072,7 +1074,7 @@ def test_resume_task_accepts_completed(db_factory, tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(
         orch_mod.kernel_client,
         "get_session",
-        _as_async(lambda sid: SimpleNamespace(status="idle", stop_reason=None)),
+        _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason=None)),
     )
     orch = TaskOrchestrator()
     spawned: list[tuple[str, str]] = []
@@ -1145,7 +1147,7 @@ def test_heartbeat_pending_synthesizes_terminal_completed(
         "sC": SimpleNamespace(status="running", stop_reason=None),  # still in flight
     }
     monkeypatch.setattr(
-        orch_mod.kernel_client, "get_session", _as_async(lambda sid: sessions.get(sid))
+        orch_mod.kernel_client, "get_session", _as_async(lambda _uid, sid: sessions.get(sid))
     )
     # ``_heartbeat_pending`` lives in tasks/coordination.py (ADR-023 Step 3b);
     # the orchestrator delegates to it, so stub the coordination module's
@@ -1206,7 +1208,7 @@ def test_e2e_stop_resume_closed_loop_through_routes(db_factory, tmp_path, monkey
         orch_mod.kernel_client,
         "get_session",
         _as_async(
-            lambda sid: SimpleNamespace(status="idle", stop_reason={"type": "user_interrupt"})
+            lambda _uid, sid: SimpleNamespace(status="idle", stop_reason={"type": "user_interrupt"})
         ),
     )
 
@@ -1310,7 +1312,7 @@ def test_resume_evicts_kernel_runtime_before_respawn(db_factory, tmp_path, monke
         orch_mod.kernel_client,
         "get_session",
         _as_async(
-            lambda sid: SimpleNamespace(status="idle", stop_reason={"type": "user_interrupt"})
+            lambda _uid, sid: SimpleNamespace(status="idle", stop_reason={"type": "user_interrupt"})
         ),
     )
 

@@ -256,7 +256,7 @@ class RecoveryService:
             for run in runs:
                 if run.kind != "subtask" or run.status not in ("active", "paused"):
                     continue
-                ks = await kernel_client.get_session(run.session_id)
+                ks = await kernel_client.get_session(require_current_user_id(), run.session_id)
                 node = plan.get(run.subtask_key) if run.subtask_key else None
                 rec = reconcile(
                     getattr(ks, "status", None) if ks is not None else None,
@@ -357,7 +357,7 @@ class RecoveryService:
         try:
             from valuz_agent.adapters import kernel_client
 
-            await kernel_client.interrupt(session_id)
+            await kernel_client.interrupt(require_current_user_id(), session_id)
         except Exception:  # noqa: BLE001
             logger.warning("interrupt failed for session %s", session_id, exc_info=True)
 

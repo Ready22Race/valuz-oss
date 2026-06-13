@@ -131,7 +131,7 @@ async def _build_additional_context(
 
             project_cwd = await project_cwd_by_id(require_current_user_id(), project_id) or ""
             task_id = None
-            sess = await kernel_client.get_session(session_id)
+            sess = await kernel_client.get_session(require_current_user_id(), session_id)
             if sess is not None:
                 task_id = ((sess.metadata or {}).get("valuz", {}) or {}).get("task_id")
             idx = injection_assembler.context_index_block(
