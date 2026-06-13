@@ -43,14 +43,14 @@ async def svc_and_secrets():
 
 
 async def _row(svc, session, cid):
-    return await ConnectorDatastore(session).get_by_id(cid)
+    return await ConnectorDatastore(session).get_by_id("local-test-owner", cid)
 
 
 # ── Acceptance #1 — catalog secret header → store + manifest, not json ──
 async def test_should_route_catalog_secret_header_to_store_not_plaintext(svc_and_secrets):
     svc, secrets, _ = svc_and_secrets
     fields = [CatalogFieldSpec(key="api_key", name="X-API-Key", target="header", secret=True)]
-    v = await svc.create_connector(
+    v = await svc.create_connector("local-test-owner", 
         slug="acme",
         display_name="Acme",
         transport="http",
@@ -59,7 +59,7 @@ async def test_should_route_catalog_secret_header_to_store_not_plaintext(svc_and
         headers=[CredEntry(key="X-API-Key", secret=False, value="k")],
         catalog_fields=fields,
     )
-    row = await svc.get_connector(v.id)
+    row = await svc.get_connector("local-test-owner", v.id)
     # GET hides the secret value; entry present, no value.
     assert row is not None
     h = next(e for e in row.headers if e.key == "X-API-Key")
@@ -72,7 +72,7 @@ async def test_should_route_catalog_secret_header_to_store_not_plaintext(svc_and
 # ── Acceptance #3 — custom split: secret→store, plaintext→json ─────────
 async def test_should_split_custom_entries_by_client_secret_flag(svc_and_secrets):
     svc, secrets, _ = svc_and_secrets
-    v = await svc.create_connector(
+    v = await svc.create_connector("local-test-owner", 
         slug="cust",
         display_name="Cust",
         transport="http",
@@ -83,7 +83,7 @@ async def test_should_split_custom_entries_by_client_secret_flag(svc_and_secrets
             CredEntry(key="X-Trace", secret=False, value="t"),
         ],
     )
-    row = await svc.get_connector(v.id)
+    row = await svc.get_connector("local-test-owner", v.id)
     assert row is not None
     auth = next(e for e in row.headers if e.key == "Authorization")
     trace = next(e for e in row.headers if e.key == "X-Trace")
@@ -98,7 +98,7 @@ async def test_should_let_catalog_fields_override_client_secret_flag(svc_and_sec
     svc, secrets, _ = svc_and_secrets
     # Catalog says secret=True; malicious client claims secret=False.
     fields = [CatalogFieldSpec(key="api_key", name="Authorization", target="header", secret=True)]
-    v = await svc.create_connector(
+    v = await svc.create_connector("local-test-owner", 
         slug="acme",
         display_name="Acme",
         transport="http",
@@ -107,7 +107,7 @@ async def test_should_let_catalog_fields_override_client_secret_flag(svc_and_sec
         headers=[CredEntry(key="Authorization", secret=False, value="Bearer k")],
         catalog_fields=fields,
     )
-    row = await svc.get_connector(v.id)
+    row = await svc.get_connector("local-test-owner", v.id)
     assert row is not None
     auth = next(e for e in row.headers if e.key == "Authorization")
     assert auth.secret is True and auth.value is None  # treated as secret
@@ -117,7 +117,7 @@ async def test_should_let_catalog_fields_override_client_secret_flag(svc_and_sec
 async def test_should_route_secret_param_to_store_and_inject_into_query(svc_and_secrets):
     svc, secrets, _ = svc_and_secrets
     fields = [CatalogFieldSpec(key="token", name="token", target="param", secret=True)]
-    v = await svc.create_connector(
+    v = await svc.create_connector("local-test-owner", 
         slug="acme",
         display_name="Acme",
         transport="http",
@@ -126,7 +126,7 @@ async def test_should_route_secret_param_to_store_and_inject_into_query(svc_and_
         params=[CredEntry(key="token", secret=False, value="p")],
         catalog_fields=fields,
     )
-    row = await svc.get_connector(v.id)
+    row = await svc.get_connector("local-test-owner", v.id)
     assert row is not None
     tok = next(e for e in row.params if e.key == "token")
     assert tok.secret is True and tok.value is None
@@ -144,7 +144,7 @@ def test_should_merge_params_overriding_same_key_and_preserving_others():
 # ── Acceptance #7 — desired-state: rotate / preserve(blank) / delete ───
 async def test_should_apply_desired_state_semantics_on_update(svc_and_secrets):
     svc, secrets, _ = svc_and_secrets
-    v = await svc.create_connector(
+    v = await svc.create_connector("local-test-owner", 
         slug="d",
         display_name="D",
         transport="http",
@@ -158,7 +158,7 @@ async def test_should_apply_desired_state_semantics_on_update(svc_and_secrets):
     cid = v.id
 
     # Blank value on the secret + resend plaintext → preserved unchanged.
-    await svc.update_connector(
+    await svc.update_connector("local-test-owner", 
         cid,
         headers=[
             CredEntry(key="Authorization", secret=True, value=None),
@@ -169,7 +169,7 @@ async def test_should_apply_desired_state_semantics_on_update(svc_and_secrets):
     assert headers == {"X-Trace": "t1", "Authorization": "Bearer one"}
 
     # Rotate the secret, drop X-Trace entirely (absent → deleted).
-    await svc.update_connector(
+    await svc.update_connector("local-test-owner", 
         cid,
         headers=[CredEntry(key="Authorization", secret=True, value="Bearer two")],
     )
@@ -187,7 +187,7 @@ async def test_should_apply_desired_state_semantics_on_update(svc_and_secrets):
 # ── Acceptance #8 — probe and resolver share build_overrides ──────────
 async def test_should_inject_identically_via_resolver_and_build_overrides(svc_and_secrets):
     svc, secrets, _ = svc_and_secrets
-    v = await svc.create_connector(
+    v = await svc.create_connector("local-test-owner", 
         slug="parity",
         display_name="Parity",
         transport="http",
@@ -209,7 +209,7 @@ async def test_should_inject_identically_via_resolver_and_build_overrides(svc_an
 # ── delete clears manifest-referenced secrets ─────────────────────────
 async def test_should_delete_manifest_secrets_on_connector_delete(svc_and_secrets):
     svc, secrets, _ = svc_and_secrets
-    v = await svc.create_connector(
+    v = await svc.create_connector("local-test-owner", 
         slug="del",
         display_name="Del",
         transport="http",
@@ -219,5 +219,5 @@ async def test_should_delete_manifest_secrets_on_connector_delete(svc_and_secret
     )
     ref = f"connector/{v.id}/cred/header.X-Secret"
     assert secrets.get(ref) == "zzz"
-    assert await svc.delete_connector(v.id) is True
+    assert await svc.delete_connector("local-test-owner", v.id) is True
     assert secrets.get(ref) is None

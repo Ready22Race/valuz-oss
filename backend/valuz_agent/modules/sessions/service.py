@@ -192,7 +192,7 @@ class SessionService:
             # Chat project: all enabled connectors that are connected or unknown
             return [
                 conn.slug
-                for conn in await self._connectors.list_enabled()
+                for conn in await self._connectors.list_enabled(require_current_user_id())
                 if conn.status in ("connected", "unknown")
             ]
         except Exception:  # noqa: BLE001

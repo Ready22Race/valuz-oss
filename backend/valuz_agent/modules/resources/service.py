@@ -33,7 +33,9 @@ class ResourceFacade:
                 ConnectorDatastore(self._db),
                 FileSecretStore(settings.secrets_dir),
             )
-            await conn_svc.delete_connector(resource_id)
+            from valuz_agent.infra.auth_context import require_current_user_id
+
+            await conn_svc.delete_connector(require_current_user_id(), resource_id)
         elif resource_type == "skill":
             from valuz_agent.modules.skills.datastore import SkillDatastore
 
