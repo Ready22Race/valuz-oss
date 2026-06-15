@@ -7,10 +7,10 @@ productName: Valuz
 # Distribution-package artifact name template. Edition + platform + arch
 # are computed by scripts/build-desktop.sh and exported as VALUZ_DIST_TAG.
 # Result examples (per docs/STRUCTURE.md §"Distribution Model"):
-#   valuz-oss-darwin-arm64.dmg
-#   valuz-enterprise-darwin-arm64.dmg
+#   valuz-v0.1.6-oss-darwin-arm64.dmg
+#   valuz-v0.1.6-enterprise-darwin-arm64.dmg
 # The installed command stays ``valuz`` regardless of edition.
-artifactName: "valuz-${env.VALUZ_DIST_TAG}.${ext}"
+artifactName: "valuz-v${version}-${env.VALUZ_DIST_TAG}.${ext}"
 directories:
   output: release
 files:
