@@ -4,13 +4,14 @@ protocols:
     - valuz-oss
 appId: io.valuz.oss.desktop
 productName: Valuz
-# Distribution-package artifact name template. Edition + platform + arch
-# are computed by scripts/build-desktop.sh and exported as VALUZ_DIST_TAG.
+# Distribution-package artifact name template. Edition comes from
+# VALUZ_EDITION (build-desktop.sh:94); platform+arch from VALUZ_DIST_TAG
+# (build-desktop.sh:137, no edition — keeps the tag arch-only).
 # Result examples (per docs/STRUCTURE.md §"Distribution Model"):
-#   valuz-v0.1.6-oss-darwin-arm64.dmg
-#   valuz-v0.1.6-enterprise-darwin-arm64.dmg
+#   valuz-oss-v0.1.6-darwin-arm64.dmg
+#   valuz-enterprise-v0.1.6-darwin-arm64.dmg
 # The installed command stays ``valuz`` regardless of edition.
-artifactName: "valuz-v${version}-${env.VALUZ_DIST_TAG}.${ext}"
+artifactName: "valuz-${env.VALUZ_EDITION}-v${version}-${env.VALUZ_DIST_TAG}.${ext}"
 directories:
   output: release
 files:
