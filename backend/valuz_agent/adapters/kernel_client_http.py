@@ -184,11 +184,17 @@ class HttpKernelClient:
         limit: int = 50,
         offset: int = 0,
     ) -> list[SessionData]:
-        # No remote endpoint: the kernel HTTP API is owner-scoped. A remote
-        # kernel runs its own startup recovery in-process; a cross-owner host
-        # aggregator against a remote kernel would need a dedicated admin route.
-        raise KernelNotImplementedError(
-            501, "cross-owner list_all_sessions is unsupported over the HTTP kernel transport"
+        # The kernel HTTP API is owner-scoped — there is no "every owner"
+        # endpoint (that would be a privileged admin route a remote/sandboxed
+        # kernel deliberately doesn't expose, to avoid leaking other tenants'
+        # sessions). For the single-owner deployments this transport targets
+        # (OSS desktop, single-tenant remote), "all sessions" == the LOCAL
+        # owner's, so resolve it and delegate to the owner-scoped list. True
+        # multi-owner aggregation against a remote kernel stays out of scope.
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
+        return await self.list_sessions(
+            resolve_local_user_id(), status=status, ids=ids, limit=limit, offset=offset
         )
 
     async def update_session(
