@@ -116,24 +116,24 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
         _wire(result.provider, endpoint.base_url, endpoint.token, result.static_roots)
         return
 
-    # Preflight BEFORE doing any work. The user asked for a sandbox explicitly
-    # (VALUZ_SANDBOX_DRIVER=...) — if the host can't provide one we FAIL LOUD
-    # rather than silently falling back to the in-process kernel, which would
-    # leave them believing the agent is confined when it isn't (a security
-    # surprise). Set VALUZ_SANDBOX_FALLBACK=inprocess for a warned degrade.
+    # Preflight BEFORE doing any work. If the host can't provide the requested
+    # sandbox (wrong OS, unsupported macOS version, missing creds), the OSS
+    # default is to **degrade to the in-process kernel** with a loud warning —
+    # the local desktop is single-user and the sandbox is defence-in-depth, so
+    # an unsupported environment shouldn't block startup. A hardened deployment
+    # that REQUIRES confinement sets VALUZ_SANDBOX_STRICT=1 to fail loud instead.
     problems = driver.preflight()
     if problems:
         msg = f"{driver_name} sandbox unavailable: " + "; ".join(problems)
-        if os.environ.get("VALUZ_SANDBOX_FALLBACK") == "inprocess":
-            log.warning("%s — falling back to in-process kernel (UNSANDBOXED)", msg)
-            return
-        raise SystemExit(
-            f"{msg}\n"
-            f"Refusing to start unsandboxed after an explicit "
-            f"VALUZ_SANDBOX_DRIVER={driver_name}. Fix the environment, unset the "
-            "driver to run in-process, or set VALUZ_SANDBOX_FALLBACK=inprocess "
-            "to degrade with a warning."
-        )
+        if os.environ.get("VALUZ_SANDBOX_STRICT") == "1":
+            raise SystemExit(
+                f"{msg}\n"
+                "Refusing to start: VALUZ_SANDBOX_STRICT=1 requires the sandbox, "
+                f"but {driver_name} is unavailable on this host. Fix the "
+                "environment, or unset VALUZ_SANDBOX_STRICT to run in-process."
+            )
+        log.warning("%s — running the kernel IN-PROCESS (UNSANDBOXED)", msg)
+        return
 
     result = asyncio.run(driver.provision_for_boot(ctx))
     log.warning("kernel running in %s sandbox at %s", driver_name, result.endpoint.base_url)
