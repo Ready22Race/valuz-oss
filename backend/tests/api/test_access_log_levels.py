@@ -41,6 +41,12 @@ def app_client() -> TestClient:
     async def status() -> dict:  # hard-skipped poll
         return {}
 
+    @app.get("/.well-known/oauth-authorization-server")
+    async def oauth_root() -> dict:  # MCP OAuth-discovery probe → 404 by design
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404)
+
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -79,4 +85,18 @@ def test_status_poll_is_fully_skipped(
         response = app_client.get("/v1/system/status")
     assert _records(caplog) == []
     # Headers still stamped — only the log line is suppressed.
+    assert "X-Process-Time-Ms" in response.headers
+
+
+def test_oauth_discovery_404_is_fully_skipped(
+    app_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The MCP client probes ``/.well-known/oauth-...`` before every connection
+    # to the in-process MCP mounts; our local servers carry no auth, so the
+    # 404 is expected. It must NOT log at WARNING (404 ≥ 400) or it floods the
+    # panel on every session's MCP connect.
+    with caplog.at_level(logging.DEBUG, logger="valuz_agent.api.access"):
+        response = app_client.get("/.well-known/oauth-authorization-server")
+    assert response.status_code == 404
+    assert _records(caplog) == []
     assert "X-Process-Time-Ms" in response.headers

@@ -109,12 +109,23 @@ class TimingMiddleware(BaseHTTPMiddleware):
         (would dwarf everything else even at DEBUG).
       - ``/internal/mcp/...``: kernel-internal MCP traffic; chatty and
         not actionable from the UI.
+      - ``/.well-known/oauth-...``: OAuth-discovery probes. The MCP
+        streamable-HTTP client handshake checks for OAuth metadata before
+        every connection to the in-process MCP mounts; our local servers
+        carry no auth, so the 404 is the *expected* "no OAuth here" signal
+        and the client proceeds. Without this they'd flood the panel as
+        WARNINGs (404 ≥ 400) on every session's MCP connect.
 
     Skipped requests still get the ``X-Process-Time-Ms`` header set —
     only the log line is suppressed.
     """
 
-    _SKIP_PREFIXES = ("/v1/system/status", "/internal/mcp")
+    _SKIP_PREFIXES = (
+        "/v1/system/status",
+        "/internal/mcp",
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-protected-resource",
+    )
     _SLOW_MS = 1000.0
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:

@@ -188,11 +188,19 @@ _HANDLER_TAG = "_valuz_handler"
 #     hard-skips these (logs *nothing*), so the uvicorn line is the only noise left.
 #   - ``/v1/runs`` (the activity overview, polled every few seconds) — demoted to
 #     DEBUG in ``TimingMiddleware``; uvicorn printing it at INFO defeats that choice.
+#   - ``/.well-known/oauth-...`` — MCP OAuth-discovery probes that 404 by design
+#     (our in-process MCP mounts carry no auth); ``TimingMiddleware`` skips them too.
 #
 # This filter brings the uvicorn access log in line with the noise-control
 # ``TimingMiddleware`` already documents, so the two streams don't disagree.
 # Keep this set in sync with that middleware's reasoning.
-_ACCESS_LOG_SILENCED_PREFIXES = ("/v1/runs", "/v1/system/status", "/internal/mcp")
+_ACCESS_LOG_SILENCED_PREFIXES = (
+    "/v1/runs",
+    "/v1/system/status",
+    "/internal/mcp",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-protected-resource",
+)
 
 
 class _AccessLogPathFilter(logging.Filter):
@@ -325,6 +333,17 @@ def configure_logging(level: int = logging.INFO) -> None:
     for name, lg in list(logging.Logger.manager.loggerDict.items()):
         if isinstance(lg, logging.Logger) and lg.disabled and _under(name):
             lg.disabled = False
+
+    # The host mounts several in-process MCP servers (toolkit / docs /
+    # automations / connectors). Each session's MCP client runs one
+    # connect → OAuth-discovery → list-tools → terminate cycle against them,
+    # so ``mcp.server.*`` emits a steady stream of INFO with no signal
+    # ("Created new transport", "Terminating session", "Processing request of
+    # type ListToolsRequest"). Pin the server subtree to WARNING — real MCP
+    # warnings still surface, the per-connection churn drops. (The ``mcp``
+    # client subtree above stays at the app level: those logs ARE actionable
+    # when a remote connector misbehaves.)
+    logging.getLogger("mcp.server").setLevel(logging.WARNING)
 
     # Silence uvicorn's parallel access log for chatty poll endpoints. Done
     # here (not before ``uvicorn.run``) because uvicorn's ``dictConfig`` rebuilds
