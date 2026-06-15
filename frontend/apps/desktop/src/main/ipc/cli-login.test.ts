@@ -331,7 +331,11 @@ describe("launchTerminalWithCommand — win32", () => {
     });
     const result = await launchTerminalWithCommand("claude", deps);
     expect(result).toEqual({ launched: true });
-    expect(spawnDetached).toHaveBeenCalledWith("wt.exe", [
+    expect(spawnDetached).toHaveBeenCalledWith("cmd.exe", [
+      "/c",
+      "start",
+      '""',
+      "wt.exe",
       "new-tab",
       "--",
       "cmd.exe",
@@ -354,6 +358,10 @@ describe("launchTerminalWithCommand — win32", () => {
     const result = await launchTerminalWithCommand("codex", deps);
     expect(result).toEqual({ launched: true });
     expect(spawnDetached).toHaveBeenCalledWith("cmd.exe", [
+      "/c",
+      "start",
+      '""',
+      "cmd.exe",
       "/K",
       "codex login",
     ]);

@@ -50,8 +50,24 @@ export const defaultDeps: CliLoginDeps = {
     return { stdout: String(stdout), stderr: String(stderr) };
   },
   spawnDetached: (file, args) => {
-    const child = spawn(file, args, { detached: true, stdio: "ignore" });
+    // On Windows, `detached: true` translates to DETACHED_PROCESS, which
+    // spawns console apps (cmd.exe) WITHOUT a console window — they run
+    // invisibly. We skip it there; the caller wraps Windows launches in
+    // `cmd /c start` so a new window appears and parent-detachment still
+    // works. On Linux we keep detached so the terminal outlives Electron.
+    const isWindows = platform() === "win32";
+    const child = spawn(file, args, {
+      detached: !isWindows,
+      stdio: "ignore",
+      windowsHide: false,
+    });
     child.unref();
+    // spawn errors (ENOENT, EPERM) fire asynchronously — without a listener
+    // they vanish and we'd silently report success. Log so a failed launch
+    // is at least visible in `valuz logs`.
+    child.on("error", (err) => {
+      console.error(`[cli-login] spawn failed for ${file}:`, err);
+    });
   },
   stat: async (path) => {
     const s = await stat(path);
@@ -326,22 +342,26 @@ export const launchTerminalWithCommand = async (
   }
 
   if (plat === "win32") {
-    // Try Windows Terminal (wt.exe) first, fall back to cmd.exe.
+    // Wrap launches in `cmd /c start "" ...`. Two reasons:
+    //   1. `start` opens a NEW console window — without it, a console app
+    //      spawned from Electron (which has no console of its own) either
+    //      attaches nowhere or, with `detached: true`, is created with
+    //      DETACHED_PROCESS = no window at all (the previous bug: the
+    //      terminal never appeared).
+    //   2. `start` goes through ShellExecute, which resolves Microsoft Store
+    //      App Execution Aliases (wt.exe is one — a zero-byte reparse point
+    //      under %LOCALAPPDATA%\Microsoft\WindowsApps). Plain Node spawn
+    //      (CreateProcessW) can't launch those, so wt silently failed and,
+    //      because spawn doesn't throw, the cmd.exe fallback never ran.
+    const hasWt = await deps
+      .execFile("where", ["wt.exe"])
+      .then(() => true)
+      .catch(() => false);
+    const launchArgs = hasWt
+      ? ["/c", "start", '""', "wt.exe", "new-tab", "--", "cmd.exe", "/K", command]
+      : ["/c", "start", '""', "cmd.exe", "/K", command];
     try {
-      await deps.execFile("where", ["wt.exe"]);
-      deps.spawnDetached("wt.exe", [
-        "new-tab",
-        "--",
-        "cmd.exe",
-        "/K",
-        command,
-      ]);
-      return { launched: true };
-    } catch {
-      // Windows Terminal not available — fall back to cmd.exe
-    }
-    try {
-      deps.spawnDetached("cmd.exe", ["/K", command]);
+      deps.spawnDetached("cmd.exe", launchArgs);
       return { launched: true };
     } catch (err) {
       return {
