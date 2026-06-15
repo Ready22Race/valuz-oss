@@ -67,10 +67,16 @@ def run_auto_discovery_scan() -> None:
     the async service inside it. Each KB rescan opens its own
     ``async_unit_of_work`` session so a failed rescan does not poison the
     next KB's transaction.
+
+    ``run_in_background_db_scope`` binds a per-loop DB engine for this foreign
+    loop — required under asyncpg, where the shared main-loop pool can't be
+    driven from another loop (no-op on SQLite).
     """
     import asyncio
 
-    asyncio.run(_arun_auto_discovery_scan())
+    from valuz_agent.infra.db import run_in_background_db_scope
+
+    asyncio.run(run_in_background_db_scope(_arun_auto_discovery_scan()))
 
 
 async def _arun_auto_discovery_scan() -> None:
