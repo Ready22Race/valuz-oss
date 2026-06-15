@@ -189,6 +189,16 @@ class DecisionAggregator:
             # Cross-owner: the decision inbox aggregates every owner's
             # task-driven sessions into one process-wide snapshot.
             sessions = await kernel_client.list_all_sessions(limit=500)
+        except kernel_client.KernelNotImplementedError:
+            # Expected, not an error: the HTTP kernel transport (sandbox /
+            # remote kernel) is owner-scoped and exposes no cross-owner
+            # listing. Start empty — the inbox fills from live events as the
+            # aggregator subscribes; there's no startup backfill in this mode.
+            logger.info(
+                "decisions hydration: cross-owner listing unavailable on the http "
+                "kernel transport — starting with 0 hydrated entries"
+            )
+            return
         except Exception:  # noqa: BLE001
             logger.warning("decisions hydration: list_sessions failed", exc_info=True)
             return
