@@ -1,5 +1,5 @@
 /* ============================================================================
- * Valuz Design Tokens v2 — 2026-06-11
+ * Valuz Design Tokens v2.6 — 2026-06-15
  *
  * 用途：替换 frontend/packages/ui/src/styles/project.css 中
  *      @theme 块（原 17–146 行）、:root 规范变量块（原 151–170 行）
@@ -85,12 +85,18 @@
   --info-soft:   var(--brand-100);
   --info-text:   var(--brand-700);
 
-  /* ===== 阴影 —— 从前景色派生，明暗两端自动协调 ===== */
+  /* ===== 阴影 —— 从前景色派生，明暗两端自动协调 =====
+   * v2.6 分层（设计裁决）：阴影是否带 1px spread 环，取决于元素自身有没有边框。
+   *   --shadow-outline：纯投影，无环。给「自带 fg-8 边框」的元素（outline 按钮等），
+   *                     避免环 + 边框叠成双描边（v2.5 曾整体去环，但那样卡片也失去了立体感）。
+   *   --shadow-1：投影 + fg-3 浅环。给「无边框」的容器（卡片 / popover / toast），
+   *               环代替边框、更立体。 */
   --shadow-rgb: 19 19 19; /* = --foreground，CSS 暂无法从 var 提取通道，与基色同步改 */
   --shadow-border-a: 0.06;
   --shadow-blur-a: 0.07;
-  --shadow-1: 0 1px 2px rgb(var(--shadow-rgb) / var(--shadow-blur-a)),
-              0 0 0 1px rgb(var(--shadow-rgb) / calc(var(--shadow-border-a) * 0.7)); /* 卡片 */
+  --shadow-outline: 0 1px 2px rgb(var(--shadow-rgb) / var(--shadow-blur-a)); /* 有边框元素：纯投影 y1 blur2 */
+  --shadow-1: 0 1px 2px rgb(var(--shadow-rgb) / calc(var(--shadow-blur-a) * 1.35)),
+              0 0 0 1px var(--fg-3); /* 无边框容器：投影增强 + fg-3 浅环 */
   --shadow-2: 0 4px 10px rgb(var(--shadow-rgb) / var(--shadow-blur-a)),
               0 1px 2px rgb(var(--shadow-rgb) / var(--shadow-blur-a)); /* 悬浮卡片 / sidebar active */
   --shadow-3: 0 12px 32px -8px rgb(var(--shadow-rgb) / calc(var(--shadow-blur-a) * 2)),
@@ -266,6 +272,8 @@
   --radius-full: 9999px;
 
   /* 阴影别名（旧名 → 新 4 级） */
+  --color-shadow-outline: var(--shadow-outline); /* 有边框元素（outline 按钮 / input）专用，纯投影无环 */
+  --shadow-button: var(--shadow-outline);        /* 语义别名：按钮用纯投影 */
   --shadow-sm: var(--shadow-1);
   --shadow: var(--shadow-1);
   --shadow-md: var(--shadow-2);
