@@ -1,9 +1,10 @@
 """``_finalize_session`` persists a turn failure durably.
 
-Regression for "session event 没有友好提示": a failed agent turn only emitted
-``session_error`` via ``emit_live_event`` (live-only, missed by any client not
-connected at failure time), so on reload the UI showed a bare "运行失败" with no
-reason. The fix threads the captured exception into ``_finalize_session``, which
+Regression for the "no friendly session event on a failed turn" bug: a failed
+agent turn only emitted ``session_error`` via ``emit_live_event`` (live-only,
+missed by any client not connected at failure time), so on reload the UI showed
+a bare "Run failed" with no reason. The fix threads the captured exception into
+``_finalize_session``, which
 appends a ``session_error`` event as part of the same kernel ``finalize`` call —
 so the reason survives reload and the terminal state is marked an error.
 """

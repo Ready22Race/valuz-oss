@@ -144,8 +144,6 @@ class EmbeddedDocsRuntime:
         ]
         for kw in keywords:
             cmd.extend(["-e", kw])
-        # “--” 必须位于 -e 模式之后、路径之前：终止选项解析，
-        # 避免以 “-” 开头的路径被 rg 当成选项。
         cmd.append("--")
         cmd.extend(paths)
 

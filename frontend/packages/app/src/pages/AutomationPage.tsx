@@ -708,8 +708,8 @@ export const AutomationPage = () => {
         }
         title={
           // Create flow is now mode-agnostic (chat OR project, picked inside
-          // the dialog), so the title is the generic "新建自动化". Edit keeps
-          // the named title.
+          // the dialog), so the title is the generic "New automation". Edit
+          // keeps the named title.
           editTarget
             ? t(k("automation.dialogTitleEditNamed"), {
                 name: editTarget.detail.name,

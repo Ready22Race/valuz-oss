@@ -109,7 +109,7 @@ async def _finalize_session(
     appended **durably** as part of the same finalize call — the live
     ``emit_live_event`` only reaches SSE followers connected at the moment of
     failure, so without this the actual reason is lost on reload and the UI
-    shows a bare "运行失败". ``stop_reason_*`` mark the terminal state as an
+    shows a bare "Run failed". ``stop_reason_*`` mark the terminal state as an
     error rather than a clean idle.
     """
     session = await kernel_client.get_session(require_current_user_id(), session_id)
