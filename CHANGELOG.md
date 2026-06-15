@@ -5,6 +5,51 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-06-15
+
+### Features
+
+- Multi-user: owner-scope every read and stamp every write with an explicit user
+  id, across host + kernel. (#101 @homeant)
+- Sandbox: pluggable driver registry (overlay-ready seam); degrades to in-process
+  execution when no driver is available. (#110 @Ready22Race)
+- Automations: choose a chat or project target in the global create dialog. (#117 @Ready22Race)
+- Attachments: hand un-parseable images to the runtime directly (native passthrough). (#120 @Ready22Race)
+
+### Changed
+
+- Activity overview polls `/v1/runs` every 10s instead of 2.5s — lighter
+  background load for the running-runs badge and Activity page. (#105 @St0neWan9)
+- Desktop: refreshed the dock / app-switcher icon — clean anti-aliased squircle,
+  macOS-standard corner radius, soft drop shadow. (#130 @St0neWan9)
+- Attachments: drop the "由模型识别" native-passthrough hint from the chip and file
+  panel. (#128 @Ready22Race)
+
+### Fixed
+
+- Sessions: persist the turn-failure error so the reason survives a reload. (#116 @Ready22Race)
+- Conversation: attaching a file no longer deselects the current agent. (#121 @Ready22Race)
+- Desktop (Windows): main window no longer opens oversized, and the CLI-login
+  terminal opens correctly. (#123 @hanjixin)
+- Tasks: re-stamp the in-process MCP token on the task/actor turn path so
+  relaunched tasks keep tool access. (#126 @Ready22Race)
+- Packaging: bundle the built-in parser `plugins` package in the frozen build. (#124 @Ready22Race)
+- Parser: log an actionable root cause when the registry has no `light_local`
+  provider. (#125 @Ready22Race)
+- KB search: ripgrep `--` must follow the `-e` patterns. (#115 @Ready22Race)
+- DB: use a per-loop engine for background-thread `asyncio.run` (asyncpg). (#114 @homeant)
+- HTTP kernel transport: implement `list_all_sessions` and seed the owner in
+  background threads; quiet cross-owner decision hydration. (#111, #109 @Ready22Race)
+- Logging: silence MCP OAuth-discovery 404s and per-connection server churn. (#122 @Ready22Race)
+- Version: align the version surface across settings, build, and changelog. (#106 @hanjixin)
+
+### Docs & Chore
+
+- CI(release): assert `latest-*.yml` is generated on all four platform jobs. (#107 @hanjixin)
+- API: log request-validation (422) failures with the field and path. (#112 @Ready22Race)
+- Kernel: remove the cloud kernel-image build from OSS. (#108 @Ready22Race)
+- Comments: monolingual cleanup of recently-added comments; docs-search comment tidy. (#119, #118 @Ready22Race)
+
 ## [0.1.6] - 2026-06-13
 
 ### Features
@@ -141,6 +186,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename the single-writer lock file, drop a dead helper, and correct the rationale. (#29 @Ready22Race)
 - CI: Node.js 25 with dependency caching. (#14 @hanjixin)
 
+[0.1.7]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.2...v0.1.4
