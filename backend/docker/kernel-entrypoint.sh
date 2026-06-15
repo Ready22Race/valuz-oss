@@ -7,6 +7,14 @@
 # v1 cloud model the DB is sandbox-local SQLite, fresh per sandbox.
 set -eu
 
+# Be invocation-independent: a cloud sandbox platform (e.g. Tencent AGS) may run
+# this as a bare Command without honouring the image WORKDIR/ENV, so anchor the
+# cwd and PYTHONPATH ourselves. alembic resolves -c alembic/kernel/alembic.ini
+# from /app, and PYTHONPATH lets the kernel (app.main / src.*) import.
+cd /app
+export PYTHONPATH="${PYTHONPATH:-/app/kernel}"
+export PATH="/app/.venv/bin:${PATH}"
+
 # Sandbox-local SQLite by default. A deployer whose platform only mounts /tmp
 # writable can override, e.g. DATABASE_URL=sqlite+aiosqlite:////tmp/kernel.db
 : "${DATABASE_URL:=sqlite+aiosqlite:////app/data/kernel.db}"

@@ -26,6 +26,11 @@ on:
         required: false
         default: "ghcr.io/agent-infra/sandbox:1.0.0.150"
         type: string
+      push_to:
+        description: "Full target image ref to push to (e.g. ccr.ccs.tencentyun.com/<ns>/valuz-kernel:0.1.0). Empty = build-only, no push. Needs secrets REGISTRY_USERNAME / REGISTRY_PASSWORD for that registry (TCR console creds for Tencent)."
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: build-kernel-image-${{ github.ref }}-${{ inputs.target }}
@@ -157,11 +162,39 @@ jobs:
           docker logs vsmoke | tail -60 || true
           docker rm -f vsmoke || true
 
+      # ── Push the verified image (only if push_to is set). Runs AFTER smoke,
+      #    so a broken standalone image (set -e smoke) never gets pushed. ─────
+      - name: Parse registry host
+        id: reg
+        if: ${{ inputs.push_to != '' }}
+        run: echo "host=$(echo '${{ inputs.push_to }}' | cut -d/ -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to target registry
+        if: ${{ inputs.push_to != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.reg.outputs.host }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Tag + push
+        if: ${{ inputs.push_to != '' }}
+        run: |
+          set -e
+          PUSH_TO='${{ inputs.push_to }}'
+          docker tag valuz-kernel:verify "$PUSH_TO"
+          docker push "$PUSH_TO"
+          echo "pushed=$PUSH_TO" >> "$GITHUB_OUTPUT"
+
       - name: Summary
         if: ${{ always() }}
         run: |
           {
-            echo "### Build (${{ inputs.target }}) — build-only, no push"
+            echo "### Build (${{ inputs.target }})"
             echo "- dockerfile: \`${{ steps.cfg.outputs.dockerfile }}\`"
-            echo "- image built + loaded as \`valuz-kernel:verify\` (discarded at job end)"
+            if [ -n "${{ inputs.push_to }}" ]; then
+              echo "- pushed: \`${{ inputs.push_to }}\`"
+            else
+              echo "- build-only (no push); image discarded at job end"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
