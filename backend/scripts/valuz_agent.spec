@@ -180,6 +180,17 @@ a = Analysis(
         *_extra_datas,
         # valuz_agent package — raw .py files, loaded via sys.path
         (str(HERE / "valuz_agent"), "valuz_agent"),
+        # Built-in parser plugins — a sibling top-level ``plugins`` package
+        # (``plugins/parser/<id>/``) the registry discovers DYNAMICALLY via
+        # ``importlib.import_module("plugins.parser")`` + ``pkgutil.iter_modules``.
+        # PyInstaller's static analysis can't follow that string import, so
+        # without bundling the tree the frozen build raises
+        # ``ModuleNotFoundError: No module named 'plugins'`` and the registry
+        # comes up with ZERO parsers (every attachment/KB parse then fails).
+        # Same raw-.py-via-sys.path strategy as ``valuz_agent``; the plugins'
+        # own third-party deps (markitdown / pymupdf4llm / rapidocr / …) are
+        # already collected through ``_third_party_pkgs`` above.
+        (str(HERE / "plugins"), "plugins"),
         # Vendored kernel — same strategy; kernel/__init__.py injects its
         # own path for bare imports (src.*, app.*).
         (str(HERE / "kernel"), "kernel"),
