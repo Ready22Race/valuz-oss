@@ -48,12 +48,34 @@ from valuz_agent.boot.kernel import KERNEL_DIR
 from valuz_agent.ports.sandbox_provider import (
     MountGrant,
     MountSpec,
+    SandboxBootContext,
+    SandboxBootResult,
     SandboxEndpoint,
     SandboxProvisionError,
     SandboxSpec,
 )
 
 _BIND_LINE = re.compile(r"Uvicorn running on https?://127\.0\.0\.1:(\d+)")
+
+# Empirically-supported macOS floor for the Seatbelt driver. ``sandbox-exec``
+# is deprecated and the sandbox-extension SPI behaviour varies by release, so
+# the driver only runs on a known-good range. This is the floor we've verified
+# (Ventura); override with VALUZ_SEATBELT_MIN_MACOS when a different release is
+# validated. The current dev host (macOS 26) is well above it.
+_SEATBELT_MIN_MACOS_MAJOR = 13
+
+
+def _macos_major() -> int | None:
+    """Major macOS version (e.g. 26 for ``26.4``), or None if undetectable."""
+    import platform
+
+    ver = platform.mac_ver()[0]
+    if not ver:
+        return None
+    try:
+        return int(ver.split(".")[0])
+    except ValueError:
+        return None
 
 # Standard macOS sandbox-extension classes, keyed by mount mode. These match
 # the ``(extension "...")`` class the profile pre-declares; the values are
@@ -137,8 +159,24 @@ def seatbelt_preflight() -> list[str]:
     if sys.platform != "darwin":
         problems.append(
             f"not macOS (sys.platform={sys.platform!r}); sandbox-exec is "
-            "macOS-only — use the docker driver elsewhere"
+            "macOS-only — use a cloud/overlay driver elsewhere"
         )
+    else:
+        # Version gate: Seatbelt only runs on a known-good macOS range (the
+        # sandbox-exec / extension-SPI behaviour is version-dependent).
+        floor = _SEATBELT_MIN_MACOS_MAJOR
+        try:
+            floor = int(os.environ.get("VALUZ_SEATBELT_MIN_MACOS", floor))
+        except ValueError:
+            pass
+        major = _macos_major()
+        if major is not None and major < floor:
+            problems.append(
+                f"macOS {major} is below the supported floor for the Seatbelt "
+                f"sandbox (>= {floor}); sandbox-exec / the extension SPI behave "
+                "differently on older releases. Set VALUZ_SEATBELT_MIN_MACOS if "
+                "you've verified this release."
+            )
     if shutil.which("sandbox-exec") is None:
         problems.append("sandbox-exec not found on PATH (expected /usr/bin/sandbox-exec)")
     if not (KERNEL_DIR / "app" / "main.py").exists():
@@ -543,3 +581,60 @@ class SeatbeltSandboxProvider:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+class SeatbeltDriver:
+    """The OSS built-in local-sandbox driver — registered as ``seatbelt``.
+
+    Owns the boot wiring that used to live inline in ``main.py``: preflight,
+    the writable-mount manifest, the RED-LINE deny set, and the
+    ``SandboxBootResult`` (endpoint + provider + static roots). ``main.py`` and
+    ``sandbox_runtime`` drive this through the ``SandboxDriver`` protocol and
+    never name Seatbelt directly.
+    """
+
+    name = "seatbelt"
+
+    def preflight(self) -> list[str]:
+        return seatbelt_preflight()
+
+    async def provision_for_boot(self, ctx: SandboxBootContext) -> SandboxBootResult:
+        from valuz_agent.infra.config import settings
+
+        data_dir = settings.data_dir
+        sandbox_dir = data_dir / "sandbox"
+        sandbox_dir.mkdir(parents=True, exist_ok=True)
+        host_db = data_dir / settings.db_filename
+
+        mounts = host_sandbox_rw_mounts()
+        spec = SandboxSpec(
+            sandbox_id="host-kernel",
+            kernel_db_path=str(sandbox_dir / "kernel.db"),
+            mounts=mounts,
+            env=ctx.passthrough_env,  # ⑥ L1 credential injection
+            host_callback_url=ctx.host_callback_url,
+            # RED LINE: host business DB (+ wal/shm) and secret store.
+            deny_paths=(
+                str(host_db),
+                str(host_db) + "-wal",
+                str(host_db) + "-shm",
+                str(settings.secrets_dir),
+            ),
+        )
+        provider = SeatbeltSandboxProvider()
+        endpoint = await provider.provision(spec)
+        return SandboxBootResult(
+            endpoint=endpoint,
+            provider=provider,
+            static_roots=tuple(m.source for m in mounts),
+        )
+
+    def attach(self, ctx: SandboxBootContext, endpoint: SandboxEndpoint) -> SandboxBootResult:
+        provider = SeatbeltSandboxProvider.from_existing(
+            "host-kernel", endpoint.base_url, endpoint.token
+        )
+        return SandboxBootResult(
+            endpoint=endpoint,
+            provider=provider,
+            static_roots=tuple(m.source for m in host_sandbox_rw_mounts()),
+        )

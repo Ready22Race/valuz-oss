@@ -174,3 +174,65 @@ class SandboxProvider(Protocol):
 
 class SandboxProvisionError(RuntimeError):
     """A provider could not bring up a healthy kernel endpoint."""
+
+
+# ---------------------------------------------------------------------------
+# Driver seam — the registrable boot unit (one per backend).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SandboxBootContext:
+    """What a driver needs from boot to provision/attach the kernel sandbox.
+
+    Carries only what's derived from the launch args / process env; the driver
+    reads everything else (``data_dir``, secrets, its own ``VALUZ_*`` settings)
+    from the ``settings`` singleton.
+    """
+
+    host: str
+    port: int
+    host_callback_url: str = ""
+    passthrough_env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SandboxBootResult:
+    """A provisioned (or re-attached) kernel sandbox, ready to drive."""
+
+    endpoint: SandboxEndpoint
+    provider: SandboxProvider
+    static_roots: tuple[str, ...] = ()
+    """cwd roots already reachable inside the sandbox without a per-project
+    grant (Seatbelt's rw mounts); empty when every cwd needs binding."""
+
+
+class SandboxDriver(Protocol):
+    """A registrable sandbox backend — the boot/assembly seam.
+
+    ``SandboxProvider`` is the runtime-ops protocol; a ``SandboxDriver`` owns
+    the boot wiring around it (preflight, spec building, provider creation,
+    re-attach) so the dispatch in ``main.py`` / ``sandbox_runtime`` is fully
+    driver-agnostic. OSS registers the built-in ``seatbelt`` driver; an overlay
+    registers ``e2b`` / ``vefaas`` through the registry (a pip-installed package
+    + a ``valuz.sandbox_drivers`` entry point) without editing OSS.
+    """
+
+    name: str
+
+    def preflight(self) -> list[str]:
+        """Reasons this host can't run the driver (empty = OK). Called BEFORE
+        provisioning so an unsupported host (wrong OS / macOS version / missing
+        credentials) fails upfront and the dispatch can fall back cleanly."""
+        ...
+
+    async def provision_for_boot(self, ctx: SandboxBootContext) -> SandboxBootResult:
+        """Provision a fresh kernel sandbox; return the live endpoint + provider
+        + static roots. Raises ``SandboxProvisionError`` on failure."""
+        ...
+
+    def attach(self, ctx: SandboxBootContext, endpoint: SandboxEndpoint) -> SandboxBootResult:
+        """Re-attach (sync) in a process that did NOT provision — the uvicorn
+        ``--reload`` child / lazy activation — to an already-running sandbox
+        published via env. Returns a provider seeded with the endpoint."""
+        ...
