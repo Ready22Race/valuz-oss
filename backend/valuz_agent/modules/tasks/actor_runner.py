@@ -78,6 +78,7 @@ async def run_session_to_idle(
 
     final_status: str = "idle"
     encountered_error = False
+    turn_error: BaseException | None = None
 
     consumed_attachment_ids: list[str] = []
 
@@ -142,6 +143,7 @@ async def run_session_to_idle(
             )
             final_status = "terminated"
             encountered_error = True
+            turn_error = exc
             try:
                 await kernel_client.emit_live_event(
                     require_current_user_id(),
@@ -155,16 +157,20 @@ async def run_session_to_idle(
             except Exception:  # noqa: BLE001
                 pass
 
-    except BaseException:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001
         logger.exception("run_session_to_idle: unexpected error for session %s", session_id)
         final_status = "terminated"
         encountered_error = True
+        turn_error = exc
 
-    # Finalise session metadata + status
+    # Finalise session metadata + status. Passing ``turn_error`` makes the
+    # failure durable: ``_finalize_session`` appends a ``session_error`` event in
+    # the same call so the reason survives reload (the ``emit_live_event`` above
+    # is live-only and is missed by any client not connected at failure time).
     try:
         from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
 
-        await _finalize_session(session_id, content, final_status)
+        await _finalize_session(session_id, content, final_status, error=turn_error)
     except Exception:  # noqa: BLE001
         logger.exception("run_session_to_idle: finalize failed for session %s", session_id)
 
