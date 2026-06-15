@@ -141,10 +141,15 @@ class EmbeddedDocsRuntime:
             f"--context={self.CONTEXT_LINES}",
             f"--max-count={self.RG_MAX_COUNT}",
             "--no-heading",
-            "--",
         ]
         for kw in keywords:
             cmd.extend(["-e", kw])
+        # ``--`` must come AFTER the ``-e`` patterns and BEFORE the paths: it
+        # ends option parsing so paths that start with ``-`` aren't mistaken
+        # for flags. Placed before ``-e`` (the old bug), rg treated ``-e`` as
+        # the pattern and every keyword/path as a search path
+        # (``rg: 医生: No such file``), so every query fell back to python.
+        cmd.append("--")
         cmd.extend(paths)
 
         proc = subprocess.run(
