@@ -842,7 +842,11 @@ class DocumentLibraryService:
                     logger.exception("could not mark rescan task as failed")
 
         def _runner() -> None:
-            asyncio.run(_arun())
+            from valuz_agent.infra.db import run_in_background_db_scope
+
+            # Per-loop DB engine for this foreign loop (asyncpg can't share the
+            # main-loop pool across loops; no-op on SQLite).
+            asyncio.run(run_in_background_db_scope(_arun()))
 
         threading.Thread(target=_runner, name="docs-bg-rescan", daemon=True).start()
 
@@ -918,7 +922,11 @@ class DocumentLibraryService:
                     logger.exception("could not mark reindex task as failed")
 
         def _runner() -> None:
-            asyncio.run(_arun())
+            from valuz_agent.infra.db import run_in_background_db_scope
+
+            # Per-loop DB engine for this foreign loop (asyncpg can't share the
+            # main-loop pool across loops; no-op on SQLite).
+            asyncio.run(run_in_background_db_scope(_arun()))
 
         threading.Thread(target=_runner, name="docs-bg-reindex", daemon=True).start()
 
