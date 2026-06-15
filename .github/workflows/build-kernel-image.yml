@@ -125,12 +125,12 @@ jobs:
             SDK=$(python -c "import claude_agent_sdk,os;print(os.path.dirname(claude_agent_sdk.__file__))")
             ls -la "$SDK/_bundled/" || (echo "MISSING bundled claude" && exit 1)
             command -v codex && codex --version || echo "codex: ABSENT (expected per linux override)"'
-          docker run -d --name k -p 8000:8000 -e KERNEL_AUTH_TOKEN=devtoken valuz-kernel:verify
+          docker run -d --name ksmoke -p 8000:8000 -e KERNEL_AUTH_TOKEN=devtoken valuz-kernel:verify
           ok=0; for _ in $(seq 1 45); do curl -fs localhost:8000/health >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
-          docker logs k | tail -30; test "$ok" = 1
+          docker logs ksmoke | tail -30; test "$ok" = 1
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/api/v1/sessions)" = 401
           test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer devtoken' localhost:8000/api/v1/sessions)" = 200
-          docker rm -f k; echo "✓ standalone image boots + serves + auth-gates"
+          docker rm -f ksmoke; echo "✓ standalone image boots + serves + auth-gates"
 
       # ── veFaaS smoke: deps present + AIO boot + reach kernel via :8080
       #    gateway. Best-effort (the AIO base boots many services and our
@@ -141,17 +141,21 @@ jobs:
         run: |
           set -x
           docker run --rm --entrypoint sh valuz-kernel:verify -c '
-            /app/.venv/bin/python -c "import app.main" && echo "app.main import OK"
+            PYTHONPATH=/app/kernel /app/.venv/bin/python -c "import app.main" && echo "app.main import OK"
             SDK=$(/app/.venv/bin/python -c "import claude_agent_sdk,os;print(os.path.dirname(claude_agent_sdk.__file__))")
             ls -la "$SDK/_bundled/"
             ls -la /opt/tiger/run/supervisord/valuz-kernel.conf /opt/gem/nginx/valuz-kernel.conf'
-          docker run -d --name v --security-opt seccomp=unconfined -p 8080:8080 valuz-kernel:verify
+          # Boot the AIO sandbox (inherits its supervisord init) and reach the
+          # kernel through the :8080 gateway. (Container names must be >=2 chars.)
+          docker rm -f vsmoke 2>/dev/null || true
+          docker run -d --name vsmoke --security-opt seccomp=unconfined -p 8080:8080 valuz-kernel:verify
           for _ in $(seq 1 60); do curl -fs localhost:8080/v1/sandbox/health >/dev/null 2>&1 && break; sleep 2; done
-          curl -s localhost:8080/v1/sandbox/health || true
-          curl -s localhost:8080/kernel/health || true
-          docker exec v sh -c 'tail -40 /var/log/valuz-kernel*.log 2>/dev/null' || true
-          docker logs v | tail -60 || true
-          docker rm -f v || true
+          echo "--- AIO health ---";    curl -s localhost:8080/v1/sandbox/health || true; echo
+          echo "--- kernel health ---"; curl -s localhost:8080/kernel/health || true; echo
+          docker exec vsmoke sh -c 'tail -40 /var/log/valuz-kernel*.log 2>/dev/null' || true
+          docker exec vsmoke sh -c 'supervisorctl status 2>/dev/null || /opt/tiger/**/supervisorctl status 2>/dev/null' || true
+          docker logs vsmoke | tail -60 || true
+          docker rm -f vsmoke || true
 
       - name: Summary
         if: ${{ always() }}
