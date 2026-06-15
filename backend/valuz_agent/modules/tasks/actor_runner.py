@@ -43,6 +43,37 @@ from valuz_agent.infra.fs_registry import fs_registry
 logger = logging.getLogger(__name__)
 
 
+async def _restamp_always_on_mcp(session_id: str) -> None:
+    """Refresh the always-on in-process MCP token before driving a turn.
+
+    ``settings.internal_mcp_token`` rotates per process, so a session re-driven
+    after a backend restart — task **resume / recovery**, the persistent actor
+    loop, a sync kickoff — carries a *stale* ``X-Valuz-Internal`` in its
+    persisted ``mcp_servers``. The in-process MCP gate then 403s every request
+    and the runtime parks the ``harness`` server in ``needsAuth``, hiding ALL
+    its tools — both the base set (memory / submit_skill) and, for a lead, the
+    orchestration set (dispatch / review_subtask / finish_task / await_members /
+    send / get_plan). The symptom: a re-launched lead reports it "has no
+    orchestration tools" and only the runtime's built-ins remain.
+
+    The chat path already self-heals this in ``send_message`` /
+    ``send_message_sync``; the task/actor turn path had no equivalent. Re-stamp
+    here so every turn-driving primitive converges. Best-effort — the re-stamp
+    is idempotent (a no-op when the token already matches, keeping the prompt
+    cache warm) and must never block the turn.
+    """
+    try:
+        from valuz_agent.modules.sessions.capabilities import (
+            refresh_always_on_mcp_for_session,
+        )
+
+        await refresh_always_on_mcp_for_session(session_id)
+    except Exception:  # noqa: BLE001 — never block a turn on a re-stamp failure
+        logger.warning(
+            "always-on MCP re-stamp failed for session %s", session_id, exc_info=True
+        )
+
+
 # ---------------------------------------------------------------------------
 # run_session_to_idle — the shared one-shot turn-to-idle primitive
 # (extracted from SessionService._run_agent_background)
@@ -119,6 +150,12 @@ async def run_session_to_idle(
             )
         except Exception:  # noqa: BLE001
             additional_context = ""
+
+        # Heal a stale in-process MCP token (rotates per process) before the
+        # turn — see ``_restamp_always_on_mcp``. Load-bearing for task lead /
+        # member runs re-driven after a backend restart, which otherwise lose
+        # the whole ``harness`` toolset to a 403.
+        await _restamp_always_on_mcp(session_id)
 
         try:
             message = await kernel_client.run_turn(
@@ -338,6 +375,11 @@ class ActorRunner:
         the session — the actor loop owns that, once, at loop exit. Live
         events reach SSE followers through the kernel's bus taps.
         """
+        # Heal a stale in-process MCP token before every actor-loop turn — this
+        # is the path a recovered / resumed lead+member loop runs on after a
+        # backend restart, where the persisted ``harness`` token is stale and
+        # would otherwise 403 (hiding dispatch / review_subtask / finish_task).
+        await _restamp_always_on_mcp(session_id)
         try:
             # Kernel ``run_turn`` persists ``status="running"`` to the DB
             # itself (agent-harness 3e742fc) — no host pre-persist needed.
