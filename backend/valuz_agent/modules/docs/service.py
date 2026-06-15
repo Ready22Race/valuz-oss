@@ -793,10 +793,16 @@ class DocumentLibraryService:
         scan_state_dir = self._scan_state_dir
         session_factory = self._session_factory
 
+        # Capture the owner in the request/scheduler context; the daemon
+        # thread below doesn't inherit the ContextVar (see _arun seeding).
+        owner_id = require_current_user_id()
+
         async def _arun() -> None:
+            from valuz_agent.infra.auth_context import set_current_user_id
             from valuz_agent.infra.db import async_unit_of_work
             from valuz_agent.modules.docs.datastore import DocumentDatastore
 
+            set_current_user_id(owner_id)
             try:
                 async with async_unit_of_work(commit=False) as db:
                     local_service = DocumentLibraryService(
@@ -868,10 +874,18 @@ class DocumentLibraryService:
         scan_state_dir = self._scan_state_dir
         session_factory = self._session_factory
 
+        # Capture the owner HERE — this method runs in the request context
+        # where ``valuz_current_user_id`` is set. The daemon thread below has
+        # its own ContextVar scope and would otherwise raise
+        # OwnerContextUnsetError on the first owner-scoped read.
+        owner_id = require_current_user_id()
+
         async def _arun() -> None:
+            from valuz_agent.infra.auth_context import set_current_user_id
             from valuz_agent.infra.db import async_unit_of_work
             from valuz_agent.modules.docs.datastore import DocumentDatastore
 
+            set_current_user_id(owner_id)
             try:
                 async with async_unit_of_work(commit=False) as db:
                     local_service = DocumentLibraryService(
