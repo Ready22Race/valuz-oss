@@ -1045,10 +1045,6 @@ export const ProjectDetailContextPanel = ({
                   <span className="shrink-0 rounded bg-error-light px-1 py-px text-2xs text-error-text">
                     {t("common.failed")}
                   </span>
-                ) : f.parseStatus === "native" ? (
-                  <span className="shrink-0 rounded bg-surface-soft px-1 py-px text-2xs text-ink-meta">
-                    {t("conversation.attachmentNative")}
-                  </span>
                 ) : null}
                 {onRemoveUploadedFile ? (
                   <button
