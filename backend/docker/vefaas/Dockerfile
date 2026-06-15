@@ -19,7 +19,13 @@
 #   docker buildx build --platform linux/amd64 \
 #     -f docker/vefaas/Dockerfile -t <volc-cr>/<ns>/valuz-kernel:<tag> --push .
 
-ARG BASE_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+# Pinned (not :latest) for reproducibility. The Volcengine vefaas-public image
+# and ghcr.io/agent-infra/sandbox are the SAME image at a given version (the
+# upstream README publishes both at the same tag — the volc one is the mainland
+# China mirror). This default is the CN base (fast to pull in CN where you
+# build to push to Volcengine CR); CI overrides BASE_IMAGE to the ghcr mirror
+# at the same version for faster pulls on GitHub's runners.
+ARG BASE_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.0.0.150
 FROM ${BASE_IMAGE}
 
 # uv installs a self-contained python + the dependency closure, so we never
