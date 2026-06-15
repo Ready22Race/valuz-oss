@@ -307,6 +307,40 @@ async def test_spawn_result_with_error_metadata_marks_failed(db, tmp_path, monke
     assert got.parsed_path is None
 
 
+async def test_spawn_image_parse_miss_marks_native_not_failed(db, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An image the local parser can't text-extract (e.g. OCR not authorized,
+    no enhanced model) is NOT a failure: it's reclassified ``native`` so the
+    raw image is handed to the runtime to read directly. ``parsed_path`` stays
+    None (no text extract); the error is cleared so the UI shows no failure."""
+    router = _SpyRouter(
+        mode=ParserPluginMode.SYNC,
+        markdown="*OCR not authorized*",
+        metadata={"plugin_id": "rapidocr", "error": "rapidocr_models setup required"},
+    )
+    _inject_router(monkeypatch, router)
+    dest = tmp_path / "att"
+    dest.mkdir()
+    rid = await _make_parsing_row(stored_path=str(tmp_path / "pic.png"), filename="pic.png")
+    got = await _run_spawn(rid, tmp_path / "pic.png", dest, "pic.png")
+    assert got.parse_status == "native"
+    assert got.parsed_path is None
+    assert got.error_message is None
+
+
+async def test_spawn_image_parser_exception_marks_native(db, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Even a hard parser crash on an image lands ``native`` (hand it to the
+    runtime) rather than ``failed`` — the runtime does its best with the raw
+    file, and the row is never stranded in ``parsing``."""
+    router = _SpyRouter(mode=ParserPluginMode.SYNC, raises=RuntimeError("ocr boom"))
+    _inject_router(monkeypatch, router)
+    dest = tmp_path / "att"
+    dest.mkdir()
+    rid = await _make_parsing_row(stored_path=str(tmp_path / "shot.jpeg"), filename="shot.jpeg")
+    got = await _run_spawn(rid, tmp_path / "shot.jpeg", dest, "shot.jpeg")
+    assert got.parse_status == "native"
+    assert got.parsed_path is None
+
+
 async def test_spawn_real_light_local_router_end_to_end(db, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Scenario-1 end-to-end through the REAL ParserRouter + LightLocal plugin
     (no stub): a .txt attachment parses to ready with engine=light_local and

@@ -488,6 +488,7 @@ export const ConversationsHomePage = () => {
                     | "parsing"
                     | "ready"
                     | "failed"
+                    | "native"
                     | undefined,
                   sourceKind: a.source_kind,
                 }))}

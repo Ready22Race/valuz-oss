@@ -1235,6 +1235,7 @@ export const ProjectDetailPage = () => {
             | "parsing"
             | "ready"
             | "failed"
+            | "native"
             | undefined,
           sourceKind: a.source_kind,
         }))}
@@ -1388,6 +1389,7 @@ export const ProjectDetailPage = () => {
                     | "parsing"
                     | "ready"
                     | "failed"
+                    | "native"
                     | undefined,
                   sourceKind: a.source_kind,
                 }))}

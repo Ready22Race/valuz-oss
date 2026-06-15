@@ -11,6 +11,7 @@ import {
   FolderClosed,
   Gauge,
   Hand,
+  Image as ImageIcon,
   Loader2,
   Lock,
   Paperclip,
@@ -272,8 +273,10 @@ export interface ComposerProps {
     id: string;
     name: string;
     /** Async parse status — drives the inline progress indicator on the
-     *  chip ("解析中" spinner while ``parsing``, error tint on ``failed``). */
-    parseStatus?: "parsing" | "ready" | "failed";
+     *  chip ("解析中" spinner while ``parsing``, error tint on ``failed``,
+     *  a calm "model reads it" hint on ``native`` — an image with no local
+     *  text extract that the runtime ingests directly). */
+    parseStatus?: "parsing" | "ready" | "failed" | "native";
     /** ``local`` upload vs ``kb_doc`` live reference — drives the chip icon. */
     sourceKind?: "local" | "kb_doc";
   }[];
@@ -1205,11 +1208,17 @@ export const Composer = ({
                 const isKb = doc.sourceKind === "kb_doc";
                 const isParsing = doc.parseStatus === "parsing";
                 const isFailed = doc.parseStatus === "failed";
+                // ``native`` — an image with no local text extract; the runtime
+                // reads it directly. Not a failure: render a normal chip with a
+                // calm hint so the user knows the model will handle it.
+                const isNative = doc.parseStatus === "native";
                 const ChipIcon = isParsing
                   ? Loader2
-                  : isKb
-                    ? Database
-                    : Paperclip;
+                  : isNative
+                    ? ImageIcon
+                    : isKb
+                      ? Database
+                      : Paperclip;
                 return (
                   <span
                     key={`pinned-${doc.id}`}
@@ -1235,6 +1244,10 @@ export const Composer = ({
                       </span>
                     ) : isFailed ? (
                       <span className="shrink-0">{t("common.failed")}</span>
+                    ) : isNative ? (
+                      <span className="shrink-0 text-ink-meta">
+                        {t("conversation.attachmentNative")}
+                      </span>
                     ) : null}
                     {onRemovePinnedAttachment ? (
                       <button

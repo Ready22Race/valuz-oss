@@ -150,10 +150,11 @@ export interface UploadedFileItem {
   /** Parser/upload status for the row badge. */
   status?: "uploaded" | "ok" | "failed";
   /** Async parse status of the attachment. ``parsing`` renders an inline
-   *  spinner + "解析中"; ``failed`` renders the error badge. Distinct from
-   *  ``status`` so the live poll can drive the indicator without disturbing
-   *  legacy callers. */
-  parseStatus?: "parsing" | "ready" | "failed";
+   *  spinner + "解析中"; ``failed`` renders the error badge; ``native`` is an
+   *  image with no local text extract that the runtime reads directly (no
+   *  error). Distinct from ``status`` so the live poll can drive the indicator
+   *  without disturbing legacy callers. */
+  parseStatus?: "parsing" | "ready" | "failed" | "native";
   /** Origin of the attachment: ``local`` (multipart upload) vs
    * ``kb_doc`` (live reference to a global knowledge-base document).
    * Drives the row icon — KB picks render a ``Database`` glyph so
@@ -1043,6 +1044,10 @@ export const ProjectDetailContextPanel = ({
                 {f.status === "failed" || f.parseStatus === "failed" ? (
                   <span className="shrink-0 rounded bg-error-light px-1 py-px text-2xs text-error-text">
                     {t("common.failed")}
+                  </span>
+                ) : f.parseStatus === "native" ? (
+                  <span className="shrink-0 rounded bg-surface-soft px-1 py-px text-2xs text-ink-meta">
+                    {t("conversation.attachmentNative")}
                   </span>
                 ) : null}
                 {onRemoveUploadedFile ? (
