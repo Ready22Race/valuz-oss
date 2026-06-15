@@ -26,8 +26,10 @@
 #     -f docker/kernel.Dockerfile -t <registry>/<ns>/valuz-kernel:<tag> --push .
 # or use scripts/build-kernel-image.sh.
 
+# uv must be recent enough to parse pyproject's [tool.uv] (e.g.
+# `required-environments`, added in 0.11) — match the repo's uv.
 ARG PYTHON_VERSION=3.12
-ARG UV_VERSION=0.5
+ARG UV_VERSION=0.11.1
 
 # ── Stage 1: builder — resolve + install the dependency closure ────────────
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv

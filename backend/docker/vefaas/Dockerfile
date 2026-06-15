@@ -29,8 +29,9 @@ ARG BASE_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-o
 FROM ${BASE_IMAGE}
 
 # uv installs a self-contained python + the dependency closure, so we never
-# depend on whatever python layout the base ships.
-COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
+# depend on whatever python layout the base ships. Pin a version recent enough
+# to parse pyproject's [tool.uv] (`required-environments`, 0.11+) — match repo.
+COPY --from=ghcr.io/astral-sh/uv:0.11.1 /uv /usr/local/bin/uv
 
 ARG UV_DEFAULT_INDEX=
 ENV UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX} \
