@@ -115,6 +115,14 @@ export const registerIpcHandlers = () => {
     }
   });
 
+  // Renderer asks for the runtime app version. In a packaged build this is
+  // the value electron-builder stamped from package.json (which build-desktop.sh
+  // overwrites with the git tag), so it's the single authoritative version the
+  // user is actually running — independent of the backend's pyproject version.
+  ipcMain.handle("app_get_version", async () => {
+    return app.getVersion();
+  });
+
   // Brand-logo dropdown's "关闭" item — quits the entire client and
   // every spawned sidecar. ``app.quit()`` triggers ``before-quit``,
   // which already calls ``desktopRuntime.stopAllServices()`` (see

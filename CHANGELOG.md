@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 - In-app update notice: a compact bottom-left toast that detects, downloads (with
-  inline progress), and restarts to apply an update — replaces the standalone update
+  inline progress), and restarts to apply an update — complements the standalone update
   window. (#71 @St0neWan9)
 - Live tool streaming: tool input/output deltas stream into the UI as they arrive. (#77 @Ready22Race)
 - Frameless window with custom controls on Windows and Linux. (#81 @hanjixin)
