@@ -2244,6 +2244,15 @@ export const ConversationPage = () => {
     // freshly minted ids. This is what the old ``refreshSessions``
     // race ultimately failed at.
     setSelectedSessionId(created.id);
+    // Seed the bound agent immediately. Attach-on-upload mints the session
+    // WITHOUT navigating (``navigateOnCreate=false``), so the bootstrap effect
+    // — which normally sets ``sessionAgentSlug`` from the fetched detail on a
+    // URL change — never fires. Without this, the moment ``selectedSession``
+    // turns truthy the composer flips ``selectedSession ? sessionAgentSlug :
+    // selectedAgentSlug`` to a null agent and the picker looks deselected. The
+    // session was just created with ``selectedAgentSlug``, so that is the
+    // authoritative bound agent.
+    setSessionAgentSlug(selectedAgentSlug);
     const createdItem = sessionDetailToListItem(created);
     setSessions([createdItem]);
     // Push the new session into the global session store IMMEDIATELY
