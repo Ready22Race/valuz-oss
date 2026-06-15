@@ -144,11 +144,8 @@ class EmbeddedDocsRuntime:
         ]
         for kw in keywords:
             cmd.extend(["-e", kw])
-        # ``--`` must come AFTER the ``-e`` patterns and BEFORE the paths: it
-        # ends option parsing so paths that start with ``-`` aren't mistaken
-        # for flags. Placed before ``-e`` (the old bug), rg treated ``-e`` as
-        # the pattern and every keyword/path as a search path
-        # (``rg: 医生: No such file``), so every query fell back to python.
+        # “--” 必须位于 -e 模式之后、路径之前：终止选项解析，
+        # 避免以 “-” 开头的路径被 rg 当成选项。
         cmd.append("--")
         cmd.extend(paths)
 
