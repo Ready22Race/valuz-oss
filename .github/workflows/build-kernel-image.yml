@@ -22,9 +22,9 @@ on:
           - vefaas
           - standalone
       aio_base:
-        description: "veFaaS only: AIO base to build FROM. Default is the exact Volcengine veFaaS base (don't assume the open-source ghcr image is identical — it may lack veFaaS adaptations). Override to ghcr.io/agent-infra/sandbox:latest only if the runner can't reach the CN registry."
+        description: "veFaaS only: AIO base to build FROM. ghcr and the Volcengine vefaas-public image are the SAME image at a given version (upstream publishes both at the same tag); ghcr pulls faster on GitHub runners. Pinned, not :latest. Override to the volc mirror at the same version if you prefer."
         required: false
-        default: "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+        default: "ghcr.io/agent-infra/sandbox:1.0.0.150"
         type: string
 
 concurrency:
