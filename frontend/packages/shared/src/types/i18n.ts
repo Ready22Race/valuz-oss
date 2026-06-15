@@ -402,6 +402,7 @@ export type KnownI18nKey =
   | "conversation.approvalTrayWarning"
   | "conversation.askUserAnswerTitle"
   | "conversation.attachmentLimitReached"
+  | "conversation.attachmentNative"
   | "conversation.attachmentParsing"
   | "conversation.attachmentParsingBody"
   | "conversation.attachmentParsingConfirm"

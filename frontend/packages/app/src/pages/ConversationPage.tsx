@@ -3644,7 +3644,12 @@ export const ConversationPage = () => {
       name: a.filename,
       size: formatFileSize(a.size_bytes),
       sourceKind: a.source_kind,
-      parseStatus: a.parse_status as "parsing" | "ready" | "failed" | undefined,
+      parseStatus: a.parse_status as
+        | "parsing"
+        | "ready"
+        | "failed"
+        | "native"
+        | undefined,
     }));
     // Always render the panel — even when it has nothing in it — so the
     // right-side toggle button stays visible on every conversation page.
@@ -4305,6 +4310,7 @@ export const ConversationPage = () => {
                   | "parsing"
                   | "ready"
                   | "failed"
+                  | "native"
                   | undefined,
                 sourceKind: a.source_kind,
               }))}

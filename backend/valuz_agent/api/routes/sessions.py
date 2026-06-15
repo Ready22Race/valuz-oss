@@ -713,6 +713,23 @@ _PARSE_TASKS: set[asyncio.Task[None]] = set()
 _LOCAL_PARSE_SEMAPHORE = asyncio.Semaphore(2)
 
 
+# File types a vision-capable runtime can read directly. When the local parser
+# can't text-extract one of these (no OCR / enhanced model authorized), that is
+# NOT a failure — the raw file is handed to the runtime, which ingests it
+# natively. The parse is reclassified ``failed`` → ``native`` so the UI shows a
+# calm "model reads it" hint instead of a scary "Failed", and the turn still
+# ships the source file (``_attachment_specs`` always carries ``source_path``).
+_RUNTIME_NATIVE_EXTS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif"}
+)
+
+
+def _is_runtime_native(path: str) -> bool:
+    """True for files a vision runtime reads directly — a local-parse miss on
+    these is a passthrough (status ``native``), not a failure."""
+    return Path(path).suffix.lower() in _RUNTIME_NATIVE_EXTS
+
+
 def _spawn_attachment_parse(
     attachment_id: str, source_path: str, dest_dir: Path, base_name: str
 ) -> None:
@@ -763,6 +780,14 @@ def _spawn_attachment_parse(
         except Exception as exc:  # noqa: BLE001 — contain; never crash the loop
             logger.exception("Background parse failed for attachment %s", attachment_id)
             error_message = str(exc)
+        # Image (and other vision-readable) files the local parser couldn't
+        # text-extract are handed off to the runtime, which reads them
+        # natively — not a failure. ``parsed_path`` stays None (no text
+        # extract); only the original ships, which is exactly what the runtime
+        # needs.
+        if parse_status == "failed" and _is_runtime_native(source_path):
+            parse_status = "native"
+            error_message = None
         try:
             async with async_unit_of_work() as db:
                 await SessionDatastore(db).update_attachment_parse(
