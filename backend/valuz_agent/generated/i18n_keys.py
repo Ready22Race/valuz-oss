@@ -408,7 +408,6 @@ I18nKey = Literal[
     "conversation.approvalTrayWarning",
     "conversation.askUserAnswerTitle",
     "conversation.attachmentLimitReached",
-    "conversation.attachmentNative",
     "conversation.attachmentParsing",
     "conversation.attachmentParsingBody",
     "conversation.attachmentParsingConfirm",
