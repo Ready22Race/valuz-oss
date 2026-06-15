@@ -41,6 +41,21 @@ class Settings(BaseSettings):
     kernel_url: str = "http://127.0.0.1:8400"
     kernel_token: str | None = None
 
+    # ── E2B-compatible cloud sandbox ─────────────────────────────────
+    # Selected by VALUZ_SANDBOX_DRIVER=e2b. The kernel runs in a remote
+    # microVM (Tencent Cloud Agent Runtime / CubeSandbox / hosted E2B) booted
+    # from a template built from docker/kernel.Dockerfile; the host drives it
+    # over HTTP. ``e2b_domain`` is the only thing that distinguishes the
+    # backend (e.g. ap-guangzhou.tencentags.com); ``e2b_api_key`` is the
+    # console-created key — use the E2B-compatible ``e2b_...`` form the
+    # console shows, NOT the ``ark_...`` form; ``e2b_template`` is the sandbox
+    # tool/template name (no default templates exist — create it in the
+    # console first). See integrations/sandbox_e2b.py.
+    e2b_domain: str = "ap-guangzhou.tencentags.com"
+    e2b_api_key: str | None = None
+    e2b_template: str | None = None
+    e2b_kernel_port: int = 8000
+
     @property
     def is_http_kernel(self) -> bool:
         """True when the kernel runs as a SEPARATE process (subprocess /
