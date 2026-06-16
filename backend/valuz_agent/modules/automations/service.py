@@ -273,7 +273,9 @@ class AutomationService:
         )
 
     @staticmethod
-    def _run_to_item(row: AutomationRunRow) -> AutomationRunItemResponse:
+    def _run_to_item(
+        row: AutomationRunRow, task_status: str | None = None
+    ) -> AutomationRunItemResponse:
         created_files: list[str] = []
         if row.created_files:
             try:
@@ -295,6 +297,7 @@ class AutomationService:
             error_message_key=row.error_message_key,
             session_id=row.session_id,
             created_files=created_files,
+            task_status=task_status,
         )
 
     # ── Project target picker ───────────────────────────────────────
@@ -764,7 +767,33 @@ class AutomationService:
         runs = await self._ds.list_runs(
             require_current_user_id(), automation_id, limit=limit, cursor=cursor
         )
-        return [self._run_to_item(r) for r in runs]
+        # Task automations: the run row freezes to ``success`` at kickoff, so
+        # resolve each lead session's live task status and let the client show
+        # that instead. Batched to avoid an N+1 over the runs page.
+        task_status_by_session = await self._resolve_task_statuses(runs)
+        return [
+            self._run_to_item(
+                r, task_status_by_session.get(r.session_id) if r.session_id else None
+            )
+            for r in runs
+        ]
+
+    async def _resolve_task_statuses(
+        self, runs: list[AutomationRunRow]
+    ) -> dict[str, str]:
+        """Map each run's lead ``session_id`` → its task's current status.
+
+        Returns ``{}`` when no run carries a session id (e.g. conversation
+        automations), avoiding the tasks-datastore round trip entirely.
+        """
+        session_ids = [r.session_id for r in runs if r.session_id]
+        if not session_ids:
+            return {}
+        from valuz_agent.modules.tasks.datastore import TaskSessionDatastore
+
+        return await TaskSessionDatastore(self._db).get_task_status_by_session_ids(
+            require_current_user_id(), session_ids
+        )
 
     # ── Validation helpers (used by the frontend's preview UI) ────────
 

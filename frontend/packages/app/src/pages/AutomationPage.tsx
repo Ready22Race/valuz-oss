@@ -60,6 +60,18 @@ function runStatusToLogStatus(
   return "skip";
 }
 
+// The badge status shown in the execution log. For a task automation the run
+// row freezes to `success` the instant kickoff returns, so prefer the live
+// task status (resolved server-side) — `active`/`paused` are still in flight.
+function runToLogStatus(run: AutomationRunItem): ExecutionLogRow["status"] {
+  if (run.task_status) {
+    if (run.task_status === "completed") return "ok";
+    if (run.task_status === "failed") return "err";
+    return "pending"; // active / paused → still running
+  }
+  return runStatusToLogStatus(run.status);
+}
+
 function formatRunTime(ms: number): string {
   const d = new Date(ms);
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -195,6 +207,40 @@ export const AutomationPage = () => {
 
   // ── Data loading ─────────────────────────────────────────────────
 
+  // Recent execution log — fan out N parallel `listRuns(id, 3)` calls, merge +
+  // sort by triggered_at desc, cap to a screen-worth. 3 per automation is
+  // enough for "what fired today" while keeping the round-trip count
+  // proportional to user-perceived activity. Reused by both the initial load
+  // and the poll, so it never touches `loading` (no PageLoader flicker).
+  const refreshRuns = useCallback(
+    async (automations: Array<{ automation_id: string; name: string }>) => {
+      if (automations.length === 0) {
+        setRecentRuns([]);
+        return;
+      }
+      const runFetches = await Promise.all(
+        automations.map(async (automation) => {
+          try {
+            const res = await automationsApi.listRuns(automation.automation_id, 3);
+            return res.runs.map((run) => ({
+              ...run,
+              automation_name: automation.name,
+            }));
+          } catch {
+            return [] as Array<AutomationRunItem & { automation_name: string }>;
+          }
+        }),
+      );
+      setRecentRuns(
+        runFetches
+          .flat()
+          .sort((a, b) => b.triggered_at - a.triggered_at)
+          .slice(0, 30),
+      );
+    },
+    [],
+  );
+
   const loadAll = useCallback(async () => {
     try {
       const [groupsRes, targetsRes, agentsRes] = await Promise.all([
@@ -223,47 +269,29 @@ export const AutomationPage = () => {
       );
       setProjectMembers(Object.fromEntries(memberPairs));
 
-      // Recent execution log — fan out N parallel `listRuns(id, 3)`
-      // calls, merge + sort by triggered_at desc, cap to a screen-worth.
-      // 3 per automation is enough for "what fired today" while keeping
-      // the round-trip count proportional to user-perceived activity.
-      const allAutomations = groupsRes.groups.flatMap(
-        (group) => group.automations,
+      await refreshRuns(
+        groupsRes.groups.flatMap((group) => group.automations),
       );
-      const runFetches = await Promise.all(
-        allAutomations.map(async (automation) => {
-          try {
-            const res = await automationsApi.listRuns(
-              automation.automation_id,
-              3,
-            );
-            return res.runs.map((run) => ({
-              ...run,
-              automation_name: automation.name,
-            }));
-          } catch {
-            return [] as Array<AutomationRunItem & { automation_name: string }>;
-          }
-        }),
-      );
-      const merged = runFetches
-        .flat()
-        .sort(
-          (a, b) =>
-            b.triggered_at - a.triggered_at,
-        )
-        .slice(0, 30);
-      setRecentRuns(merged);
     } catch (error) {
       toast.error(t(k("automation.loadFailed"), { error: String(error) }));
     } finally {
       setLoading(false);
     }
-  }, [t]);
+  }, [t, refreshRuns]);
 
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  // Poll the execution log so a task automation's live status (resolved
+  // server-side from the lead session's task) updates without a manual
+  // refresh. Lightweight — only re-fetches runs, never the full page load.
+  useEffect(() => {
+    const automations = groups.flatMap((group) => group.automations);
+    if (automations.length === 0) return;
+    const id = setInterval(() => void refreshRuns(automations), 5000);
+    return () => clearInterval(id);
+  }, [groups, refreshRuns]);
 
   // ── Derived state ───────────────────────────────────────────────
 
@@ -559,7 +587,7 @@ export const AutomationPage = () => {
   const executionRows: ExecutionLogRow[] = recentRuns.map((run) => ({
     id: run.run_id,
     time: formatRunTime(run.triggered_at),
-    status: runStatusToLogStatus(run.status),
+    status: runToLogStatus(run),
     duration: formatDuration(run.duration_ms),
     output:
       (run.error_message_key
