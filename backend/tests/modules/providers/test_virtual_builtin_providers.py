@@ -22,6 +22,7 @@ from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.models import Base, ProviderRow
 from valuz_agent.modules.providers.service import ProviderService
+from valuz_agent.modules.settings.models import AppSettingRow
 from valuz_agent.ports.llm_provider import _InMemoryRegistry, set_llm_registry
 
 OWNER = "owner-A"
@@ -59,7 +60,9 @@ class _SvcHandle:
 async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
     db_file = tmp_path / "providers.db"
     sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(sync_engine, tables=[ProviderRow.__table__])
+    Base.metadata.create_all(
+        sync_engine, tables=[ProviderRow.__table__, AppSettingRow.__table__]
+    )
     sync_factory = sessionmaker(bind=sync_engine, expire_on_commit=False)
 
     async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
@@ -174,6 +177,42 @@ class TestMaterializeOnLogin:
         monkeypatch.setattr(settings, "subscription_login_enabled", False)
         with pytest.raises(ProviderNotFound):
             await svc.service.enable_provider(OWNER, "ch-claude-subscription")
+
+
+class TestSetDefaultMaterializes:
+    """Selecting an unconfigured CLI-subscription channel as the default
+    model must materialize it on demand instead of 404ing — the virtual
+    template carries only a catalog id, with no DB row until first use."""
+
+    async def test_set_default_materializes_subscription(self, svc: _SvcHandle) -> None:
+        ds = svc.service._ds  # noqa: SLF001 — test reaches into the datastore for row state
+        # No real rows yet — exactly the fresh-install repro for the 404.
+        assert await ds.list_providers(OWNER) == []
+        await svc.service.set_default(OWNER, "ch-claude-subscription")
+        # A real row now exists (fresh uuid, not the catalog id) and is the default.
+        rows = await ds.list_providers(OWNER)
+        assert len(rows) == 1
+        assert rows[0].provider_kind == "claude-subscription"
+        assert rows[0].id != "ch-claude-subscription"
+        assert rows[0].is_default is True
+        assert rows[0].enabled is True
+        default_row = await ds.get_default(OWNER)
+        assert default_row is not None and default_row.id == rows[0].id
+
+    async def test_set_default_with_model_materializes(self, svc: _SvcHandle) -> None:
+        ds = svc.service._ds  # noqa: SLF001
+        await svc.service.set_default(
+            OWNER, "ch-codex-subscription", default_model="gpt-5-codex"
+        )
+        rows = await ds.list_providers(OWNER)
+        codex = [r for r in rows if r.provider_kind == "codex-subscription"]
+        assert len(codex) == 1
+        assert codex[0].is_default is True
+        assert codex[0].default_model == "gpt-5-codex"
+
+    async def test_set_default_unknown_id_still_404s(self, svc: _SvcHandle) -> None:
+        with pytest.raises(ProviderNotFound):
+            await svc.service.set_default(OWNER, "ch-does-not-exist")
 
 
 class TestGetVirtualTemplate:
