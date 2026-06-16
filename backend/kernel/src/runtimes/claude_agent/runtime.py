@@ -686,11 +686,16 @@ class ClaudeAgentRuntime:
         last_sig: tuple[Any, ...] | None = None
         try:
             while True:
-                final = self._read_workflow_state(state_path)
+                final = await asyncio.to_thread(self._read_workflow_state, state_path)
                 if final is not None:
                     await self._emit_workflow_state(tool_use_id, run_id, final)
                     return
-                state = self._derive_live_state(run_id, summary, self._read_journal(journal_path))
+                # Read+parse journal.jsonl OFF the loop: it is re-read in full
+                # every poll tick and grows with the run, so a sync read here
+                # would block the kernel asyncio loop proportional to journal
+                # size (tens-to-hundreds of ms on a large fan-out).
+                journal = await asyncio.to_thread(self._read_journal, journal_path)
+                state = self._derive_live_state(run_id, summary, journal)
                 sig = (state["agentCount"], state["agentsDone"])
                 if sig != last_sig:
                     last_sig = sig
@@ -818,10 +823,11 @@ class ClaudeAgentRuntime:
             await asyncio.gather(*pollers, return_exceptions=True)
         for wf in active:
             try:
-                final = self._read_workflow_state(wf["state_path"])
+                final = await asyncio.to_thread(self._read_workflow_state, wf["state_path"])
                 if final is None:
+                    journal = await asyncio.to_thread(self._read_journal, wf["journal_path"])
                     final = self._derive_live_state(
-                        wf["run_id"], wf["summary"], self._read_journal(wf["journal_path"])
+                        wf["run_id"], wf["summary"], journal
                     )
                     final["status"] = "completed"
                 await self._emit_workflow_state(wf["tool_use_id"], wf["run_id"], final)
