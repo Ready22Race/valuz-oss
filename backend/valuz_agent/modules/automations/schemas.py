@@ -203,6 +203,12 @@ class AutomationRunItemResponse(BaseModel):
     error_message_key: str | None
     session_id: str | None
     created_files: list[str]
+    # Live status of the task this run kicked off (task automations only).
+    # ``run.status`` freezes to ``success`` the moment kickoff returns, so the
+    # client prefers this — resolved from the lead session's task at read time
+    # (``active`` / ``completed`` / ``failed`` / ``paused``). ``None`` for
+    # non-task runs or when the task is gone.
+    task_status: str | None = None
 
 
 class CronValidateRequest(BaseModel):

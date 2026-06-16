@@ -299,6 +299,30 @@ class TaskSessionDatastore:
             .all()
         )
 
+    async def get_task_status_by_session_ids(
+        self, user_id: str, session_ids: list[str]
+    ) -> dict[str, str]:
+        """Map run ``session_id`` → its owning task's current ``status``.
+
+        Batch join ``valuz_task_session`` → ``valuz_task`` for the given session
+        ids. Used by the automations activity log to surface a task automation's
+        *live* outcome (the lead task is still running long after the kickoff run
+        row was stamped ``success``). Sessions with no task row are omitted.
+        """
+        if not session_ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(TaskSessionRow.session_id, TaskRow.status)
+                .join(TaskRow, TaskRow.id == TaskSessionRow.task_id)
+                .where(
+                    TaskSessionRow.session_id.in_(session_ids),
+                    TaskSessionRow.user_id == user_id,
+                )
+            )
+        ).all()
+        return {session_id: status for session_id, status in rows}
+
     async def get_run(self, session_id: str) -> TaskSessionRow | None:
         """SYSTEM lookup by the globally-unique kernel ``session_id`` (runner +
         kernel-event finalization). Not a user query — no owner filter."""
