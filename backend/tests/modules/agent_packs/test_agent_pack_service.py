@@ -101,30 +101,56 @@ async def test_import_pack_creates_agents(svc: AgentPackService) -> None:
     # the pack's recommended effort wins over the deploy default
     assert analyst.effort == "high"
     assert analyst.source == "custom"
-    assert "china-sector-overview" in analyst.skills
-    assert "akshare-mcp" in analyst.connector_types
+    # 投研 ships as a bare roster for now — its dedicated team wires up the
+    # skills + (Valuz) MCPs later; the third-party financial MCPs were removed.
+    assert analyst.skills == []
+    assert analyst.connector_types == []
 
 
 async def test_import_pack_registers_connectors(svc: AgentPackService) -> None:
-    # the investment pack's financial MCPs activate on import — registered as the
-    # user's ConnectorRows (idempotent) so they resolve at session time.
-    await svc.import_pack(USER, "investment", **DEPLOY)
+    # A pack's connectors activate on import — registered as the user's
+    # ConnectorRows (idempotent) so they resolve at session time. No built-in
+    # pack ships connectors right now, so drive it with a synthetic manifest.
+    from valuz_agent.modules.agent_packs.manifest import (
+        AgentPackManifest,
+        PackAgent,
+        PackCollection,
+        PackConnector,
+    )
+
+    manifest = AgentPackManifest(
+        collection=PackCollection(name="Synthetic"),
+        agents=[PackAgent(slug="a1", name="A1", connectors=["my-http"])],
+        connectors=[
+            PackConnector(
+                slug="my-http",
+                source="custom",
+                display_name="My HTTP MCP",
+                transport="http",
+                url="https://example.com/mcp",
+                auth_type="bearer",
+                requires_credentials=True,
+            )
+        ],
+    )
+    await svc.import_manifest(USER, manifest, **DEPLOY)
     connector_svc = svc._agents._connectors
     slugs = {v.slug for v in await connector_svc.list_connectors(USER)}
-    assert {"wind-mcp", "ifind-mcp", "akshare-mcp", "china-news-mcp"} <= slugs
+    assert "my-http" in slugs
     # idempotent: a second import doesn't duplicate
-    await svc.import_pack(USER, "investment", **DEPLOY)
-    again = [v for v in await connector_svc.list_connectors(USER) if v.slug == "wind-mcp"]
+    await svc.import_manifest(USER, manifest, **DEPLOY)
+    again = [v for v in await connector_svc.list_connectors(USER) if v.slug == "my-http"]
     assert len(again) == 1
 
 
 async def test_import_pack_materializes_skills(svc: AgentPackService, tmp_path) -> None:
     # bundled skills land in the official-skills dir on import (deferred from
-    # boot), so they're in the library and resolvable at session time.
-    await svc.import_pack(USER, "investment", **DEPLOY)
+    # boot), so they're in the library and resolvable at session time. The
+    # content team is the one that still ships bundled skills.
+    await svc.import_pack(USER, "content", **DEPLOY)
     skills_dir = tmp_path / "official-skills"
-    assert (skills_dir / "china-dcf" / "SKILL.md").is_file()
-    assert (skills_dir / "china-sector-overview").is_dir()
+    assert (skills_dir / "xhs-topic-method" / "SKILL.md").is_file()
+    assert (skills_dir / "xhs-note-writing").is_dir()
 
 
 async def test_import_pack_idempotent(svc: AgentPackService) -> None:
@@ -223,43 +249,62 @@ def test_extract_rejects_non_zip() -> None:
 
 
 async def test_export_import_roundtrip(svc: AgentPackService, tmp_path, monkeypatch) -> None:
-    # seed the source library with the investment team (agents + connectors)
-    await svc.import_pack(USER, "investment", **DEPLOY)
-    slugs = [
-        "inv-industry-analyst",
-        "inv-model-builder",
-        "inv-earnings-tracker",
-        "inv-report-writer",
-    ]
-    data = await svc.export_agents(
-        USER, slugs, collection={"id": "inv", "name": "My Investment Team"}
+    from valuz_agent.modules.agent_packs.errors import PackImportFailed
+    from valuz_agent.modules.agent_packs.manifest import (
+        AgentPackManifest,
+        PackAgent,
+        PackCollection,
+        PackConnector,
     )
+
+    # Seed the source library via a synthetic manifest: two agents, one wired to
+    # a custom HTTP connector (the truly-portable kind — import + authorize).
+    seed = AgentPackManifest(
+        collection=PackCollection(name="My Team"),
+        agents=[
+            PackAgent(slug="r1", name="R1", instructions="lead", connectors=["my-http"]),
+            PackAgent(slug="r2", name="R2", instructions="member"),
+        ],
+        connectors=[
+            PackConnector(
+                slug="my-http",
+                source="custom",
+                display_name="My HTTP MCP",
+                transport="http",
+                url="https://example.com/mcp",
+                auth_type="bearer",
+                requires_credentials=True,
+            )
+        ],
+    )
+    await svc.import_manifest(USER, seed, **DEPLOY)
+
+    slugs = ["r1", "r2"]
+    data = await svc.export_agents(USER, slugs, collection={"name": "My Team"})
     assert isinstance(data, bytes) and len(data) > 0
 
-    # import into a *separate* install (fresh db + secret store), simulating a
+    # Import into a *separate* install (fresh db + secret store), simulating a
     # different machine — connector slugs are globally unique per install.
-    # Pin both skill roots under tmp so an embedded-skill install never touches
-    # the real ~/.agents tree.
     monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(tmp_path / "dest-official"))
     monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "dest-user-skills"))
     dest, session2, engine2 = await _build_service(tmp_path / "dest")
     try:
         preview = await dest.preview_import(USER, data)
         assert preview["preview_id"]
-        assert preview["collection"]["name"] == "My Investment Team"
+        assert preview["collection"]["name"] == "My Team"
         assert {a["slug"] for a in preview["agents"]} == set(slugs)
         assert all(not a["in_library"] for a in preview["agents"])
-        assert {c["slug"] for c in preview["connectors"]} >= {"wind-mcp", "akshare-mcp"}
+        # the connector + its "needs a key" flag survive the round-trip
+        conn = next(c for c in preview["connectors"] if c["slug"] == "my-http")
+        assert conn["requires_credentials"] is True
 
         result = await dest.confirm_import(USER, preview["preview_id"], **DEPLOY)
-        assert result["created"] == 4
+        assert result["created"] == 2
         dest_agents = {a.slug for a in await dest._agents.list_agents(USER)}
         assert set(slugs) <= dest_agents
         dest_conns = {v.slug for v in await dest._agents._connectors.list_connectors(USER)}
-        assert {"wind-mcp", "akshare-mcp", "ifind-mcp", "china-news-mcp"} <= dest_conns
+        assert "my-http" in dest_conns
         # the staged preview is consumed — confirming again fails
-        from valuz_agent.modules.agent_packs.errors import PackImportFailed
-
         with pytest.raises(PackImportFailed):
             await dest.confirm_import(USER, preview["preview_id"], **DEPLOY)
     finally:
