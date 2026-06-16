@@ -128,16 +128,27 @@ The `(runtime, provider, model)` triple is locked once a session is created; `mo
 
 ## 3. Data Layer
 
-Host and kernel share **one SQLite file** at `~/.valuz/app/valuz.db`. Both layers
-run fully **async** on `aiosqlite`. WAL journaling plus a `busy_timeout` keep
-concurrent host/kernel access safe.
+Host and kernel keep **separate SQLite files** under `~/.valuz/app/`: the host's
+`valuz.db` (the `valuz_*` business tables) and the kernel's `kernel.db`
+(`sessions` / `messages` / `events`, its langgraph checkpoint tables, and the
+kernel `alembic_version`). The split lets a sandboxed/remote kernel own its file
+exclusively and gives the in-process (`make dev`) and sandboxed (`make
+dev-sandbox`) kernels one shared session history. An explicit `database_url`
+(e.g. a shared Postgres) co-locates both layers in one store instead. Both run
+fully **async** on `aiosqlite`; WAL journaling plus a `busy_timeout` keep access
+safe.
 
 - All host DB access goes through `infra/db.py`
-  (`async_unit_of_work` / `get_async_session`).
+  (`async_unit_of_work` / `get_async_session`); the host never queries kernel
+  tables on its own engine — it reaches kernel state through the `KernelClient`
+  seam.
 - Synchronous DB calls must never run on the event loop — the host migrated off
   its sync engine to remove an event-loop deadlock.
 - Schema is created and migrated at boot: host migrations (Alembic + seed) and
-  kernel migrations (kernel-owned Alembic) run in `boot/`.
+  kernel migrations (kernel-owned Alembic) run in `boot/`. A one-time boot step
+  (`boot/kernel_db_split.py`) moves a pre-split install's kernel tables out of
+  `valuz.db` into `kernel.db` (back up → copy → verify → drop), so upgrading
+  preserves existing history.
 
 ---
 
