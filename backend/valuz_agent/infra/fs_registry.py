@@ -349,7 +349,7 @@ class FsRegistry:
     # ---- FS-10 — parser plugin local assets (model files, licenses) ----
     #
     # Each plugin gets its own subdirectory under ``data_dir/models/``.
-    # ``RapidOcrSetupJob`` writes PP-OCRv5 ONNX files + the Apache 2.0
+    # ``RapidOcrSetupJob`` writes PP-OCRv6 ONNX files + the Apache 2.0
     # ``LICENSE`` + a ``READY`` marker into ``models/light_local/rapidocr/``.
     # ``parser_light_local._build_rapidocr`` reads the same directory and
     # constructs ``rapidocr.RapidOCR`` with explicit ``params={"Det.model_path":
