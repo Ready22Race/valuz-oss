@@ -1,224 +1,141 @@
-"""memory_get / memory_write in-process MCP tools (memory-system-design §3.2).
+"""memory in-process MCP tool (memory-system-design §5).
 
-Registered via the kernel ``register_tool`` mechanism (same pattern as
-``modules/tasks/dispatch_mcp``). Both are runtime-agnostic (MCP tools work
-across claude/codex/deepagents). The handlers resolve the scope's storage
-location from the calling session's context:
-
-- ``global``  : always available.
-- ``project`` : needs the kernel project's cwd (ExecContext.project_id).
-- ``task``    : needs project cwd + the session's task_id (metadata["valuz"]).
-
-Scope visibility/writability is enforced by ScopeResolver: a chat session
-(no project cwd) can only touch ``global``; a task session can touch all three.
+A single ``memory`` tool with actions add/replace/remove (no read — memory is
+injected, so reading is implicit). Registered in the host toolkit MCP ``base``
+toolset, so it is runtime-agnostic (claude/codex/deepagents). The handler
+resolves the ``project`` target from the calling session's host-stamped
+``metadata.valuz.project_id`` (the kernel knows no projects); ``user`` /
+``global`` need no project. Both this tool and the background extractor (P1)
+call the same ``MemoryStore`` pipeline — only the ``source`` tag differs.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from src.core import ToolDef, ToolResult
 from src.core.tools import ExecContext
 
-import valuz_agent.boot.kernel  # noqa: F401
+import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.auth_context import require_current_user_id
-from valuz_agent.modules.memory.models import MEM_TYPES, MemoryScope, Scope
-from valuz_agent.modules.memory.service import MemoryError, memory_service
+from valuz_agent.modules.memory.models import TARGETS
+from valuz_agent.modules.memory.prompts import TOOL_DESCRIPTION
+from valuz_agent.modules.memory.service import MemoryError, memory_store
 
 logger = logging.getLogger(__name__)
 
-MEMORY_GET_TOOL_NAME = "memory_get"
-MEMORY_WRITE_TOOL_NAME = "memory_write"
+MEMORY_TOOL_NAME = "memory"
+_ACTIONS = ("add", "replace", "remove")
 
 
 # --- context resolution (module-level so tests can monkeypatch) -------------
 
 
-async def _resolve_project_cwd(session_id: str) -> str | None:
-    """Project-root cwd for the session's project — resolved through the
-    session's host-stamped ``metadata.valuz.project_id`` (the kernel knows
-    no projects). NOT ``session.cwd``: task sub-runs execute in their own
-    run_dir while memory scopes must anchor at the project root."""
+async def _resolve_project_id(session_id: str) -> str | None:
+    """Project id for the session — read from the host-stamped
+    ``metadata.valuz.project_id`` (the kernel knows no projects). Returns None
+    for quick chats / agent-only sessions (only user+global are writable there)."""
     if not session_id:
         return None
     sess = await kernel_client.get_session(require_current_user_id(), session_id)
     if sess is None:
         return None
-    project_id = ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or ""
-    if not project_id:
-        return None
-    from valuz_agent.modules.projects.service import project_cwd_by_id
-
-    return await project_cwd_by_id(sess.user_id, str(project_id))
+    return ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or None
 
 
-async def _resolve_task_id(session_id: str) -> str | None:
-    if not session_id:
-        return None
-    sess = await kernel_client.get_session(require_current_user_id(), session_id)
-    if sess is None:
-        return None
-    valuz = (sess.metadata or {}).get("valuz", {}) or {}
-    return valuz.get("task_id") or None
+# --- handler ----------------------------------------------------------------
 
 
-class ScopeResolver:
-    """Resolve a requested scope name into a concrete MemoryScope for a session,
-    enforcing visibility (chat → global only; project/task sessions → all)."""
-
-    async def resolve(self, scope: Scope, ctx: ExecContext) -> MemoryScope:
-        if scope == "global":
-            return MemoryScope("global")
-        cwd = await _resolve_project_cwd(ctx.session_id)
-        if not cwd:
-            raise MemoryError(
-                f"scope {scope!r} unavailable: this session has no project cwd "
-                "(only 'global' memory is available here)"
-            )
-        if scope == "project":
-            return MemoryScope("project", project_cwd=cwd)
-        if scope == "task":
-            task_id = await _resolve_task_id(ctx.session_id)
-            if not task_id:
-                raise MemoryError("scope 'task' unavailable: this session is not bound to a task")
-            return MemoryScope("task", project_cwd=cwd, task_id=task_id)
-        raise MemoryError(f"unknown scope: {scope!r}")
-
-
-_scope_resolver = ScopeResolver()
-
-
-# --- handlers ---------------------------------------------------------------
-
-
-async def _memory_get_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
-    scope = args.get("scope")
-    name = args.get("name")
-    if scope not in ("global", "project", "task") or not name:
-        return ToolResult(content="memory_get: 'scope' and 'name' are required", is_error=True)
-    try:
-        ms = await _scope_resolver.resolve(scope, ctx)
-        body = memory_service.get(ms, name=str(name))
-    except MemoryError as exc:
-        return ToolResult(content=f"memory_get: {exc}", is_error=True)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("memory_get failed")
-        return ToolResult(content=f"memory_get failed: {exc}", is_error=True)
-    if body is None:
-        return ToolResult(content=f"memory_get: no memory named {name!r} in {scope} scope")
-    return ToolResult(content=body)
-
-
-async def _memory_write_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
-    scope = args.get("scope")
-    name = args.get("name")
-    mtype = args.get("type")
+async def _memory_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+    action = args.get("action")
+    target = args.get("target")
     content = args.get("content")
-    if scope not in ("global", "project", "task"):
-        return ToolResult(content="memory_write: invalid 'scope'", is_error=True)
-    if not name or mtype not in MEM_TYPES or not content:
+    old_text = args.get("old_text")
+
+    if action not in _ACTIONS:
+        return ToolResult(content="memory: 'action' must be add|replace|remove", is_error=True)
+    if target not in TARGETS:
+        return ToolResult(content="memory: 'target' must be user|global|project", is_error=True)
+    if action == "add" and not content:
+        return ToolResult(content="memory: 'content' is required for add", is_error=True)
+    if action == "replace" and (not old_text or not content):
         return ToolResult(
-            content=(
-                "memory_write: 'name', 'type'(user|feedback|project|reference), "
-                "'content' are required"
-            ),
-            is_error=True,
+            content="memory: 'old_text' and 'content' are required for replace", is_error=True
         )
+    if action == "remove" and not old_text:
+        return ToolResult(content="memory: 'old_text' is required for remove", is_error=True)
+
+    project_id: str | None = None
+    if target == "project":
+        project_id = await _resolve_project_id(ctx.session_id)
+        if not project_id:
+            return ToolResult(
+                content=(
+                    "memory: 'project' target unavailable here (this session has no "
+                    "project) — use 'user' or 'global'"
+                ),
+                is_error=True,
+            )
+
     try:
-        ms = await _scope_resolver.resolve(scope, ctx)
-        entry = memory_service.write(
-            ms, name=str(name), type=mtype, content=str(content), source="agent"
-        )
+        if action == "add":
+            result = memory_store.add(target, str(content), project_id=project_id, source="agent")
+        elif action == "replace":
+            result = memory_store.replace(
+                target, str(old_text), str(content), project_id=project_id, source="agent"
+            )
+        else:  # remove
+            result = memory_store.remove(
+                target, str(old_text), project_id=project_id, source="agent"
+            )
     except MemoryError as exc:
-        return ToolResult(content=f"memory_write: {exc}", is_error=True)
+        return ToolResult(content=f"memory: {exc}", is_error=True)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("memory_write failed")
-        return ToolResult(content=f"memory_write failed: {exc}", is_error=True)
-    return ToolResult(content=f"saved [{entry.scope}] {entry.name} ({entry.type})")
+        logger.exception("memory tool failed")
+        return ToolResult(content=f"memory failed: {exc}", is_error=True)
+
+    return ToolResult(
+        content=json.dumps(result, ensure_ascii=False),
+        is_error=not bool(result.get("success", True)),
+    )
 
 
-# --- schemas ----------------------------------------------------------------
+# --- schema -----------------------------------------------------------------
 
-_SCOPE_PROP = {
+_TARGET_PROP = {
     "type": "string",
-    "enum": ["global", "project", "task"],
-    "description": "global=cross-project user memory; project=this project; task=this task.",
+    "enum": list(TARGETS),
+    "description": (
+        "user=who the user is (cross-project); global=cross-project notes/lessons; "
+        "project=this project (project sessions only)."
+    ),
 }
-
-_GET_PARAMS = {
-    "type": "object",
-    "properties": {"scope": _SCOPE_PROP, "name": {"type": "string"}},
-    "required": ["scope", "name"],
-}
-_WRITE_PARAMS = {
+_PARAMS = {
     "type": "object",
     "properties": {
-        "scope": _SCOPE_PROP,
-        "name": {"type": "string", "description": "kebab-case slug, unique per scope."},
-        "type": {"type": "string", "enum": list(MEM_TYPES)},
-        "content": {"type": "string", "description": "The durable fact/preference/decision."},
+        "action": {"type": "string", "enum": list(_ACTIONS), "description": "add|replace|remove."},
+        "target": _TARGET_PROP,
+        "content": {"type": "string", "description": "Entry text. Required for add and replace."},
+        "old_text": {
+            "type": "string",
+            "description": "Unique substring identifying the entry to replace/remove.",
+        },
     },
-    "required": ["scope", "name", "type", "content"],
+    "required": ["action", "target"],
 }
-
-_GET_DESC = (
-    "Load the full content of a stored memory by scope+name. The available "
-    "memory names appear in the injected memory index."
-)
-_WRITE_DESC = (
-    "Save a durable memory (fact/preference/decision NOT derivable from code/git). "
-    "Same name overwrites (update). Types: user|feedback|project|reference."
-)
-
-
-# Declarations (handler=None) for AgentConfig.tools — the kernel only surfaces
-# a tool to the model if it is declared on the agent's tools tuple; the real
-# handlers are attached from the registry (register_memory_tools) at runtime.
-MEMORY_TOOL_DECLARATIONS: tuple[ToolDef, ...] = (
-    ToolDef(
-        name=MEMORY_GET_TOOL_NAME,
-        description=_GET_DESC,
-        parameters=_GET_PARAMS,
-        handler=None,
-        read_only=True,
-    ),
-    ToolDef(
-        name=MEMORY_WRITE_TOOL_NAME,
-        description=_WRITE_DESC,
-        parameters=_WRITE_PARAMS,
-        handler=None,
-        read_only=False,
-    ),
-)
 
 
 def build_memory_tool_defs() -> tuple[ToolDef, ...]:
-    """Build the memory_get / memory_write defs (live handlers) for the
-    host toolkit MCP server."""
-    _defs: list[ToolDef] = []
-
-    def register_tool(td: ToolDef) -> None:
-        _defs.append(td)
-
-    register_tool(
-        ToolDef(
-            name=MEMORY_GET_TOOL_NAME,
-            description=_GET_DESC,
-            parameters=_GET_PARAMS,
-            handler=_memory_get_handler,
-            read_only=True,
-        )
+    """Build the single ``memory`` tool def (live handler) for the host toolkit MCP server."""
+    td = ToolDef(
+        name=MEMORY_TOOL_NAME,
+        description=TOOL_DESCRIPTION,
+        parameters=_PARAMS,
+        handler=_memory_handler,
+        read_only=False,
     )
-    register_tool(
-        ToolDef(
-            name=MEMORY_WRITE_TOOL_NAME,
-            description=_WRITE_DESC,
-            parameters=_WRITE_PARAMS,
-            handler=_memory_write_handler,
-            read_only=False,
-        )
-    )
-    logger.info("Built memory tool defs: %s, %s", MEMORY_GET_TOOL_NAME, MEMORY_WRITE_TOOL_NAME)
-    return tuple(_defs)
+    logger.info("Built memory tool def: %s", MEMORY_TOOL_NAME)
+    return (td,)

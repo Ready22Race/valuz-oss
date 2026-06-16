@@ -392,34 +392,30 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    # ---- FS-12 — memory store directories (memory-system-design §2.1) ----
+    # ---- FS-12 — memory store directories (memory-system-design §3) ----
     #
-    #   global  → <data_dir>/memory/                       (cross-project, per-user)
-    #   project → <project_cwd>/.valuz/memory/             (project, cross-session+task)
-    #   task    → <project_cwd>/.valuz/memory/tasks/<id>/  (single task, lead+members)
+    #   global  → <data_dir>/memories/               (root IS the global namespace)
+    #   project → <data_dir>/memories/projects/<id>/ (per-project, keyed by project_id)
     #
-    # Each scope dir holds topic files ``<name>.md`` (frontmatter) + a single
-    # ``MEMORY.md`` index. Returns (and creates) the scope directory.
+    # Centralized under the valuz data dir (never inside a user's bound repo) and
+    # keyed by stable ``project_id`` (decoupled from ``project.cwd``). global holds
+    # the flat ``USER.md`` + ``MEMORY.md``; each project dir holds ``MEMORY.md``.
+    # Returns (and creates) the scope directory.
 
     def memory_dir(
         self,
-        scope: Literal["global", "project", "task"],
+        scope: Literal["global", "project"],
         *,
-        project_cwd: str | Path | None = None,
-        task_id: str | None = None,
+        project_id: str | None = None,
     ) -> Path:
         if scope == "global":
-            path = self.data_dir() / "memory"
+            path = self.data_dir() / "memories"
         elif scope == "project":
-            if not project_cwd:
-                raise ValueError("project memory requires project_cwd")
-            path = Path(project_cwd) / ".valuz" / "memory"
-        elif scope == "task":
-            if not project_cwd or not task_id:
-                raise ValueError("task memory requires project_cwd and task_id")
-            if "/" in task_id or ".." in task_id:
-                raise ValueError(f"invalid task_id: {task_id!r}")
-            path = Path(project_cwd) / ".valuz" / "memory" / "tasks" / task_id
+            if not project_id:
+                raise ValueError("project memory requires project_id")
+            if "/" in project_id or ".." in project_id:
+                raise ValueError(f"invalid project_id: {project_id!r}")
+            path = self.data_dir() / "memories" / "projects" / project_id
         else:  # pragma: no cover - guarded by Literal
             raise ValueError(f"unknown memory scope: {scope!r}")
         path.mkdir(parents=True, exist_ok=True)

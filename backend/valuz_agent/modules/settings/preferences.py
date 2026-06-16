@@ -41,6 +41,13 @@ KEY_DEFAULT_PROVIDER_ID = "model.default_provider_id"
 KEY_DEFAULT_MODEL = "model.default_model"
 KEY_THEME = "ui.theme"
 KEY_FONT_SIZE = "ui.font_size"
+# Memory system toggles (memory-system-design §11). ``memory.enabled`` is the
+# product master switch (gates injection, the foreground tool, and the
+# background extractor); ``memory.auto_extract`` gates ONLY the background
+# extractor, so a user can keep manual/agent memory while turning off the
+# automatic (LLM-spending) review. Both default ON.
+KEY_MEMORY_ENABLED = "memory.enabled"
+KEY_MEMORY_AUTO_EXTRACT = "memory.auto_extract"
 
 FALLBACK_TIMEZONE = "UTC"
 FALLBACK_LOCALE = "zh-CN"
@@ -99,7 +106,7 @@ async def _write(db: AsyncSession, key: str, value: str) -> None:
             key=key,
             value_json=json.dumps({"value": value}),
             updated_at=now_ms(),
-        )
+        ),
     )
 
 
@@ -280,6 +287,33 @@ async def set_font_size(db: AsyncSession, value: str) -> None:
     if value not in ALLOWED_FONT_SIZES:
         raise ValueError(f"Invalid font_size: {value!r}. Allowed: {sorted(ALLOWED_FONT_SIZES)}")
     await _write(db, KEY_FONT_SIZE, value)
+
+
+async def _read_bool(db: AsyncSession, key: str, default: bool) -> bool:
+    raw = await _read(db, key)
+    if raw is None:
+        return default
+    return raw == "true"
+
+
+async def get_memory_enabled(db: AsyncSession) -> bool:
+    """Memory master switch (default ON). Gates injection + tool + extractor."""
+    return await _read_bool(db, KEY_MEMORY_ENABLED, True)
+
+
+async def set_memory_enabled(db: AsyncSession, value: bool) -> None:
+    await _write(db, KEY_MEMORY_ENABLED, "true" if value else "false")
+
+
+async def get_memory_auto_extract(db: AsyncSession) -> bool:
+    """Background-extractor switch (default ON). Independent of the foreground
+    tool: turning this off keeps manual/agent memory but stops the automatic
+    (LLM-spending) review."""
+    return await _read_bool(db, KEY_MEMORY_AUTO_EXTRACT, True)
+
+
+async def set_memory_auto_extract(db: AsyncSession, value: bool) -> None:
+    await _write(db, KEY_MEMORY_AUTO_EXTRACT, "true" if value else "false")
 
 
 def detect_system_timezone() -> str:
