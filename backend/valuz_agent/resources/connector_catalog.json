@@ -42,7 +42,9 @@
     "display_name": "GitHub",
     "description": "Access GitHub repositories, issues, pull requests and more.",
     "icon_url": "https://github.com/favicon.ico",
-    "categories": ["developer"],
+    "categories": [
+      "developer"
+    ],
     "url": "https://api.githubcopilot.com/mcp/",
     "auth_type": "oauth",
     "transport": "http",
@@ -69,7 +71,9 @@
     "display_name": "Linear",
     "description": "Manage Linear issues, projects and cycles.",
     "icon_url": "https://linear.app/favicon.ico",
-    "categories": ["productivity"],
+    "categories": [
+      "productivity"
+    ],
     "url": "https://mcp.linear.app/mcp",
     "auth_type": "oauth",
     "transport": "http",
@@ -80,7 +84,9 @@
     "display_name": "Notion",
     "description": "Read and write Notion pages and databases.",
     "icon_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAAAAABXZoBIAAAA80lEQVR4AZTRIYyDMBjF8efxBn3qfFD1IcGiUFOIyVokAos6h8IjEXNIfD6DqUXOVb7jNnK027pkf9mfeE0LvukjtOtifJRp6BpdqAi3kquDLSJV6KYbJjF/5zXGA8/o6SU4OYhyHzQyX4bupwSWA4FvOMUKpYvVtjlOsqz322QunumXP6A1MpGcK62eUQGoSKPBZ2QOQMj+JWYREIUwzVqgCWFCACaIM5AMIWQJxEG0ADxsdswUyfEB7R0lQm7J3EfKDcdZVm4ZbhX/yM55eHs1Mk84kDmaWp9S51O7AxkDwFda6Lrth8s+gN/BTaMgUWMCAITxMqVHQtVcAAAAAElFTkSuQmCC",
-    "categories": ["productivity"],
+    "categories": [
+      "productivity"
+    ],
     "url": "https://mcp.notion.com/mcp",
     "auth_type": "oauth",
     "transport": "http",
@@ -96,10 +102,15 @@
       "zh-CN": "通过 Chrome DevTools 协议调试、检查和自动化网页",
       "en-US": "Debug, inspect and automate web pages via the Chrome DevTools Protocol"
     },
-    "categories": ["developer"],
+    "categories": [
+      "developer"
+    ],
     "transport": "stdio",
     "auth_type": "none",
     "command": "npx",
-    "args": ["-y", "chrome-devtools-mcp@latest"]
+    "args": [
+      "-y",
+      "chrome-devtools-mcp@latest"
+    ]
   }
 ]

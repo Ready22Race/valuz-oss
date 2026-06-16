@@ -54,11 +54,14 @@ export interface TeamMember {
 }
 
 /**
- * A team the user can pick in step 4. The first three are opinionated presets
- * (their agents get created + deployed into the example project on entry); the
- * last ("custom") has no fixed roster and routes to the "skip team" path.
+ * A team the user can pick in step 4. The first three are the recommended
+ * Agent Packs (内容 / 投研 / 产研) — picking one imports that pack's agents and
+ * deploys them into the example project; the rosters here mirror the deployed
+ * packs. The last ("custom") has no fixed roster and routes to the "skip team"
+ * path. The pack manifests (backend ``resources/agent_packs/``) are the source
+ * of truth; these previews carry only onboarding's curated name/duty copy.
  */
-export type TeamId = "general" | "investment" | "product" | "custom";
+export type TeamId = "content" | "investment" | "product" | "custom";
 
 export interface TeamPreset {
   id: TeamId;
@@ -75,32 +78,32 @@ export interface TeamPreset {
 
 export const TEAMS: TeamPreset[] = [
   {
-    id: "general",
-    emoji: "🧩",
-    nameKey: "onboarding.teams.general.name",
-    taglineKey: "onboarding.teams.general.tagline",
-    collabKey: "onboarding.teams.general.collab",
+    id: "content",
+    emoji: "✨",
+    nameKey: "onboarding.teams.content.name",
+    taglineKey: "onboarding.teams.content.tagline",
+    collabKey: "onboarding.teams.content.collab",
     members: [
       {
-        avatar: "🔎",
-        nameKey: "onboarding.roles.general.researcher.name",
+        avatar: "💡",
+        nameKey: "onboarding.roles.content.topicPlanner.name",
         tag: "lead",
-        dutyKey: "onboarding.roles.general.researcher.duty",
+        dutyKey: "onboarding.roles.content.topicPlanner.duty",
       },
       {
         avatar: "✍️",
-        nameKey: "onboarding.roles.general.writer.name",
-        dutyKey: "onboarding.roles.general.writer.duty",
+        nameKey: "onboarding.roles.content.noteWriter.name",
+        dutyKey: "onboarding.roles.content.noteWriter.duty",
       },
       {
-        avatar: "🔍",
-        nameKey: "onboarding.roles.general.reviewer.name",
-        dutyKey: "onboarding.roles.general.reviewer.duty",
+        avatar: "🎨",
+        nameKey: "onboarding.roles.content.visualDesigner.name",
+        dutyKey: "onboarding.roles.content.visualDesigner.duty",
       },
       {
-        avatar: "🗂️",
-        nameKey: "onboarding.roles.general.archivist.name",
-        dutyKey: "onboarding.roles.general.archivist.duty",
+        avatar: "📣",
+        nameKey: "onboarding.roles.content.publisher.name",
+        dutyKey: "onboarding.roles.content.publisher.duty",
       },
     ],
   },
@@ -129,8 +132,8 @@ export const TEAMS: TeamPreset[] = [
       },
       {
         avatar: "📋",
-        nameKey: "onboarding.roles.investment.compliance.name",
-        dutyKey: "onboarding.roles.investment.compliance.duty",
+        nameKey: "onboarding.roles.investment.reportWriter.name",
+        dutyKey: "onboarding.roles.investment.reportWriter.duty",
       },
     ],
   },

@@ -292,7 +292,7 @@ class AgentService:
         # project the agent is deployed to) picks the edit up automatically.
         return row
 
-    async def delete_agent(self, user_id: str, slug: str) -> None:
+    async def delete_agent(self, user_id: str, slug: str, *, cascade: bool = False) -> None:
         # Official and custom agents are equally deletable now — the only block
         # is the live派驻 guard below. seed_official_agents is insert-if-absent,
         # so deleted defaults simply won't come back unless the user wipes DB.
@@ -302,12 +302,18 @@ class AgentService:
         # Protected base agents (default-assistant) opt out of deletion.
         if not existing.deletable:
             raise AgentNotDeletableError(slug)
-        # v2 派驻 guard: block deleting an agent still referenced by any project
-        # member (would orphan a task holder). Caller must解除派驻 first.
+        # v2 派驻 guard: an agent referenced by project members can't be deleted
+        # outright — that would orphan those members. Two modes:
+        #   cascade=False (default) — block and tell the caller to 解除派驻 first
+        #     (keeps the API safe for non-interactive callers).
+        #   cascade=True — the confirmed-delete path: 解除 every 派驻 first, then
+        #     delete, so the user doesn't have to hunt down each project by hand.
         deployments = await self._members.list_by_source_agent_slug(user_id, existing.slug)
         if deployments:
-            if deployments:
+            if not cascade:
                 raise AgentStillDeployedError(slug, len(deployments))
+            for m in deployments:
+                await self._members.delete(user_id, m.project_id, m.agent_slug)
         if not await self._agents.delete(user_id, slug):
             raise AgentNotFoundError(slug)
 

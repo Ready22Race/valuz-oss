@@ -13,6 +13,7 @@ from valuz_agent.api.middleware import (
     ErrorHandlerMiddleware,
     TimingMiddleware,
 )
+from valuz_agent.api.routes.agent_templates import router as agent_templates_router
 from valuz_agent.api.routes.agents import router as agents_router
 from valuz_agent.api.routes.analytics import router as analytics_router
 from valuz_agent.api.routes.automations import router as automations_router
@@ -100,6 +101,7 @@ def create_app() -> FastAPI:
     app.include_router(automations_router)
     app.include_router(decisions_router)
     app.include_router(agents_router)
+    app.include_router(agent_templates_router)
     app.include_router(tasks_router)
     app.include_router(analytics_router)
     app.include_router(resources_router)

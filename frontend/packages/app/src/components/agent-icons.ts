@@ -1,20 +1,26 @@
 import {
+  Activity,
   BarChart3,
   Bot,
   BrainCircuit,
   BriefcaseBusiness,
+  Calculator,
   Code2,
   FileSearch,
+  Gem,
   Globe2,
   Headphones,
+  Image,
   Lightbulb,
   Megaphone,
   Palette,
   PenTool,
+  Presentation,
   Scale,
   Search,
   ShieldCheck,
   Sparkles,
+  Trophy,
   type LucideIcon,
 } from "lucide-react";
 import { createElement } from "react";
@@ -191,6 +197,13 @@ export const AVATAR_PRESETS: Array<{ key: string; icon: LucideIcon }> = [
   { key: "business", icon: BriefcaseBusiness },
   { key: "idea", icon: Lightbulb },
   { key: "search", icon: Search },
+  // Added for the agent-team templates (investment / Xiaohongshu / World Cup).
+  { key: "gem", icon: Gem },
+  { key: "trophy", icon: Trophy },
+  { key: "calculator", icon: Calculator },
+  { key: "activity", icon: Activity },
+  { key: "presentation", icon: Presentation },
+  { key: "image", icon: Image },
 ];
 
 const AVATAR_PRESET_MAP = new Map<string, LucideIcon>(

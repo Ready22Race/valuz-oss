@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 from app.schemas import (
     McpHttpServerConfigSchema as McpHttpServerConfig,
@@ -72,7 +73,7 @@ async def _resolve_connector_slug(
         return None
 
     if row.transport == "stdio":
-        return _build_stdio_config(row)
+        return _build_stdio_config(row, secrets)
 
     return await _build_http_config(row, secrets)
 
@@ -135,14 +136,33 @@ async def _build_http_config(row, secrets: FileSecretStore) -> list[McpServerCon
     ]
 
 
-def _build_stdio_config(row) -> list[McpServerConfig] | None:
+def _bundled_mcp_servers_dir() -> str:
+    """Absolute path to the bundled MCP server tree
+    (``valuz_agent/resources/mcp_servers``), as a POSIX string.
+
+    Bundled stdio connectors reference their entry point with the
+    ``{mcp_dir}`` placeholder so the catalog stays path-agnostic and the
+    same JSON works in a dev checkout and a PyInstaller-frozen app (where
+    ``resources/`` lands under ``_internal/valuz_agent/``).
+    """
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parent.parent / "resources" / "mcp_servers").as_posix()
+
+
+def _build_stdio_config(row, secrets: FileSecretStore) -> list[McpServerConfig] | None:
     import shlex
 
     if not row.command:
         logger.info("mcp resolver: stdio connector %s has no command", row.slug)
         return None
 
-    raw_command = row.command
+    mcp_dir = _bundled_mcp_servers_dir()
+
+    def _expand(value: str) -> str:
+        return value.replace("{mcp_dir}", mcp_dir)
+
+    raw_command = _expand(row.command)
     extra_args: tuple[str, ...] = ()
     if " " in raw_command:
         parts = shlex.split(raw_command)
@@ -154,7 +174,7 @@ def _build_stdio_config(row) -> list[McpServerConfig] | None:
         try:
             parsed = json.loads(row.args_json)
             if isinstance(parsed, list):
-                args = extra_args + tuple(str(a) for a in parsed)
+                args = extra_args + tuple(_expand(str(a)) for a in parsed)
         except json.JSONDecodeError:
             pass
     env: dict[str, str] = {}
@@ -165,6 +185,15 @@ def _build_stdio_config(row) -> list[McpServerConfig] | None:
                 env = {str(k): str(v) for k, v in parsed_env.items()}
         except json.JSONDecodeError:
             pass
+    # Inject secret credentials (e.g. WIND_API_KEY) declared in the
+    # connector's cred manifest with ``target == "env"``. Values come from
+    # the secret store, never persisted in the connector row.
+    for m in _parse_manifest(row.cred_manifest_json):
+        if m.get("target") != "env":
+            continue
+        val = secrets.get(m["secret_ref"])
+        if val is not None:
+            env[m["name"]] = val
     return [
         McpStdioServerConfig(
             name=row.slug,
@@ -173,6 +202,16 @@ def _build_stdio_config(row) -> list[McpServerConfig] | None:
             env=env,
         )
     ]
+
+
+def _parse_manifest(raw: str | None) -> list[dict[str, Any]]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [m for m in parsed if isinstance(m, dict)] if isinstance(parsed, list) else []
 
 
 __all__ = ["resolve_mcp_servers"]

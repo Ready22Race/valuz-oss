@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { FileText, Plus, Search, Sparkles, Upload, Zap } from "lucide-react";
 import {
@@ -191,9 +191,20 @@ export const SkillsPage = () => {
     setMainClassName,
   } = useProjectOutlet();
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
+  const [searchParams] = useSearchParams();
   const [skills, setSkills] = useState<SkillView[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
+  // Honor a ``?skill=<id>`` deep link (e.g. from an agent's 装备 list) as the
+  // initial selection; falls back to the first skill once the list loads if the
+  // id isn't found. Lazy initializer so there's no setState-in-effect.
+  const [activeSkillId, setActiveSkillId] = useState<string | null>(() =>
+    searchParams.get("skill"),
+  );
+  // The ``?skill=`` deep link only positions the list once: scroll the
+  // pre-selected card into view on first paint, then leave the scroll alone so
+  // ordinary clicks don't yank the viewport around.
+  const skillParam = searchParams.get("skill");
+  const scrolledToParamRef = useRef(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -566,7 +577,10 @@ export const SkillsPage = () => {
                 // logic here for the badge lookup.
                 const cat = categories.find((c) => c.filter(skill));
                 const categoryId = cat?.id ?? "_other";
-                return (
+                // Scroll the deep-linked (``?skill=``) card into view once.
+                const scrollTarget =
+                  isSelected && !!skillParam && !scrolledToParamRef.current;
+                const card = (
                   <SkillCard
                     skill={toCardSkill(skill)}
                     originBadge={badgeForCategory(categoryId, skill, t)}
@@ -579,6 +593,19 @@ export const SkillsPage = () => {
                       />
                     }
                   />
+                );
+                if (!scrollTarget) return card;
+                return (
+                  <div
+                    ref={(el) => {
+                      if (el) {
+                        el.scrollIntoView({ block: "center" });
+                        scrolledToParamRef.current = true;
+                      }
+                    }}
+                  >
+                    {card}
+                  </div>
                 );
               }}
               emptyState={
