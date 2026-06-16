@@ -101,10 +101,14 @@ async def test_import_pack_creates_agents(svc: AgentPackService) -> None:
     # the pack's recommended effort wins over the deploy default
     assert analyst.effort == "high"
     assert analyst.source == "custom"
-    # 投研 ships as a bare roster for now — its dedicated team wires up the
-    # skills + (Valuz) MCPs later; the third-party financial MCPs were removed.
-    assert analyst.skills == []
-    assert analyst.connector_types == []
+    # 投研 deploys with its global skill set + the Valuz MCPs (search + quotes).
+    assert analyst.skills == [
+        "sector-overview",
+        "competitive-analysis",
+        "comps",
+        "idea-generation",
+    ]
+    assert analyst.connector_types == ["valuz-search", "valuz-stock"]
 
 
 async def test_import_pack_registers_connectors(svc: AgentPackService) -> None:

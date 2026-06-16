@@ -264,11 +264,11 @@
           <div class="dtab on">概览</div><div class="dtab">指令</div><div class="dtab">技能</div><div class="dtab">连接器</div>
         </div>
         <div class="dbody">
-          行业全景、竞争格局、可比公司、标的池——一条龙的 A 股行业研究。给一个行业/主题和一句话角度,产出结构化研究纪要。
-          <div class="lbl">技能(移植自 claude-for-financial-services-cn)</div>
+          行业全景、竞争格局、可比公司、标的池——一条龙的全球股票行业研究(美股/港股/A 股为主,兼顾其他市场)。给一个行业/主题和一句话角度,产出结构化研究纪要。
+          <div class="lbl">技能(移植自 claude-for-financial-services-cn,已全球化改写)</div>
           <span class="chip"><i data-lucide="file-search"></i> 行业综述</span><span class="chip"><i data-lucide="file-search"></i> 竞争格局</span><span class="chip"><i data-lucide="file-search"></i> 可比估值</span><span class="chip"><i data-lucide="file-search"></i> 标的筛选</span>
-          <div class="lbl">连接器(数据自动降级:Wind → iFind → AkShare)</div>
-          <span class="chip"><i data-lucide="plug"></i> 万得 Wind</span><span class="chip"><i data-lucide="plug"></i> 同花顺 iFind</span><span class="chip"><i data-lucide="plug"></i> AkShare(免费)</span><span class="chip"><i data-lucide="plug"></i> 财经新闻(免费)</span>
+          <div class="lbl">连接器(Valuz 自有 MCP)</div>
+          <span class="chip"><i data-lucide="plug"></i> Valuz · 搜索</span><span class="chip"><i data-lucide="plug"></i> Valuz · 行情</span>
           <div class="lbl">派驻</div>
           尚未派驻到任何项目
         </div>
@@ -356,23 +356,22 @@
 <script>
   // ══ 数据(与 teams.md 一致)══
   const MCP = {
-    wind:{n:"万得 Wind",free:false}, ifind:{n:"同花顺 iFind",free:false},
-    akshare:{n:"AkShare",free:true}, news:{n:"财经新闻",free:true},
+    valuzSearch:{n:"Valuz · 搜索",free:true}, valuzStock:{n:"Valuz · 行情",free:true},
     xhs:{n:"小红书检索",free:true}, websearch:{n:"网络搜索",free:true},
   };
   const teams = [
     { id:"investment", scene:"投研 / 金融", icon:"gem", name:"投研 Team",
-      tag:"行业 + 建模 + 跟踪 + 成稿,A 股投研完整班底",
+      tag:"行业 + 建模 + 跟踪 + 成稿,全球股票投研完整班底(美股/港股/A 股为主)",
       pipeline:["行业研究","财务建模","业绩跟踪","研报成稿"],
       roles:[
         { s:"inv-industry-analyst", a:"bar-chart-3", n:"行业分析师", d:"行业全景、竞争格局、可比公司、标的池", effort:"high",
-          skills:["行业综述","竞争格局","可比估值","标的筛选"], mcp:["wind","ifind","akshare","news"] },
+          skills:["行业综述","竞争格局","可比估值","标的筛选"], mcp:["valuzSearch","valuzStock"] },
         { s:"inv-model-builder", a:"calculator", n:"财务建模师", d:"DCF / 三表 / 可比,直接出 Excel 模型", effort:"high",
-          skills:["DCF 估值","三表模型","可比估值","模型审计"], mcp:["wind","ifind","akshare"] },
+          skills:["DCF 估值","三表模型","可比估值","模型审计"], mcp:["valuzSearch","valuzStock"] },
         { s:"inv-earnings-tracker", a:"activity", n:"业绩跟踪员", d:"财报季:读财报 → 差异分析 → 更新模型 → 点评", effort:"high",
-          skills:["业绩点评","财报前瞻","模型更新"], mcp:["wind","ifind","akshare","news"] },
+          skills:["业绩点评","财报前瞻","模型更新"], mcp:["valuzSearch","valuzStock"] },
         { s:"inv-report-writer", a:"presentation", n:"研报撰写人", d:"首次覆盖报告、晨会纪要、路演 PPT", effort:"medium",
-          skills:["首次覆盖","晨会纪要","PPT 生成"], mcp:["akshare"] },
+          skills:["首次覆盖","晨会纪要","PPT 生成"], mcp:["valuzSearch","valuzStock"] },
       ]},
     { id:"xhs-content", scene:"内容创作", icon:"sparkles", name:"小红书内容创作 Team",
       tag:"选题 → 文案 → 配图 → 发布,图文笔记生产线",
@@ -552,8 +551,8 @@
       <div><div class="nm">投研 Team.valuz-agent</div><div class="ds">一组 4 个 agent · 含 13 个技能 · 来自他人分享</div></div></div>
       <div class="pvlbl">包含的 Agent</div>${rows}
       <div class="callout"><span class="ci">${ic('key-round')}</span>
-      <div>这组 agent 用到 <b>万得 Wind / 同花顺 iFind / AkShare / 财经新闻</b> 4 个连接器,包内<b>不含密钥</b>。
-      AkShare 与财经新闻免费、导入即用;Wind / iFind 在设置里填你自己的凭证后自动升级数据源。</div></div>`;
+      <div>这组 agent 用到 <b>Valuz · 搜索 / Valuz · 行情</b> 2 个连接器,包内<b>不含密钥</b>。
+      均为 Valuz 自有 MCP,OAuth 登录后即可使用。</div></div>`;
   }
   function openImport(){ resetImport(); document.getElementById("impOverlay").classList.add("show"); lucide.createIcons(); }
   function closeImport(){ document.getElementById("impOverlay").classList.remove("show"); }

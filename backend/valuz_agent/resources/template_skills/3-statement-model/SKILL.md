@@ -1,80 +1,94 @@
 ---
-name: china-3-statement-model
-description: Three-statement financial model for A-share stocks. Adapts the standard 3-statement-model methodology for Chinese accounting standards (CAS), Chinese GAAP differences, and AkShare-sourced financials. Use instead of the original 3-statement-model skill when building integrated IS/BS/CF models for Chinese listed companies.
+name: 3-statement-model
+description: Three-statement financial model for global equities (focus US / HK / A-shares, also other markets). Builds integrated IS/BS/CF models using valuz-stock (income_statement / balance_sheet / cashflow_statement / revenue_breakdown / company_overview) for three-statement history and revenue drivers, and valuz-search (earnings_search / document_raw_content) for earnings reports, calls, research, minutes, and filings. Applies the accounting standard of each issuer (US GAAP / IFRS / CAS) and notes where line items differ by standard.
 ---
 
-# china-3-statement-model
+# 3-statement-model
 
 ## Purpose
 
-Build institutional-quality three-statement models (Income Statement / Balance Sheet / Cash Flow) for A-share equities, adapted for Chinese Accounting Standards (CAS) and the Chinese market context.
+Build institutional-quality three-statement models (Income Statement / Balance Sheet / Cash Flow) for 全球股票市场（美股/港股/A 股为主，兼顾其他市场）, applying the accounting standard that applies to each issuer (US GAAP / IFRS / CAS).
 
-## Key Differences from US 3-Statement Models
+## Standard-Aware Parameters
 
-| Parameter | US Model | China Model |
-|-----------|----------|-------------|
-| Accounting standard | US GAAP / IFRS | CAS (企业会计准则) |
-| Tax rate | 21% federal | 25% standard (高新技术企业 15%) |
-| Currency | USD | CNY (人民币) |
-| Fiscal year | Varied | Mostly Dec 31 year-end |
-| Revenue recognition | ASC 606 | CAS 14 (similar principles) |
-| Goodwill | Indefinite life (no amortization) | CAS 8 — goodwill amortized or tested |
-| R&D capitalization | Typically expensed | Can be capitalized under CAS |
-| VAT treatment | Sales tax separate | 增值税 often embedded in revenue/sales |
-| Unit reporting | USD | Often 千元 (thousands CNY) — verify |
+Line items and conventions differ by the standard the issuer reports under. Determine the applicable standard first, then adapt.
+
+| Parameter | Notes (varies by applicable standard) |
+|-----------|---------------------------------------|
+| Accounting standard | US GAAP / IFRS / CAS (企业会计准则) — pick per issuer |
+| Tax rate | Use the applicable corporate rate for the issuer's jurisdiction (do not hard-code) |
+| Currency | Reporting currency of the issuer (USD / HKD / CNY / …) |
+| Fiscal year | Varies by issuer — confirm year-end |
+| Revenue recognition | ASC 606 / IFRS 15 / CAS 14 — similar principles, confirm per standard |
+| Goodwill | US GAAP / IFRS: indefinite life, impairment-tested; under some standards amortized — confirm per standard |
+| R&D capitalization | Typically expensed under US GAAP; capitalizable under IFRS / CAS — confirm per standard |
+| Indirect taxes (e.g. VAT) | Reported per local standard; often excluded from headline revenue — confirm per standard |
+| Unit reporting | Use the local common unit for the issuer's reports — verify before modeling |
 
 ## Data Sources
 
-### Tier 0 — 万得 Wind（最全面付费数据）
-- 覆盖：A股/港美股/基金/指数/债券/宏观/研报/分析（44个工具）
-- MCP 服务：`wind-mcp`（需 `WIND_API_KEY` 密钥，以 `ak_` 开头）
-- 优势：全市场覆盖面最广、数据最全面、包含研报和量化分析
-- 密钥申请：https://aifinmarket.wind.com.cn/#/home
+Use `valuz-stock` to pull three-statement history and line-item data; use `valuz-search` to retrieve original earnings reports and filings.
 
-### Tier 1 — 同花顺 iFind（付费精确数据）/ AkShare MCP（Tier-2 免费备选）
+**Symbol format (note at first tool use):** `valuz-stock` takes a **bare ticker** (`AAPL` / `00700` / `600519`); `valuz-search` takes `market:ticker` (`US:AAPL` / `HK:00700` / `SH:600519`).
 
-```python
-get_financials(ticker, "income", "annual")   → 利润表
-get_financials(ticker, "balance", "annual")  → 资产负债表
-get_financials(ticker, "cashflow", "annual") → 现金流量表
-get_quote(ticker)                            → 实时行情
-get_historical_data(ticker)                  → 历史价格
-get_stock_info(ticker)                       → 公司基本信息
+### `valuz-stock` — 三表历史数据、财务科目、营收拆分、公司画像
+
+```text
+income_statement(symbol, period=annual, limit=5)    → 利润表 / Income Statement
+balance_sheet(symbol, period=annual, limit=5)       → 资产负债表 / Balance Sheet
+cashflow_statement(symbol, period=annual, limit=5)  → 现金流量表 / Cash Flow Statement
+revenue_breakdown(symbol)                            → 营收拆分 / Revenue breakdown (建模驱动)
+company_overview(symbol)                             → 公司画像 / Company overview
 ```
 
-### Secondary Sources (when AkShare insufficient)
-- 巨潮资讯 (cninfo.com.cn) — mandatory disclosure filings
-- 上交所 / 深交所 — listed company announcements
-- 上证e互动 / 深交所互动易 — IR Q&A
-- 公司官网投资者关系页面
+- `period` accepts `annual` or `quarterly`; `limit` controls how many periods to return (use a multi-period `limit` for historical depth).
+- Tickers span markets: US (`AAPL`), HK (`00700`), A-share (`600519`), and others — always **bare** for `valuz-stock`.
+
+### `valuz-search` — 财报、公告原文检索
+
+Retrieve original earnings reports, earnings calls, research, minutes, and regulatory filings to source and verify line items, disclosures, and footnotes.
+
+```text
+earnings_search(query, symbols=["US:AAPL"])  → 定位财报文档 / Find earnings filings
+document_raw_content(...)                      → 取财报原文 / Fetch full filing text (科目口径核对)
+document_fetch(...)                            → 取文档结构化内容 / Fetch document content
+```
+
+Use `earnings_search` (valuz-search) to locate the relevant filing, then `document_raw_content` / `document_fetch` (valuz-search) to pull the original text for line-item / 科目口径 reconciliation. Symbols use `market:ticker`.
 
 ## Workflow
 
 ### Step 1: Data Retrieval
 
-Pull 3-5 years of historical financials from AkShare.
+用 `income_statement` / `balance_sheet` / `cashflow_statement`(valuz-stock, period=annual, limit=5)拉 5 年历史三表；营收驱动用 `revenue_breakdown`(valuz-stock)，公司画像用 `company_overview`(valuz-stock)；财报原文/科目口径核对用 `earnings_search`+`document_raw_content`(valuz-search)。Pull 3-5 years of historical financials.
+
+**Symbol format:** `valuz-stock` 裸代码（`AAPL` / `00700` / `600519`）；`valuz-search` `market:ticker`（`US:AAPL` / `HK:00700` / `SH:600519`）。
 
 **Verify units carefully:**
-- Some statements report in 元 (CNY)
-- Others in 千元 (thousands CNY)
-- Normalize to consistent unit before modeling
+- Reporting unit varies by issuer/market (e.g. 元 / 千元 / thousands / millions)
+- Normalize to a consistent unit before modeling
 
-```python
-# Pull all three statements
-get_financials(ticker, "income", "annual")
-get_financials(ticker, "balance", "annual")
-get_financials(ticker, "cashflow", "annual")
+```text
+# Pull all three statements (valuz-stock, bare ticker)
+income_statement(symbol, period=annual, limit=5)
+balance_sheet(symbol, period=annual, limit=5)
+cashflow_statement(symbol, period=annual, limit=5)
+# Revenue drivers + company profile
+revenue_breakdown(symbol)
+company_overview(symbol)
+# Reconcile line items against original filings (valuz-search, market:ticker)
+earnings_search(query, symbols=["US:AAPL"])  →  document_raw_content(...)
 ```
 
 ### Step 2: Historical Analysis
 
 Document key trends:
 
-- **Revenue growth**: YoY %, CAGR over 3-5 years
+- **Revenue growth**: YoY %, CAGR over 3-5 years (拆分驱动用 `revenue_breakdown`)
 - **Gross margin**: 毛利率 — track expansion/contraction
 - **Operating margin**: 营业利润率
 - **Net margin**: 净利率
-- **Tax rate**: 所得税率 — flag if below 25% (likely 高新技术企业)
+- **Tax rate**: 所得税率 — flag if below the applicable statutory rate (possible incentives/preferential rate)
 - **Effective tax rate**: vs statutory rate
 - **D&A**: 折旧与摊销 as % of PPE
 - **CapEx**: 资本支出 from cash flow statement
@@ -83,17 +97,17 @@ Document key trends:
 
 ### Step 3: Build the Model
 
-Follow standard 3-statement modeling methodology, adapted for CAS:
+Follow standard 3-statement modeling methodology, adapted to the applicable standard (US GAAP / IFRS / CAS):
 
 #### Income Statement (利润表)
 
-Key line items (Chinese naming):
+Key line items (naming may vary by standard; CAS naming shown as reference):
 - 营业收入 (Revenue)
 - 营业成本 (COGS)
-- 税金及附加 (Taxes and surcharges — includes 消费税、城建税等)
+- 税金及附加 (Taxes and surcharges — includes 消费税、城建税等; applies under CAS)
 - 销售费用 (Selling expenses)
 - 管理费用 (G&A)
-- 研发费用 (R&D expenses — must be separated per CAS)
+- 研发费用 (R&D expenses — separated where the standard requires)
 - 财务费用 (Financial costs — net of interest income)
 - 营业利润 (Operating profit)
 - 营业外收入/支出 (Non-operating income/expenses)
@@ -138,7 +152,7 @@ Key line items:
 
 #### Cash Flow Statement (现金流量表)
 
-Chinese indirect method:
+Indirect method:
 - 经营活动现金流量 (Operating CF):
   - Start from 净利润
   - Adjust: D&A, 财务费用, 投资收益, 营运资本 changes
@@ -157,7 +171,7 @@ Chinese indirect method:
 
 ### Step 4: Balance Checks
 
-**CRITICAL — Chinese-specific checks:**
+**CRITICAL checks:**
 
 1. **Cash reconciliation**: 货币资金 (BS) = 期末现金余额 (CF) ± restricted cash
 2. **BS balancing**: 资产总计 = 负债和股东权益总计
@@ -173,31 +187,31 @@ Chinese indirect method:
 - Sensitivity on revenue growth, gross margin, tax rate
 - Key drivers: 毛利率, 期间费用率, 营运资本效率
 
-## China-Specific Modeling Conventions
+## Modeling Conventions (Standard-Aware)
 
-### 增值税 (VAT)
-- Listed companies report 营业收入 net of VAT
-- 税金及附加 includes 消费税 but not VAT
-- VAT is off-balance-sheet in most models
+### Indirect taxes (e.g. 增值税 / VAT)
+- Headline 营业收入 is typically reported 按当地准则口径 (net of indirect taxes such as VAT where applicable)
+- Under CAS, 税金及附加 includes 消费税 but not VAT
+- Indirect taxes are usually off-balance-sheet in most models
 
 ### 商誉 (Goodwill)
-- Common from M&A, especially 2015-2016 boom
+- Common from M&A
 - Flag if 商誉 > 30% of 归母权益
-- Note annual impairment testing requirements
+- Note impairment-testing (and, under standards that amortize, amortization) requirements
 
 ### 研发费用 (R&D)
-- CAS requires R&D to be expensed (not capitalized like IFRS allows)
-- Some companies disclose R&D capitalization in notes — check if >5% of revenue
+- Treatment differs by standard: typically expensed under US GAAP; capitalizable under IFRS / CAS
+- Check disclosures for capitalized R&D — flag if >5% of revenue
 
 ### 折旧 (Depreciation)
-- Chinese companies often use straight-line over longer lives
+- Often straight-line over the asset's useful life
 - Typical ranges:
   - Buildings: 20-40 years
   - Equipment: 5-10 years
   - Vehicles: 4-6 years
 
 ### 存货 (Inventory)
-- LIFO not permitted under CAS (FIFO or weighted average only)
+- Costing method (FIFO / weighted average / LIFO) depends on the applicable standard — LIFO is permitted under US GAAP but not under IFRS / CAS
 - 存货计价 affects margin comparability across years
 
 ### 应收款项 (Receivables)
@@ -213,26 +227,26 @@ Chinese indirect method:
 
 ## Excel Formatting (OpenPyXL / Office JS)
 
-Follow the same professional conventions as the base `xlsx-author` skill, with China-specific adaptations:
+Follow the same professional conventions as the base `xlsx-author` skill:
 
 - **Section headers**: Dark blue `#1F4E79` with white bold text
 - **Column headers**: Light blue `#D9E1F2` with black bold text
 - **Input cells**: Blue font (RGB: 0,0,255) — all hardcoded inputs
 - **Formula cells**: Black font (RGB: 0,0,0)
 - **Sheet links**: Green font (RGB: 0,128,0)
-- **Currency**: CNY (¥) with thousands separator
+- **Currency**: issuer reporting currency with thousands separator
 - **Percentages**: 0.0% format
-- **Cell comments**: "Source: AkShare, [date], [field], [ticker]"
+- **Cell comments**: "Source: valuz-stock `income_statement`/`balance_sheet`/`cashflow_statement` (or valuz-search `document_raw_content`), [date], [field], [ticker]"
 
 ### Number Format Conventions
 
 | Item | Format | Example |
 |------|--------|---------|
-| Revenue | ¥#,##0 | ¥12,345 |
+| Revenue | #,##0 (with currency symbol) | 12,345 |
 | Percentages | 0.0% | 15.3% |
 | Ratios | 0.00x | 2.50x |
 | Dates | YYYY | 2024 |
-| Stock price | ¥#,##0.00 | ¥158.50 |
+| Stock price | #,##0.00 (with currency symbol) | 158.50 |
 
 ## Quality Checks
 
@@ -243,7 +257,7 @@ Before delivering:
 - [ ] Retained earnings roll-forward ties
 - [ ] CapEx/Depreciation logic consistent
 - [ ] Debt changes tie between BS and CF
-- [ ] Tax rate reasonable (20-28% unless 高新技术企业)
+- [ ] Tax rate reasonable for the issuer's jurisdiction (flag if below the applicable statutory rate)
 - [ ] All hardcoded inputs have cell comments
 - [ ] All formulas reference cells, no hardcodes in formulas
 - [ ] Scenario blocks structured correctly (Bear/Base/Bull)
@@ -251,22 +265,22 @@ Before delivering:
 
 ## Common Pitfalls
 
-1. **Unit mismatch**: Mixing 元 and 千元 — always normalize
-2. **VAT confusion**: Double-counting VAT in revenue or COGS
+1. **Unit mismatch**: Mixing reporting units (e.g. 元 / 千元 / thousands / millions) — always normalize
+2. **Indirect-tax confusion**: Double-counting VAT (or other indirect taxes) in revenue or COGS
 3. **Goodwill spike**: Forgetting large goodwill from acquisitions
-4. **Tax rate variance**: Assuming 25% when company is 高新技术企业 (15%)
-5. **R&D understatement**: CAS expenses all R&D, but some companies capitalize in notes
+4. **Tax rate variance**: Assuming a generic rate when a preferential/incentive rate applies
+5. **R&D treatment**: Differs by standard — expensed vs capitalized; check disclosures
 6. **Receivables inflation**: 应收账款 much higher than revenue growth — flag
 7. **Short-term debt**: 短期借款 often high; don't miss current portion of LT debt
 8. **Minority interest**: 少数股东权益 can be significant for conglomerates
 
 ## Data Source Priority
 
-1. **AkShare MCP** (primary) — real-time and historical A-share data
-2. **巨潮资讯** (cninfo.com.cn) — mandatory disclosures
-3. **交易所公告** — SH/SZ exchange filings
-4. **公司官网/IR** — supplementary data
-5. **Web search** — only if above insufficient, mark `[UNSOURCED]`
+用 `income_statement` / `balance_sheet` / `cashflow_statement` / `revenue_breakdown` / `company_overview`(valuz-stock, 裸代码)取三表历史与科目数据，用 `earnings_search`+`document_raw_content`(valuz-search, `market:ticker`)取财报/公告原文。
+
+1. **valuz-stock** (`income_statement` / `balance_sheet` / `cashflow_statement` / `revenue_breakdown` / `company_overview`) — three-statement history, financial line items, revenue drivers, company profile
+2. **valuz-search** (`earnings_search` → `document_raw_content` / `document_fetch`) — original earnings reports, calls, research, minutes, filings
+3. **Web search** — only if the above are insufficient; mark `[UNSOURCED]`
 
 ## Output Checklist
 
@@ -276,12 +290,6 @@ Before delivering:
 - [ ] Scenario analysis (Bear/Base/Bull)
 - [ ] Sensitivity tables
 - [ ] All hardcoded inputs sourced and commented
-- [ ] CAS conventions documented
-- [ ] Currency consistent (CNY)
+- [ ] Applicable accounting standard (US GAAP / IFRS / CAS) documented
+- [ ] Currency consistent (issuer reporting currency)
 - [ ] File named: `[Ticker]_3StatementModel_[Date].xlsx`
-> **Data Source Mode Switch**: Set env var `IFIND_DATA_SOURCE_MODE` to control data source preference.
-> - `ifind-only` (strict): Use iFind only, error if unavailable
-> - `ifind-fallback` (default): iFind preferred, fallback to AkShare
-> - `akshare-only`: Skip iFind, use AkShare only
-> - `wind-only`: Wind only, error if unavailable
-> - `wind-fallback`: Wind first, fallback to iFind → AkShare

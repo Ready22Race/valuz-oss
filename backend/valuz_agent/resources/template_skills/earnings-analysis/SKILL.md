@@ -1,47 +1,60 @@
 ---
-name: china-earnings-analysis
-description: Post-earnings quarterly update reports for A-share companies under coverage. Analyzes 业绩快报/正式财报, generates variance tables (actual vs 一致预期 vs prior), flags key drivers, and drafts structured earnings notes in Chinese sell-side format. Use instead of the original earnings-analysis skill for Chinese equities. Triggers on "A股财报分析", "季度业绩点评", "年报/中报点评", "earnings review", or "[company] earnings".
+name: earnings-analysis
+description: Post-earnings quarterly update reports for global companies under coverage (focus US / HK / A-shares, also other markets). Analyzes earnings flashes/formal filings, generates variance tables (actual vs consensus vs prior), flags key drivers, and drafts structured earnings notes in sell-side format. Pulls actual/historical financials, guidance, and indicator values via valuz-stock, and retrieves earnings reports, calls, research, minutes, and filings via valuz-search. Triggers on "财报分析", "季度业绩点评", "年报/中报点评", "earnings review", or "[company] earnings".
 ---
 
-# china-earnings-analysis
+# earnings-analysis
 
 ## Purpose
 
-Create professional **A股季度/年度业绩点评报告**, analyzing results for companies already under coverage. Follow Chinese sell-side research standards (中金、中信、华泰 format).
+Create professional **季度/年度业绩点评报告**, analyzing results for global 上市公司（美股/港股/A 股为主，兼顾其他市场）already under coverage. Follow established sell-side research standards.
 
 ## Data Sources
 
-### Primary: iFind MCP (Tier-1 付费) / AkShare MCP (Tier-2 免费备选)
+### Tools
+
+- **valuz-stock** — 实际/历史财务、指引、指标数值数据.
+- **valuz-search** — 财报、电话会、公告、纪要检索.
+
+Use **valuz-stock** to pull actual financials; use **valuz-search** to retrieve the underlying earnings reports, earnings-call transcripts, consensus research, and filings.
+
+> **Symbol formats differ across the two servers:** valuz-stock 用裸代码（`AAPL` / `00700` / `600519`）；valuz-search 用 `market:ticker`（`US:AAPL` / `HK:00700` / `SH:600519`）。
 
 ```python
-get_financials(ticker, "income", "quarterly")   → 利润表 (季度)
-get_financials(ticker, "income", "annual")      → 利润表 (年度)
-get_financials(ticker, "balance", "quarterly")  → 资产负债表
-get_financials(ticker, "cashflow", "quarterly") → 现金流量表
-get_quote(ticker)                               → 实时行情, PE/PB
-get_historical_data(ticker)                     → 股价表现
-# News (china-news MCP — separate server)
-get_stock_news(ticker="{{TICKER}}")          → 相关新闻
+# 实际/历史财务 — valuz-stock (裸代码)
+income_statement(symbol="AAPL", period="quarterly", limit=8)   → 利润表 (季度)
+income_statement(symbol="AAPL", period="annual", limit=5)      → 利润表 (年度)
+balance_sheet(symbol="AAPL", period="quarterly", limit=8)      → 资产负债表
+cashflow_statement(symbol="AAPL", period="quarterly", limit=8) → 现金流量表
+revenue_breakdown(symbol="AAPL", period="quarterly")           → 分业务/分地区收入
+company_overview(symbol="AAPL")                                → 公司概览
+stock_quote(symbol="AAPL")                                     → 行情, PE/PB/PS
+earnings_calendar(symbol="AAPL")                               → 财报日历
+
+# 财报原文 / 电话会 / 公告 / 一致预期 — valuz-search (market:ticker)
+earnings_search(symbols=["US:AAPL"])      → 交易所财报
+conferences_search(symbols=["US:AAPL"])   → 业绩电话会纪要/演示
+filings_search(symbols=["US:AAPL"])       → 公告
+reports_search(symbols=["US:AAPL"])       → 机构研报 / 一致预期
+document_raw_content(...)                 → 取上述检索结果的原文（指引 vs 实际）
 ```
 
-### Secondary Sources
+### Secondary Sources (via valuz-search)
 
-- **巨潮资讯** (cninfo.com.cn) — 正式财报 PDF (mandatory)
-- **上证e互动 / 深交所互动易** — 投资者关系 Q&A
-- **公司官网** — 业绩说明会 (earnings call) 材料
-- **慧博投研 / 同花顺 iFinD** — 一致预期数据
-- **Wind / Choice** — institutional consensus (if available)
+- **交易所财报 / 公告** — retrieve with `earnings_search` / `filings_search`, pull full text with `document_raw_content` (covers SEC EDGAR、港交所披露易、巨潮资讯等各市场披露平台)
+- **业绩电话会 / 业绩说明会** — `conferences_search` (纪要/演示), full text via `document_raw_content`
+- **机构研报 / 一致预期** — `reports_search` (analyst consensus & sell-side views)
 
 ## Key Financial Terms (Chinese → English)
 
 | Chinese | English | Notes |
 |---------|---------|-------|
-| 营业收入 | Revenue | Top-line, net of VAT |
+| 营业收入 | Revenue | Top-line, 按当地准则口径 |
 | 营业成本 | COGS | Cost of goods sold |
 | 毛利率 | Gross margin | 营业利润/营业收入 |
 | 营业利润 | Operating profit | 核心经营利润 |
-| 归母净利润 | Net income attributable to parent | Key metric for A-share coverage |
-| 扣非净利润 | Net income (non-GAAP adj.) | Deducts one-time items |
+| 归母净利润 | Net income attributable to parent | Key coverage metric (US/HK: net income to shareholders) |
+| 扣非净利润 | Net income (non-GAAP adj.) | Deducts one-time items; US/HK equivalent = adjusted / non-GAAP net income |
 | 净利润 | Net income | May include minority interest |
 | 经营活动现金流 | Operating CF | 经营现金流 |
 | 资本支出 | CapEx | 购建固定资产 |
@@ -53,14 +66,14 @@ get_stock_news(ticker="{{TICKER}}")          → 相关新闻
 ### Step 1: Pull the Earnings Print
 
 **Data to collect:**
-- Current quarter / full year income statement (from 巨潮 PDF or iFind/AkShare)
-- Balance sheet and cash flow statement
-- Management commentary / 业绩说明会 transcript
-- Company press release (投资者关系活动记录表)
+- Current quarter / full year income statement — actual via `income_statement` (valuz-stock); original filing via `earnings_search` + `document_raw_content` (valuz-search)
+- Balance sheet and cash flow statement — `balance_sheet` / `cashflow_statement` (valuz-stock)
+- Management commentary / 业绩说明会 / earnings-call transcript — `conferences_search` + `document_raw_content` (valuz-search)
+- Company press release / 公告 — `filings_search` + `document_raw_content` (valuz-search)
 
 **Verify against:**
-- Previous quarter guidance (管理层指引)
-- Consensus estimates (一致预期) if available
+- Previous quarter guidance (管理层指引) — pull from prior 电话会 via `conferences_search` + `document_raw_content`, compare to actuals
+- Consensus estimates (一致预期) — `reports_search` (valuz-search) if available
 
 ### Step 2: Build the Variance Table
 
@@ -81,18 +94,15 @@ get_stock_news(ticker="{{TICKER}}")          → 相关新闻
   - **符合预期**: -10% to +10%
   - **低于预期**: <-10%
 
-**Consensus sources (in priority order):**
-1. Wind / Choice 一致预期
-2. 慧博投研 盈利预测
-3. 同花顺 iFinD 盈利预测
-4. 分析师预测调研 (from 巨潮 业绩预告)
-5. If unavailable, note `[UNSOURCED]`
+**Consensus sources:**
+- 实际数用 `income_statement` / `cashflow_statement` (valuz-stock)；一致预期用 `reports_search` (valuz-search)；财报原文/电话会指引/公告用 `earnings_search` / `conferences_search` / `filings_search` + `document_raw_content` (valuz-search)
+- If unavailable, note `[UNSOURCED]`
 
 ### Step 3: Analyze Key Drivers
 
 **Revenue:**
 - Volume vs price decomposition
-- Segment revenue breakdown (if disclosed)
+- Segment revenue breakdown (if disclosed) — `revenue_breakdown` (valuz-stock)
 - New product / customer contribution
 - Industry volume trends
 
@@ -134,10 +144,10 @@ Based on current quarter results and management guidance:
 ### Step 5: Valuation Update
 
 **Current valuation metrics:**
-- Current stock price + daily change
-- PE (动 / 静), PB, PS
+- Current stock price + daily change — `stock_quote` (valuz-stock)
+- PE (动 / 静), PB, PS — `stock_quote` (valuz-stock)
 - EV/EBITDA (if applicable)
-- 52-week high/low, YTD performance
+- 52-week high/low, YTD performance — `stock_quote` (valuz-stock)
 - Relative to sector median
 
 **Post-earnings re-rating assessment:**
@@ -147,7 +157,7 @@ Based on current quarter results and management guidance:
 
 ### Step 6: Draft the Report
 
-**Standard A-share earnings update structure:**
+**Standard earnings update structure:**
 
 ```
 标题：[公司名称]（[代码]）[Q20XX / FY20XX] 业绩点评：[超预期/符合预期/低于预期]
@@ -194,58 +204,55 @@ Based on current quarter results and management guidance:
 
 **Before delivering:**
 
-- [ ] All numbers sourced from 巨潮 PDF or iFind/AkShare
+- [ ] All numbers sourced from valuz-stock (`income_statement` / `balance_sheet` / `cashflow_statement` / `revenue_breakdown` / `stock_quote`) or valuz-search (`earnings_search` / `conferences_search` / `filings_search` / `reports_search` + `document_raw_content`)
 - [ ] Variance table complete with actual/consensus/prior
 - [ ] Beat/miss flagged with % surprise
 - [ ] Key drivers identified and explained
 - [ ] Forward estimates updated
 - [ ] Valuation metrics current
-- [ ] Risk factors listed (China-specific)
+- [ ] Risk factors listed (market-specific)
 - [ ] Citations complete; unsourced items marked `[UNSOURCED]`
 
-## China-Specific Elements
+## Market-Specific Elements
 
-### Earnings Call (业绩说明会)
+### Earnings Call (业绩说明会 / earnings call)
 - Schedule: typically same day or next trading day after earnings release
-- Location: 上证e互动 / 深交所互动易
+- Channels: 各市场披露平台与投资者问答（SEC EDGAR、港交所披露易、巨潮资讯、上证e互动 / 深交所互动易，及 IR sites）
 - Format: online video/audio + text Q&A
-- Key questions often from retail investors
+- Key questions may come from analysts (US/HK) or retail investors (A-share)
 
 ### Regulatory Requirements
-- 业绩预告 (earnings preview): required if variance >50%
-- 业绩快报 (earnings flash): optional, typically 10 days before full report
-- Full annual report: 4 months after year-end
-- Semi-annual report: 2 months after H1
-- Quarterly report: 1 month after quarter-end
+Filing cadence varies by market — confirm the relevant regime:
+- A-share: 业绩预告 (earnings preview) required if variance >50%; 业绩快报 (earnings flash) optional, typically 10 days before full report; full annual report 4 months after year-end; semi-annual 2 months after H1; quarterly 1 month after quarter-end
+- US: 10-K (annual) / 10-Q (quarterly) / 8-K (material events) per SEC deadlines
+- HK: annual / interim reports per HKEX listing rules
 
 ### Accounting Nuances
-- 扣非净利润 (non-GAAP net income) widely used by analysts
+- 扣非净利润 (non-GAAP / adjusted net income) widely used by analysts — US/HK report adjusted / non-GAAP equivalents
 - 其他收益 (other income) can mask core operating performance
 - 政府补助 (government subsidies) significant for some sectors
 - 资产减值损失 (asset impairment) — flag if unexpectedly large
-- 股份支付 (share-based compensation) — expensed immediately under CAS
+- 股份支付 (share-based compensation) — expensed immediately under CAS / IFRS / US GAAP
 
 ### Market Context
-- 涨跌停 limits affect post-earnings price action (±10% main board, ±20% 创业板/科创板)
-- Northbound flow (北向资金) may react strongly to earnings
-- Retail investor participation high → earnings can cause outsized moves
+- Price-move limits differ by market (e.g. A-share ±10% main board, ±20% 创业板/科创板; US/HK have no daily limit)
+- Institutional vs retail flow (e.g. A-share northbound 北向资金) may react strongly to earnings
+- Earnings can cause outsized moves, especially in retail-heavy markets
 
 ## Source Citations
 
 **Format for data citations:**
 
 ```
-Source: 巨潮资讯, [Company] 2024 年年度报告, p.[X], [URL if applicable]
-Source: iFind ifind_get_stock_financials / AkShare get_financials(ticker="{{TICKER}}", statement_type="income", period="quarterly")
-Source: 慧博投研, [Company] 盈利预测, accessed [Date]
-Source: 同花顺 iFinD, 一致预期数据, accessed [Date]
+Source: valuz-search, earnings_search(symbols=["US:AAPL"]) → document_raw_content(...), [Company] 2024 年度报告 / annual report, p.[X], [URL if applicable]
+Source: valuz-stock, income_statement(symbol="AAPL", period="quarterly")
+Source: valuz-search, reports_search(symbols=["US:AAPL"]) — 一致预期, accessed [Date]
+Source: valuz-search, conferences_search(symbols=["US:AAPL"]) → document_raw_content(...) — 电话会/业绩说明会, accessed [Date]
 ```
+
+**Symbols across markets:** valuz-stock 裸代码 US `AAPL` / HK `00700` / A-share `600519`；valuz-search `market:ticker` US `US:AAPL` / HK `HK:00700` / A-share `SH:600519`.
 
 **For figures not from primary sources:**
 ```
 [UNSOURCED] — estimate based on [rationale]
 ```
-> **Data Source Mode Switch**: Set env var `IFIND_DATA_SOURCE_MODE` to control data source preference.
-> - `ifind-only` (strict): Use iFind only, error if unavailable
-> - `ifind-fallback` (default): iFind preferred, fallback to AkShare
-> - `akshare-only`: Skip iFind, use AkShare only

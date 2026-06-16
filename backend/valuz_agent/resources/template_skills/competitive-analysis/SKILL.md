@@ -1,47 +1,59 @@
 ---
-name: china-competitive-analysis
-description: Competitive landscape analysis for A-share companies and Chinese industries. Maps competitors, compares positioning, and assesses relative strengths. Adapted from the original competitive-analysis skill for Chinese market context. Triggers on "A股竞争格局", "行业竞争分析", "competitive landscape China", "competitive analysis A-share", or "[company] competitors China".
+name: competitive-analysis
+description: Competitive landscape analysis for global equities (focus US / HK / A-shares, also other markets). Maps competitors, compares positioning, and assesses relative strengths across markets. Uses `valuz-stock` (industry_constituents, company_overview, revenue_breakdown, income_statement, company_shareholders) for peer sets, financials, and share data, and `valuz-search` (reports_search, conferences_search, filings_search) for research, earnings calls, and filings. Triggers on "竞争格局", "行业竞争分析", "competitive landscape", "competitive analysis", or "[company] competitors".
 ---
 
-# china-competitive-analysis
+# competitive-analysis
 
 ## Purpose
 
-Analyze **A股行业竞争格局**, mapping competitive dynamics for Chinese companies and industries.
+Analyze **全球股票市场（美股/港股/A 股为主，兼顾其他市场）行业竞争格局**, mapping competitive dynamics for companies and industries across markets.
 
 ## Data Sources
 
-### Tier 0 — 万得 Wind（最全面付费数据）
-- 覆盖：A股/港美股/基金/指数/债券/宏观/研报/分析（44个工具）
-- MCP 服务：`wind-mcp`（需 `WIND_API_KEY` 密钥，以 `ak_` 开头）
-- 优势：全市场覆盖面最广、数据最全面、包含研报和量化分析
-- 密钥申请：https://aifinmarket.wind.com.cn/#/home
+Two Valuz connectors cover everything this skill needs:
 
-### Tier 1 — 同花顺 iFind（付费精确数据）/ AkShare MCP（Tier-2 免费备选）
+- `valuz-stock` — 行情、财务、份额/指标数值数据 (quotes, financials, market-share and indicator figures).
+- `valuz-search` — 财报、公告、研报、纪要、电话会检索 (earnings reports, filings, research, minutes, earnings calls).
 
-```python
-get_industry_stocks(industry="...")    → Full peer list
-get_quote(ticker)                     → Valuation, market cap
-get_financials(ticker, "income")      → Revenue, margins
-get_financials(ticker, "balance")     → Assets, debt
-get_stock_info(ticker)                → Business description
+Rule of thumb: 用 `valuz-stock` 取财务/份额数据，用 `valuz-search` 取定性资料。
+
+**Symbol format (重要):** `valuz-stock` 用裸代码 (`AAPL` / `00700` / `600519`)；
+`valuz-search` 用 `market:ticker` (`US:AAPL` / `HK:00700` / `SH:600519`)。
+
+```text
+industry_constituents(industry="...")           (valuz-stock) → 同行/竞争集 peer list
+company_overview(symbol=...)                     (valuz-stock) → 业务描述、估值、市值
+revenue_breakdown(symbol=..., period="annual")   (valuz-stock) → 营收/业务结构、份额拆分
+income_statement(symbol=..., period="annual")    (valuz-stock) → 营收、毛利、净利
+balance_sheet(symbol=..., period="annual")       (valuz-stock) → 资产、负债
+company_shareholders(symbol=...)                 (valuz-stock) → 股东/控制权
+reports_search(query=..., symbols=[...])         (valuz-search) → 卖方研报、竞争定性
+conferences_search(query=..., symbols=[...])     (valuz-search) → 电话会、管理层口径
+filings_search(query=..., symbols=[...])         (valuz-search) → 公告、招股书、分部披露
 ```
 
+Tickers span markets — US (`AAPL` / `US:AAPL`), HK (`00700` / `HK:00700`),
+A-share (`600519` / `SH:600519`), and others.
+
 ### Secondary Sources
-- 巨潮年报 — detailed segment data
-- 券商行业报告 — analyst competitive analysis
-- Wind / Choice — market share data
-- 行业协会 — industry statistics
+- Annual / segment reports — detailed segment data (`filings_search` via `valuz-search`)
+- Sell-side industry reports — analyst competitive analysis (`reports_search` via `valuz-search`)
+- Earnings-call commentary — management framing of rivals (`conferences_search` via `valuz-search`)
+- Market-share / revenue-mix data — `revenue_breakdown` via `valuz-stock`
+- Industry associations — industry statistics
 
 ## Workflow
 
 ### Step 1: Map the Competitive Set
 
 **Industry definition:**
-```python
-# Get full industry composition
-get_industry_stocks(industry="白酒")
+```text
+# Get full industry composition (cross-market peers) — valuz-stock 裸代码输出
+industry_constituents(industry="spirits / liquor")
 ```
+
+提示：`valuz-stock` 用裸代码 (`AAPL` / `00700` / `600519`)，`valuz-search` 用 `market:ticker` (`US:AAPL` / `HK:00700` / `SH:600519`)。
 
 **Tier the competitors:**
 
@@ -52,12 +64,19 @@ get_industry_stocks(industry="白酒")
 | Tier 3 (跟随者) | Niche players, regional | {{NICH_PLAYER}} |
 | Tier 4 (边缘) | Declining or niche | {{LOW_END_PLAYER}} |
 
+Peer/competitor sets are cross-market — a leader in one market may compete with challengers listed elsewhere (US / HK / A-share / others).
+
 ### Step 2: Competitive Comparison Matrix
+
+每家竞争者用 `company_overview` (valuz-stock) 取业务描述/估值/市值，
+`income_statement` (valuz-stock) 取营收、毛利、净利，`revenue_breakdown`
+(valuz-stock) 比业务结构与份额；控制权/股东差异用 `company_shareholders`
+(valuz-stock)。全部传裸代码 (`AAPL` / `00700` / `600519`)。
 
 **Core comparison table:**
 
-| Company | Revenue (亿) | YoY | Gross Margin | Net Margin | ROE | Market Cap (亿) | PE (TTM) | Market Share |
-|---------|-------------|-----|-------------|------------|-----|----------------|----------|-------------|
+| Company | Revenue | YoY | Gross Margin | Net Margin | ROE | Market Cap | PE (TTM) | Market Share |
+|---------|---------|-----|-------------|------------|-----|-----------|----------|-------------|
 | | | | | | | | | |
 
 **Expand with competitive dimensions:**
@@ -73,6 +92,10 @@ get_industry_stocks(industry="白酒")
 
 ### Step 3: Market Share Analysis
 
+份额/营收结构逐年取自 `revenue_breakdown`(symbol, period="annual") (valuz-stock)；
+官方口径的市场地位/份额引述用 `reports_search` 或 `filings_search`
+(valuz-search，`market:ticker` 代码，如 `US:AAPL`)。
+
 **Share trends:**
 
 | Company | 2020 | 2021 | 2022 | 2023 | 2024E | Trend |
@@ -85,6 +108,9 @@ get_industry_stocks(industry="白酒")
 - Market share distribution
 
 ### Step 4: Competitive Positioning
+
+战略定位/护城河/管理层对竞争的定性判断，用 `reports_search`、`conferences_search`、
+`filings_search` (valuz-search，`market:ticker` 代码) 检索研报观点、电话会口径与公告披露。
 
 **Positioning map:**
 
@@ -106,7 +132,7 @@ Example for {{EXAMPLE_SECTOR}}:
 
 ### Step 5: Barriers to Entry
 
-**China-specific barriers:**
+**Common barriers:**
 
 | Barrier Type | Examples |
 |-------------|---------|
@@ -116,7 +142,7 @@ Example for {{EXAMPLE_SECTOR}}:
 | 技术壁垒 | Patents, know-how, 技术积累 |
 | 牌照/资质 | Regulatory licenses, 牌照 |
 | 资金壁垒 | Capital requirements |
-| 政策壁垒 | Industry access restrictions |
+| 政策壁垒 | Industry access / regulatory restrictions |
 | 数据壁垒 | Data network effects |
 
 ### Step 6: Threat Assessment
@@ -145,6 +171,11 @@ Example for {{EXAMPLE_SECTOR}}:
 
 ### Step 7: Competitive Dynamics
 
+价格战、产能扩张、并购、新品等竞争动态的定性证据，用 `conferences_search`
+(管理层口径)、`reports_search` (卖方观点)、`filings_search` (公告/交易披露)
+(valuz-search，`market:ticker` 代码)；扩张/并购对营收结构的影响用 `revenue_breakdown`
+(valuz-stock) 印证。
+
 **Historical evolution:**
 - How has competitive landscape changed?
 - What drove shifts (policy, technology, demand)?
@@ -160,31 +191,31 @@ Example for {{EXAMPLE_SECTOR}}:
 - New entrants?
 - Technology disruption?
 
-## China-Specific Considerations
+## Market-Specific Considerations
 
 ### Industry Structure
 
 | Pattern | Description | Example Industries |
 |---------|-------------|-------------------|
-| 寡头垄断 | Few large players | 白酒 (top 5 >80%) |
-| 分散竞争 | Fragmented, many players | 餐饮, 零售 |
-| 区域割据 | Regional champions | 啤酒, 食品加工 |
-| 龙头集中 | Consolidating toward leaders | 家电, 医药流通 |
+| 寡头垄断 | Few large players | spirits (top 5 >80%) |
+| 分散竞争 | Fragmented, many players | restaurants, retail |
+| 区域割据 | Regional champions | beer, food processing |
+| 龙头集中 | Consolidating toward leaders | appliances, drug distribution |
 
 ### Competitive Behavior
 
 - **价格战** (price wars) — common in commoditized sectors
-- **渠道争夺** (channel competition) — 经销商, 线上平台
+- **渠道争夺** (channel competition) — 经销商, 线上平台 / online platforms
 - **产能扩张** (capacity race) — leads to overcapacity
 - **并购整合** (consolidation M&A) — industry rationalization
 - **国际化** (going global) — emerging competitive frontier
 
-### Government Role
+### Regulatory & Government Role
 
-- 产业政策 shapes competitive dynamics
-- 国企 vs 民企 competitive dynamics
-- 地方保护 (local protectionism) in some industries
-- 反垄断 enforcement affects market structure
+- Industrial policy shapes competitive dynamics
+- State-owned vs private competitive dynamics (e.g., A-share 国企 vs 民企)
+- Local protectionism (地方保护) in some markets
+- Antitrust / 反垄断 enforcement affects market structure (e.g., US DOJ/FTC, EU, China SAMR)
 
 ## Output Format
 
@@ -218,16 +249,10 @@ Example for {{EXAMPLE_SECTOR}}:
 ## Quality Checks
 
 Before delivering:
-- [ ] Competitive set complete and relevant
-- [ ] Market share data sourced
+- [ ] Competitive set complete and relevant (`industry_constituents`)
+- [ ] Market share / revenue mix sourced (`revenue_breakdown` + `reports_search`/`filings_search`)
 - [ ] Comparison matrix comprehensive
 - [ ] Barriers analyzed
 - [ ] Competitive dynamics explained
 - [ ] Forward outlook included
 - [ ] Strategic implications drawn
-> **Data Source Mode Switch**: Set env var `IFIND_DATA_SOURCE_MODE` to control data source preference.
-> - `ifind-only` (strict): Use iFind only, error if unavailable
-> - `ifind-fallback` (default): iFind preferred, fallback to AkShare
-> - `akshare-only`: Skip iFind, use AkShare only
-> - `wind-only`: Wind only, error if unavailable
-> - `wind-fallback`: Wind first, fallback to iFind → AkShare

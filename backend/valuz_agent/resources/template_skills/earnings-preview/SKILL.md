@@ -1,56 +1,63 @@
 ---
-name: china-earnings-preview
-description: Pre-earnings analysis for A-share stocks. Builds scenario frameworks (actual vs consensus, beat/miss cases), identifies key metrics to watch, and prepares positioning notes before Chinese companies report quarterly results. Use instead of the original earnings-preview skill for A-share coverage. Triggers on "A股财报前瞻", "季报前瞻", "业绩前瞻", "earnings preview", "what to watch for [company] earnings", or "pre-earnings setup".
+name: earnings-preview
+description: Pre-earnings analysis for global equities (focus US / HK / A-shares, also other markets). Builds scenario frameworks (actual vs consensus, beat/miss cases), identifies key metrics to watch, and prepares positioning notes before companies report quarterly results. Uses valuz-stock (earnings_calendar, income_statement, revenue_breakdown, company_overview, stock_quote) and valuz-search (reports_search 一致预期/前瞻, conferences_search guidance, earnings_search, filings_search, news_search). Triggers on "财报前瞻", "季报前瞻", "业绩前瞻", "earnings preview", "what to watch for [company] earnings", or "pre-earnings setup".
 ---
 
-# china-earnings-preview
+# earnings-preview
 
 ## Purpose
 
-Build **A股季报/年报前瞻分析**, preparing for company earnings releases with scenario frameworks and key metrics to watch.
+Build **全球上市公司（美股/港股/A 股为主，兼顾其他市场）季报/年报前瞻分析**, preparing for company earnings releases with scenario frameworks and key metrics to watch.
 
 ## Data Sources
 
-### Primary: iFind MCP (Tier-1 付费) / AkShare MCP (Tier-2 免费备选)
+用 `valuz-stock` 定档期 + 取历史财务基线，用 `valuz-search` 取一致预期/指引/电话会/公告。
+
+> **Symbol format**: `valuz-stock` 用裸代码（`AAPL` / `00700` / `600519`）；`valuz-search` 用 `market:ticker`（`US:AAPL` / `HK:00700` / `SH:600519`）。
+
+- **`valuz-stock`** — 财报日程、历史财务、指标数值数据。
+- **`valuz-search`** — 一致预期/前瞻、指引、电话会、公告、纪要检索。
 
 ```python
-get_quote(ticker)                        → Current valuation, PE/PB
-get_historical_data(ticker)              → Trading context, 52-wk range
-get_financials(ticker, "income", "annual")  → Historical revenue/EPS trends
-# News (china-news MCP — separate server)
-get_stock_news(ticker="{{TICKER}}")          → Pre-earnings context
-get_industry_stocks(industry="...")      → Peer trading multiples
+# valuz-stock — 裸代码 (AAPL / 00700 / 600519)
+earnings_calendar(symbol="AAPL")                      → 下次财报档期、报告期
+income_statement(symbol="AAPL", period="quarterly", limit=8)  → 历史营收/利润/EPS 趋势
+revenue_breakdown(symbol="AAPL", period="quarterly")  → 分部/分产品收入结构
+company_overview(symbol="AAPL")                       → 估值、PE/PB、市值
+stock_quote(symbol="AAPL")                            → 当前价、交易区间
+# valuz-search — market:ticker (US:AAPL / HK:00700 / SH:600519)
+reports_search(query="一致预期 前瞻", symbols=["US:AAPL"])  → 卖方一致预期、前瞻研报
+conferences_search(symbols=["US:AAPL"])               → 上次电话会指引
+news_search(query="业绩预告 指引", symbols=["US:AAPL"]) → 近期催化、指引新闻
+filings_search(symbols=["US:AAPL"])                   → 业绩预告、公告
+earnings_search(symbols=["US:AAPL"])                  → 历史财报披露文档
 ```
 
-### Consensus Estimates Sources
+### Consensus Estimates
 
-| Source | Access | Notes |
-|--------|--------|-------|
-| Wind 一致预期 | Institutional | Most comprehensive |
-| Choice 一致预期 | Institutional | Alternative |
-| 慧博投研 | Web / API | Good coverage |
-| 同花顺 iFinD | Web / API | Retail-friendly UI |
-| 东方财富 | Web | Free, some coverage |
-| 巨潮 业绩预告 | Regulatory | Mandatory disclosures |
+- 一致预期/前瞻用 `reports_search`(valuz-search，`query="一致预期"` 或 `"前瞻"`)。
+- **If consensus unavailable**, derive from:
+  - 历史增速基线：`income_statement`(valuz-stock)
+  - 上次指引：`conferences_search`(valuz-search) 取电话会指引
+  - Industry benchmarks
 
-**If consensus unavailable**, derive from:
-- Historical growth rates
-- Management guidance from prior calls
-- Industry benchmarks
-
-### Secondary Sources
-- 公司公告 (earnings preview notices 业绩预告)
-- 行业研究报告 (sector reports)
-- 卖方研报 (broker research summaries)
+### Secondary Sources (via `valuz-search`)
+- 公司公告/业绩预告 (earnings preview notices) — `filings_search`
+- 历史财报披露文档 — `earnings_search`
+- 卖方研报/前瞻 (broker research) — `reports_search`
+- 电话会指引/纪要 (earnings call) — `conferences_search`、`minutes_search`
+- 近期催化/指引新闻 — `news_search`
 
 ## Workflow
 
 ### Step 1: Establish Baseline
 
+先用 `earnings_calendar`(valuz-stock，裸代码) 确认下次财报档期与报告期；历史基线用 `income_statement`(valuz-stock，`period="quarterly"`, `limit=8`)，收入结构用 `revenue_breakdown`(valuz-stock)。
+
 **Historical performance (last 4-8 quarters):**
 
-| Quarter | Revenue (亿) | YoY | Net Income (亿) | YoY | EPS (元) | Net Margin |
-|---------|-------------|-----|----------------|-----|----------|------------|
+| Quarter | Revenue | YoY | Net Income | YoY | EPS | Net Margin |
+|---------|---------|-----|------------|-----|-----|------------|
 | Q1 2024 | | | | | | |
 | Q2 2024 | | | | | | |
 | Q3 2024 | | | | | | |
@@ -64,14 +71,16 @@ get_industry_stocks(industry="...")      → Peer trading multiples
 
 ### Step 2: Gather Consensus Estimates
 
+一致预期与前瞻用 `reports_search`(valuz-search，`query="一致预期"`/`"前瞻"`, `symbols=["US:AAPL"]`)；上次管理层指引用 `conferences_search`(valuz-search)；近期指引/预告新闻用 `news_search`(valuz-search)。
+
 **Consensus table:**
 
 | Metric | Q1 2024 Estimate | Range (Low-High) | # Analysts |
 |--------|-----------------|-------------------|------------|
-| Revenue (亿) | | | |
+| Revenue | | | |
 | YoY Growth | | | |
-| Net Income (亿) | | | |
-| EPS (元) | | | |
+| Net Income | | | |
+| EPS | | | |
 | Gross Margin | | | |
 | Net Margin | | | |
 
@@ -90,21 +99,21 @@ For each company, identify 3-5 metrics that will drive the report:
 | Metric | Why It Matters | Watch Threshold | Risk if Missed |
 |--------|---------------|-----------------|----------------|
 | e.g., 白酒批价 | Price indicator for channel health | >950元/瓶 | Demand softness |
-| e.g., 动力电池装机量 | Volume indicator | >XX GWh | Market share loss |
+| e.g., iPhone units / ASP | Volume & mix indicator | > prior-year | Demand softness |
 | e.g., 云业务收入增速 | Growth engine health | >30% | Cloud slowdown |
 
 **Sector-wide KPIs (for sector previews):**
 
 | Sector | Key Metrics |
 |--------|-------------|
-| 白酒 | 批价、库存、回款、动销 |
-| 半导体 | 产能利用率、出货量、ASP、库存天数 |
-| 新能源汽车 | 交付量、单车收入、毛利率、电池成本 |
-| 医药 | 创新药收入、研发费用、集采影响 |
-| 银行 | NIM、不良率、拨备覆盖率 |
-| 券商 | 经纪/投行/资管收入、股基交易量 |
-| 光伏 | 硅料/组件价格、排产、海外出货 |
-| 房地产 | 销售额、拿地、融资成本 |
+| 白酒 / Spirits | 批价、库存、回款、动销 |
+| 半导体 / Semiconductors | 产能利用率、出货量、ASP、库存天数 |
+| 新能源汽车 / EVs | 交付量、单车收入、毛利率、电池成本 |
+| 医药 / Pharma | 创新药收入、研发费用、集采/定价影响 |
+| 银行 / Banks | NIM、不良率、拨备覆盖率 |
+| 券商 / Brokers | 经纪/投行/资管收入、股基交易量 |
+| 光伏 / Solar | 硅料/组件价格、排产、海外出货 |
+| 房地产 / Real estate | 销售额、拿地、融资成本 |
 
 ### Step 4: Build Scenario Framework
 
@@ -115,7 +124,7 @@ BEAR CASE (超预期悲观)
   Revenue: -X% vs consensus
   Net Income: -Y% vs consensus
   Key factor: [specific risk]
-  Likely catalysts: 业绩预告大幅下调, 行业负面政策
+  Likely catalysts: 业绩预告大幅下调, 行业负面政策 (核对 `filings_search` / `news_search`)
 
 BASE CASE (符合预期)
   Revenue: ±Z% vs consensus
@@ -134,9 +143,11 @@ BULL CASE (超预期乐观)
 
 **What does the market expect?**
 
+当前估值/股价用 `company_overview` 与 `stock_quote`(valuz-stock，裸代码)；卖方评级分布用 `reports_search`(valuz-search)。
+
 - Recent stock price performance into earnings
-- Implied move from options (if A-share options available)
-- Sentiment from 北向资金 trends
+- Implied move from options (if listed options available)
+- Sentiment from fund flows (e.g. 北向资金 for A-shares, ETF/institutional flows elsewhere)
 - Broker recommendations distribution
 
 **Position sizing considerations:**
@@ -165,7 +176,7 @@ BULL CASE (超预期乐观)
 四、估值与预期
   - 当前估值水平
   - 市场情绪指标
-  - 北向资金动向
+  - 资金动向（如北向资金 / 机构资金流向）
 
 五、情景判断与策略
   - 不同情景下的股价反应
@@ -183,59 +194,64 @@ After actual results are released:
 - Revise forward estimates
 - Note any material guidance changes
 
-## China-Specific Pre-Earnings Considerations
+## Market-Aware Pre-Earnings Considerations
 
-### Earnings Calendar (A-share)
+### Earnings Calendar
 
-| Report Type | Deadline | Typical Release Time |
-|-------------|----------|----------------------|
-| Q1 / Q3季报 | 1 month after quarter-end | Before market open or after close |
-| Semi-annual report (中报) | 2 months after H1 | Before market open |
-| Annual report (年报) | 4 months after year-end | Typically Jan-Apr |
+Earnings-season conventions vary by market — confirm each company's reporting
+calendar and deadlines for its listing venue rather than assuming a single
+schedule. 用 `earnings_calendar`(valuz-stock，裸代码) 取该公司下次披露日期与报告期。
+
+| Report Type | Typical Cadence | Typical Release Time |
+|-------------|-----------------|----------------------|
+| Quarterly (e.g. Q1 / Q3季报, US 10-Q) | Within weeks–months of quarter-end, per venue | Before market open or after close |
+| Semi-annual report (中报 / interim) | Within months of period-end, per venue | Before market open |
+| Annual report (年报 / 10-K) | Within months of year-end, per venue | Varies by market |
 
 **Release pattern:**
-- Most companies release before market open (8:00-9:00 AM)
-- Some release after market close (after 15:00)
-- 创业板/科创板 may have more flexible schedules
+- Many companies release before market open or after market close
+- Tickers span US (e.g. AAPL), HK (e.g. 0700.HK), and A-share (e.g. 600519.SH)
+- Some venues (e.g. 创业板/科创板) may have more flexible schedules
 
-### 业绩预告 (Earnings Preview Notice)
+### 业绩预告 / Pre-Announcements
 
-- Mandatory if actual vs prior period variance >50%
-- Published typically 2-4 weeks before formal report
-- Format: 预增 (increase), 预减 (decrease), 扭亏 (turn to profit), 首亏 (first loss), 续亏 (continued loss)
+- Some markets mandate earnings pre-announcements above a variance threshold
+  (e.g. A-share 业绩预告 when actual vs prior period variance is large);
+  others rely on voluntary guidance or pre-announcements.
+- Published typically weeks before the formal report
+- A-share format examples: 预增 (increase), 预减 (decrease), 扭亏 (turn to profit), 首亏 (first loss), 续亏 (continued loss)
 - Provides directional guidance before formal report
+- 检索：`filings_search`(valuz-search，`symbols=["SH:600519"]`) 或 `news_search`(valuz-search，`query="业绩预告"`)
 
 ### Consensus Reliability
 
-**Caveats for Chinese consensus:**
-- Fewer analysts covering A-shares vs US large caps
-- Estimates may be stale (update frequency lower)
+**Caveats for consensus across markets:**
+- Coverage breadth varies — large-cap US names typically have many analysts;
+  smaller or non-US names may have fewer
+- Estimates may be stale (update frequency varies by market)
 - Institutional vs retail analyst coverage varies significantly
-- Broker research sometimes biased ( conflicted interests )
+- Broker research sometimes biased (conflicted interests)
 - Cross-reference multiple sources when possible
 
-### Policy Risk
+### Policy & Regulatory Risk
 
 - Regulatory changes can materially impact earnings overnight
-- 行业政策 (industry policy) shifts common in:
-  - 医药 (pharmaceuticals — 集采)
-  - 教育 (education — 双减)
-  - 互联网 (internet — antitrust)
-  - 新能源 (renewables — subsidy changes)
+- Industry policy shifts are common across markets, e.g.:
+  - 医药 / Pharma (集采 / drug pricing)
+  - 教育 / Education (regulatory tightening)
+  - 互联网 / Internet (antitrust)
+  - 新能源 / Renewables (subsidy / incentive changes)
 - Factor policy risk into scenario analysis
 
 ## Quality Checks
 
 Before delivering preview:
 
-- [ ] Historical data complete and accurate (AkSource verified)
-- [ ] Consensus estimates sourced (or clearly noted as unavailable)
+- [ ] Historical data complete and accurate (verified via `income_statement` / `revenue_breakdown`, valuz-stock)
+- [ ] Consensus estimates sourced via `reports_search` / `conferences_search` (valuz-search) — or clearly noted as unavailable
 - [ ] Scenario framework covers bull/base/bear
 - [ ] Key watch items identified with rationale
-- [ ] China-specific risks flagged (政策, 集采, etc.)
+- [ ] Market-specific risks flagged (政策, 集采, regulatory, etc.)
 - [ ] Valuation context included
 - [ ] Pre-earnings positioning actionable
-> **Data Source Mode Switch**: Set env var `IFIND_DATA_SOURCE_MODE` to control data source preference.
-> - `ifind-only` (strict): Use iFind only, error if unavailable
-> - `ifind-fallback` (default): iFind preferred, fallback to AkShare
-> - `akshare-only`: Skip iFind, use AkShare only
+- [ ] Disclosure source confirmed on the right platform (SEC EDGAR、港交所披露易、巨潮资讯等)

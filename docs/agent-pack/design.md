@@ -41,7 +41,7 @@ agent 的 identity / instructions / runtime / effort / avatar、skill 引用、c
 - `model` —— 跟 provider 绑定,只作 `model_hint`(推荐值),导入时用 resolver 重新绑到目标通道。
 
 **第 3 层 · 绝不导出,导入时补(密钥)**
-`WIND_API_KEY`、OAuth token 等,在 keychain/secret store 里。包里**一个密钥字段都没有**,只用 `auth_type` / `requires_credentials` 声明「需要 key」,值在导入时补。
+第三方 `API_KEY`、OAuth token 等,在 keychain/secret store 里。包里**一个密钥字段都没有**,只用 `auth_type` / `requires_credentials` 声明「需要 key」,值在导入时补。
 
 > 安全红线:可分享的包里一旦带密钥,用户一发出去就泄了。
 
@@ -55,10 +55,10 @@ Agent Pack 本质是一个 zip 归档(扩展名 `.valuzpack`):
 investment-pro.valuzpack
 ├── manifest.json          ← 纯 JSON,无代码、无密钥、无 provider_id
 └── skills/                ← 唯一载荷目录
-    ├── china-dcf/
+    ├── dcf/
     │   ├── SKILL.md
     │   └── ...(skill 自带的资产/脚本)
-    └── china-comps/SKILL.md
+    └── comps/SKILL.md
 ```
 
 - `skills/` 是**唯一**的文件载荷目录,因为 skill 天生是文件包。只装**用户拥有**的 skill;
@@ -94,15 +94,15 @@ investment-pro.valuzpack
       "runtime": "claude_agent",       // claude_agent | codex | deepagents
       "model_hint": "claude-sonnet-4-6", // 仅推荐,导入时重绑通道;可为 null
       "effort": "high",                // low|medium|high|xhigh|max | null
-      "skills": ["china-dcf", "china-comps"],   // 引用 skills[].slug
-      "connectors": ["akshare-mcp", "my-research-api"] // 引用 connectors[].slug
+      "skills": ["dcf", "comps"],   // 引用 skills[].slug
+      "connectors": ["my-stdio-mcp", "my-research-api"] // 引用 connectors[].slug
     }
   ],
 
   // ── skill 清单(被 agents 引用,包级共享去重)──
   "skills": [
     {
-      "slug": "china-dcf",
+      "slug": "dcf",
       "name": <Text>,                  // 列表展示,可选
       "description": <Text>,           // 可选
       "source": "embedded"             // embedded(skills/ 下有文件) | bundled(app 自带,引用)
@@ -112,7 +112,7 @@ investment-pro.valuzpack
   // ── connector 清单(纯指针 + 定义,密钥/代码均无)──
   "connectors": [
     {
-      "slug": "akshare-mcp",
+      "slug": "my-stdio-mcp",
       "display_name": <Text>,
       "description": <Text>,
       "transport": "stdio",            // http | sse | stdio
@@ -121,7 +121,7 @@ investment-pro.valuzpack
       "requires_setup": false,         // true → 导入「待配置」托盘:需本机自部署
       "url": null,                     // http/sse 用
       "command": "uv",                 // stdio 用(指针原文)
-      "args": ["run","--with","akshare","python","{mcp_dir}/akshare-mcp/server.py","--transport","stdio"],
+      "args": ["run","--with","<deps>","python","{mcp_dir}/my-stdio-mcp/server.py","--transport","stdio"],
       "oauth_metadata": null,          // OAuth/directory 用,可为 null
       "setup_hint": null               // requires_setup 时给一句本机部署提示 <Text>
     }

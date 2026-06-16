@@ -1,86 +1,101 @@
 ---
-name: china-pptx-author
+name: pptx-author
 description: >
-  Generic PowerPoint authoring skill for A-share investment analysis and pitch decks.
-  Creates professional 路演PPT / 投资分析PPT for any A-share company using live data
-  from iFind MCP (Tier-1) and AkShare MCP (Tier-2 fallback) tools. All company-specific values are parameterized — never hardcoded.
-  Triggers on "A股PPT制作", "投资PPT", "制作PPT", "路演PPT", "pitch deck",
-  "PowerPoint [company/ticker]", or any request to create slides for a Chinese stock.
-  When invoked, use the `generate_a_share_ppt` script with --company and --ticker args.
+  Generic PowerPoint authoring skill for global equity investment analysis and pitch decks.
+  Creates professional 路演PPT / 投资分析PPT for any listed company across global stock markets
+  (US / HK / A-share focus, other markets too) using live data from the `valuz-stock` connector
+  (quotes, financials, indicators) and the `valuz-search` connector (filings, research). All
+  company-specific values are parameterized — never hardcoded.
+  Triggers on "股票PPT制作", "投资PPT", "制作PPT", "路演PPT", "pitch deck",
+  "PowerPoint [company/ticker]", or any request to create slides for a listed stock.
+  When invoked, use the `generate_equity_ppt` script with --company and --ticker args.
 ---
 
-# china-pptx-author
+# pptx-author
 
 ## Purpose
 
-Generate professional **A股投资分析PPT** for any listed company.
+Generate professional **投资分析PPT (equity investment decks)** for any listed company.
 This skill is a generic engine — every output is driven by two parameters:
 
 | Parameter | Example | Description |
 |-----------|---------|-------------|
-| `{{COMPANY_NAME}}` | {{COMPANY_NAME}} | Full Chinese company name (e.g., 贵州茅台) |
-| `{{TICKER}}` | {{TICKER}} | 6-digit A-share code (e.g., 600519) |
+| `{{COMPANY_NAME}}` | {{COMPANY_NAME}} | Full company name (e.g., Apple Inc. / 腾讯控股 / 贵州茅台) |
+| `{{TICKER}}` | {{TICKER}} | Bare ticker for `valuz-stock` (e.g., AAPL / 00700 / 600519) |
+| `{{MARKET}}` | {{MARKET}} | Market prefix for `valuz-search` symbols (US / HK / SH) |
 | `{{OUTPUT_PATH}}` | ./output.pptx | Where to save the PPTX file |
 
 All financial figures, price data, peer valuations, and company descriptions are
-fetched live from iFind / AkShare / public APIs. **Nothing is hardcoded.**
+fetched live from `valuz-stock` / `valuz-search` connectors. **Nothing is hardcoded.**
 
 ---
 
 ## Data Pipeline
 
+Most deck content comes from team output; the data connectors are used only to
+fill in charts and figures. Two connectors back the data slides:
+
+- **`valuz-stock`** — quantitative data: quotes, financial statement values, segments.
+- **`valuz-search`** — qualitative data: filings, research, for citation/佐证.
+
+> **Symbol format:** `valuz-stock` takes a **bare ticker** (AAPL / 00700 / 600519);
+> `valuz-search` takes a `market:ticker` symbol (US:AAPL / HK:00700 / SH:600519).
+
 ### Step 1: Resolve Company Info
 
 ```python
-# MCP tool: search_stock
-search_stock(keyword="{{COMPANY_NAME}}")
-# → confirms ticker, exchange (SH/SZ), full legal name
+# valuz-stock — company_overview (bare ticker)
+company_overview(symbol="{{TICKER}}")
+# → company profile + identifiers (e.g. NASDAQ / HKEX / SSE), full legal name
 ```
 
 ```python
-# MCP tool: get_quote
-get_quote(ticker="{{TICKER}}")
-# → live price, PE, PB, market cap, turnover, 52-week range
+# valuz-stock — stock_quote (bare ticker)
+stock_quote(symbol="{{TICKER}}")
+# → live price, market cap, turnover (for cover / highlights)
 ```
 
 ```python
-# MCP tool: get_financials
-get_financials(ticker="{{TICKER}}", statement_type="income", period="annual")
+# valuz-stock — financial statements (bare ticker)
+income_statement(symbol="{{TICKER}}", period="annual", limit=5)
 # → annual income statement: revenue, net profit, margins, EPS, etc.
-get_financials(ticker="{{TICKER}}", statement_type="balance", period="annual")
+balance_sheet(symbol="{{TICKER}}", period="annual", limit=5)
 # → balance sheet: assets, liabilities, equity
-get_financials(ticker="{{TICKER}}", statement_type="cashflow", period="annual")
+cashflow_statement(symbol="{{TICKER}}", period="annual", limit=5)
 # → cash flow statement
+revenue_breakdown(symbol="{{TICKER}}", period="annual", limit=5)
+# → segment / revenue mix for operating-metrics charts
 ```
 
 ```python
-# MCP tool: get_historical_data
-get_historical_data(ticker="{{TICKER}}", frequency="weekly", start_date="{{START_DATE}}", end_date="{{END_DATE}}")
-# → OHLCV price history for trend charts
+# valuz-stock — price history for trend charts (bare ticker)
+ohlcv(symbol="{{TICKER}}", limit=260)
+# → OHLCV price history; use kline(symbol=...) for candlestick rendering
 ```
 
 ```python
-# MCP tool: get_industry_stocks
-get_industry_stocks(industry="{{INDUSTRY_NAME}}")
-# → peer companies in the same sector for comps analysis
+# valuz-search — qualitative material for citations (market:ticker symbol)
+reports_search(query="{{COMPANY_NAME}} business overview", symbols=["{{MARKET}}:{{TICKER}}"])
+filings_search(query="{{COMPANY_NAME}} annual report", symbols=["{{MARKET}}:{{TICKER}}"])
+# → research notes / filings to cite and support narrative slides
 ```
 
-### Step 2: Fetch Peer Data
+### Step 2: Peer / Comps Data
 
 ```python
-# For each peer returned by get_industry_stocks, call get_quote to get PE/PB
-# Focus on top 5-8 comparable companies by revenue/market cap
+# Pull peer figures with the same valuz-stock calls (stock_quote / income_statement)
+# on each comparable ticker; focus on top 5-8 comps by revenue/market cap.
 ```
 
 ### Step 3: Generate Charts
 
 Use matplotlib to create:
-1. **Revenue & Profit trend** — from `get_financials(income)`
-2. **Margin trends** — gross margin, net margin, ROE over time
-3. **Growth rates** — YoY revenue and profit growth
-4. **Peer comparison** — horizontal bar chart of PE and PB vs peers
-5. **Price trend** — from `get_historical_data`
-6. **Valuation range** — football field based on peer PE distribution
+1. **Revenue & Profit trend** — from `income_statement` (valuz-stock)
+2. **Margin trends** — gross margin, net margin, ROE over time (`income_statement`)
+3. **Growth rates** — YoY revenue and profit growth (`income_statement`)
+4. **Peer comparison** — horizontal bar chart of PE and PB vs peers (`stock_quote`)
+5. **Price trend** — from `ohlcv` / `kline` (valuz-stock)
+6. **Segment mix** — from `revenue_breakdown` (valuz-stock)
 
 All chart titles and labels must include `{{COMPANY_NAME}}` dynamically.
 
@@ -94,7 +109,7 @@ The default deck is **12 slides**. Adjust sections based on `deck_type` paramete
 
 ```
 Slide 1:  Cover
-    {{COMPANY_NAME}} ({{TICKER}}.{{EXCHANGE}})
+    {{COMPANY_NAME}} ({{TICKER}})
     {{REPORT_TITLE}}  |  {{DATE}}
     机密文件 | 仅供内部参考
 
@@ -102,22 +117,22 @@ Slide 2:  投资摘要 (Investment Highlights)
     • {{HIGHLIGHT_1}}
     • {{HIGHLIGHT_2}}
     • {{HIGHLIGHT_3}}
-    目标价: ¥{{TARGET_PRICE_LOW}} - ¥{{TARGET_PRICE_HIGH}}
+    目标价: {{CURRENCY}}{{TARGET_PRICE_LOW}} - {{CURRENCY}}{{TARGET_PRICE_HIGH}}
     评级: {{RATING}}
 
 Slide 3:  公司概览 (Company Overview)
     {{COMPANY_DESCRIPTION}}
     主营业务: {{MAIN_BUSINESS}}
-    成立时间 | 上市板块 | 控股股东 (all from search_stock / get_quote)
+    成立时间 | 上市市场 | 控股股东 (from company_overview / stock_quote / valuz-search)
 
 Slide 4:  行业分析 (Industry Overview)
     {{INDUSTRY_NAME}} — market size, trends, policy
-    Data from: get_industry_stocks result analysis
+    Data from: reports_search / news_search (valuz-search) + peer figures
 
 Slide 5:  财务分析 (Financial Summary)
     [Chart: Revenue & Profit]  [Chart: Margin Trends]
     [Chart: Growth Rates]
-    All data from get_financials(income, annual)
+    All data from income_statement(period="annual") (valuz-stock)
 
 Slide 6:  运营指标 (Operating Metrics)
     Segment breakdown, KPIs (if available from financials)
@@ -140,7 +155,7 @@ Slide 11: 投资建议 (Recommendation)
     评级 + 目标价 range + upside calculation
 
 Slide 12: 免责声明 (Disclaimer)
-    Standard A-share research disclaimer
+    Standard equity research disclaimer
 ```
 
 ### Deck Type Variants
@@ -177,11 +192,11 @@ Slide 12: 免责声明 (Disclaimer)
 | 每页一个主题 | One idea per slide |
 | 标题先行 | Clear headline at top of every slide |
 | 数据可视化 | Charts > tables > text |
-| 中文为主 | Primary language Chinese, with English subtitles |
-| 术语统一 | Use standard A-share terminology (see below) |
-| 不编造数据 | If data unavailable from API, show "N/A" or omit |
+| 双语呈现 | Primary language Chinese, with English subtitles (adapt to target market) |
+| 术语统一 | Use standard equity-research terminology (see below) |
+| 不编造数据 | If data unavailable from connector, show "N/A" or omit |
 
-### A-Share Terminology
+### Equity-Research Terminology
 
 | English | Chinese |
 |---------|---------|
@@ -221,7 +236,7 @@ Before delivering the PPT:
 Invoke the generation script (from project root):
 
 ```bash
-cd {{PROJECT_ROOT}} && python3 scripts/generate_a_share_ppt.py \
+cd {{PROJECT_ROOT}} && python3 scripts/generate_equity_ppt.py \
   --company "{{COMPANY_NAME}}" \
   --ticker "{{TICKER}}" \
   --industry "{{INDUSTRY_NAME}}" \
@@ -234,7 +249,15 @@ Required args: `--company`, `--ticker`
 Optional: `--industry` (for peer lookup), `--output`, `--type` (pitch/deep_dive/initiation), `--title`
 
 If `--industry` is omitted, the script attempts to infer it from the company's sector classification.
-> **Data Source Mode Switch**: Set env var `IFIND_DATA_SOURCE_MODE` to control data source preference.
-> - `ifind-only` (strict): Use iFind only, error if unavailable
-> - `ifind-fallback` (default): iFind preferred, fallback to AkShare
-> - `akshare-only, wind-only (Wind only), wind-fallback (Wind first, fallback to iFind → AkShare)`: Skip iFind, use AkShare only
+
+Reference report/deck styles after major global research houses — e.g. 高盛/摩根士丹利/中金 等
+(Goldman Sachs / Morgan Stanley / CICC) — adapting the house style to the target market.
+
+Examples across markets:
+- US: `--company "Apple Inc." --ticker "AAPL"`
+- HK: `--company "腾讯控股" --ticker "0700.HK"`
+- A-share: `--company "贵州茅台" --ticker "600519.SH"`
+
+All quantitative data flows from the `valuz-stock` connector (行情/财务数值); all qualitative
+material flows from the `valuz-search` connector (定性资料). No vendor API keys to configure —
+the connectors are provided by the Valuz workstation.

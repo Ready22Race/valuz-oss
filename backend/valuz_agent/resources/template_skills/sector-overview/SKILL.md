@@ -1,47 +1,47 @@
 ---
-name: china-sector-overview
-description: Comprehensive A-share sector and industry landscape reports — market size, competitive positioning, policy environment, key A-share players, trading multiples, and thematic trends. Adapted from the original sector-overview skill for Chinese market structure and terminology. Triggers on "A股行业分析", "行业研究", "板块分析", "sector overview China", "A-share sector deep dive", "白酒/半导体/新能源 行业分析", or "[industry] landscape China".
+name: sector-overview
+description: Comprehensive global equity sector and industry landscape reports — market size, competitive positioning, policy environment, key players, trading multiples, and thematic trends. Covers global stock markets with a focus on US / HK / A-shares, while also handling other markets. Uses valuz-stock (Stock MCP — industry_constituents, index_constituents, concepts_today/latest, company_overview, stock_quote, income_statement) and valuz-search (Search MCP — reports_search, news_search, filings_search). Triggers on "行业分析", "行业研究", "板块分析", "sector overview", "sector deep dive", "[industry] 行业分析", or "[industry] landscape".
 ---
 
-# china-sector-overview
+# sector-overview
 
 ## Purpose
 
-Create comprehensive **A股行业/板块深度报告** covering market dynamics, competitive positioning, regulatory environment, key players, trading multiples, and thematic trends.
+Create comprehensive **行业/板块深度报告 (industry/sector deep-dive)** covering market dynamics, competitive positioning, regulatory environment, key players, trading multiples, and thematic trends across **全球股票市场（美股/港股/A 股为主，兼顾其他市场）**.
 
 ## Data Sources
 
-### Primary: iFind MCP (Tier-1 付费) / AkShare MCP (Tier-2 免费备选)
+Two Valuz connectors cover everything you need:
+
+- **`valuz-stock`** (Stock MCP) — 行情、财务、行业/指数成分、概念热度. **裸代码**（AAPL / 00700 / 600519）.
+- **`valuz-search`** (Search MCP) — 财报、公告、研报、纪要、电话会、新闻检索. **`market:ticker`**（US:AAPL / HK:00700 / SH:600519）.
+
+**符号格式（首次使用注意）：valuz-stock 用裸代码（AAPL / 00700 / 600519）；valuz-search 用 `market:ticker`（US:AAPL / HK:00700 / SH:600519）。**
+
+Rule of thumb: **用 `valuz-stock` 取行情/财务/行业成分/概念热度，用 `valuz-search` 取定性资料（研报/政策/新闻）。**
+注意：**没有专门的"宏观经济序列"MCP 工具** —— 行业规模、GDP/CPI/利率等宏观数据通过 `reports_search`（行业/宏观/策略研报）、`news_search`(valuz-search) 检索，或作为分析师输入。
 
 ```python
-get_industry_stocks(industry="白酒")     → 板块成分股
-get_quote(ticker)                        → 个股行情、估值
-get_financials(ticker, "income")         → 财务数据对比
-get_index_data("000001")                 → 大盘基准
-# News (china-news MCP — separate server)
-get_stock_news(ticker="{{TICKER}}")          → 行业新闻
-get_market_overview()                    → 涨幅榜/成交额榜
+# 板块/赛道玩家清单与基准 (valuz-stock, 裸代码)
+industry_constituents(...)                        → 行业/赛道成分股
+index_constituents(...)                           → 指数成分股（大盘基准）
+concepts_today() / concepts_latest()              → 主题/概念热度
+company_overview(symbol="AAPL")                   → 个股基本面对照
+stock_quote(symbol="AAPL")                        → 个股行情、规模（市值）
+income_statement(symbol="AAPL", period="annual")  → 财务数据对比
+# 行业规模/政策/研报/新闻 (valuz-search, market:ticker)
+reports_search(query="...", symbols=["US:AAPL"])  → 行业/宏观/策略研报
+news_search(query="...")                          → 政策、行业新闻
 ```
-
-### Secondary Sources
-
-| Source | Use |
-|--------|-----|
-| 东方财富行业板块 | Industry classification, sector indices |
-| 巨潮资讯 | Company filings for competitive analysis |
-| 国家统计局 / 海关总署 | Macro data (industry output, trade) |
-| 行业协会 (中汽协, 硅业分会, etc.) | Sector-specific statistics |
-| Wind / Choice / 同花顺 | Comprehensive sector data |
-| 券商研报 | Analyst consensus and frameworks |
 
 ## Workflow
 
 ### Step 1: Define Scope & Angle
 
 **Clarify:**
-- Sector / industry focus (e.g., 白酒, 半导体, 新能源汽车)
+- Sector / industry focus (e.g., Semiconductors, EV / 新能源汽车, Spirits / 白酒)
 - Angle (e.g., investment theme, competitive analysis, turnaround story)
-- Geographic scope (A-share only, or include HK-listed / US-listed Chinese)
+- Geographic scope (target market — US, HK, A-share, or cross-listed / global peers)
 - Time horizon (cyclical analysis, secular trends, near-term trade)
 
 ### Step 2: Market Size & Structure
@@ -50,13 +50,13 @@ get_market_overview()                    → 涨幅榜/成交额榜
 
 | Metric | Data | Source |
 |--------|------|--------|
-| Total market size | 市场规模 (亿元/亿元) | 国家统计局, 行业协会 |
-| Growth rate | 同比增速 / CAGR | Historical data |
-| Market share | CR5, CR10 concentration | Company filings |
-| Penetration rate | For new industries | Industry reports |
-| Export/import | 进出口数据 | 海关总署 |
+| Total market size | 市场规模 (target market) | `reports_search`(valuz-search, 行业/宏观研报) |
+| Growth rate | 同比增速 / CAGR | `reports_search`/`news_search`(valuz-search)，或个股 `income_statement`(valuz-stock) 汇总 |
+| Market share | CR5, CR10 concentration | `filings_search`/`reports_search`(valuz-search) |
+| Penetration rate | For new industries | `reports_search`(valuz-search, 行业研报) |
+| Export/import | 进出口数据 | `reports_search`/`news_search`(valuz-search, 宏观/贸易) |
 
-**A-share representation:**
+**Listed representation (in the target market):**
 - Number of listed companies in sector
 - Total market cap (总市值 / 流通市值)
 - Average PE / PB multiples
@@ -67,27 +67,29 @@ get_market_overview()                    → 涨幅榜/成交额榜
 **Peer mapping:**
 
 ```python
-# Get all stocks in an industry
-get_industry_stocks(industry="白酒")
+# 拉赛道玩家清单 (valuz-stock, 裸代码)
+industry_constituents(...)   → 行业/赛道成分股
+index_constituents(...)      → 指数成分（用指数代表板块时）
+concepts_today()             → 当日热门概念/题材成分
 ```
 
-**For each major player, pull:**
+**For each major player, pull (valuz-stock, 裸代码):**
 ```python
-get_quote(ticker)           → Price, market cap, multiples
-get_financials(ticker)      → Revenue, margins, growth
-get_stock_info(ticker)      → Business description
+stock_quote(symbol="AAPL")                          → Price, market cap, multiples
+income_statement(symbol="AAPL", period="annual")    → Revenue, margins, growth
+company_overview(symbol="AAPL")                      → Business description, 基本面
 ```
 
 **Competitive analysis table:**
 
-| Company | Ticker | Market Cap (亿) | Revenue (亿) | YoY Growth | Gross Margin | Net Margin | PE (TTM) | Market Share |
-|---------|--------|----------------|-------------|------------|-------------|------------|----------|-------------|
+| Company | Ticker | Market Cap | Revenue | YoY Growth | Gross Margin | Net Margin | PE (TTM) | Market Share |
+|---------|--------|-----------|---------|------------|-------------|------------|----------|-------------|
 | | | | | | | | | |
 
 **Competitive positioning:**
 - Market share trends (gaining or losing)
 - Product positioning (premium, mid-tier, mass market)
-- Geographic footprint (national vs regional)
+- Geographic footprint (national vs regional vs global)
 - Distribution strength (渠道能力)
 - Brand equity (品牌力)
 
@@ -109,23 +111,25 @@ get_stock_info(ticker)      → Business description
 
 ### Step 5: Policy Environment
 
-**China-specific policy analysis:**
+**Cross-market policy analysis:**
 
 | Policy Area | Current Status | Impact |
 |-------------|---------------|--------|
 | 产业政策 | 支持/限制/中性 | Direct sector impact |
-| 环保政策 | 双碳目标 | Cost structure impact |
-| 监管政策 | 集采/反垄断 | Margin / market share impact |
-| 补贴政策 | 新能源/半导体补贴 | Competitiveness impact |
+| 环保 / 气候政策 | 减碳目标 | Cost structure impact |
+| 监管政策 | 反垄断、行业监管 | Margin / market share impact |
+| 贸易政策 | 关税与出口管制 | Competitiveness impact |
 | 货币政策 | 宽松/中性/紧缩 | Financing cost impact |
 
-**Key regulatory bodies:**
-- 发改委 (NDRC) — industrial policy, pricing
-- 工信部 (MIIT) — manufacturing, tech, telecom
-- 生态环境部 (MEE) — environmental compliance
-- 卫健委 (NHC) — healthcare, pharmaceuticals
-- 证监会 (CSRC) — capital markets
-- 央行 (PBoC) — monetary policy
+**Key regulatory bodies (market-dependent):**
+- Industrial / pricing regulators (e.g., NDRC, FTC, agency overseeing 产业政策与定价)
+- Tech / telecom / manufacturing regulators (e.g., MIIT, FCC)
+- Environmental regulators (e.g., MEE, EPA)
+- Healthcare / pharma regulators (e.g., NHC, FDA)
+- Capital-markets regulators (e.g., CSRC, SEC)
+- Central banks (e.g., PBoC, Fed) — monetary policy
+
+用 `reports_search`（行业/宏观/策略研报）与 `news_search`(valuz-search) 拉取相关市场的最新政策、监管事件与新闻。
 
 ### Step 6: Key Drivers & Trends
 
@@ -133,8 +137,8 @@ get_stock_info(ticker)      → Business description
 - Technology adoption (技术替代)
 - Consumption upgrade/downgrade (消费升级/降级)
 - Demographic shifts (人口结构)
-- Supply chain localization (供应链国产化)
-- Environmental transition (双碳/ESG)
+- Supply chain localization / reshoring (供应链国产化/回流)
+- Environmental transition (减碳/ESG)
 
 **Cyclical factors:**
 - Inventory cycles (库存周期)
@@ -146,8 +150,8 @@ get_stock_info(ticker)      → Business description
 
 **Thematic angles:**
 
-1. **Policy-driven**: 国产替代, 新基建, 乡村振兴
-2. **Demand-driven**: 消费升级, 老龄化, 出海
+1. **Policy-driven**: 国产替代/reshoring, 新基建/infrastructure, 产业补贴
+2. **Demand-driven**: 消费升级, 老龄化, 出海/globalization
 3. **Supply-driven**: 产能出清, 行业整合, 龙头集中
 4. **Technology-driven**: AI应用, 新能源, 生物医药创新
 
@@ -167,10 +171,10 @@ get_stock_info(ticker)      → Business description
 
 ### Step 9: Report Structure
 
-**Standard A-share sector overview format:**
+**Standard sector overview format:**
 
 ```
-【XX证券】[行业] 深度报告：[标题]
+[Research] [行业 / Industry] 深度报告：[标题]
 
 一、行业概述
    市场规模、增速、发展阶段
@@ -197,72 +201,73 @@ get_stock_info(ticker)      → Business description
    政策风险、需求风险、竞争风险
 ```
 
-## China-Specific Considerations
+## Market-Specific Considerations
 
-### A-share Market Structure
+### Market Structure (varies by listing venue)
 
 | Feature | Description | Implication |
 |---------|-------------|-------------|
-| 涨跌停限制 | ±10% (main), ±20% (创业板/科创板) | Price discovery slower |
-| 散户占比高 | Retail ~60-80% of turnover | More sentiment-driven |
-| 政策驱动 | Government announcements move markets | Monitor policy closely |
+| 涨跌停 / 限制 | e.g. A-share ±10% (main), ±20% (创业板/科创板); US no daily limit | Price discovery speed varies |
+| 散户占比 | High in A-share (~60-80% of turnover); lower in US | Sentiment vs institution driven |
+| 政策驱动 | Government announcements can move markets (esp. A-share/HK) | Monitor policy closely |
 | 板块轮动 | Sector rotation common | Timing important |
-| 北向资金 | Foreign inflows tracked daily | Sentiment indicator |
+| 跨境资金 | Foreign / 北向资金 flows tracked | Sentiment indicator |
+
+Example tickers across markets — valuz-stock 裸代码: **AAPL** (US), **00700** (HK), **600519** (A-share); valuz-search `market:ticker`: **US:AAPL**, **HK:00700**, **SH:600519**.
 
 ### Industry Classification
 
 **Common sector classifications:**
-- 申万行业分类 (SW Industry) — most widely used
-- 中信行业分类 (CITIC) — alternative
-- 证监会行业分类 — regulatory standard
-- 东方财富行业 — data vendor specific
+- GICS — global standard, widely used for US/global names
+- 申万行业分类 (SW Industry) — common for A-shares
+- 中信行业分类 (CITIC) — alternative for A-shares
+- Regulatory / data-vendor classifications
 
-**Use `get_industry_stocks(industry="...")` with Chinese industry names.**
+**用 `industry_constituents`(valuz-stock) 拉取与目标市场匹配的行业成分股；以指数代表板块时改用 `index_constituents`(valuz-stock)。**
 
 ### Sector-Specific Metrics
 
 | Sector | Key Metrics |
 |--------|-------------|
-| 白酒 | 批价, 库存, 回款, 动销, 渠道库存 |
-| 半导体 | 产能利用率, 出货量, ASP, 库存天数 |
-| 新能源汽车 | 交付量, 单车收入, 电池成本, 渗透率 |
-| 医药 | 创新药收入, 研发费用率, 集采中标 |
-| 银行 | NIM, 不良率, 拨备覆盖率, ROE |
-| 券商 | 经纪/投行/资管收入, 股基交易量, 两融余额 |
-| 光伏 | 硅料/组件价格, 排产, 海外出货 |
-| 房地产 | 销售额, 拿地, 融资成本, 去化周期 |
-| 食品饮料 | 动销, 库存, 提价能力 |
-| 互联网 | DAU/MAU, ARPU, 收入增速, 利润率 |
+| Spirits / 白酒 | 批价, 库存, 回款, 动销, 渠道库存 |
+| Semiconductors / 半导体 | 产能利用率, 出货量, ASP, 库存天数 |
+| EV / 新能源汽车 | 交付量, 单车收入, 电池成本, 渗透率 |
+| Pharma / 医药 | 创新药收入, 研发费用率, 招采中标 |
+| Banks / 银行 | NIM, 不良率, 拨备覆盖率, ROE |
+| Brokers / 券商 | 经纪/投行/资管收入, 股基交易量, 两融余额 |
+| Solar / 光伏 | 硅料/组件价格, 排产, 海外出货 |
+| Real estate / 房地产 | 销售额, 拿地, 融资成本, 去化周期 |
+| Food & bev / 食品饮料 | 动销, 库存, 提价能力 |
+| Internet / 互联网 | DAU/MAU, ARPU, 收入增速, 利润率 |
 
 ### Policy Risk Framework
 
-**High policy-sensitivity sectors:**
-1. 医药 — 集采 (volume-based procurement)
-2. 互联网 — 反垄断, 数据安全
-3. 教育 — 双减 (reduced private tutoring)
-4. 金融 — 监管周期, 利率政策
-5. 房地产 — 三道红线, 限购限贷
-6. 新能源 — 补贴退坡, 产能过剩
+**High policy-sensitivity sectors (examples span markets):**
+1. 医药 / Pharma — 招采/集采, 药价改革, drug pricing
+2. 互联网 / Internet — 反垄断, 数据安全, antitrust
+3. 半导体 / Semiconductors — 出口管制, 国产替代, export controls
+4. 金融 / Financials — 监管周期, 利率政策
+5. 房地产 / Real estate — 融资监管, 限购限贷
+6. 新能源 / Clean energy — 补贴退坡, 关税, 产能过剩
 
 **Policy risk assessment:**
 - Current policy stance (支持/中性/限制)
-- Upcoming regulatory events
+- Upcoming regulatory events (反垄断、关税与出口管制、行业监管)
 - Historical policy impact patterns
 - Best/worst case scenarios
+
+用 `reports_search`（行业/宏观/策略研报）与 `news_search`(valuz-search) 拉取相关政策背景与新闻。
 
 ## Quality Checks
 
 Before delivering:
 - [ ] Industry definition clear and consistent
-- [ ] Market size data sourced (统计局 or industry association)
-- [ ] Competitive landscape covers top 5-10 players
-- [ ] Financials sourced from iFind / AkShare / 巨潮
-- [ ] Valuation multiples calculated consistently
-- [ ] Policy environment analyzed
+- [ ] Market scope (target market) stated; 符号格式正确（valuz-stock 裸代码 AAPL / 00700 / 600519；valuz-search `market:ticker` US:AAPL / HK:00700 / SH:600519）
+- [ ] Market size data sourced (`reports_search`/`news_search`(valuz-search))
+- [ ] Competitive landscape covers top 5-10 players (`industry_constituents`/`index_constituents`(valuz-stock))
+- [ ] Financials sourced via `income_statement`/`company_overview`(valuz-stock)
+- [ ] Valuation multiples calculated consistently (`stock_quote`(valuz-stock))
+- [ ] Policy environment analyzed (`reports_search`/`news_search`(valuz-search))
 - [ ] Investment themes articulated
 - [ ] Ideas shortlist included (3-5 names)
-- [ ] Risk factors specific to China market included
-> **Data Source Mode Switch**: Set env var `IFIND_DATA_SOURCE_MODE` to control data source preference.
-> - `ifind-only` (strict): Use iFind only, error if unavailable
-> - `ifind-fallback` (default): iFind preferred, fallback to AkShare
-> - `akshare-only`: Skip iFind, use AkShare only
+- [ ] Risk factors specific to the target market included
