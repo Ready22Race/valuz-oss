@@ -75,8 +75,7 @@
     "automation": {
       "autoPaused": "窗口期内 {failed}/{total} 次失败 ({pct}%)，已自动暂停。修复后请到自动化页面手动恢复。",
       "appNotRunning": "应用未运行，本次自动化已跳过",
-      "titlePrefix": "[自动化]",
-      "taskKickedOff": "已启动任务：{title}"
+      "titlePrefix": "[自动化]"
     },
     "parser": {
       "ocrNotAuthorized": "*OCR 未授权 — 请在设置 → 解析模型中启用*"

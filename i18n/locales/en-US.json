@@ -75,8 +75,7 @@
     "automation": {
       "autoPaused": "{failed}/{total} failures in window ({pct}%), auto-paused. Fix the issue and resume manually from the Automation page.",
       "appNotRunning": "App not running, automation skipped",
-      "titlePrefix": "[Automation]",
-      "taskKickedOff": "Started task: {title}"
+      "titlePrefix": "[Automation]"
     },
     "parser": {
       "ocrNotAuthorized": "*OCR not authorized — please enable in Settings → Parser*"

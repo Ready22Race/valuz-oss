@@ -293,7 +293,6 @@ I18nKey = Literal[
     "automation.updateSuccess",
     "backend.automation.appNotRunning",
     "backend.automation.autoPaused",
-    "backend.automation.taskKickedOff",
     "backend.automation.titlePrefix",
     "backend.parser.ocrNotAuthorized",
     "backend.provider.apiKeyEmpty",

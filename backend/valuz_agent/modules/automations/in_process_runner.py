@@ -514,10 +514,6 @@ class InProcessAutomationRunner:
 
         try:
             title = rendered_prompt[:60] if len(rendered_prompt) > 60 else rendered_prompt
-            # Stamp the start BEFORE kickoff so ``duration_ms`` measures the
-            # real kickoff cost (create task + resolve lead session). It used
-            # to be set *after* kickoff returned, collapsing the duration to
-            # ~0ms in the activity log.
             run.started_at = now_ms()
             task = await task_orchestrator.kickoff(
                 project_id=row.project_id,
@@ -556,12 +552,13 @@ class InProcessAutomationRunner:
             run.status = "success"
             run.completed_at = now_ms()
             run.session_id = lead_session_id
-            run.result_summary = t(
-                "backend.automation.taskKickedOff",
-                params={"title": title or row.name},
-            )
-            if run.started_at:
-                run.duration_ms = run.completed_at - run.started_at
+            # Just the task title — no "kicked off" prefix. The run is a
+            # fire-and-forget kickoff: the lead session runs in the background
+            # (deep-linked via ``session_id``), so ``duration_ms`` is left unset
+            # rather than reporting the few-ms kickoff cost, which never matches
+            # the task's real running time in the activity log.
+            run.result_summary = title or row.name
+            run.duration_ms = None
             await ds.replace_run(run)
             logger.info(
                 "Automation %s kicked off task %s (lead session %s)",
