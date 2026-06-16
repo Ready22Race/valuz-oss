@@ -37,7 +37,6 @@ const bootstrap = async () => {
   // the bundled binary). See ``services/system-logs.ts``.
   registerSystemLogIpc();
   startLogTail();
-  await createMainWindow();
 
   const updater = setupUpdater({ getMainWindow, getUpdateWindow: () => getUpdateWindow() });
   // Renderer-driven manual check + restart-to-install. setupUpdater()
@@ -82,6 +81,12 @@ const bootstrap = async () => {
       applyAppMenu();
     }
   });
+
+  // Create the window LAST — once every ipcMain handler above is registered.
+  // The renderer invokes ``set_menu_locale`` as soon as it loads (and on each
+  // locale change); creating the window earlier raced that invoke against this
+  // handler's registration → "No handler registered for 'set_menu_locale'".
+  await createMainWindow();
 
   appTray = createAppTray({
     getMainWindow,
