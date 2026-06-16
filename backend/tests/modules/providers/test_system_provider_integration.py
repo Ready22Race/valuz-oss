@@ -98,6 +98,18 @@ def fresh_registry() -> None:
     set_llm_registry(_InMemoryRegistry())
 
 
+@pytest.fixture(autouse=True)
+def _no_subscription_templates(monkeypatch) -> None:
+    """These tests assert exact system/user list membership. Keep the virtual
+    CLI-subscription templates (Claude Pro·Max / Codex, added by
+    ``list_providers``) out of the picture so the assertions stay focused on the
+    registry-merge behaviour under test. Subscription templates have their own
+    coverage in ``test_virtual_builtin_providers.py``."""
+    from valuz_agent.infra.config import settings
+
+    monkeypatch.setattr(settings, "subscription_login_enabled", False)
+
+
 def _descriptor(
     *,
     provider_id: str = "valuz-channel",

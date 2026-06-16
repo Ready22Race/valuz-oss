@@ -168,6 +168,12 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     # `run_kernel_migrations`) before the first request. Without the context
     # manager, startup never runs.
     with TestClient(app) as client:
+        # Built-ins are no longer seeded at boot (OSS's contract: configure a
+        # model channel before use). Skill-creator chat-start creates a session,
+        # which needs a configured provider — establish that precondition the
+        # way a real install would (the admin reset endpoint repopulates the
+        # built-in channels for this owner).
+        client.post("/v1/providers/reset")
         yield {
             "client": client,
             "user_skills": user_skills,

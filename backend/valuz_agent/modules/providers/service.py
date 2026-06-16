@@ -764,6 +764,94 @@ def _resolve_discovery_protocol(row: ProviderRow) -> str:
     return "openai"
 
 
+def _builtin_subscription_row(entry: Any) -> ProviderRow | None:
+    """Transient (unpersisted) ``ProviderRow`` for a built-in OAuth subscription
+    catalog entry, or ``None`` when the entry isn't an OAuth kind.
+
+    Shared by the list (``_builtin_subscription_template_items``) and the detail
+    (``_virtual_builtin_subscription_detail``) so the virtual template a user
+    sees in the list opens identically in the edit dialog. ``model_ids=None``
+    keeps the picker tracking the live recommended subscription catalog.
+    """
+    descriptor = _PROVIDER_MAP.get(entry.provider_kind)
+    if descriptor is None or descriptor.auth_type != "oauth":
+        return None
+    return ProviderRow(
+        id=entry.id,
+        name=entry.name,
+        provider_kind=entry.provider_kind,
+        source="builtin",
+        credential_source="none",
+        base_url=descriptor.default_base_url or None,
+        default_model=descriptor.default_model or None,
+        model_ids=None,
+        account_provider_id=None,
+        enabled=True,
+        is_default=False,
+        deletable=False,
+        test_status="never",
+        auth_type="oauth",
+    )
+
+
+def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[ProviderListItem]:
+    """Virtual list entries for OSS CLI-subscription channels (Claude Pro·Max,
+    Codex) the caller hasn't configured yet.
+
+    These are NOT persisted. Built-ins are no longer seeded as rows (seeding bred
+    rows owned by an identity that may never authenticate — the device-local id
+    under single-tenant, no one under a multi-user overlay — plus a well-known-id
+    primary-key collision when the same channel is configured by multiple users).
+    A real ``valuz_provider`` row is materialized only on login
+    (``ProviderService._materialize_builtin_subscription``). A kind already in
+    ``configured_kinds`` (a prior login, or a legacy seeded row) is skipped so the
+    configured row shows instead of a duplicate template.
+
+    Only OAuth subscription kinds are virtualized here — api_key built-ins are
+    discovered through the "add provider" dialog (``GET /v1/providers/config``)
+    and materialized by ``create_provider``. Gated by
+    ``settings.subscription_login_enabled`` (off on a shared multi-user server
+    with no local CLI keychain).
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.seeds._io import load_provider_seeds
+
+    if not settings.subscription_login_enabled:
+        return []
+    items: list[ProviderListItem] = []
+    for entry in load_provider_seeds().providers:
+        if entry.provider_kind in configured_kinds:
+            continue
+        row = _builtin_subscription_row(entry)
+        if row is None:
+            continue
+        items.append(_row_to_list_item(row))
+    return items
+
+
+def _virtual_builtin_subscription_detail(provider_id: str) -> ProviderDetail | None:
+    """Detail for an unconfigured built-in OAuth subscription template.
+
+    No DB row exists for a virtual template until the user logs in, so the edit
+    dialog's ``GET /v1/providers/{id}`` would 404. Mirror what
+    ``_builtin_subscription_template_items`` surfaces in the list so the dialog
+    opens on the same data. ``None`` when ``provider_id`` isn't a built-in OAuth
+    catalog id or subscription login is disabled for this deployment.
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.seeds._io import load_provider_seeds
+
+    if not settings.subscription_login_enabled:
+        return None
+    entry = next((e for e in load_provider_seeds().providers if e.id == provider_id), None)
+    if entry is None:
+        return None
+    row = _builtin_subscription_row(entry)
+    if row is None:
+        return None
+    return _row_to_detail(row)
+
+
 class ProviderService:
     def __init__(
         self,
@@ -808,7 +896,11 @@ class ProviderService:
             system_items.append(
                 _descriptor_to_list_item(d, model_options=opts, model_labels=labels)
             )
-        combined = system_items + user_items
+        # Virtual CLI-subscription templates for kinds not yet configured (no DB
+        # row exists until the user logs in — see ``_materialize_builtin_subscription``).
+        configured_kinds = {r.provider_kind for r in rows}
+        template_items = _builtin_subscription_template_items(configured_kinds)
+        combined = system_items + user_items + template_items
         # Richer visibility filter (overlay-bound policy): hide whole provider
         # ids the caller isn't allowed to see — e.g. builtin personal channels
         # (Claude Pro/Max, Codex) when the platform disables member-configured
@@ -828,9 +920,15 @@ class ProviderService:
                 model_labels=await _resolve_descriptor_model_labels(descriptor),
             )
         row = await self._ds.get_by_id(user_id, provider_id)
-        if not row:
-            raise ProviderNotFound(f"Provider {provider_id!r} not found")
-        return _row_to_detail(row)
+        if row is not None:
+            return _row_to_detail(row)
+        # No row: the id may be an unconfigured built-in subscription template
+        # (virtualized in ``list_providers``) — resolve it so the edit dialog
+        # opens instead of erroring with "获取模型详情失败".
+        virtual = _virtual_builtin_subscription_detail(provider_id)
+        if virtual is not None:
+            return virtual
+        raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
     @staticmethod
     def _guard_not_system(provider_id: str) -> None:
@@ -1161,6 +1259,19 @@ class ProviderService:
         self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
+            # Edit dialog on an unconfigured built-in subscription template: no
+            # row exists until login. The OAuth dialog persists nothing (api key
+            # / endpoint / models are all hidden), so an empty save is a harmless
+            # no-op — return the virtual detail rather than 404, matching the
+            # pre-virtualization seeded-row behaviour. A patch that DOES carry a
+            # change still 404s: log the channel in first so a real row exists.
+            no_changes = not any(
+                (name, base_url, api_key, default_model, protocol, auth_type, models is not None)
+            )
+            if no_changes:
+                virtual = _virtual_builtin_subscription_detail(provider_id)
+                if virtual is not None:
+                    return virtual
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
         if row.source == "managed":
@@ -1343,12 +1454,22 @@ class ProviderService:
         signal that the user has completed the out-of-band login.  Calling
         this on an already-enabled row is a no-op (idempotent).
 
+        Built-ins aren't seeded, so a subscription login is the FIRST time a row
+        exists. When no row matches ``provider_id``, treat it as a built-in
+        catalog id (e.g. ``ch-claude-subscription``) and materialize a row on
+        demand (``_materialize_builtin_subscription``); a non-builtin id still
+        404s.
+
         System-managed providers are immutable (403 via ``SystemProviderImmutable``).
         """
         self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
-            raise ProviderNotFound(f"Provider {provider_id!r} not found")
+            materialized = await self._materialize_builtin_subscription(user_id, provider_id)
+            if materialized is None:
+                raise ProviderNotFound(f"Provider {provider_id!r} not found")
+            self._bus.publish("provider.updated", provider_id=materialized.id)
+            return _row_to_detail(materialized)
 
         if row.enabled and row.credential_source == "cli_keychain":
             # Already in the desired state — idempotent, return current detail.
@@ -1361,6 +1482,60 @@ class ProviderService:
         await self._ds.update(row)
         self._bus.publish("provider.updated", provider_id=row.id)
         return _row_to_detail(row)
+
+    async def _materialize_builtin_subscription(
+        self, user_id: str, provider_id: str
+    ) -> ProviderRow | None:
+        """Create (or reuse) the row for a built-in OAuth subscription channel.
+
+        ``provider_id`` is a well-known catalog id (e.g. ``ch-claude-subscription``).
+        Built-ins aren't seeded, so the first ``claude``/``codex`` ``/login`` is
+        when the row first appears. Idempotent by *kind*: if the user already has
+        a row of that kind (a prior login, or a legacy seeded row) it is enabled
+        and returned rather than duplicated — the materialized row carries a fresh
+        uuid id, not the catalog id, so a lookup by id alone can't dedupe.
+
+        Returns ``None`` when ``provider_id`` isn't a known OAuth built-in or
+        subscription login is disabled for this deployment — the caller maps that
+        to ``ProviderNotFound``.
+        """
+        from valuz_agent.infra.config import settings
+        from valuz_agent.seeds._io import load_provider_seeds
+
+        if not settings.subscription_login_enabled:
+            return None
+        entry = next((e for e in load_provider_seeds().providers if e.id == provider_id), None)
+        if entry is None:
+            return None
+        descriptor = _PROVIDER_MAP.get(entry.provider_kind)
+        if descriptor is None or descriptor.auth_type != "oauth":
+            return None
+
+        # Idempotency by kind — reuse an existing row (prior login / legacy seed).
+        for existing in await self._ds.list_providers(user_id):
+            if existing.provider_kind == entry.provider_kind:
+                existing.enabled = True
+                existing.credential_source = "cli_keychain"
+                existing.updated_at = now_ms()
+                await self._ds.update(existing)
+                return existing
+
+        row = ProviderRow(
+            name=entry.name,
+            provider_kind=entry.provider_kind,
+            source="user",
+            credential_source="cli_keychain",
+            base_url=descriptor.default_base_url or None,
+            default_model=descriptor.default_model or None,
+            model_ids=None,
+            enabled=True,
+            is_default=False,
+            deletable=True,
+            test_status="never",
+            auth_type="oauth",
+        )
+        await self._ds.create(user_id, row)
+        return row
 
     async def set_default(
         self, user_id: str, provider_id: str, *, default_model: str | None = None
