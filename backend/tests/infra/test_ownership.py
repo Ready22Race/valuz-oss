@@ -153,10 +153,10 @@ class TestUserMixinStamping:
 # 4. drop_stale_host_tables
 # --------------------------------------------------------------------------- #
 class TestDropStaleHostTables:
-    """The probe is a pure stamp gate now (0-migration policy) — full
+    """The probe is data-preserving now (trusts any known revision) — full
     behavioral coverage lives in ``tests/migrations/test_host_baseline_reset``.
-    These two cases pin the ownership-relevant ends: an unstamped legacy DB
-    resets; a baseline-stamped DB is trusted as-is."""
+    These cases pin the ownership-relevant ends: an unstamped legacy DB resets;
+    a DB stamped at a known revision is trusted as-is."""
 
     def test_drops_legacy_db_without_baseline_stamp(self, tmp_path) -> None:
         engine = create_engine(f"sqlite:///{tmp_path / 'pre.db'}")
