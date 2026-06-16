@@ -1,14 +1,14 @@
 """`_execute_task_kickoff` run-row bookkeeping.
 
-Two regressions guarded here:
+Guarded here:
 
-  * **duration_ms** — ``started_at`` must be stamped BEFORE the kickoff call so
-    the run's duration reflects the real kickoff cost. It used to be set right
-    next to ``completed_at`` (both after kickoff), collapsing every task
-    automation's duration to ~0ms in the activity log.
-  * **result_summary** — must be a localized, human-readable line built from the
-    task title, NOT the raw ``f"Task kicked off: {task.id}"`` (an opaque id the
-    user can't act on; deep-linking already rides ``session_id``).
+  * **duration_ms** — left UNSET for a task kickoff. The kickoff is
+    fire-and-forget (the lead session runs in the background), so the few-ms
+    kickoff cost never matches the task's real running time; the activity log
+    shows "—" instead of a misleading duration.
+  * **result_summary** — the bare task title, with no "kicked off" prefix and
+    NOT the raw ``f"Task kicked off: {task.id}"`` (an opaque id the user can't
+    act on; deep-linking already rides ``session_id``).
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ async def _fake_uow(*args, **kwargs):
 
 
 @pytest.mark.asyncio
-async def test_task_kickoff_stamps_duration_and_localized_summary() -> None:
+async def test_task_kickoff_leaves_duration_unset_and_titles_summary() -> None:
     runner = InProcessAutomationRunner()
     runner._triggers = Mock()
     runner._triggers.next_fire_at = Mock(return_value=9_999)
@@ -94,17 +94,15 @@ async def test_task_kickoff_stamps_duration_and_localized_summary() -> None:
             rendered_prompt=prompt,
         )
 
-    # Duration is real (started stamped before kickoff → completed after).
+    # Fire-and-forget kickoff: duration is left unset (UI shows "—").
     assert run.status == "success"
-    assert run.started_at is not None and run.completed_at is not None
-    assert run.started_at < run.completed_at
-    assert run.duration_ms is not None and run.duration_ms > 0
+    assert run.duration_ms is None
 
-    # Summary is the localized title line — not the raw task id.
-    assert run.result_summary
+    # Summary is the bare task title — no prefix, not the raw task id.
+    assert run.result_summary == prompt  # title == rendered prompt (< 60 chars)
     assert "task-abc-123" not in run.result_summary
     assert not run.result_summary.startswith("Task kicked off:")
-    assert prompt in run.result_summary  # title == rendered prompt (< 60 chars)
+    assert not run.result_summary.startswith("Started task:")
 
     # Lead session deep-link still wired.
     assert run.session_id == "lead-sess-1"
