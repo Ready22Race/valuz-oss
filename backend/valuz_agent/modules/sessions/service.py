@@ -1008,7 +1008,11 @@ class SessionService:
             raise LookupError("owner context not set — cannot check budget")
         budget = await ext.billing.check_budget(uid)
         if not budget.allowed:
-            raise BudgetExceeded(budget.reason or "insufficient credits")
+            raise BudgetExceeded(
+                budget.reason or "insufficient credits",
+                message_key=budget.message_key,
+                message_params=budget.message_params,
+            )
 
         old_status = status
 
@@ -1092,7 +1096,11 @@ class SessionService:
             raise LookupError("owner context not set — cannot check budget")
         budget = await ext.billing.check_budget(uid)
         if not budget.allowed:
-            raise BudgetExceeded(budget.reason or "insufficient credits")
+            raise BudgetExceeded(
+                budget.reason or "insufficient credits",
+                message_key=budget.message_key,
+                message_params=budget.message_params,
+            )
 
         # Mirror ``send_message``: flip the session to ``status="running"``
         # before driving the turn. The frontend's auto-resume effect on

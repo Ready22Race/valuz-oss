@@ -124,6 +124,7 @@ export interface AutomationRunItem {
   duration_ms: number | null;
   result_summary: string | null;
   error_code: string | null;
+  error_message_key: string | null;
   error_message: string | null;
   session_id: string | null;
   created_files: string[];

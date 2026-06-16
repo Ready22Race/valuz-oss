@@ -397,6 +397,7 @@ class InProcessAutomationRunner:
                 except Exception as exc:
                     run.status = "failed"
                     run.error_code = type(exc).__name__
+                    run.error_message_key = getattr(exc, "message_key", None)
                     run.error_message = str(exc)[:500]
                     run.completed_at = now_ms()
                     await ds.replace_run(run)
@@ -456,6 +457,7 @@ class InProcessAutomationRunner:
                 except Exception as exc:
                     run.status = "failed"
                     run.error_code = type(exc).__name__
+                    run.error_message_key = getattr(exc, "message_key", None)
                     run.error_message = str(exc)[:500]
                     logger.exception("Run %s failed for automation %s", run_id, automation_id)
 
@@ -563,6 +565,7 @@ class InProcessAutomationRunner:
         except Exception as exc:
             run.status = "failed"
             run.error_code = type(exc).__name__
+            run.error_message_key = getattr(exc, "message_key", None)
             run.error_message = str(exc)[:500]
             run.completed_at = now_ms()
             await ds.replace_run(run)
