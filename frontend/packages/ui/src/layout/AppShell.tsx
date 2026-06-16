@@ -225,40 +225,25 @@ export const AppShell = ({
           </div>
         </main>
 
-        {aside
-          ? (() => {
-              console.log("[AppShell] rendering aside element");
-              return (
-                <aside
-                  className={cn(
-                    "hidden shrink-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card lg:flex",
-                    asideClassName,
-                  )}
-                >
-                  {aside}
-                </aside>
-              );
-            })()
-          : right
-            ? (() => {
-                console.log("[AppShell] rendering right element");
-                return (
-                  <aside
-                    className={cn(
-                      "hidden shrink-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card lg:flex",
-                      asideClassName,
-                    )}
-                  >
-                    {right}
-                  </aside>
-                );
-              })()
-            : (() => {
-                console.log(
-                  "[AppShell] NOT rendering aside (both null/undefined)",
-                );
-                return null;
-              })()}
+        {aside ? (
+          <aside
+            className={cn(
+              "hidden shrink-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card lg:flex",
+              asideClassName,
+            )}
+          >
+            {aside}
+          </aside>
+        ) : right ? (
+          <aside
+            className={cn(
+              "hidden shrink-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card lg:flex",
+              asideClassName,
+            )}
+          >
+            {right}
+          </aside>
+        ) : null}
       </div>
     </div>
   </div>
