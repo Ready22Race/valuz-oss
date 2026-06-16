@@ -35,6 +35,7 @@ import { FilePenLine, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   projectsApi,
+  ApiError,
   sessionsApi,
   providersApi,
   automationsApi,
@@ -63,6 +64,7 @@ import {
   type MemberWithAgent,
 } from "@valuz/core";
 import { modelLabel } from "@valuz/shared";
+import { t as _t } from "@valuz/shared/i18n";
 import type { SessionListItem } from "@valuz/shared";
 import { useProjectOutlet } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
@@ -1144,8 +1146,17 @@ export const ProjectDetailPage = () => {
       await sessionsApi.sendMessage(session.id, text);
       setComposerValue("");
       navigate(`/conversation/${session.id}`);
-    } catch {
-      toast.error(t("common.saveFailed" as Parameters<typeof t>[0]));
+    } catch (cause) {
+      // A billing rejection (402) carries an i18n key the client renders;
+      // otherwise fall back to the generic save-failed copy.
+      toast.error(
+        cause instanceof ApiError && cause.i18nKey
+          ? _t(
+              cause.i18nKey as Parameters<typeof _t>[0],
+              cause.i18nParams as Parameters<typeof _t>[1],
+            )
+          : t("common.saveFailed" as Parameters<typeof t>[0]),
+      );
     } finally {
       setSending(false);
     }

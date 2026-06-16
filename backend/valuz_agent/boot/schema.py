@@ -1,16 +1,15 @@
-"""Host-side schema bootstrap — single-baseline ("0-migration") policy.
+"""Host-side schema bootstrap — incremental alembic chain.
 
 The host owns its own alembic chain at ``backend/alembic/host`` with a
 non-default ``version_table = alembic_version_host`` so it does NOT
 collide with the kernel's ``alembic_version`` row in the same SQLite
 file.
 
-The chain holds exactly ONE revision: the 0001 baseline that creates the
-whole host schema. Pre-launch there are no upgrade migrations — schema
-changes regenerate 0001, and any DB not stamped at it is dropped wholesale
-and re-initialized (see ``drop_stale_host_tables``). ``run_host_migrations``
-then runs ``alembic upgrade head``, which on an empty/clean DB just lays
-down the baseline.
+The chain is incremental: the 0001 baseline creates the schema and later
+revisions ALTER it. ``drop_stale_host_tables`` keeps any DB stamped at a
+*known* revision and lets ``run_host_migrations`` (``alembic upgrade head``)
+migrate it forward — data-preserving. Only an unknown/foreign/corrupt stamp
+(or tables present with no stamp) is dropped wholesale and re-initialized.
 """
 
 from __future__ import annotations
@@ -32,31 +31,37 @@ ALEMBIC_DIR = _BACKEND_ROOT / "alembic" / "host"
 ALEMBIC_INI = ALEMBIC_DIR / "alembic.ini"
 VERSION_TABLE = "alembic_version_host"
 
-# The one and only host revision. If a baseline regeneration ever changes the
-# schema shape, bump this id together with the migration's ``revision`` so
-# DBs stamped at the previous baseline fail the equality check below and get
-# rebuilt — the stamp is the single source of truth, no schema inspection.
-# Bumped 0001 → 0002 for the per-user composite PKs on the semantic-key tables
-# (valuz_app_setting / valuz_shortcut_binding / valuz_onboarding_state /
-# valuz_setup_job key on ``(<semantic_key>, user_id)``). DBs stamped at the
-# previous baseline are dropped + rebuilt (0-migration policy).
-BASELINE_REVISION = "0002"
+# Head revision of the host alembic chain (kept for reference / exports). The
+# chain is incremental now: ``drop_stale_host_tables`` trusts any DB on a
+# *known* revision and lets ``alembic upgrade head`` migrate it forward
+# (data-preserving); only an unknown/foreign/corrupt stamp is dropped + rebuilt.
+BASELINE_REVISION = "0003"
+
+
+def _known_host_revisions() -> set[str]:
+    """Every revision id in the host alembic chain.
+
+    A DB stamped at any of these is on a valid upgrade path and is migrated
+    forward by ``alembic upgrade head`` (data-preserving) — see
+    ``drop_stale_host_tables``.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(ALEMBIC_DIR))
+    return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
 
 
 def drop_stale_host_tables(engine: Engine | None = None) -> None:
-    """0-migration reset probe — host counterpart to
-    ``boot.kernel.drop_stale_kernel_tables``.
+    """Self-heal probe for a corrupt/foreign host stamp (incremental chain).
 
-    The host ships exactly one alembic revision (``BASELINE_REVISION``); there
-    is no upgrade path and, pre-launch, no data-preservation contract. The
-    check is a single stamp comparison — no schema fingerprinting:
-
-    - stamped at the baseline → trust it, no-op;
-    - anything else (an older multi-revision chain, a missing/empty stamp from
-      a boot that died mid-initialization, a future id from another branch) →
-      drop every ``valuz_*`` table plus the ``alembic_version_host`` stamp, so
-      the following ``run_host_migrations`` re-initializes the whole host
-      schema cleanly from the baseline.
+    The host alembic chain is incremental. This keeps any DB stamped at a
+    *known* revision and lets ``run_host_migrations`` (``alembic upgrade
+    head``) migrate it forward — data-preserving. Only an unknown/foreign
+    stamp, or ``valuz_*`` tables present with no stamp at all (a boot that
+    died mid-initialization), triggers a drop-and-rebuild so the upgrade can
+    re-initialize cleanly from the baseline.
 
     No-op on a fresh file. Runs synchronously off the event loop — it owns no
     session and reads no business data, like the kernel probe.
@@ -80,8 +85,8 @@ def drop_stale_host_tables(engine: Engine | None = None) -> None:
                 ).fetchone()
                 stamp = row[0] if row else None
 
-        if stamp == BASELINE_REVISION:
-            return  # already on the current baseline
+        if stamp in _known_host_revisions():
+            return  # known revision — `alembic upgrade head` migrates it
 
         stale = sorted(t for t in existing if t.startswith("valuz_"))
         if VERSION_TABLE in existing:
@@ -90,9 +95,8 @@ def drop_stale_host_tables(engine: Engine | None = None) -> None:
             return  # fresh install — nothing to reset
 
         logger.warning(
-            "host schema is not on baseline %s (stamp=%s) — "
+            "host schema stamp=%s is not a known revision — "
             "dropping %d host table(s) for a clean re-initialization",
-            BASELINE_REVISION,
             stamp,
             len(stale),
         )

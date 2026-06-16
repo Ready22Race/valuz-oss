@@ -1,10 +1,23 @@
+from typing import Any
+
+
 class ValuzError(Exception):
     status_code: int = 500
     error_code: int = 500000
     message: str = "Internal server error"
 
-    def __init__(self, message: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        message_key: str | None = None,
+        message_params: dict[str, Any] | None = None,
+    ) -> None:
         self.message = message or self.__class__.message
+        # Optional i18n key (+ params) so the client can render a localized
+        # message; raisers set them (e.g. a billing rejection).
+        self.message_key = message_key
+        self.message_params = message_params
         super().__init__(self.message)
 
 

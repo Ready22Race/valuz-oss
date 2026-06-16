@@ -562,6 +562,9 @@ export const AutomationPage = () => {
     status: runStatusToLogStatus(run.status),
     duration: formatDuration(run.duration_ms),
     output:
+      (run.error_message_key
+        ? t(run.error_message_key as I18nKey)
+        : null) ??
       run.result_summary ??
       run.error_message ??
       (run.error_code ? `${run.error_code}` : ""),

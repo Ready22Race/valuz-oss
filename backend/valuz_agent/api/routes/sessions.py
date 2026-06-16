@@ -296,7 +296,17 @@ async def send_message(
         raise HTTPException(status_code=401, detail="Unauthenticated")
     budget = await ext.billing.check_budget(user_id, estimated_cost=0.0)
     if not budget.allowed:
-        raise HTTPException(status_code=402, detail=budget.reason or "Budget exceeded")
+        # Structured detail: an overlay (e.g. commercial billing) may attach an
+        # i18n ``key`` (+ ``params``) for the client to render; ``message`` is
+        # the no-translation fallback. OSS/Noop only ever sets ``message``.
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "message_key": budget.message_key,
+                "message_params": budget.message_params,
+                "message": budget.reason or "Budget exceeded",
+            },
+        )
     return await svc.send_message(
         session_id, body.prompt, provider_id=body.provider_id, model_id=body.model_id
     )

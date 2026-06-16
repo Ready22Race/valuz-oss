@@ -105,6 +105,9 @@ class AutomationRunRow(Base, PrimaryKeyMixin, UserMixin):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     result_summary: Mapped[str | None] = mapped_column(Text)
     error_code: Mapped[str | None] = mapped_column(String(64))
+    # Optional i18n key for a friendly failure message (e.g. billing
+    # rejection); the client prefers it over error_code / error_message.
+    error_message_key: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)
     session_id: Mapped[str | None] = mapped_column(String(36))
     created_files: Mapped[str | None] = mapped_column(Text)
