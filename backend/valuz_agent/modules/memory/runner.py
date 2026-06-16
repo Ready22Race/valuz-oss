@@ -212,3 +212,140 @@ async def run_extraction_for_session(session_id: str, user_id: str | None) -> No
         logger.debug("memory extraction failed for %s", session_id, exc_info=True)
     finally:
         reset_current_user_id(token)
+
+
+# ── Task-finish extraction (memory-system-design §7.1) ───────────────────────
+
+_MAX_DIGEST_CHARS = 6_000
+
+
+def _lead_provider_id(source: Any) -> str | None:
+    """Provider id used to re-resolve credentials for the ephemeral review session.
+    Chat sessions stash it in ``valuz.locked_provider_id``; task lead sessions carry
+    it on the embedded agent config (``agent_config.metadata.provider_id``)."""
+    valuz = (getattr(source, "metadata", None) or {}).get("valuz", {}) or {}
+    pid = valuz.get("locked_provider_id")
+    if pid:
+        return str(pid)
+    ac = getattr(source, "agent_config", None)
+    meta = (getattr(ac, "metadata", None) or {}) if ac is not None else {}
+    pid = meta.get("provider_id")
+    return str(pid) if pid else None
+
+
+def build_task_digest(task: Any, runs: list[Any], *, max_chars: int = _MAX_DIGEST_CHARS) -> str:
+    """Render a finished task's plan + per-member results into a compact digest —
+    the raw material for multi-agent lessons. Bounded to keep the prompt sane."""
+    lines = [
+        f"TASK: {getattr(task, 'title', '') or ''}",
+        f"GOAL: {getattr(task, 'goal', '') or ''}",
+        f"OUTCOME: {getattr(task, 'status', '') or ''}",
+    ]
+    subtasks = (getattr(task, "plan", None) or {}).get("subtasks") or []
+    nodes = [n for n in subtasks if isinstance(n, dict)]
+    if nodes:
+        lines.append("")
+        lines.append("PLAN (final state):")
+        for n in nodes:
+            deps = ", ".join(n.get("depends_on") or [])
+            tail = f", deps={deps}" if deps else ""
+            lines.append(
+                f"- [{n.get('status', '?')}] {n.get('key', '?')} "
+                f"(agent={n.get('agent', '?')}{tail}): {n.get('title', '') or ''}"
+            )
+    members = [r for r in runs if getattr(r, "kind", None) == "subtask"]
+    if members:
+        lines.append("")
+        lines.append("MEMBER RESULTS:")
+        for r in members:
+            manifest = getattr(r, "result_manifest", None) or {}
+            summary = (manifest.get("summary") or "").strip().replace("\n", " ")
+            if len(summary) > 400:
+                summary = summary[:400] + "…"
+            lines.append(
+                f"- {getattr(r, 'subtask_key', None) or '?'} "
+                f"(agent={getattr(r, 'agent_slug', '?')}) "
+                f"[{getattr(r, 'status', '?')}]: {summary}"
+            )
+    return "\n".join(lines)[:max_chars]
+
+
+async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
+    """Task-finish trigger: when a multi-agent task completes, graduate its durable
+    multi-agent lessons + project progress into project memory. Reviews the lead's
+    orchestration transcript plus a digest of the plan and member results. Fully
+    best-effort — never affects the task."""
+    if not user_id or not task_id:
+        return
+    token = set_current_user_id(user_id)
+    try:
+        from valuz_agent.modules.tasks.datastore import TaskDatastore, TaskSessionDatastore
+
+        async with async_unit_of_work(commit=False) as db:
+            task = await TaskDatastore(db).get_task(user_id, task_id)
+            runs = await TaskSessionDatastore(db).list_runs(user_id, task_id) if task else []
+        # Only graduate lessons from a successfully completed task.
+        if task is None or task.status != "completed":
+            return
+
+        async with async_unit_of_work() as db:
+            from valuz_agent.modules.settings.preferences import (
+                get_memory_auto_extract,
+                get_memory_enabled,
+            )
+
+            if not (await get_memory_enabled(db) and await get_memory_auto_extract(db)):
+                return
+
+        # Tasks live on real projects; bail if the project is missing/chat-kind.
+        project_id = task.project_id or None
+        if not project_id:
+            return
+        brief = await _resolve_project_brief(user_id, project_id)
+        if brief is None or brief[0] != "project":
+            return
+        project_context = _format_project_context(brief[1], brief[2])
+
+        # The lead run is the orchestration session of record.
+        lead = next((r for r in runs if getattr(r, "kind", None) == "lead"), None)
+        lead_sid = getattr(lead, "session_id", None) if lead else None
+        lead_session_id = lead_sid or task.current_holder
+        if not lead_session_id:
+            return
+        source = await kernel_client.get_session(user_id, lead_session_id)
+        if source is None:
+            return
+        provider_id = _lead_provider_id(source)
+        if not provider_id or not source.model:
+            logger.debug("task memory: unresolved provider/model for task %s", task_id)
+            return
+
+        messages = await kernel_client.list_messages(user_id, lead_session_id, limit=80)
+        transcript = build_transcript(messages)
+        digest = build_task_digest(task, runs)
+
+        async with async_unit_of_work() as db:
+            mp = await resolve_model_provider(
+                provider_id=provider_id,
+                model_id=source.model,
+                providers=ProviderDatastore(db),
+                secrets=FileSecretStore(settings.secrets_dir),
+                runtime_provider=source.runtime_provider,
+            )
+        logger.info("task memory: reviewing finished task %s (project=%s)", task_id, project_id)
+        completer = _make_completer(
+            user_id=user_id,
+            runtime_provider=source.runtime_provider,
+            model=source.model,
+            mp=mp,
+        )
+        await MemoryExtractor(complete=completer).extract(
+            transcript=transcript,
+            project_id=project_id,
+            project_context=project_context,
+            task_digest=digest,
+        )
+    except Exception:  # noqa: BLE001 — best-effort; never affect the task
+        logger.debug("task memory extraction failed for %s", task_id, exc_info=True)
+    finally:
+        reset_current_user_id(token)

@@ -45,7 +45,7 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
     from valuz_agent.infra import fs_registry as fsmod
 
     monkeypatch.setattr(fsmod.FsRegistry, "data_dir", lambda self: tmp_path / "app")
-    monkeypatch.setattr(r, "async_unit_of_work", lambda: _UOW())
+    monkeypatch.setattr(r, "async_unit_of_work", lambda *_a, **_k: _UOW())
     monkeypatch.setattr(r, "ProviderDatastore", lambda _db: object())
     monkeypatch.setattr(r, "FileSecretStore", lambda _d: object())
 
@@ -283,3 +283,210 @@ def test_chat_kind_project_gated_to_user_global(patched):
     # chat-kind project → project scope dropped; global still written
     assert memory_store.read_entries("project", project_id="chatproj") == []
     assert "kept global" in memory_store.read_entries("global")
+
+
+# ── Task-finish extraction (memory-system-design §7.1) ───────────────────────
+
+
+def test_build_task_digest():
+    from valuz_agent.modules.memory.runner import build_task_digest
+
+    task = SimpleNamespace(
+        title="Q2 渠道研究",
+        goal="分析茅台 Q2 渠道动销",
+        status="completed",
+        plan={
+            "subtasks": [
+                {
+                    "key": "collect",
+                    "title": "采集财报",
+                    "agent": "researcher",
+                    "status": "completed",
+                    "depends_on": [],
+                },
+                {
+                    "key": "analyze",
+                    "title": "分析",
+                    "agent": "analyst",
+                    "status": "completed",
+                    "depends_on": ["collect"],
+                },
+            ]
+        },
+    )
+    runs = [
+        SimpleNamespace(kind="lead", session_id="lead1"),
+        SimpleNamespace(
+            kind="subtask",
+            subtask_key="collect",
+            agent_slug="researcher",
+            status="completed",
+            result_manifest={"summary": "拿到 Q2 财报"},
+        ),
+    ]
+    d = build_task_digest(task, runs)
+    assert "Q2 渠道研究" in d and "采集财报" in d and "deps=collect" in d
+    assert "researcher" in d and "拿到 Q2 财报" in d
+
+
+def test_lead_provider_id_chat_then_agent_config_fallback():
+    from valuz_agent.modules.memory.runner import _lead_provider_id
+
+    chat = SimpleNamespace(metadata={"valuz": {"locked_provider_id": "p1"}}, agent_config=None)
+    assert _lead_provider_id(chat) == "p1"
+    # task lead sessions carry it on the embedded agent config instead
+    task = SimpleNamespace(
+        metadata={}, agent_config=SimpleNamespace(metadata={"provider_id": "p2"})
+    )
+    assert _lead_provider_id(task) == "p2"
+    assert _lead_provider_id(SimpleNamespace(metadata={}, agent_config=None)) is None
+
+
+def _wire_task(monkeypatch, *, task, runs):  # noqa: ANN001, ANN202
+    class _TaskDS:
+        def __init__(self, _db):  # noqa: ANN001
+            pass
+
+        async def get_task(self, _uid, _tid):  # noqa: ANN001, ANN202
+            return task
+
+    class _RunDS:
+        def __init__(self, _db):  # noqa: ANN001
+            pass
+
+        async def list_runs(self, _uid, _tid):  # noqa: ANN001, ANN202
+            return runs
+
+    monkeypatch.setattr("valuz_agent.modules.tasks.datastore.TaskDatastore", _TaskDS)
+    monkeypatch.setattr("valuz_agent.modules.tasks.datastore.TaskSessionDatastore", _RunDS)
+
+
+def _wire_lead(monkeypatch, *, payload, seen=None):  # noqa: ANN001, ANN202
+    source = SimpleNamespace(
+        metadata={"valuz": {"locked_provider_id": "p1"}},
+        model="claude-sonnet-4-6",
+        runtime_provider="claude_agent",
+        agent_config=None,
+    )
+
+    async def _get(_uid, _sid):  # noqa: ANN001, ANN202
+        return source
+
+    async def _list(_uid, _sid, **_kw):  # noqa: ANN003, ANN202
+        return [
+            SimpleNamespace(
+                user_message=SimpleNamespace(text="plan + dispatch the subtasks"),
+                assistant_message="reviewed member output, approved",
+            )
+        ]
+
+    async def _run(_uid, _sid, text):  # noqa: ANN001, ANN202
+        if seen is not None:
+            seen["prompt"] = text
+        return SimpleNamespace(assistant_message=payload)
+
+    monkeypatch.setattr(r.kernel_client, "get_session", _get)
+    monkeypatch.setattr(r.kernel_client, "list_messages", _list)
+    monkeypatch.setattr(r.kernel_client, "run_turn", _run)
+
+
+def test_task_finish_writes_project_memory(patched):
+    monkeypatch, calls = patched
+    from valuz_agent.modules.memory.runner import run_task_finish_extraction
+
+    async def _brief(_uid, _pid):  # noqa: ANN001, ANN202
+        return ("project", "茅台研究", "重视一手财报")
+
+    monkeypatch.setattr(r, "_resolve_project_brief", _brief)
+    task = SimpleNamespace(
+        title="Q2 渠道",
+        goal="分析渠道动销",
+        status="completed",
+        project_id="realproj",
+        current_holder="lead1",
+        plan={
+            "subtasks": [
+                {
+                    "key": "c",
+                    "title": "采集",
+                    "agent": "researcher",
+                    "status": "completed",
+                    "depends_on": [],
+                }
+            ]
+        },
+    )
+    runs = [
+        SimpleNamespace(kind="lead", session_id="lead1"),
+        SimpleNamespace(
+            kind="subtask",
+            subtask_key="c",
+            agent_slug="researcher",
+            status="completed",
+            result_manifest={"summary": "完成采集"},
+        ),
+    ]
+    _wire_task(monkeypatch, task=task, runs=runs)
+    seen: dict[str, str] = {}
+    payload = json.dumps(
+        {
+            "ops": [
+                {
+                    "action": "add",
+                    "target": "project",
+                    "content": "decomposition collect-then-analyze works well for 渠道 research",
+                }
+            ]
+        }
+    )
+    _wire_lead(monkeypatch, payload=payload, seen=seen)
+
+    asyncio.run(run_task_finish_extraction("t1", "u1"))
+    assert "decomposition collect-then-analyze works well for 渠道 research" in (
+        memory_store.read_entries("project", project_id="realproj")
+    )
+    # task-finish review prompt used (multi-agent framing) + project identity injected
+    assert "MULTI-AGENT TASK" in seen["prompt"] and "茅台研究" in seen["prompt"]
+    # the plan + member digest reached the reviewer
+    assert "采集" in seen["prompt"] and "完成采集" in seen["prompt"]
+    assert calls["create"] == 1 and calls["delete"] == 1
+
+
+def test_task_finish_skips_non_completed(patched):
+    monkeypatch, calls = patched
+    from valuz_agent.modules.memory.runner import run_task_finish_extraction
+
+    task = SimpleNamespace(
+        status="stopped",
+        project_id="realproj",
+        current_holder="lead1",
+        title="x",
+        goal="y",
+        plan={},
+    )
+    _wire_task(monkeypatch, task=task, runs=[])
+    asyncio.run(run_task_finish_extraction("t1", "u1"))
+    assert calls["create"] == 0
+
+
+def test_task_finish_toggle_off_skips(patched):
+    monkeypatch, calls = patched
+    import valuz_agent.modules.settings.preferences as prefs
+
+    async def _false(_db):  # noqa: ANN001, ANN202
+        return False
+
+    monkeypatch.setattr(prefs, "get_memory_enabled", _false)
+    from valuz_agent.modules.memory.runner import run_task_finish_extraction
+
+    task = SimpleNamespace(
+        status="completed",
+        project_id="realproj",
+        current_holder="lead1",
+        title="x",
+        goal="y",
+        plan={},
+    )
+    _wire_task(monkeypatch, task=task, runs=[SimpleNamespace(kind="lead", session_id="lead1")])
+    asyncio.run(run_task_finish_extraction("t1", "u1"))
+    assert calls["create"] == 0
