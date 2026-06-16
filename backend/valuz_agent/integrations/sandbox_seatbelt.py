@@ -277,6 +277,16 @@ def build_seatbelt_profile(spec: SandboxSpec) -> str:
     for p in (*rw_subpaths, tmpdir):
         lines.append(f'(allow file-write* (subpath {_q(p)}))')
 
+    # Individual writable FILES (not trees): the shared kernel.db + its WAL/SHM
+    # sidecars, which live next to valuz.db outside every rw mount. A per-file
+    # ``literal`` allow keeps the grant tight — the sandbox can write these
+    # three paths but nothing else in the data dir (valuz.db / secrets stay
+    # denied below). ``literal`` (not ``subpath``) so it matches the exact file.
+    if spec.rw_files:
+        lines.append("; --- write: shared kernel.db + WAL/SHM (files, not tree) ---")
+        for f in spec.rw_files:
+            lines.append(f'(allow file-write* (literal {_q(f)}))')
+
     # Dynamic mount: pre-declare that this long-lived sandbox HONOURS macOS
     # sandbox-extension tokens of the standard read-write class. This grants
     # NOTHING on its own (no token = no access); it only lets the host
@@ -658,12 +668,24 @@ class SeatbeltDriver:
         sandbox_dir = data_dir / "sandbox"
         sandbox_dir.mkdir(parents=True, exist_ok=True)
         host_db = data_dir / settings.db_filename
+        # The kernel uses the SHARED ``kernel.db`` (config.kernel_db_path) so
+        # dev (in-process) and dev-sandbox see one session history. It sits
+        # next to ``valuz.db`` in ``data_dir`` — outside every rw mount — so
+        # write-allow the file + its WAL/SHM sidecars explicitly (mirror of the
+        # valuz.db deny triple). The host migrates this file before spawn; the
+        # sandbox is its sole writer at runtime.
+        kernel_db = settings.kernel_db_path
 
         mounts = host_sandbox_rw_mounts()
         spec = SandboxSpec(
             sandbox_id="host-kernel",
-            kernel_db_path=str(sandbox_dir / "kernel.db"),
+            kernel_db_path=str(kernel_db),
             mounts=mounts,
+            rw_files=(
+                str(kernel_db),
+                str(kernel_db) + "-wal",
+                str(kernel_db) + "-shm",
+            ),
             env=ctx.passthrough_env,  # ⑥ L1 credential injection
             host_callback_url=ctx.host_callback_url,
             # RED LINE: host business DB (+ wal/shm) and secret store.

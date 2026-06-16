@@ -62,8 +62,13 @@ class SandboxSpec:
 
     sandbox_id: str
     kernel_db_path: str
-    """Absolute path to the sandbox's private kernel SQLite file."""
+    """Absolute path to the kernel SQLite file the sandbox opens."""
     mounts: tuple[MountSpec, ...] = ()
+    rw_files: tuple[str, ...] = ()
+    """Individual FILE paths the sandbox may write (vs ``mounts``, which are
+    directory trees). Used for the shared ``kernel.db`` + its ``-wal`` /
+    ``-shm`` sidecars: they live next to the host DB outside any rw mount, so
+    they need an explicit per-file write-allow."""
     env: dict[str, str] = field(default_factory=dict)
     """Environment injected into the kernel process — the ⑥ L1 落点
     (provider keys resolved from references, never persisted)."""
