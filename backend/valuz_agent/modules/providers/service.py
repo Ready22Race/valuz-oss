@@ -1547,14 +1547,24 @@ class ProviderService:
         self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
-            raise ProviderNotFound(f"Provider {provider_id!r} not found")
+            # Built-in CLI-subscription channels (claude/codex ``/login``) have
+            # no DB row until first use — they're surfaced as virtual templates
+            # keyed by their catalog id, so selecting one as the default would
+            # otherwise 404. Materialize it on demand (mirrors enable_provider).
+            # The materialized row carries a fresh uuid id, NOT the catalog id,
+            # so every write below keys off ``row.id`` rather than the
+            # ``provider_id`` argument.
+            row = await self._materialize_builtin_subscription(user_id, provider_id)
+            if row is None:
+                raise ProviderNotFound(f"Provider {provider_id!r} not found")
         if not row.enabled:
             raise NoAvailableProvider(f"Provider {provider_id!r} is disabled")
-        await self._set_default_internal(user_id, provider_id)
+        resolved_id = row.id
+        await self._set_default_internal(user_id, resolved_id)
 
         # Optionally update the provider row's default_model.
         if default_model is not None:
-            updated_row = await self._ds.get_by_id(user_id, provider_id)
+            updated_row = await self._ds.get_by_id(user_id, resolved_id)
             if updated_row:
                 updated_row.default_model = default_model
                 updated_row.updated_at = now_ms()
@@ -1571,12 +1581,12 @@ class ProviderService:
         )
 
         db = self._ds._db  # noqa: SLF001 — sanctioned cross-module db reuse (mirrors resolve_infer_config)
-        await set_default_provider_id(db, provider_id)
+        await set_default_provider_id(db, resolved_id)
         effective_model = default_model if default_model is not None else row.default_model
         if effective_model:
             await set_default_model(db, effective_model)
 
-        self._bus.publish("provider.default.changed", provider_id=provider_id)
+        self._bus.publish("provider.default.changed", provider_id=resolved_id)
 
     # ── Resolution ───────────────────────────────────────────────
 
