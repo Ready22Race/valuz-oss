@@ -95,6 +95,7 @@ from src.runtimes.codex.event_mapper import (
     extract_turn_completed,
     map_notification,
 )
+from src.runtimes.interruption import is_runtime_interruption
 
 logger = logging.getLogger(__name__)
 
@@ -505,6 +506,17 @@ class CodexRuntime:
                     category="user_interrupt",
                     retry_status="terminal",
                     message="cancelled",
+                )
+            elif is_runtime_interruption(exc):
+                # Graceful host stop tore down the codex subprocess mid-turn
+                # ("closed stdout" / broken pipe). This is NOT a task failure:
+                # leave it resumable (``interrupted``) so boot recovery
+                # re-drives the turn — the same outcome a hard kill gets via
+                # ``scan_orphan_runs`` — and suppress the scary session_error.
+                session.stop_reason = Error(
+                    category="interrupted",
+                    retry_status="terminal",
+                    message="runtime process interrupted",
                 )
             else:
                 session.stop_reason = Error(

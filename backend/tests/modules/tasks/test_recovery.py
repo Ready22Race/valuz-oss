@@ -31,6 +31,13 @@ def test_classify_host_restart_is_resumable() -> None:
     assert classify_member("idle", {"type": "error", "category": "host_restart"}) == "resume"
 
 
+def test_classify_interrupted_is_resumable() -> None:
+    # Graceful host stop tore down the runtime subprocess mid-turn; the runtime
+    # stamped a resumable ``interrupted`` (not ``execution_error``). Recovery
+    # must re-drive it, exactly like the hard-kill ``host_restart`` path.
+    assert classify_member("idle", {"type": "error", "category": "interrupted"}) == "resume"
+
+
 def test_classify_real_error_is_failed() -> None:
     assert classify_member("idle", {"type": "error", "category": "execution_error"}) == "failed"
 
