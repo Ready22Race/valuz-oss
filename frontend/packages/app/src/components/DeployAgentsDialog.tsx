@@ -193,17 +193,19 @@ export const DeployAgentsDialog = ({
               )}
             </div>
           </div>
+        </div>
+        <DialogFooter
+          className={onCreateNew ? "sm:items-center sm:justify-between" : ""}
+        >
           {onCreateNew && (
             <button
               type="button"
-              className="self-start border-t border-surface-border pt-2 text-xs text-primary hover:underline"
+              className="text-xs text-primary hover:text-primary/80"
               onClick={onCreateNew}
             >
               {t("agent.deployCreateLink")}
             </button>
           )}
-        </div>
-        <DialogFooter>
           <Button onClick={() => onOpenChange(false)}>
             {t("common.done")}
           </Button>
