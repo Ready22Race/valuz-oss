@@ -44,6 +44,14 @@ KERNEL_DIR: Path = Path(__file__).resolve().parents[2] / "kernel"
 KERNEL_ALEMBIC_DIR: Path = Path(__file__).resolve().parents[2] / "alembic" / "kernel"
 KERNEL_ALEMBIC_INI: Path = KERNEL_ALEMBIC_DIR / "alembic.ini"
 
+# The kernel chain stamps the default ``alembic_version`` table (the host chain
+# uses ``alembic_version_host`` in the same file so the two never collide).
+KERNEL_VERSION_TABLE = "alembic_version"
+# Tables the kernel owns and may drop on a stale-stamp rebuild — the current
+# trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
+# langgraph checkpoint tables in the same file are off-limits.
+_KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
+
 
 def _set_kernel_env() -> None:
     """Make the kernel see the valuz database URL and a sane workspace dir.
@@ -65,28 +73,38 @@ def _set_kernel_env() -> None:
     os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.db_path))
 
 
+def _known_kernel_revisions() -> set[str]:
+    """Every revision id in the kernel alembic chain.
+
+    A DB stamped at any of these is on a valid upgrade path and is migrated
+    forward by ``alembic upgrade head`` (data-preserving) — see
+    ``drop_stale_kernel_tables``.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(KERNEL_ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(KERNEL_ALEMBIC_DIR))
+    return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
+
+
 def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
-    """Belt-and-braces drop trigger for kernel-shape drift.
+    """Self-heal probe for a corrupt/foreign kernel stamp (incremental chain).
 
-    The kernel's Alembic chain is the only thing that's *supposed* to
-    rewrite ``sessions`` / ``messages`` / ``events``, but
-    historically the kernel has shipped schema changes that reuse the
-    same revision id (so already-stamped DBs skip the upgrade and end
-    up missing required columns). This function detects those known
-    fingerprints by checking for the presence of marker columns —
-    anything missing means "drop the kernel tables so the next
-    ``alembic upgrade head`` rebuilds clean".
+    Mirrors the host's ``boot.schema.drop_stale_host_tables``: the kernel
+    alembic chain is incremental, so a DB stamped at a *known* revision is
+    migrated forward by ``run_kernel_migrations`` (``alembic upgrade head``) —
+    data-preserving. Only an unknown/foreign stamp, or kernel tables present
+    with no stamp at all (a boot that died mid-initialization, or a half-created
+    trio), triggers a drop-and-rebuild so the upgrade re-initializes cleanly.
 
-    Per dev-stage policy: no data preservation. Internal dogfood users
-    accepted this trade in exchange for cleaner kernel upgrade
-    semantics — see CHANGELOG entry for the V1+V2 schema bootstrap.
+    Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES`` — the current trio
+    plus pre-cutover fossils) plus the kernel ``alembic_version`` stamp. The
+    host ``valuz_*`` tables and the DeepAgents langgraph checkpoint tables that
+    share the same SQLite file are never touched.
 
-    Idempotent: a healthy three-table kernel passes through unchanged.
-
-    Lives next to ``run_kernel_migrations`` so the boot sequence has
-    a single import surface for "do everything the kernel needs at
-    startup". Called automatically by ``run_kernel_migrations``; tests
-    can pass in an ad-hoc engine to pin specific fingerprint cases.
+    No-op on a fresh file / healthy DB. Runs synchronously off the event loop —
+    it owns no session and reads no business data, like the host probe.
     """
     from sqlalchemy import create_engine, inspect, text
 
@@ -97,61 +115,31 @@ def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
         inspector = inspect(engine)
         existing = set(inspector.get_table_names())
 
-        def _has_col(table: str, col: str) -> bool:
-            if table not in existing:
-                return False
-            return col in {c["name"] for c in inspector.get_columns(table)}
+        stamp: str | None = None
+        if KERNEL_VERSION_TABLE in existing:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text(f"SELECT version_num FROM {KERNEL_VERSION_TABLE}")  # noqa: S608
+                ).fetchone()
+                stamp = row[0] if row else None
 
-        suspect: list[str] = []
+        if stamp in _known_kernel_revisions():
+            return  # known revision — `alembic upgrade head` migrates it forward
 
-        # De-projectization cutover: the kernel now owns exactly three
-        # tables (sessions / messages / events) and sessions embed their
-        # agent snapshot. Any DB still carrying the old projects/agents
-        # tables — or a sessions shape without agent_config — predates the
-        # cutover and must be wiped (regenerated baseline, no ALTER chain).
-        if "projects" in existing or "agents" in existing:
-            suspect.append("sessions")
-        if "sessions" in existing and not _has_col("sessions", "agent_config"):
-            if "sessions" not in suspect:
-                suspect.append("sessions")
-        # V4 fossils that survived the V5 cutover.
-        if _has_col("sessions", "environment_id"):
-            if "sessions" not in suspect:
-                suspect.append("sessions")
-        if _has_col("environments", "workspace_mounts"):
-            suspect.append("environments")
-
-        # Torn-state recovery: an interrupted previous boot can leave the
-        # trio half-created. Drop whatever's there so the next
-        # ``alembic upgrade`` rebuilds.
-        kernel_tables = {"sessions", "messages", "events"} & existing
-        if kernel_tables and len(kernel_tables) < 3:
-            for t in kernel_tables:
-                if t not in suspect:
-                    suspect.append(t)
-
-        # Cascade: if any member is stale the others are too — the kernel's
-        # initial migration creates them as a unit. The legacy table names
-        # (projects / agents / environments) stay in the drop list so
-        # pre-cutover fossils are cleared.
-        if "sessions" in suspect:
-            for t in ("projects", "agents", "events", "environments", "messages"):
-                if t in existing and t not in suspect:
-                    suspect.append(t)
-            # Also reset the kernel's alembic stamp so the upgrade
-            # treats this as a fresh install.
-            if "alembic_version" in existing and "alembic_version" not in suspect:
-                suspect.append("alembic_version")
-
-        if not suspect:
-            return
+        stale = [t for t in _KERNEL_OWNED_TABLES if t in existing]
+        if not stale:
+            return  # fresh install / no kernel tables — nothing to reset
+        if KERNEL_VERSION_TABLE in existing:
+            stale.append(KERNEL_VERSION_TABLE)
 
         logger.warning(
-            "Stale kernel tables detected (%s) — dropping for fresh alembic baseline",
-            ", ".join(suspect),
+            "kernel schema stamp=%s is not a known revision — "
+            "dropping %d kernel table(s) for a clean re-initialization",
+            stamp,
+            len(stale),
         )
         with engine.begin() as conn:
-            for table in suspect:
+            for table in stale:
                 conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
     finally:
         if owns_engine:
@@ -177,12 +165,15 @@ def run_kernel_migrations() -> None:
 
     Two steps under one entry point:
 
-    1. ``_drop_stale_kernel_tables`` — safety net for kernel shape drift
-       (see its docstring). No-op on healthy DBs.
-    2. The kernel's own alembic ``upgrade head``. Writes its revision
-       into the default ``alembic_version`` table; the host's chain
-       uses a separate ``alembic_version_host`` row in the same file
-       so the two don't collide.
+    1. ``drop_stale_kernel_tables`` — data-preserving self-heal probe. Trusts
+       any DB stamped at a known kernel revision (the upgrade migrates it
+       forward); only an unknown/foreign/unstamped kernel schema is dropped so
+       the upgrade can rebuild it. No-op on a healthy DB.
+    2. The kernel's own alembic ``upgrade head``. Writes its revision into the
+       default ``alembic_version`` table; the host's chain uses a separate
+       ``alembic_version_host`` row in the same file so the two don't collide.
+       Schema changes ship as new, reversible revisions chained onto the head —
+       existing ``sessions`` / ``messages`` / ``events`` data migrates in place.
 
     Always runs in a dedicated thread because the kernel's
     ``alembic/env.py`` calls ``asyncio.run()`` to drive its async

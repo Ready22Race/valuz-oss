@@ -1,17 +1,11 @@
-"""0-migration reset tests for ``drop_stale_host_tables``.
+"""Self-heal tests for ``drop_stale_host_tables`` (incremental host chain).
 
-The host alembic chain holds exactly one revision — the 0001 baseline that
-creates the whole host schema. There is no upgrade path and no schema
-fingerprinting: the probe compares the ``alembic_version_host`` stamp against
-``BASELINE_REVISION`` and, on any mismatch (legacy multi-revision chain,
-missing/empty stamp from a boot that died mid-initialization, an id from a
-diverged branch), drops every ``valuz_*`` table plus the stamp so the
-following ``upgrade head`` re-initializes the schema cleanly.
-
-This is what fixed the "table valuz_project_session already exists" boot
-crash: a DB stamped by one branch's chain, booted under another branch's
-chain, used to re-run a CREATE TABLE migration into an existing table. Now
-any stamp mismatch resets the host schema wholesale.
+The host alembic chain is incremental: the baseline creates the schema and
+later revisions ALTER it. The probe is data-preserving — it keeps any DB
+stamped at a *known* revision (``alembic upgrade head`` migrates it forward)
+and only drops + rebuilds when the ``alembic_version_host`` stamp is
+unknown/foreign, or host tables are present with no stamp at all (a boot that
+died mid-initialization).
 """
 
 from __future__ import annotations
@@ -41,9 +35,9 @@ def _create_host_shape(conn, *, stamp: str | None) -> None:
         conn.execute(text(f"INSERT INTO alembic_version_host VALUES ('{stamp}')"))
 
 
-def test_should_noop_when_stamped_at_baseline(tmp_path) -> None:
-    """Stamp == baseline → trust it; tables and data untouched."""
-    engine = create_engine(f"sqlite:///{tmp_path / 'on_baseline.db'}")
+def test_should_noop_when_stamped_at_head(tmp_path) -> None:
+    """Stamp == head revision → trust it; tables and data untouched."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'on_head.db'}")
     with engine.begin() as conn:
         _create_host_shape(conn, stamp=BASELINE_REVISION)
         conn.execute(text("INSERT INTO valuz_agent VALUES ('a1', 'local-u')"))
@@ -56,12 +50,30 @@ def test_should_noop_when_stamped_at_baseline(tmp_path) -> None:
         assert conn.execute(text("SELECT id FROM valuz_agent")).fetchall() == [("a1",)]
 
 
-def test_should_reset_when_stamped_by_legacy_chain(tmp_path) -> None:
-    """Any old multi-revision stamp (0001/0003/0004) → full reset."""
-    for legacy in ("0001", "0003", "0004"):
-        engine = create_engine(f"sqlite:///{tmp_path / f'at_{legacy}.db'}")
+def test_should_preserve_when_stamped_at_older_known_revision(tmp_path) -> None:
+    """A DB on an earlier *known* revision is left for ``alembic upgrade head``
+    to migrate forward — data-preserving, not wiped. (The baseline file's
+    revision id is ``0002``.)"""
+    engine = create_engine(f"sqlite:///{tmp_path / 'older_known.db'}")
+    with engine.begin() as conn:
+        _create_host_shape(conn, stamp="0002")
+        conn.execute(text("INSERT INTO valuz_agent VALUES ('a1', 'local-u')"))
+
+    drop_stale_host_tables(engine)
+
+    assert _stamp(engine) == "0002"
+    assert _host_tables(engine) == {"valuz_agent", "valuz_provider"}
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT id FROM valuz_agent")).fetchall() == [("a1",)]
+
+
+def test_should_reset_when_stamped_by_foreign_revision(tmp_path) -> None:
+    """An unknown/foreign stamp (a retired id like ``0001``, or one from a
+    diverged branch) → full reset."""
+    for foreign in ("0001", "0099", "deadbeef"):
+        engine = create_engine(f"sqlite:///{tmp_path / f'foreign_{foreign}.db'}")
         with engine.begin() as conn:
-            _create_host_shape(conn, stamp=legacy)
+            _create_host_shape(conn, stamp=foreign)
 
         drop_stale_host_tables(engine)
 

@@ -51,16 +51,16 @@ class UserMixin:
 
 # The host is fully async: ONE aiosqlite engine for ALL data access. There is no
 # synchronous *data* engine — every session/ORM path goes through
-# ``AsyncSessionLocal`` / ``async_unit_of_work`` (ADR-020). Host Alembic
-# migrations + the pre-v2 wipe also run async (``host_bootstrap``; the host
-# ``alembic/env.py`` mirrors the kernel's async env).
+# ``AsyncSessionLocal`` / ``async_unit_of_work`` (ADR-020). Both alembic chains
+# (host + kernel) also run async, each on a dedicated thread off the event loop
+# (their ``alembic/env.py`` files call ``asyncio.run``).
 #
-# The ONLY remaining synchronous SQLite touch is ``kernel_bootstrap.
-# drop_stale_kernel_tables`` — a boot-time kernel-table-drift DDL probe that runs
-# OFF the event loop in a dedicated thread (so it carries no deadlock risk; the
-# ADR-020 hazard is sync-on-loop). It owns no session and reads no business data;
-# it's a sanctioned sync island alongside the kernel's own alembic, not a host
-# data-access engine.
+# The only synchronous SQLite touch is the pair of boot-time self-heal probes
+# (``boot.schema.drop_stale_host_tables`` / ``boot.kernel.drop_stale_kernel_tables``):
+# both run OFF the event loop in a dedicated thread (no deadlock risk; the
+# ADR-020 hazard is sync-on-loop), own no session, and read no business data.
+# They are data-preserving — a DB on a known alembic revision is migrated
+# forward in place; only an unknown/foreign/corrupt stamp is dropped + rebuilt.
 async_engine: AsyncEngine = create_async_engine(settings.db_url_async, echo=settings.debug)
 
 if settings.is_sqlite:
