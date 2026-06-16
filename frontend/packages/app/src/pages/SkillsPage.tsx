@@ -360,12 +360,16 @@ export const SkillsPage = () => {
   // Pass the backend's nested tree through verbatim — the panel renders
   // directories + files recursively with depth-based indentation.
   const [activeFiles, setActiveFiles] = useState<
-    SkillImportPreviewFile[] | undefined
+    | {
+        skillId: string;
+        files: SkillImportPreviewFile[];
+      }
+    | undefined
   >(undefined);
 
   useEffect(() => {
     if (!currentSkill) {
-      setActiveFiles([]);
+      setActiveFiles(undefined);
       return;
     }
     let cancelled = false;
@@ -374,15 +378,22 @@ export const SkillsPage = () => {
       .listFiles(currentSkill.id)
       .then((res) => {
         if (cancelled) return;
-        setActiveFiles(res);
+        setActiveFiles({ skillId: currentSkill.id, files: res });
       })
       .catch(() => {
-        if (!cancelled) setActiveFiles([]);
+        if (!cancelled) {
+          setActiveFiles({ skillId: currentSkill.id, files: [] });
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [currentSkill?.id]);
+
+  const activeFilesForCurrentSkill =
+    activeFiles && currentSkill && activeFiles.skillId === currentSkill.id
+      ? activeFiles.files
+      : undefined;
 
   /* ── Handlers ──────────────────────────────────────────────── */
 
@@ -458,8 +469,9 @@ export const SkillsPage = () => {
     }
     setRightPanel(
       <SkillDetailPanel
+        key={currentSkill.id}
         skill={currentCardSkill}
-        files={activeFiles}
+        files={activeFilesForCurrentSkill}
         onLoadFile={async (path) => {
           const res = await skillsApi.getFileContent(currentSkill.id, path);
           return res.content;
@@ -487,7 +499,13 @@ export const SkillsPage = () => {
     return () => {
       setRightPanel(null);
     };
-  }, [currentSkill, currentCardSkill, activeFiles, navigate, setRightPanel]);
+  }, [
+    currentSkill,
+    currentCardSkill,
+    activeFilesForCurrentSkill,
+    navigate,
+    setRightPanel,
+  ]);
 
   return (
     <div className="flex h-full flex-col">

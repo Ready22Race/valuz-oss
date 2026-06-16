@@ -358,8 +358,13 @@ export const SkillDetailPanel = ({
   };
 
   useEffect(() => {
-    if (!selectedPath || !onLoadFile) return;
+    if (!selectedPath || !onLoadFile) {
+      setContent("");
+      setContentLoading(false);
+      return;
+    }
     let cancelled = false;
+    setContent("");
     setContentLoading(true);
     onLoadFile(selectedPath)
       .then((c) => {
