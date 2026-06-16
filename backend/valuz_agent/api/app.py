@@ -15,6 +15,7 @@ from valuz_agent.api.routes.automations import router as automations_router
 from valuz_agent.api.routes.connectors import router as connectors_router
 from valuz_agent.api.routes.decisions import router as decisions_router
 from valuz_agent.api.routes.docs import router as docs_router
+from valuz_agent.api.routes.memory import router as memory_router
 from valuz_agent.api.routes.onboarding import router as onboarding_router
 from valuz_agent.api.routes.parser import settings_router as parser_settings_router
 from valuz_agent.api.routes.parser import system_router as parser_system_router
@@ -83,6 +84,7 @@ def create_app() -> FastAPI:
     app.include_router(resources_router)
     app.include_router(onboarding_router)
     app.include_router(settings_router)
+    app.include_router(memory_router)
     # Parser routes live in a separate module because they straddle the
     # ``/v1/system`` and ``/v1/settings`` namespaces (setup jobs vs.
     # routing config). One module, two ``APIRouter`` instances.
