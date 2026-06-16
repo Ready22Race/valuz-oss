@@ -669,14 +669,11 @@ export function AccordionSection({
   };
 
   return (
-    // Spec 5.8 Context Section card: bg #F7F8FA, border 1px #F3F4F6,
-    // radius 12, mb 8px. Header min-h 40, padding 10px 14px, gap 9px,
-    // title 13px / 500 / #131313, count 12px / #6E7481, chevron #94A3B8.
-    <div className="mb-2 overflow-hidden rounded-xl border border-[#F3F4F6] bg-surface-soft dark:border-surface-border">
+    <div className="mb-2 overflow-hidden rounded-xl border border-surface-border/40 bg-surface-soft dark:border-surface-border">
       {/* Hover lives on the row wrapper so background color spans the
           entire header (including the trailing action button), not just
           the toggle hit-area. */}
-      <div className="flex items-center transition-colors duration-[120ms] hover:bg-[rgba(0,0,0,0.02)]">
+      <div className="flex items-center transition-colors duration-[120ms] hover:bg-surface-muted/60">
         <button
           type="button"
           onClick={() => setOpen(!open)}
@@ -712,8 +709,6 @@ export function AccordionSection({
         )}
       >
         <div className="overflow-hidden">
-          {/* 内容嵌套白底（无 border，仅顶部圆角，跟外层 surface-soft 形成层次）
-              —— 对齐 frontend/docs/design/app.jsx ContextSection 实现。 */}
           <div
             className={cn(
               "overflow-hidden rounded-t-xl bg-surface px-3 py-3",
@@ -1049,7 +1044,7 @@ export const ProjectDetailContextPanel = ({
                   <button
                     type="button"
                     onClick={() => onRemoveUploadedFile(f.id)}
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-red-50 hover:text-red-500"
+                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-error-light hover:text-error-text"
                     title={t("common.remove")}
                   >
                     <X className="h-3 w-3" />
@@ -1158,10 +1153,10 @@ export const ProjectDetailContextPanel = ({
                 return (
                   <div key={member.id}>
                     {index > 0 ? (
-                      <div className="h-px w-[301px] bg-[#f7f8fa]" />
+                      <div className="h-px w-[301px] bg-surface-border/40 dark:bg-surface-border" />
                     ) : null}
                     <div className="group relative rounded-lg bg-card">
-                      <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
+                      <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-surface-muted/60" />
                       <div className="relative z-10 flex items-center gap-2.5 py-2.5">
                         {/* Row body opens the shared agent (global edit). */}
                         <button
@@ -1222,7 +1217,7 @@ export const ProjectDetailContextPanel = ({
                                 event.currentTarget.blur();
                                 onRemoveMember(member.slug);
                               }}
-                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
+                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-error-light hover:text-error-text"
                               title={t(
                                 "agent.deleteMember" as Parameters<typeof t>[0],
                               )}
@@ -1319,7 +1314,7 @@ export const ProjectDetailContextPanel = ({
                       <button
                         type="button"
                         onClick={() => onRemoveSkill(skill.id)}
-                        className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-red-50 hover:text-red-500"
+                        className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-error-light hover:text-error-text"
                         title={t("common.remove")}
                       >
                         <X className="h-3 w-3" />
@@ -1385,7 +1380,7 @@ export const ProjectDetailContextPanel = ({
                       <button
                         type="button"
                         onClick={() => onToggleMcpServer(server.slug, false)}
-                        className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-red-50 hover:text-red-500"
+                        className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-error-light hover:text-error-text"
                         title={t("common.remove" as Parameters<typeof t>[0])}
                       >
                         <X className="h-3 w-3" />
@@ -1431,13 +1426,13 @@ export const ProjectDetailContextPanel = ({
           }
         >
           {(scheduledTasks ?? []).length > 0 ? (
-            <div className="mx-auto w-[301px] divide-y divide-[#f3f4f6]">
+            <div className="mx-auto w-[301px] divide-y divide-surface-border">
               {(scheduledTasks ?? []).map((task) => (
                 <div
                   key={task.id}
                   className="group relative rounded-lg bg-card"
                 >
-                  <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
+                  <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-surface-muted/60" />
                   <div className="relative z-10 py-2.5">
                     <div className="flex items-center gap-2">
                       <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink-heading">

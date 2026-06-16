@@ -492,8 +492,10 @@ export const SkillDetailPanel = ({
       <div className="border-b border-surface-border px-4 pb-4 pt-4">
         <div className="mb-3 flex items-center gap-3">
           <div
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-transparent text-lg font-semibold"
-            style={{ backgroundColor: iconStyle.bg, color: iconStyle.fg }}
+            className={cn(
+              "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-transparent text-lg font-semibold",
+              iconStyle.className,
+            )}
           >
             {iconStyle.letter}
           </div>

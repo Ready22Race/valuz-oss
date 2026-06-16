@@ -12,10 +12,10 @@ import { WELCOME_FEED, type FeedCard, type FeedStatus } from "./mock";
 export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
   const { t } = useTranslation();
   return (
-    <div className="relative grid min-h-screen grid-cols-1 overflow-hidden bg-white lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+    <div className="relative grid min-h-screen grid-cols-1 overflow-hidden bg-background lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
       {/* ---------- Left: pitch ---------- */}
-      <div className="relative flex flex-col justify-center overflow-hidden bg-[linear-gradient(135deg,#f8fbff_0%,#ffffff_38%,#f3f6ff_68%,#eef4ff_100%)] px-10 py-16 lg:px-16">
-        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(28deg,rgba(91,130,255,0.24)_0%,rgba(141,108,255,0.14)_24%,transparent_48%),linear-gradient(180deg,transparent_66%,rgba(225,233,255,0.56)_100%)]" />
+      <div className="relative flex flex-col justify-center overflow-hidden bg-[linear-gradient(135deg,var(--color-background)_0%,var(--color-surface)_38%,var(--color-brand-50)_68%,var(--color-brand-100)_100%)] px-10 py-16 lg:px-16">
+        <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(28deg,color-mix(in_oklab,var(--color-brand)_24%,transparent)_0%,color-mix(in_oklab,var(--color-brand-secondary)_14%,transparent)_24%,transparent_48%),linear-gradient(180deg,transparent_66%,color-mix(in_oklab,var(--color-brand-100)_56%,transparent)_100%)]" />
         <div className="relative mx-auto w-full max-w-md -translate-y-5">
           {/* Brand eyebrow */}
           <div className="mb-10 flex items-center gap-5">
@@ -28,7 +28,21 @@ export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
             <img
               src="./valuz-wordmark.svg"
               alt="Valuz"
-              className="h-auto w-[90px] -translate-x-[18px] translate-y-0.5"
+              className="sr-only"
+            />
+            <span
+              className="h-[30px] w-[91px] -translate-x-[18px] translate-y-0.5 bg-ink-heading"
+              aria-hidden
+              style={{
+                maskImage: "url(./valuz-wordmark.svg)",
+                maskRepeat: "no-repeat",
+                maskSize: "contain",
+                maskPosition: "center",
+                WebkitMaskImage: "url(./valuz-wordmark.svg)",
+                WebkitMaskRepeat: "no-repeat",
+                WebkitMaskSize: "contain",
+                WebkitMaskPosition: "center",
+              }}
             />
           </div>
 
@@ -69,7 +83,7 @@ export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
       </div>
 
       {/* ---------- Right: live team feed ---------- */}
-      <div className="relative hidden flex-col justify-center overflow-hidden border-l border-surface-border/70 bg-white px-10 py-16 lg:flex lg:px-14">
+      <div className="relative hidden flex-col justify-center overflow-hidden border-l border-surface-border/70 bg-surface px-10 py-16 lg:flex lg:px-14">
         <div className="mx-auto w-full max-w-[560px]">
           <p className="mb-8 max-w-[520px] font-display text-[14.5px] italic leading-6 text-ink-meta">
             {t("onboarding.heroQuote" as Parameters<typeof t>[0])}
@@ -83,7 +97,7 @@ export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
               >
                 <div className="relative flex h-full -translate-y-[30px] items-center justify-center">
                   <span
-                    className={`absolute left-1/2 top-1/2 w-[0.5px] -translate-x-1/2 bg-[#ECEFF3] ${
+                    className={`absolute left-1/2 top-1/2 w-[0.5px] -translate-x-1/2 bg-surface-border ${
                       i < WELCOME_FEED.length - 1
                         ? "bottom-[-72px]"
                         : "bottom-[-32px]"
@@ -91,7 +105,7 @@ export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
                     aria-hidden
                   />
                   <span
-                    className="relative z-[1] flex h-5 w-5 items-center justify-center rounded-full bg-white shadow-[0_6px_12px_rgba(110,119,131,0.22)]"
+                    className="relative z-[1] flex h-5 w-5 items-center justify-center rounded-full bg-surface shadow-md"
                     aria-hidden
                   >
                     <span className="h-3 w-3 rounded-full bg-ink-muted" />
@@ -144,7 +158,7 @@ const FeedCardView = ({ card }: { card: FeedCard }) => {
 
   return (
     <div
-      className="rounded-xl border border-surface-border/80 bg-white/84 p-4 shadow-[0_12px_30px_rgba(15,23,42,0.08)] backdrop-blur"
+      className="rounded-xl border border-surface-border/80 bg-surface/84 p-4 shadow-lg backdrop-blur"
       style={{
         maxWidth: "480px",
       }}

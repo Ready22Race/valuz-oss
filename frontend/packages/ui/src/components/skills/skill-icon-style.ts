@@ -1,30 +1,30 @@
-export const SKILL_ICON_COLORS: Record<string, { bg: string; fg: string }> = {
-  A: { bg: "#f3f2ff", fg: "#725cf9" },
-  B: { bg: "#eef4ff", fg: "#4c74d9" },
-  C: { bg: "#ecfbff", fg: "#2f8fbd" },
-  D: { bg: "#effaf5", fg: "#2f9d6a" },
-  E: { bg: "#f5f8e9", fg: "#7d9330" },
-  F: { bg: "#fff8e8", fg: "#c58a18" },
-  G: { bg: "#fff1ec", fg: "#d66a3a" },
-  H: { bg: "#fff0f5", fg: "#d75d88" },
-  I: { bg: "#f7efff", fg: "#8d55d8" },
-  J: { bg: "#eef0ff", fg: "#5c68df" },
-  K: { bg: "#eaf7ff", fg: "#3b8fd4" },
-  L: { bg: "#eafbf7", fg: "#2f9f8b" },
-  M: { bg: "#f0faee", fg: "#53a84d" },
-  N: { bg: "#f8f7e8", fg: "#9b9135" },
-  O: { bg: "#fff4e3", fg: "#c77c10" },
-  P: { bg: "#fff0ea", fg: "#d45f3c" },
-  Q: { bg: "#fcefff", fg: "#b552ce" },
-  R: { bg: "#f1f0ff", fg: "#7160e8" },
-  S: { bg: "#edf5ff", fg: "#4b7fd7" },
-  T: { bg: "#e9fbff", fg: "#2694b0" },
-  U: { bg: "#edfaf1", fg: "#36a35c" },
-  V: { bg: "#f6f9e7", fg: "#82972d" },
-  W: { bg: "#fff6e6", fg: "#bd8516" },
-  X: { bg: "#fff1f0", fg: "#d9584f" },
-  Y: { bg: "#f9f0ff", fg: "#9b59d8" },
-  Z: { bg: "#f0f2ff", fg: "#6371df" },
+export const SKILL_ICON_COLORS: Record<string, string> = {
+  A: "bg-brand-light text-brand dark:bg-brand-light dark:text-brand-700",
+  B: "bg-accent-blue/10 text-accent-blue dark:bg-accent-blue/15 dark:text-accent-blue",
+  C: "bg-accent-sky/10 text-accent-sky dark:bg-accent-sky/15 dark:text-accent-sky",
+  D: "bg-success-light text-success-text",
+  E: "bg-accent-lime/10 text-accent-lime dark:bg-accent-lime/15 dark:text-accent-lime",
+  F: "bg-warning-light text-warning-text",
+  G: "bg-accent-orange/10 text-accent-orange dark:bg-accent-orange/15 dark:text-accent-orange",
+  H: "bg-accent-pink/10 text-accent-pink dark:bg-accent-pink/15 dark:text-accent-pink",
+  I: "bg-brand-light text-brand dark:bg-brand-light dark:text-brand-700",
+  J: "bg-brand-light text-brand dark:bg-brand-light dark:text-brand-700",
+  K: "bg-accent-blue/10 text-accent-blue dark:bg-accent-blue/15 dark:text-accent-blue",
+  L: "bg-accent-teal/10 text-accent-teal dark:bg-accent-teal/15 dark:text-accent-teal",
+  M: "bg-success-light text-success-text",
+  N: "bg-accent-amber/10 text-accent-amber dark:bg-accent-amber/15 dark:text-accent-amber",
+  O: "bg-warning-light text-warning-text",
+  P: "bg-accent-orange/10 text-accent-orange dark:bg-accent-orange/15 dark:text-accent-orange",
+  Q: "bg-accent-fuchsia/10 text-accent-fuchsia dark:bg-accent-fuchsia/15 dark:text-accent-fuchsia",
+  R: "bg-brand-light text-brand dark:bg-brand-light dark:text-brand-700",
+  S: "bg-accent-blue/10 text-accent-blue dark:bg-accent-blue/15 dark:text-accent-blue",
+  T: "bg-accent-teal/10 text-accent-teal dark:bg-accent-teal/15 dark:text-accent-teal",
+  U: "bg-success-light text-success-text",
+  V: "bg-accent-lime/10 text-accent-lime dark:bg-accent-lime/15 dark:text-accent-lime",
+  W: "bg-warning-light text-warning-text",
+  X: "bg-error-light text-error-text",
+  Y: "bg-accent-fuchsia/10 text-accent-fuchsia dark:bg-accent-fuchsia/15 dark:text-accent-fuchsia",
+  Z: "bg-brand-light text-brand dark:bg-brand-light dark:text-brand-700",
 };
 
 export const getSkillIconLetter = (name: string): string => {
@@ -34,8 +34,8 @@ export const getSkillIconLetter = (name: string): string => {
 
 export const getSkillIconStyle = (
   name: string,
-): { letter: string; bg: string; fg: string } => {
+): { letter: string; className: string } => {
   const letter = getSkillIconLetter(name);
-  const color = SKILL_ICON_COLORS[letter];
-  return { letter, ...color };
+  const className = SKILL_ICON_COLORS[letter];
+  return { letter, className };
 };
