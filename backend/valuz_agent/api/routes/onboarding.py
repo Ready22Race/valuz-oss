@@ -1,10 +1,10 @@
 """Onboarding helpers — wire up the first-run sample project / assistant.
 
 POST /v1/onboarding/example-project
-  Body: { "team_id": "general" | "investment" | "product" }
-  Creates the example project directory, binds it as a project, and
-  CREATES the chosen team's agents (as the user's own) deployed into that
-  project. Also ensures the Valuz Helper exists in the library so the
+  Body: { "team_id": "content" | "investment" | "product" }
+  Creates the example project directory, binds it as a project, imports the
+  chosen recommended pack's agents into the user's library, and deploys them
+  into that project. Also ensures the Valuz Helper exists in the library so the
   user always has an agent ready for the no-project quick chat.
 
 POST /v1/onboarding/assistant
@@ -18,32 +18,20 @@ skips onboarding has an empty library. All operations are idempotent.
 from __future__ import annotations
 
 import logging
-from typing import Literal, TypedDict, cast
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from valuz_agent.api.deps import require_current_user_id
-from valuz_agent.generated.i18n_keys import I18nKey
 from valuz_agent.i18n import t
-from valuz_agent.modules.agents.seed import VALUZ_HELPER_SLUG
-
-
-def _ti(key: str) -> str:
-    """Resolve a dynamically-built i18n key.
-
-    ``t()`` declares ``key: I18nKey`` (a closed Literal union) so mypy can't
-    accept f-string keys. The team roster + helper text use stable, codegen'd
-    keys built from ``_TEAM_ROLE_KEYS`` — equally safe at runtime, just not
-    statically narrowable. This helper localizes the cast to one spot.
-    """
-    return t(cast(I18nKey, key))
-
-
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.infra.fs_registry import fs_registry
-from valuz_agent.modules.agents.service import AgentService
+from valuz_agent.modules.agent_packs.loader import load_builtin_pack
+from valuz_agent.modules.agent_packs.service import AgentPackService
+from valuz_agent.modules.agents.seed import VALUZ_HELPER_SLUG
+from valuz_agent.modules.agents.service import AgentService, MemberAlreadyExistsError
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.service import ConnectorService
 from valuz_agent.modules.projects.datastore import ProjectDatastore
@@ -65,52 +53,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/onboarding", tags=["onboarding"])
 
 # ---------------------------------------------------------------------------
-# Team rosters — the agents created (as the user's own) when a preset team is
-# chosen. These live here, NOT in the official-agent seed, so the agent library
-# is empty until onboarding (or the user) puts something in it.
-#
-# Each role's display name / description / detailed instructions are resolved
-# from i18n at create time, using the user's currently configured UI locale
-# (pushed at startup from preferences.default_locale). Agents are "baked" in
-# the user's language at create time — switching locales afterwards won't
-# retro-translate already-deployed agents.
+# Recommended teams — onboarding surfaces a subset of the built-in Agent Packs
+# (内容 / 投研 / 产研). Picking one imports that pack's agents into the user's
+# library and deploys them into the example project. The pack manifests
+# (``resources/agent_packs/<id>/manifest.json``) are the single source of truth
+# for the rosters and their localized text — onboarding no longer carries its
+# own roster i18n. The agents are still created on demand (not seeded globally),
+# so a user who skips onboarding keeps an empty library.
 # ---------------------------------------------------------------------------
 
-TeamId = Literal["general", "investment", "product"]
-
-
-class RoleDef(TypedDict):
-    name: str
-    description: str
-    instructions: str
-
-
-# Role keys per team. Drives both the i18n lookup
-# (``onboarding.roles.<team>.<role>.{name,description,instructions}``) and the
-# deploy order — the first role becomes the team lead.
-_TEAM_ROLE_KEYS: dict[TeamId, list[str]] = {
-    "general": ["researcher", "writer", "reviewer", "archivist"],
-    "investment": ["analyst", "modeler", "tracker", "compliance"],
-    "product": ["pm", "designer", "engineer", "qa"],
-}
-
-
-def _get_team_roster(team_id: TeamId) -> list[RoleDef]:
-    """Resolve a team's roles into localized RoleDefs.
-
-    Reads name / description / instructions from the i18n catalog under
-    ``onboarding.roles.<team>.<role>.*``. Each entry on the returned list is
-    ready to feed into ``AgentService.create_blank_agent``.
-    """
-    base = f"onboarding.roles.{team_id}"
-    return [
-        {
-            "name": _ti(f"{base}.{role_key}.name"),
-            "description": _ti(f"{base}.{role_key}.description"),
-            "instructions": _ti(f"{base}.{role_key}.instructions"),
-        }
-        for role_key in _TEAM_ROLE_KEYS[team_id]
-    ]
+TeamId = Literal["content", "investment", "product"]
 
 
 def _resolve_project_name() -> str:
@@ -333,48 +285,57 @@ async def create_example_project(
             else:
                 raise HTTPException(status_code=422, detail=msg) from exc
 
-        # Step 2: only on a fresh project, create the team's agents (as the
-        # user's own) and deploy them into it. A reused project already has
-        # them — re-creating would duplicate.
+        # Step 2: only on a fresh project, import the recommended pack's agents
+        # into the user's library and deploy them into the project. A reused
+        # project already has them — re-deploying would trip the dedup guard.
         created = 0
         if created_new:
+            manifest = load_builtin_pack(body.team_id)
+            if manifest is None:
+                raise HTTPException(status_code=404, detail=f"unknown team: {body.team_id}")
             # Resolve the runtime + model + provider to deploy with. Three-tier:
             #   1. user's explicit defaults (set in ConnectStep / Settings) —
             #      runtime included, so the team runs on the runtime the user
             #      picked instead of a hard-coded claude_agent
             #   2. first enabled provider's first model + a runtime derived
-            #      from that provider — picks whatever the user actually wired
-            #      up (GPT / DeepSeek / GLM / …), avoiding the old hard-coded
-            #      Claude runtime/model that silently broke non-Claude users
-            #   3. 422 if no provider is configured at all (the frontend
-            #      TeamStep guard banner catches this first; this is the
-            #      authoritative fallback when the guard is bypassed)
+            #      from that provider — picks whatever the user actually wired up
+            #   3. 422 if no provider is configured at all (the TeamStep guard
+            #      catches this first; this is the authoritative fallback)
             default_runtime, default_provider_id, default_model = await _resolve_deploy_target(db)
+            effort = await get_default_effort(db)
             logger.info(
-                "onboarding: deploying team %r with runtime=%r model=%r provider=%r",
+                "onboarding: importing team pack %r with runtime=%r model=%r provider=%r",
                 body.team_id,
                 default_runtime,
                 default_model,
                 default_provider_id,
             )
-            for role in _get_team_roster(body.team_id):
+            # Import the pack into the library (creates the agents, materializes
+            # bundled skills, de-dups by slug), then live-reference them into the
+            # example project.
+            pack_svc = AgentPackService(agent_svc)
+            await pack_svc.import_manifest(
+                user_id,
+                manifest,
+                runtime=default_runtime,
+                provider_id=default_provider_id,
+                model=default_model,
+                effort=effort,
+            )
+            for agent in manifest.agents:
                 try:
-                    await agent_svc.create_blank_agent(
+                    await agent_svc.deploy_agent(
                         user_id,
-                        project_id=project_id,
-                        agent_slug=None,
-                        name=role["name"],
-                        description=role["description"],
-                        instructions=role["instructions"],
-                        runtime=default_runtime,
-                        model=default_model,
-                        provider_id=default_provider_id,
+                        project_id,
+                        source_agent_slug=agent.slug,
                     )
                     created += 1
+                except MemberAlreadyExistsError:
+                    pass
                 except Exception:  # noqa: BLE001 — one bad role shouldn't sink the rest
                     logger.exception(
-                        "onboarding: failed to create role %r for team %r",
-                        role["name"],
+                        "onboarding: failed to deploy %r for team %r",
+                        agent.slug,
                         body.team_id,
                     )
 

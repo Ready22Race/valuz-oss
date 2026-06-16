@@ -158,8 +158,12 @@ export const agentsApi = {
     });
   },
 
-  deleteAgent(slug: string): Promise<void> {
-    return fetchJson(`/v1/agents/${encodeURIComponent(slug)}`, {
+  /** Delete an agent. ``cascade`` first 解除 every 派驻 the agent has, then
+   *  deletes it — the confirmed-delete path. Without it, an agent still
+   *  deployed to a project returns 409. */
+  deleteAgent(slug: string, opts?: { cascade?: boolean }): Promise<void> {
+    const query = opts?.cascade ? "?cascade=true" : "";
+    return fetchJson(`/v1/agents/${encodeURIComponent(slug)}${query}`, {
       method: "DELETE",
     });
   },

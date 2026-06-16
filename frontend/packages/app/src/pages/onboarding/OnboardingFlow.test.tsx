@@ -33,7 +33,7 @@ vi.mock("./ConnectStep", () => ({
 }));
 vi.mock("./TeamStep", () => ({
   TeamStep: ({ onEnter }: { onEnter: (id: string) => Promise<void> }) => (
-    <button onClick={() => void onEnter("general")}>mock-team-enter</button>
+    <button onClick={() => void onEnter("content")}>mock-team-enter</button>
   ),
 }));
 
@@ -70,7 +70,7 @@ describe("OnboardingFlow", () => {
     fireEvent.click(screen.getByText("mock-connect-continue"));
     fireEvent.click(screen.getByText("mock-team-enter"));
     await waitFor(() =>
-      expect(createExampleProjectMock).toHaveBeenCalledWith("general"),
+      expect(createExampleProjectMock).toHaveBeenCalledWith("content"),
     );
     expect(markOnboardedMock).toHaveBeenCalled();
     expect(navigateMock).toHaveBeenCalledWith("/projects/ws-1");

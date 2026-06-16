@@ -86,6 +86,38 @@ async def test_should_allow_delete_after_undeploy(db) -> None:
     assert await AgentDatastore(db).get_agent("local-test-owner", "modeler") is None
 
 
+async def test_cascade_delete_removes_all_deployments_then_agent(db) -> None:
+    # One library agent deployed into two projects (shared live reference).
+    agents = AgentDatastore(db)
+    members = ProjectMemberDatastore(db)
+    await agents.create(
+        "local-test-owner",
+        AgentRow(user_id="local-test-owner", slug="scout", name="SCOUT", source="custom"),
+    )
+    for pid, handle in (("w1", "scout"), ("w2", "scout-2")):
+        await members.create(
+            "local-test-owner",
+            ProjectMemberRow(
+                user_id="local-test-owner",
+                project_id=pid,
+                agent_slug=handle,
+                source_agent_slug="scout",
+            ),
+        )
+    svc = AgentService(db)  # type: ignore[arg-type]
+
+    # Default (no cascade) still blocks — the guard is intact for safe callers.
+    with pytest.raises(AgentStillDeployedError) as exc:
+        await svc.delete_agent("local-test-owner", "scout")
+    assert exc.value.deployment_count == 2
+
+    # cascade=True 解除 both 派驻, then deletes the agent — one confirmed action.
+    await svc.delete_agent("local-test-owner", "scout", cascade=True)
+    assert await AgentDatastore(db).get_agent("local-test-owner", "scout") is None
+    assert await ProjectMemberDatastore(db).get("local-test-owner", "w1", "scout") is None
+    assert await ProjectMemberDatastore(db).get("local-test-owner", "w2", "scout-2") is None
+
+
 async def test_should_block_delete_when_agent_not_deletable(db) -> None:
     # The 默认助手 base agent is seeded with deletable=False; delete must be
     # rejected and the row must survive.

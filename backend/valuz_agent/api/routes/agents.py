@@ -284,12 +284,18 @@ async def update_agent(
 @router.delete("/v1/agents/{slug}", status_code=204)
 async def delete_agent(
     slug: str,
+    cascade: bool = False,
     user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> None:
-    """Delete an agent."""
+    """Delete an agent.
+
+    ``cascade=true`` first 解除 every 派驻 (project membership) the agent has,
+    then deletes it — the confirmed-delete path. Without it, an agent still
+    deployed to a project returns 409 (the caller must 解除派驻 first).
+    """
     try:
-        await svc.delete_agent(user_id, slug)
+        await svc.delete_agent(user_id, slug, cascade=cascade)
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Agent not found: {slug}") from exc
     except (AgentStillDeployedError, AgentNotDeletableError) as exc:

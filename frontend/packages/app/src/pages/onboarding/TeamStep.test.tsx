@@ -26,7 +26,7 @@ const renderStep = (onEnter = vi.fn().mockResolvedValue(undefined)) => {
 describe("TeamStep", () => {
   it("should show the three preset teams and the no-team block when on the grid", () => {
     renderStep();
-    expect(screen.getByText("通用 Team")).toBeTruthy();
+    expect(screen.getByText("内容创作 Team")).toBeTruthy();
     expect(screen.getByText("投研 Team")).toBeTruthy();
     expect(screen.getByText("产研 Team")).toBeTruthy();
     expect(screen.getByText("暂时不需要 team")).toBeTruthy();
