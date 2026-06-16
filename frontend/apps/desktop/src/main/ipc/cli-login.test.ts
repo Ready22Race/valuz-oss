@@ -21,6 +21,10 @@ const makeDeps = (overrides: Partial<CliLoginDeps> = {}): CliLoginDeps => ({
   }),
   homedir: () => HOME,
   platform: () => "darwin",
+  // Default to "no bundled binary" so tests that don't care about the
+  // fallback get deterministic nulls instead of hitting the real fs.
+  // Tests that exercise the bundled path override this.
+  resolveBundled: () => null,
   ...overrides,
 });
 
@@ -226,7 +230,10 @@ describe("getCliStatus", () => {
 
 describe("launchTerminalWithCommand — darwin", () => {
   it("should invoke osascript with Terminal.app and the login command", async () => {
-    const execFile = vi.fn(async () => ok(""));
+    const execFile = vi.fn(async (file: string, args: string[]) => {
+      if (file === "which" && args[0] === "claude") return ok("/usr/local/bin/claude\n");
+      return ok("");
+    });
     const deps = makeDeps({ platform: () => "darwin", execFile });
     const result = await launchTerminalWithCommand("claude", deps);
     expect(result).toEqual({ launched: true });
@@ -234,29 +241,33 @@ describe("launchTerminalWithCommand — darwin", () => {
       "-e",
       'tell application "Terminal" to activate',
       "-e",
-      'tell application "Terminal" to do script "claude /login"',
+      'tell application "Terminal" to do script "/usr/local/bin/claude /login"',
     ]);
   });
 
   it("should propagate osascript failure as launched:false", async () => {
-    const deps = makeDeps({
-      platform: () => "darwin",
-      execFile: vi.fn(() => fail("not allowed")),
+    const execFile = vi.fn(async (file: string, args: string[]) => {
+      if (file === "which" && args[0] === "codex") return ok("/usr/local/bin/codex\n");
+      return fail("not allowed");
     });
+    const deps = makeDeps({ platform: () => "darwin", execFile });
     const result = await launchTerminalWithCommand("codex", deps);
     expect(result.launched).toBe(false);
     expect(result.error).toBe("not allowed");
   });
 
-  it("should send `codex login` (subcommand) for the codex tool", async () => {
-    const execFile = vi.fn(async () => ok(""));
+  it("should send `login` (subcommand) for the codex tool", async () => {
+    const execFile = vi.fn(async (file: string, args: string[]) => {
+      if (file === "which" && args[0] === "codex") return ok("/usr/local/bin/codex\n");
+      return ok("");
+    });
     const deps = makeDeps({ platform: () => "darwin", execFile });
     await launchTerminalWithCommand("codex", deps);
     expect(execFile).toHaveBeenCalledWith("osascript", [
       "-e",
       'tell application "Terminal" to activate',
       "-e",
-      'tell application "Terminal" to do script "codex login"',
+      'tell application "Terminal" to do script "/usr/local/bin/codex login"',
     ]);
   });
 });
@@ -265,9 +276,9 @@ describe("launchTerminalWithCommand — linux", () => {
   it("should spawn the first terminal found via `which`", async () => {
     const spawnDetached = vi.fn();
     const execFile = vi.fn(async (_file: string, args: string[]) => {
-      const term = args[0];
-      if (term === "x-terminal-emulator")
-        return ok("/usr/bin/x-terminal-emulator\n");
+      const arg = args[0];
+      if (arg === "x-terminal-emulator") return ok("/usr/bin/x-terminal-emulator\n");
+      if (arg === "claude") return ok("/usr/local/bin/claude\n");
       return fail();
     });
     const deps = makeDeps({
@@ -281,16 +292,16 @@ describe("launchTerminalWithCommand — linux", () => {
       "-e",
       "bash",
       "-c",
-      "claude /login; exec bash",
+      "/usr/local/bin/claude /login; exec bash",
     ]);
   });
 
-  it("should run `codex login` inside the spawned terminal", async () => {
+  it("should run `login` inside the spawned terminal for the codex tool", async () => {
     const spawnDetached = vi.fn();
     const execFile = vi.fn(async (_file: string, args: string[]) => {
-      const term = args[0];
-      if (term === "x-terminal-emulator")
-        return ok("/usr/bin/x-terminal-emulator\n");
+      const arg = args[0];
+      if (arg === "x-terminal-emulator") return ok("/usr/bin/x-terminal-emulator\n");
+      if (arg === "codex") return ok("/usr/local/bin/codex\n");
       return fail();
     });
     const deps = makeDeps({
@@ -303,14 +314,21 @@ describe("launchTerminalWithCommand — linux", () => {
       "-e",
       "bash",
       "-c",
-      "codex login; exec bash",
+      "/usr/local/bin/codex login; exec bash",
     ]);
   });
 
   it("should report no_terminal when none of the known terminals are on PATH", async () => {
+    // Binary resolves (global codex) so we reach the terminal lookup, which
+    // finds nothing → no_terminal. Without the global path we'd exit early
+    // with binary_not_found and never test the terminal-missing branch.
+    const execFile = vi.fn(async (_file: string, args: string[]) => {
+      if (args[0] === "codex") return ok("/usr/local/bin/codex\n");
+      return fail();
+    });
     const deps = makeDeps({
       platform: () => "linux",
-      execFile: vi.fn(() => fail()),
+      execFile,
     });
     const result = await launchTerminalWithCommand("codex", deps);
     expect(result).toEqual({ launched: false, error: "no_terminal" });
@@ -322,6 +340,7 @@ describe("launchTerminalWithCommand — win32", () => {
     const spawnDetached = vi.fn();
     const execFile = vi.fn(async (file: string, args: string[]) => {
       if (file === "where" && args[0] === "wt.exe") return ok("C:\\Windows\\wt.exe\n");
+      if (file === "where" && args[0] === "claude.exe") return ok("C:\\Users\\test\\claude.exe\n");
       return ok("");
     });
     const deps = makeDeps({
@@ -340,7 +359,7 @@ describe("launchTerminalWithCommand — win32", () => {
       "--",
       "cmd.exe",
       "/K",
-      "claude /login",
+      "C:\\Users\\test\\claude.exe /login",
     ]);
   });
 
@@ -348,6 +367,7 @@ describe("launchTerminalWithCommand — win32", () => {
     const spawnDetached = vi.fn();
     const execFile = vi.fn(async (file: string, args: string[]) => {
       if (file === "where" && args[0] === "wt.exe") return fail();
+      if (file === "where" && args[0] === "codex.exe") return ok("C:\\Users\\test\\codex.exe\n");
       return ok("");
     });
     const deps = makeDeps({
@@ -363,25 +383,166 @@ describe("launchTerminalWithCommand — win32", () => {
       '""',
       "cmd.exe",
       "/K",
-      "codex login",
+      "C:\\Users\\test\\codex.exe login",
     ]);
+  });
+});
+
+describe("launchTerminalWithCommand — bundled fallback", () => {
+  // Regression: when there's no global install, the terminal MUST be given
+  // the bundled binary's absolute path. A bare `claude`/`codex` goes through
+  // PATH and silently ENOENTs on machines with no global install, so the
+  // user clicks Login, the status check says installed:true (it found the
+  // bundled binary), and then the terminal opens and immediately fails.
+  //
+  // The bundled paths below mirror what `resolveBundledClaude` /
+  // `resolveBundledCodex` actually return in a packaged build:
+  //   <resourcesPath>/libexec/_internal/claude_agent_sdk/_bundled/claude[.exe]
+  //   <resourcesPath>/libexec/_internal/codex_cli_bin/bin/codex[.exe]
+  const WIN_RESOURCES =
+    "C:\\Users\\test\\AppData\\Local\\Programs\\Valuz\\resources";
+  const WIN_BUNDLED_CLAUDE = `${WIN_RESOURCES}\\libexec\\_internal\\claude_agent_sdk\\_bundled\\claude.exe`;
+  const MAC_BUNDLED_CLAUDE =
+    "/Applications/Valuz.app/Contents/Resources/libexec/_internal/claude_agent_sdk/_bundled/claude";
+  const LINUX_BUNDLED_CODEX =
+    "/opt/Valuz/resources/libexec/_internal/codex_cli_bin/bin/codex";
+
+  it("win32: uses the bundled claude.exe when no global install exists", async () => {
+    const spawnDetached = vi.fn();
+    const execFile = vi.fn(async (file: string, args: string[]) => {
+      if (file === "where" && args[0] === "wt.exe") return ok("C:\\Windows\\wt.exe\n");
+      // `where claude.exe` returns blank — no global install
+      return ok("");
+    });
+    const deps = makeDeps({
+      platform: () => "win32",
+      execFile,
+      spawnDetached,
+      resolveBundled: () => WIN_BUNDLED_CLAUDE,
+    });
+    const result = await launchTerminalWithCommand("claude", deps);
+    expect(result).toEqual({ launched: true });
+    expect(spawnDetached).toHaveBeenCalledWith("cmd.exe", [
+      "/c",
+      "start",
+      '""',
+      "wt.exe",
+      "new-tab",
+      "--",
+      "cmd.exe",
+      "/K",
+      `${WIN_BUNDLED_CLAUDE} /login`,
+    ]);
+  });
+
+  it("win32: quotes the bundled path for a per-machine install under Program Files", async () => {
+    // electron-builder's nsis installer defaults to per-user (%LOCALAPPDATA%,
+    // no spaces), but a per-machine install lands under "C:\Program Files\..."
+    // — the path then contains a space and cmd.exe /K needs it double-quoted.
+    const programFilesCodex =
+      "C:\\Program Files\\Valuz\\resources\\libexec\\_internal\\codex_cli_bin\\bin\\codex.exe";
+    const spawnDetached = vi.fn();
+    const execFile = vi.fn(async (file: string, args: string[]) => {
+      if (file === "where" && args[0] === "wt.exe") return ok("C:\\Windows\\wt.exe\n");
+      return ok("");
+    });
+    const deps = makeDeps({
+      platform: () => "win32",
+      execFile,
+      spawnDetached,
+      resolveBundled: () => programFilesCodex,
+    });
+    await launchTerminalWithCommand("codex", deps);
+    expect(spawnDetached).toHaveBeenCalledWith("cmd.exe", [
+      "/c",
+      "start",
+      '""',
+      "wt.exe",
+      "new-tab",
+      "--",
+      "cmd.exe",
+      "/K",
+      `"${programFilesCodex}" login`,
+    ]);
+  });
+
+  it("darwin: uses the bundled claude when no global install exists", async () => {
+    const execFile = vi.fn(async (file: string) => {
+      // `which claude` fails (no global install); osascript succeeds.
+      if (file === "which") return fail("not on PATH");
+      return ok("");
+    });
+    const deps = makeDeps({
+      platform: () => "darwin",
+      execFile,
+      resolveBundled: () => MAC_BUNDLED_CLAUDE,
+    });
+    const result = await launchTerminalWithCommand("claude", deps);
+    expect(result).toEqual({ launched: true });
+    expect(execFile).toHaveBeenCalledWith("osascript", [
+      "-e",
+      'tell application "Terminal" to activate',
+      "-e",
+      `tell application "Terminal" to do script "${MAC_BUNDLED_CLAUDE} /login"`,
+    ]);
+  });
+
+  it("linux: uses the bundled codex when no global install exists", async () => {
+    const spawnDetached = vi.fn();
+    const execFile = vi.fn(async (_file: string, args: string[]) => {
+      const arg = args[0];
+      if (arg === "x-terminal-emulator") return ok("/usr/bin/x-terminal-emulator\n");
+      // `which codex` fails — no global install
+      return fail();
+    });
+    const deps = makeDeps({
+      platform: () => "linux",
+      execFile,
+      spawnDetached,
+      resolveBundled: () => LINUX_BUNDLED_CODEX,
+    });
+    const result = await launchTerminalWithCommand("codex", deps);
+    expect(result).toEqual({ launched: true });
+    expect(spawnDetached).toHaveBeenCalledWith("/usr/bin/x-terminal-emulator", [
+      "-e",
+      "bash",
+      "-c",
+      `${LINUX_BUNDLED_CODEX} login; exec bash`,
+    ]);
+  });
+
+  it("returns binary_not_found when neither global nor bundled resolves", async () => {
+    // `where` blank, resolveBundled defaults to null (makeDeps).
+    const deps = makeDeps({
+      platform: () => "win32",
+      execFile: vi.fn(async () => ok("")),
+    });
+    const result = await launchTerminalWithCommand("claude", deps);
+    expect(result).toEqual({ launched: false, error: "binary_not_found" });
   });
 });
 
 describe("bundled CLI fallback", () => {
   it("detectCliPath should fall back to bundled claude when which fails", async () => {
+    // `which` fails AND makeDeps' default resolveBundled returns null →
+    // detectCliPath reports null (no global, no bundled).
     const deps = makeDeps({ execFile: vi.fn(() => fail()) });
-    // resolveBundledClaude hits the real filesystem — in the test env neither
-    // the production nor the dev path exists, so it returns null.
     const path = await detectCliPath("claude", deps);
     expect(path).toBeNull();
   });
 
   it("detectCliPath should fall back to bundled codex when which fails", async () => {
     const deps = makeDeps({ execFile: vi.fn(() => fail()) });
-    // resolveBundledCodex hits the real filesystem — in the test env neither
-    // the production nor the dev path exists, so it returns null.
     const path = await detectCliPath("codex", deps);
     expect(path).toBeNull();
+  });
+
+  it("detectCliPath returns the bundled path when resolveBundled supplies one", async () => {
+    const deps = makeDeps({
+      execFile: vi.fn(() => fail()),
+      resolveBundled: () => "/bundle/claude",
+    });
+    const path = await detectCliPath("claude", deps);
+    expect(path).toBe("/bundle/claude");
   });
 });
