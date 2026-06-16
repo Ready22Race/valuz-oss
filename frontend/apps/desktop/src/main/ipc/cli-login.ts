@@ -42,6 +42,12 @@ export interface CliLoginDeps {
   stat: (path: string) => Promise<StatLike>;
   homedir: () => string;
   platform: () => string;
+  /**
+   * Resolve a CLI binary bundled inside the backend's PyInstaller bundle.
+   * Injected so tests can exercise the bundled-fallback path without the
+   * real filesystem; ``defaultDeps`` wires it to the module-level resolver.
+   */
+  resolveBundled?: (tool: CliTool) => string | null;
 }
 
 export const defaultDeps: CliLoginDeps = {
@@ -75,6 +81,7 @@ export const defaultDeps: CliLoginDeps = {
   },
   homedir,
   platform,
+  resolveBundled: (tool) => resolveBundled(tool),
 };
 
 // Strict markers we require in each CLI's status output before declaring a
@@ -228,7 +235,7 @@ const resolveCliBinary = async (
     // which/where failed — fall through to bundled
   }
 
-  return resolveBundled(tool);
+  return deps.resolveBundled ? deps.resolveBundled(tool) : null;
 };
 
 export const detectCliPath = async (
@@ -294,11 +301,37 @@ const findLinuxTerminal = async (
 // Each CLI surfaces its login flow through a different invocation:
 //   - claude uses an in-REPL slash command (``claude /login``)
 //   - codex uses a regular subcommand (``codex login``)
-// Treat them as data, not as ``${tool} /login`` formatting, so adding new
-// tools later doesn't have to keep matching the wrong shape.
-const LOGIN_COMMAND: Record<CliTool, string> = {
-  claude: "claude /login",
-  codex: "codex login",
+// Only the args live here — the binary path is resolved per-launch (global →
+// bundled) so the terminal never depends on PATH. Splicing the path in at
+// call time is what makes the bundled binary reachable on machines with no
+// global install.
+const LOGIN_ARGS: Record<CliTool, string[]> = {
+  claude: ["/login"],
+  codex: ["login"],
+};
+
+/**
+ * Build the login command using an absolute binary path. The terminal must
+ * not rely on PATH: a bare ``claude``/``codex`` goes through PATH and
+ * silently ENOENTs when the user hasn't installed one globally, leaving the
+ * bundled binary unused. Quote the path only when it contains spaces —
+ * unnecessary quotes can confuse cmd's quirky parser, and typical install
+ * paths (``/usr/local/bin/claude``, ``%LOCALAPPDATA%\Programs\Valuz\…``)
+ * have none.
+ */
+const buildLoginCommand = (
+  plat: string,
+  binary: string,
+  args: string[],
+): string => {
+  const argStr = args.join(" ");
+  const needsQuote = /\s/.test(binary);
+  if (plat === "win32") {
+    const bin = needsQuote ? `"${binary}"` : binary;
+    return `${bin} ${argStr}`;
+  }
+  const bin = needsQuote ? `'${binary}'` : binary;
+  return `${bin} ${argStr}`;
 };
 
 export const launchTerminalWithCommand = async (
@@ -306,7 +339,18 @@ export const launchTerminalWithCommand = async (
   deps: CliLoginDeps = defaultDeps,
 ): Promise<LaunchResult> => {
   const plat = deps.platform();
-  const command = LOGIN_COMMAND[tool];
+
+  // Resolve the binary the SAME way status detection does — global first,
+  // bundled otherwise. Without this the terminal receives a bare
+  // ``claude``/``codex`` that goes through PATH; on machines with no global
+  // install that silently ENOENTs and the bundled binary never runs, even
+  // though ``getCliStatus`` just reported ``installed: true`` from the same
+  // bundled path.
+  const binary = await resolveCliBinary(tool, deps);
+  if (!binary) {
+    return { launched: false, error: "binary_not_found" };
+  }
+  const command = buildLoginCommand(plat, binary, LOGIN_ARGS[tool]);
 
   if (plat === "darwin") {
     try {
