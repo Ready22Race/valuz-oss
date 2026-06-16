@@ -18,10 +18,9 @@ class ProjectRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     instructions_md: Mapped[str | None] = mapped_column(Text)
     # DEPRECATED / inert: the early single-blob project memory. Superseded by the
     # file-based project memory at ``~/.valuz/memories/projects/<id>/`` (see
-    # modules/memory). Nothing reads or writes these anymore; they are kept only
-    # because the host's 0-migration baseline policy (boot/schema.py) makes a
-    # physical column drop a full host-table reset — they drop for free at the
-    # next baseline regen.
+    # modules/memory). Nothing reads or writes these anymore; they remain only so
+    # the live schema is undisturbed. Drop them in a future alembic migration
+    # (a SQLite ``batch_alter_table`` column drop) when convenient.
     memory_summary: Mapped[str | None] = mapped_column(Text)
     memory_version: Mapped[int] = mapped_column(Integer, default=0)
 

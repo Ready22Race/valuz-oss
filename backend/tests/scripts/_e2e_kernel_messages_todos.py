@@ -3,10 +3,9 @@
 This script exercises the full host stack against a freshly-created
 SQLite DB to prove three things land correctly together:
 
-1. **Schema rebuild trigger** — ``migrate_kernel_table_dropout_pre_kernel``
-   leaves an empty DB alone; ``run_kernel_migrations`` then creates the
-   new ``messages`` table, ``events.message_id`` column, and
-   ``sessions.todos`` column.
+1. **Schema creation** — ``run_kernel_migrations`` creates the kernel
+   schema from empty, including the ``messages`` table, the
+   ``events.message_id`` column, and the ``sessions.todos`` column.
 2. **Kernel routes mounted** — the new
    ``GET /api/v1/sessions/{id}/messages`` /
    ``GET /api/v1/messages/{id}`` endpoints respond.

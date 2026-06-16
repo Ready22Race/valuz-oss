@@ -25,12 +25,8 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from valuz_agent.infra.config import settings
-
-if TYPE_CHECKING:
-    from sqlalchemy import Engine
 
 logger = logging.getLogger(__name__)
 
@@ -65,99 +61,6 @@ def _set_kernel_env() -> None:
     os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.db_path))
 
 
-def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
-    """Belt-and-braces drop trigger for kernel-shape drift.
-
-    The kernel's Alembic chain is the only thing that's *supposed* to
-    rewrite ``sessions`` / ``messages`` / ``events``, but
-    historically the kernel has shipped schema changes that reuse the
-    same revision id (so already-stamped DBs skip the upgrade and end
-    up missing required columns). This function detects those known
-    fingerprints by checking for the presence of marker columns —
-    anything missing means "drop the kernel tables so the next
-    ``alembic upgrade head`` rebuilds clean".
-
-    Per dev-stage policy: no data preservation. Internal dogfood users
-    accepted this trade in exchange for cleaner kernel upgrade
-    semantics — see CHANGELOG entry for the V1+V2 schema bootstrap.
-
-    Idempotent: a healthy three-table kernel passes through unchanged.
-
-    Lives next to ``run_kernel_migrations`` so the boot sequence has
-    a single import surface for "do everything the kernel needs at
-    startup". Called automatically by ``run_kernel_migrations``; tests
-    can pass in an ad-hoc engine to pin specific fingerprint cases.
-    """
-    from sqlalchemy import create_engine, inspect, text
-
-    owns_engine = engine is None
-    if engine is None:
-        engine = create_engine(settings.kernel_db_url)
-    try:
-        inspector = inspect(engine)
-        existing = set(inspector.get_table_names())
-
-        def _has_col(table: str, col: str) -> bool:
-            if table not in existing:
-                return False
-            return col in {c["name"] for c in inspector.get_columns(table)}
-
-        suspect: list[str] = []
-
-        # De-projectization cutover: the kernel now owns exactly three
-        # tables (sessions / messages / events) and sessions embed their
-        # agent snapshot. Any DB still carrying the old projects/agents
-        # tables — or a sessions shape without agent_config — predates the
-        # cutover and must be wiped (regenerated baseline, no ALTER chain).
-        if "projects" in existing or "agents" in existing:
-            suspect.append("sessions")
-        if "sessions" in existing and not _has_col("sessions", "agent_config"):
-            if "sessions" not in suspect:
-                suspect.append("sessions")
-        # V4 fossils that survived the V5 cutover.
-        if _has_col("sessions", "environment_id"):
-            if "sessions" not in suspect:
-                suspect.append("sessions")
-        if _has_col("environments", "workspace_mounts"):
-            suspect.append("environments")
-
-        # Torn-state recovery: an interrupted previous boot can leave the
-        # trio half-created. Drop whatever's there so the next
-        # ``alembic upgrade`` rebuilds.
-        kernel_tables = {"sessions", "messages", "events"} & existing
-        if kernel_tables and len(kernel_tables) < 3:
-            for t in kernel_tables:
-                if t not in suspect:
-                    suspect.append(t)
-
-        # Cascade: if any member is stale the others are too — the kernel's
-        # initial migration creates them as a unit. The legacy table names
-        # (projects / agents / environments) stay in the drop list so
-        # pre-cutover fossils are cleared.
-        if "sessions" in suspect:
-            for t in ("projects", "agents", "events", "environments", "messages"):
-                if t in existing and t not in suspect:
-                    suspect.append(t)
-            # Also reset the kernel's alembic stamp so the upgrade
-            # treats this as a fresh install.
-            if "alembic_version" in existing and "alembic_version" not in suspect:
-                suspect.append("alembic_version")
-
-        if not suspect:
-            return
-
-        logger.warning(
-            "Stale kernel tables detected (%s) — dropping for fresh alembic baseline",
-            ", ".join(suspect),
-        )
-        with engine.begin() as conn:
-            for table in suspect:
-                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
-    finally:
-        if owns_engine:
-            engine.dispose()
-
-
 def _do_alembic_upgrade() -> None:
     _set_kernel_env()
 
@@ -175,14 +78,14 @@ def _do_alembic_upgrade() -> None:
 def run_kernel_migrations() -> None:
     """Apply the kernel's Alembic migrations to the valuz SQLite file.
 
-    Two steps under one entry point:
-
-    1. ``_drop_stale_kernel_tables`` — safety net for kernel shape drift
-       (see its docstring). No-op on healthy DBs.
-    2. The kernel's own alembic ``upgrade head``. Writes its revision
-       into the default ``alembic_version`` table; the host's chain
-       uses a separate ``alembic_version_host`` row in the same file
-       so the two don't collide.
+    Runs the kernel's own alembic ``upgrade head``, writing its revision
+    into the default ``alembic_version`` table; the host's chain uses a
+    separate ``alembic_version_host`` row in the same file so the two
+    don't collide. Schema changes ship as new, reversible revisions
+    chained onto the existing head — existing ``sessions`` / ``messages``
+    / ``events`` data is migrated in place, never dropped. (The earlier
+    dev-stage ``drop_stale_kernel_tables`` fingerprint-and-wipe probe is
+    retired now that the product is released.)
 
     Always runs in a dedicated thread because the kernel's
     ``alembic/env.py`` calls ``asyncio.run()`` to drive its async
@@ -193,8 +96,6 @@ def run_kernel_migrations() -> None:
     the host code obvious at the call site.
     """
     import threading
-
-    drop_stale_kernel_tables()
 
     error: list[BaseException] = []
 

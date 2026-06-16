@@ -82,7 +82,8 @@ def reset_providers_cmd(
     # Ensure the host schema exists via the SAME path as app startup — Alembic
     # upgrade head (idempotent; a no-op against an already-current DB). Using
     # ``Base.metadata.create_all`` here would build tables without an
-    # ``alembic_version_host`` stamp, which the next ``serve`` boot would wipe.
+    # ``alembic_version_host`` stamp, leaving alembic unable to track them on
+    # later upgrades.
     run_host_migrations()
 
     async def _run() -> list[ProviderListItem]:
