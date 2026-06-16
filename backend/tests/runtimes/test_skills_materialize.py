@@ -1,0 +1,164 @@
+"""Skill materialization must work without privileged symlinks.
+
+On Windows ``os.symlink`` needs Developer Mode / admin (``WinError 1314``);
+ordinary users hit a permission error. The materializer must therefore fall
+back to a directory junction (or a copy when even junctions are unsupported)
+while keeping its manifest-driven, never-destroy-user-data cleanup correct.
+
+These tests drive the platform-specific link primitive on POSIX too, by
+monkeypatching ``os.name``/``os.symlink``, so the Windows path is exercised in
+CI without a Windows runner.
+"""
+
+# ruff: noqa: I001 — kernel bootstrap side-effect import must precede `from src.*`
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+# Side-effect import: puts the kernel ``src/`` on sys.path before any ``from
+# src.*`` below resolves. Mirrors tests/integrations/test_sandbox_seatbelt.py.
+import kernel  # noqa: F401
+
+from src.runtimes import skills_materialize as sm
+
+
+def _make_skill(tmp_path: Path, name: str) -> str:
+    src = tmp_path / "sources" / name
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+    return str(src)
+
+
+def _manifest(root: Path, manifest_rel: str) -> dict:
+    return json.loads((root / manifest_rel).read_text(encoding="utf-8"))
+
+
+# -- POSIX happy path (symlink) --------------------------------------------
+
+
+def test_symlink_materialization_records_kind(tmp_path: Path) -> None:
+    src = _make_skill(tmp_path, "alpha")
+    root = Path(sm.prepare_deepagents_skills(str(tmp_path / "cwd"), [src]))
+
+    link = root / "alpha"
+    assert link.is_symlink()
+    assert (link / "SKILL.md").read_text(encoding="utf-8") == "# alpha\n"
+
+    manifest = _manifest(Path(tmp_path / "cwd"), sm.AGENTS_MANIFEST)
+    assert manifest == {"managed": [{"name": "alpha", "kind": "symlink"}]}
+
+
+def test_symlink_reflects_live_source_edits(tmp_path: Path) -> None:
+    src = _make_skill(tmp_path, "alpha")
+    root = Path(sm.prepare_deepagents_skills(str(tmp_path / "cwd"), [src]))
+
+    (Path(src) / "SKILL.md").write_text("# edited\n", encoding="utf-8")
+    assert (root / "alpha" / "SKILL.md").read_text(encoding="utf-8") == "# edited\n"
+
+
+# -- Windows fallback: copy when the link primitive is unavailable ----------
+
+
+def _force_copy_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drive the Windows branch on POSIX. Forcing ``_on_windows`` True is enough:
+    ``_winapi`` is a Windows-only module, so the materializer's ``import _winapi``
+    raises ``ModuleNotFoundError`` (an ``ImportError``) here, which it catches and
+    falls back to a copy — exactly the FAT/exFAT/network-share case. (We do NOT
+    flip the global ``os.name``, which would switch ``pathlib`` into
+    un-instantiable ``WindowsPath`` mode.)"""
+    monkeypatch.setattr(sm, "_on_windows", lambda: True)
+
+
+def test_copy_fallback_when_no_link_primitive(tmp_path: Path, monkeypatch) -> None:
+    src = _make_skill(tmp_path, "beta")
+    _force_copy_fallback(monkeypatch)
+
+    cwd = tmp_path / "cwd"
+    root = Path(sm.prepare_deepagents_skills(str(cwd), [src]))
+
+    entry = root / "beta"
+    assert not entry.is_symlink()
+    assert entry.is_dir()
+    assert (entry / "SKILL.md").read_text(encoding="utf-8") == "# beta\n"
+
+    manifest = _manifest(cwd, sm.AGENTS_MANIFEST)
+    assert manifest == {"managed": [{"name": "beta", "kind": "copy"}]}
+
+
+def test_copy_entry_is_cleaned_up_on_rematerialize(tmp_path: Path, monkeypatch) -> None:
+    """A previously-copied entry (real dir) must be removed when the skill set
+    changes — the manifest kind drives ``rmtree`` so it doesn't leak or collide."""
+    src_beta = _make_skill(tmp_path, "beta")
+    src_gamma = _make_skill(tmp_path, "gamma")
+    _force_copy_fallback(monkeypatch)
+
+    cwd = tmp_path / "cwd"
+    root = Path(sm.prepare_deepagents_skills(str(cwd), [src_beta]))
+    assert (root / "beta").is_dir()
+
+    # Re-materialize with a different skill: the old copy must be gone.
+    sm.prepare_deepagents_skills(str(cwd), [src_gamma])
+    assert not (root / "beta").exists()
+    assert (root / "gamma").is_dir()
+    manifest = _manifest(cwd, sm.AGENTS_MANIFEST)
+    assert manifest == {"managed": [{"name": "gamma", "kind": "copy"}]}
+
+
+# -- Cleanup safety: never destroy what we didn't write ---------------------
+
+
+def test_user_placed_dir_is_never_destroyed(tmp_path: Path) -> None:
+    src = _make_skill(tmp_path, "alpha")
+    cwd = tmp_path / "cwd"
+    root = Path(sm.prepare_deepagents_skills(str(cwd), [src]))
+
+    # User hand-places a real directory with the same basename a future skill
+    # would use. It is NOT in our manifest, so it must survive + force a loud error.
+    sm.prepare_deepagents_skills(str(cwd), [])  # clears our managed 'alpha'
+    user_dir = root / "alpha"
+    user_dir.mkdir()
+    (user_dir / "precious.txt").write_text("keep me", encoding="utf-8")
+
+    src_again = _make_skill(tmp_path / "again", "alpha")
+    with pytest.raises(FileExistsError):
+        sm.prepare_deepagents_skills(str(cwd), [src_again])
+
+    # The user's file is untouched.
+    assert (user_dir / "precious.txt").read_text(encoding="utf-8") == "keep me"
+
+
+def test_legacy_string_manifest_is_read_and_cleaned(tmp_path: Path) -> None:
+    """A manifest written by an older build stored bare name strings; cleanup
+    must still recognise and remove those (as symlinks)."""
+    src = _make_skill(tmp_path, "alpha")
+    cwd = tmp_path / "cwd"
+    root = Path(sm.prepare_deepagents_skills(str(cwd), [src]))
+
+    # Rewrite the manifest in the legacy bare-string shape.
+    manifest_path = cwd / sm.AGENTS_MANIFEST
+    manifest_path.write_text(json.dumps({"managed": ["alpha"]}), encoding="utf-8")
+    assert sm._read_manifest(str(manifest_path)) == [("alpha", "symlink")]
+
+    # Re-materialize empty: the legacy symlink entry must be cleaned up.
+    sm.prepare_deepagents_skills(str(cwd), [])
+    assert not (root / "alpha").exists()
+
+
+def test_broken_symlink_is_cleaned_up(tmp_path: Path) -> None:
+    src = _make_skill(tmp_path / "src", "alpha")
+    cwd = tmp_path / "cwd"
+    root = Path(sm.prepare_deepagents_skills(str(cwd), [src]))
+
+    # Delete the source -> broken symlink under the skills root.
+    os.remove(Path(src) / "SKILL.md")
+    os.rmdir(src)
+    assert (root / "alpha").is_symlink()  # broken, but still a link
+
+    # Re-materialize empty: the broken link must be removed idempotently.
+    sm.prepare_deepagents_skills(str(cwd), [])
+    assert not os.path.islink(root / "alpha")
+    assert not (root / "alpha").exists()
