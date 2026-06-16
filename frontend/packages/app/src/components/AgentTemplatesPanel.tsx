@@ -119,7 +119,13 @@ export const AgentTemplatesPanel = ({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="flex max-h-[85vh] flex-col overflow-hidden border-0 sm:max-w-3xl">
+      <DialogContent
+        // Don't auto-focus on open — Radix would land focus on the top-right
+        // close (X) button, leaving a focus ring on it. Let the dialog open
+        // with nothing focused.
+        onOpenAutoFocus={(e) => e.preventDefault()}
+        className="flex max-h-[85vh] flex-col overflow-hidden border-0 sm:max-w-3xl"
+      >
         <DialogHeader>
           {detail ? (
             <>
