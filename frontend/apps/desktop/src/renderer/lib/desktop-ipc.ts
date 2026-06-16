@@ -7,6 +7,17 @@ const getBridge = (): DesktopBridge | null =>
 
 export const isElectron = (): boolean => getBridge() !== null;
 
+/**
+ * Tell the main process which UI locale is active so the native menu bar
+ * (built in the main process, which can't read this renderer's
+ * localStorage) matches the in-app language. No-op outside Electron.
+ */
+export const setMenuLocale = async (locale: string): Promise<void> => {
+  const bridge = getBridge();
+  if (!bridge) return;
+  await bridge.invoke("set_menu_locale", { locale });
+};
+
 const selectDirectoryViaInput = (): Promise<string | null> =>
   new Promise((resolve) => {
     const input = document.createElement("input");

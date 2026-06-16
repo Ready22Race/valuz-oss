@@ -8,6 +8,7 @@ import { DEEP_LINK_PROTOCOL, parseDeepLink } from "./deep-link-utils";
 import { desktopRuntime } from "./ipc/desktop";
 import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
+import { setLocale as setMenuI18nLocale } from "@valuz/shared/i18n";
 import {
   registerSystemLogIpc,
   startLogTail,
@@ -59,12 +60,28 @@ const bootstrap = async () => {
     closeUpdateWindow();
     updater.quitAndInstall();
   });
-  Menu.setApplicationMenu(
-    buildAppMenu({
-      getMainWindow,
-      checkForUpdates: updater.checkForUpdates,
-    }),
+  // The native menu is built in the main process, which can't read the
+  // renderer's localStorage — seed it from the OS language so it's not stuck
+  // on the i18n default, then let the renderer report the actual in-app
+  // locale over IPC (set_menu_locale) and rebuild.
+  setMenuI18nLocale(
+    app.getLocale().toLowerCase().startsWith("zh") ? "zh-CN" : "en-US",
   );
+  const applyAppMenu = () =>
+    Menu.setApplicationMenu(
+      buildAppMenu({
+        getMainWindow,
+        checkForUpdates: updater.checkForUpdates,
+      }),
+    );
+  applyAppMenu();
+  ipcMain.handle(DESKTOP_CHANNELS.setMenuLocale, (_event, payload) => {
+    const locale = (payload as { locale?: string } | undefined)?.locale;
+    if (locale === "en-US" || locale === "zh-CN") {
+      setMenuI18nLocale(locale);
+      applyAppMenu();
+    }
+  });
 
   appTray = createAppTray({
     getMainWindow,

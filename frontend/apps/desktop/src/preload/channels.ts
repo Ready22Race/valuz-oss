@@ -31,6 +31,7 @@ export const DESKTOP_CHANNELS = {
   updaterQuitAndInstall: "updater:quit-and-install",
   updaterShowWindow: "updater:show-window",
   updaterGetState: "updater:get-state",
+  setMenuLocale: "set_menu_locale",
 } as const;
 
 export const DESKTOP_EVENTS = {
