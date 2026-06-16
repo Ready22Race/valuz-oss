@@ -25,8 +25,12 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from valuz_agent.infra.config import settings
+
+if TYPE_CHECKING:
+    from sqlalchemy import Engine
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,14 @@ KERNEL_DIR: Path = Path(__file__).resolve().parents[2] / "kernel"
 # backend/alembic/kernel (sibling of the host chain at backend/alembic/host).
 KERNEL_ALEMBIC_DIR: Path = Path(__file__).resolve().parents[2] / "alembic" / "kernel"
 KERNEL_ALEMBIC_INI: Path = KERNEL_ALEMBIC_DIR / "alembic.ini"
+
+# The kernel chain stamps the default ``alembic_version`` table (the host chain
+# uses ``alembic_version_host`` in the same file so the two never collide).
+KERNEL_VERSION_TABLE = "alembic_version"
+# Tables the kernel owns and may drop on a stale-stamp rebuild — the current
+# trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
+# langgraph checkpoint tables in the same file are off-limits.
+_KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
 
 
 def _set_kernel_env() -> None:
@@ -61,6 +73,79 @@ def _set_kernel_env() -> None:
     os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.db_path))
 
 
+def _known_kernel_revisions() -> set[str]:
+    """Every revision id in the kernel alembic chain.
+
+    A DB stamped at any of these is on a valid upgrade path and is migrated
+    forward by ``alembic upgrade head`` (data-preserving) — see
+    ``drop_stale_kernel_tables``.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(KERNEL_ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(KERNEL_ALEMBIC_DIR))
+    return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
+
+
+def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
+    """Self-heal probe for a corrupt/foreign kernel stamp (incremental chain).
+
+    Mirrors the host's ``boot.schema.drop_stale_host_tables``: the kernel
+    alembic chain is incremental, so a DB stamped at a *known* revision is
+    migrated forward by ``run_kernel_migrations`` (``alembic upgrade head``) —
+    data-preserving. Only an unknown/foreign stamp, or kernel tables present
+    with no stamp at all (a boot that died mid-initialization, or a half-created
+    trio), triggers a drop-and-rebuild so the upgrade re-initializes cleanly.
+
+    Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES`` — the current trio
+    plus pre-cutover fossils) plus the kernel ``alembic_version`` stamp. The
+    host ``valuz_*`` tables and the DeepAgents langgraph checkpoint tables that
+    share the same SQLite file are never touched.
+
+    No-op on a fresh file / healthy DB. Runs synchronously off the event loop —
+    it owns no session and reads no business data, like the host probe.
+    """
+    from sqlalchemy import create_engine, inspect, text
+
+    owns_engine = engine is None
+    if engine is None:
+        engine = create_engine(settings.kernel_db_url)
+    try:
+        inspector = inspect(engine)
+        existing = set(inspector.get_table_names())
+
+        stamp: str | None = None
+        if KERNEL_VERSION_TABLE in existing:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text(f"SELECT version_num FROM {KERNEL_VERSION_TABLE}")  # noqa: S608
+                ).fetchone()
+                stamp = row[0] if row else None
+
+        if stamp in _known_kernel_revisions():
+            return  # known revision — `alembic upgrade head` migrates it forward
+
+        stale = [t for t in _KERNEL_OWNED_TABLES if t in existing]
+        if not stale:
+            return  # fresh install / no kernel tables — nothing to reset
+        if KERNEL_VERSION_TABLE in existing:
+            stale.append(KERNEL_VERSION_TABLE)
+
+        logger.warning(
+            "kernel schema stamp=%s is not a known revision — "
+            "dropping %d kernel table(s) for a clean re-initialization",
+            stamp,
+            len(stale),
+        )
+        with engine.begin() as conn:
+            for table in stale:
+                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
+    finally:
+        if owns_engine:
+            engine.dispose()
+
+
 def _do_alembic_upgrade() -> None:
     _set_kernel_env()
 
@@ -78,14 +163,17 @@ def _do_alembic_upgrade() -> None:
 def run_kernel_migrations() -> None:
     """Apply the kernel's Alembic migrations to the valuz SQLite file.
 
-    Runs the kernel's own alembic ``upgrade head``, writing its revision
-    into the default ``alembic_version`` table; the host's chain uses a
-    separate ``alembic_version_host`` row in the same file so the two
-    don't collide. Schema changes ship as new, reversible revisions
-    chained onto the existing head — existing ``sessions`` / ``messages``
-    / ``events`` data is migrated in place, never dropped. (The earlier
-    dev-stage ``drop_stale_kernel_tables`` fingerprint-and-wipe probe is
-    retired now that the product is released.)
+    Two steps under one entry point:
+
+    1. ``drop_stale_kernel_tables`` — data-preserving self-heal probe. Trusts
+       any DB stamped at a known kernel revision (the upgrade migrates it
+       forward); only an unknown/foreign/unstamped kernel schema is dropped so
+       the upgrade can rebuild it. No-op on a healthy DB.
+    2. The kernel's own alembic ``upgrade head``. Writes its revision into the
+       default ``alembic_version`` table; the host's chain uses a separate
+       ``alembic_version_host`` row in the same file so the two don't collide.
+       Schema changes ship as new, reversible revisions chained onto the head —
+       existing ``sessions`` / ``messages`` / ``events`` data migrates in place.
 
     Always runs in a dedicated thread because the kernel's
     ``alembic/env.py`` calls ``asyncio.run()`` to drive its async
@@ -96,6 +184,8 @@ def run_kernel_migrations() -> None:
     the host code obvious at the call site.
     """
     import threading
+
+    drop_stale_kernel_tables()
 
     error: list[BaseException] = []
 

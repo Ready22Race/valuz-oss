@@ -1,14 +1,16 @@
 """kernel initial schema
 
-The initial baseline of the kernel alembic chain — it creates the three kernel
+The 0001 baseline of the kernel alembic chain — it creates the three kernel
 tables (sessions/messages/events) from empty. Each carries a required
 ``user_id`` (owner id) plus a matching ``ix_<table>_user_id`` index, stamped
-from ``src.core.owner_context`` (host-seeded at boot). Released DBs are stamped
-at this revision; ``run_kernel_migrations`` runs ``alembic upgrade head``,
-a no-op against an already-stamped DB. Subsequent schema changes ship as NEW,
-reversible revisions chained onto this one so existing data is migrated in
-place — never dropped. (The earlier dev-stage fingerprint-and-wipe probe in
-``boot.kernel`` is retired.)
+from ``src.core.owner_context`` (host-seeded at boot).
+
+The chain is incremental: this baseline creates the schema and later revisions
+ALTER it. ``boot.kernel.drop_stale_kernel_tables`` keeps any DB stamped at a
+*known* revision and lets ``run_kernel_migrations`` (``alembic upgrade head``)
+migrate it forward — data-preserving. Only an unknown/foreign/corrupt stamp
+(or kernel tables present with no stamp) is dropped wholesale and
+re-initialized. Mirrors the host chain's ``boot.schema``.
 
 Revision ID: 0001
 Revises:

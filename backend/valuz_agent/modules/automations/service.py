@@ -292,6 +292,7 @@ class AutomationService:
             duration_ms=row.duration_ms,
             result_summary=row.result_summary,
             error_code=row.error_code,
+            error_message_key=row.error_message_key,
             session_id=row.session_id,
             created_files=created_files,
         )

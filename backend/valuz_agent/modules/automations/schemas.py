@@ -200,6 +200,7 @@ class AutomationRunItemResponse(BaseModel):
     duration_ms: int | None
     result_summary: str | None
     error_code: str | None
+    error_message_key: str | None
     session_id: str | None
     created_files: list[str]
 
