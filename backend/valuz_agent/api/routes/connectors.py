@@ -1354,7 +1354,13 @@ async def _probe_connector(
                 _detect_shell_path, os.environ.get("PATH", "")
             )
 
-            raw_command = view.command
+            # Bundled stdio connectors reference their entry point with the
+            # ``{mcp_dir}`` placeholder; expand it the same way the runtime
+            # resolver does, or the probe spawns ``python {mcp_dir}/...`` as a
+            # literal path and the server exits with "Connection closed".
+            from valuz_agent.adapters.mcp_resolver import expand_mcp_dir
+
+            raw_command = expand_mcp_dir(view.command)
             extra_args: list[str] = []
             if " " in raw_command:
                 parts = shlex.split(raw_command)
@@ -1362,7 +1368,7 @@ async def _probe_connector(
                 extra_args = parts[1:]
 
             resolved_command = shutil.which(raw_command, path=shell_path_str) or raw_command
-            probe_args = extra_args + (view.args or [])
+            probe_args = extra_args + [expand_mcp_dir(str(a)) for a in (view.args or [])]
             probe_env: dict[str, str] = os.environ.copy()
             probe_env["PATH"] = shell_path_str
             if env:

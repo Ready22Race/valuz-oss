@@ -211,6 +211,8 @@
       "args": [
         "run",
         "--no-project",
+        "--python",
+        ">=3.10,<3.14",
         "--with",
         "mcp>=1.0.0",
         "--with",
@@ -243,6 +245,8 @@
       "args": [
         "run",
         "--no-project",
+        "--python",
+        ">=3.10,<3.14",
         "--with",
         "mcp>=1.0.0",
         "--with",
@@ -272,6 +276,8 @@
       "args": [
         "run",
         "--no-project",
+        "--python",
+        ">=3.10,<3.14",
         "--with",
         "mcp>=1.0.0",
         "--with",
@@ -303,6 +309,8 @@
       "args": [
         "run",
         "--no-project",
+        "--python",
+        ">=3.10,<3.14",
         "--with",
         "mcp>=1.0.0",
         "--with",

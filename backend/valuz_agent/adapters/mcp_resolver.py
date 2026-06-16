@@ -150,6 +150,18 @@ def _bundled_mcp_servers_dir() -> str:
     return (Path(__file__).resolve().parent.parent / "resources" / "mcp_servers").as_posix()
 
 
+def expand_mcp_dir(value: str) -> str:
+    """Substitute the ``{mcp_dir}`` placeholder a bundled stdio connector uses
+    for its entry point with the absolute bundled-server tree path.
+
+    The single source of truth for this expansion — used both by the runtime
+    resolver (``_build_stdio_config``) and the connector test probe, so a
+    bundled connector that runs at session time also passes the UI's
+    "test connection" probe.
+    """
+    return value.replace("{mcp_dir}", _bundled_mcp_servers_dir())
+
+
 def _build_stdio_config(row, secrets: FileSecretStore) -> list[McpServerConfig] | None:
     import shlex
 
@@ -157,10 +169,8 @@ def _build_stdio_config(row, secrets: FileSecretStore) -> list[McpServerConfig] 
         logger.info("mcp resolver: stdio connector %s has no command", row.slug)
         return None
 
-    mcp_dir = _bundled_mcp_servers_dir()
-
     def _expand(value: str) -> str:
-        return value.replace("{mcp_dir}", mcp_dir)
+        return expand_mcp_dir(value)
 
     raw_command = _expand(row.command)
     extra_args: tuple[str, ...] = ()

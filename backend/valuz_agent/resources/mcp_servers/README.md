@@ -10,9 +10,12 @@ A catalog entry references its entry point with the **`{mcp_dir}`**
 placeholder, which `adapters/mcp_resolver.py:_build_stdio_config` expands to
 this directory's absolute path (works in a dev checkout and a PyInstaller
 build, where `resources/` lands under `_internal/valuz_agent/`). Dependencies
-are installed on demand via `uv run --no-project --with <pkg> ...`, so the main
-backend env stays clean and the bundle stays small. First launch of a given
-server pays a one-time dependency-install cost.
+are installed on demand via `uv run --no-project --python '>=3.10,<3.14' --with <pkg> ...`,
+so the main backend env stays clean and the bundle stays small. First launch of a
+given server pays a one-time dependency-install cost. The explicit `--python`
+constraint is load-bearing: `--no-project` makes `uv` pick a default interpreter,
+which on a host whose system Python is < 3.10 (e.g. macOS `/usr/bin/python3` =
+3.9) fails to resolve `mcp` (requires Python ≥ 3.10) and the server never starts.
 
 ```jsonc
 {
@@ -20,7 +23,8 @@ server pays a one-time dependency-install cost.
   "transport": "stdio",
   "auth_type": "none",
   "command": "uv",
-  "args": ["run", "--no-project", "--with", "mcp>=1.0.0", "--with", "akshare>=1.14.0",
+  "args": ["run", "--no-project", "--python", ">=3.10,<3.14",
+           "--with", "mcp>=1.0.0", "--with", "akshare>=1.14.0",
            "python", "{mcp_dir}/akshare-mcp/server.py", "--transport", "stdio"]
 }
 ```
