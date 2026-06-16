@@ -155,6 +155,45 @@ def test_run_turn_maps_error_frame_to_client_error() -> None:
     assert "Session not found" in str(excinfo.value)
 
 
+def test_run_turn_disables_keepalive_ping_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The run channel must connect with ``ping_timeout=None``.
+
+    A whole agent turn rides this socket and can legitimately go quiet for
+    long stretches; the websockets default 20s pong timeout would close a
+    healthy-but-busy turn with 1011 (``keepalive ping timeout``). Pin the
+    connect kwargs so that regression can't silently return.
+    """
+    captured: dict[str, Any] = {}
+    real_connect = websockets.connect
+
+    def _spy_connect(*args: Any, **kwargs: Any):
+        captured.update(kwargs)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(websockets, "connect", _spy_connect)
+
+    async def _run():
+        frames = [{"type": "session_idle", "data": {"stop_reason": "end_turn"}, "timestamp": 1}]
+        async with _FakeKernelWs(frames) as fake:
+            client = HttpKernelClient(f"http://127.0.0.1:{fake.port}", token="tok")
+
+            async def _fake_list_messages(
+                user_id, session_id: str, *, limit: int = 50, offset: int = 0
+            ):
+                return [_fake_message(session_id)]
+
+            client.list_messages = _fake_list_messages  # type: ignore[method-assign]
+            try:
+                await client.run_turn("owner-a", "sess-1", "hi")
+            finally:
+                await client.aclose()
+
+    asyncio.run(_run())
+
+    assert captured.get("ping_timeout") is None
+    assert captured.get("ping_interval") == 20
+
+
 def test_run_turn_maps_dropped_channel_to_unavailable() -> None:
     async def _run():
         # Server sends nothing and closes immediately → mid-turn drop.

@@ -381,7 +381,22 @@ class HttpKernelClient:
             }
         }
         try:
-            async with websockets.connect(url, additional_headers=headers, max_size=None) as ws:
+            # The run channel carries a whole agent turn, which can legitimately
+            # go quiet for long stretches (a slow tool call, a model streaming
+            # stall, a momentarily busy host loop). Keep sending keepalive pings
+            # so intermediaries don't drop the socket, but disable the pong
+            # *timeout* (``ping_timeout=None``) — otherwise a healthy but busy
+            # turn gets killed by the library's 20s default, surfacing as
+            # ``run channel closed: ... keepalive ping timeout``. A genuinely
+            # dead kernel is still caught promptly: the peer's TCP close makes
+            # ``recv()`` raise (ConnectionClosed / OSError below).
+            async with websockets.connect(
+                url,
+                additional_headers=headers,
+                max_size=None,
+                ping_interval=20,
+                ping_timeout=None,
+            ) as ws:
                 await ws.send(json.dumps(payload))
                 while True:
                     frame = json.loads(await ws.recv())

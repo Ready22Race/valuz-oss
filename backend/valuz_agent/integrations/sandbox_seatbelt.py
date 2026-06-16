@@ -33,12 +33,14 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import logging
 import os
 import re
 import secrets
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Literal
 
@@ -54,6 +56,8 @@ from valuz_agent.ports.sandbox_provider import (
     SandboxProvisionError,
     SandboxSpec,
 )
+
+logger = logging.getLogger(__name__)
 
 _BIND_LINE = re.compile(r"Uvicorn running on https?://127\.0\.0\.1:(\d+)")
 
@@ -341,6 +345,7 @@ class SeatbeltSandboxProvider:
     def __init__(self) -> None:
         self._procs: dict[str, subprocess.Popen[bytes]] = {}
         self._endpoints: dict[str, SandboxEndpoint] = {}
+        self._log_drainers: dict[str, threading.Thread] = {}
 
     @classmethod
     def from_existing(cls, sandbox_id: str, base_url: str, token: str) -> SeatbeltSandboxProvider:
@@ -386,6 +391,16 @@ class SeatbeltSandboxProvider:
             self._procs.pop(spec.sandbox_id, None)
             raise SandboxProvisionError(f"kernel sandbox failed to start: {exc}") from exc
 
+        # CRITICAL: keep draining the kernel's stdout for the process's
+        # lifetime. ``_await_bind`` only reads up to the bind line; if nothing
+        # consumes the pipe afterwards, uvicorn's per-request access logs fill
+        # the ~64 KiB OS pipe buffer and the *next* log ``write()`` blocks
+        # forever — on the kernel's main thread, freezing its asyncio loop
+        # mid-write. The host then sees every kernel-proxied call (sessions,
+        # runs, the WS run channel) hang. Drain on a daemon thread so the pipe
+        # never backs up; the thread exits on EOF when the process dies.
+        self._start_log_drain(spec.sandbox_id, proc)
+
         endpoint = SandboxEndpoint(
             sandbox_id=spec.sandbox_id,
             base_url=f"http://127.0.0.1:{port}",
@@ -393,6 +408,34 @@ class SeatbeltSandboxProvider:
         )
         self._endpoints[spec.sandbox_id] = endpoint
         return endpoint
+
+    def _start_log_drain(self, sandbox_id: str, proc: subprocess.Popen[bytes]) -> None:
+        """Continuously read the kernel subprocess's stdout so its log writes
+        never block on a full pipe. Forwards each line to the host log (the
+        kernel's output was otherwise discarded after bind). Runs on a daemon
+        thread that ends when ``readline`` hits EOF (process exit)."""
+        if proc.stdout is None:
+            return
+
+        stdout = proc.stdout
+
+        def _pump() -> None:
+            try:
+                for raw in iter(stdout.readline, b""):
+                    logger.debug(
+                        "[sandbox %s] %s",
+                        sandbox_id,
+                        raw.decode(errors="replace").rstrip(),
+                    )
+            except (ValueError, OSError):
+                # Pipe closed under us on teardown — nothing left to drain.
+                pass
+
+        t = threading.Thread(
+            target=_pump, name=f"sandbox-log-{sandbox_id}", daemon=True
+        )
+        t.start()
+        self._log_drainers[sandbox_id] = t
 
     async def health(self, sandbox_id: str) -> bool:
         ep = self._endpoints.get(sandbox_id)
@@ -409,6 +452,9 @@ class SeatbeltSandboxProvider:
     async def destroy(self, sandbox_id: str) -> None:
         proc = self._procs.pop(sandbox_id, None)
         self._endpoints.pop(sandbox_id, None)
+        # The drain thread exits on its own once the process dies (readline
+        # hits EOF); just drop our handle to it.
+        self._log_drainers.pop(sandbox_id, None)
         if proc is not None:
             self._terminate(proc)
 
@@ -527,8 +573,15 @@ class SeatbeltSandboxProvider:
             "127.0.0.1",
             "--port",
             "0",
-            "--log-level",
-            "info",
+            # Silence uvicorn's per-request access firehose (the stream that
+            # filled the undrained pipe and froze the loop) with
+            # ``--no-access-log`` — NOT by lowering ``--log-level``. The level
+            # also gates the startup "Uvicorn running on http://127.0.0.1:<port>"
+            # line, which ``_await_bind`` parses to learn the OS-assigned port;
+            # suppressing it hangs the bind probe and boot never finishes.
+            # ``--no-access-log`` keeps that INFO line while dropping the
+            # per-request noise.
+            "--no-access-log",
         ]
         return subprocess.Popen(
             cmd,

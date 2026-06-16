@@ -88,7 +88,7 @@ start_backend() {
     info "backend → http://127.0.0.1:$BACKEND_PORT (log: $log_file)"
     cd "$BACKEND_DIR"
     uv run python -m valuz_agent --host 127.0.0.1 --port "$BACKEND_PORT" $RELOAD_FLAG \
-        2>&1 | tee "$log_file" &
+        2>&1 | python3 "$ROOT_DIR/scripts/devlog.py" "$log_file" &
     PIDS+=("$!")
 
     # Wait up to 30s for the backend to come up. ``--noproxy '*'`` keeps the
@@ -116,7 +116,7 @@ start_frontend() {
     info "frontend desktop dev (log: $log_file)"
     cd "$FRONTEND_DIR"
     pnpm --filter @valuz/desktop dev \
-        2>&1 | tee "$log_file" &
+        2>&1 | python3 "$ROOT_DIR/scripts/devlog.py" "$log_file" &
     PIDS+=("$!")
 }
 
