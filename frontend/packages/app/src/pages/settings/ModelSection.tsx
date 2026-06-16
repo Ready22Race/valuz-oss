@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import {
   Cpu,
@@ -136,10 +136,60 @@ export const ModelSection = () => {
     }
   }, []);
 
+  // Re-check the CLI subscription login state (Claude/Codex). The login runs
+  // in an external terminal, so the app has to re-poll to notice it.
+  const refreshCliStatus = useCallback(async () => {
+    if (!platformCheckCliLogin) return;
+    try {
+      const [claude, codex] = (await Promise.all([
+        platformCheckCliLogin("claude"),
+        platformCheckCliLogin("codex"),
+      ])) as [CliLoginStatus, CliLoginStatus];
+      setCliStatus({ claude, codex });
+    } catch {
+      // best-effort -- stale cliStatus is fine
+    }
+  }, [platformCheckCliLogin]);
+
+  // (B) After a login terminal is launched, poll that tool's status until it
+  // flips to logged_in (or ~3 min passes), then refresh the row. One timer
+  // per tool; cleared on success / timeout / unmount.
+  const cliPollRef = useRef<Partial<Record<CliTool, number>>>({});
+  const pollCliLogin = useCallback(
+    (tool: CliTool) => {
+      if (!platformCheckCliLogin) return;
+      const deadline = Date.now() + 180_000;
+      const tick = async () => {
+        if (Date.now() > deadline) {
+          delete cliPollRef.current[tool];
+          return;
+        }
+        try {
+          const status = (await platformCheckCliLogin(tool)) as CliLoginStatus;
+          if (status.state === "logged_in") {
+            setCliStatus((prev) => ({ ...prev, [tool]: status }));
+            void loadProvidersList();
+            delete cliPollRef.current[tool];
+            return;
+          }
+        } catch {
+          // keep polling
+        }
+        cliPollRef.current[tool] = window.setTimeout(tick, 2500);
+      };
+      if (cliPollRef.current[tool] !== undefined) {
+        window.clearTimeout(cliPollRef.current[tool]);
+      }
+      cliPollRef.current[tool] = window.setTimeout(tick, 2500);
+    },
+    [platformCheckCliLogin, loadProvidersList],
+  );
+
   const cliLogin = useCliLoginFlow({
     onProviderMarkedOAuth: () => {
       void loadProvidersList();
     },
+    onLoginLaunched: pollCliLogin,
   });
 
   const loadProviders = useCallback(async () => {
@@ -179,22 +229,37 @@ export const ModelSection = () => {
   // "available" without the user having to reload. Failures degrade
   // silently (status stays ``undefined``, badge hides).
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const [claude, codex] = (await Promise.all([
-          platformCheckCliLogin!("claude"),
-          platformCheckCliLogin!("codex"),
-        ])) as [CliLoginStatus, CliLoginStatus];
-        if (!cancelled) setCliStatus({ claude, codex });
-      } catch {
-        // best-effort -- stale cliStatus is fine
-      }
-    })();
-    return () => {
-      cancelled = true;
+    void refreshCliStatus();
+  }, [providersList, refreshCliStatus]);
+
+  // (A) Re-check when the window regains focus / becomes visible — the user
+  // typically switches back to the app right after finishing the terminal
+  // login, so the badge flips without a manual refresh.
+  useEffect(() => {
+    const recheck = () => {
+      void refreshCliStatus();
+      void loadProvidersList();
     };
-  }, [providersList]);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") recheck();
+    };
+    window.addEventListener("focus", recheck);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", recheck);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refreshCliStatus, loadProvidersList]);
+
+  // Stop any in-flight CLI-login polls on unmount.
+  useEffect(() => {
+    const polls = cliPollRef.current;
+    return () => {
+      Object.values(polls).forEach(
+        (id) => id !== undefined && window.clearTimeout(id),
+      );
+    };
+  }, []);
 
   const handleSetEffort = async (value: EffortLevel) => {
     try {
