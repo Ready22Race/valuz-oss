@@ -205,9 +205,20 @@ async def run_session_to_idle(
     # the same call so the reason survives reload (the ``emit_live_event`` above
     # is live-only and is missed by any client not connected at failure time).
     try:
+        from valuz_agent.adapters.kernel_client import KernelUnavailableError
         from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
 
-        await _finalize_session(session_id, content, final_status, error=turn_error)
+        try:
+            await _finalize_session(session_id, content, final_status, error=turn_error)
+        except KernelUnavailableError:
+            # Backend shutting down — kernel store already torn down. Finalize
+            # is pointless; boot recovery reconciles this session. Skip quietly
+            # rather than logging a shutdown-race traceback.
+            logger.debug(
+                "run_session_to_idle: kernel unavailable (shutdown), skipping "
+                "finalize for %s",
+                session_id,
+            )
     except Exception:  # noqa: BLE001
         logger.exception("run_session_to_idle: finalize failed for session %s", session_id)
 
