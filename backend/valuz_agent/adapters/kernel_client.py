@@ -227,13 +227,25 @@ class KernelClient(Protocol):
 def _store() -> Any:
     from app.dependencies import get_store
 
-    return get_store()
+    try:
+        return get_store()
+    except RuntimeError as exc:
+        # The kernel's StorePort singleton is torn down on app-lifespan exit
+        # (``shutdown_dependencies`` resets it to ``None``). An in-flight
+        # in-process call landing here means the kernel is shutting down and no
+        # longer serving. Surface it as the typed "unavailable" signal so
+        # best-effort callers (e.g. the actor-loop finalize that races shutdown)
+        # can skip quietly instead of crashing on a bare ``RuntimeError``.
+        raise KernelUnavailableError(503, str(exc)) from exc
 
 
 def _orchestrator() -> Any:
     from app.dependencies import get_orchestrator
 
-    return get_orchestrator()
+    try:
+        return get_orchestrator()
+    except RuntimeError as exc:
+        raise KernelUnavailableError(503, str(exc)) from exc
 
 
 class InProcessKernelClient:

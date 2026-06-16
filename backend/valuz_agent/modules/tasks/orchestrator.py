@@ -1354,8 +1354,23 @@ class TaskOrchestrator:
         """
         from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
 
+        from valuz_agent.adapters.kernel_client import KernelUnavailableError
+
         try:
             await _finalize_session(session_id, last_content, final_status)
+        except KernelUnavailableError:
+            # The backend is shutting down — the kernel store is already torn
+            # down (the actor loop was cancelled mid-flight and runs this
+            # finalize in its ``finally``). Finalize is pointless now: the
+            # session is left ``running`` and ``recover_running_sessions`` /
+            # ``recover_active_tasks`` reconcile it on the next boot. Skip
+            # quietly instead of spamming a "Dependencies not initialized"
+            # traceback for every in-flight session at shutdown.
+            logger.debug(
+                "_finalize_actor: kernel unavailable (shutdown) — deferring "
+                "finalize of %s to boot recovery",
+                session_id,
+            )
         except Exception:  # noqa: BLE001
             logger.exception("_finalize_actor: finalize failed for %s", session_id)
 
