@@ -8,6 +8,7 @@ import {
 import { useSearchParams } from "react-router-dom";
 import {
   Activity,
+  Brain,
   Cpu,
   FileText,
   Info,
@@ -23,6 +24,7 @@ import { useProjectOutlet } from "@valuz/app/layout";
 import { ModelSection } from "./settings/ModelSection";
 import { ConnectorsSection } from "./settings/ConnectorsSection";
 import { GeneralSection } from "./settings/GeneralSection";
+import { MemorySection } from "./settings/MemorySection";
 import { ParsingSection } from "./settings/ParsingSection";
 import { SystemLogsSettingsSection } from "./settings/SystemLogsSection";
 import { AboutSection } from "./settings/AboutSection";
@@ -42,6 +44,7 @@ const TAB_ICON_MAP: Record<string, ReactNode> = {
   activity: <Activity className="h-4 w-4" />,
   info: <Info className="h-4 w-4" />,
   radio: <Radio className="h-4 w-4" />,
+  brain: <Brain className="h-4 w-4" />,
 };
 
 const readStoredTab = (): string => {
@@ -64,6 +67,7 @@ const SECTION_MAP: Record<string, React.ComponentType> = {
   model: ModelSection,
   connectors: ConnectorsSection,
   general: GeneralSection,
+  memory: MemorySection,
   parsing: ParsingSection,
   "system-logs": SystemLogsSettingsSection,
   about: AboutSection,

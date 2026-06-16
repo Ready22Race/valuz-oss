@@ -938,6 +938,10 @@
     "parseFailed": "Parse failed",
     "projectDir": "Project Directory",
     "projectFiles": "Files",
+    "projectMemory": "Memory",
+    "memoryAuto": "Auto",
+    "memoryClearConfirm": "Confirm clear?",
+    "memoryEmpty": "Memory accumulates automatically after the conversation goes idle.",
     "projectName": "Project Name",
     "refDocs": "Referenced docs",
     "refreshFiles": "Refresh file list",
@@ -986,6 +990,21 @@
     }
   },
   "settings": {
+    "memory": {
+      "enabledLabel": "Enable memory",
+      "enabledDesc": "Master switch: memory injection + background auto-generation",
+      "autoExtractLabel": "Background auto-memory",
+      "autoExtractDesc": "Distil and save memory after a chat goes idle (calls a model)",
+      "scopeUser": "About you",
+      "scopeGlobal": "General notes",
+      "empty": "No memory yet",
+      "clearScope": "Clear",
+      "loading": "Loading…",
+      "deleted": "Deleted",
+      "cleared": "Cleared",
+      "loadFailed": "Failed to load memory",
+      "saveFailed": "Action failed"
+    },
     "onboarding": {
       "title": "Onboarding",
       "rerunLabel": "Re-run onboarding",
@@ -1406,6 +1425,10 @@
       "general": {
         "desc": "Appearance & shortcuts",
         "label": "General"
+      },
+      "memory": {
+        "desc": "Inspect and control memory",
+        "label": "Memory"
       },
       "shortcuts": {
         "desc": "Global commands & input",

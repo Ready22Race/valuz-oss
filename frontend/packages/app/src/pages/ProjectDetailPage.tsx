@@ -67,7 +67,7 @@ import type { SessionListItem } from "@valuz/shared";
 import { useProjectOutlet } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
 import { useProjectKbBindings, useKbDocTree } from "@valuz/app/hooks";
-import { RUNTIME_DISPLAY_NAME, useTranslation } from "@valuz/core";
+import { RUNTIME_DISPLAY_NAME, memoryApi, useTranslation } from "@valuz/core";
 import { toFileTree } from "../lib/file-tree";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 
@@ -512,13 +512,54 @@ export const ProjectDetailPage = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
   // Member agents for the config panel's "Agents" section (PRD-NEXT §3.4).
   const [members, setMembers] = useState<ProjectMemberItem[]>([]);
+
+  // ── Project memory (auto-curated) — drives the project-memory tab ──────
+  const [projectMemory, setProjectMemory] = useState<string[]>([]);
+  useEffect(() => {
+    if (!id) return;
+    let alive = true;
+    void memoryApi
+      .getMemory(id)
+      .then((v) => {
+        if (alive) setProjectMemory(v.entries.project ?? []);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [id]);
+  const handleMemoryDeleteEntry = useCallback(
+    async (text: string) => {
+      if (!id) return;
+      try {
+        const v = await memoryApi.deleteEntry({
+          target: "project",
+          old_text: text,
+          project_id: id,
+        });
+        setProjectMemory(v.entries.project ?? []);
+      } catch {
+        // best-effort — leave the list as-is on failure
+      }
+    },
+    [id],
+  );
+  const handleMemoryClear = useCallback(async () => {
+    if (!id) return;
+    try {
+      const v = await memoryApi.clearScope({ target: "project", project_id: id });
+      setProjectMemory(v.entries.project ?? []);
+    } catch {
+      // best-effort
+    }
+  }, [id]);
   // Raw member rows kept alongside the panel-shaped ``members`` so the
   // hover-actions on each row can open the edit dialog with the agent's
   // full profile (model / instructions / skills / connectors / effort)
   // without a second fetch. Updated in the same callback as ``members``
   // so the two never drift.
   const [rawMembers, setRawMembers] = useState<MemberWithAgent[]>([]);
-  // Member remove (解除派驻) dialog state. Editing is global — handled on the
+  // Member remove (undeploy) dialog state. Editing is global — handled on the
   // agent detail page, not here (see openMember).
   const [memberDeleteTarget, setMemberDeleteTarget] = useState<string | null>(
     null,
@@ -574,18 +615,18 @@ export const ProjectDetailPage = () => {
   }, [id]);
 
   // ──────────────────────────────────────────────────────────────────
-  // Member open / delete handlers. Live-reference 派驻 (08-agents-module
-  // §派驻): a member is a *reference* to the shared library agent, so
+  // Member open / delete handlers. Live-reference deployment (08-agents-module
+  // §deploy): a member is a *reference* to the shared library agent, so
   // "editing a member" === editing the global agent. Opening a member
   // navigates to the agent detail page (the single edit surface) with
-  // ``fromProject`` state so it shows a "返回项目" back affordance. No
+  // ``fromProject`` state so it shows a "back to project" back affordance. No
   // per-member fork/patch. ``useCallback`` keeps refs stable so the
   // ``setRightPanel`` effect (which lists them in deps) doesn't churn.
   // ──────────────────────────────────────────────────────────────────
   // Open the SHARED library agent detail. ``slug`` is the global library agent
   // slug (see ProjectMemberItem.sourceAgentSlug), not the project-local member
   // slug — using the member slug would 404 on /agents/:slug. AgentDetailPage
-  // shows a "返回项目" affordance via the router state.
+  // shows a "back to project" affordance via the router state.
   const openMember = useCallback(
     (slug: string) => {
       if (!id) return;
@@ -1211,6 +1252,9 @@ export const ProjectDetailPage = () => {
         onAddMember={() => setAddAgentOpen(true)}
         onOpenMember={openMember}
         onRemoveMember={(slug) => setMemberDeleteTarget(slug)}
+        projectMemory={projectMemory}
+        onMemoryDeleteEntry={handleMemoryDeleteEntry}
+        onMemoryClear={handleMemoryClear}
         // Skills + Connectors are configured per-Agent (in the agent editor),
         // not at the project level (PRD-NEXT §3.4) — so the project config
         // panel intentionally omits those sections.
@@ -1334,6 +1378,9 @@ export const ProjectDetailPage = () => {
     // the composer chip updated live.
     stagedAttachments,
     removeAttachment,
+    projectMemory,
+    handleMemoryDeleteEntry,
+    handleMemoryClear,
   ]);
 
   /* ── PLACEHOLDER_RENDER ─────────────────────────────────────── */
@@ -1493,7 +1540,7 @@ export const ProjectDetailPage = () => {
                   members={members}
                   onOpen={(taskId) => navigate(`/tasks/${taskId}`)}
                   onAddTask={() => {
-                    // v2: there is no separate 新建任务 page anymore — the
+                    // v2: there is no separate "new task" page anymore — the
                     // project composer's "task" mode is the new entry. Switch
                     // it and scroll the composer back into view.
                     setComposerMode("task");
