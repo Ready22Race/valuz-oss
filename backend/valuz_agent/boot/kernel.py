@@ -61,16 +61,16 @@ def _set_kernel_env() -> None:
     ``app.config``.
 
     ``DEEPAGENTS_CHECKPOINT_DB`` points the kernel's DeepAgentsRuntime
-    langgraph checkpointer at the SAME SQLite file as the rest of valuz —
-    one file to back up, no stray ``./deepagents_checkpoints.db`` left
-    in whatever cwd happened to be active when the runtime first booted.
-    Langgraph's checkpoint tables (``checkpoints`` / ``writes`` /
-    ``checkpoint_blobs``) don't collide with the kernel's
-    ``sessions/messages/events`` or valuz's ``valuz_*`` namespaces;
-    setdefault honours an external override.
+    langgraph checkpointer at the kernel's OWN SQLite file (``kernel.db``),
+    alongside ``sessions/messages/events`` — so the checkpoint tables
+    (``checkpoints`` / ``writes`` / ``checkpoint_blobs``) travel with the
+    kernel into a sandbox/remote deployment instead of being stranded in the
+    host ``valuz.db``. No stray ``./deepagents_checkpoints.db`` in whatever
+    cwd happened to be active at first boot; setdefault honours an external
+    override.
     """
     os.environ["DATABASE_URL"] = settings.kernel_db_url_async
-    os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.db_path))
+    os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.kernel_db_path))
 
 
 def _known_kernel_revisions() -> set[str]:
@@ -155,7 +155,12 @@ def _do_alembic_upgrade() -> None:
 
     cfg = Config(str(KERNEL_ALEMBIC_INI))
     cfg.set_main_option("script_location", str(KERNEL_ALEMBIC_DIR))
-    cfg.set_main_option("sqlalchemy.url", settings.db_url_async)
+    # The kernel alembic ``env.py`` prefers the ``DATABASE_URL`` env (set by
+    # ``_set_kernel_env`` to ``kernel_db_url_async``) over this option, so the
+    # two must agree on the kernel file — point the config at the kernel URL,
+    # not the host ``db_url_async``, so the migration can never land on
+    # ``valuz.db`` if the env is ever cleared.
+    cfg.set_main_option("sqlalchemy.url", settings.kernel_db_url_async)
 
     command.upgrade(cfg, "head")
 

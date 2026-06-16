@@ -7,20 +7,26 @@ class Settings(BaseSettings):
     app_name: str = "valuz-agent"
     data_dir: Path = Path.home() / ".valuz" / "app"
     db_filename: str = "valuz.db"
+    # The kernel's own SQLite file — sessions / messages / events, its
+    # langgraph checkpoint tables, and the kernel ``alembic_version``. Kept
+    # in a SEPARATE file from the host ``valuz.db`` (sibling in ``data_dir``)
+    # so it can be handed to a sandboxed/remote kernel that owns it
+    # exclusively, and so dev (in-process) and dev-sandbox share one history.
+    # See ``kernel_db_url`` for the resolution order.
+    kernel_db_filename: str = "kernel.db"
     debug: bool = False
 
     # Explicit DATABASE_URL — when set, overrides the default SQLite path.
     # Accepts postgresql://... for multi-user deployments.
     database_url: str | None = None
 
-    # Separate kernel database — when set, the kernel's three tables
-    # (sessions / messages / events + its ``alembic_version``) live in
-    # their own file/database instead of sharing ``valuz.db``. This is
-    # the storage-separation knob behind kernel independent deployment:
-    # the host carries only ``valuz_*`` tables and reaches kernel state
-    # exclusively through the ``KernelClient`` seam. Default ``None``
-    # keeps the legacy single-file layout. Override with
-    # ``VALUZ_KERNEL_DATABASE_URL`` (e.g. ``sqlite:///.../kernel.db``).
+    # Explicit override for the kernel database URL (e.g. a Postgres DSN, or
+    # a custom SQLite path). When unset, the kernel still gets its OWN file —
+    # ``data_dir/kernel_db_filename`` — for the local SQLite default; it only
+    # shares the host database when ``database_url`` itself is set (a server
+    # deployment where host + kernel deliberately co-locate). The host always
+    # reaches kernel state through the ``KernelClient`` seam, never by querying
+    # kernel tables on its own engine. Override with ``VALUZ_KERNEL_DATABASE_URL``.
     kernel_database_url: str | None = None
 
     # Kernel transport mode — which ``KernelClient`` implementation the
@@ -110,16 +116,34 @@ class Settings(BaseSettings):
         return f"sqlite+aiosqlite:///{self.db_path}"
 
     @property
+    def kernel_db_path(self) -> Path:
+        return self.data_dir / self.kernel_db_filename
+
+    @property
     def kernel_db_url(self) -> str:
-        """Sync-driver URL for the kernel's database (defaults to the
-        shared host database when no separate kernel DB is configured)."""
-        return self.kernel_database_url or self.db_url
+        """Sync-driver URL for the kernel's database.
+
+        Resolution order:
+        1. ``kernel_database_url`` — explicit override (Postgres / custom path).
+        2. ``database_url`` — an explicit host DB (e.g. a shared Postgres
+           server) co-locates the kernel there, preserving the single-store
+           layout server deployments rely on.
+        3. Otherwise (the local SQLite default) the kernel gets its OWN
+           ``kernel.db`` file, separate from the host ``valuz.db``.
+        """
+        if self.kernel_database_url:
+            return self.kernel_database_url
+        if self.database_url:
+            return self.database_url
+        return f"sqlite:///{self.kernel_db_path}"
 
     @property
     def kernel_db_url_async(self) -> str:
         if self.kernel_database_url:
             return self._to_async_url(self.kernel_database_url)
-        return self.db_url_async
+        if self.database_url:
+            return self._to_async_url(self.database_url)
+        return f"sqlite+aiosqlite:///{self.kernel_db_path}"
 
     @property
     def is_sqlite(self) -> bool:
