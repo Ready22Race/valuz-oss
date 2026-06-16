@@ -102,6 +102,7 @@ async def bootstrap_schema() -> None:
        (providers today; more later). Safe to re-run on every boot.
     """
     from valuz_agent.boot.kernel import run_kernel_migrations
+    from valuz_agent.boot.kernel_db_split import migrate_kernel_store_out_of_host_db
     from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.seeds import seed_all
@@ -117,6 +118,14 @@ async def bootstrap_schema() -> None:
     target_dir = settings.data_dir / "projects"
     if legacy_dir.is_dir() and not target_dir.exists():
         legacy_dir.rename(target_dir)
+
+    # 0. One-time cutover: move pre-split kernel tables (sessions/messages/
+    #    events + any langgraph checkpoints + the kernel alembic stamp) out of
+    #    the shared valuz.db into the kernel's own kernel.db. Runs in BOTH
+    #    modes (a host-side SQLite file move, before any engine opens the
+    #    files) and BEFORE the kernel alembic so the upgrade lands on the
+    #    just-migrated kernel.db. No-op once split / on a fresh install.
+    migrate_kernel_store_out_of_host_db()
 
     # 1. Kernel alembic (its own ``alembic_version`` row). SKIPPED in
     #    http mode — the standalone kernel owns its own database and
