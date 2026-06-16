@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Badge,
+  Button,
   DeleteConfirmDialog,
   ProviderAddDialog,
   Select,
@@ -19,6 +20,7 @@ import {
   type RuntimeId,
 } from "@valuz/core";
 import { useTranslation } from "@valuz/core";
+import { modelLabel } from "@valuz/shared";
 import { t as _t } from "@valuz/shared/i18n";
 import { Check, Loader2, Lock, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -53,16 +55,6 @@ const API_KEY_DISPLAY: Record<string, string> = {
   minimax: "MiniMax",
 };
 
-const LOGIN_CMD: Record<CliTool, string> = {
-  claude: "claude /login",
-  codex: "codex login",
-};
-const INSTALL_CMD: Record<CliTool, string> = {
-  claude: "npm install -g @anthropic-ai/claude-code",
-  codex: "npm install -g @openai/codex",
-};
-const ONBOARDING_BADGE_CLASS =
-  "rounded-full text-2xs";
 const DEFAULT_BADGE_CLASS =
   "h-4 rounded-[4px] px-1 py-0 text-[10px] leading-none font-normal";
 const AVAILABLE_BADGE_CLASS =
@@ -419,8 +411,18 @@ const ProviderRow = ({
 }) => {
   const { t } = useTranslation();
   const isOAuth = provider.auth_type === "oauth";
+  // An OAuth subscription channel is "connected" (usable → 可用) only when its
+  // CLI is actually logged in — NOT merely because the seeded provider row is
+  // enabled. Builtin subscription rows seed enabled=True (seeds/providers.py),
+  // so keying off enabled alone made a freshly-seeded codex-subscription show
+  // 可用 even though the user never ran `codex /login`. This mirrors
+  // Settings → Model (ModelSection), which drives the OAuth badge off real CLI
+  // keychain state. While cliStatus is still loading it's undefined → not
+  // connected → the badge branches below stay hidden (no wrong-state flash),
+  // and the logged-in-but-not-enabled enable flow is preserved because that
+  // path requires enabled=False.
   const connected = isOAuth
-    ? provider.enabled
+    ? provider.enabled && cliStatus?.state === "logged_in"
     : provider.credential_source !== "none";
   // OAuth, installed-but-not-logged-in → show the terminal login hint.
   const needsLogin =
@@ -485,7 +487,7 @@ const ProviderRow = ({
               </Badge>
             )}
           </div>
-          {!connected && (
+          {!connected && !isOAuth && (
             <p className="mt-1 text-xs leading-5 text-ink-body">
               {provider.provider_kind.includes("claude")
                 ? t("onboarding.claudeSubDesc" as Parameters<typeof t>[0])
@@ -511,24 +513,47 @@ const ProviderRow = ({
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           )}
+          {/* Logged in via CLI but the channel row isn't enabled yet → a single
+              enable button, matching Settings → Model's action affordance. */}
           {!connected && loggedInNotEnabled && (
-            <Badge
-              className={`${AVAILABLE_BADGE_CLASS} gap-1 bg-[#f3f2ff] text-[#725cf9]`}
+            <Button
+              size="sm"
+              className="text-xs"
+              disabled={busy}
+              onClick={(e) => {
+                e.stopPropagation();
+                onEnable?.();
+              }}
             >
-              <span className="h-1.5 w-1.5 rounded-full bg-[#725cf9]" />
-              {t("onboarding.availableBadge" as Parameters<typeof t>[0])}
-            </Badge>
+              {t("onboarding.oneClickEnable" as Parameters<typeof t>[0])}
+            </Button>
           )}
+          {/* Not installed / not logged in → a plain status LABEL (muted text,
+              no border so it doesn't read as a button) + one outline CLI-login
+              button. Reuses Settings → Model's exact label keys so the two
+              screens read identically. */}
           {!connected && needsLogin && (
-            <Badge
-              variant="outline"
-              className={`${ONBOARDING_BADGE_CLASS} gap-1`}
-            >
-              <Lock className="h-2.5 w-2.5" />
-              {cliStatus && !cliStatus.installed
-                ? t("onboarding.notInstalledBadge" as Parameters<typeof t>[0])
-                : t("onboarding.notLoggedInBadge" as Parameters<typeof t>[0])}
-            </Badge>
+            <>
+              <span className="flex items-center gap-1 text-xs text-ink-meta">
+                <Lock className="h-3 w-3" />
+                {cliStatus && !cliStatus.installed
+                  ? t("onboarding.notInstalledBadge" as Parameters<typeof t>[0])
+                  : t("onboarding.notLoggedInBadge" as Parameters<typeof t>[0])}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-xs"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onLogin?.();
+                }}
+              >
+                {cliStatus && !cliStatus.installed
+                  ? t("settings.model.installCli" as Parameters<typeof t>[0])
+                  : t("settings.model.cliLogin" as Parameters<typeof t>[0])}
+              </Button>
+            </>
           )}
           {/* Connected → show 「可用」 so the user can tell at a glance which
               channels are wired up. Inline model picker reveals on click. */}
@@ -558,7 +583,7 @@ const ProviderRow = ({
             onValueChange={onPick}
             disabled={busy || (models?.length ?? 0) === 0}
           >
-            <SelectTrigger className="w-full font-mono text-xs">
+            <SelectTrigger className="w-full text-xs">
               <SelectValue
                 placeholder={t(
                   "onboarding.pickModelHint" as Parameters<typeof t>[0],
@@ -567,8 +592,10 @@ const ProviderRow = ({
             </SelectTrigger>
             <SelectContent>
               {(models ?? []).map((m) => (
-                <SelectItem key={m} value={m} className="font-mono text-xs">
-                  {m}
+                <SelectItem key={m} value={m} className="text-xs">
+                  {/* Show the human display name (e.g. "Opus 4.8"), same as
+                      Settings → Model; the wire-level id is still the value. */}
+                  {provider.model_labels?.[m] || modelLabel(m)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -576,69 +603,6 @@ const ProviderRow = ({
         </div>
       )}
 
-      {/* Not-yet-connected OAuth: one-click enable (logged in) or login hint */}
-      {!connected && isOAuth && (
-        <div className="border-t border-surface-border/70 px-4 pb-3.5 pt-3">
-          {loggedInNotEnabled ? (
-            <button
-              type="button"
-              disabled={busy}
-              onClick={onEnable}
-              className="rounded-lg bg-brand px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-brand-hover disabled:opacity-50"
-            >
-              {t("onboarding.oneClickEnable" as Parameters<typeof t>[0])}
-            </button>
-          ) : (
-            <SetupHint cliStatus={cliStatus} onLogin={onLogin} />
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
-
-const SetupHint = ({
-  cliStatus,
-  onLogin,
-}: {
-  cliStatus?: CliLoginStatus;
-  onLogin?: () => void;
-}) => {
-  const { t } = useTranslation();
-  const tool: CliTool = cliStatus?.cliPath?.includes("codex")
-    ? "codex"
-    : "claude";
-  const installing = cliStatus ? !cliStatus.installed : false;
-  const cmd = installing ? INSTALL_CMD[tool] : LOGIN_CMD[tool];
-  return (
-    <div>
-      <div className="flex items-center gap-2 text-xs text-ink-body">
-        {installing
-          ? t("onboarding.installHint" as Parameters<typeof t>[0])
-          : t("onboarding.loginHint" as Parameters<typeof t>[0])}
-        <code className="rounded border border-surface-border bg-surface-soft px-2 py-0.5 font-mono text-2xs text-ink-heading">
-          {cmd}
-        </code>
-        <button
-          type="button"
-          onClick={() => {
-            void navigator.clipboard?.writeText(cmd);
-            toast.success(
-              _t("onboarding.copiedCommand" as Parameters<typeof _t>[0]),
-            );
-          }}
-          className="text-ink-meta hover:text-ink-heading"
-        >
-          {t("onboarding.copyCommand" as Parameters<typeof t>[0])}
-        </button>
-      </div>
-      <button
-        type="button"
-        onClick={onLogin}
-        className="mt-2 rounded-lg border border-surface-border bg-surface px-3 py-1.5 text-xs font-medium text-ink-body transition-colors hover:bg-surface-soft"
-      >
-        {t("onboarding.goLogin" as Parameters<typeof t>[0])}
-      </button>
     </div>
   );
 };
