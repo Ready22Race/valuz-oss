@@ -1,42 +1,57 @@
 ---
-name: china-initiating-coverage
-description: Institutional-quality equity research initiation reports for A-share companies. Covers company analysis, financial modeling, valuation, chart preparation, and final report assembly. Adapted from the original initiating-coverage skill for Chinese market conventions, CAS accounting, and AkShare data sources. Triggers on "A股首次覆盖", "首次评级", "initiate coverage China", "initiate on [company]", "A股研究报告", or "start research on [company]".
+name: initiating-coverage
+description: Institutional-quality equity research initiation reports for companies across global stock markets (US / HK / A-shares focus, also other markets). Covers company analysis, financial modeling, valuation, chart preparation, and final report assembly. Uses the valuz-stock connector for quotes, financials, and valuation indicators, and the valuz-search connector for earnings reports, calls, research, minutes, and filings. Triggers on "首次覆盖", "首次评级", "initiate coverage", "initiate on [company]", "研究报告", or "start research on [company]".
 ---
 
-# china-initiating-coverage
+# initiating-coverage
 
 ## Purpose
 
-Create institutional-quality **A股首次覆盖研究报告**, following Chinese sell-side research standards.
+Create institutional-quality **首次覆盖研究报告 (initiation reports)** for companies across global stock markets (美股/港股/A 股为主，兼顾其他市场), following mainstream sell-side research standards.
 
 ## Data Sources
 
-### Primary: iFind MCP (Tier-1 付费) / AkShare MCP (Tier-2 免费备选)
+首次覆盖以**整合团队成员产出**（行业研究、财务建模、跟踪覆盖）为主，仅在数据缺口处直接取数。取数走两个 Valuz 连接器。
 
-```python
-get_stock_info(ticker)                    → Company profile
-get_quote(ticker)                        → Current valuation
-get_historical_data(ticker)              → Trading history
-get_financials(ticker, "income")         → Historical P&L
-get_financials(ticker, "balance")        → Historical BS
-get_financials(ticker, "cashflow")        → Historical CF
-get_industry_stocks(industry="...")       → Peer companies
+> **代码格式（首次取数务必注意）**：`valuz-stock` 用**裸代码**（`AAPL` / `00700` / `600519`）；`valuz-search` 用 `market:ticker`（`US:AAPL` / `HK:00700` / `SH:600519`）。
+
+### `valuz-stock` — Valuz Stock MCP（公司画像 / 财务 / 估值倍数 / 同业）
+
+```text
+company_overview(symbol)                          → 公司画像、规模、业务描述
+company_shareholders(symbol)                      → 股东构成 / 股权结构
+income_statement(symbol, period="annual")         → 历史损益（营收、利润、利润率口径）
+balance_sheet(symbol, period="annual")            → 历史资产负债（账面价值、负债）
+cashflow_statement(symbol, period="annual")        → 历史现金流
+industry_constituents(...)                        → 同业（行业成分股）做可比集
+factors_compute(symbols=[...], ...)               → PE()/PB()/PS()/EV-EBITDA 等估值倍数
+stock_quote(symbol)                               → 价格、市值（当前估值）
 ```
+
+### `valuz-search` — Valuz Search MCP（既有研报 / 公告 / 电话会 / 纪要）
+
+```text
+reports_search(query=..., symbols=["US:AAPL", ...])   → 既有券商研报 / 行业观点
+conferences_search(query=..., symbols=[...])          → 电话会 / 业绩会观点
+filings_search(query=..., symbols=[...])              → 年报、招股书等正式公告
+comprehensive_search(query=...)                       → 综合检索（财报/纪要/公告/新闻）
+```
+
+> **取数缺口对照**：公司画像 / 股东用 `company_overview`、`company_shareholders`（valuz-stock，裸代码）；同业与估值倍数用 `industry_constituents`、`factors_compute`（valuz-stock）；既有研报 / 行业观点用 `reports_search`、`conferences_search`（valuz-search，`market:ticker`）；财务佐证用 `income_statement` / `balance_sheet` / `cashflow_statement`（valuz-stock）；正式公告（年报 / 招股书）用 `filings_search`（valuz-search）。
 
 ### Secondary Sources
 
-- **巨潮资讯** — official filings (annual reports, prospectus)
-- **上交所 / 深交所** — listing documents, announcements
+- **filings_search**（valuz-search）— official filings（年报、招股书、上市文件、公告）for the target market
 - **公司官网** — investor relations, presentations
-- **慧博 / Wind / Choice** — consensus estimates
-- **券商研报** — existing analyst coverage (if any)
+- **Sell-side consensus** — consensus estimates
+- **既有研报 / 行业观点** — existing analyst coverage, via `reports_search` / `conferences_search`（valuz-search）
 - **行业协会** — industry data
 
 ## Workflow
 
 ### Task 1: Company Research
 
-**Company overview:**
+**Company overview:**（缺口数据：公司画像用 `company_overview`(valuz-stock，裸代码)；股权 / 股东用 `company_shareholders`(valuz-stock)）
 - Business description (主营业务)
 - History and development (发展历程)
 - Ownership structure (股权结构)
@@ -54,17 +69,17 @@ get_industry_stocks(industry="...")       → Peer companies
 2. What is its competitive advantage? (护城河)
 3. What are the key growth drivers?
 4. What are the main risks?
-5. Who are the comparable companies?
+5. Who are the comparable companies?（同业集用 `industry_constituents`(valuz-stock)；既有行业观点用 `reports_search`(valuz-search，`market:ticker`)）
 
 ### Task 2: Financial Modeling
 
-Build a financial model (refer to `china-3-statement-model` skill):
+Build a financial model (refer to `3-statement-model` skill). 历史财务佐证取自 `income_statement` / `balance_sheet` / `cashflow_statement`(valuz-stock，裸代码，`period="annual"`)：
 
 **Historical analysis (3-5 years):**
 
 | Metric | 2020 | 2021 | 2022 | 2023 | 2024E | 2025E | 2026E |
 |--------|------|------|------|------|-------|-------|-------|
-| Revenue (亿) | | | | | | | |
+| Revenue | | | | | | | |
 | YoY Growth | | | | | | | |
 | Gross Margin | | | | | | | |
 | Operating Margin | | | | | | | |
@@ -72,31 +87,31 @@ Build a financial model (refer to `china-3-statement-model` skill):
 | ROE | | | | | | | |
 | Net Debt/EBITDA | | | | | | | |
 
-**Key modeling considerations (see china-3-statement-model):**
-- CAS accounting standards
-- 25% tax rate (or 15% for 高新技术企业)
-- 千元 vs 元 unit normalization
-- 增值税 treatment
-- 商誉 flagging
+**Key modeling considerations (see 3-statement-model):**
+- Accounting standards of the target market (US GAAP / IFRS / CAS as applicable)
+- Local statutory tax rate (and any preferential rates that apply)
+- Unit normalization (reporting currency and scale)
+- Indirect/sales tax treatment
+- Goodwill flagging
 - R&D expense treatment
 
 ### Task 3: Valuation Analysis
 
 **Build comprehensive valuation:**
 
-1. **DCF** (refer to `china-dcf` skill)
-   - WACC with CGB risk-free rate
-   - 6-8% China ERP
-   - 25% tax rate
-   - CNY denominated
+1. **DCF** (refer to `dcf` skill)
+   - WACC with the target market's risk-free rate
+   - Market-appropriate equity risk premium (ERP)
+   - Local statutory tax rate
+   - Reporting-currency denominated
 
-2. **Comparable companies** (refer to `china-comps` skill)
-   - Peer set from same 东方财富 industry
-   - PE, PB, PS, EV/EBITDA multiples
+2. **Comparable companies** (refer to `comps` skill)
+   - Peer set from the same industry classification（用 `industry_constituents`(valuz-stock) 取同业）
+   - PE, PB, PS, EV/EBITDA multiples（用 `factors_compute`(valuz-stock) 计算倍数）
    - Regression analysis if >5 peers
 
 3. **Precedent transactions** (if available)
-   - China M&A comparable multiples
+   - Comparable M&A transaction multiples
    - Control premium analysis
 
 4. **Sum-of-the-parts** (if multi-segment)
@@ -105,8 +120,8 @@ Build a financial model (refer to `china-3-statement-model` skill):
 
 **Valuation summary:**
 
-| Method | Value (元/股) | Weight | Rationale |
-|--------|--------------|--------|-----------|
+| Method | Value (per share) | Weight | Rationale |
+|--------|-------------------|--------|-----------|
 | DCF | | | |
 | PE comps | | | |
 | PB comps | | | |
@@ -138,20 +153,20 @@ Build a financial model (refer to `china-3-statement-model` skill):
 
 **Chart standards:**
 - Dark theme or light theme (consistent with firm template)
-- Chinese labels where appropriate
-- Source: AkShare historical data
-- Include A-share specific markers (涨跌停, 财报日期)
+- Labels in the appropriate language for the target market
+- Source: `income_statement` / `balance_sheet` / `cashflow_statement` 与 `stock_quote`(valuz-stock)；估值倍数序列用 `factors_compute`(valuz-stock)
+- Include market-specific markers where relevant (e.g. price limits, earnings dates)
 
 ### Task 5: Report Assembly
 
-**Standard A-share initiation report format:**
+**Standard initiation report format:**
 
 ```
 【XX证券】[公司名称]（[代码]）首次覆盖报告：[评级]
 
 投资要点：
   - [3-5 bullet investment highlights]
-  - 目标价：¥XX.XX (X% upside/downside)
+  - 目标价：[currency]XX.XX (X% upside/downside)
   - 评级：买入/增持/中性/减持/卖出
 
 一、投资逻辑
@@ -186,7 +201,7 @@ Build a financial model (refer to `china-3-statement-model` skill):
    - [Company-specific risks]
    - [Industry risks]
    - [Market risks]
-   - [Policy risks]
+   - [Policy/regulatory risks]
 
 附录：
    - 财务报表预测
@@ -199,9 +214,9 @@ Build a financial model (refer to `china-3-statement-model` skill):
 - Full report: 15-30 pages
 - Financial model appendix: 10-15 pages
 
-## China-Specific Considerations
+## Market-Specific Considerations
 
-### Rating Conventions (A-share)
+### Rating Conventions
 
 | Rating | Chinese Equivalent | Implied Return |
 |--------|-------------------|----------------|
@@ -211,12 +226,12 @@ Build a financial model (refer to `china-3-statement-model` skill):
 | Underweight / Reduce | 减持 | -5% to -15% |
 | Sell | 卖出 | <-15% downside |
 
-**Note:** Some firms use 5-point scale (买入/增持/中性/减持/卖出), others use 3-point (买入/增持/减持).
+**Note:** Rating scales vary by report house and market — 高盛/摩根士丹利/中金 等主流卖方 use different conventions (some 5-point 买入/增持/中性/减持/卖出, some 3-point). Match the convention of the target market and house style.
 
 ### Coverage Initiation Practices
 
 **Pre-initiation checklist:**
-- [ ] Company filings reviewed (年报, 招股说明书)
+- [ ] Company filings reviewed (annual report, prospectus) — via `filings_search`(valuz-search，`market:ticker`)
 - [ ] Management meeting completed (if possible)
 - [ ] Industry research thorough
 - [ ] Peer comparison complete
@@ -224,39 +239,39 @@ Build a financial model (refer to `china-3-statement-model` skill):
 - [ ] Valuation analysis complete
 - [ ] Conflicts of interest disclosed
 
-**Common initation triggers:**
-- New IPO (新股)
+**Common initiation triggers:**
+- New IPO
 - IPO quiet period expiry (typically 30-180 days)
 - Market cap reaches coverage threshold
 - New sector coverage mandate
 - Material corporate action (M&A, restructuring)
 
-### China-Specific Risks to Highlight
+### Market-Specific Risks to Highlight
 
 | Risk Category | Examples |
 |--------------|---------|
 | 政策风险 | Regulatory changes, industry policy shifts |
-| 市场风险 | A-share volatility, retail sentiment |
+| 市场风险 | Equity market volatility, sentiment swings |
 | 流动性风险 | Low float, low turnover |
-| 公司治理 | Related party transactions, pledge risk |
+| 公司治理 | Related party transactions, controlling-shareholder risk |
 | 行业风险 | Overcapacity, demand cyclicality |
 | 汇率风险 | For exporters/importers |
 | 商誉减值 | Goodwill impairment risk |
-| 质押风险 | Share pledge unwinding |
+| 质押风险 | Share pledge unwinding (where applicable) |
 
 ### Regulatory Compliance
 
-**Chinese regulatory requirements for research:**
-- 投资者适当性管理 (suitability)
-- 利益冲突披露 (conflict of interest)
-- 研究报告留痕 (research record retention)
-- 静默期规定 (quiet period before IPOs)
-- 预测免责声明 (disclaimer on estimates)
+**Research compliance requirements (per the target market's regulator):**
+- Investor suitability (投资者适当性管理)
+- Conflict of interest disclosure (利益冲突披露)
+- Research record retention (研究报告留痕)
+- Quiet period rules before IPOs (静默期规定)
+- Disclaimer on estimates (预测免责声明)
 
 ## Quality Checks
 
 Before delivering:
-- [ ] All financial data sourced from AkShare / 巨潮
+- [ ] All financial data sourced from valuz-stock / valuz-search
 - [ ] Financial model balanced and validated
 - [ ] Valuation analysis comprehensive
 - [ ] Peer comparison adequate (>3 peers)
@@ -265,7 +280,3 @@ Before delivering:
 - [ ] Report follows standard format
 - [ ] All citations complete
 - [ ] Compliance disclosures included
-> **Data Source Mode Switch**: Set env var `IFIND_DATA_SOURCE_MODE` to control data source preference.
-> - `ifind-only` (strict): Use iFind only, error if unavailable
-> - `ifind-fallback` (default): iFind preferred, fallback to AkShare
-> - `akshare-only`: Skip iFind, use AkShare only

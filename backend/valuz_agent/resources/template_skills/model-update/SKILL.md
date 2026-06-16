@@ -1,40 +1,57 @@
 ---
-name: china-model-update
-description: Update A-share financial models with new quarterly data, management guidance, or macro changes. Reflects actuals, rolls estimates forward, flags material changes, and updates valuation. Adapted from the original model-update skill for Chinese market conventions and AkShare data. Triggers on "A股模型更新", "模型更新", "plug earnings into model", "update model for [company]", "刷新预测", or "更新财务模型".
+name: model-update
+description: Update global equity financial models with new quarterly data, management guidance, or macro changes. Reflects actuals, rolls estimates forward, flags material changes, and updates valuation. Works across global stock markets (US / HK / A-shares primary, other markets supported), using valuz-stock (quotes, financials, indicators) and valuz-search (filings, calls, research). Triggers on "模型更新", "plug earnings into model", "update model for [company]", "刷新预测", or "更新财务模型".
 ---
 
-# china-model-update
+# model-update
 
 ## Purpose
 
-Update existing **A股财务模型** with new data, ensuring all cells are traceable to sources and all changes are documented.
+Update existing **financial models for global equities**（全球股票市场：美股 / 港股 / A 股为主，兼顾其他市场）with new data, ensuring all cells are traceable to sources and all changes are documented.
 
 ## Data Sources
 
-### Primary: iFind MCP (Tier-1 付费) / AkShare MCP (Tier-2 免费备选)
+> **代码格式 / Symbol format**：valuz-stock 用裸代码（`AAPL` / `00700` / `600519`）；valuz-search 用 `market:ticker`（`US:AAPL` / `HK:00700` / `SH:600519`）。
 
-```python
-get_financials(ticker, "income", "quarterly")   → Q[X] actual results
-get_financials(ticker, "balance", "quarterly")  → BS update
-get_financials(ticker, "cashflow", "quarterly") → CF update
-get_financials(ticker, "income", "annual")      → Full year update
-get_quote(ticker)                               → Current market data
-get_stock_info(ticker)                          → Any company changes
+### Primary: valuz-stock (实际/历史财务、LTM、指标数值)
+
+落最新实际三表、刷新 LTM、刷新价格/市值（裸代码）：
+
+```
+income_statement(symbol, period="quarterly", limit=N)   → Q[X] 实际利润表 / actual income statement
+balance_sheet(symbol, period="quarterly", limit=N)      → BS update
+cashflow_statement(symbol, period="quarterly", limit=N) → CF update
+income_statement(symbol, period="annual", limit=N)      → 全年更新 / full-year update
+revenue_breakdown(symbol)                               → 收入拆分 / revenue mix
+stock_quote(symbol)                                     → 当前价格、市值 / current price & market data
+company_overview(symbol)                                → 公司基本信息变化 / company changes
 ```
 
-### Secondary Sources
+> `period` 取 `quarterly` 或 `annual`；`limit` 拉取多期以便对齐历史列与 LTM 计算。
 
-- **巨潮资讯** — official filings for exact figures
-- **业绩说明会 transcript** — management commentary
-- **管理层指引** — guidance from earnings calls
-- **Wind / Choice / 同花顺** — consensus updates
+### Secondary: valuz-search (财报/公告原文)
+
+落数后用财报原文逐项核对（`market:ticker`）：
+
+```
+earnings_search(query, symbols=["US:AAPL"])  → 定位业绩/财报文档 / locate earnings docs
+filings_search(query, symbols=["SH:600519"]) → 官方公告、监管披露 / official filings
+document_raw_content(...)                    → 取原文核对精确数字 / exact figures from source
+document_summary(...)                        → 管理层评论、业绩说明会要点 / management commentary, call highlights
+reports_search(query, symbols=[...])         → 卖方研究、一致预期更新 / sell-side & consensus updates
+```
+
+- **earnings_search + document_raw_content** — official filings for exact figures (financial reports, regulatory disclosures)
+- **业绩说明会 / earnings call transcript** — management commentary（`conferences_search` / `document_summary`）
+- **管理层指引 / guidance** — guidance from earnings calls
+- **Research & consensus** — sell-side estimate updates（`reports_search`）
 
 ## Workflow
 
 ### Step 1: Identify What Changed
 
 **Change triggers:**
-- Quarterly earnings release (季报/年报)
+- Quarterly earnings release (季报/年报 / quarterly / annual report)
 - Management guidance update (管理层指引调整)
 - Macro assumption change (rate, tax, policy)
 - Model error or refinement
@@ -44,7 +61,7 @@ get_stock_info(ticker)                          → Any company changes
 
 | Date | Change Type | Item | Old Value | New Value | Reason |
 |------|-------------|------|-----------|-----------|--------|
-| | Earnings update | Revenue FY25E | XX亿 | XX亿 | Q1 actuals beat |
+| | Earnings update | Revenue FY25E | XX | XX | Q1 actuals beat |
 | | Guidance | Tax rate | 25% | 25% | No change |
 | | Macro | CapEx % | 5% | 6% | New plant announced |
 
@@ -52,14 +69,18 @@ get_stock_info(ticker)                          → Any company changes
 
 **Quarterly actuals:**
 
+用 `income_statement`/`balance_sheet`/`cashflow_statement`(valuz-stock, period="quarterly", limit=N) 落最新实际数并刷新 LTM；用 `earnings_search`+`document_raw_content`(valuz-search) 取财报原文逐项核对。
+
 ```
-[Company] Q[X] 20XX Actuals (from AkShare / 巨潮):
-- 营业收入: XXX亿 (YoY: +XX%)
-- 毛利率: XX% (vs prior: XX%)
-- 归母净利润: XXX亿 (YoY: +XX%)
-- EPS: X.XX元
-- 经营现金流: XXX亿
+[Company] Q[X] 20XX Actuals (from income_statement / balance_sheet / cashflow_statement，原文核对 earnings_search+document_raw_content):
+- Revenue 营业收入: XXX (YoY: +XX%)   # 按当地准则口径
+- Gross margin 毛利率: XX% (vs prior: XX%)
+- Net income 归母净利润: XXX (YoY: +XX%)
+- EPS: X.XX
+- Operating cash flow 经营现金流: XXX
 ```
+
+> Amounts are reported in the issuer's local convention（按当地常用单位）and revenue is stated under local accounting conventions（按当地准则口径）.
 
 **Update sequence:**
 1. Drop Q[X] actuals into historical columns
@@ -91,8 +112,8 @@ get_stock_info(ticker)                          → Any company changes
 
 **Market data refresh:**
 
-```python
-get_quote(ticker)  # Current price, PE, PB
+```
+stock_quote(symbol)  # 当前价格、市值、估值倍数 / current price, market cap, PE, PB（valuz-stock 裸代码）
 ```
 
 **Valuation metrics to update:**
@@ -131,22 +152,22 @@ get_quote(ticker)  # Current price, PE, PB
 **Model update memo:**
 
 ```
-[公司名称]（[代码]）模型更新 [Date]
+[公司名称 / Company]（[代码 / Ticker]）模型更新 / Model Update [Date]
 
-一、更新内容
+一、更新内容 / What changed
    [Bullet list of changes made]
 
-二、关键变动
+二、关键变动 / Key revisions
    Revenue FY25E: [Old] → [New] ([Change]%)
    Net Income FY25E: [Old] → [New] ([Change]%)
    Driver: [Explanation]
 
-三、估值影响
-   新目标价: ¥XX.XX (之前 ¥XX.XX)
-   调整幅度: +X% / -X%
-   调整逻辑: [Brief rationale]
+三、估值影响 / Valuation impact
+   新目标价 / New target price: XX.XX (之前 / prior XX.XX)   # local currency
+   调整幅度 / Adjustment: +X% / -X%
+   调整逻辑 / Rationale: [Brief rationale]
 
-四、后续关注
+四、后续关注 / Watch list
    - [Next catalyst]
    - [Key metric to monitor]
    - [Risk factor]
@@ -156,7 +177,7 @@ get_quote(ticker)  # Current price, PE, PB
 
 **Before finalizing:**
 
-- [ ] All Q[X] actuals sourced from 巨潮 PDF or AkShare
+- [ ] All Q[X] actuals sourced from `income_statement`/`balance_sheet`/`cashflow_statement`(valuz-stock) and cross-checked against `earnings_search`+`document_raw_content`(valuz-search)
 - [ ] Historical data matches reported figures exactly
 - [ ] All formulas intact (no broken references)
 - [ ] LTM calculations updated
@@ -167,25 +188,29 @@ get_quote(ticker)  # Current price, PE, PB
 - [ ] Cell comments added for new inputs
 - [ ] Model balances correctly
 
-## China-Specific Update Considerations
+## Market-Aware Update Considerations
 
 ### Earnings Season Timing
 
-| Report | Deadline | Typical Release Window |
-|--------|----------|------------------------|
-| Q1季报 | Apr 30 | Apr 1-30 |
-| 中报 | Aug 31 | Aug 1-31 |
-| Q3季报 | Oct 31 | Oct 1-31 |
-| 年报 | Apr 30 | Jan-Apr |
+Reporting cadence varies by market — confirm the issuer's filing calendar. A representative pattern:
+
+| Report | Deadline (market-dependent) | Typical Release Window |
+|--------|-----------------------------|------------------------|
+| Q1 季报 | e.g. Apr 30 | Apr 1-30 |
+| 中报 / Interim | e.g. Aug 31 | Aug 1-31 |
+| Q3 季报 | e.g. Oct 31 | Oct 1-31 |
+| 年报 / Annual | e.g. Apr 30 | Jan-Apr |
+
+> US issuers report quarterly (10-Q / 10-K), HK issuers typically half-yearly plus quarterly updates, A-share issuers on the calendar above — adapt to the actual market.
 
 **Model update priority:**
 - Annual report: Complete overhaul of historicals
-- Semi-annual: Major update, adjust full-year estimates
+- Semi-annual / interim: Major update, adjust full-year estimates
 - Quarterly: Incremental update, verify full-year trajectory
 
-### 业绩预告 Integration
+### Pre-Announcement Integration
 
-If company issued 业绩预告:
+If company issued a pre-announcement (业绩预告 / preliminary results / guidance):
 - Use as directional signal before formal report
 - Adjust estimates if variance >20% from prior
 - Flag for detailed update when formal report arrives
@@ -196,13 +221,13 @@ If company issued 业绩预告:
 - If company guidance differs from consensus, flag divergence
 - Note if management commentary suggests estimate revision
 
-### Regulatory Changes
+### Regulatory & Accounting Changes
 
 Monitor for:
-- Tax rate changes (高新技术企业 reclassification)
-- Accounting standard updates
+- Tax rate changes (e.g. preferential-status reclassification)
+- Accounting standard updates — apply the issuer's basis (**US GAAP / IFRS / CAS**)
 - Industry-specific regulation impacts on assumptions
-- Dividend policy changes (影响 DCF terminal value)
+- Dividend policy changes (影响 DCF terminal value / affects DCF terminal value)
 
 ## Quality Checks
 
@@ -213,7 +238,3 @@ Before delivering:
 - [ ] Valuation update reflects current market conditions
 - [ ] Changes documented in update memo
 - [ ] Model passes basic QC (balance checks, sum checks)
-> **Data Source Mode Switch**: Set env var `IFIND_DATA_SOURCE_MODE` to control data source preference.
-> - `ifind-only` (strict): Use iFind only, error if unavailable
-> - `ifind-fallback` (default): iFind preferred, fallback to AkShare
-> - `akshare-only`: Skip iFind, use AkShare only

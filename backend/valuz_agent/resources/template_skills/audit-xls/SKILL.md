@@ -1,34 +1,39 @@
 ---
-name: china-audit-xls
-description: Audit financial models and Excel workbooks for A-share analysis. Adapts the original audit-xls skill for Chinese financial modeling standards, CAS conventions, and A-share-specific checks. Triggers on "A股模型审计", "财务模型核查", "audit model China", "audit xlsx", "模型QC", or "check model [company]".
+name: audit-xls
+description: Audit financial models and Excel workbooks for global equity analysis. Covers US / HK / A-share and other markets, cross-checking model numbers against valuz-stock financial statements (income_statement / balance_sheet / cashflow_statement / stock_quote) and tracing source disclosures via valuz-search (earnings_search / filings_search + document_raw_content). Triggers on "模型审计", "财务模型核查", "audit model", "audit xlsx", "模型QC", or "check model [company]".
 ---
 
-# china-audit-xls
+# audit-xls
 
 ## Purpose
 
-Audit **A股财务模型** — comprehensive quality checks for Chinese equity financial models.
+Audit **financial models** — comprehensive quality checks for equity financial models across **全球股票市场（美股/港股/A 股为主，兼顾其他市场）**.
 
 ## Data Sources
 
-### Tier 0 — 万得 Wind（最全面付费数据）
-- 覆盖：A股/港美股/基金/指数/债券/宏观/研报/分析（44个工具）
-- MCP 服务：`wind-mcp`（需 `WIND_API_KEY` 密钥，以 `ak_` 开头）
-- 优势：全市场覆盖面最广、数据最全面、包含研报和量化分析
-- 密钥申请：https://aifinmarket.wind.com.cn/#/home
+**代码格式约定（首次取数务必区分）**：valuz-stock 用**裸代码**（US `AAPL`、HK `00700`、A 股 `600519`）；valuz-search 用 `market:ticker`（US `US:AAPL`、HK `HK:00700`、A 股 `SH:600519`）。
 
-### Tier 1 — 同花顺 iFind（付费精确数据）/ AkShare MCP（Tier-2 免费备选）
+### valuz-stock — 取数核对用的财务/行情数值
 
-```python
-get_financials(ticker, "income")     → Actuals for cross-check
-get_financials(ticker, "balance")    → BS for cross-check
-get_financials(ticker, "cashflow")   → CF for cross-check
-get_quote(ticker)                    → Market data
+把模型里的财务数核回源（period 取 `annual`/`quarterly`，`limit` 控制期数）：
+
+```text
+income_statement(symbol, period, limit)     → 利润表 actuals，核对收入/成本/净利
+balance_sheet(symbol, period, limit)        → 资产负债表，核对资产/负债/权益
+cashflow_statement(symbol, period, limit)   → 现金流量表，核对经营/投资/筹资现金流
+stock_quote(symbol)                         → 价格/市值核对（share count × price = market cap）
 ```
 
-### Secondary Sources
-- 巨潮 — source financials
-- 审计报告 — reference data
+### valuz-search — 财报/公告原文溯源
+
+核对模型中历史数据的科目口径与附注时，先检索文档、再取原文：
+
+```text
+earnings_search(query, symbols, num, start_datetime, end_datetime)  → 定位财报/业绩文档
+filings_search(query, symbols, num, start_datetime, end_datetime)   → 定位公告/招股书等披露文件
+document_raw_content(...)   → 取命中文档的原文（核对口径、附注）
+document_fetch(...)         → 取文档结构化内容
+```
 
 ## Workflow
 
@@ -68,35 +73,35 @@ get_quote(ticker)                    → Market data
 
 ### Step 3: Historicals Cross-Check
 
-**Cross-check against source data:**
+**Cross-check against source data:** 用 `income_statement`/`balance_sheet`/`cashflow_statement`(valuz-stock) 把表内历史数核回源；对存疑科目用 `earnings_search`/`filings_search` 定位文档、`document_raw_content`(valuz-search) 取原文核对口径。
 
-| Line Item | Model | iFind / AkShare / 巨潮 | Difference | Explanation |
+| Line Item | Model | income_statement / balance_sheet / cashflow_statement (valuz-stock) | Difference | Explanation |
 |-----------|-------|----------------|------------|-------------|
-| 营业收入 | | | | |
-| 营业成本 | | | | |
-| 归母净利润 | | | | |
-| 总资产 | | | | |
-| 净资产 | | | | |
-| 经营现金流 | | | | |
+| 营业收入 / Revenue | | | | |
+| 营业成本 / COGS | | | | |
+| 归母净利润 / Net income | | | | |
+| 总资产 / Total assets | | | | |
+| 净资产 / Equity | | | | |
+| 经营现金流 / Operating cash flow | | | | |
 
 **Cross-check tolerance:**
 - Revenue, profit: ±2%
 - Balance sheet: ±1%
 - Cash flow: ±3% (timing differences)
 
-### Step 4: CAS Compliance Check
+### Step 4: Accounting Compliance Check
 
-**CAS-specific checks:**
+按标的适用准则（US GAAP / IFRS / CAS）合规检查：
 
 | Check | Description |
 |-------|-------------|
-| Revenue net of VAT | 营业收入 not gross |
-| R&D expensed | Not capitalized (unless criteria met) |
-| Tax calculation | 25% / 15% rate applied correctly |
+| Revenue recognition | 按当地准则口径确认收入（如增值税/销售税口径） |
+| R&D treatment | Expensed vs capitalized 按适用准则处理 |
+| Tax calculation | 按当地适用税率正确计算 |
 | Minority interest | Separated from parent equity |
 | Government grants | Correct classification |
-| 合同负债 | Recognized appropriately |
-| 信用减值损失 | CAS 22 model applied |
+| Contract liabilities / 合同负债 | Recognized appropriately |
+| Credit impairment / 信用减值损失 | 按适用准则减值模型应用 |
 
 ### Step 5: Balance Sheet Integrity
 
@@ -107,7 +112,7 @@ get_quote(ticker)                    → Market data
 | BS balances | Assets = L + E | ✓ |
 | Cash flow ties | Ending cash = Beginning + Net CF | ✓ |
 | Debt schedule | Short + Long = Total debt | ✓ |
-| Share count | Shares × Price = Market cap | ✓ |
+| Share count | Shares × Price = Market cap（对回 `stock_quote`,valuz-stock） | ✓ |
 | Minority interest | Correct % applied | ✓ |
 
 ### Step 6: Forecast Logic Check
@@ -129,7 +134,7 @@ get_quote(ticker)                    → Market data
 |--------|-------------|------|-----------|
 | Revenue growth | 5-10% | 10-20% | 20-30% |
 | Margin expansion | 0 ppts | 0-2 ppts | 2-5 ppts |
-| Tax rate | 25% | 25% | 15% (if 高新) |
+| Tax rate | 按当地法定税率 | 按当地法定税率 | 按适用优惠税率（如有） |
 
 ### Step 7: Valuation Check
 
@@ -144,14 +149,14 @@ get_quote(ticker)                    → Market data
 | Comps | Multiples reasonable | ✓ |
 | Football field | Min/median/max consistent | ✓ |
 
-**WACC components (China):**
+**WACC components:**
 
 | Component | Typical Range |
 |-----------|--------------|
-| Risk-free rate (CGB 10Y) | 2.0-3.0% |
-| Equity risk premium | 6-8% |
-| Cost of debt | 3-6% |
-| Tax rate | 25% (15% for 高新) |
+| Risk-free rate (10Y govt bond, 按标的市场) | 按当地市场利率 |
+| Equity risk premium | 5-8% |
+| Cost of debt | 按当地融资成本 |
+| Tax rate | 按当地适用税率 |
 
 ### Step 8: Sensitivity & Scenario Check
 
@@ -164,15 +169,15 @@ get_quote(ticker)                    → Market data
 | Tornado chart | Key drivers identified |
 | Monte Carlo (if used) | Assumptions reasonable |
 
-### Step 9: Common A-share Model Errors
+### Step 9: Common Model Errors
 
 **Error checklist:**
 
 | Error | Detection | Fix |
 |-------|-----------|-----|
-| 收入用含税 | VAT not removed | Divide by 1.13 |
-| 税率错误 | Wrong rate applied | Verify 高新 status |
-| 单位错误 | 千元 vs 万元 | Standardize |
+| 收入口径错误 | 未按当地准则口径处理 | Apply local-standard revenue basis |
+| 税率错误 | Wrong rate applied | Verify applicable tax rate |
+| 单位错误 | 按当地常用单位不一致 | Standardize to a consistent unit |
 | 季度加总错误 | Q+Q ≠ Annual | Check sum |
 | 增长率计算 | Wrong base period | Verify formula |
 | 少数股东损益 | Missing | Add if applicable |
@@ -194,8 +199,8 @@ get_quote(ticker)                    → Market data
 三、历史数据核对
    [Cross-check results]
 
-四、CAS合规检查
-   [CAS compliance]
+四、准则合规检查（US GAAP / IFRS / CAS）
+   [Accounting compliance]
 
 五、预测逻辑检查
    [Forecast quality]
@@ -218,14 +223,8 @@ Before completing:
 - [ ] All structural checks passed
 - [ ] No hardcodes found
 - [ ] Historicals cross-checked
-- [ ] CAS compliant
+- [ ] Accounting-standard compliant (US GAAP / IFRS / CAS as applicable)
 - [ ] BS/CF integrity verified
 - [ ] Forecast logic sound
 - [ ] Valuation reasonable
 - [ ] All issues documented
-> **Data Source Mode Switch**: Set env var `IFIND_DATA_SOURCE_MODE` to control data source preference.
-> - `ifind-only` (strict): Use iFind only, error if unavailable
-> - `ifind-fallback` (default): iFind preferred, fallback to AkShare
-> - `akshare-only`: Skip iFind, use AkShare only
-> - `wind-only`: Wind only, error if unavailable
-> - `wind-fallback`: Wind first, fallback to iFind → AkShare

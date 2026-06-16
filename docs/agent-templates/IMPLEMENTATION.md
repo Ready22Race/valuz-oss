@@ -15,29 +15,24 @@
 | 契约优先 | 先改 `api/openapi.yaml` → 后端 → `make generate-types` → 前端 | 项目铁律 |
 
 ### 源素材
-- 投研 13 个 `china-*` skill：`~/Dev/claude-for-financial-services-cn/vertical-plugins/china-finance/skills/`（`china-competitive-analysis` 在 `investment-banking/skills/`）。每个就是一个 `SKILL.md`，copy 即移植。
-- 4 个 MCP server：`~/Dev/claude-for-financial-services-cn/mcp-servers/{wind,ifind,akshare,china-news}-mcp/`，FastMCP stdio，依赖轻（wind/ifind 仅 `requests`；akshare/china-news 需 `akshare`+`pandas`）。
+- 投研 13 个 skill：源自 [claude-for-financial-services-cn](https://github.com/jwangkun/claude-for-financial-services-cn)，移植后**去掉 `china-` 前缀、改写为全球股票市场口径（美股/港股/A 股为主）**，落在 `resources/template_skills/`（每个就是一个 `SKILL.md`）。
+- 数据工具：投研团队统一用 Valuz 自有 MCP——`valuz-search`（财报/电话会/研报/纪要/公告检索）+ `valuz-stock`（行情/财务/指标），均为 HTTP/OAuth，已在 `connector_catalog.json`。（早期曾计划移植 wind/ifind/akshare/china-news 四个第三方 stdio MCP，已弃用。）
 - 小红书 4 + 世界杯 3 个 skill：**自研**，方法论见 teams.md 各角色指令 + harness-100 参考。
 
-### ⚠️ 唯一待定方案：stdio MCP 运行时
-源 MCP 是 Python `server.py`，需 deps（akshare/pandas）。Valuz 现有 stdio 先例（chrome-devtools）是 `npx` **运行时拉取**，不打包代码。三选一：
-- **A（推荐）**：MCP server 代码进 `resources/mcp_servers/`，catalog command 用 `uv run --with akshare,pandas python <path>/server.py`，deps 运行时按需装。不污染主后端依赖，首次有安装延迟。
-- B：把 akshare/pandas 加进 backend `pyproject.toml`，PyInstaller 打包带上。包体变大。
-- C：MCP 发成 pip 包，`uvx` 运行。最干净，但要发包。
-
-> wind/ifind 是**付费源**，端到端验证需用户提供 `WIND_API_KEY`/`IFIND_AUTH_TOKEN`；akshare/china-news 免费可全程验证。
+### MCP 运行时（已定）
+投研团队改用 Valuz 自有 MCP（`valuz-search` / `valuz-stock`，HTTP transport + OAuth），无需移植第三方 stdio MCP、不引入 akshare/pandas 依赖，登录后开箱可用。小红书/世界杯仍用各自的 stdio/HTTP connector。
 
 ## 阶段与任务
 
 ### Phase 1 · 装备层 - Skills（无依赖，可先做）
-1. 移植 13 个 `china-*` skill → `resources/official_skills/`（原 slug 原文件）。
+1. 移植 13 个投研 skill → `resources/template_skills/`，**去掉 `china-` 前缀并改写为全球股票市场口径**。
 2. 自研 7 个 skill（`xhs-topic-method`/`xhs-note-writing`/`xhs-visual-method`/`xhs-publish-playbook` + `wc-scouting`/`wc-forecast-synthesis`/`wc-poster-design`）→ `resources/official_skills/`，按 teams.md 提纲撰写 `SKILL.md`。
 3. 给所有新 skill 打 `.bundled-version` 标记（或确认 boot sync 自动打）。验证 boot 后 skill library 可见、未连 Reportify 也可用。
 
 ### Phase 2 · 装备层 - MCP 连接器
 4. 定 stdio 运行方案（A/B/C），落 MCP server 代码位置。
-5. `connector_catalog.json` 增 6 个 connector：`wind-mcp`/`ifind-mcp`/`akshare-mcp`/`china-news-mcp`/`xhs-search-mcp`/`web-search-mcp`（双语 display_name/description，付费源标 credentials）。
-6. 验证 akshare-mcp 能被 mcp_resolver 拉起、agent session 能调用。
+5. `connector_catalog.json` 备齐 connector：投研用 `valuz-search`/`valuz-stock`（已内置，HTTP/OAuth）；小红书/世界杯用 `xhs-search-mcp`/`web-search-mcp`（双语 display_name/description）。
+6. 验证 `valuz-search`/`valuz-stock` 能被 mcp_resolver 解析、agent session 能调用。
 
 ### Phase 3 · 后端模板库 feature（契约优先）
 7. `api/openapi.yaml`：`AgentTemplate`/`TemplateRole`/`AddTemplateResponse` schema + `GET /v1/agent-templates` + `POST /v1/agent-templates/{id}:add`。
@@ -60,6 +55,6 @@
 18. 浏览器走查：浏览模板 → 添加投研 team → 库里出现 4 个 agent → 派进项目 → 起会话确认 skill/MCP 挂载。
 
 ## 风险与边界
-- **MCP 运行时**（Phase 2）是最高不确定性环节，先打通免费的 akshare 验证链路，wind/ifind 留 catalog entry + 凭证脚手架。
+- **MCP 接入**：投研用 Valuz 自有 HTTP MCP（`valuz-search`/`valuz-stock`），OAuth 登录即用，无第三方 stdio 运行时风险。
 - 世界杯 team 是 2026 限时（6.11–7.19），当前在窗口内，值得做但生命周期短。
 - 自研 7 个 skill 的质量取决于 teams.md 提纲的可操作性，撰写后需自查。

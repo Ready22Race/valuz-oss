@@ -1,90 +1,99 @@
 ---
-name: china-comps
-description: Comparable company analysis for A-share stocks. Uses AkShare MCP to build peer groups, pull financial data, compute valuation multiples (PE, PB, PS), and assess relative value within a Chinese industry sector.
+name: comps
+description: Comparable company analysis for global equities (focus US / HK / A-shares, also other markets). Uses the Valuz Quotes MCP (valuz-stock) and Valuz Search MCP (valuz-search) to build cross-market peer groups, pull financial data, compute valuation multiples (PE, PB, PS), and assess relative value within an industry sector.
 ---
 
-# china-comps
+# comps
 
-## Data Sources (Multi-Tier)
+## Data Sources
 
-### Tier 0 — 万得 Wind（最全面付费数据）
-- 覆盖：A股/港美股/基金/指数/债券/宏观/研报/分析（44个工具）
-- MCP 服务：`wind-mcp`（需 `WIND_API_KEY` 密钥，以 `ak_` 开头）
-- 优势：全市场覆盖面最广、数据最全面、包含研报和量化分析
-- 密钥申请：https://aifinmarket.wind.com.cn/#/home
+全球股票市场（美股/港股/A 股为主，兼顾其他市场）的可比公司分析使用两个 Valuz 连接器：
 
-### Tier 1 — 同花顺 iFind（付费精确数据）
-Use ifind MCP when a valid `IFIND_AUTH_TOKEN` is configured.
+> **代码格式（首次取数务必注意）**：`valuz-stock` 用**裸代码**（`AAPL` / `00700` / `600519`）；`valuz-search` 用 `market:ticker`（`US:AAPL` / `HK:00700` / `SH:600519`）。
 
-```python
-ifind_get_stock_info(ticker)             → Company profile, multiples
-ifind_get_stock_financials(ticker, ...)  → Revenue, net income, margins
-ifind_search_stocks(query)               → Industry-wide stock screening
+### `valuz-stock` — Valuz Stock MCP
+行情、财务报表、估值因子、行业成分。可比分析常用：
+
+```text
+industry_constituents(...)                       → 同业（行业成分股）              # 选同业集
+index_constituents(...)                          → 指数成分股（备选同业来源）
+company_overview(symbol)                         → 公司画像、规模、业务描述
+stock_quote(symbol)                              → 价格、市值
+factors_compute(symbols=[...], ...)              → PE()/PB()/PS()/ROE()/EPS() 估值倍数
+factors(symbol=...)                              → 单票现成因子值
+income_statement(symbol, period="annual")        → 营收、净利润（财务口径）
+balance_sheet(symbol, period="annual")           → 账面价值、负债（财务口径）
 ```
 
-### Tier 2 — AkShare（免费开源数据）
-Fallback when iFind is unavailable.
+### `valuz-search` — Valuz Search MCP
+财报、公告、研报、纪要、电话会检索。可比分析主要用 `reports_search` 取行业研报做定性对照。
 
-```python
-get_quote(ticker)              → Price, PE, PB, market cap
-get_financials(ticker, "income", "annual")  → Revenue, net income
-get_financials(ticker, "balance", "annual") → Book value
-get_stock_info(ticker)         → Business description
+```text
+reports_search(query=..., symbols=["US:AAPL", ...])   → 行业研报 / 同业定性对照
+comprehensive_search(query=...)                       → 综合检索（财报/纪要/公告/新闻）
 ```
 
-> **数据源模式开关**: 当环境变量 `IFIND_DATA_SOURCE_MODE=ifind-only` 时，仅使用 iFind 数据源，禁用 AkShare 降级。
+> 取数原则：用 `valuz-stock` 取行情/财务/倍数与同业成分，用 `valuz-search`（`reports_search`）取定性研报对照。
 
 ---
-name: china-comps
-description: Comparable company analysis for A-share stocks. Uses the AkShare MCP to build peer groups, pull financial data, compute valuation multiples (PE, PB, PS), and assess relative value within a Chinese industry sector. Use instead of the original comps-analysis skill when dealing with Chinese-listed equities.
----
 
-# china-comps
+# comps
 
 ## Workflow
 
 ### 1. Define the peer group
 
-Start with the target stock, then use `get_industry_stocks(industry="<行业名称>")` to get the full peer set for that industry. Common industry names used in the 东方财富 classification:
+Start with the target stock, then use `industry_constituents`（valuz-stock，裸代码如 `600519`）to retrieve industry peers for that sector — or `index_constituents`（valuz-stock）when the peer set is better anchored to an index. Peer sets should be **cross-market** — a peer group can mix US, HK, and A-share listings within the same industry. Common sectors and example leaders:
 
 | Industry | Example Leaders |
 |----------|-----------------|
-| 白酒 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
-| 半导体 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
-| 电池 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
-| 银行 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
-| 证券 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
-| 保险 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
-| 医疗器械 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
-| 光伏设备 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
-| 汽车整车 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
-| 软件开发 | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 白酒 / Spirits | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 半导体 / Semiconductors | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 电池 / Batteries | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 银行 / Banks | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 证券 / Brokers | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 保险 / Insurance | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 医疗器械 / Medical Devices | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 光伏设备 / Solar | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 汽车整车 / Autos | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+| 软件开发 / Software | {{SECTOR_LEADER}}, {{CHALLENGER_1}}, {{CHALLENGER_2}} |
+
+Tickers follow each market's convention — US (`AAPL`), HK (`0700.HK`), A-share (`600519.SH`).
 
 ### 2. Pull financial data for each peer
 
-```
+代码格式提醒：valuz-stock 用裸代码（`AAPL` / `00700` / `600519`），valuz-search 用 `market:ticker`（`US:AAPL` / `HK:00700` / `SH:600519`）。
+
+```text
+For the peer set as a whole:
+  factors_compute(symbols=[...], ...)  → PE()/PB()/PS()/ROE()/EPS() 倍数（批量）   (valuz-stock)
+
 For each ticker in the peer set:
-  get_quote(ticker)         → price, PE, PB, market cap
-  get_financials(ticker, "income", "annual")     → revenue, net income
-  get_financials(ticker, "balance", "annual")    → book value, debt
-  get_stock_info(ticker)    → business description
+  stock_quote(symbol)                       → price, market cap                    (valuz-stock)
+  company_overview(symbol)                  → business description, profile         (valuz-stock)
+  income_statement(symbol, period="annual") → revenue, net income (财务口径)        (valuz-stock)
+  balance_sheet(symbol, period="annual")    → book value, debt (财务口径)           (valuz-stock)
+  reports_search(query="...", symbols=["US:AAPL", ...]) → qualitative color (行业研报) (valuz-search)
 ```
 
 ### 3. Compute standard multiples
 
-| Multiple | Formula | AkShare source field |
-|----------|---------|---------------------|
-| PE (TTM) | Price / EPS TTM | `get_quote` → 动态市盈率 |
-| PB | Price / Book Value per share | `get_quote` → 市净率 |
-| PS (TTM) | Market Cap / Revenue TTM | Compute from market cap + revenue |
-| EV/EBITDA | Enterprise Value / EBITDA | Compute from market cap + debt - cash |
-| Dividend Yield | DPS / Price | `get_quote` → 股息率 |
+倍数优先用 `factors_compute`（valuz-stock）批量计算，因子语法用 `PE()` / `PB()` / `PS()` / `ROE()` / `EPS()`；无现成因子时再用 `stock_quote` + 报表口径自行换算。
+
+| Multiple | Formula | valuz-stock source |
+|----------|---------|--------------------|
+| PE (TTM) | Price / EPS TTM | `factors_compute` → `PE()`（或 `PE_TTM()`） |
+| PB | Price / Book Value per share | `factors_compute` → `PB()` |
+| PS (TTM) | Market Cap / Revenue TTM | `factors_compute` → `PS()`（或由 `stock_quote` 市值 + `income_statement` 营收换算） |
+| EV/EBITDA | Enterprise Value / EBITDA | 由 `stock_quote` 市值 + `balance_sheet` 负债/现金换算 |
+| ROE | Net Income / Equity | `factors_compute` → `ROE()` |
+| Dividend Yield | DPS / Price | `stock_quote` → dividend yield |
 
 ### 4. Present the comps table
 
 Sort by market cap (largest first). Flag outliers (>2 standard deviations from mean). Include:
 - Ticker, company name, price
-- Market cap (亿 CNY)
+- Market cap (in the listing's local currency, e.g. USD / HKD / CNY)
 - PE, PB, PS
 - Revenue growth %, Net margin %
 - 52-week high/low
@@ -98,7 +107,8 @@ Sort by market cap (largest first). Flag outliers (>2 standard deviations from m
 
 ## Notes
 
-- All financial data from AkShare is based on Chinese accounting standards (CAS), not IFRS/US GAAP
-- Chinese market has 涨跌停 limits (±10% for main board, ±20% for ChiNext/STAR)
-- A-share market cap includes both circulating (流通) and non-circulating shares — check if the user wants 流通市值 or 总市值
-- For cross-market comps (A-share vs HK-listed), note that A-shares typically trade at a premium
+- Financial data may be reported under US GAAP / IFRS / CAS depending on the listing — normalize when comparing across markets (按当地准则口径)
+- Revenue is reported 按当地准则口径; reconcile definitions before comparing cross-market peers
+- Some markets apply daily price-limit mechanisms (e.g. A-shares ±10% main board / ±20% ChiNext/STAR) — note these when interpreting single-day moves
+- For A-share names, market cap may be quoted as 流通市值 (circulating) or 总市值 (total) — confirm which the user wants
+- For cross-market comps (e.g. A-share vs HK-listed dual-listings), note that A-shares typically trade at a premium
