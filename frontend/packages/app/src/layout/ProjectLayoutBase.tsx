@@ -44,6 +44,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  DeleteConfirmDialog,
   ErrorBoundary,
   Input,
   OfflineBanner,
@@ -163,6 +164,10 @@ export function ProjectLayoutBase({
       window.matchMedia("(max-width: 1040px)").matches,
   );
   const [createOpen, setCreateOpen] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const [newName, setNewName] = useState("");
   const [newRootPath, setNewRootPath] = useState("");
   const [createError, setCreateError] = useState("");
@@ -753,24 +758,7 @@ export function ProjectLayoutBase({
               const ws = allProjects.find(
                 (project) => project.id === projectId,
               );
-              if (!ws) return;
-              if (
-                !window.confirm(
-                  t("sidebar.removeProjectConfirm", { name: ws.name }),
-                )
-              ) {
-                return;
-              }
-              projectsApi
-                .delete(projectId)
-                .then(() => {
-                  toast.success(t("sidebar.removed"));
-                  void fetchProjects();
-                  if (location.pathname.startsWith(`/projects/${projectId}`)) {
-                    navigate("/projects");
-                  }
-                })
-                .catch(() => toast.error(t("sidebar.removeFailed")));
+              if (ws) setRemoveTarget({ id: ws.id, name: ws.name });
             }}
           />
         }
@@ -885,6 +873,28 @@ export function ProjectLayoutBase({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <DeleteConfirmDialog
+        open={!!removeTarget}
+        onOpenChange={(open) => {
+          if (!open) setRemoveTarget(null);
+        }}
+        itemName={removeTarget?.name}
+        onConfirm={() => {
+          if (!removeTarget) return;
+          const projectId = removeTarget.id;
+          projectsApi
+            .delete(projectId)
+            .then(() => {
+              toast.success(t("sidebar.removed"));
+              void fetchProjects();
+              if (location.pathname.startsWith(`/projects/${projectId}`)) {
+                navigate("/projects");
+              }
+            })
+            .catch(() => toast.error(t("sidebar.removeFailed")))
+            .finally(() => setRemoveTarget(null));
+        }}
+      />
     </ErrorBoundary>
   );
 }
