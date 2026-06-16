@@ -206,10 +206,16 @@ async def init_kernel(app: FastAPI) -> None:
     # Wire the background memory extractor to the idle trigger (memory-system-design
     # §7): once a session goes quiet, review it and write durable memories through
     # the same MemoryStore pipeline as the foreground tool.
-    from valuz_agent.modules.memory.runner import run_extraction_for_session
-    from valuz_agent.modules.memory.scheduler import idle_scheduler
+    from valuz_agent.modules.memory.runner import (
+        run_extraction_for_session,
+        run_task_finish_extraction,
+    )
+    from valuz_agent.modules.memory.scheduler import idle_scheduler, task_finish_scheduler
 
     idle_scheduler.set_runner(run_extraction_for_session)
+    # Task-finish trigger (§7.1): when a multi-agent task completes, graduate its
+    # durable multi-agent lessons + project progress into project memory.
+    task_finish_scheduler.set_runner(run_task_finish_extraction)
 
 
 def install_binding_change_listener() -> None:

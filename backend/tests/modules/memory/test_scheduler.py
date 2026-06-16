@@ -65,3 +65,48 @@ def test_runner_failure_is_swallowed():
         await asyncio.sleep(0.05)
 
     asyncio.run(go())  # the failing runner must not propagate
+
+
+def test_task_finish_scheduler_fires_immediately():
+    from valuz_agent.modules.memory.scheduler import TaskFinishScheduler
+
+    calls: list[tuple[str, str | None]] = []
+
+    async def runner(tid: str, uid: str | None) -> None:
+        calls.append((tid, uid))
+
+    sched = TaskFinishScheduler(runner)
+
+    async def go() -> None:
+        sched.notify_finished("t1", "u1")  # no debounce — fires right away
+        await asyncio.sleep(0.02)
+
+    asyncio.run(go())
+    assert calls == [("t1", "u1")]
+
+
+def test_task_finish_scheduler_noop_without_runner():
+    from valuz_agent.modules.memory.scheduler import TaskFinishScheduler
+
+    sched = TaskFinishScheduler(None)
+
+    async def go() -> None:
+        sched.notify_finished("t1", "u1")  # must not raise
+        await asyncio.sleep(0.01)
+
+    asyncio.run(go())
+
+
+def test_task_finish_scheduler_swallows_failure():
+    from valuz_agent.modules.memory.scheduler import TaskFinishScheduler
+
+    async def runner(_tid: str, _uid: str | None) -> None:
+        raise RuntimeError("boom")
+
+    sched = TaskFinishScheduler(runner)
+
+    async def go() -> None:
+        sched.notify_finished("t1", "u1")
+        await asyncio.sleep(0.02)
+
+    asyncio.run(go())  # failing runner must not propagate

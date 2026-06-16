@@ -73,3 +73,45 @@ class IdleExtractionScheduler:
 
 
 idle_scheduler = IdleExtractionScheduler()
+
+
+# Task-finish trigger (memory-system-design §7.1). Unlike the idle scheduler this
+# fires IMMEDIATELY — a finished task is a discrete, once-per-task signal, not an
+# idle window, so there is nothing to debounce. Runs(task_id, user_id).
+TaskRunner = Callable[[str, str | None], Awaitable[None]]
+
+
+class TaskFinishScheduler:
+    def __init__(self, runner: TaskRunner | None = None) -> None:
+        self._runner = runner
+        # Hold strong refs so fire-and-forget tasks aren't GC'd mid-flight.
+        self._pending: set[asyncio.Task[None]] = set()
+
+    def set_runner(self, runner: TaskRunner) -> None:
+        """Wire the task-finish extraction runner (called at boot)."""
+        self._runner = runner
+
+    def notify_finished(self, task_id: str, user_id: str | None = None) -> None:
+        """Call when a task reaches a terminal ``completed`` state. Cheap,
+        non-blocking, no-op when no runner is wired or there's no running loop."""
+        if self._runner is None or not task_id:
+            return
+        try:
+            task = asyncio.create_task(self._run(task_id, user_id))
+        except RuntimeError:
+            logger.debug("task-finish scheduler: no running loop for %s", task_id)
+            return
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def _run(self, task_id: str, user_id: str | None) -> None:
+        runner = self._runner
+        if runner is None:
+            return
+        try:
+            await runner(task_id, user_id)
+        except Exception:  # noqa: BLE001 — extraction is best-effort
+            logger.debug("task-finish extraction failed for %s", task_id, exc_info=True)
+
+
+task_finish_scheduler = TaskFinishScheduler()

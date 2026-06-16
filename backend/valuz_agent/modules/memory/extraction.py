@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from valuz_agent.modules.memory.models import TARGETS, Target
-from valuz_agent.modules.memory.prompts import build_review_prompt
+from valuz_agent.modules.memory.prompts import build_review_prompt, build_task_review_prompt
 from valuz_agent.modules.memory.service import MemoryError, MemoryStore, memory_store
 
 logger = logging.getLogger(__name__)
@@ -162,23 +162,35 @@ class MemoryExtractor:
         transcript: str,
         project_id: str | None = None,
         project_context: str | None = None,
+        task_digest: str | None = None,
     ) -> dict[str, Any]:
         """Review ``transcript`` and write any durable memories. Returns a small
         report. Caller runs this in the background and swallows failures.
         ``project_context`` (name + instructions) is forwarded to the reviewer so
-        it can route project-specific facts to the ``project`` target."""
+        it can route project-specific facts to the ``project`` target. When
+        ``task_digest`` is set the review is framed as a finished multi-agent task
+        (design §7.1) — the digest (plan + member results) is reviewed alongside
+        the lead's orchestration ``transcript`` to graduate durable lessons."""
         if self._complete is None:
             return {"skipped": "no completer wired", "ops": 0, "applied": 0}
-        if not transcript.strip():
+        if not transcript.strip() and not (task_digest and task_digest.strip()):
             return {"skipped": "empty transcript", "ops": 0, "applied": 0}
 
         targets = ["user", "global"] + (["project"] if project_id else [])
         current = {t: self._store.read_entries(t, project_id=project_id) for t in targets}  # type: ignore[arg-type]
-        prompt = build_review_prompt(
-            transcript=redact_secrets(transcript),
-            current=current,
-            project_context=project_context,
-        )
+        if task_digest is not None:
+            prompt = build_task_review_prompt(
+                task_digest=redact_secrets(task_digest),
+                transcript=redact_secrets(transcript),
+                current=current,
+                project_context=project_context,
+            )
+        else:
+            prompt = build_review_prompt(
+                transcript=redact_secrets(transcript),
+                current=current,
+                project_context=project_context,
+            )
 
         raw = await self._complete(prompt)
         ops = parse_ops(raw)
