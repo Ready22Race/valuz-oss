@@ -181,7 +181,7 @@ jobs:
     name: macOS (x86_64)
     needs: set-version
     if: ${{ github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'mac-x64' }}
-    runs-on: macos-runner-x86
+    runs-on: macos-15-intel
     environment: CSC_KEY_PASSWORD
     permissions:
       contents: write
