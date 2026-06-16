@@ -42,15 +42,23 @@ TOOL_DESCRIPTION = (
 )
 
 
-def render_current_memory(current: dict[str, list[str]]) -> str:
-    """Render the current per-target entries so the reviewer can consolidate/dedupe."""
+def render_current_memory(
+    current: dict[str, list[str]], usage: dict[str, str] | None = None
+) -> str:
+    """Render the current per-target entries so the reviewer can consolidate/dedupe.
+    When ``usage`` is given, each target header carries its char budget (e.g.
+    ``[project] — 3,600/4,000 chars (90%)``) so the reviewer can free up room
+    before a target overflows."""
     parts: list[str] = []
     for target, entries in current.items():
+        header = f"[{target}]"
+        if usage and target in usage:
+            header = f"{header} — {usage[target]}"
         if entries:
             listed = "\n".join(f"  - {e}" for e in entries)
-            parts.append(f"[{target}]\n{listed}")
+            parts.append(f"{header}\n{listed}")
         else:
-            parts.append(f"[{target}] (empty)")
+            parts.append(f"{header} (empty)")
     return "\n".join(parts) if parts else "(no memory yet)"
 
 
@@ -59,11 +67,14 @@ def build_review_prompt(
     transcript: str,
     current: dict[str, list[str]],
     project_context: str | None = None,
+    usage: dict[str, str] | None = None,
 ) -> str:
     """Build the background reviewer prompt. ``current`` keys are the targets the
     reviewer may write (``project`` is included only when a real project is bound).
     ``project_context`` (name + instructions) anchors project-level routing so the
-    reviewer can recognise facts/decisions specific to THIS project."""
+    reviewer can recognise facts/decisions specific to THIS project. ``usage`` is
+    the per-target char budget, shown so the reviewer consolidates before a target
+    overflows (over-cap writes are rejected, not auto-grown)."""
     targets = " / ".join(current.keys())
     project_block = ""
     if project_context:
@@ -84,10 +95,12 @@ def build_review_prompt(
         + "\n</rules>\n\n"
         + project_block
         + f"Writable targets: {targets}.\n\n"
-        "Current memory (consolidate against this: use replace/remove to merge "
-        "overlapping or stale entries, add only genuinely new facts; do not duplicate "
-        "what is already present):\n"
-        "<current_memory>\n" + render_current_memory(current) + "\n</current_memory>\n\n"
+        "Current memory — each target shows its hard char budget. Consolidate against "
+        "this: add only genuinely new facts, never duplicate what is already present, "
+        "and when a target is near its limit FIRST use replace/remove to merge "
+        "overlapping or drop stale entries so the new ones fit (over-budget writes are "
+        "rejected, not auto-grown):\n"
+        "<current_memory>\n" + render_current_memory(current, usage) + "\n</current_memory>\n\n"
         "<transcript>\n" + transcript + "\n</transcript>\n\n"
         "Respond with ONLY a JSON object, no prose outside it:\n"
         '{"ops": [{"action": "add|replace|remove", "target": "<target>", '
@@ -104,6 +117,7 @@ def build_task_review_prompt(
     transcript: str,
     current: dict[str, list[str]],
     project_context: str | None = None,
+    usage: dict[str, str] | None = None,
 ) -> str:
     """Build the review prompt fired when a multi-agent TASK finishes (design §7.1).
 
@@ -134,9 +148,11 @@ def build_task_review_prompt(
         + "\n</rules>\n\n"
         + project_block
         + f"Writable targets: {targets}.\n\n"
-        "Current memory (consolidate against this — replace/remove to merge "
-        "overlapping or stale entries, add only genuinely new facts; never duplicate):\n"
-        "<current_memory>\n" + render_current_memory(current) + "\n</current_memory>\n\n"
+        "Current memory — each target shows its hard char budget. Consolidate against "
+        "this: add only genuinely new facts, never duplicate, and when a target is near "
+        "its limit FIRST replace/remove to merge overlapping or drop stale entries so "
+        "the new ones fit (over-budget writes are rejected, not auto-grown):\n"
+        "<current_memory>\n" + render_current_memory(current, usage) + "\n</current_memory>\n\n"
         "<task>\n" + task_digest + "\n</task>\n\n"
         "<lead_transcript>\n" + transcript + "\n</lead_transcript>\n\n"
         "Respond with ONLY a JSON object, no prose outside it:\n"
