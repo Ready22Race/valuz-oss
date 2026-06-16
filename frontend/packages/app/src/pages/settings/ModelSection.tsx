@@ -1,13 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { toast } from "sonner";
-import {
-  Cpu,
-  FilePenLine,
-  Lock,
-  Plus,
-  RefreshCw,
-  Trash2,
-} from "lucide-react";
+import { Cpu, FilePenLine, Lock, Plus, RefreshCw, Trash2 } from "lucide-react";
 import type { ProviderOption } from "@valuz/ui";
 import { modelLabel } from "@valuz/shared";
 import {
@@ -117,6 +110,10 @@ export const ModelSection = () => {
       const res = await providersApi.list();
       // Hide:
       // - managed (Reportify) -- those live under the Connectors module.
+      // - system (platform-provided, e.g. "Valuz 系统模型") -- these need no
+      //   setup and aren't user-managed, so they're noise in the
+      //   manage-your-channels list. They still appear in onboarding's
+      //   model-default picker (ConnectStep), which has its own filter.
       // - Unconfigured api_key descriptors -- they're "quick-add" seeds
       //   that show up as "未配置" dead rows if the user never touched
       //   them. Two exceptions kept:
@@ -128,6 +125,7 @@ export const ModelSection = () => {
         res.providers.filter(
           (p) =>
             p.source !== "managed" &&
+            p.source !== "system" &&
             (p.credential_source !== "none" || p.auth_type === "oauth"),
         ),
       );
