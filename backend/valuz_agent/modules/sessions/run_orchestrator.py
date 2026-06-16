@@ -148,3 +148,13 @@ async def _finalize_session(
             stop_reason_message=stop_reason_message,
         ),
     )
+
+    # Arm the idle memory-extraction trigger (memory-system-design §7.1). The
+    # scheduler debounces, so it fires once the conversation goes quiet — not per
+    # turn — and is a no-op until the runner is wired at boot. Never blocks a turn.
+    try:
+        from valuz_agent.modules.memory.scheduler import idle_scheduler
+
+        idle_scheduler.notify_turn(session_id, require_current_user_id())
+    except Exception:  # noqa: BLE001 — memory triggering must never fail a turn
+        logger.debug("memory idle trigger skipped for %s", session_id, exc_info=True)

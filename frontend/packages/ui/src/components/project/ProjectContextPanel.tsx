@@ -124,7 +124,7 @@ export interface ProjectMemberItem {
   id: string;
   name: string;
   slug: string;
-  /** Global library agent slug this member was派驻 from. Passed to
+  /** Global library agent slug this member was deployed from. Passed to
    *  ``onOpenMember`` so the host can show the SHARED agent's detail (not
    *  the project-local member). Falls back to ``slug`` when unknown
    *  (e.g. legacy rows). */
@@ -138,7 +138,7 @@ export interface ProjectMemberItem {
    *  decoupled from ``@valuz/core`` (only allowed deps: ``@valuz/shared``). */
   runtimeLabel?: string;
   /** True when the underlying library agent was removed — render a
-   *  "已被智能体库移除" placeholder with only the remove (解除派驻) action. */
+   *  "removed from the agent library" placeholder with only the remove (undeploy) action. */
   orphan?: boolean;
 }
 
@@ -150,7 +150,7 @@ export interface UploadedFileItem {
   /** Parser/upload status for the row badge. */
   status?: "uploaded" | "ok" | "failed";
   /** Async parse status of the attachment. ``parsing`` renders an inline
-   *  spinner + "解析中"; ``failed`` renders the error badge; ``native`` is an
+   *  spinner + "parsing"; ``failed`` renders the error badge; ``native`` is an
    *  image with no local text extract that the runtime reads directly (no
    *  error). Distinct from ``status`` so the live poll can drive the indicator
    *  without disturbing legacy callers. */
@@ -201,10 +201,10 @@ export interface ProjectContextPanelProps {
    */
   members?: ProjectMemberItem[];
   onAddMember?: () => void;
-  /** Open a member's shared agent (live-reference 派驻: editing is global —
+  /** Open a member's shared agent (live-reference deployment: editing is global —
    *  the host navigates to the agent detail page). */
   onOpenMember?: (slug: string) => void;
-  /** Remove a member from the project (解除派驻). The host is expected to confirm. */
+  /** Remove a member from the project (undeploy). The host is expected to confirm. */
   onRemoveMember?: (slug: string) => void;
   skills?: ProjectSkill[];
   onAddSkill?: () => void;
@@ -233,7 +233,7 @@ export interface ProjectContextPanelProps {
   onExpandKbFolder?: (kbId: string, folderId: string) => Promise<void>;
   /** Remove a whole KB from the project (the ``×`` on a KB header row). */
   onRemoveKb?: (kbId: string) => void;
-  /** Reset a KB back to "whole knowledge base in scope" (the ``全选``
+  /** Reset a KB back to "whole knowledge base in scope" (the ``select-all``
    *  affordance shown on a narrowed KB's header row). */
   onSelectAllInKb?: (kbId: string) => void;
   /**
@@ -259,12 +259,19 @@ export interface ProjectContextPanelProps {
   onManageScheduledTasks?: () => void;
   fileTree?: FileTreeNode[];
   /** Section title for the file-tree accordion. Project projects use
-   * "{t("project.projectFiles")}"; chat projects use "生成的文件" — the underlying tree
+   * "{t("project.projectFiles")}"; chat projects use "generated files" — the underlying tree
    * is the same component, only the label changes per context. */
   fileTreeTitle?: string;
   /** Render the file tree as a top-level tab instead of an accordion. This is
    * opt-in so conversation side panels keep their original layout. */
   fileTreeInTab?: boolean;
+  /** Project-scope memory entries (auto-curated). ``undefined`` hides the
+   * project-memory tab entirely — pass it only on the real-project home panel. */
+  projectMemory?: string[];
+  /** Delete one memory entry (located by its exact text). */
+  onMemoryDeleteEntry?: (text: string) => void;
+  /** Clear all project memory. */
+  onMemoryClear?: () => void;
   /** Hide project-level edit/manage affordances for read-only conversation
    * context panels while keeping them available on the project home panel. */
   hideProjectContextActions?: boolean;
@@ -590,6 +597,77 @@ function TodosList({ items }: { items: TodoListItem[] }) {
   );
 }
 
+/* ── Project memory tab ───────────────────────────────────────── */
+
+function MemoryTab({
+  entries,
+  onDeleteEntry,
+  onClear,
+}: {
+  entries: string[];
+  onDeleteEntry?: (text: string) => void;
+  onClear?: () => void;
+}) {
+  const { t } = useI18n();
+  const [confirmClear, setConfirmClear] = useState(false);
+  return (
+    <div className="py-2">
+      <div className="mb-2 flex items-center justify-between px-1">
+        <span className="text-2xs text-ink-meta">
+          {t("project.memoryAuto")} · {entries.length}
+        </span>
+        {entries.length > 0 && onClear && (
+          <button
+            type="button"
+            onClick={() => {
+              if (confirmClear) {
+                onClear();
+                setConfirmClear(false);
+              } else {
+                setConfirmClear(true);
+              }
+            }}
+            onBlur={() => setConfirmClear(false)}
+            className="rounded-md px-2 py-0.5 text-2xs text-ink-meta transition hover:bg-error-light hover:text-error-text"
+          >
+            {confirmClear
+              ? t("project.memoryClearConfirm")
+              : t("settings.memory.clearScope")}
+          </button>
+        )}
+      </div>
+      {entries.length === 0 ? (
+        <p className="px-2 py-8 text-center text-2xs leading-relaxed text-ink-meta">
+          {t("project.memoryEmpty")}
+        </p>
+      ) : (
+        <ul className="space-y-1">
+          {entries.map((entry, i) => (
+            <li
+              key={`${i}-${entry.slice(0, 16)}`}
+              className="group flex items-start gap-2 rounded-md px-2 py-2 hover:bg-surface-soft"
+            >
+              <span className="flex-1 whitespace-pre-wrap text-2xs leading-relaxed text-ink-body">
+                {entry}
+              </span>
+              {onDeleteEntry && (
+                <button
+                  type="button"
+                  aria-label={t("common.delete")}
+                  onClick={() => onDeleteEntry(entry)}
+                  className="shrink-0 rounded p-1 text-ink-meta opacity-0 transition group-hover:opacity-100 hover:text-error-text"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /**
  * Manual refresh button. Owns its own spinning state — clicking
  * triggers a 2s spin animation regardless of how fast the parent's
@@ -713,8 +791,9 @@ export function AccordionSection({
         )}
       >
         <div className="overflow-hidden">
-          {/* 内容嵌套白底（无 border，仅顶部圆角，跟外层 surface-soft 形成层次）
-              —— 对齐 frontend/docs/design/app.jsx ContextSection 实现。 */}
+          {/* Nested white content surface (no border, top corners only) —
+              layered over the outer surface-soft for depth. Mirrors the
+              ContextSection in frontend/docs/design/app.jsx. */}
           <div
             className={cn(
               "overflow-hidden rounded-t-xl bg-surface px-3 py-3",
@@ -767,6 +846,9 @@ export const ProjectDetailContextPanel = ({
   fileTree,
   fileTreeTitle,
   fileTreeInTab = false,
+  projectMemory,
+  onMemoryDeleteEntry,
+  onMemoryClear,
   hideProjectContextActions = false,
   rootPath = "",
   onFileClick,
@@ -803,6 +885,9 @@ export const ProjectDetailContextPanel = ({
   // Files section shows whenever the caller provides a fileTree array. Chat
   // projects should pass ``undefined`` to hide the section altogether.
   const showFiles = fileTree !== undefined;
+  // Memory tab shows only when the caller passes project memory (real-project
+  // home panel). Conversation panels / chat projects pass undefined → no tab.
+  const showMemory = projectMemory !== undefined;
   const defaultOpenSection =
     initialOpenSection !== undefined
       ? initialOpenSection
@@ -1762,8 +1847,8 @@ export const ProjectDetailContextPanel = ({
       style={width !== undefined ? { width } : undefined}
     >
       {/* One tab shell everywhere — the assistant conversation has only the
-          "工作区" tab (no project files) but keeps the same line-tab styling
-          for consistency. The "项目文件" tab is added only when files exist. */}
+          "workspace" tab (no project files) but keeps the same line-tab styling
+          for consistency. The "project files" tab is added only when files exist. */}
       <Tabs
         defaultValue="context"
         className="flex h-full min-h-0 flex-col gap-0"
@@ -1781,6 +1866,11 @@ export const ProjectDetailContextPanel = ({
                 {t("project.projectFiles")}
               </TabsTrigger>
             )}
+            {showMemory && (
+              <TabsTrigger value="memory" className="after:!opacity-0">
+                {t("project.projectMemory")}
+              </TabsTrigger>
+            )}
           </TabsList>
         </header>
         <TabsContent value="context" className="min-h-0 overflow-y-auto px-2">
@@ -1792,6 +1882,18 @@ export const ProjectDetailContextPanel = ({
             className="min-h-0 overflow-hidden px-2 pb-2"
           >
             {fileTreePanel}
+          </TabsContent>
+        )}
+        {showMemory && (
+          <TabsContent
+            value="memory"
+            className="min-h-0 overflow-y-auto px-2 pb-2"
+          >
+            <MemoryTab
+              entries={projectMemory ?? []}
+              onDeleteEntry={onMemoryDeleteEntry}
+              onClear={onMemoryClear}
+            />
           </TabsContent>
         )}
       </Tabs>

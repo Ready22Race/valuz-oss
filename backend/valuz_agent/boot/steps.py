@@ -203,6 +203,14 @@ async def init_kernel(app: FastAPI) -> None:
         lead=tuple(by_name[n] for n in dispatch_names if n in by_name) + shared,
     )
 
+    # Wire the background memory extractor to the idle trigger (memory-system-design
+    # §7): once a session goes quiet, review it and write durable memories through
+    # the same MemoryStore pipeline as the foreground tool.
+    from valuz_agent.modules.memory.runner import run_extraction_for_session
+    from valuz_agent.modules.memory.scheduler import idle_scheduler
+
+    idle_scheduler.set_runner(run_extraction_for_session)
+
 
 def install_binding_change_listener() -> None:
     """Wire ``project.bindings.changed`` → docs caps refresh.

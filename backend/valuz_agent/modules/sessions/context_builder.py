@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 
-from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 
@@ -114,33 +113,23 @@ async def _build_additional_context(
             if kb_section:
                 sections.append(kb_section)
 
-        # 3) Memory (memory-system-design §3.4): global core in full +
-        #    project/task index (full bodies on demand via memory_get).
-        #    MVP injects via additional-context (per-turn) rather than the
-        #    frozen system prompt — build_project_system_prompt must stay
-        #    byte-identical to the user-visible instructions_md. Guarded so a
+        # 3) Memory (memory-system-design §8): a frozen snapshot — USER +
+        #    cross-project MEMORY + (in a project) that project's MEMORY,
+        #    captured once per session and reused byte-for-byte (prefix-cache
+        #    friendly). Rides additional-context, not the frozen system prompt,
+        #    so it never pollutes the user-visible instructions_md. Guarded so a
         #    memory lookup never blocks a turn.
         try:
-            from valuz_agent.modules.memory.injection import injection_assembler
+            from valuz_agent.modules.settings.preferences import get_memory_enabled
 
-            mem_parts: list[str] = []
-            g = injection_assembler.global_block()
-            if g.strip():
-                mem_parts.append(g.strip())
-            from valuz_agent.modules.projects.service import project_cwd_by_id
+            if await get_memory_enabled(db):
+                from valuz_agent.modules.memory.injection import injection_assembler
 
-            project_cwd = await project_cwd_by_id(require_current_user_id(), project_id) or ""
-            task_id = None
-            sess = await kernel_client.get_session(require_current_user_id(), session_id)
-            if sess is not None:
-                task_id = ((sess.metadata or {}).get("valuz", {}) or {}).get("task_id")
-            idx = injection_assembler.context_index_block(
-                project_cwd=project_cwd or None, task_id=task_id
-            )
-            if idx.strip():
-                mem_parts.append(idx.strip())
-            if mem_parts:
-                sections.append("\n\n".join(mem_parts))
+                mem_block = injection_assembler.snapshot_for_session(
+                    session_id=session_id, project_id=project_id or None
+                )
+                if mem_block.strip():
+                    sections.append(mem_block.strip())
         except Exception:  # noqa: BLE001 — never block a turn on memory
             logger.debug("memory injection skipped", exc_info=True)
 

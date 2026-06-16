@@ -1,0 +1,90 @@
+"""Memory P2 #6: management API route handler tests."""
+
+# ruff: noqa: I001
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from fastapi import HTTPException
+
+import valuz_agent.boot.kernel  # noqa: F401
+import valuz_agent.api.routes.memory as m
+from valuz_agent.modules.memory import memory_store
+
+
+class _UOW:
+    async def __aenter__(self):  # noqa: ANN204
+        return object()
+
+    async def __aexit__(self, *_a):  # noqa: ANN002, ANN204
+        return False
+
+
+@pytest.fixture
+def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
+    from valuz_agent.infra import fs_registry as fsmod
+
+    monkeypatch.setattr(fsmod.FsRegistry, "data_dir", lambda self: tmp_path / "app")
+    monkeypatch.setattr(m, "async_unit_of_work", lambda *_a, **_k: _UOW())
+
+    state = {"enabled": True, "auto_extract": True}
+
+    async def _ge(_db):  # noqa: ANN001, ANN202
+        return state["enabled"]
+
+    async def _ga(_db):  # noqa: ANN001, ANN202
+        return state["auto_extract"]
+
+    async def _se(_db, v):  # noqa: ANN001, ANN202
+        state["enabled"] = v
+
+    async def _sa(_db, v):  # noqa: ANN001, ANN202
+        state["auto_extract"] = v
+
+    monkeypatch.setattr(m, "get_memory_enabled", _ge)
+    monkeypatch.setattr(m, "get_memory_auto_extract", _ga)
+    monkeypatch.setattr(m, "set_memory_enabled", _se)
+    monkeypatch.setattr(m, "set_memory_auto_extract", _sa)
+    return state
+
+
+def test_get_memory_view(patched):
+    memory_store.add("user", "be terse")
+    memory_store.add("global", "prefers pnpm")
+    memory_store.add("project", "tracks ACME", project_id="p1")
+    view = asyncio.run(m.get_memory(project_id="p1"))
+    assert view.enabled and view.auto_extract
+    assert view.entries["user"] == ["be terse"]
+    assert view.entries["global"] == ["prefers pnpm"]
+    assert view.entries["project"] == ["tracks ACME"]
+    # no project_id -> no project key in the view
+    assert "project" not in asyncio.run(m.get_memory()).entries
+
+
+def test_patch_settings(patched):
+    out = asyncio.run(m.patch_memory_settings(m.MemorySettingsPatch(enabled=False)))
+    assert out.enabled is False and out.auto_extract is True
+    assert patched["enabled"] is False
+
+
+def test_delete_entry(patched):
+    memory_store.add("global", "alpha one")
+    memory_store.add("global", "beta two")
+    view = asyncio.run(
+        m.delete_memory_entry(m.MemoryEntryDelete(target="global", old_text="alpha"))
+    )
+    assert view.entries["global"] == ["beta two"]
+
+
+def test_delete_entry_404(patched):
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(m.delete_memory_entry(m.MemoryEntryDelete(target="global", old_text="nope")))
+    assert ei.value.status_code == 404
+
+
+def test_clear_scope(patched):
+    memory_store.add("global", "x")
+    memory_store.add("global", "y")
+    view = asyncio.run(m.clear_memory_scope(m.MemoryClear(target="global")))
+    assert view.entries["global"] == []

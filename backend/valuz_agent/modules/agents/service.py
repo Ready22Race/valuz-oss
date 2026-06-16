@@ -49,8 +49,8 @@ def _prepare_conversation_tools(agent: AgentConfig) -> AgentConfig:
     re-save the agent (which previously triggered an agent save on every
     "send" — see the conversation bug fix).
 
-    Also declares the always-on **in-process** baseline tools — memory
-    (``memory_get`` / ``memory_write``) and ``submit_skill`` — so every
+    Also declares the always-on **in-process** baseline tools — the
+    ``memory`` tool and ``submit_skill`` — so every
     member/lead agent surfaces them, exactly like conversation sessions. These
     bind via the persisted ``AgentConfig.tools`` (the kernel reads tools off the
     agent, not the session), so they can only live here; the handlers are

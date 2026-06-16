@@ -508,6 +508,98 @@ paths:
                     items:
                       $ref: "#/components/schemas/RuntimeListItem"
 
+  # ── Memory (inspect / prune / toggle the agent memory system) ────────
+
+  /v1/memory:
+    get:
+      summary: View stored memory and the memory toggles
+      operationId: getMemory
+      tags: [memory]
+      description: |
+        Returns the on/off toggles plus current entries per scope: ``user``
+        and cross-project ``global`` always, plus ``project`` when a
+        ``project_id`` is supplied. Drives Settings → Memory and the project
+        Context Panel memory section.
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Memory view
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryView"
+
+  /v1/memory/settings:
+    patch:
+      summary: Toggle the memory system on/off
+      operationId: patchMemorySettings
+      tags: [memory]
+      description: |
+        ``enabled`` is the master switch (injection + background extractor);
+        ``auto_extract`` gates only the background extractor. Only sent keys
+        are updated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemorySettingsPatch"
+      responses:
+        "200":
+          description: Updated toggles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemorySettings"
+
+  /v1/memory/entry:
+    delete:
+      summary: Delete a single memory entry
+      operationId: deleteMemoryEntry
+      tags: [memory]
+      description: |
+        Removes the entry located by a unique substring (``old_text``) in the
+        given ``target``. Returns 404 when no entry matches.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryEntryDelete"
+      responses:
+        "200":
+          description: Memory view after deletion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryView"
+
+  /v1/memory/scope:
+    delete:
+      summary: Clear all entries in a memory scope
+      operationId: clearMemoryScope
+      tags: [memory]
+      description: |
+        Removes every entry in ``target`` (``user`` / ``global`` / ``project``).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryClear"
+      responses:
+        "200":
+          description: Memory view after clearing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryView"
+
   # ── System (backend status & log path discovery) ────────────────────
 
   /v1/system/status:
@@ -2060,6 +2152,45 @@ paths:
 
 components:
   schemas:
+    MemoryTarget:
+      type: string
+      enum: [user, global, project]
+    MemoryView:
+      type: object
+      required: [enabled, auto_extract, entries]
+      properties:
+        enabled: {type: boolean}
+        auto_extract: {type: boolean}
+        entries:
+          type: object
+          additionalProperties:
+            type: array
+            items: {type: string}
+          description: Entries per scope, keyed by target (user / global / project).
+    MemorySettings:
+      type: object
+      required: [enabled, auto_extract]
+      properties:
+        enabled: {type: boolean}
+        auto_extract: {type: boolean}
+    MemorySettingsPatch:
+      type: object
+      properties:
+        enabled: {type: boolean}
+        auto_extract: {type: boolean}
+    MemoryEntryDelete:
+      type: object
+      required: [target, old_text]
+      properties:
+        target: {$ref: "#/components/schemas/MemoryTarget"}
+        old_text: {type: string}
+        project_id: {type: string}
+    MemoryClear:
+      type: object
+      required: [target]
+      properties:
+        target: {$ref: "#/components/schemas/MemoryTarget"}
+        project_id: {type: string}
     RunSummary:
       type: object
       required: [session_id, source_kind, project_id, title, status, updated_at]

@@ -1,56 +1,31 @@
-"""Memory types (memory-system-design §2.2 / §3.1)."""
+"""Memory types (memory-system-design §4)."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Literal
 
-Scope = Literal["global", "project", "task"]
-# Four-way convergence: Claude Code / Hermes / Multica #838 / valuz auto-memory.
-MemType = Literal["user", "feedback", "project", "reference"]
-Source = Literal["auto", "agent", "user"]
+# Three write targets, 1:1 with the three flat §-delimited files (design §3/§4):
+#   user    -> <memories>/USER.md                 (global: who the user is)
+#   global  -> <memories>/MEMORY.md               (global: cross-project notes/lessons)
+#   project -> <memories>/projects/<id>/MEMORY.md (this project)
+Target = Literal["user", "global", "project"]
+TARGETS: tuple[Target, ...] = ("user", "global", "project")
 
-MEM_TYPES: tuple[MemType, ...] = ("user", "feedback", "project", "reference")
+# Who wrote it. "auto" = background extractor; "agent" = foreground tool call;
+# "user" = explicit user-driven write. A tag only — every source goes through the
+# same write pipeline (design §5). Not persisted per-entry in P0 (flat files have
+# no per-entry metadata); used for logging/gating. Per-entry markers arrive in P2.
+Source = Literal["agent", "auto", "user"]
 
-# Index lines must stay short (Claude Code Dreaming rule: index, not dump).
-MAX_DESCRIPTION_CHARS = 150
+# Entry delimiter — a sequence that essentially never appears in prose, so an
+# entry may itself be multi-line (design §3).
+ENTRY_DELIMITER = "\n§\n"
 
+# Hard char limits per target (chars, not tokens — model-independent). Design §4.
+CHAR_LIMITS: dict[Target, int] = {
+    "user": 1500,
+    "global": 2500,
+    "project": 4000,
+}
 
-@dataclass(frozen=True)
-class MemoryScope:
-    """Addresses one scope's storage location.
-
-    - global: ``MemoryScope("global")``
-    - project: ``MemoryScope("project", project_cwd=<abs path>)``
-    - task: ``MemoryScope("task", project_cwd=<abs path>, task_id=<id>)``
-    """
-
-    scope: Scope
-    project_cwd: str | None = None
-    task_id: str | None = None
-
-
-@dataclass(frozen=True)
-class MemoryIndexEntry:
-    """One line of an injected index (name + one-line description)."""
-
-    scope: Scope
-    name: str
-    type: MemType
-    description: str
-
-
-@dataclass(frozen=True)
-class MemoryEntry:
-    """A full memory: frontmatter + body."""
-
-    scope: Scope
-    name: str
-    type: MemType
-    description: str
-    content: str
-    source: Source
-    status: Literal["active", "superseded"] = "active"
-    superseded_by: str | None = None
-    created_at: str = ""
-    updated_at: str = ""
+__all__ = ["Target", "TARGETS", "Source", "ENTRY_DELIMITER", "CHAR_LIMITS"]

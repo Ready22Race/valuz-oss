@@ -939,6 +939,10 @@
     "parseFailed": "解析失败",
     "projectDir": "项目目录",
     "projectFiles": "项目文件",
+    "projectMemory": "项目记忆",
+    "memoryAuto": "自动",
+    "memoryClearConfirm": "确认清空?",
+    "memoryEmpty": "记忆会在对话静默后自动累积",
     "projectName": "项目名称",
     "refDocs": "引用文档",
     "refreshFiles": "刷新文件列表",
@@ -987,6 +991,21 @@
     }
   },
   "settings": {
+    "memory": {
+      "enabledLabel": "启用记忆",
+      "enabledDesc": "总开关:控制记忆注入与后台自动生成",
+      "autoExtractLabel": "后台自动记忆",
+      "autoExtractDesc": "会话静默后自动提炼并保存(会调用模型)",
+      "scopeUser": "关于你",
+      "scopeGlobal": "通用笔记",
+      "empty": "暂无记忆",
+      "clearScope": "清空",
+      "loading": "加载中…",
+      "deleted": "已删除",
+      "cleared": "已清空",
+      "loadFailed": "加载记忆失败",
+      "saveFailed": "操作失败"
+    },
     "onboarding": {
       "title": "新手引导",
       "rerunLabel": "重新运行引导",
@@ -1407,6 +1426,10 @@
       "general": {
         "desc": "外观、快捷键",
         "label": "通用"
+      },
+      "memory": {
+        "desc": "查看与控制记忆",
+        "label": "记忆"
       },
       "shortcuts": {
         "desc": "全局命令与输入",
