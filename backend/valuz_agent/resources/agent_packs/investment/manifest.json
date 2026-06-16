@@ -36,18 +36,8 @@
       "runtime": "claude_agent",
       "model_hint": null,
       "effort": "high",
-      "skills": [
-        "china-sector-overview",
-        "china-competitive-analysis",
-        "china-comps",
-        "china-idea-generation"
-      ],
-      "connectors": [
-        "wind-mcp",
-        "ifind-mcp",
-        "akshare-mcp",
-        "china-news-mcp"
-      ]
+      "skills": [],
+      "connectors": []
     },
     {
       "slug": "inv-model-builder",
@@ -67,17 +57,8 @@
       "runtime": "claude_agent",
       "model_hint": null,
       "effort": "high",
-      "skills": [
-        "china-dcf",
-        "china-3-statement-model",
-        "china-comps",
-        "china-audit-xls"
-      ],
-      "connectors": [
-        "wind-mcp",
-        "ifind-mcp",
-        "akshare-mcp"
-      ]
+      "skills": [],
+      "connectors": []
     },
     {
       "slug": "inv-earnings-tracker",
@@ -97,17 +78,8 @@
       "runtime": "claude_agent",
       "model_hint": null,
       "effort": "high",
-      "skills": [
-        "china-earnings-analysis",
-        "china-earnings-preview",
-        "china-model-update"
-      ],
-      "connectors": [
-        "wind-mcp",
-        "ifind-mcp",
-        "akshare-mcp",
-        "china-news-mcp"
-      ]
+      "skills": [],
+      "connectors": []
     },
     {
       "slug": "inv-report-writer",
@@ -127,203 +99,10 @@
       "runtime": "claude_agent",
       "model_hint": null,
       "effort": "medium",
-      "skills": [
-        "china-initiating-coverage",
-        "china-morning-note",
-        "china-pptx-author"
-      ],
-      "connectors": [
-        "akshare-mcp"
-      ]
+      "skills": [],
+      "connectors": []
     }
   ],
-  "skills": [
-    {
-      "slug": "china-sector-overview",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-competitive-analysis",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-comps",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-idea-generation",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-dcf",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-3-statement-model",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-audit-xls",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-earnings-analysis",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-earnings-preview",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-model-update",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-initiating-coverage",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-morning-note",
-      "source": "bundled"
-    },
-    {
-      "slug": "china-pptx-author",
-      "source": "bundled"
-    }
-  ],
-  "connectors": [
-    {
-      "slug": "wind-mcp",
-      "source": "catalog",
-      "display_name": {
-        "zh-CN": "万得 Wind",
-        "en-US": "Wind"
-      },
-      "description": {
-        "zh-CN": "付费全市场金融数据（A股/港美股/基金/宏观/研报），覆盖最全（Tier-0）。需在后端环境配置 WIND_API_KEY。",
-        "en-US": "Paid full-market financial data (equities, funds, macro, research) — the most complete source. Requires WIND_API_KEY in the backend environment."
-      },
-      "transport": "stdio",
-      "auth_type": "none",
-      "requires_credentials": true,
-      "requires_setup": false,
-      "command": "uv",
-      "args": [
-        "run",
-        "--no-project",
-        "--python",
-        ">=3.10,<3.14",
-        "--with",
-        "mcp>=1.0.0",
-        "--with",
-        "requests>=2.32.4",
-        "--with",
-        "urllib3>=1.26.0",
-        "python",
-        "{mcp_dir}/wind-mcp/server.py",
-        "--transport",
-        "stdio"
-      ],
-      "credentials_help_url": "https://aifinmarket.wind.com.cn/#/home"
-    },
-    {
-      "slug": "ifind-mcp",
-      "source": "catalog",
-      "display_name": {
-        "zh-CN": "同花顺 iFind",
-        "en-US": "iFinD"
-      },
-      "description": {
-        "zh-CN": "付费 A 股行情、财务、事件与公告精确数据（Tier-1）。需在后端环境配置 IFIND_AUTH_TOKEN。",
-        "en-US": "Paid precise A-share quotes, financials, events and filings (Tier-1). Requires IFIND_AUTH_TOKEN in the backend environment."
-      },
-      "transport": "stdio",
-      "auth_type": "none",
-      "requires_credentials": true,
-      "requires_setup": false,
-      "command": "uv",
-      "args": [
-        "run",
-        "--no-project",
-        "--python",
-        ">=3.10,<3.14",
-        "--with",
-        "mcp>=1.0.0",
-        "--with",
-        "requests>=2.28.0",
-        "python",
-        "{mcp_dir}/ifind-mcp/server.py",
-        "--transport",
-        "stdio"
-      ]
-    },
-    {
-      "slug": "akshare-mcp",
-      "source": "catalog",
-      "display_name": {
-        "zh-CN": "AkShare 金融数据",
-        "en-US": "AkShare"
-      },
-      "description": {
-        "zh-CN": "免费 A 股行情、财报、行业与指数数据，投研团队的开箱兜底数据源（Tier-2）",
-        "en-US": "Free A-share quotes, financials, sector and index data — the out-of-box fallback for the research team"
-      },
-      "transport": "stdio",
-      "auth_type": "none",
-      "requires_credentials": false,
-      "requires_setup": false,
-      "command": "uv",
-      "args": [
-        "run",
-        "--no-project",
-        "--python",
-        ">=3.10,<3.14",
-        "--with",
-        "mcp>=1.0.0",
-        "--with",
-        "akshare>=1.14.0",
-        "--with",
-        "pandas>=1.5.0",
-        "python",
-        "{mcp_dir}/akshare-mcp/server.py",
-        "--transport",
-        "stdio"
-      ]
-    },
-    {
-      "slug": "china-news-mcp",
-      "source": "catalog",
-      "display_name": {
-        "zh-CN": "财经新闻",
-        "en-US": "China Financial News"
-      },
-      "description": {
-        "zh-CN": "免费财联社、东方财富与交易所公告检索，提供舆情与公告语境（Tier-3）",
-        "en-US": "Free financial news and exchange-filing search (CLS, EastMoney) for sentiment and announcement context"
-      },
-      "transport": "stdio",
-      "auth_type": "none",
-      "requires_credentials": false,
-      "requires_setup": false,
-      "command": "uv",
-      "args": [
-        "run",
-        "--no-project",
-        "--python",
-        ">=3.10,<3.14",
-        "--with",
-        "mcp>=1.0.0",
-        "--with",
-        "akshare>=1.14.0",
-        "--with",
-        "requests>=2.28.0",
-        "--with",
-        "lxml>=4.9.0",
-        "python",
-        "{mcp_dir}/china-news-mcp/server.py",
-        "--transport",
-        "stdio"
-      ]
-    }
-  ]
+  "skills": [],
+  "connectors": []
 }
