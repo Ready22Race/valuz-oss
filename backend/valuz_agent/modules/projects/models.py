@@ -13,11 +13,15 @@ class ProjectRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     root_path: Mapped[str | None] = mapped_column(Text)
     icon: Mapped[str | None] = mapped_column(String(16))
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
-    # Context fields — formerly the 1:1 ``valuz_workspace_context`` table,
-    # folded into the main row. ``instructions_md`` is the user-authored
-    # prompt source; ``memory_summary``/``memory_version`` carry the
-    # background-accumulated memory with optimistic-lock versioning.
+    # ``instructions_md`` (formerly the 1:1 ``valuz_workspace_context`` table,
+    # folded into the main row) is the user-authored prompt source.
     instructions_md: Mapped[str | None] = mapped_column(Text)
+    # DEPRECATED / inert: the early single-blob project memory. Superseded by the
+    # file-based project memory at ``~/.valuz/memories/projects/<id>/`` (see
+    # modules/memory). Nothing reads or writes these anymore; they are kept only
+    # because the host's 0-migration baseline policy (boot/schema.py) makes a
+    # physical column drop a full host-table reset — they drop for free at the
+    # next baseline regen.
     memory_summary: Mapped[str | None] = mapped_column(Text)
     memory_version: Mapped[int] = mapped_column(Integer, default=0)
 

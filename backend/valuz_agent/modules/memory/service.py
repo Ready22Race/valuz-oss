@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
 from pathlib import Path
@@ -121,6 +122,14 @@ class MemoryStore:
             path = self._path_for(target, project_id)
             if path.exists():
                 path.unlink()
+
+    def drop_project(self, project_id: str) -> None:
+        """Source-driven forgetting (design §11): remove a project's whole memory
+        directory when the project is deleted. Idempotent / best-effort. The dir
+        is Valuz-owned and centralized (never the user's bound repo), so it is
+        always safe to delete."""
+        with self._lock:
+            shutil.rmtree(self._fs.memory_dir("project", project_id=project_id), ignore_errors=True)
 
     @staticmethod
     def _char_count(entries: list[str]) -> int:

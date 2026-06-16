@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +17,8 @@ from valuz_agent.modules.projects.models import ProjectRow
 from valuz_agent.modules.sessions import project_index
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.skills.datastore import SkillDatastore
+
+logger = logging.getLogger(__name__)
 
 # Kernel V5+1aae940 collapses ``permission_mode`` to a 3-value enum;
 # every legacy value (set on dev DBs by the previous host code) maps to
@@ -62,7 +65,6 @@ class ProjectListItem:
 @dataclass
 class ProjectDetail(ProjectListItem):
     instructions_md: str | None = None
-    memory_summary: str | None = None
 
 
 @dataclass
@@ -96,7 +98,6 @@ def _row_to_list_item(row: ProjectRow, cwd: str | None = None) -> ProjectListIte
 def _row_to_detail(
     row: ProjectRow,
     instructions_md: str | None = None,
-    memory_summary: str | None = None,
     cwd: str | None = None,
 ) -> ProjectDetail:
     return ProjectDetail(
@@ -106,7 +107,6 @@ def _row_to_detail(
         root_path=row.root_path,
         icon=row.icon,
         instructions_md=instructions_md,
-        memory_summary=memory_summary,
         cwd=cwd,
     )
 
@@ -197,7 +197,6 @@ class ProjectService:
                 return _row_to_detail(
                     row,
                     instructions_md=row.instructions_md,
-                    memory_summary=row.memory_summary,
                     cwd=self.resolve_project_cwd(row),
                 )
         row = await self._ds.get_by_id(user_id, project_id)
@@ -206,7 +205,6 @@ class ProjectService:
         return _row_to_detail(
             row,
             instructions_md=row.instructions_md,
-            memory_summary=row.memory_summary,
             cwd=self.resolve_project_cwd(row),
         )
 
@@ -260,22 +258,6 @@ class ProjectService:
         # Pure filesystem write (.claude/project-config.json) — stays sync.
         self._connectors.set_project_connectors(row, slugs)
 
-    async def update_memory(
-        self,
-        user_id: str,
-        project_id: str,
-        summary: str | None,
-        expected_version: int,
-    ) -> None:
-        row = await self._ds.get_by_id(user_id, project_id)
-        if not row:
-            raise KeyError(project_id)
-        if row.memory_version != expected_version:
-            raise ValueError("PROJECT_MEMORY_VERSION_CONFLICT")
-        row.memory_summary = summary
-        row.memory_version = expected_version + 1
-        await self._ds.update(row)
-
     async def preview_delete(self, user_id: str, project_id: str) -> ProjectDeletePreview:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
@@ -328,6 +310,15 @@ class ProjectService:
         if self._skills:
             await self._skills.set_project_skills(user_id, project_id, [])
         await self._ds.delete(user_id, project_id)
+        # Source-driven forgetting (memory-system-design §11): a deleted project's
+        # centralized memory dir is Valuz-owned (never the user's bound repo), so
+        # it's safe to remove. Best-effort — never fail the delete on cleanup.
+        try:
+            from valuz_agent.modules.memory.service import memory_store
+
+            memory_store.drop_project(project_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("project memory cleanup skipped for %s", project_id, exc_info=True)
 
     # ------------------------------------------------------------------
     # Kernel mirror — every valuz project must back a V5 kernel Project +
