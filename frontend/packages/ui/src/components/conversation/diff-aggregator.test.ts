@@ -230,6 +230,119 @@ describe("aggregateTurnFileChanges", () => {
     expect(summary.changes[0]!.unified_diff).toContain("+after");
   });
 
+  it("should render a Codex apply_patch 'add' as an all-additions new file", () => {
+    const turn = makeTurn([
+      {
+        kind: "tool",
+        tool: makeTool({
+          title: "apply_patch",
+          input: JSON.stringify({
+            changes: [
+              {
+                diff: "line1\nline2\nline3",
+                path: "/repo/added.md",
+                kind: { type: "add" },
+              },
+            ],
+          }),
+        }),
+      },
+    ]);
+    const summary = aggregateTurnFileChanges(turn)!;
+    expect(summary.changes).toHaveLength(1);
+    expect(summary.changes[0]!.file_path).toBe("/repo/added.md");
+    expect(summary.changes[0]!.additions).toBe(3);
+    expect(summary.changes[0]!.deletions).toBe(0);
+    expect(summary.changes[0]!.unified_diff).toContain("+line1");
+  });
+
+  it("should use a Codex apply_patch 'update' unified diff verbatim", () => {
+    const diff = "@@ -1,2 +1,3 @@\n context\n+added row\n more context";
+    const turn = makeTurn([
+      {
+        kind: "tool",
+        tool: makeTool({
+          title: "apply_patch",
+          input: JSON.stringify({
+            changes: [
+              { diff, path: "/repo/index.md", kind: { type: "update" } },
+            ],
+          }),
+        }),
+      },
+    ]);
+    const summary = aggregateTurnFileChanges(turn)!;
+    expect(summary.changes).toHaveLength(1);
+    expect(summary.changes[0]!.file_path).toBe("/repo/index.md");
+    // Counted from the unified-diff prefixes, not re-derived.
+    expect(summary.changes[0]!.additions).toBe(1);
+    expect(summary.changes[0]!.deletions).toBe(0);
+    expect(summary.changes[0]!.unified_diff).toBe(diff);
+  });
+
+  it("should split a multi-file apply_patch call into one row per file", () => {
+    const turn = makeTurn([
+      {
+        kind: "tool",
+        tool: makeTool({
+          title: "apply_patch",
+          input: JSON.stringify({
+            changes: [
+              {
+                diff: "new content",
+                path: "/repo/a.md",
+                kind: { type: "add" },
+              },
+              {
+                diff: "@@ -1 +1,2 @@\n keep\n+extra",
+                path: "/repo/b.md",
+                kind: { type: "update", move_path: null },
+              },
+            ],
+          }),
+        }),
+      },
+    ]);
+    const summary = aggregateTurnFileChanges(turn)!;
+    expect(summary.changes.map((c) => c.file_path)).toEqual([
+      "/repo/a.md",
+      "/repo/b.md",
+    ]);
+    expect(summary.total_additions).toBe(2);
+  });
+
+  it("should propagate has_error from a failed apply_patch call", () => {
+    const turn = makeTurn([
+      {
+        kind: "tool",
+        tool: makeTool({
+          title: "apply_patch",
+          status: "error",
+          input: JSON.stringify({
+            changes: [
+              { diff: "x", path: "/repo/c.md", kind: { type: "add" } },
+            ],
+          }),
+        }),
+      },
+    ]);
+    const summary = aggregateTurnFileChanges(turn)!;
+    expect(summary.changes[0]!.has_error).toBe(true);
+  });
+
+  it("should skip an apply_patch call whose changes are malformed", () => {
+    const turn = makeTurn([
+      {
+        kind: "tool",
+        tool: makeTool({
+          title: "apply_patch",
+          input: JSON.stringify({ changes: "not-an-array" }),
+        }),
+      },
+    ]);
+    expect(aggregateTurnFileChanges(turn)).toBeNull();
+  });
+
   it("should preserve first-seen file order across mixed tools", () => {
     const turn = makeTurn([
       {
