@@ -21,9 +21,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.infra.local_identity import resolve_local_user_id
 from valuz_agent.modules.agents.seed import seed_official_agents
-from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.seeds.providers import seed_builtin_providers
 
 
@@ -35,8 +33,17 @@ async def seed_all(db: AsyncSession) -> None:
     are NOT seeded — they enter the library only when the user picks a team in
     onboarding (created on deploy) or creates their own. So a user who skips
     onboarding sees just the default assistant, not a wall of roles.
+
+    Built-in **model providers** are NOT seeded. OSS's contract is that you
+    configure a model channel (via onboarding / Settings → Models) before use,
+    so a fresh install legitimately starts with zero provider rows — the keyless
+    default this used to seed only masked that contract (and, under a multi-user
+    overlay, bred rows owned by a never-authenticating id plus a well-known-id
+    primary-key collision). Built-ins are surfaced as virtual templates and
+    materialized on configure (see ``modules.providers.service.list_providers``).
+    ``seed_builtin_providers`` is retained for the admin reset path
+    (``reset_providers`` / the ``reset-providers`` CLI).
     """
-    await seed_builtin_providers(resolve_local_user_id(), ProviderDatastore(db))
     await seed_official_agents(db)
 
 

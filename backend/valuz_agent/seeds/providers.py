@@ -70,9 +70,7 @@ def _row_for(entry: ProviderSeedEntry) -> ProviderRow:
     if auth_type == "oauth":
         model_ids = None
     else:
-        model_ids = (
-            json.dumps(list(descriptor.model_options)) if descriptor.model_options else None
-        )
+        model_ids = json.dumps(list(descriptor.model_options)) if descriptor.model_options else None
 
     return ProviderRow(
         id=entry.id,
@@ -93,7 +91,14 @@ def _row_for(entry: ProviderSeedEntry) -> ProviderRow:
 
 
 async def seed_builtin_providers(user_id: str, ds: ProviderDatastore) -> None:
-    """Insert any missing built-in provider rows. Safe to re-run."""
+    """Insert any missing built-in provider rows. Safe to re-run.
+
+    NOT called at boot — built-ins are surfaced as virtual templates and
+    materialized on configure (see ``modules.providers.service.list_providers``);
+    a fresh install starts with zero provider rows. Retained for the admin reset
+    path (``reset_providers`` / the ``reset-providers`` CLI), which deliberately
+    repopulates the well-known built-in rows for a single owner on demand.
+    """
     seed = load_provider_seeds()
     existing_ids = {r.id for r in await ds.list_providers(user_id)}
     inserted = 0

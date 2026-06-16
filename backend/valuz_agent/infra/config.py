@@ -84,6 +84,15 @@ class Settings(BaseSettings):
     # ``VALUZ_MAX_SESSION_ATTACHMENTS``.
     max_session_attachments: int = 20
 
+    # Whether CLI-subscription model channels (Claude Pro·Max via ``claude
+    # /login``, Codex via ``codex /login``) are offered. These authenticate
+    # out-of-band against a **local** CLI keychain, so they only make sense
+    # where that keychain exists — the desktop app and local/LAN headless runs.
+    # A shared multi-user server (no per-user CLI keychain) sets this False so
+    # the subscription templates are not surfaced in the providers list.
+    # Override with ``VALUZ_SUBSCRIPTION_LOGIN_ENABLED``.
+    subscription_login_enabled: bool = True
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / self.db_filename
