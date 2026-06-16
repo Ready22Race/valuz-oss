@@ -29,6 +29,11 @@ class BudgetStatus:
     allowed: bool
     remaining_credits: float | None = None
     reason: str | None = None
+    # Optional i18n key + params an overlay can attach so the client renders a
+    # localized message (e.g. a billing rejection) instead of the raw ``reason``.
+    # OSS leaves these None; the default Noop provider never sets them.
+    message_key: str | None = None
+    message_params: dict[str, Any] | None = None
 
 
 @dataclass

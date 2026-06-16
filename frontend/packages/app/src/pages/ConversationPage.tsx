@@ -26,6 +26,7 @@ import {
   Trash2,
 } from "lucide-react";
 import {
+  ApiError,
   sessionsApi,
   agentsApi,
   connectorsApi,
@@ -2786,8 +2787,18 @@ export const ConversationPage = () => {
       );
       setSelectedSessionId(detail.id);
     } catch (cause) {
+      // The backend may attach an i18n key to a business error (structured
+      // ``detail.key``) and let the client render it — e.g. a commercial
+      // billing rejection. Prefer that key; otherwise show the raw message.
       const msg =
-        cause instanceof Error ? cause.message : "Failed to send message.";
+        cause instanceof ApiError && cause.i18nKey
+          ? _t(
+              cause.i18nKey as Parameters<typeof _t>[0],
+              cause.i18nParams as Parameters<typeof _t>[1],
+            )
+          : cause instanceof Error
+            ? cause.message
+            : "Failed to send message.";
       setError(msg);
       toast.error(msg);
       setSending(false);
