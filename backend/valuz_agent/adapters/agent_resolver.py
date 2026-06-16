@@ -532,13 +532,19 @@ async def _resolve_agent_provider(
             runtime_provider=agent.runtime_provider,
         )
         if resolved is None:
-            logger.warning(
-                "agent_resolver: resolve_model_provider returned None for "
-                "agent %s provider_id=%s model=%s — provider row may be "
-                "missing, disabled, or its credential source unresolved.",
-                agent.id,
+            # The ONLY non-raising None path in ``resolve_model_provider`` is an
+            # OAuth subscription provider (``auth_type="oauth"`` — codex/claude
+            # ``/login``): there is no API key to forward because credentials
+            # live in the CLI's keychain, so the kernel skips env overrides and
+            # the spawned process uses the ambient login token. This is the
+            # healthy, expected path — every genuine failure (row missing /
+            # disabled / no credentials) raises ``ProviderNotResolvable`` and is
+            # handled in the ``except`` below. Debug breadcrumb only, not a warning.
+            logger.debug(
+                "agent_resolver: provider %s for agent %s is an OAuth subscription "
+                "(no env override; CLI supplies the credential out-of-band).",
                 provider_id,
-                model,
+                agent.id,
             )
         return resolved
     except Exception:
