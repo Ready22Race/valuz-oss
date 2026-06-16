@@ -39,6 +39,7 @@ from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.infra.lifecycle import is_draining
 
 logger = logging.getLogger(__name__)
 
@@ -204,23 +205,30 @@ async def run_session_to_idle(
     # failure durable: ``_finalize_session`` appends a ``session_error`` event in
     # the same call so the reason survives reload (the ``emit_live_event`` above
     # is live-only and is missed by any client not connected at failure time).
-    try:
-        from valuz_agent.adapters.kernel_client import KernelUnavailableError
-        from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
-
+    if is_draining():
+        # App shutting down — leave the session ``running`` for boot recovery
+        # rather than racing the kernel-store teardown. (The ``KernelUnavailable``
+        # catch below is the belt-and-suspenders for a finalize already in
+        # flight when draining flips.)
+        logger.debug("run_session_to_idle: draining, skipping finalize for %s", session_id)
+    else:
         try:
-            await _finalize_session(session_id, content, final_status, error=turn_error)
-        except KernelUnavailableError:
-            # Backend shutting down — kernel store already torn down. Finalize
-            # is pointless; boot recovery reconciles this session. Skip quietly
-            # rather than logging a shutdown-race traceback.
-            logger.debug(
-                "run_session_to_idle: kernel unavailable (shutdown), skipping "
-                "finalize for %s",
-                session_id,
-            )
-    except Exception:  # noqa: BLE001
-        logger.exception("run_session_to_idle: finalize failed for session %s", session_id)
+            from valuz_agent.adapters.kernel_client import KernelUnavailableError
+            from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
+
+            try:
+                await _finalize_session(session_id, content, final_status, error=turn_error)
+            except KernelUnavailableError:
+                # Backend shutting down — kernel store already torn down. Finalize
+                # is pointless; boot recovery reconciles this session. Skip quietly
+                # rather than logging a shutdown-race traceback.
+                logger.debug(
+                    "run_session_to_idle: kernel unavailable (shutdown), skipping "
+                    "finalize for %s",
+                    session_id,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("run_session_to_idle: finalize failed for session %s", session_id)
 
     # Mark attachments consumed
     if consumed_attachment_ids:
@@ -439,6 +447,13 @@ class ActorRunner:
         exited_on_shutdown = False
         try:
             while True:
+                # App is shutting down — do NOT start a new turn (it would spawn
+                # a runtime against a process being torn down, e.g. a fresh codex
+                # turn that immediately hits a dead pipe). Break and let the
+                # ``finally`` leave the session for boot recovery.
+                if is_draining():
+                    exited_on_shutdown = True
+                    break
                 final_status = await host._run_turn_with_sink(session_id, prompt)
                 turns += 1
 
@@ -501,15 +516,23 @@ class ActorRunner:
                     prompt = msg.text
         finally:
             mailbox_registry.unregister(session_id)
-            await host._finalize_actor(
-                session_id=session_id,
-                last_content=prompt,
-                final_status=final_status,
-                role=role,
-                task_id=task_id,
-                project_id=project_id,
-                via_shutdown=exited_on_shutdown,
-            )
+            # When draining, skip the ENTIRE finalize. ``_finalize_actor`` touches
+            # the kernel store (status flip) AND the host DB (lead auto-finalize /
+            # member run record), both being torn down right now; running it spams
+            # errors and would mark the task/member terminal — the opposite of what
+            # boot recovery wants. Leave the session ``running`` / the task
+            # ``active``; recovery resumes it. (A plain ``if`` — never ``return``
+            # from a ``finally``, which would swallow a propagating CancelledError.)
+            if not is_draining():
+                await host._finalize_actor(
+                    session_id=session_id,
+                    last_content=prompt,
+                    final_status=final_status,
+                    role=role,
+                    task_id=task_id,
+                    project_id=project_id,
+                    via_shutdown=exited_on_shutdown,
+                )
 
     @staticmethod
     def _format_member_done(msg: Any) -> str:

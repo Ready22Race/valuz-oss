@@ -39,6 +39,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
 
     # ── shutdown（逆序拆解）──
+    # FIRST, before tearing anything down: flip the draining flag so the
+    # long-lived task actor loops stop starting new turns and skip their
+    # finalize. They then leave in-flight sessions ``running`` for boot recovery
+    # to resume — instead of racing the kernel-store / host-DB teardown below
+    # (which otherwise spams "Dependencies not initialized" at every restart).
+    from valuz_agent.infra.lifecycle import set_draining
+
+    set_draining()
     await steps.stop_decision_aggregator(app)
     await steps.stop_automation_runner(app)
     steps.shutdown_parse_pool()
