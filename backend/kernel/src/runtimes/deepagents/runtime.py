@@ -38,7 +38,6 @@ from deepagents import SubAgent, create_deep_agent
 from deepagents.backends import LocalShellBackend
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
-
 from src.core.agent_config import AgentConfig, SubAgentDef
 from src.core.approval_rule_matcher import ExactArgsRuleMatcher, RuntimeApprovalRuleMatcher
 from src.core.events import AVAILABLE_DECISIONS_EDITABLE_WITH_SESSION, Event, EventSink
@@ -60,6 +59,7 @@ from src.runtimes.deepagents.approval_bridge import (
     _classify_subject,
 )
 from src.runtimes.deepagents.middleware import ToolErrorTolerantMiddleware
+from src.runtimes.interruption import is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
@@ -420,14 +420,24 @@ class DeepAgentsRuntime:
             )
         except Exception as exc:
             session.status = "idle"
-            session.stop_reason = Error(
-                category="execution_error",
-                retry_status="exhausted",
-                message=str(exc),
-            )
-            await self.event_sink.emit(Event(type="session_error", data={"message": str(exc)}))
-            if self.config.hooks:
-                await self.config.hooks.fire("on_error", error=exc, session_id=session.id)
+            if is_runtime_interruption(exc):
+                # Graceful host stop tore down the runtime subprocess mid-turn —
+                # resumable ``interrupted``, not a task failure (see codex
+                # runtime for the full rationale). Suppress session_error.
+                session.stop_reason = Error(
+                    category="interrupted",
+                    retry_status="terminal",
+                    message="runtime process interrupted",
+                )
+            else:
+                session.stop_reason = Error(
+                    category="execution_error",
+                    retry_status="exhausted",
+                    message=str(exc),
+                )
+                await self.event_sink.emit(Event(type="session_error", data={"message": str(exc)}))
+                if self.config.hooks:
+                    await self.config.hooks.fire("on_error", error=exc, session_id=session.id)
         finally:
             self._active_task = None
             await self.event_sink.emit(

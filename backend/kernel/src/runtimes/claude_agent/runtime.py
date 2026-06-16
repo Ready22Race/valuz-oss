@@ -100,6 +100,7 @@ from src.runtimes.claude_agent.approval_bridge import (
     _build_pending_payload,
     _classify_subject,
 )
+from src.runtimes.interruption import is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
@@ -555,6 +556,20 @@ class ClaudeAgentRuntime:
                     retry_status="terminal",
                     message="cancelled",
                 )
+            elif is_runtime_interruption(exc):
+                # Graceful host stop tore down the claude CLI subprocess
+                # mid-turn ("closed stdout" / broken pipe). This is NOT a
+                # task failure: leave it resumable (``interrupted``) so boot
+                # recovery re-drives the turn — the same outcome a hard kill
+                # gets via ``scan_orphan_runs`` — and suppress the scary
+                # session_error + the on_error hook. Drop buffered stderr so a
+                # resumed turn starts fresh.
+                session.stop_reason = Error(
+                    category="interrupted",
+                    retry_status="terminal",
+                    message="runtime process interrupted",
+                )
+                self._stderr_buffer.clear()
             else:
                 # B2a (`docs/design/cross-runtime-approval-contract.md`
                 # §11 R3): for ``auto_review`` sessions, the most common

@@ -90,9 +90,14 @@ def classify_member(status: str | None, stop_reason: Any) -> Disposition:
     if typ == "end_turn":
         return "completed"  # normal terminal turn
     if typ == "error":
-        # host_restart = interrupted mid-flight by a crash → resumable;
-        # any other error = a real execution failure.
-        return "resume" if sr.get("category") == "host_restart" else "failed"
+        # Interrupted mid-flight → resumable. Two ways a turn loses its
+        # process without it being a task failure:
+        #   * host_restart — a hard kill left the row ``running``;
+        #     ``scan_orphan_runs`` flipped it at boot.
+        #   * interrupted — a graceful host stop tore down the runtime
+        #     subprocess and the runtime stamped it resumable itself.
+        # Any other error = a real execution failure.
+        return "resume" if sr.get("category") in ("host_restart", "interrupted") else "failed"
     # idle with no / unknown stop_reason → conservatively resumable.
     return "resume"
 
