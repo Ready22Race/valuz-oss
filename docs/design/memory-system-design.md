@@ -15,7 +15,7 @@
 - scope 是 global/project/task 三层,task 层与任务 Plan DAG 重复。
 - 项目记忆写进 `<project_cwd>/.valuz/memory/` —— 对绑定的外部文件夹型项目,会污染**用户自己的仓库**。
 
-**结论:按"重写"处理**,复用其正确的内部件(原子写、frontmatter→改为 `¶` 平铺、威胁扫描、单写锁),换掉 API 面、scope 模型与存储位置。本文即重写后的目标设计。
+**结论:按"重写"处理**,复用其正确的内部件(原子写、frontmatter→改为 `§` 平铺、威胁扫描、单写锁),换掉 API 面、scope 模型与存储位置。本文即重写后的目标设计。
 
 ---
 
@@ -47,6 +47,7 @@
 - **跨项目的情况怎么办?** 正是 **global** 的职责(用户身份/偏好/通用教训)。global 不被砍,而是专管跨项目。
 - **为什么砍 task?** 任务的工作态已在 **Plan DAG** 里结构化持久化;任务里真正有价值的学习("这种拆解有效""member X 擅长 Y")应当 **graduate 到 project**,而非留在随任务消亡的 task 目录。task 是最弱的一层。
 - **member 子run 与 lead 共享同一份 project 记忆**(它们在同一项目内),不另设隔离。
+- **project 的自动抽取仅对真实项目(`kind="project"`)**:quick-chat 临时项目(`kind="chat"`,每次新对话自动建,无名无 instructions)只写 user+global —— 给每个临时项目写 project 记忆只会把它碎片化。抽取时把**项目名 + instructions** 注入 review prompt,让 reviewer 能识别并路由项目级事实(见 §7.2)。
 
 可见性级联:
 
@@ -70,16 +71,16 @@
 
 - **global 不另设子目录**:`memories/` 根本身即 global 命名空间,`USER.md` / `MEMORY.md` 直接放根(再套 `global/` 是冗余)。`projects/` 是唯一子目录。
 - **集中、按稳定 `project-id` 键**,与 `project.cwd` 解耦 —— **绝不写进用户绑定的外部仓库**;统一备份/清空/审计。
-- 每个文件是 **`\n¶\n` 平铺的自然语言条目列表**,无 per-topic 文件、无 per-entry frontmatter、无单独索引(全量注入,不需要索引)。条目可多行。按**确切文件名**寻址(不 glob),所以根目录混放全局文件与 `projects/` 容器无碍。
+- 每个文件是 **`\n§\n` 平铺的自然语言条目列表**,无 per-topic 文件、无 per-entry frontmatter、无单独索引(全量注入,不需要索引)。条目可多行。按**确切文件名**寻址(不 glob),所以根目录混放全局文件与 `projects/` 容器无碍。
 - `FsRegistry` 改动:`memory_dir(scope, *, project_id=None)` —— global→`data_dir/memories/`(根);project→`data_dir/memories/projects/<project_id>/`;删除 task 分支与 `project_cwd` 入参。
 
 文件示例(`projects/<id>/MEMORY.md`):
 
 ```
 本项目跟踪公司 ACME 的季度财报与电话会;产出语言=中文,口径=投资人
-¶
+§
 方向决策:优先用一手财报数据,二手研报仅作交叉验证(用户 2026-06 确认)
-¶
+§
 多智能体教训:"先拆数据采集再拆分析"的计划比一次性大拆更少返工
 ```
 
@@ -173,9 +174,10 @@ Valuz 已有**四个其它持久层**,memory 必须靠"不和它们重复"来定
 
 - **LLM 调用 = 临时 kernel 会话**:host 经 `kernel_client.create_session` + `run_turn` 跑一个**无工具、一次性**的回顾会话(克隆源会话已解析的 runtime/provider/model,换上 curator 指令、清空 tools/skills/mcp),读 `assistant_message` 拿 JSON。
   - 选它而非 host 直连单发:**复用既有 provider/model 解析**,对所有渠道类型(自带 Key / OAuth 订阅 / 系统渠道)开箱即用、零重复、真正 runtime 中立;代价是每次抽取多一个一次性会话(可接受 —— 受 idle 去抖节流)。
+  - **OAuth/订阅渠道**(Codex/Claude 登录)无静态 api_key:`resolve_model_provider` 返回 None 是**正常**的,此时以 `model_provider=None` 建会话、由 runtime 自鉴权(与源会话一致);仅自带 Key 渠道带具体 key。
 - **核心是纯函数**:prompt 构建 / JSON 解析 / 脱敏 / scope 路由 / 应用都在 `extraction.py`(可独立单测),临时会话只是注入的 `complete` 实现(`MemoryExtractor(complete=…)`)。
 - **应用**:host 把每个 op 过 §5 的同一条写入流水线,`source="auto"`。回顾会话无工具 → **无需 sandbox**;且标记 ephemeral/不抽取以**防递归**(回顾会话经 `run_turn` 直跑、不走 idle 落点,本就不会自触发)。
-- **scope 路由**:`project` 仅当源会话绑定项目时允许;否则只写 user/global。
+- **scope 路由**:`project` 仅对**真实项目(`kind="project"`)**开放;quick-chat 临时项目(`kind="chat"`)只写 user/global。对真实项目,把**项目名 + instructions** 作为 `<project>` 块注入 review prompt,并给出三向路由指引(user=跨项目偏好;global=跨项目教训;project=本项目专属事实/决策/进展),让 reviewer 能正确产出 project 记忆。
 - **顺带合并**:reviewer 看得到当前各 target 内容,逼近上限时先 `replace`/`remove` 合并再 `add` —— 有界与合并是 reviewer 本职,无需单独 pass。
 - **双向脱敏**(§9):送 transcript 前 + op 落盘前各抹一次密钥。
 - **best-effort**:后台 asyncio、失败吞掉,绝不阻塞 turn。
@@ -263,7 +265,7 @@ Valuz 已有**四个其它持久层**,memory 必须靠"不和它们重复"来定
 
 | 期 | 内容 | 价值 |
 |---|---|---|
-| **P0**(重写地基) | `¶`-平铺三文件 + 单 `memory` 工具(add/replace/remove,子串,无 read)+ 共用写入流水线 + 威胁扫描 + **加载时净化** + FsRegistry 集中路径 + 冻结快照注入(捕获一次)+ 有界上限与溢出 error + 测试 | 读写注入闭环、可靠 |
+| **P0**(重写地基) | `§`-平铺三文件 + 单 `memory` 工具(add/replace/remove,子串,无 read)+ 共用写入流水线 + 威胁扫描 + **加载时净化** + FsRegistry 集中路径 + 冻结快照注入(捕获一次)+ 有界上限与溢出 error + 测试 | 读写注入闭环、可靠 |
 | **P1** ★ | **后台抽取引擎**:无工具 LLM(provider 接缝)→ 结构化 op → 共用流水线(source=auto);触发(nudge + session-end + 任务 finish);scope 路由;双向脱敏;抽取器内合并;限流闸。save/skip 规则注入工具 desc + review prompt | **兑现"项目记忆自动累积"的产品承诺** |
 | **P2** | 反馈/老化(轻量 per-entry 标记 + 使用计数)、哈希清单 drift、审批门 + pending、GUI 面(设置 + 项目 Context Panel) | 生命周期完整、可控 |
 | **P3**(可选) | 渐进披露(索引 + read/search 工具,当某 scope 真的很大);语义召回 provider(additive ≤1);多租户 per-user global(商业版);global 核心移入冻结系统提示 | 规模/质量 |
@@ -305,6 +307,6 @@ Valuz 已有**四个其它持久层**,memory 必须靠"不和它们重复"来定
 ## 附:与当前代码的差异(实现时执行)
 
 - 删 `memory_get` 工具与 progressive-disclosure;改为单 `memory`(add/replace/remove)+ 全量注入。
-- 存储:per-topic 文件 + frontmatter 索引 → **`¶` 平铺三文件**;`<project_cwd>/.valuz/memory/` → **`data_dir/memories/`(集中 + project_id 键)**;删 task。
+- 存储:per-topic 文件 + frontmatter 索引 → **`§` 平铺三文件**;`<project_cwd>/.valuz/memory/` → **`data_dir/memories/`(集中 + project_id 键)**;删 task。
 - 新增 `modules/memory/extraction.py`(P1 主体)。
 - 修掉代码中对 `docs/exec-plans/active/memory-system-design.md` 与 `memory-system-design §X.Y` 的悬空引用 → 指向本文 `docs/design/memory-system-design.md`。
