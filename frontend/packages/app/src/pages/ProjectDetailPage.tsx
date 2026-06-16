@@ -565,6 +565,14 @@ export const ProjectDetailPage = () => {
     null,
   );
   const [memberDeleteBusy, setMemberDeleteBusy] = useState(false);
+  // Scheduled-task / conversation deletion — confirmed via the unified
+  // DeleteConfirmDialog instead of the browser's native window.confirm.
+  const [pendingDelete, setPendingDelete] = useState<{
+    kind: "task" | "session";
+    id: string;
+    name: string;
+  } | null>(null);
+  const [pendingDeleteBusy, setPendingDeleteBusy] = useState(false);
   // Project conversations bind to one of the project's configured agents
   // (instead of a raw model). This is the picker for the next session.
   const [selectedAgentSlug, setSelectedAgentSlug] = useState<string | null>(
@@ -1046,23 +1054,11 @@ export const ProjectDetailPage = () => {
   );
 
   const handleDeleteScheduledTask = useCallback(
-    async (taskId: string) => {
+    (taskId: string) => {
       const task = scheduledTasks.find((it) => it.automation_id === taskId);
-      const confirmed = window.confirm(
-        t("cron.confirmDeleteTaskDesc" as Parameters<typeof t>[0], {
-          name: task?.name ?? "",
-        }),
-      );
-      if (!confirmed) return;
-      try {
-        await automationsApi.delete(taskId);
-        toast.success(t("common.deleted" as Parameters<typeof t>[0]));
-        await reloadScheduledTasks();
-      } catch {
-        toast.error(t("common.deleteFailed" as Parameters<typeof t>[0]));
-      }
+      setPendingDelete({ kind: "task", id: taskId, name: task?.name ?? "" });
     },
-    [reloadScheduledTasks, scheduledTasks],
+    [scheduledTasks],
   );
 
   const handleOpenInFinder = () => {
@@ -1516,23 +1512,8 @@ export const ProjectDetailPage = () => {
                       );
                     }
                   }}
-                  onDelete={async (sid, label) => {
-                    if (
-                      !window.confirm(
-                        `${t("common.confirmDelete" as Parameters<typeof t>[0])}\n${label}`,
-                      )
-                    )
-                      return;
-                    try {
-                      await deleteSession(sid);
-                      toast.success(
-                        t("sidebar.deleted" as Parameters<typeof t>[0]),
-                      );
-                    } catch {
-                      toast.error(
-                        t("sidebar.deleteFailed" as Parameters<typeof t>[0]),
-                      );
-                    }
+                  onDelete={(sid, label) => {
+                    setPendingDelete({ kind: "session", id: sid, name: label });
                   }}
                 />
               </TabsContent>
@@ -1658,6 +1639,45 @@ export const ProjectDetailPage = () => {
         confirmLabel={t("common.remove")}
         loading={memberDeleteBusy}
         onConfirm={confirmMemberDelete}
+      />
+      <DeleteConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(v) => !v && setPendingDelete(null)}
+        itemName={pendingDelete?.name || undefined}
+        description={
+          pendingDelete?.kind === "task"
+            ? t("cron.confirmDeleteTaskDesc" as Parameters<typeof t>[0], {
+                name: pendingDelete.name,
+              })
+            : undefined
+        }
+        loading={pendingDeleteBusy}
+        onConfirm={async () => {
+          if (!pendingDelete) return;
+          const pd = pendingDelete;
+          setPendingDeleteBusy(true);
+          try {
+            if (pd.kind === "task") {
+              await automationsApi.delete(pd.id);
+              toast.success(t("common.deleted" as Parameters<typeof t>[0]));
+              await reloadScheduledTasks();
+            } else {
+              await deleteSession(pd.id);
+              toast.success(t("sidebar.deleted" as Parameters<typeof t>[0]));
+            }
+            setPendingDelete(null);
+          } catch {
+            toast.error(
+              t(
+                (pd.kind === "task"
+                  ? "common.deleteFailed"
+                  : "sidebar.deleteFailed") as Parameters<typeof t>[0],
+              ),
+            );
+          } finally {
+            setPendingDeleteBusy(false);
+          }
+        }}
       />
     </div>
   );
