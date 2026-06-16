@@ -31,11 +31,12 @@ from valuz_agent.ports.sandbox_provider import (
 )
 
 
-def _spec(tmp: Path, *, deny=(), mounts=()) -> SandboxSpec:
+def _spec(tmp: Path, *, deny=(), mounts=(), rw_files=()) -> SandboxSpec:
     return SandboxSpec(
         sandbox_id="t",
         kernel_db_path=str(tmp / "kernel.db"),
         mounts=mounts or (MountSpec(target=str(tmp), source=str(tmp), mode="rw"),),
+        rw_files=tuple(rw_files),
         deny_paths=tuple(deny),
         host_callback_url="http://127.0.0.1:8000",
     )
@@ -98,6 +99,17 @@ def test_profile_write_allowlist_covers_rw_mounts_not_ro(tmp_path) -> None:
 
     assert f'(allow file-write* (subpath "{os.path.realpath(str(rw))}"))' in profile
     assert f'file-write* (subpath "{os.path.realpath(str(ro))}")' not in profile
+
+
+def test_profile_write_allowlist_covers_rw_files(tmp_path) -> None:
+    """The shared kernel.db + WAL/SHM get per-FILE write-allow (``literal``),
+    distinct from the directory-tree ``subpath`` mount rules — so the sandbox
+    can write exactly those three files but nothing else in the data dir."""
+    kdb = tmp_path / "kernel.db"
+    files = (str(kdb), str(kdb) + "-wal", str(kdb) + "-shm")
+    profile = build_seatbelt_profile(_spec(tmp_path, rw_files=files))
+    for f in files:
+        assert f'(allow file-write* (literal "{f}"))' in profile
 
 
 # ---- Seatbelt enforcement (macOS) -------------------------------------

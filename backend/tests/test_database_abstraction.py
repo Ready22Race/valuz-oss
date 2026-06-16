@@ -32,3 +32,30 @@ class TestDatabaseUrlConfig:
 
     def test_to_async_url_passthrough(self) -> None:
         assert Settings._to_async_url("mysql://x") == "mysql://x"
+
+
+class TestKernelDbUrlConfig:
+    def test_default_kernel_db_is_separate_file(self) -> None:
+        """No override: the kernel gets its OWN kernel.db, distinct from valuz.db."""
+        s = Settings(data_dir="/tmp/valuz-test-db")
+        assert s.kernel_db_url == "sqlite:////tmp/valuz-test-db/kernel.db"
+        assert s.kernel_db_url_async == "sqlite+aiosqlite:////tmp/valuz-test-db/kernel.db"
+        assert s.kernel_db_url != s.db_url  # the split
+
+    def test_explicit_database_url_colocates_kernel(self) -> None:
+        """An explicit host DB (e.g. Postgres) shares the store with the kernel."""
+        s = Settings(
+            data_dir="/tmp/valuz-test-db",
+            database_url="postgresql://valuz:valuz@localhost:5432/valuz",
+        )
+        assert s.kernel_db_url == s.db_url
+        assert s.kernel_db_url_async == s.db_url_async
+
+    def test_explicit_kernel_database_url_wins(self) -> None:
+        s = Settings(
+            data_dir="/tmp/valuz-test-db",
+            database_url="postgresql://valuz:valuz@localhost:5432/valuz",
+            kernel_database_url="sqlite:///kernel-only.db",
+        )
+        assert s.kernel_db_url == "sqlite:///kernel-only.db"
+        assert s.kernel_db_url_async == "sqlite+aiosqlite:///kernel-only.db"

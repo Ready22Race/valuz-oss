@@ -39,12 +39,16 @@ backend/
     └── cli.py                    # Typer CLI (`serve`, `reset-providers`)
 ```
 
-A single SQLite file at `~/.valuz/app/valuz.db` carries both layers:
-3 unprefixed kernel tables (`sessions` / `messages` / `events`),
-the `valuz_*`-prefixed business tables, and two alembic heads
-(`alembic_version` kernel + `alembic_version_host` host). Both layers run
-**async** SQLAlchemy on aiosqlite; WAL + per-connection `busy_timeout` make
-concurrent access safe.
+Two SQLite files under `~/.valuz/app/`: the host's `valuz.db` (the
+`valuz_*`-prefixed business tables + `alembic_version_host`) and the kernel's
+own `kernel.db` (the 3 unprefixed kernel tables `sessions` / `messages` /
+`events`, its langgraph checkpoint tables, and `alembic_version`). The split
+(config `kernel_db_url`, default-on for SQLite) lets a sandboxed/remote kernel
+own its file and gives `make dev` + `make dev-sandbox` one shared history; an
+explicit `database_url` (Postgres) co-locates both instead. A one-time boot step
+(`boot/kernel_db_split.py`) migrates a pre-split `valuz.db`'s kernel tables into
+`kernel.db`. Both layers run **async** SQLAlchemy on aiosqlite; WAL +
+per-connection `busy_timeout` make concurrent access safe.
 
 ## The two boundary contracts
 
