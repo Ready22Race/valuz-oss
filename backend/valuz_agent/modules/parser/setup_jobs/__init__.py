@@ -2,7 +2,7 @@
 
 A setup job represents an explicit, user-authorized side-effect that must
 run before a plugin capability becomes usable. Today the only one is
-``RapidOcrSetupJob`` (PP-OCRv5 model download from ModelScope); future
+``RapidOcrSetupJob`` (PP-OCRv6 model download from ModelScope); future
 cloud plugins use the same framework for things like license acceptance
 gates.
 

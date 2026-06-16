@@ -31,15 +31,15 @@ LIGHT_LOCAL_PLUGIN_ID = "light_local"
 
 _RAPIDOCR_SETUP = SetupRequirement(
     id=RAPIDOCR_SETUP_ID,
-    label_zh="下载 OCR 模型(PP-OCRv5 ONNX)",
+    label_zh="下载 OCR 模型(PP-OCRv6 ONNX)",
     label_key="parser_light_local.setup.label",
     kind="model_download",
     network_required=True,
     # Conservative declared size until ``RapidOcrSetupJob`` reports the
-    # measured value via the HEAD pre-pass at start time. PP-OCRv5
-    # mobile bundle is ~20MB; round up to 24MB for the dialog so we
+    # measured value via the HEAD pre-pass at start time. PP-OCRv6
+    # medium bundle is ~139MB; round up to 150MB for the dialog so we
     # don't under-promise.
-    size_bytes=24 * 1024 * 1024,
+    size_bytes=150 * 1024 * 1024,
     source="modelscope_official",
     license_name="Apache License 2.0",
     license_url="https://www.apache.org/licenses/LICENSE-2.0.txt",

@@ -178,8 +178,8 @@ class TestNotFound:
 def test_rapidocr_is_complete_reads_marker_file(tmp_path: Path, monkeypatch):
     """The router's capability gate relies on ``is_complete`` being a
     pure filesystem probe — no DB, no network. The marker also encodes
-    the model version so a stale PP-OCRv4 directory doesn't read as
-    "ready" after the v4→v5 cutover; pin that contract here too."""
+    the model version so a stale PP-OCRv4/v5 directory doesn't read as
+    "ready" after the v6 cutover; pin that contract here too."""
     from valuz_agent.modules.parser.setup_jobs.rapidocr import RapidOcrSetupJob
 
     job = RapidOcrSetupJob()
@@ -193,9 +193,9 @@ def test_rapidocr_is_complete_reads_marker_file(tmp_path: Path, monkeypatch):
     # Marker without the expected model_version line → still not complete.
     (tmp_path / "READY").write_text("2026-05-15T00:00:00+00:00", encoding="utf-8")
     assert job.is_complete() is False
-    # Marker with the v5 model_version line → complete.
+    # Marker with the v6 model_version line → complete.
     (tmp_path / "READY").write_text(
-        "timestamp=2026-05-15T00:00:00+00:00\nmodel_version=PP-OCRv5\n",
+        "timestamp=2026-05-15T00:00:00+00:00\nmodel_version=PP-OCRv6\n",
         encoding="utf-8",
     )
     assert job.is_complete() is True
