@@ -235,6 +235,7 @@ export type KnownI18nKey =
   | "automation.updateSuccess"
   | "backend.automation.appNotRunning"
   | "backend.automation.autoPaused"
+  | "backend.automation.taskKickedOff"
   | "backend.automation.titlePrefix"
   | "backend.parser.ocrNotAuthorized"
   | "backend.provider.apiKeyEmpty"
