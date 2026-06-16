@@ -161,3 +161,26 @@ def test_tool_closed_loop_and_scope(store, monkeypatch):
     # invalid action / missing required params -> error
     assert asyncio.run(t._memory_handler({"action": "frob", "target": "global"}, chat)).is_error
     assert asyncio.run(t._memory_handler({"action": "add", "target": "global"}, chat)).is_error
+
+
+def test_drop_project_removes_dir(store, tmp_path):
+    """Source-driven forgetting: drop_project deletes the project's memory dir."""
+    store.add("project", "Tracks ACME.", project_id="p1")
+    proj_dir = _root(tmp_path) / "projects" / "p1"
+    assert (proj_dir / "MEMORY.md").exists()
+    store.drop_project("p1")
+    assert not proj_dir.exists()
+    store.drop_project("p1")  # idempotent — no error on a missing dir
+
+
+def test_drop_project_leaves_other_scopes(store):
+    """Dropping one project's memory never touches user/global or sibling projects."""
+    store.add("user", "Analyst.")
+    store.add("global", "Cross-project note.")
+    store.add("project", "P1 fact.", project_id="p1")
+    store.add("project", "P2 fact.", project_id="p2")
+    store.drop_project("p1")
+    assert store.read_entries("user") == ["Analyst."]
+    assert store.read_entries("global") == ["Cross-project note."]
+    assert store.read_entries("project", project_id="p1") == []
+    assert store.read_entries("project", project_id="p2") == ["P2 fact."]

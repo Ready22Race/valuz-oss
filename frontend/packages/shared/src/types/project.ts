@@ -5,5 +5,4 @@ export interface ProjectItem {
   root_path: string | null
   icon: string | null
   instructions_md?: string | null
-  memory_summary?: string | null
 }

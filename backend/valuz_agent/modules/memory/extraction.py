@@ -190,8 +190,3 @@ class MemoryExtractor:
             len(report.get("skipped", [])),
         )
         return report
-
-
-# Live completer is wired in a follow-up step (LLM-call path TBD); until then the
-# extractor is inert (enabled=False) and triggers are no-ops.
-memory_extractor = MemoryExtractor()

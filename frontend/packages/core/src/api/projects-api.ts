@@ -22,7 +22,6 @@ export interface ProjectListItem {
 
 export interface ProjectDetail extends ProjectListItem {
   instructions_md: string | null;
-  memory_summary: string | null;
 }
 
 export interface ProjectDeletePreview {
