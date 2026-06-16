@@ -121,7 +121,7 @@ export const ScheduledTaskTable = ({
     status === "on" ? t("cron.enable") : t("cron.paused");
 
   return (
-    <Card className="gap-0 overflow-hidden py-0">
+    <Card className="gap-0 overflow-hidden border-surface-border py-0 shadow-none">
       <CardContent className="px-0 py-0">
         {title && (
           <button
