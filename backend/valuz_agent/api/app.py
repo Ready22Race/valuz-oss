@@ -1,9 +1,13 @@
+import logging
 import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from valuz_agent.api.middleware import (
     ErrorHandlerMiddleware,
@@ -32,6 +36,8 @@ from valuz_agent.api.routes.tasks import router as tasks_router
 from valuz_agent.boot import lifespan
 from valuz_agent.infra.config import settings
 
+logger = logging.getLogger("valuz_agent.api")
+
 
 def create_app() -> FastAPI:
     if getattr(sys, "frozen", False):
@@ -47,6 +53,21 @@ def create_app() -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def _log_validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI's default 422 handler returns the field-level detail in the
+        # response body but logs nothing, so a request-body validation failure
+        # shows up as a bare "422 Unprocessable Content" with no clue which
+        # field was wrong. Log the offending path + the per-field errors so the
+        # cause is visible in the backend log, then return the standard body.
+        logger.warning(
+            "422 validation error on %s %s: %s",
+            request.method,
+            request.url.path,
+            exc.errors(),
+        )
+        return JSONResponse(status_code=422, content={"detail": jsonable_encoder(exc.errors())})
 
     from valuz_agent.ports.extensions import ext
 

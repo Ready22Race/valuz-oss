@@ -272,8 +272,10 @@ export interface ComposerProps {
     id: string;
     name: string;
     /** Async parse status — drives the inline progress indicator on the
-     *  chip ("解析中" spinner while ``parsing``, error tint on ``failed``). */
-    parseStatus?: "parsing" | "ready" | "failed";
+     *  chip ("解析中" spinner while ``parsing``, error tint on ``failed``).
+     *  ``native`` (an image the runtime reads directly) and ``ready`` both
+     *  render as an ordinary chip. */
+    parseStatus?: "parsing" | "ready" | "failed" | "native";
     /** ``local`` upload vs ``kb_doc`` live reference — drives the chip icon. */
     sourceKind?: "local" | "kb_doc";
   }[];
@@ -1205,6 +1207,8 @@ export const Composer = ({
                 const isKb = doc.sourceKind === "kb_doc";
                 const isParsing = doc.parseStatus === "parsing";
                 const isFailed = doc.parseStatus === "failed";
+                // ``native`` (an image the runtime reads directly) renders like
+                // any ordinary attachment — no special icon or hint.
                 const ChipIcon = isParsing
                   ? Loader2
                   : isKb

@@ -141,10 +141,10 @@ class EmbeddedDocsRuntime:
             f"--context={self.CONTEXT_LINES}",
             f"--max-count={self.RG_MAX_COUNT}",
             "--no-heading",
-            "--",
         ]
         for kw in keywords:
             cmd.extend(["-e", kw])
+        cmd.append("--")
         cmd.extend(paths)
 
         proc = subprocess.run(

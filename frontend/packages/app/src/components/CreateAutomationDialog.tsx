@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import type { ActionKind, Trigger } from "@valuz/core";
+import type { ActionKind, AutomationProjectTarget, Trigger } from "@valuz/core";
 import { automationsApi } from "@valuz/core";
 import {
   browserTimezone,
@@ -115,12 +115,28 @@ export interface CreateAutomationDialogProps {
   /** Default selection — usually the first member / first library agent. */
   defaultAgentSlug?: string;
   /**
-   * Whether the bound project can host project-task automations. Maps
-   * to ``project_kind === "project"`` at the call site. When false,
-   * the Task mode toggle is rendered but disabled with a hint —
-   * matches the backend ``AutomationTaskOnlyOnProject`` constraint.
+   * Edit mode only: whether the locked project can host project-task
+   * automations (``project_kind === "project"``). In CREATE mode this is
+   * ignored — Task availability is derived from ``targets`` instead (any
+   * project target present ⇒ Task selectable). When false, the Task pill
+   * is disabled with a hint — matches the backend
+   * ``AutomationTaskOnlyOnProject`` constraint.
    */
   allowTaskMode?: boolean;
+  /**
+   * Target choices for the CREATE flow — the Chat sentinel plus every
+   * project (``automationsApi.listProjectTargets``). When present (and not
+   * edit mode) the dialog renders a target selector wired to
+   * ``onSelectTarget``, linked to the agent picker: picking a project
+   * swaps the candidate agents to that project's members. Omitted in edit
+   * mode, where the target is fixed to the row's project.
+   */
+  targets?: AutomationProjectTarget[];
+  /** Currently-selected target id (owned by the parent so the agent list
+   *  can be recomputed from it). */
+  selectedTargetId?: string | null;
+  /** Notify the parent the user picked a different target. */
+  onSelectTarget?: (id: string) => void;
   /**
    * Pre-fill values for edit mode. When provided, the dialog opens with
    * these values populated and the title defaults to "Edit ...". Omit
@@ -141,6 +157,9 @@ export const CreateAutomationDialog = ({
   agents,
   defaultAgentSlug,
   allowTaskMode = false,
+  targets,
+  selectedTargetId,
+  onSelectTarget,
   initial,
   title: titleProp,
   description: descriptionProp,
@@ -159,6 +178,19 @@ export const CreateAutomationDialog = ({
         : "automation.dialogTitleNew") as Parameters<typeof t>[0],
     );
   const description = descriptionProp ?? "";
+
+  // Target wiring (create flow only). The selector lets the user point the
+  // automation at the Chat sentinel or any project; the chosen target both
+  // decides ``project_kind`` at submit and drives which agents are offered.
+  const targetList = targets ?? [];
+  const projectTargets = targetList.filter((tg) => tg.kind === "project");
+  const showTargetSelector = !isEdit && targetList.length > 0;
+  const selectedTarget =
+    targetList.find((tg) => tg.id === selectedTargetId) ?? null;
+  // Task mode availability. In create mode it follows the targets (you need
+  // at least one project to host a task); in edit mode the locked project's
+  // ``allowTaskMode`` prop decides.
+  const taskModeAllowed = isEdit ? allowTaskMode : projectTargets.length > 0;
 
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -205,6 +237,30 @@ export const CreateAutomationDialog = ({
   // false (chat projects) the Task radio is disabled and we coerce
   // ``task`` back to ``chat`` at submit time as a defence-in-depth.
   const [actionKind, setActionKind] = useState<ActionKind>("chat");
+
+  // The agent picker is linked to the target: switching projects swaps the
+  // candidate list out from under the stored ``agentSlug``. Rather than chase
+  // it with an effect (the parent hands a fresh ``agents`` array every render),
+  // derive the effective selection — keep the user's pick when it's still
+  // valid, otherwise fall back to the first candidate. No setState, no churn.
+  const effectiveAgentSlug =
+    agentSlug && agents.some((a) => a.slug === agentSlug)
+      ? agentSlug
+      : (agents[0]?.slug ?? "");
+
+  // Picking Task while pointed at Chat (or nothing) auto-jumps to the first
+  // project — Task can't run without one, and this saves a second click.
+  const handlePickMode = (value: ActionKind) => {
+    setActionKind(value);
+    if (
+      value === "task" &&
+      !isEdit &&
+      selectedTarget?.kind !== "project" &&
+      projectTargets[0]
+    ) {
+      onSelectTarget?.(projectTargets[0].id);
+    }
+  };
 
   // Edge-triggered reset: only when the dialog transitions from closed
   // to open. ``initial`` and ``agents`` are fresh references on every
@@ -338,9 +394,16 @@ export const CreateAutomationDialog = ({
     };
   };
 
+  // Task mode needs a concrete project target; block submit until one is
+  // picked (the selector only offers projects in Task mode, so this only
+  // bites on the brief window before the auto-jump lands).
+  const taskNeedsProject =
+    !isEdit && actionKind === "task" && selectedTarget?.kind !== "project";
+
   const submitDisabled =
-    !agentSlug ||
+    !effectiveAgentSlug ||
     !prompt.trim() ||
+    taskNeedsProject ||
     (triggerKind === "interval" && intervalSeconds < MIN_INTERVAL_SECONDS);
 
   const handleSubmit = async () => {
@@ -348,11 +411,11 @@ export const CreateAutomationDialog = ({
     await onSubmit({
       name: name.trim() || t("cron.untitled" as Parameters<typeof t>[0]),
       prompt_template: prompt.trim(),
-      agent_slug: agentSlug,
+      agent_slug: effectiveAgentSlug,
       trigger: buildTrigger(),
-      // Defence-in-depth: if the project doesn't permit task mode, the
-      // submit always coerces to chat regardless of the local toggle.
-      action_kind: allowTaskMode ? actionKind : "chat",
+      // Defence-in-depth: if task mode isn't available, the submit always
+      // coerces to chat regardless of the local toggle.
+      action_kind: taskModeAllowed ? actionKind : "chat",
     });
     onOpenChange(false);
   };
@@ -406,7 +469,7 @@ export const CreateAutomationDialog = ({
                     label: t(
                       "automation.actionKindTask" as Parameters<typeof t>[0],
                     ),
-                    hint: allowTaskMode
+                    hint: taskModeAllowed
                       ? t(
                           "automation.actionKindTaskHint" as Parameters<
                             typeof t
@@ -417,7 +480,7 @@ export const CreateAutomationDialog = ({
                             typeof t
                           >[0],
                         ),
-                    disabled: !allowTaskMode,
+                    disabled: !taskModeAllowed,
                   },
                 ] as const
               ).map((opt) => {
@@ -427,7 +490,7 @@ export const CreateAutomationDialog = ({
                     key={opt.value}
                     type="button"
                     disabled={opt.disabled}
-                    onClick={() => !opt.disabled && setActionKind(opt.value)}
+                    onClick={() => !opt.disabled && handlePickMode(opt.value)}
                     className={
                       "flex-1 rounded-lg border px-3 py-2 text-left text-xs transition-colors " +
                       (opt.disabled
@@ -445,6 +508,74 @@ export const CreateAutomationDialog = ({
                 );
               })}
             </div>
+          </FormField>
+
+          {/* Target + agent — linked, directly under the execution mode so
+              the user decides "where it runs / who runs it" before writing
+              the prompt. The target (Chat sentinel or a project) drives both
+              ``project_kind`` at submit and the candidate agents below; in
+              Task mode only projects are offered. Hidden in edit mode, where
+              the target is fixed to the row's project. */}
+          {showTargetSelector && (
+            <FormField
+              label={t("automation.targetLabel" as Parameters<typeof t>[0])}
+            >
+              <Select
+                value={selectedTargetId ?? ""}
+                onValueChange={(v) => v && onSelectTarget?.(v)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(actionKind === "task" ? projectTargets : targetList).map(
+                    (tg) => (
+                      <SelectItem key={tg.id} value={tg.id}>
+                        {tg.name}
+                      </SelectItem>
+                    ),
+                  )}
+                </SelectContent>
+              </Select>
+            </FormField>
+          )}
+
+          <FormField
+            label={t("automation.agentLabel" as Parameters<typeof t>[0])}
+          >
+            <Select
+              value={effectiveAgentSlug}
+              onValueChange={setAgentSlug}
+              disabled={agents.length === 0}
+            >
+              <SelectTrigger>
+                <SelectValue
+                  placeholder={
+                    agents.length === 0
+                      ? t(
+                          "automation.agentPlaceholderEmpty" as Parameters<
+                            typeof t
+                          >[0],
+                        )
+                      : t(
+                          "automation.agentPlaceholderPick" as Parameters<
+                            typeof t
+                          >[0],
+                        )
+                  }
+                />
+              </SelectTrigger>
+              <SelectContent>
+                {agents.map((a) => (
+                  <SelectItem key={a.slug} value={a.slug}>
+                    {a.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="mt-1 text-xs text-ink-meta">
+              {t("automation.agentHint" as Parameters<typeof t>[0])}
+            </p>
           </FormField>
 
           <FormField label={t("cron.instruction" as Parameters<typeof t>[0])}>
@@ -586,44 +717,6 @@ export const CreateAutomationDialog = ({
                 </p>
               </TabsContent>
             </Tabs>
-          </FormField>
-
-          <FormField
-            label={t("automation.agentLabel" as Parameters<typeof t>[0])}
-          >
-            <Select
-              value={agentSlug}
-              onValueChange={setAgentSlug}
-              disabled={agents.length === 0}
-            >
-              <SelectTrigger>
-                <SelectValue
-                  placeholder={
-                    agents.length === 0
-                      ? t(
-                          "automation.agentPlaceholderEmpty" as Parameters<
-                            typeof t
-                          >[0],
-                        )
-                      : t(
-                          "automation.agentPlaceholderPick" as Parameters<
-                            typeof t
-                          >[0],
-                        )
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent>
-                {agents.map((a) => (
-                  <SelectItem key={a.slug} value={a.slug}>
-                    {a.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="mt-1 text-xs text-ink-meta">
-              {t("automation.agentHint" as Parameters<typeof t>[0])}
-            </p>
           </FormField>
         </div>
 

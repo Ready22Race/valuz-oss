@@ -27,8 +27,9 @@
 #   enterprise   — enterprise overlay
 #   finance      — vertical industry edition (finance)
 #
-# Edition feeds the produced artifact name via VALUZ_DIST_TAG, e.g.
-#   valuz-oss-darwin-arm64.dmg / valuz-enterprise-darwin-arm64.dmg
+# Edition feeds the produced artifact name via VALUZ_EDITION (prefix) +
+# VALUZ_DIST_TAG (platform+arch suffix), e.g.
+#   valuz-oss-v0.1.6-darwin-arm64.dmg / valuz-enterprise-v0.1.6-darwin-arm64.dmg
 # The installed command stays ``valuz`` regardless of edition.
 #
 # Prerequisites:
@@ -125,7 +126,7 @@ esac
 
 # Normalize arch for the distribution tag (electron-builder uses
 # ``arm64`` / ``x64`` while we want ``arm64`` / ``amd64`` to match the
-# STRUCTURE.md naming examples (valuz-oss-darwin-arm64.tar.gz).
+# STRUCTURE.md naming examples (valuz-oss-v0.1.6-darwin-arm64.tar.gz).
 case "$ARCH_RAW" in
   arm64|aarch64) ARCH_TAG="arm64" ;;
   x86_64|amd64)  ARCH_TAG="amd64" ;;
@@ -133,8 +134,9 @@ case "$ARCH_RAW" in
 esac
 
 # Single distribution tag the electron-builder ``artifactName`` template
-# consumes via ``${env.VALUZ_DIST_TAG}``. Result example: ``oss-darwin-arm64``.
-export VALUZ_DIST_TAG="${EDITION}-${PLATFORM_TAG}-${ARCH_TAG}"
+# consumes via ``${env.VALUZ_DIST_TAG}``. Arch+platform only (edition is
+# injected separately via VALUZ_EDITION). Result example: ``darwin-arm64``.
+export VALUZ_DIST_TAG="${PLATFORM_TAG}-${ARCH_TAG}"
 
 log "Platform: $PLATFORM ($ARCH_RAW) | edition=$EDITION | dist tag=$VALUZ_DIST_TAG"
 
@@ -294,6 +296,19 @@ if ! $SKIP_FRONTEND; then
   # Portable sed: swap "version": "old" → "version": "new"
   sed -i.bak -E 's/("version"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"'"$BUILD_VERSION"'"/' "$DESKTOP_PKG"
   rm -f "$DESKTOP_PKG.bak"
+
+  # Mirror the same version into backend/pyproject.toml so the backend's
+  # /v1/system/status (which calls _read_app_version → reads pyproject) reports
+  # the same version the desktop package carries. Anchored to ^version (top-level
+  # [project] block) — won't touch indented version lines inside [tool.*] tables.
+  BACKEND_PYPROJECT="$BACKEND_DIR/pyproject.toml"
+  if [ -f "$BACKEND_PYPROJECT" ]; then
+    log "Setting backend version: $BUILD_VERSION"
+    sed -i.bak -E 's/^version[[:space:]]*=[[:space:]]*"[^"]*"/version = "'"'"$BUILD_VERSION"'"'"/' "$BACKEND_PYPROJECT"
+    rm -f "$BACKEND_PYPROJECT.bak"
+  else
+    warn "backend/pyproject.toml not found at $BACKEND_PYPROJECT — skipping version sync"
+  fi
 
   # Build: typecheck + vite + electron-builder.
   # We call each step via pnpm exec so variable expansion happens in bash,

@@ -225,6 +225,7 @@ export type KnownI18nKey =
   | "automation.runFailed"
   | "automation.runQueued"
   | "automation.subtitle"
+  | "automation.targetLabel"
   | "automation.timezoneLabel"
   | "automation.title"
   | "automation.toggleFailed"

@@ -40,6 +40,12 @@ def _access_record(request_target: str) -> logging.LogRecord:
         "/v1/runs/123",  # sub-path
         "/v1/system/status",
         "/internal/mcp/foo",
+        # MCP OAuth-discovery probes — both the bare root probe and the
+        # per-mount nested form the streamable-HTTP client issues.
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server/internal/mcp/toolkit/base/mcp",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource/internal/mcp/docs/mcp",
     ],
 )
 def test_silenced_paths_are_dropped(target: str) -> None:

@@ -157,6 +157,25 @@ def build_default_registry(
             continue
         plugins[pid] = plugin
 
+    # ``light_local`` is the universal fallback every routing decision lands on
+    # (``ParserRouter._resolve_plugin`` → ``registry.get(LIGHT_LOCAL_PLUGIN_ID)``).
+    # If it's absent the registry is fundamentally broken: every parse AND every
+    # KB rescan raises a cryptic ``UnknownPluginError`` deep in the router (e.g.
+    # "rescan: failed to snapshot routing for kinds"). Surface the ROOT CAUSE
+    # once, here, with an actionable message — the usual culprit is the built-in
+    # ``plugins`` package failing to import in a packaged build (see the
+    # ``_discover_builtin_subpackages`` warning above: it isn't bundled by
+    # PyInstaller), which otherwise only shows up as scattered downstream errors.
+    if LIGHT_LOCAL_PLUGIN_ID not in plugins:
+        logger.error(
+            "parser registry has no %r plugin — document/attachment parsing is "
+            "UNAVAILABLE. The built-in 'plugins.parser' package likely failed to "
+            "import (see the preceding warning); in a packaged build this means it "
+            "was not bundled. Loaded plugins: %s",
+            LIGHT_LOCAL_PLUGIN_ID,
+            sorted(plugins) or "(none)",
+        )
+
     return ParserPluginRegistry(plugins=list(plugins.values()))
 
 

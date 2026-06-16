@@ -793,10 +793,16 @@ class DocumentLibraryService:
         scan_state_dir = self._scan_state_dir
         session_factory = self._session_factory
 
+        # Capture the owner in the request/scheduler context; the daemon
+        # thread below doesn't inherit the ContextVar (see _arun seeding).
+        owner_id = require_current_user_id()
+
         async def _arun() -> None:
+            from valuz_agent.infra.auth_context import set_current_user_id
             from valuz_agent.infra.db import async_unit_of_work
             from valuz_agent.modules.docs.datastore import DocumentDatastore
 
+            set_current_user_id(owner_id)
             try:
                 async with async_unit_of_work(commit=False) as db:
                     local_service = DocumentLibraryService(
@@ -836,7 +842,11 @@ class DocumentLibraryService:
                     logger.exception("could not mark rescan task as failed")
 
         def _runner() -> None:
-            asyncio.run(_arun())
+            from valuz_agent.infra.db import run_in_background_db_scope
+
+            # Per-loop DB engine for this foreign loop (asyncpg can't share the
+            # main-loop pool across loops; no-op on SQLite).
+            asyncio.run(run_in_background_db_scope(_arun()))
 
         threading.Thread(target=_runner, name="docs-bg-rescan", daemon=True).start()
 
@@ -868,10 +878,18 @@ class DocumentLibraryService:
         scan_state_dir = self._scan_state_dir
         session_factory = self._session_factory
 
+        # Capture the owner HERE — this method runs in the request context
+        # where ``valuz_current_user_id`` is set. The daemon thread below has
+        # its own ContextVar scope and would otherwise raise
+        # OwnerContextUnsetError on the first owner-scoped read.
+        owner_id = require_current_user_id()
+
         async def _arun() -> None:
+            from valuz_agent.infra.auth_context import set_current_user_id
             from valuz_agent.infra.db import async_unit_of_work
             from valuz_agent.modules.docs.datastore import DocumentDatastore
 
+            set_current_user_id(owner_id)
             try:
                 async with async_unit_of_work(commit=False) as db:
                     local_service = DocumentLibraryService(
@@ -904,7 +922,11 @@ class DocumentLibraryService:
                     logger.exception("could not mark reindex task as failed")
 
         def _runner() -> None:
-            asyncio.run(_arun())
+            from valuz_agent.infra.db import run_in_background_db_scope
+
+            # Per-loop DB engine for this foreign loop (asyncpg can't share the
+            # main-loop pool across loops; no-op on SQLite).
+            asyncio.run(run_in_background_db_scope(_arun()))
 
         threading.Thread(target=_runner, name="docs-bg-reindex", daemon=True).start()
 

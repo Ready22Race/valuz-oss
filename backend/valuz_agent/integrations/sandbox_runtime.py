@@ -67,28 +67,41 @@ def activate(
 
 
 def _lazy_activate() -> _State | None:
-    """Build state from env on first use, if a sandbox is configured."""
+    """Build state from env on first use, if a sandbox is configured.
+
+    Driver-agnostic: resolves the active driver from the registry and re-attaches
+    to the already-running sandbox the provisioning process published via env.
+    Returns None (→ no-op) when no driver is set or no sandbox is up.
+    """
     global _state, _lazy_tried
     if _state is not None:
         return _state
     if _lazy_tried:
         return None
     _lazy_tried = True
-    if os.getenv("VALUZ_SANDBOX_DRIVER") != "seatbelt":
-        return None
-    base_url = os.getenv("VALUZ_KERNEL_URL")
-    if not base_url:
-        return None
-    from valuz_agent.integrations.sandbox_seatbelt import (
-        SeatbeltSandboxProvider,
-        host_sandbox_rw_mounts,
-    )
 
-    provider = SeatbeltSandboxProvider.from_existing(
-        "host-kernel", base_url, os.getenv("VALUZ_KERNEL_TOKEN", "")
+    from valuz_agent.integrations import sandbox_registry
+    from valuz_agent.ports.sandbox_provider import SandboxBootContext, SandboxEndpoint
+
+    driver = sandbox_registry.get(os.getenv("VALUZ_SANDBOX_DRIVER"))
+    base_url = os.getenv("VALUZ_KERNEL_URL")
+    if driver is None or not base_url:
+        return None
+
+    ctx = SandboxBootContext(
+        host="127.0.0.1",
+        port=0,
+        host_callback_url=os.getenv("VALUZ_BACKEND_BASE_URL", ""),
     )
-    roots = tuple(os.path.realpath(m.source) for m in host_sandbox_rw_mounts())
-    _state = _State(provider=provider, sandbox_id="host-kernel", static_roots=roots)
+    endpoint = SandboxEndpoint(
+        sandbox_id="host-kernel", base_url=base_url, token=os.getenv("VALUZ_KERNEL_TOKEN", "")
+    )
+    result = driver.attach(ctx, endpoint)
+    _state = _State(
+        provider=result.provider,
+        sandbox_id="host-kernel",
+        static_roots=tuple(os.path.realpath(r) for r in result.static_roots),
+    )
     return _state
 
 

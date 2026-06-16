@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, String, event
+from sqlalchemy import BigInteger, NullPool, String, event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -81,3 +81,19 @@ if settings.is_sqlite:
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     bind=async_engine, expire_on_commit=False
 )
+
+
+def new_background_sessionmaker() -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+    """A throwaway engine + sessionmaker for code running on a FOREIGN event
+    loop — a background-thread ``asyncio.run`` (KB auto-discovery, docs
+    reindex/rescan). asyncpg connections are bound to the loop that created
+    them, so driving the shared ``async_engine`` pool from another loop raises
+    ``InterfaceError: another operation is in progress`` (and corrupts the
+    on-loop pool users). Each foreign loop gets its OWN ``NullPool`` engine — no
+    pooling, since the loop is short-lived — which the caller disposes when the
+    loop ends (see ``infra.db.background_db_scope``). SQLite is loop-agnostic
+    (aiosqlite proxies each connection through its own thread), so callers skip
+    this for sqlite and keep using the shared ``AsyncSessionLocal``.
+    """
+    engine = create_async_engine(settings.db_url_async, echo=settings.debug, poolclass=NullPool)
+    return engine, async_sessionmaker(bind=engine, expire_on_commit=False)

@@ -682,13 +682,17 @@ export const AutomationPage = () => {
         onOpenChange={handleDialogOpenChange}
         onSubmit={handleDialogSubmit}
         agents={agentChoices}
+        // Create flow: hand the dialog the full target list (Chat sentinel +
+        // projects) and let it own the selection ↔ mode coupling. Omitted in
+        // edit mode, where the target is fixed to the row's project.
+        targets={editTarget ? undefined : targets}
+        selectedTargetId={selectedTargetId}
+        onSelectTarget={setSelectedTargetId}
         allowTaskMode={
-          // Task mode only valid on project projects (backend rejects
-          // ``task`` on chat). In edit mode the row's existing project
-          // wins; in create mode the picked target decides.
-          editTarget
-            ? editTarget.projectKind === "project"
-            : selectedTarget?.kind === "project"
+          // Edit mode only: Task is valid iff the row's locked project is a
+          // ``project`` kind. In create mode the dialog derives this from
+          // ``targets`` instead, so this value is ignored there.
+          editTarget ? editTarget.projectKind === "project" : false
         }
         initial={
           editTarget
@@ -703,17 +707,14 @@ export const AutomationPage = () => {
             : undefined
         }
         title={
+          // Create flow is now mode-agnostic (chat OR project, picked inside
+          // the dialog), so the title is the generic "New automation". Edit
+          // keeps the named title.
           editTarget
             ? t(k("automation.dialogTitleEditNamed"), {
                 name: editTarget.detail.name,
               })
-            : selectedTarget?.kind === "chat"
-              ? t(k("automation.dialogTitleChat"))
-              : selectedTarget
-                ? t(k("automation.dialogTitleProject"), {
-                    project: selectedTarget.name,
-                  })
-                : t(k("automation.dialogTitleNew"))
+            : t(k("automation.dialogTitleNew"))
         }
       />
 

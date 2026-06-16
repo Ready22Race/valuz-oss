@@ -93,12 +93,24 @@ def _derive_session_name(content: str) -> str:
     return cleaned[:40].replace("\n", " ").strip()
 
 
-async def _finalize_session(session_id: str, content: str, final_status: str) -> None:
+async def _finalize_session(
+    session_id: str,
+    content: str,
+    final_status: str,
+    error: BaseException | None = None,
+) -> None:
     """Persist post-turn valuz metadata and the resolved kernel status.
 
     Split out so both the success and failure paths in ``_run_agent_background``
     can share it. Builds a fresh ``Session`` dataclass because the kernel's
     types are frozen.
+
+    When ``error`` is supplied (the turn raised), a ``session_error`` event is
+    appended **durably** as part of the same finalize call — the live
+    ``emit_live_event`` only reaches SSE followers connected at the moment of
+    failure, so without this the actual reason is lost on reload and the UI
+    shows a bare "Run failed". ``stop_reason_*`` mark the terminal state as an
+    error rather than a clean idle.
     """
     session = await kernel_client.get_session(require_current_user_id(), session_id)
     if session is None:
@@ -111,12 +123,30 @@ async def _finalize_session(session_id: str, content: str, final_status: str) ->
         valuz["name"] = content[:40].replace("\n", " ").strip()
     meta["valuz"] = valuz
 
-    from app.schemas import FinalizeSessionRequest
+    from app.schemas import EventPayload, FinalizeSessionRequest
+
+    error_event = None
+    stop_reason_type = None
+    stop_reason_message = None
+    if error is not None:
+        message = str(error) or "agent turn failed"
+        error_event = EventPayload(
+            type="session_error",
+            data={"category": type(error).__name__, "message": message},
+        )
+        stop_reason_type = "error"
+        stop_reason_message = message
 
     await kernel_client.finalize_session(
         require_current_user_id(),
         session_id,
-        FinalizeSessionRequest(status=final_status, metadata=meta),  # type: ignore[arg-type]
+        FinalizeSessionRequest(
+            status=final_status,  # type: ignore[arg-type]
+            metadata=meta,
+            error_event=error_event,
+            stop_reason_type=stop_reason_type,  # type: ignore[arg-type]
+            stop_reason_message=stop_reason_message,
+        ),
     )
 
     # Arm the idle memory-extraction trigger (memory-system-design §7.1). The

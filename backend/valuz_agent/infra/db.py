@@ -23,15 +23,30 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from valuz_agent.infra.database import AsyncSessionLocal
+from valuz_agent.infra.config import settings
+from valuz_agent.infra.database import AsyncSessionLocal, new_background_sessionmaker
 
 logger = logging.getLogger(__name__)
+
+# Sessionmaker override for code running on a FOREIGN event loop (a
+# background-thread ``asyncio.run``). Unset (``None``) on the main app loop, so
+# all ordinary access uses the shared ``AsyncSessionLocal``. ``background_db_scope``
+# sets it to a per-loop sessionmaker; ``async_unit_of_work`` reads it each call.
+_bg_sessionmaker: ContextVar[async_sessionmaker[AsyncSession] | None] = ContextVar(
+    "_bg_sessionmaker", default=None
+)
+
+
+def _active_sessionmaker() -> async_sessionmaker[AsyncSession]:
+    return _bg_sessionmaker.get() or AsyncSessionLocal
+
 
 # Lock-contention retry budget. The async host engine and the async kernel
 # engine share one SQLite file; under parallel dispatch they compete for the
@@ -70,7 +85,7 @@ async def async_unit_of_work(*, commit: bool = True) -> AsyncIterator[AsyncSessi
     touches the session lifecycle — no scattered ``AsyncSessionLocal()`` /
     ``commit()`` / ``close()``.
     """
-    db = AsyncSessionLocal()
+    db = _active_sessionmaker()()
     try:
         yield db
         if commit:
@@ -91,8 +106,45 @@ async def get_async_session() -> AsyncIterator[AsyncSession]:
         yield db
 
 
+@asynccontextmanager
+async def background_db_scope() -> AsyncIterator[None]:
+    """Bind a per-loop DB engine for the enclosed scope.
+
+    For code running on a FOREIGN event loop — a background-thread
+    ``asyncio.run`` (KB auto-discovery, docs reindex/rescan). Inside the scope,
+    ``async_unit_of_work`` / ``get_async_session`` draw sessions from a private
+    ``NullPool`` engine instead of the shared, main-loop-bound ``async_engine``.
+    That is required under asyncpg, whose connections are bound to the loop that
+    created them — driving the shared pool from another loop raises
+    ``InterfaceError: another operation is in progress``. The private engine is
+    disposed on exit.
+
+    No-op on SQLite (aiosqlite is loop-agnostic): the shared engine is kept, so
+    the default single-user deployment is entirely unaffected.
+    """
+    if settings.is_sqlite:
+        yield
+        return
+    engine, maker = new_background_sessionmaker()
+    token = _bg_sessionmaker.set(maker)
+    try:
+        yield
+    finally:
+        _bg_sessionmaker.reset(token)
+        await engine.dispose()
+
+
+async def run_in_background_db_scope[T](coro: Awaitable[T]) -> T:
+    """Await ``coro`` inside ``background_db_scope`` — the idiomatic wrapper for
+    a background thread's ``asyncio.run``: ``asyncio.run(run_in_background_db_scope(_arun()))``."""
+    async with background_db_scope():
+        return await coro
+
+
 __all__ = [
     "async_commit_with_retry",
     "async_unit_of_work",
+    "background_db_scope",
     "get_async_session",
+    "run_in_background_db_scope",
 ]

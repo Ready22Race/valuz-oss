@@ -150,10 +150,11 @@ export interface UploadedFileItem {
   /** Parser/upload status for the row badge. */
   status?: "uploaded" | "ok" | "failed";
   /** Async parse status of the attachment. ``parsing`` renders an inline
-   *  spinner + "parsing"; ``failed`` renders the error badge. Distinct from
-   *  ``status`` so the live poll can drive the indicator without disturbing
-   *  legacy callers. */
-  parseStatus?: "parsing" | "ready" | "failed";
+   *  spinner + "parsing"; ``failed`` renders the error badge; ``native`` is an
+   *  image with no local text extract that the runtime reads directly (no
+   *  error). Distinct from ``status`` so the live poll can drive the indicator
+   *  without disturbing legacy callers. */
+  parseStatus?: "parsing" | "ready" | "failed" | "native";
   /** Origin of the attachment: ``local`` (multipart upload) vs
    * ``kb_doc`` (live reference to a global knowledge-base document).
    * Drives the row icon — KB picks render a ``Database`` glyph so

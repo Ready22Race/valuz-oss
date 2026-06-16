@@ -11,6 +11,7 @@ export const DESKTOP_CHANNELS = {
   unregisterServiceDescriptor: "unregister_service_descriptor",
   selectDirectory: "select_directory",
   openExternalUrl: "open_external_url",
+  appGetVersion: "app_get_version",
   appQuit: "app_quit",
   windowOpenNew: "window_open_new",
   windowMinimize: "window_minimize",

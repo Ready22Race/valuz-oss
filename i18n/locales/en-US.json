@@ -10,6 +10,7 @@
     "actionNew": "New",
     "agentHint": "Execution model / runtime follow the selected agent.",
     "agentLabel": "Agent",
+    "targetLabel": "Target",
     "timezoneLabel": "Timezone",
     "nextRunPreview": "Next run",
     "agentPlaceholderEmpty": "No agents available — add one first",

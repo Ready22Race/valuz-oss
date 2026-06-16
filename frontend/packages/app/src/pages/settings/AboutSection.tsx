@@ -6,17 +6,43 @@ import {
   MetricStrip,
   SettingsSection,
 } from "@valuz/ui";
-import { useTranslation, useUpdaterStore } from "@valuz/core";
-import { useCallback, useMemo } from "react";
+import { useTranslation, useUpdaterStore, useSystemStore } from "@valuz/core";
+import { useCallback, useEffect, useMemo, useState } from "react";
+
+const REPO_BASE = "https://github.com/valuz-ai/valuz-oss";
+
+type DesktopBridge = {
+  invoke: <T>(ch: string, args?: unknown) => Promise<T>;
+};
+
+const getBridge = (): DesktopBridge | null =>
+  (window as Window & { valuzDesktop?: DesktopBridge }).valuzDesktop ?? null;
 
 export const AboutSection = () => {
   const { t } = useTranslation();
-  const { status: updaterStatus, version } = useUpdaterStore();
+  const { status: updaterStatus, version: updaterVersion } = useUpdaterStore();
+  const systemStatus = useSystemStore((s) => s.status);
 
-  const bridge = useMemo(() => {
-    type DesktopBridge = { invoke: <T>(ch: string, args?: unknown) => Promise<T> };
-    return (window as Window & { valuzDesktop?: DesktopBridge }).valuzDesktop ?? null;
-  }, []);
+  const bridge = useMemo(() => getBridge(), []);
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!bridge) return;
+    let cancelled = false;
+    void bridge
+      .invoke<string>("app_get_version")
+      .then((v) => {
+        if (!cancelled && typeof v === "string") setAppVersion(v);
+      })
+      .catch(() => {
+        // Swallow — version stays null, falls back to system store below.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bridge]);
+
+  const displayVersion = appVersion ?? systemStatus?.version ?? null;
 
   const handleCheck = useCallback(() => {
     if (!bridge) return;
@@ -28,26 +54,26 @@ export const AboutSection = () => {
     void bridge.invoke("updater:show-window");
   }, [bridge]);
 
+  const openUrl = useCallback(
+    (url: string) => {
+      if (!bridge) return;
+      void bridge.invoke("open_external_url", { url });
+    },
+    [bridge],
+  );
+
   return (
-    <SettingsSection
-      title={t("settings.about.title")}
-      desc={t("settings.about.desc")}
-    >
+    <SettingsSection title={t("settings.about.title")} desc={t("settings.about.desc")}>
       <MetricStrip
         items={[
           {
-            label: "Build",
-            value: "2026.04",
-            hint: "Prototype branch",
-          },
-          {
-            label: "Channel",
-            value: "Desktop Alpha",
-            hint: "Internal preview",
+            label: "Version",
+            value: displayVersion ? `v${displayVersion}` : "—",
+            hint: appVersion ? "Packaged build" : "Backend reported",
           },
           {
             label: "Updates",
-            value: "Manual",
+            value: "Auto · 30 min",
             hint: t("settings.about.checkAfterInstall"),
           },
         ]}
@@ -57,11 +83,9 @@ export const AboutSection = () => {
           <div className="flex items-center gap-4">
             <img src="./logo.png" alt="Valuz" className="h-14 w-14 shrink-0" />
             <div>
-              <div className="text-base font-medium text-ink-heading">
-                Valuz Desktop
-              </div>
+              <div className="text-base font-medium text-ink-heading">Valuz Desktop</div>
               <div className="tabular mt-0.5 text-xs text-ink-meta">
-                v0.1.0 · Build 2026.04
+                {displayVersion ? `v${displayVersion}` : ""}
               </div>
             </div>
           </div>
@@ -95,21 +119,22 @@ export const AboutSection = () => {
           >
             <RefreshCw className="mr-1 h-3 w-3" />
             {t("settings.about.newVersionAvailable")}
-            {version ? ` v${version}` : ""}
+            {updaterVersion ? ` v${updaterVersion}` : ""}
           </Button>
         )}
         {updaterStatus === "error" && (
-          <span className="text-xs text-red-500">
-            {t("settings.about.checkFailed")}
-          </span>
+          <span className="text-xs text-red-500">{t("settings.about.checkFailed")}</span>
         )}
-        <Button variant="ghost" size="sm">
-          {t("settings.about.viewChangelog")}
-        </Button>
-        <Button variant="ghost" size="sm">
-          {t("settings.about.contactSupport")}{" "}
-          <ArrowUpRight className="h-3.5 w-3.5" />
-        </Button>
+        {bridge && (
+          <>
+            <Button variant="ghost" size="sm" onClick={() => openUrl(`${REPO_BASE}/releases`)}>
+              {t("settings.about.viewChangelog")}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => openUrl(`${REPO_BASE}/issues`)}>
+              {t("settings.about.contactSupport")} <ArrowUpRight className="h-3.5 w-3.5" />
+            </Button>
+          </>
+        )}
       </div>
     </SettingsSection>
   );
