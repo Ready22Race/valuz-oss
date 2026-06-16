@@ -1,17 +1,17 @@
 """initial schema
 
-The host chain holds exactly this one revision — the 0-migration policy.
-Pre-launch, schema changes REGENERATE this baseline (autogenerate against an
-empty DB from ``infra.database.Base.metadata``) instead of shipping ALTER
-migrations; if the shape changes, bump this ``revision`` together with
-``boot.schema.BASELINE_REVISION``. At boot, ``drop_stale_host_tables`` drops
-every host table on any DB whose stamp differs from the baseline id, then
-``upgrade head`` re-initializes the schema cleanly from here.
+The baseline of the host alembic chain — it creates the whole host schema from
+empty. The chain is incremental: this baseline creates the schema and later
+revisions ALTER it (``alembic upgrade head`` migrates a DB forward in place,
+data-preserving). ``boot.schema.drop_stale_host_tables`` only drops + rebuilds a
+DB whose stamp is unknown/foreign, or whose tables carry no stamp at all — a
+DB on any known revision is never wiped.
 
-This revision folds in the formerly separate 0002 (``valuz_project_session``
-index table), 0003 (member ``source_agent_slug`` backfill — moot on a fresh
-schema) and 0004 (drop of the dangling ``kernel_agent_id`` columns;
-``valuz_agent.id`` is the only identity now).
+The ``revision`` id is ``"0002"`` while the filename keeps the ``0001`` prefix:
+released DBs carry the ``0002`` stamp, so the id must not change. It folds in
+the formerly separate 0002 (``valuz_project_session`` index table), 0003
+(member ``source_agent_slug`` backfill) and 0004 (drop of the dangling
+``kernel_agent_id`` columns; ``valuz_agent.id`` is the only identity now).
 
 Every business table carries a required ``user_id`` (the owner id) plus a
 matching ``ix_<table>_user_id`` index. The column is stamped from the
@@ -19,7 +19,7 @@ request-scoped owner ContextVar (``infra.owner_context``); in OSS that
 resolves to the device-derived local install id, under the commercial overlay
 to the logged-in user.
 
-Revision ID: 0001
+Revision ID: 0002
 Revises:
 Create Date: 2026-06-10
 
