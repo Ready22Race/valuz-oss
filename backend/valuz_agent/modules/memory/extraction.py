@@ -178,18 +178,23 @@ class MemoryExtractor:
 
         targets = ["user", "global"] + (["project"] if project_id else [])
         current = {t: self._store.read_entries(t, project_id=project_id) for t in targets}  # type: ignore[arg-type]
+        # Surface each target's char budget so the reviewer consolidates before a
+        # target overflows (over-cap writes are rejected, not auto-grown).
+        usage = {t: MemoryStore.usage_for(v, t) for t, v in current.items()}  # type: ignore[arg-type]
         if task_digest is not None:
             prompt = build_task_review_prompt(
                 task_digest=redact_secrets(task_digest),
                 transcript=redact_secrets(transcript),
                 current=current,
                 project_context=project_context,
+                usage=usage,
             )
         else:
             prompt = build_review_prompt(
                 transcript=redact_secrets(transcript),
                 current=current,
                 project_context=project_context,
+                usage=usage,
             )
 
         raw = await self._complete(prompt)

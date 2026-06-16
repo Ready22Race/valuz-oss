@@ -120,3 +120,39 @@ def test_extractor_inert_without_completer(store):
     assert not ext.enabled
     rep = asyncio.run(ext.extract(transcript="anything"))
     assert rep["applied"] == 0 and "skipped" in rep
+
+
+def test_usage_for_format():
+    assert MemoryStore.usage_for([], "global") == "0/2,500 chars (0%)"
+    half = MemoryStore.usage_for(["x" * 1250], "global")
+    assert half == "1,250/2,500 chars (50%)"
+
+
+def test_render_current_memory_shows_usage():
+    from valuz_agent.modules.memory.prompts import render_current_memory
+
+    out = render_current_memory(
+        {"user": ["be terse"], "global": []},
+        usage={"user": "8/1,500 chars (0%)", "global": "0/2,500 chars (0%)"},
+    )
+    assert "[user] — 8/1,500 chars (0%)" in out
+    assert "[global] — 0/2,500 chars (0%) (empty)" in out
+    # without usage the headers stay plain (back-compat)
+    plain = render_current_memory({"user": ["be terse"]})
+    assert "[user]\n  - be terse" in plain
+
+
+def test_extractor_surfaces_usage_in_review_prompt(store):
+    """The reviewer must see each target's char budget so it consolidates before a
+    target overflows (over-cap writes are rejected, not auto-grown)."""
+    store.add("global", "prefers pnpm over npm for all JS projects")
+    seen: dict[str, str] = {}
+
+    async def _capture(prompt):  # noqa: ANN001, ANN202
+        seen["p"] = prompt
+        return json.dumps({"ops": []})
+
+    ext = MemoryExtractor(store=store, complete=_capture)
+    asyncio.run(ext.extract(transcript="user: please review this conversation content"))
+    assert "/2,500 chars (" in seen["p"]  # global budget surfaced
+    assert "/1,500 chars (" in seen["p"]  # user budget surfaced

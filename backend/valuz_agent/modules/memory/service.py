@@ -135,6 +135,16 @@ class MemoryStore:
     def _char_count(entries: list[str]) -> int:
         return len(ENTRY_DELIMITER.join(entries)) if entries else 0
 
+    @staticmethod
+    def usage_for(entries: list[str], target: Target) -> str:
+        """Human-readable budget line for a target, e.g. ``3,600/4,000 chars (90%)``.
+        Surfaced to the background reviewer so it consolidates BEFORE overflowing
+        (the write pipeline rejects over-cap adds rather than auto-growing)."""
+        cur = MemoryStore._char_count(entries)
+        limit = CHAR_LIMITS[target]
+        pct = min(100, int(cur / limit * 100)) if limit else 0
+        return f"{cur:,}/{limit:,} chars ({pct}%)"
+
     # -- write actions (the single shared pipeline) -------------------------
 
     def add(
