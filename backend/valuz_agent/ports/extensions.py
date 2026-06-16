@@ -23,7 +23,7 @@ from valuz_agent.api.middleware import AuthMiddleware
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.llm_provider import LLMProviderRegistry, _InMemoryRegistry
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
-from valuz_agent.ports.resource_enhancer import NoopResourceEnhancer, ResourceListEnhancer
+from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
 
 
 class Extensions:
@@ -33,7 +33,7 @@ class Extensions:
         self.billing: BillingPort = NoopBillingProvider()
         self.llm_registry: LLMProviderRegistry = _InMemoryRegistry()
         self.policy: ProviderPolicyPort = AllowAllProviderPolicy()
-        self.resource_enhancer: ResourceListEnhancer = NoopResourceEnhancer()
+        self.resource_list_hook: ResourceListHook = NoopResourceListHook()
         # The request auth middleware as a ``(cls, kwargs)`` tuple. Defaults to
         # the OSS ``AuthMiddleware``; the commercial overlay swaps in a subclass
         # (e.g. one that publishes extra per-request ContextVars with a reset
