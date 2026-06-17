@@ -10,7 +10,12 @@ from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import NoAvailableProvider, ProviderNotFound
 from valuz_agent.modules.providers.service import ProviderService
-from valuz_agent.modules.settings.kernel_endpoint import get_endpoint, set_endpoint
+from valuz_agent.modules.settings.kernel_endpoint import (
+    get_endpoint,
+    probe_endpoint,
+    set_endpoint,
+    stored_token,
+)
 from valuz_agent.modules.settings.preferences import (
     detect_system_timezone,
     get_default_effort,
@@ -161,6 +166,56 @@ async def patch_kernel_endpoint(payload: KernelEndpointPatchPayload) -> KernelEn
             return _kernel_endpoint_response(result)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class KernelEndpointTestPayload(BaseModel):
+    url: str | None = Field(default=None)
+    # Omit to test with the already-stored token (the "Test" button on a saved
+    # endpoint shouldn't force re-entering the secret).
+    token: str | None = Field(default=None)
+    host_external_url: str | None = Field(default=None)
+
+
+class KernelEndpointTestResponse(BaseModel):
+    kernel_reachable: bool
+    auth_ok: bool
+    kernel_status: int | None
+    # ④ callback direction (static): unset | loopback | ok. A remote kernel
+    # can't reach a loopback host — surfaced here so "Test" doesn't false-green.
+    callback_hint: str
+    ok: bool
+    detail: str
+
+
+@router.post("/kernel-endpoint/test")
+async def test_kernel_endpoint(payload: KernelEndpointTestPayload) -> KernelEndpointTestResponse:
+    """Probe a candidate remote-kernel endpoint before committing it.
+
+    Tests host→kernel for real (reachable + token accepted) and reports the
+    ④ kernel→host callback direction statically (a loopback host external URL
+    is the #1 silent failure for a remote kernel). Falls back to the persisted
+    url / token / external URL for any field left unset.
+    """
+    async with async_unit_of_work(commit=False) as db:
+        current = await get_endpoint(db)
+    url = (payload.url if payload.url is not None else current.url) or ""
+    if not url.strip():
+        raise HTTPException(status_code=422, detail="url is required to test")
+    token = payload.token if payload.token is not None else stored_token()
+    host_external_url = (
+        payload.host_external_url
+        if payload.host_external_url is not None
+        else current.host_external_url
+    )
+    result = await probe_endpoint(url=url, token=token, host_external_url=host_external_url)
+    return KernelEndpointTestResponse(
+        kernel_reachable=result.kernel_reachable,
+        auth_ok=result.auth_ok,
+        kernel_status=result.kernel_status,
+        callback_hint=result.callback_hint,
+        ok=result.ok,
+        detail=result.detail,
+    )
 
 
 # ── Model defaults (runtime + provider + model + effort) ─────────────

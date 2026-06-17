@@ -47,6 +47,59 @@ class Settings(BaseSettings):
     kernel_url: str = "http://127.0.0.1:8400"
     kernel_token: str | None = None
 
+    # ── AGS / e2b cloud sandbox driver (VALUZ_SANDBOX_DRIVER=ags) ──────
+    # Provisions the kernel image (see docker/kernel.Dockerfile, published to
+    # ghcr.io) inside a Tencent AGS sandbox over the e2b-compatible SDK. All
+    # optional — the driver's preflight reports what's missing and the host
+    # falls back to in-process when unset. The API key may also come from the
+    # SDK's own ``E2B_API_KEY`` env; ``ags_domain`` points the SDK at AGS
+    # instead of e2b.dev. ``ags_kernel_template`` is the template/image the
+    # sandbox runs (the kernel image, registered as an AGS template).
+    ags_api_key: str | None = None
+    ags_domain: str | None = None
+    ags_kernel_template: str | None = None
+    ags_kernel_port: int = 8000
+    # AGS rejects the e2b ``create(envs=)`` per-sandbox env sync (500
+    # "post-create env sync failed"), so the kernel's bearer must be a STATIC
+    # env on the sandbox tool. Set this to that same token: the driver then
+    # skips create-time env injection and uses this token to auth to the
+    # kernel. Unset → dynamic mode (random token via create envs) for e2b
+    # backends that honour it.
+    ags_kernel_token: str | None = None
+    # Path the AGS sandbox tool/template mounts the COS bucket at (the mount is
+    # configured on the sandbox tool in the console, NOT by this driver). The
+    # host stages a project to COS under a prefix and the kernel session cwd
+    # becomes ``{mount_path}/{prefix}``. Keep in sync with the console mount.
+    ags_mount_path: str = "/workspace"
+    # Safety caps on per-project stage-in (loud log + stop, never silent
+    # truncation): max files and max total bytes uploaded to COS.
+    ags_stage_max_files: int = 5000
+    ags_stage_max_bytes: int = 200_000_000
+    # Sandbox lifetime hint (seconds). AGS 常驻 sandboxes are effectively
+    # no-timeout; this is the create-time timeout the e2b SDK requires. Large
+    # by default so a long-running kernel isn't reaped mid-session. (Stock e2b
+    # caps this; AGS's true no-timeout is a backend-side convention.)
+    ags_sandbox_timeout_s: int = 86_400
+    # e2b ``secure``: when True the exposed sandbox URL is gated by an e2b
+    # traffic-access token (403 without it). We default FALSE because the
+    # kernel enforces its OWN bearer (``KERNEL_AUTH_TOKEN``) on every non-health
+    # route, so the host can reach it directly; flip True only if you also
+    # thread the e2b traffic token (not wired here).
+    ags_secure: bool = False
+
+    # ── COS (object store backing the cloud sandbox workspace, ⑤) ─────
+    # Tencent COS is S3-compatible; the host writes the project here under a
+    # per-project prefix and AGS mounts the bucket so the kernel sees it as
+    # ``/workspace``. Secrets belong in ``.env`` (git-ignored) / the secret
+    # store, never in code — production should prefer a CAM role / STS over a
+    # long-lived SecretId/SecretKey. ``cos_endpoint`` defaults to the regional
+    # COS S3 endpoint when unset.
+    cos_bucket: str | None = None
+    cos_region: str = "ap-beijing"
+    cos_secret_id: str | None = None
+    cos_secret_key: str | None = None
+    cos_endpoint: str | None = None
+
     @property
     def is_http_kernel(self) -> bool:
         """True when the kernel runs as a SEPARATE process (subprocess /

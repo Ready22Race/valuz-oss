@@ -1417,10 +1417,37 @@
       "systemLogs": {
         "desc": "后端状态与日志流",
         "label": "服务日志"
+      },
+      "gateway": {
+        "label": "内核",
+        "desc": "智能体内核的运行位置"
       }
     },
     "timezone": "时区",
-    "title": "设置"
+    "title": "设置",
+    "gateway": {
+      "desc": "在本进程内运行智能体内核，或通过 HTTP 驱动运行在远程主机 / 云沙箱上的内核。",
+      "localTitle": "本地（进程内）",
+      "localDesc": "在本应用内运行内核。默认，可离线工作。",
+      "remoteTitle": "远程沙箱",
+      "remoteDesc": "通过 HTTP 驱动运行在其他主机或云沙箱上的内核。",
+      "urlLabel": "内核地址",
+      "urlDesc": "远程内核的基础 URL（主机 → 内核）。",
+      "externalUrlLabel": "主机回调地址",
+      "externalUrlDesc": "远程内核回连本主机所用的地址（内核 → 主机）。回环地址在远程沙箱中无法访问。",
+      "tokenLabel": "鉴权令牌",
+      "tokenDesc": "内核所需的 Bearer 令牌（KERNEL_AUTH_TOKEN）。",
+      "tokenStored": "已保存 — 留空则保持不变",
+      "tokenPlaceholder": "Bearer 令牌",
+      "restartNote": "重启后生效。",
+      "testButton": "测试",
+      "saveButton": "保存",
+      "saved": "内核地址已保存",
+      "saveFailed": "保存内核地址失败",
+      "testFailed": "测试失败",
+      "callbackLoopback": "内核可达，但主机回调地址是回环地址，远程内核无法回连 —— 工具回调（记忆、文档、任务）将失败。请填写一个可被访问的主机地址。",
+      "callbackUnset": "内核可达，但未设置主机回调地址 —— 远程内核将无法回调工具。请填写。"
+    }
   },
   "sidebar": {
     "automation": "自动化",

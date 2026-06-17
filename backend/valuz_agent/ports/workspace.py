@@ -88,3 +88,41 @@ class LocalWorkspaceHandle:
 
     async def exists(self, rel: str) -> bool:
         return self.subpath(rel).exists()
+
+
+class RemoteWorkspaceHandle:
+    """Cloud implementation — project files live in an object store the sandbox
+    mounts as its workspace (host and kernel do NOT share a filesystem).
+
+    The sync ``cwd()`` / ``subpath()`` return the **in-sandbox** path (e.g.
+    ``/workspace/<project_id>``) — what the kernel is told to use as the session
+    cwd — NOT a host path. The async IO methods read/write the backing object
+    store under the project's key prefix, so the host can stage files in and
+    read results back over the same ``WorkspaceHandle`` protocol the local form
+    uses. Object key for a workspace-relative ``rel`` is ``{prefix}/{rel}``.
+    """
+
+    def __init__(self, store: object, *, key_prefix: str, sandbox_cwd: str) -> None:
+        # ``store`` is an ``ObjectStore`` (ports.object_store) — typed loosely
+        # here to keep this port free of the integration import.
+        self._store = store
+        self._prefix = key_prefix.rstrip("/")
+        self._cwd = sandbox_cwd
+
+    def cwd(self) -> Path:
+        return Path(self._cwd)
+
+    def subpath(self, *parts: str) -> Path:
+        return Path(self._cwd).joinpath(*parts)
+
+    def _key(self, rel: str) -> str:
+        return f"{self._prefix}/{rel.lstrip('/')}"
+
+    async def read_bytes(self, rel: str) -> bytes:
+        return await self._store.get_bytes(self._key(rel))  # type: ignore[attr-defined,no-any-return]
+
+    async def write_bytes(self, rel: str, data: bytes) -> None:
+        await self._store.put_bytes(self._key(rel), data)  # type: ignore[attr-defined]
+
+    async def exists(self, rel: str) -> bool:
+        return await self._store.exists(self._key(rel))  # type: ignore[attr-defined,no-any-return]

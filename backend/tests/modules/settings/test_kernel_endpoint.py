@@ -121,3 +121,83 @@ async def test_apply_persisted_noop_when_inprocess(sm, monkeypatch) -> None:
         applied = await ke.apply_persisted_endpoint(db)
     assert applied is False
     assert settings.kernel_mode == "inprocess"
+
+
+# ── "Test remote" probe ───────────────────────────────────────────────
+
+
+def _mock_transport(status: int):
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"data": []})
+
+    return httpx.MockTransport(handler)
+
+
+def _raising_transport():
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.usefixtures("sm")
+async def test_probe_reachable_and_authed() -> None:
+    res = await ke.probe_endpoint(
+        url="https://kernel:8000/",
+        token="good",
+        host_external_url="https://host:8000",
+        transport=_mock_transport(200),
+    )
+    assert res.kernel_reachable is True
+    assert res.auth_ok is True
+    assert res.kernel_status == 200
+    assert res.callback_hint == "ok"
+    assert res.ok is True
+
+
+@pytest.mark.usefixtures("sm")
+async def test_probe_bad_token_is_401() -> None:
+    res = await ke.probe_endpoint(
+        url="https://kernel:8000",
+        token="wrong",
+        host_external_url="https://host:8000",
+        transport=_mock_transport(401),
+    )
+    assert res.kernel_reachable is True
+    assert res.auth_ok is False
+    assert res.ok is False
+    assert "token" in res.detail.lower()
+
+
+@pytest.mark.usefixtures("sm")
+async def test_probe_unreachable() -> None:
+    res = await ke.probe_endpoint(
+        url="https://nope:8000",
+        token="t",
+        transport=_raising_transport(),
+    )
+    assert res.kernel_reachable is False
+    assert res.ok is False
+    assert "not reachable" in res.detail.lower()
+
+
+@pytest.mark.usefixtures("sm")
+async def test_probe_callback_hint_loopback_and_unset() -> None:
+    loop = await ke.probe_endpoint(
+        url="https://k:8000",
+        token="t",
+        host_external_url="http://127.0.0.1:8000",
+        transport=_mock_transport(200),
+    )
+    assert loop.callback_hint == "loopback"  # remote kernel can't reach this
+    unset = await ke.probe_endpoint(
+        url="https://k:8000",
+        token="t",
+        host_external_url=None,
+        transport=_mock_transport(200),
+    )
+    assert unset.callback_hint == "unset"
