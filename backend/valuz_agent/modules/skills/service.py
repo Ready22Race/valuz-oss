@@ -246,59 +246,92 @@ class SkillLibraryService:
             if manifest.id in seen_ids:
                 continue
             seen_ids.add(manifest.id)
-            existing = await self._ds.get_by_id(require_current_user_id(), manifest.id)
-            from valuz_agent.modules.skills.models import SkillIndexRow
-
-            if existing is None:
-                await self._ds.create(
-                    require_current_user_id(),
-                    SkillIndexRow(
-                        id=manifest.id,
-                        slug=manifest.slug or manifest.id,
-                        name=manifest.name,
-                        description=manifest.description,
-                        scope=manifest.scope,
-                        source=manifest.source,
-                        source_path=manifest.path,
-                        project_root=manifest.project_root,
-                        manifest_filename=None,
-                        tags_json=",".join(manifest.tags) if manifest.tags else None,
-                        icon=manifest.icon,
-                        status="available",
-                        readonly=manifest.readonly,
-                        deletable=manifest.deletable,
-                        is_locked=manifest.is_locked,
-                        content_hash=manifest.content_hash,
-                        manifest_hash=manifest.manifest_hash,
-                        folder_created_at=manifest.folder_created_at,
-                        # New rows default to "discovered"; the create /
-                        # import flows overwrite this via set_creation_origin
-                        # right after they call startup_scan.
-                        creation_origin="discovered",
-                    ),
-                )
-            else:
-                existing.name = manifest.name
-                existing.description = manifest.description
-                existing.source_path = manifest.path
-                existing.status = "available"
-                existing.content_hash = manifest.content_hash
-                existing.manifest_hash = manifest.manifest_hash
-                existing.readonly = manifest.readonly
-                existing.deletable = manifest.deletable
-                existing.is_locked = manifest.is_locked
-                # Birthtime is immutable, so overwriting it every scan is
-                # safe (also backfills legacy rows). creation_origin is
-                # host bookkeeping owned by the DB — never clobber a real
-                # value; only heal a NULL legacy row to "discovered".
-                existing.folder_created_at = manifest.folder_created_at
-                existing.creation_origin = existing.creation_origin or "discovered"
-                await self._ds.update(existing)
+            await self._upsert_manifest(manifest)
 
         for row in await self._ds.list_skills(require_current_user_id()):
             if row.id not in seen_ids:
                 row.status = "unavailable"
                 await self._ds.update(row)
+
+    async def _upsert_manifest(self, manifest) -> None:  # type: ignore[no-untyped-def]
+        """Create or refresh the ``valuz_skill_index`` row for one manifest.
+
+        Shared by the broad ``startup_scan`` and the targeted
+        ``index_official_skills`` so both write rows identically. ``status`` is
+        set ``available`` (the caller owns marking absent rows ``unavailable``).
+        """
+        existing = await self._ds.get_by_id(require_current_user_id(), manifest.id)
+        from valuz_agent.modules.skills.models import SkillIndexRow
+
+        if existing is None:
+            await self._ds.create(
+                require_current_user_id(),
+                SkillIndexRow(
+                    id=manifest.id,
+                    slug=manifest.slug or manifest.id,
+                    name=manifest.name,
+                    description=manifest.description,
+                    scope=manifest.scope,
+                    source=manifest.source,
+                    source_path=manifest.path,
+                    project_root=manifest.project_root,
+                    manifest_filename=None,
+                    tags_json=",".join(manifest.tags) if manifest.tags else None,
+                    icon=manifest.icon,
+                    status="available",
+                    readonly=manifest.readonly,
+                    deletable=manifest.deletable,
+                    is_locked=manifest.is_locked,
+                    content_hash=manifest.content_hash,
+                    manifest_hash=manifest.manifest_hash,
+                    folder_created_at=manifest.folder_created_at,
+                    # New rows default to "discovered"; the create / import
+                    # flows overwrite this via set_creation_origin right after
+                    # they call startup_scan.
+                    creation_origin="discovered",
+                ),
+            )
+        else:
+            existing.name = manifest.name
+            existing.description = manifest.description
+            existing.source_path = manifest.path
+            existing.status = "available"
+            existing.content_hash = manifest.content_hash
+            existing.manifest_hash = manifest.manifest_hash
+            existing.readonly = manifest.readonly
+            existing.deletable = manifest.deletable
+            existing.is_locked = manifest.is_locked
+            # Birthtime is immutable, so overwriting it every scan is safe
+            # (also backfills legacy rows). creation_origin is host bookkeeping
+            # owned by the DB — never clobber a real value; only heal a NULL
+            # legacy row to "discovered".
+            existing.folder_created_at = manifest.folder_created_at
+            existing.creation_origin = existing.creation_origin or "discovered"
+            await self._ds.update(existing)
+
+    async def index_official_skills(self) -> int:
+        """Deterministically index the bundled official skills.
+
+        Run right after ``sync_bundled_official_skills`` at boot so the official
+        skills the client ships are in ``valuz_skill_index`` in the SAME step —
+        independent of the broad ``startup_scan`` (best-effort, error-swallowed),
+        which lagged when finance-edition skills landed on disk out-of-band and
+        left agents that reference them unable to resolve the skill ("Unknown
+        skill"). Upserts only; never marks anything unavailable. Returns the
+        count indexed.
+        """
+        from valuz_agent.modules.skills.contracts import RuntimeContext
+
+        ctx = RuntimeContext()
+        count = 0
+        async with _scan_lock:
+            for source in self._extra_sources:
+                for manifest in source.list_skills(ctx):
+                    if manifest.scope != "official":
+                        continue
+                    await self._upsert_manifest(manifest)
+                    count += 1
+        return count
 
     async def set_skill_enabled(
         self,
