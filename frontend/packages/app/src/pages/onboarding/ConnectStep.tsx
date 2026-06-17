@@ -263,10 +263,8 @@ const RuntimeCardRow = ({
   const { t } = useTranslation();
   return (
     <div
-      className={`rounded-xl border transition-all ${
-        isDefault
-          ? "border-brand/60 bg-brand-light/20 ring-1 ring-brand/40"
-          : "border-surface-border bg-surface"
+      className={`rounded-xl shadow-sm transition-all ${
+        isDefault ? "bg-brand-50 ring-1 ring-brand/40" : "bg-card"
       }`}
     >
       <div className="flex items-center gap-3.5 px-4 py-3.5">
@@ -292,7 +290,7 @@ const RuntimeCardRow = ({
           )}
         </div>
       </div>
-      <div className="border-t border-surface-border/70 px-4 pb-4 pt-3">
+      <div className="border-t border-surface-border/40 px-4 pb-4 pt-3 dark:border-surface-border">
         <Select value={value} onValueChange={onPick} disabled={busy}>
           <SelectTrigger className="w-full font-mono text-xs">
             <SelectValue

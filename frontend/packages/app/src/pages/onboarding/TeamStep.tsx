@@ -264,7 +264,7 @@ const PresetDetail = ({
           </div>
         </div>
       )}
-      <div className="overflow-hidden rounded-xl border border-surface-border bg-surface shadow-sm [&>*+*]:border-t [&>*+*]:border-surface-border">
+      <div className="overflow-hidden rounded-xl bg-card shadow-sm dark:[&>*+*]:border-surface-border [&>*+*]:border-t [&>*+*]:border-surface-border/40">
         {team.members.map((m) => (
           <MemberCard key={m.nameKey} member={m} />
         ))}
