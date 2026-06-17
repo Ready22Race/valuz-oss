@@ -185,11 +185,16 @@ async def apply_persisted_sandbox() -> None:
     if settings.is_http_kernel:
         return  # explicit env / provisioned sandbox already selected http
     from valuz_agent.infra.db import async_unit_of_work
-    from valuz_agent.modules.settings.sandbox_config import apply_to_settings
+    from valuz_agent.modules.settings.sandbox_config import (
+        apply_to_settings,
+        get_sandbox_config,
+    )
 
     driver_name: str | None = None
+    persisted_driver = "inprocess"
     try:
         async with async_unit_of_work(commit=False) as db:
+            persisted_driver = (await get_sandbox_config(db)).driver
             # A persisted sandbox DRIVER config (UI-driven AGS) — copy it onto
             # settings; provisioning happens below (outside the UoW).
             driver_name = await apply_to_settings(db)
@@ -199,6 +204,10 @@ async def apply_persisted_sandbox() -> None:
 
     if driver_name:
         await _provision_sandbox_at_boot(driver_name)
+    elif persisted_driver == "inprocess":
+        # Cloud was switched OFF in the UI — reap any sandbox we provisioned
+        # earlier so a 常驻 sandbox doesn't linger now that nothing reuses it.
+        await _reap_remembered_sandbox()
 
 
 async def _provision_sandbox_at_boot(driver_name: str) -> None:
@@ -318,6 +327,33 @@ async def _sandbox_alive(base_url: str) -> bool:
         return r.status_code == 200
     except Exception:  # noqa: BLE001 — unreachable == not alive
         return False
+
+
+async def _reap_remembered_sandbox() -> None:
+    """Tear down + forget a previously-provisioned cloud sandbox when the user
+    has switched the driver back to in-process (nothing will reuse it). Best-
+    effort; never blocks boot."""
+    from valuz_agent.infra.config import settings
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.integrations import sandbox_registry
+    from valuz_agent.modules.settings import sandbox_config as sbx
+    from valuz_agent.ports.sandbox_provider import SandboxBootContext
+
+    try:
+        async with async_unit_of_work(commit=False) as db:
+            remembered = await sbx.recall_active_sandbox(db)
+        if not remembered:
+            return
+        old_url, _ = remembered
+        driver = sandbox_registry.get("ags")
+        if driver is not None:
+            ctx = SandboxBootContext(host="127.0.0.1", port=8000)
+            await _kill_sandbox_quietly(driver, ctx, old_url, settings.ags_kernel_token or "")
+        async with async_unit_of_work() as db:
+            await sbx.forget_active_sandbox(db)
+        logger.warning("cloud sandbox disabled — reaped remembered sandbox %s", old_url)
+    except Exception:  # noqa: BLE001 — best-effort cleanup
+        logger.warning("failed to reap remembered sandbox", exc_info=True)
 
 
 async def _kill_sandbox_quietly(driver: object, ctx: object, base_url: str, token: str) -> None:
