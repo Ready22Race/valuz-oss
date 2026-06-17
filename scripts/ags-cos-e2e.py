@@ -39,8 +39,7 @@ import tempfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "backend"))
 
-USER_ID = "e2e-smoke"
-PROJECT_REL = "projects/e2e-demo"
+PROJECT_REL = "projects/e2e-demo"  # path within the user's mounted prefix
 
 
 def _need(name: str) -> str:
@@ -52,6 +51,7 @@ def _need(name: str) -> str:
 
 async def main() -> None:
     from valuz_agent.infra.config import settings
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.integrations.object_store_s3 import cos_object_store, stage_directory
     from valuz_agent.integrations.sandbox_ags import (
         _AgsBackend,
@@ -70,9 +70,13 @@ async def main() -> None:
     if store is None:
         sys.exit("✗ COS not configured (VALUZ_COS_*).")
 
+    # The tool mounts THIS user's COS prefix (存储路径=/<user_id>) at the mount
+    # path, so the user_id is the mount root and is NOT in the in-sandbox path.
+    user_id = resolve_local_user_id()
     mount = settings.ags_mount_path.rstrip("/")
-    cos_prefix = f"{USER_ID}/{PROJECT_REL}"
-    sandbox_path = f"{mount}/{cos_prefix}"
+    cos_prefix = f"{user_id}/{PROJECT_REL}"  # COS key (with user_id)
+    sandbox_path = f"{mount}/{PROJECT_REL}"  # in-sandbox path (user_id stripped)
+    print(f"   user_id={user_id}  (tool 存储路径 must be /{user_id})")
 
     # 1. stage a tiny project into COS
     tmp = tempfile.mkdtemp(prefix="ags-e2e-")
@@ -117,8 +121,9 @@ async def main() -> None:
     finally:
         # 5. teardown + cleanup
         await provider.destroy("e2e")
-        removed = await store.delete_prefix(f"{USER_ID}/")
-        print(f"⑤ destroyed sandbox + cleaned {removed} COS objects")
+        # Clean ONLY the demo prefix — never the user's whole synced workspace.
+        removed = await store.delete_prefix(f"{cos_prefix}/")
+        print(f"⑤ destroyed sandbox + cleaned {removed} COS objects ({cos_prefix}/)")
 
 
 if __name__ == "__main__":

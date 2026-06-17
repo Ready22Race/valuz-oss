@@ -263,25 +263,25 @@ class AgsSandboxProvider:
     ) -> MountGrant:
         """⑤ materials face — stage ``host_path`` into the cloud sandbox via COS.
 
-        The AGS sandbox tool mounts the COS bucket at ``settings.ags_mount_path``
-        (console-configured, not by this driver). We upload the project to COS
-        under a per-project prefix; the kernel then sees it at
-        ``{mount_path}/{prefix}`` and writes results straight back to COS
-        (the mount IS the sync — no separate write-back). If COS isn't
-        configured we fall back to an empty in-sandbox dir and warn.
+        Isolation contract: the AGS sandbox tool mounts **the current user's COS
+        prefix** (存储路径 = ``/<user_id>``) at ``settings.ags_mount_path``, so a
+        sandbox sees only its own user's subtree and the user_id is the mount
+        root — it does NOT appear in the in-sandbox path. We therefore upload to
+        COS key ``<user_id>/<rel>`` but tell the kernel ``{mount_path}/<rel>``
+        (user_id stripped). The kernel writes results straight back to COS via
+        the mount (the mount IS the sync). If COS isn't configured we fall back
+        to an empty in-sandbox dir and warn.
         """
         import hashlib
 
         from valuz_agent.infra.auth_context import get_current_user_id
 
-        # User-scoped prefix, consistent with the ``sync-cos`` entry point so the
-        # whole bucket is laid out as ``<user_id>/...`` under the mount. Owner
-        # context is set on the create-session path; fall back to "local".
         uid = get_current_user_id() or "local"
         real = os.path.realpath(host_path)
         digest = hashlib.sha256(real.encode()).hexdigest()[:12]
-        prefix = f"{uid}/workspaces/{digest}"
-        kernel_cwd = f"{settings.ags_mount_path.rstrip('/')}/{prefix}"
+        rel = f"workspaces/{digest}"  # path WITHIN the user's mounted prefix
+        cos_key = f"{uid}/{rel}"  # where it lives in COS
+        kernel_cwd = f"{settings.ags_mount_path.rstrip('/')}/{rel}"  # mount root == <uid>/
 
         store = self._object_store()
         if store is None:
@@ -299,22 +299,22 @@ class AgsSandboxProvider:
 
         n, total = await stage_directory(
             store,
-            prefix,
+            cos_key,
             real,
             max_files=settings.ags_stage_max_files,
             max_bytes=settings.ags_stage_max_bytes,
         )
         logger.info(
-            "AGS bind_workspace: staged %d files (%d bytes) of %s → COS %s (mounts at %s)",
+            "AGS bind_workspace: staged %d files (%d bytes) of %s → COS %s (kernel cwd %s)",
             n,
             total,
             real,
-            prefix,
+            cos_key,
             kernel_cwd,
         )
-        self._grants[f"cos:{prefix}"] = prefix
+        self._grants[f"cos:{cos_key}"] = cos_key
         return MountGrant(
-            grant_id=f"cos:{prefix}", kernel_cwd=kernel_cwd, host_path=real, mode=mode
+            grant_id=f"cos:{cos_key}", kernel_cwd=kernel_cwd, host_path=real, mode=mode
         )
 
     async def unbind_workspace(self, sandbox_id: str, grant_id: str) -> None:

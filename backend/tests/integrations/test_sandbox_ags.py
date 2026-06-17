@@ -170,8 +170,9 @@ async def test_bind_workspace_no_cos_falls_back(monkeypatch):
 
 
 async def test_bind_workspace_stages_to_cos(monkeypatch, tmp_path):
-    # A configured COS store → the project dir is uploaded under a prefix and
-    # the kernel_cwd is the mounted path {mount}/{prefix}.
+    # Configured COS → project uploaded to COS key <user_id>/<rel>, but the
+    # kernel_cwd is {mount}/<rel> (user_id is the mount root, stripped) — the
+    # per-user-isolation contract (存储路径=/<user_id>).
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_bytes(b"print(1)")
     (tmp_path / "README.md").write_bytes(b"# hi")
@@ -187,20 +188,27 @@ async def test_bind_workspace_stages_to_cos(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "valuz_agent.integrations.object_store_s3.cos_object_store", lambda: store
     )
+    from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
     from valuz_agent.infra.config import settings
 
     monkeypatch.setattr(settings, "ags_mount_path", "/workspace")
+    token = set_current_user_id("user-42")
+    try:
+        provider = ags.AgsSandboxProvider()
+        grant = await provider.bind_workspace("host-kernel", str(tmp_path), "rw")
+    finally:
+        reset_current_user_id(token)
 
-    provider = ags.AgsSandboxProvider()
-    grant = await provider.bind_workspace("host-kernel", str(tmp_path), "rw")
-
-    # files uploaded under the per-project prefix
-    prefix = grant.grant_id.split(":", 1)[1]
-    assert f"{prefix}/src/main.py" in store.objs
-    assert store.objs[f"{prefix}/src/main.py"] == b"print(1)"
-    assert f"{prefix}/README.md" in store.objs
-    # kernel cwd is the mounted path
-    assert grant.kernel_cwd == f"/workspace/{prefix}"
+    # uploaded to COS under <user_id>/workspaces/<digest>/...
+    cos_key = grant.grant_id.split(":", 1)[1]
+    assert cos_key.startswith("user-42/workspaces/")
+    assert f"{cos_key}/src/main.py" in store.objs
+    assert store.objs[f"{cos_key}/src/main.py"] == b"print(1)"
+    assert f"{cos_key}/README.md" in store.objs
+    # kernel cwd drops the user_id (the mount roots at <user_id>/)
+    rel = cos_key.split("/", 1)[1]  # workspaces/<digest>
+    assert grant.kernel_cwd == f"/workspace/{rel}"
+    assert "user-42" not in grant.kernel_cwd
     assert grant.grant_id.startswith("cos:")
 
 
