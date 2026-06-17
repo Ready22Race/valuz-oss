@@ -917,6 +917,7 @@ class LifecycleService:
         role: Literal["lead", "subtask"],
         task_id: str,
         project_id: str,
+        via_shutdown: bool = False,
     ) -> None:
         """Finalize a session once its actor loop ends; record member result.
 
@@ -929,12 +930,37 @@ class LifecycleService:
         """
         from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
 
+        from valuz_agent.adapters.kernel_client import KernelUnavailableError
+
         try:
             await _finalize_session(session_id, last_content, final_status)
+        except KernelUnavailableError:
+            # The backend is shutting down — the kernel store is already torn
+            # down (the actor loop was cancelled mid-flight and runs this
+            # finalize in its ``finally``). Finalize is pointless now: the
+            # session is left ``running`` and ``recover_running_sessions`` /
+            # ``recover_active_tasks`` reconcile it on the next boot. Skip
+            # quietly instead of spamming a "Dependencies not initialized"
+            # traceback for every in-flight session at shutdown.
+            logger.debug(
+                "_finalize_actor: kernel unavailable (shutdown) — deferring "
+                "finalize of %s to boot recovery",
+                session_id,
+            )
         except Exception:  # noqa: BLE001
             logger.exception("_finalize_actor: finalize failed for %s", session_id)
 
         if role == "lead":
+            # A ``shutdown``-triggered exit (pause / stop / finish_task
+            # broadcast) is externally managed: stop_task already set the task
+            # paused/stopped, finish_task set it terminal. Running auto-finalize
+            # here would race a concurrent resume (a rapid pause→resume flips the
+            # task back to ``active`` before this old loop's finalize runs, and
+            # auto-finalize then wrongly ``blocked``s the freshly-resumed task).
+            # Only NATURAL exits (idle-TTL / end_turn / terminal status) should
+            # auto-close the task.
+            if via_shutdown:
+                return
             # Host-side terminal fallback: a lead loop can end (goal auto-exit
             # to default, idle-TTL, normal end_turn) WITHOUT the model calling
             # finish_task — common when a goal-mode lead satisfies a simple goal

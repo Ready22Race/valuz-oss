@@ -1480,7 +1480,9 @@ def test_lead_shutdown_exit_skips_auto_finalize(monkeypatch) -> None:
     async def _fake_auto(**kw: object) -> None:
         called.append(str(kw["task_id"]))
 
-    monkeypatch.setattr(orch, "_auto_finalize_lead_task", _fake_auto)
+    # _finalize_actor delegates to LifecycleService (ADR-023 Step 3c), whose
+    # implementation calls its own _auto_finalize_lead_task — patch it there.
+    monkeypatch.setattr(orch._lifecycle, "_auto_finalize_lead_task", _fake_auto)
 
     common = dict(
         session_id="L",
