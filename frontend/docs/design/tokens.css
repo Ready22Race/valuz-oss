@@ -30,7 +30,7 @@
   --success:      #16a34a;
   --warning:      #ef8b0c; /* v2.4 提亮：三件套后基色不再承担文字职责；取 #ff8710 与 #d97706 之间。
                               注意：实底/图标必须配文字说明，纯图标单独传达信息时用 warning-text */
-  --error:        #e5484d; /* 与 brand 等亮度（rl≈0.18），白字 AA 压线达标；替换 #dc2626 */
+  --error:        #e5484d; /* 替换 #dc2626；白字 ≈3.9:1，达 AA Large/UI(3:1)，未达正文 AA(4.5:1)，小字白底实底慎用 */
   --finance-up:   #f54b4b; /* 红涨（中国市场惯例），仅用于财务数据 */
   --finance-down: #53bc76; /* 绿跌，仅用于财务数据 */
   --slate:        #444b54; /* 蓝灰极（=v1 neutral/700）：灰阶中段的派生轴，让中性灰带冷调 */
@@ -49,13 +49,14 @@
 
   /* ===== 灰阶 —— 派生，禁止手选 ===== */
   --fg-1:  color-mix(in oklab, var(--foreground) 1%,  var(--background)); /* ≈旧 #f7f8fa surface-soft */
+  --fg-2:  color-mix(in oklab, var(--foreground) 2%,  var(--background)); /* List Item 选中态专用 */
   --fg-3:  color-mix(in oklab, var(--foreground) 3%,  var(--background)); /* ≈旧 #f3f4f6 surface-muted */
   --fg-5:  color-mix(in oklab, var(--foreground) 5%,  var(--background)); /* ≈旧 #f5f5f4 surface-2 */
   --fg-8:  color-mix(in oklab, var(--foreground) 8%,  var(--background)); /* ≈旧 #e6e7e9 border */
   --fg-12: color-mix(in oklab, var(--foreground) 12%, var(--background)); /* ≈旧 #dbdbdb border-strong */
   /* 中段（30~80）沿蓝灰轴派生：蓝调中间最饱满、两端归中性（同 v1 色板结构）。
    * 档位名表示深度，不再等于 foreground 混合百分比。 */
-  --fg-30: color-mix(in oklab, var(--slate) 37%, var(--background)); /* ≈旧 #b6b7bc ink-muted */
+  --fg-30: color-mix(in oklab, var(--slate) 37%, var(--background)); /* 实测渲染 #b1b5ba（v1 旧 ink-muted 约 #b6b7bc） */
   --fg-50: color-mix(in oklab, var(--slate) 60%, var(--background)); /* ≈旧 #898f9c neutral-500 */
   --fg-60: color-mix(in oklab, var(--slate) 75%, var(--background)); /* ≈旧 #6e7481 ink-body */
   --fg-80: var(--slate);                                             /* =旧 #444b54 neutral-700 */
@@ -80,9 +81,18 @@
   --error-soft:     color-mix(in oklab, var(--error) 10%,   var(--background));
   --error-border:   color-mix(in oklab, var(--error) 35%,   var(--background));
   --error-text:     color-mix(in oklab, var(--error) 65%,   var(--foreground));
+  --error-strong:   color-mix(in oklab, var(--error) 88%,   #000); /* 实底白字专用：error 白字仅 ≈3.9:1（未达正文 AA），混 12% 黑压到 ≈5.3:1（暗色 ≈5.1）。仅用于「实心红底 + 白字」场景（destructive 按钮）；soft/border/text 与图标圆底仍用 error 本体 */
+  --error-hover:    color-mix(in oklab, var(--error-strong) 92%, #000); /* destructive hover：在 error-strong 基础上再加深一档（≈8% 黑），明暗两端同向加深，无需分模式特例 */
+  /* 财务涨跌的「文字档」—— 派生，与状态三件套同理（mix 65% foreground）。
+   * 基色 finance-up/down 太亮：作 ≤14px 正文时 finance-up 白底仅 ≈3.5:1、finance-down ≈2.4:1，均未达 AA。
+   * 故凡「小字数字/涨跌幅」用以下文字档（白底 up ≈6.7:1 / down ≈5.0:1，过正文 AA）；
+   * 基色本体仅留给 ≥18px 大数字、图形、实底场景。 */
+  --finance-up-text:   color-mix(in oklab, var(--finance-up) 65%,   var(--foreground)); /* ≈#9f3a38 light */
+  --finance-down-text: color-mix(in oklab, var(--finance-down) 65%, var(--foreground)); /* ≈#3e7b51 light */
+
   /* Info 复用品牌紫（裁决：不引入第五个状态色相） */
   --info:        var(--brand);
-  --info-soft:   var(--brand-100);
+  --info-soft:   var(--brand-50); /* 对齐 Info 卡 / callout / note 实际用法（均 brand-50）；v2.6.8 由 brand-100 改 */
   --info-text:   var(--brand-700);
 
   /* ===== 阴影 —— 从前景色派生，明暗两端自动协调 =====
@@ -164,6 +174,7 @@
   --brand-300: color-mix(in oklab, var(--brand) 45%, var(--background));
   --brand-600: color-mix(in oklab, var(--brand) 85%, white);
   --brand-700: color-mix(in oklab, var(--brand) 70%, white);
+  /* error-strong / error-hover 不再分模式特例：均引用 var(--error) 与黑色混合，暗色下自动用暗 error 重算 */
 
   --shadow-rgb: 0 0 0;
   --shadow-border-a: 0.18;
@@ -196,7 +207,7 @@
   --color-border: var(--fg-8);
   --color-input: var(--fg-8);
   --color-ring: var(--brand);
-  --color-destructive: var(--error);
+  --color-destructive: var(--error-strong); /* 实底白字按钮取压深版，保证白字 ≥ 正文 AA */
   --color-destructive-foreground: #ffffff;
 
   /* Valuz 语义层（ink-* / surface-*，681 处引用零改动） */
@@ -246,12 +257,16 @@
   --color-error: var(--error);
   --color-error-light: var(--error-soft);
   --color-error-text: var(--error-text);
+  --color-error-strong: var(--error-strong);
+  --color-error-hover: var(--error-hover);
   --color-info: var(--info);
   --color-info-light: var(--info-soft);
   --color-info-text: var(--info-text);
 
   --color-finance-up: var(--finance-up);
   --color-finance-down: var(--finance-down);
+  --color-finance-up-text: var(--finance-up-text);     /* ≤14px 涨跌数字用文字档（基色未达 AA） */
+  --color-finance-down-text: var(--finance-down-text);
 
   /* 字阶 —— 8 档整数，0.5px 档位全部废止（迁移见 DESIGN-v2.md §9） */
   --text-micro: 0.625rem;  /* 10px badge/最小标识，仅图形场景 */
