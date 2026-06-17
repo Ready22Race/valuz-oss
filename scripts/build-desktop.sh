@@ -304,7 +304,7 @@ if ! $SKIP_FRONTEND; then
   BACKEND_PYPROJECT="$BACKEND_DIR/pyproject.toml"
   if [ -f "$BACKEND_PYPROJECT" ]; then
     log "Setting backend version: $BUILD_VERSION"
-    sed -i.bak -E 's/^version[[:space:]]*=[[:space:]]*"[^"]*"/version = "'"'"$BUILD_VERSION"'"'"/' "$BACKEND_PYPROJECT"
+    sed -i.bak -E 's/^version[[:space:]]*=[[:space:]]*"[^"]*"/version = "'"$BUILD_VERSION"'"/' "$BACKEND_PYPROJECT"
     rm -f "$BACKEND_PYPROJECT.bak"
   else
     warn "backend/pyproject.toml not found at $BACKEND_PYPROJECT — skipping version sync"
