@@ -124,9 +124,7 @@ class _AgsBackend:
     async def connect(cls, sandbox_id: str) -> _AgsBackend:
         from e2b import AsyncSandbox
 
-        sbx = await AsyncSandbox.connect(
-            sandbox_id, api_key=_api_key(), domain=settings.ags_domain
-        )
+        sbx = await AsyncSandbox.connect(sandbox_id, api_key=_api_key(), domain=settings.ags_domain)
         return cls(sbx, sandbox_id)
 
     def base_url(self) -> str:
@@ -276,16 +274,17 @@ class AgsSandboxProvider:
         the mount (the mount IS the sync). If COS isn't configured we fall back
         to an empty in-sandbox dir and warn.
         """
-        import hashlib
-
         from valuz_agent.infra.auth_context import get_current_user_id
+        from valuz_agent.integrations.sandbox_paths import cos_key_for, mount_path_for
 
         uid = get_current_user_id() or "local"
         real = os.path.realpath(host_path)
-        digest = hashlib.sha256(real.encode()).hexdigest()[:12]
-        rel = f"workspaces/{digest}"  # path WITHIN the user's mounted prefix
-        cos_key = f"{uid}/{rel}"  # where it lives in COS
-        kernel_cwd = f"{settings.ags_mount_path.rstrip('/')}/{rel}"  # mount root == <uid>/
+        # Prefix-preserving projection: the COS key mirrors the host's absolute
+        # path under the user prefix, and the in-sandbox cwd is the same path
+        # under the mount — one uniform rule shared with skill translation and
+        # the sync layout (see ``sandbox_paths``).
+        cos_key = cos_key_for(real, uid)
+        kernel_cwd = mount_path_for(real, settings.ags_mount_path)
 
         store = self._object_store()
         if store is None:
@@ -296,7 +295,7 @@ class AgsSandboxProvider:
                 kernel_cwd,
             )
             return MountGrant(
-                grant_id=f"ags-nostore:{digest}", kernel_cwd=kernel_cwd, host_path=real, mode=mode
+                grant_id=f"ags-nostore:{cos_key}", kernel_cwd=kernel_cwd, host_path=real, mode=mode
             )
 
         from valuz_agent.integrations.object_store_s3 import stage_directory
@@ -326,6 +325,14 @@ class AgsSandboxProvider:
         # there may not be read back yet (the host reads COS on demand). Staged
         # data is reclaimed by a separate lifecycle/TTL policy, not here.
         return None
+
+    def project_path(self, host_path: str) -> str:
+        # Cloud FS is separate — prefix-preserving projection onto the COS mount
+        # (pure; the content must already be staged/synced there). Shared rule
+        # with bind_workspace's cwd and the sync layout.
+        from valuz_agent.integrations.sandbox_paths import mount_path_for
+
+        return mount_path_for(os.path.realpath(host_path), settings.ags_mount_path)
 
 
 async def _safe_kill(backend: _AgsBackend) -> None:

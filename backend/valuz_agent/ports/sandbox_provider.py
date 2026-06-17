@@ -176,6 +176,17 @@ class SandboxProvider(Protocol):
         """Revoke a prior ``bind_workspace`` grant. Idempotent."""
         ...
 
+    def project_path(self, host_path: str) -> str:
+        """Map a host absolute path to the path the kernel uses for it.
+
+        Identity for drivers that share the host filesystem (the kernel sees
+        the same paths); a cloud driver returns the in-sandbox mount path (see
+        ``sandbox_paths.mount_path_for``). PURE — no staging: callers use it for
+        content already present in the sandbox (pre-synced skills).
+        ``bind_workspace`` is the staging counterpart for fresh cwd content.
+        """
+        ...
+
 
 class SandboxProvisionError(RuntimeError):
     """A provider could not bring up a healthy kernel endpoint."""

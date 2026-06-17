@@ -142,6 +142,12 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
     log.warning("kernel running in %s sandbox at %s", driver_name, result.endpoint.base_url)
     _wire(result.provider, result.endpoint.base_url, result.endpoint.token, result.static_roots)
     atexit.register(lambda: asyncio.run(result.provider.destroy("host-kernel")))
+    # Cloud kernel: pre-sync skill roots to COS so sessions can materialize them
+    # under the mount (cwds are staged per-session). Best-effort.
+    if not settings.kernel_shares_host_fs:
+        from valuz_agent.integrations.cos_sync import sync_skills_best_effort
+
+        asyncio.run(sync_skills_best_effort())
 
 
 def main(argv: list[str] | None = None) -> int:

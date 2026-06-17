@@ -50,9 +50,7 @@ _state: _State | None = None
 _lazy_tried = False
 
 
-def activate(
-    provider: SandboxProvider, sandbox_id: str, static_roots: tuple[str, ...]
-) -> None:
+def activate(provider: SandboxProvider, sandbox_id: str, static_roots: tuple[str, ...]) -> None:
     """Eagerly register the active sandbox (called by the provisioner).
 
     Optional — ``ensure_workspace_granted`` lazily activates from env if
@@ -143,11 +141,34 @@ async def ensure_workspace_granted(cwd: str) -> str:
             import logging
 
             logging.getLogger("valuz_agent.sandbox").warning(
-                "dynamic workspace grant failed for %s — agent may hit "
-                "Operation not permitted",
+                "dynamic workspace grant failed for %s — agent may hit Operation not permitted",
                 real,
                 exc_info=True,
             )
             return cwd
         state.granted[real] = binding
         return binding.kernel_cwd
+
+
+def project_path(path: str) -> str:
+    """Map a host path to the kernel-visible path WITHOUT staging.
+
+    The pure counterpart to ``ensure_workspace_granted`` (which stages a fresh
+    cwd). Identity when there is no sandbox, when the path sits under a static
+    mount, or when the active provider shares the host FS — so it is safe to
+    call unconditionally. Used for content already present in the sandbox
+    (pre-synced skills); the cwd goes through ``ensure_workspace_granted``.
+    """
+    state = _lazy_activate()
+    if state is None:
+        return path
+    real = os.path.realpath(str(Path(path).expanduser()))
+    if _under_static_root(real, state.static_roots):
+        return path
+    projector = getattr(state.provider, "project_path", None)
+    if projector is None:
+        return path
+    try:
+        return str(projector(real))
+    except Exception:  # noqa: BLE001 — degrade to the original path
+        return path

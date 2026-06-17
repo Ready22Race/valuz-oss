@@ -191,9 +191,12 @@ async def test_bind_workspace_no_cos_falls_back(monkeypatch):
 
 
 async def test_bind_workspace_stages_to_cos(monkeypatch, tmp_path):
-    # Configured COS → project uploaded to COS key <user_id>/<rel>, but the
-    # kernel_cwd is {mount}/<rel> (user_id is the mount root, stripped) — the
-    # per-user-isolation contract (存储路径=/<user_id>).
+    # Configured COS → project uploaded to prefix-preserving COS key
+    # <user_id><realpath>, and kernel_cwd is {mount}<realpath> (the AGS tool
+    # mounts <user_id>/ at the mount, so the user_id is the mount root and
+    # never appears in the in-sandbox path). One uniform rule (sandbox_paths).
+    import os
+
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "main.py").write_bytes(b"print(1)")
     (tmp_path / "README.md").write_bytes(b"# hi")
@@ -220,17 +223,20 @@ async def test_bind_workspace_stages_to_cos(monkeypatch, tmp_path):
     finally:
         reset_current_user_id(token)
 
-    # uploaded to COS under <user_id>/workspaces/<digest>/...
+    real = os.path.realpath(str(tmp_path))
+    # uploaded to COS under <user_id><realpath>/...
     cos_key = grant.grant_id.split(":", 1)[1]
-    assert cos_key.startswith("user-42/workspaces/")
+    assert cos_key == f"user-42{real}"
     assert f"{cos_key}/src/main.py" in store.objs
     assert store.objs[f"{cos_key}/src/main.py"] == b"print(1)"
     assert f"{cos_key}/README.md" in store.objs
-    # kernel cwd drops the user_id (the mount roots at <user_id>/)
-    rel = cos_key.split("/", 1)[1]  # workspaces/<digest>
-    assert grant.kernel_cwd == f"/workspace/{rel}"
+    # kernel cwd = mount prefix + host realpath; user_id is the mount root only
+    assert grant.kernel_cwd == f"/workspace{real}"
     assert "user-42" not in grant.kernel_cwd
     assert grant.grant_id.startswith("cos:")
+    # provider.project_path (pure, no staging) yields the SAME path for that cwd
+    monkeypatch.setattr(settings, "ags_mount_path", "/workspace")
+    assert provider.project_path(real) == f"/workspace{real}"
 
 
 # ── boot driver ────────────────────────────────────────────────────────
