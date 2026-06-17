@@ -1176,6 +1176,24 @@ paths:
               schema:
                 $ref: "#/components/schemas/SkillView"
 
+  /v1/skills/scan:
+    post:
+      summary: Rescan the skill library and re-index from disk
+      description: >
+        Re-discovers every skill on disk (user, official, project) and refreshes
+        the skill index so newly-added skills (e.g. a team's official skills)
+        resolve immediately, without a restart. Emits a skill-changed event so
+        open catalogs refresh.
+      operationId: rescanSkills
+      tags: [skills]
+      responses:
+        "200":
+          description: Rescan complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillRescanResponse"
+
   /v1/skills/import/session:
     post:
       summary: Import skill from session
@@ -3165,6 +3183,14 @@ components:
       properties:
         discovered:
           type: integer
+
+    SkillRescanResponse:
+      type: object
+      required: [indexed]
+      properties:
+        indexed:
+          type: integer
+          description: Number of skills discovered and indexed by the rescan.
 
     SkillCreateRequest:
       type: object

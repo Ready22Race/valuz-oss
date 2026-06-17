@@ -403,6 +403,10 @@ async def start_automation_runner(app: FastAPI) -> None:
 
     start_auto_discovery()
 
+    from valuz_agent.modules.skills.scheduler import start_skill_auto_scan
+
+    start_skill_auto_scan()
+
 
 async def start_polling_scheduler() -> None:
     """Start the parser polling scheduler's on-loop tick task. Used only
@@ -516,6 +520,10 @@ async def stop_automation_runner(app: FastAPI) -> None:
     from valuz_agent.modules.docs.scheduler import stop_auto_discovery
 
     stop_auto_discovery()
+
+    from valuz_agent.modules.skills.scheduler import stop_skill_auto_scan
+
+    stop_skill_auto_scan()
 
     watcher = getattr(app.state, "skill_watcher", None)
     if watcher is not None:

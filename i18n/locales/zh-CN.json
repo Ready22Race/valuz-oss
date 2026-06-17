@@ -1478,6 +1478,9 @@
   },
   "skill": {
     "addBtn": "添加",
+    "rescan": "扫描技能库",
+    "rescanDone": "已重新索引 {count} 个技能",
+    "rescanFailed": "扫描失败",
     "addSkill": "添加技能",
     "addSkillDesc": "选择要在此项目中启用的技能",
     "aiCreate": "AI 创建",

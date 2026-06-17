@@ -132,6 +132,11 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     monkeypatch.setattr(deps_mod, "_polling_scheduler", _NoopRunner)
     monkeypatch.setattr(docs_scheduler_mod, "start_auto_discovery", lambda: None)
     monkeypatch.setattr(docs_scheduler_mod, "stop_auto_discovery", lambda: None)
+
+    import valuz_agent.modules.skills.scheduler as skill_scheduler_mod
+
+    monkeypatch.setattr(skill_scheduler_mod, "start_skill_auto_scan", lambda: None)
+    monkeypatch.setattr(skill_scheduler_mod, "stop_skill_auto_scan", lambda: None)
     monkeypatch.setattr(fw_mod, "SkillFileWatcher", _NoopWatcher)
 
     # The three in-process MCP servers mounted + run at app startup (docs,
@@ -459,3 +464,28 @@ def test_per_session_extra_skills_round_trip(isolated_app):  # type: ignore[no-u
     # Re-fetch confirms persistence.
     again = client.get(f"/v1/sessions/{sid}/skills").json()
     assert sorted(again["skill_ids"]) == ["official:bar", "user:foo"]
+
+
+def test_rescan_skills_picks_up_new_disk_skill(isolated_app):  # type: ignore[no-untyped-def]
+    """POST /v1/skills/scan re-indexes the disk and returns the count. Adding a
+    skill folder after boot and rescanning bumps the indexed count by one — the
+    manual counterpart of the boot scan, so a just-added skill resolves without
+    a restart."""
+    client = isolated_app["client"]
+    user_skills: Path = isolated_app["user_skills"]
+
+    before = client.post("/v1/skills/scan")
+    assert before.status_code == 200, before.text
+    base = before.json()["indexed"]
+    assert isinstance(base, int)
+
+    skill_dir = user_skills / "my-fresh-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        '---\nname: "my-fresh-skill"\ndescription: "Fresh"\n---\n\nBody\n',
+        encoding="utf-8",
+    )
+
+    after = client.post("/v1/skills/scan")
+    assert after.status_code == 200, after.text
+    assert after.json()["indexed"] == base + 1

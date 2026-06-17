@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { FileText, Plus, Search, Sparkles, Upload, Zap } from "lucide-react";
+import {
+  FileText,
+  Plus,
+  RefreshCw,
+  Search,
+  Sparkles,
+  Upload,
+  Zap,
+} from "lucide-react";
 import {
   CategorizedList,
   DeleteConfirmDialog,
@@ -194,6 +202,7 @@ export const SkillsPage = () => {
   const [searchParams] = useSearchParams();
   const [skills, setSkills] = useState<SkillView[]>([]);
   const [loading, setLoading] = useState(true);
+  const [rescanning, setRescanning] = useState(false);
   // Honor a ``?skill=<id>`` deep link (e.g. from an agent's 装备 list) as the
   // initial selection; falls back to the first skill once the list loads if the
   // id isn't found. Lazy initializer so there's no setState-in-effect.
@@ -234,6 +243,26 @@ export const SkillsPage = () => {
       if (mountedRef.current) setLoading(false);
     }
   }, []);
+
+  // Manual rescan: re-index the skill library on disk (the server also emits
+  // SKILL_CHANGED, so ``useSkillEvents(loadSkills)`` refreshes the list).
+  const handleRescan = useCallback(async () => {
+    if (rescanning) return;
+    setRescanning(true);
+    try {
+      const res = await skillsApi.rescan();
+      toast.success(
+        t("skill.rescanDone" as Parameters<typeof t>[0], {
+          count: res.indexed,
+        }),
+      );
+    } catch (err) {
+      console.error("[Skills] rescan error", err);
+      toast.error(t("skill.rescanFailed" as Parameters<typeof t>[0]));
+    } finally {
+      if (mountedRef.current) setRescanning(false);
+    }
+  }, [rescanning, t]);
 
   // Draft-first (no pre-created session): land on the same draft page as
   // 新对话 so the composer's default-agent pick + agent switching work; the
@@ -547,6 +576,18 @@ export const SkillsPage = () => {
             className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body"
           >
             <Search className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            aria-label={t("skill.rescan" as Parameters<typeof t>[0])}
+            title={t("skill.rescan" as Parameters<typeof t>[0])}
+            onClick={() => void handleRescan()}
+            disabled={rescanning}
+            className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body disabled:pointer-events-none disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5${rescanning ? " animate-spin" : ""}`}
+            />
           </button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
