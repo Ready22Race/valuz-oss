@@ -29,6 +29,9 @@ def ags_configured(monkeypatch):
     monkeypatch.setattr(settings, "ags_domain", "ags.example.com")
     monkeypatch.setattr(settings, "ags_kernel_template", "valuz-kernel")
     monkeypatch.setattr(settings, "ags_kernel_port", 8000)
+    # Default to DYNAMIC token mode (no static token) regardless of the ambient
+    # env — a stray VALUZ_AGS_KERNEL_TOKEN must not flip these tests.
+    monkeypatch.setattr(settings, "ags_kernel_token", None)
     monkeypatch.setitem(sys.modules, "e2b", types.ModuleType("e2b"))
     monkeypatch.delenv("E2B_API_KEY", raising=False)
 

@@ -187,15 +187,79 @@ async def apply_persisted_kernel_endpoint() -> None:
     from valuz_agent.adapters import kernel_client
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.settings.kernel_endpoint import apply_persisted_endpoint
+    from valuz_agent.modules.settings.sandbox_config import apply_to_settings
 
+    driver_name: str | None = None
     try:
         async with async_unit_of_work(commit=False) as db:
-            applied = await apply_persisted_endpoint(db)
+            if await apply_persisted_endpoint(db):
+                # Manual http endpoint ("configure sandbox address").
+                kernel_client.rebind_client()
+                return
+            # Else: a persisted sandbox DRIVER config (UI-driven AGS) — copy it
+            # onto settings; provisioning happens below (outside the UoW).
+            driver_name = await apply_to_settings(db)
     except Exception:  # noqa: BLE001 — never block boot on settings read
-        logger.warning("failed to read persisted kernel endpoint", exc_info=True)
+        logger.warning("failed to read persisted sandbox config", exc_info=True)
         return
-    if applied:
-        kernel_client.rebind_client()
+
+    if driver_name:
+        await _provision_sandbox_at_boot(driver_name)
+
+
+async def _provision_sandbox_at_boot(driver_name: str) -> None:
+    """Provision the kernel sandbox for a PERSISTED driver config (UI-driven),
+    after the DB is up. Mirrors ``main.py::_provision_sandboxed_kernel`` (the
+    env-driven path) but reads the driver from settings the persisted config
+    just populated, and runs inside the async lifespan. Degrades to in-process
+    on any failure — never blocks boot."""
+    import asyncio
+    import atexit
+    import os
+
+    from valuz_agent.adapters import kernel_client
+    from valuz_agent.integrations import sandbox_registry, sandbox_runtime
+    from valuz_agent.ports.sandbox_provider import SandboxBootContext
+
+    driver = sandbox_registry.get(driver_name)
+    if driver is None:
+        logger.warning("persisted sandbox driver %r not registered", driver_name)
+        return
+    problems = driver.preflight()
+    if problems:
+        logger.warning(
+            "%s sandbox unavailable: %s — running in-process",
+            driver_name,
+            "; ".join(problems),
+        )
+        return
+
+    ctx = SandboxBootContext(
+        host="127.0.0.1",
+        port=8000,
+        host_callback_url=settings.kernel_callback_base_url,
+        passthrough_env={
+            k: v
+            for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+            if (v := os.environ.get(k)) is not None
+        },
+    )
+    try:
+        result = await driver.provision_for_boot(ctx)
+    except Exception:  # noqa: BLE001 — degrade, don't block boot
+        logger.warning("%s provision failed — running in-process", driver_name, exc_info=True)
+        return
+
+    settings.kernel_mode = "http"
+    settings.kernel_url = result.endpoint.base_url
+    settings.kernel_token = result.endpoint.token
+    os.environ["VALUZ_KERNEL_MODE"] = "http"
+    os.environ["VALUZ_KERNEL_URL"] = result.endpoint.base_url
+    os.environ["VALUZ_KERNEL_TOKEN"] = result.endpoint.token
+    kernel_client.rebind_client()
+    sandbox_runtime.activate(result.provider, "host-kernel", result.static_roots)
+    atexit.register(lambda: asyncio.run(result.provider.destroy("host-kernel")))
+    logger.warning("kernel running in %s sandbox at %s", driver_name, result.endpoint.base_url)
 
 
 async def init_kernel(app: FastAPI) -> None:

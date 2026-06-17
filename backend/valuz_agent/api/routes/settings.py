@@ -44,6 +44,7 @@ from valuz_agent.modules.settings.preferences import (
     set_font_size,
     set_theme,
 )
+from valuz_agent.modules.settings.sandbox_config import get_sandbox_config, set_sandbox_config
 from valuz_agent.modules.settings.service import (
     AboutInfo,
     CapabilitiesSnapshot,
@@ -224,6 +225,117 @@ async def test_kernel_endpoint(payload: KernelEndpointTestPayload) -> KernelEndp
         callback_hint=result.callback_hint,
         ok=result.ok,
         detail=result.detail,
+    )
+
+
+# ── Sandbox driver config (UI-driven remote sandbox / AGS) ───────────
+
+
+class SandboxConfigResponse(BaseModel):
+    driver: str
+    ags_domain: str
+    ags_template: str
+    ags_mount_path: str
+    cos_bucket: str
+    cos_region: str
+    cos_endpoint: str
+    ags_api_key_present: bool
+    cos_secret_id_present: bool
+    cos_secret_key_present: bool
+
+
+class SandboxConfigPatchPayload(BaseModel):
+    driver: str | None = Field(default=None)  # "inprocess" | "ags"
+    ags_domain: str | None = None
+    ags_template: str | None = None
+    ags_mount_path: str | None = None
+    cos_bucket: str | None = None
+    cos_region: str | None = None
+    cos_endpoint: str | None = None
+    # Secrets — write-only; "" clears, omit to keep.
+    ags_api_key: str | None = None
+    cos_secret_id: str | None = None
+    cos_secret_key: str | None = None
+
+
+def _sandbox_config_response(v: Any) -> "SandboxConfigResponse":
+    return SandboxConfigResponse(
+        driver=v.driver,
+        ags_domain=v.ags_domain,
+        ags_template=v.ags_template,
+        ags_mount_path=v.ags_mount_path,
+        cos_bucket=v.cos_bucket,
+        cos_region=v.cos_region,
+        cos_endpoint=v.cos_endpoint,
+        ags_api_key_present=v.ags_api_key_present,
+        cos_secret_id_present=v.cos_secret_id_present,
+        cos_secret_key_present=v.cos_secret_key_present,
+    )
+
+
+@router.get("/sandbox")
+async def get_sandbox() -> SandboxConfigResponse:
+    """The persisted sandbox-driver config (where the kernel runs). Secrets are
+    never returned — only presence flags. Applied at the next (re)start."""
+    async with async_unit_of_work(commit=False) as db:
+        return _sandbox_config_response(await get_sandbox_config(db))
+
+
+@router.patch("/sandbox")
+async def patch_sandbox(payload: SandboxConfigPatchPayload) -> SandboxConfigResponse:
+    """Configure the kernel sandbox (local / remote-AGS) from the UI — no env,
+    no scripts. Secrets go to the secret store. Takes effect on restart."""
+    try:
+        async with async_unit_of_work() as db:
+            result = await set_sandbox_config(
+                db,
+                driver=payload.driver,
+                ags_domain=payload.ags_domain,
+                ags_template=payload.ags_template,
+                ags_mount_path=payload.ags_mount_path,
+                cos_bucket=payload.cos_bucket,
+                cos_region=payload.cos_region,
+                cos_endpoint=payload.cos_endpoint,
+                ags_api_key=payload.ags_api_key,
+                cos_secret_id=payload.cos_secret_id,
+                cos_secret_key=payload.cos_secret_key,
+            )
+            return _sandbox_config_response(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+class SyncWorkspaceResponse(BaseModel):
+    user_id: str
+    total_files: int
+    total_bytes: int
+    per_source: list[tuple[str, int, int]]
+
+
+@router.post("/sandbox/sync-workspace")
+async def sync_workspace() -> SyncWorkspaceResponse:
+    """Push the current user's projects + skills to COS (the cloud sandbox
+    workspace). The "同步我的工作区到云" action. Requires the COS config set."""
+    from valuz_agent.infra.local_identity import resolve_local_user_id
+    from valuz_agent.integrations.cos_sync import sync_local_to_cos
+    from valuz_agent.integrations.object_store_s3 import cos_object_store
+
+    # Apply persisted COS config onto settings so cos_object_store() can build.
+    async with async_unit_of_work(commit=False) as db:
+        from valuz_agent.modules.settings.sandbox_config import apply_to_settings
+
+        await apply_to_settings(db)
+    store = cos_object_store()
+    if store is None:
+        raise HTTPException(
+            status_code=422, detail="COS not configured — set it in Settings → Kernel."
+        )
+    report = await sync_local_to_cos(resolve_local_user_id(), store=store)
+    return SyncWorkspaceResponse(
+        user_id=report.user_id,
+        total_files=report.total_files,
+        total_bytes=report.total_bytes,
+        per_source=report.per_source,
     )
 
 
