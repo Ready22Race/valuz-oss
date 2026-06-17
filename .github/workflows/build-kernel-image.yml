@@ -109,8 +109,15 @@ jobs:
           docker run -d --name ksmoke -p 8000:8000 -e KERNEL_AUTH_TOKEN=devtoken valuz-kernel:verify
           ok=0; for _ in $(seq 1 45); do curl -fs localhost:8000/health >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
           docker logs ksmoke | tail -30; test "$ok" = 1
+          # Auth gate: no bearer → 401 (middleware rejects every path but /health).
           test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/api/v1/sessions)" = 401
-          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer devtoken' localhost:8000/api/v1/sessions)" = 200
+          # Bearer + owner header → 200 (owner-scoped reads require X-Valuz-Owner-Id
+          # since the multi-user change in #101; without it the route 403s). Proves
+          # token accepted + owner scoping + store wired, not just the gate.
+          test "$(curl -s -o /dev/null -w '%{http_code}' \
+            -H 'Authorization: Bearer devtoken' \
+            -H 'X-Valuz-Owner-Id: smoke' \
+            localhost:8000/api/v1/sessions)" = 200
           docker rm -f ksmoke; echo "✓ standalone image boots + serves + auth-gates"
 
       # ── Publish only after the smoke passes. Re-uses the gha cache from the
