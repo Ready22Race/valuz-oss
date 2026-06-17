@@ -25,7 +25,7 @@ export const OnboardingPage = () => {
       <WindowDragRegion />
       {showWindowControls && (
         <div
-          className="fixed right-0 top-0 z-50"
+          className="fixed right-0 top-0 z-50 flex h-[36px] items-center"
           style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
         >
           <WindowControls
