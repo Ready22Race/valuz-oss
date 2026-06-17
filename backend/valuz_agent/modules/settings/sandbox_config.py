@@ -241,3 +241,47 @@ async def apply_cos_to_settings(db: AsyncSession) -> bool:
     if (sk := store.get(REF_COS_SECRET_KEY)) is not None:
         settings.cos_secret_key = sk
     return bool(settings.cos_bucket and settings.cos_secret_id and settings.cos_secret_key)
+
+
+# ── Active-sandbox memo (reuse a still-alive cloud sandbox across restarts) ──
+# A cloud sandbox (AGS) is 常驻 — it outlives the host process. Instead of
+# provisioning a fresh one on every boot, remember the last endpoint + a config
+# fingerprint, then reattach if it's still healthy and the config is unchanged.
+
+KEY_ACTIVE_SANDBOX_URL = "kernel.sandbox.active_url"
+KEY_ACTIVE_SANDBOX_FP = "kernel.sandbox.active_fingerprint"
+
+
+def sandbox_fingerprint() -> str:
+    """Identity of the AGS config that provisioned a sandbox. A remembered
+    sandbox is reused only when this still matches — change the template /
+    domain / mount and the old one is treated as stale (replaced)."""
+    import hashlib
+
+    from valuz_agent.infra.config import settings
+
+    raw = "|".join(
+        [
+            settings.ags_kernel_template or "",
+            settings.ags_domain or "",
+            settings.ags_mount_path or "",
+        ]
+    )
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+async def remember_active_sandbox(db: AsyncSession, base_url: str, fingerprint: str) -> None:
+    await _write(db, KEY_ACTIVE_SANDBOX_URL, base_url)
+    await _write(db, KEY_ACTIVE_SANDBOX_FP, fingerprint)
+
+
+async def recall_active_sandbox(db: AsyncSession) -> tuple[str, str] | None:
+    """The last provisioned ``(base_url, fingerprint)``, or None if none."""
+    url = await _read(db, KEY_ACTIVE_SANDBOX_URL)
+    fp = await _read(db, KEY_ACTIVE_SANDBOX_FP)
+    return (url, fp) if url else None
+
+
+async def forget_active_sandbox(db: AsyncSession) -> None:
+    await _write(db, KEY_ACTIVE_SANDBOX_URL, "")
+    await _write(db, KEY_ACTIVE_SANDBOX_FP, "")

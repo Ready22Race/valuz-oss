@@ -121,6 +121,31 @@ async def test_apply_noop_when_incomplete(sm, monkeypatch) -> None:
         assert await sc.apply_to_settings(db) is None
 
 
+async def test_active_sandbox_memo_roundtrip(sm) -> None:
+    # Remember / recall / forget the last provisioned endpoint (reuse-across-
+    # restarts memo).
+    async with sm() as db:
+        assert await sc.recall_active_sandbox(db) is None
+        await sc.remember_active_sandbox(db, "https://8000-abc.ags", "fp123")
+        assert await sc.recall_active_sandbox(db) == ("https://8000-abc.ags", "fp123")
+        await sc.forget_active_sandbox(db)
+        assert await sc.recall_active_sandbox(db) is None
+
+
+async def test_sandbox_fingerprint_tracks_config(monkeypatch) -> None:
+    # Same AGS config → same fingerprint (reuse); changed template → different
+    # (treat the old sandbox as stale).
+    from valuz_agent.infra.config import settings
+
+    monkeypatch.setattr(settings, "ags_kernel_template", "t1")
+    monkeypatch.setattr(settings, "ags_domain", "d")
+    monkeypatch.setattr(settings, "ags_mount_path", "/workspace")
+    fp1 = sc.sandbox_fingerprint()
+    assert fp1 == sc.sandbox_fingerprint()
+    monkeypatch.setattr(settings, "ags_kernel_template", "t2")
+    assert sc.sandbox_fingerprint() != fp1
+
+
 async def test_apply_cos_loads_ui_config_even_under_env_driver(sm, monkeypatch) -> None:
     # The sync-workspace path: UI-configured COS must reach settings even when an
     # env driver (make dev-ags) made apply_to_settings bail. Regression for the
