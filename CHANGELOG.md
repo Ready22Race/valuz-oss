@@ -5,6 +5,77 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-17
+
+### Features
+
+- Scoped agent memory: a global + per-project memory with background
+  auto-extraction, a task-finish trigger that graduates multi-agent lessons to
+  project memory, and a per-target char budget surfaced in the review prompt.
+  (#132, #138, #139 @jiaoqsh)
+- Agent Pack format: portable teams with import/export, layered over a new
+  `ResourceLibrary` facade. (#151, #135 @zhourongyu @homeant)
+- Virtual built-in channels: no boot seed — built-ins are surfaced as templates
+  and materialized on configure; platform "system" channels are hidden from
+  Settings → Models. (#159, #160 @homeant)
+- Kernel store split into its own `kernel.db` (sandbox-mountable). (#163 @Ready22Race)
+- Local OCR upgraded to PP-OCRv6_medium (PaddlePaddle official ONNX). (#150 @Ready22Race)
+- Conversation: render Codex `apply_patch` as a turn diff card. (#142 @Ready22Race)
+- Skills: manual rescan button + periodic auto-scan. (#171 @Ready22Race)
+- Automation: show live task status in the execution log instead of a frozen
+  "success". (#157 @Ready22Race)
+- Connectors: self-heal expired OAuth connectors (silent refresh), re-authorize
+  only on hard failure. (#173 @homeant)
+- Backend errors can carry an i18n key, rendered on send. (#145 @homeant)
+
+### Changed
+
+- Migrations run in-place; boot-time table wipes are gone (existing data is
+  preserved across upgrades). (#149 @Ready22Race)
+- Native menu fully localized and follows the in-app language. (#148 @St0neWan9)
+- Unified delete dialog for project / task / conversation; dialogs no longer
+  auto-focus a button. (#144 @St0neWan9)
+- Desktop dock icon centered with a lighter shadow. (#136 @St0neWan9)
+- Solid buttons (default / destructive) align in height with outline / secondary
+  buttons. (#177 @St0neWan9)
+- Investment vertical globalized: agent pack rewritten for global equities,
+  templates renamed off `china-*`, and the team stripped to a bare roster.
+  (#168 @St0neWan9, #164 @zhourongyu)
+- Tidier skill-library group labels and origin badges. (#175 @Ready22Race)
+
+### Fixed
+
+- Tasks: graceful actor-loop drain on shutdown (no finalize race); subprocess
+  death is classified as resumable "interrupted", not a failure. (#133, #140 @Ready22Race)
+- Skills: stale SKILL.md frontmatter + a detail-panel crash; deterministic
+  boot-time indexing of bundled official skills; Windows directory junctions so
+  materialization needs no admin; auto-scan runs once on start; stop
+  valuz-project-docs from pre-empting local file reads. (#167, #169, #147, #176,
+  #179 @St0neWan9 @Ready22Race @jiaoqsh)
+- Providers: materialize a built-in subscription on set-default; stop warning on
+  the healthy OAuth-subscription resolve path. (#165, #141 @St0neWan9 @Ready22Race)
+- CLI login: run `/login` against the resolved binary; auto-refresh the
+  subscription login badge after a terminal login; restore CLI detection +
+  login guidance in onboarding. (#134, #155, #158 @hanjixin @St0neWan9 @zhourongyu)
+- Automation: real kickoff duration + readable summary; cleaner task-kickoff run
+  display. (#143, #154 @Ready22Race)
+- Desktop: register `set_menu_locale` before creating the window. (#156 @Ready22Race)
+- Bundled MCP connectors + onboarding channel UX. (#162 @zhourongyu)
+- Task detail: open project files from the panel. (#178 @St0neWan9)
+- Agent template dialog no longer auto-focuses its close button. (#166 @St0neWan9)
+- DB: commit lock-retry is state-preserving; kernel event-loop no longer freezes
+  in dev-sandbox. (#174, #161 @Ready22Race)
+- `claude` runtime: treat `ResultMessage(is_error=True)` as an error, not
+  end-turn. (#181 @jiaoqsh)
+- Build: enforce `+x` on the Linux AppImage; pin `executableName` so the Linux
+  deb ships a valid icon; pin the Linux arm64 runner to ubuntu-22.04-arm.
+  (#172, #180, #170 @hanjixin)
+
+### Docs & Chore
+
+- Memory subsystem Tier-1 hygiene cleanup. (#137 @jiaoqsh)
+- Purge stale "0-migration / full-wipe" wording from the migration docs. (#152 @Ready22Race)
+
 ## [0.1.7] - 2026-06-15
 
 ### Features
@@ -186,6 +257,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename the single-writer lock file, drop a dead helper, and correct the rationale. (#29 @Ready22Race)
 - CI: Node.js 25 with dependency caching. (#14 @hanjixin)
 
+[0.2.0]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.7...v0.2.0
 [0.1.7]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.4...v0.1.5
