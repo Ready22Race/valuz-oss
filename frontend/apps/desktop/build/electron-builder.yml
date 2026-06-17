@@ -29,6 +29,15 @@ files:
   - dist/**/*
   - dist-electron/**/*
   - package.json
+  # Runtime-loaded icons read via `path.join(app.getAppPath(), "build", …)`
+  # — the macOS menu-bar tray (iconTemplate), the dock setIcon + window icon
+  # (iconRounded), and the Windows tray (icon.ico). Without these in the asar
+  # the paths resolve in dev (project dir) but not in the packaged app, so the
+  # tray showed up blank. nativeImage reads them straight from app.asar.
+  - build/iconTemplate.png
+  - build/iconTemplate@2x.png
+  - build/iconRounded.png
+  - build/icon.ico
 extraResources:
   # User-facing binaries (the valuz Go CLI). On PATH after install.
   - from: resources/bin/
@@ -47,6 +56,16 @@ extraResources:
   - from: resources/THIRD-PARTY-NOTICES.txt
     to: THIRD-PARTY-NOTICES.txt
 asar: true
+# Keep the runtime-loaded icons as real files on disk (app.asar.unpacked/)
+# so nativeImage.createFromPath reads them reliably — the path stays
+# `app.getAppPath()/build/…`, which Electron transparently redirects to the
+# unpacked copy. Belt-and-suspenders for the tray icon (was blank when only
+# inside the asar).
+asarUnpack:
+  - build/iconTemplate.png
+  - build/iconTemplate@2x.png
+  - build/iconRounded.png
+  - build/icon.ico
 mac:
   target:
     - dmg
