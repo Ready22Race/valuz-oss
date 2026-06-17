@@ -530,6 +530,7 @@ async def try_refresh_connector_token(
         new_token.refresh_token = current.refresh_token
 
     persist_oauth_token(connector_id, new_token, secrets, now_ms)
+    logger.info("connector %s oauth access token refreshed", connector_id)
     return new_token.access_token
 
 
