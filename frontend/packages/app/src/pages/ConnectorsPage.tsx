@@ -32,6 +32,7 @@ import {
   ConnectorConnectDialog,
 } from "@valuz/app/components";
 import type { ConnectorAddMode } from "@valuz/app/components";
+import { reconnectAction } from "./connector-reconnect";
 
 /* ── Catalog flattening ─────────────────────────────────────────── */
 
@@ -479,12 +480,20 @@ export const ConnectorsPage = () => {
     [runConnect],
   );
 
-  // Re-probe an already-added connector that isn't currently connected.
+  // Reconnect an already-added connector that isn't currently connected.
+  // OAuth connectors re-run the authorization flow (a stale token would 401 a
+  // bare re-probe); everything else is re-probed in place. See
+  // ``reconnectAction``.
   const handleReconnectInstalled = useCallback(
     (connector: ConnectorItem) => {
       setBusyKey(`installed:${connector.id}`);
       void (async () => {
         try {
+          const action = reconnectAction(connector);
+          if (action.kind === "reauthorize") {
+            await runConnect(action.payload);
+            return;
+          }
           const res = await connectorsApi.test(connector.id);
           if (!res.ok) {
             toast.error(res.error || _t("settings.connectors.connectFailed"));
@@ -501,7 +510,7 @@ export const ConnectorsPage = () => {
         }
       })();
     },
-    [loadAll],
+    [loadAll, runConnect],
   );
 
   const handleDisconnect = useCallback(async () => {
