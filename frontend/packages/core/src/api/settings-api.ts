@@ -113,6 +113,57 @@ export interface KernelEndpointTestResult {
   detail: string;
 }
 
+/**
+ * GET /v1/settings/model-options — the read model for the "pick a default
+ * model" pickers (onboarding + Settings default-config). Distinct from
+ * ``providersApi.list()`` (provider management): every model arrives fully
+ * resolved so the picker renders verbatim — runtimes are server-resolved, a
+ * system channel is one card, same-named models disambiguated.
+ */
+export type ModelOptionStatus = "available" | "unavailable" | "client_resolved";
+
+export interface ModelOption {
+  model_id: string;
+  /** The provider that OWNS this model — written back as
+   *  ``default_provider_id`` so resolution hits the right descriptor. May differ
+   *  from the card's ``provider_id`` when same-named system descriptors merge. */
+  provider_id: string;
+  label: string;
+  /** Every runtime this model can run on, priority-ordered. */
+  runtimes: RuntimeId[];
+  /** Preferred runtime for a one-click pick (= ``runtimes[0]``). */
+  default_runtime: RuntimeId;
+  is_current_default: boolean;
+}
+
+export interface ModelOptionProvider {
+  provider_id: string;
+  label: string;
+  kind: string;
+  source: string;
+  /** CLI tool a subscription provider logs in through; ``null`` otherwise. */
+  cli_tool: string | null;
+  /** ``available`` / ``unavailable`` are server-authoritative; ``client_resolved``
+   *  means the client must fill availability in from its CLI keychain probe. */
+  status: ModelOptionStatus;
+  unavailable_reason: string | null;
+  models: ModelOption[];
+}
+
+export interface ModelOptionGroup {
+  key: "subscription" | "system" | "api_key" | "org";
+  providers: ModelOptionProvider[];
+}
+
+export interface ModelOptionsResponse {
+  current: {
+    runtime: RuntimeId | null;
+    provider_id: string | null;
+    model: string | null;
+  };
+  groups: ModelOptionGroup[];
+}
+
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const settingsApi = {
@@ -161,6 +212,10 @@ export const settingsApi = {
 
   getModelDefaults(): Promise<ModelDefaults> {
     return fetchJson<ModelDefaults>("/v1/settings/model-defaults");
+  },
+
+  getModelOptions(): Promise<ModelOptionsResponse> {
+    return fetchJson<ModelOptionsResponse>("/v1/settings/model-options");
   },
 
   patchModelDefaults(payload: {
