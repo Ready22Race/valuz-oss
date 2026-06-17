@@ -7,9 +7,9 @@ this module lets a user configure it **once, persisted** (app settings +
 secret store), and have the host provision the AGS kernel from that config at
 the next (re)start — no env, no scripts.
 
-Layout mirrors ``kernel_endpoint`` (its sibling): non-secret fields live in the
-``valuz_app_setting`` K-V table; the three secrets (AGS API key, COS SecretId /
-SecretKey) live in the OS secret store, never the DB. ``apply_to_settings``
+Layout: non-secret fields live in the ``valuz_app_setting`` K-V table; the
+secrets (AGS API key + kernel token, COS SecretId / SecretKey) live in the OS
+secret store, never the DB. ``apply_to_settings``
 copies the persisted config onto the ``settings`` singleton at boot so the
 existing driver + provision path runs unchanged; an explicit env always wins.
 """
@@ -190,13 +190,8 @@ async def apply_to_settings(db: AsyncSession) -> str | None:
     settings.ags_domain = cfg.ags_domain or None
     settings.ags_kernel_template = cfg.ags_template
     settings.ags_mount_path = cfg.ags_mount_path
-    # Prefer the sandbox panel's own token; fall back to the Gateway panel's
-    # endpoint token, then whatever env/default is already on settings.
-    settings.ags_kernel_token = (
-        store.get(REF_AGS_KERNEL_TOKEN)
-        or store.get("kernel/endpoint-token")
-        or settings.ags_kernel_token
-    )
+    # The sandbox panel's own token, else whatever env/default is on settings.
+    settings.ags_kernel_token = store.get(REF_AGS_KERNEL_TOKEN) or settings.ags_kernel_token
     settings.cos_bucket = cfg.cos_bucket
     settings.cos_region = cfg.cos_region
     settings.cos_endpoint = cfg.cos_endpoint or None

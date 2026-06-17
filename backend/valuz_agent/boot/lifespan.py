@@ -21,7 +21,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     steps.acquire_single_writer_lock()
     await steps.bootstrap_schema()
     await steps.configure_i18n()
-    await steps.apply_persisted_kernel_endpoint()  # before init_kernel: may select http
+    await steps.apply_persisted_sandbox()  # before init_kernel: may select http (AGS)
     await steps.init_kernel(app)
     steps.install_binding_change_listener()
     # ── recovery（依赖 kernel store 已就绪）──

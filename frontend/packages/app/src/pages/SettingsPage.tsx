@@ -13,7 +13,6 @@ import {
   FileText,
   Info,
   Palette,
-  Radio,
   Server,
   Settings,
 } from "lucide-react";
@@ -25,7 +24,6 @@ import { useProjectOutlet } from "@valuz/app/layout";
 import { ModelSection } from "./settings/ModelSection";
 import { ConnectorsSection } from "./settings/ConnectorsSection";
 import { GeneralSection } from "./settings/GeneralSection";
-import { GatewaySection } from "./settings/GatewaySection";
 import { SandboxSection } from "./settings/SandboxSection";
 import { MemorySection } from "./settings/MemorySection";
 import { ParsingSection } from "./settings/ParsingSection";
@@ -46,7 +44,6 @@ const TAB_ICON_MAP: Record<string, ReactNode> = {
   "file-text": <FileText className="h-4 w-4" />,
   activity: <Activity className="h-4 w-4" />,
   info: <Info className="h-4 w-4" />,
-  radio: <Radio className="h-4 w-4" />,
   brain: <Brain className="h-4 w-4" />,
   server: <Server className="h-4 w-4" />,
 };
@@ -71,7 +68,6 @@ const SECTION_MAP: Record<string, React.ComponentType> = {
   model: ModelSection,
   connectors: ConnectorsSection,
   general: GeneralSection,
-  gateway: GatewaySection,
   sandbox: SandboxSection,
   memory: MemorySection,
   parsing: ParsingSection,

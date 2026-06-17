@@ -172,32 +172,26 @@ async def configure_i18n() -> None:
         set_locale(await get_default_locale(db))
 
 
-async def apply_persisted_kernel_endpoint() -> None:
-    """Apply a user-configured remote kernel endpoint (the "configure sandbox
-    address" feature) before the kernel client binds.
+async def apply_persisted_sandbox() -> None:
+    """Provision a UI-configured sandbox driver (Settings → Cloud Sandbox)
+    before the kernel client binds.
 
     Runs after the schema + owner context exist and BEFORE ``init_kernel`` so
     the http transport is selected before the in-process kernel singletons
     (which ``init_kernel`` skips in http mode) would be created. An explicit
-    env / provisioned-sandbox http mode wins — this only acts when the host
-    would otherwise run in-process. See ``modules/settings/kernel_endpoint``.
+    env / already-provisioned http kernel wins — this only acts when the host
+    would otherwise run in-process. See ``modules/settings/sandbox_config``.
     """
     if settings.is_http_kernel:
         return  # explicit env / provisioned sandbox already selected http
-    from valuz_agent.adapters import kernel_client
     from valuz_agent.infra.db import async_unit_of_work
-    from valuz_agent.modules.settings.kernel_endpoint import apply_persisted_endpoint
     from valuz_agent.modules.settings.sandbox_config import apply_to_settings
 
     driver_name: str | None = None
     try:
         async with async_unit_of_work(commit=False) as db:
-            if await apply_persisted_endpoint(db):
-                # Manual http endpoint ("configure sandbox address").
-                kernel_client.rebind_client()
-                return
-            # Else: a persisted sandbox DRIVER config (UI-driven AGS) — copy it
-            # onto settings; provisioning happens below (outside the UoW).
+            # A persisted sandbox DRIVER config (UI-driven AGS) — copy it onto
+            # settings; provisioning happens below (outside the UoW).
             driver_name = await apply_to_settings(db)
     except Exception:  # noqa: BLE001 — never block boot on settings read
         logger.warning("failed to read persisted sandbox config", exc_info=True)

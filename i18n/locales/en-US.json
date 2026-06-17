@@ -1419,10 +1419,6 @@
         "desc": "Backend status & log stream",
         "label": "System Logs"
       },
-      "gateway": {
-        "label": "Kernel",
-        "desc": "Where the agent kernel runs"
-      },
       "sandbox": {
         "label": "Cloud Sandbox",
         "desc": "Where the agent kernel runs (local / cloud)"
@@ -1430,29 +1426,6 @@
     },
     "timezone": "Timezone",
     "title": "Settings",
-    "gateway": {
-      "desc": "Run the agent kernel in-process, or drive a kernel running on a remote host or cloud sandbox over HTTP.",
-      "localTitle": "Local (in-process)",
-      "localDesc": "Run the kernel inside this app. Default, works offline.",
-      "remoteTitle": "Remote sandbox",
-      "remoteDesc": "Drive a kernel running on another host or a cloud sandbox over HTTP.",
-      "urlLabel": "Kernel URL",
-      "urlDesc": "Base URL of the remote kernel (host → kernel).",
-      "externalUrlLabel": "Host callback URL",
-      "externalUrlDesc": "Address the remote kernel uses to reach this host back (kernel → host). A loopback address won't work from a remote sandbox.",
-      "tokenLabel": "Auth token",
-      "tokenDesc": "Bearer token the kernel requires (KERNEL_AUTH_TOKEN).",
-      "tokenStored": "Stored — leave blank to keep",
-      "tokenPlaceholder": "Bearer token",
-      "restartNote": "Takes effect after restart.",
-      "testButton": "Test",
-      "saveButton": "Save",
-      "saved": "Kernel endpoint saved",
-      "saveFailed": "Failed to save kernel endpoint",
-      "testFailed": "Test failed",
-      "callbackLoopback": "Kernel reachable, but the host callback URL is a loopback address a remote kernel can't reach back on — tool callbacks (memory, docs, tasks) will fail. Set a reachable host address.",
-      "callbackUnset": "Kernel reachable, but no host callback URL is set — a remote kernel can't call back for tools. Set one."
-    },
     "sandbox": {
       "desc": "Choose where the agent kernel runs — in-process, or a remote AGS cloud sandbox with the workspace mounted from Tencent COS. Takes effect after restart.",
       "localTitle": "Local (in-process)",

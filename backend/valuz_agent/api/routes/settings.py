@@ -13,12 +13,6 @@ from valuz_agent.modules.providers.service import (
     ProviderService,
     _resolve_descriptor_model_protocols,
 )
-from valuz_agent.modules.settings.kernel_endpoint import (
-    get_endpoint,
-    probe_endpoint,
-    set_endpoint,
-    stored_token,
-)
 from valuz_agent.modules.settings.model_options import (
     CurrentDefault,
     ModelOptionsResponse,
@@ -113,119 +107,6 @@ async def patch_preferences(payload: PreferencesPatchPayload) -> PreferencesResp
             return await _read_preferences(db)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-# ── Kernel endpoint ("configure sandbox address") ────────────────────
-
-
-class KernelEndpointResponse(BaseModel):
-    mode: str
-    url: str
-    host_external_url: str | None = None
-    token_present: bool
-
-
-class KernelEndpointPatchPayload(BaseModel):
-    mode: str | None = Field(default=None)
-    url: str | None = Field(default=None)
-    host_external_url: str | None = Field(default=None)
-    token: str | None = Field(default=None)
-    clear_token: bool = False
-
-
-def _kernel_endpoint_response(view: Any) -> "KernelEndpointResponse":
-    return KernelEndpointResponse(
-        mode=view.mode,
-        url=view.url,
-        host_external_url=view.host_external_url,
-        token_present=view.token_present,
-    )
-
-
-@router.get("/kernel-endpoint")
-async def get_kernel_endpoint() -> KernelEndpointResponse:
-    """Return the persisted remote-kernel endpoint (the "configure sandbox
-    address" feature). The bearer token is never returned — only whether one
-    is stored. This config drives the host's kernel transport at the next
-    (re)start; an explicit env / provisioned sandbox always wins over it.
-    """
-    async with async_unit_of_work(commit=False) as db:
-        return _kernel_endpoint_response(await get_endpoint(db))
-
-
-@router.patch("/kernel-endpoint")
-async def patch_kernel_endpoint(payload: KernelEndpointPatchPayload) -> KernelEndpointResponse:
-    """Set the remote-kernel endpoint. Takes effect on the next restart (the
-    live transport is not swapped mid-session). Only sent keys change; omitting
-    ``token`` keeps the stored one, ``clear_token`` removes it. ``mode='http'``
-    requires a ``url`` (falling back to the persisted one if omitted).
-    """
-    try:
-        async with async_unit_of_work() as db:
-            current = await get_endpoint(db)
-            mode = payload.mode if payload.mode is not None else current.mode
-            url = payload.url if payload.url is not None else (current.url or None)
-            result = await set_endpoint(
-                db,
-                mode=mode,
-                url=url,
-                host_external_url=payload.host_external_url,
-                token=payload.token,
-                clear_token=payload.clear_token,
-            )
-            return _kernel_endpoint_response(result)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-class KernelEndpointTestPayload(BaseModel):
-    url: str | None = Field(default=None)
-    # Omit to test with the already-stored token (the "Test" button on a saved
-    # endpoint shouldn't force re-entering the secret).
-    token: str | None = Field(default=None)
-    host_external_url: str | None = Field(default=None)
-
-
-class KernelEndpointTestResponse(BaseModel):
-    kernel_reachable: bool
-    auth_ok: bool
-    kernel_status: int | None
-    # ④ callback direction (static): unset | loopback | ok. A remote kernel
-    # can't reach a loopback host — surfaced here so "Test" doesn't false-green.
-    callback_hint: str
-    ok: bool
-    detail: str
-
-
-@router.post("/kernel-endpoint/test")
-async def test_kernel_endpoint(payload: KernelEndpointTestPayload) -> KernelEndpointTestResponse:
-    """Probe a candidate remote-kernel endpoint before committing it.
-
-    Tests host→kernel for real (reachable + token accepted) and reports the
-    ④ kernel→host callback direction statically (a loopback host external URL
-    is the #1 silent failure for a remote kernel). Falls back to the persisted
-    url / token / external URL for any field left unset.
-    """
-    async with async_unit_of_work(commit=False) as db:
-        current = await get_endpoint(db)
-    url = (payload.url if payload.url is not None else current.url) or ""
-    if not url.strip():
-        raise HTTPException(status_code=422, detail="url is required to test")
-    token = payload.token if payload.token is not None else stored_token()
-    host_external_url = (
-        payload.host_external_url
-        if payload.host_external_url is not None
-        else current.host_external_url
-    )
-    result = await probe_endpoint(url=url, token=token, host_external_url=host_external_url)
-    return KernelEndpointTestResponse(
-        kernel_reachable=result.kernel_reachable,
-        auth_ok=result.auth_ok,
-        kernel_status=result.kernel_status,
-        callback_hint=result.callback_hint,
-        ok=result.ok,
-        detail=result.detail,
-    )
 
 
 # ── Sandbox driver config (UI-driven remote sandbox / AGS) ───────────
