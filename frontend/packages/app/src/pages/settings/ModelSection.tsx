@@ -28,6 +28,7 @@ import {
   type CliLoginStatus,
 } from "@valuz/app/components";
 import { usePlatform } from "@valuz/app/platform";
+import { modelLabel } from "@valuz/shared";
 import {
   providersApi,
   runtimesApi,
@@ -540,7 +541,11 @@ export const ModelSection = () => {
                   providerId: m.provider_id,
                   providerName: p.label,
                   modelId: m.model_id,
-                  itemLabel: m.label,
+                  // Server label wins when it's a real display name; subscription
+                  // / built-in rows have none (``m.label`` === raw id) → fall back
+                  // to the static brand catalog, same as the Composer picker.
+                  itemLabel:
+                    m.label !== m.model_id ? m.label : modelLabel(m.model_id),
                 }));
                 allOptions.push(...groupOptions);
                 groups.push({
