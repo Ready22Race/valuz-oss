@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.settings.datastore import SettingsDatastore
 from valuz_agent.modules.settings.models import AppSettingRow
@@ -73,7 +74,7 @@ async def _write(db: AsyncSession, key: str, value: str) -> None:
     )
 
 
-def _secret_store() -> object:
+def _secret_store() -> SecretStorePort:
     # Local import + construction mirrors ``api/deps._secret_store`` — the same
     # filesystem-backed store, reachable from boot (no request scope).
     from valuz_agent.infra.config import settings
@@ -87,10 +88,15 @@ async def get_endpoint(db: AsyncSession) -> KernelEndpointView:
     mode = await _read(db, KEY_MODE) or "inprocess"
     url = await _read(db, KEY_URL) or ""
     host_external_url = await _read(db, KEY_HOST_EXTERNAL_URL)
-    token_present = _secret_store().get(TOKEN_SECRET_REF) is not None  # type: ignore[attr-defined]
+    token_present = _secret_store().get(TOKEN_SECRET_REF) is not None
     return KernelEndpointView(
         mode=mode, url=url, host_external_url=host_external_url, token_present=token_present
     )
+
+
+def stored_token() -> str | None:
+    """The persisted bearer token, if any (for "Test" on a saved endpoint)."""
+    return _secret_store().get(TOKEN_SECRET_REF)
 
 
 def _validate_http_url(url: str, *, field: str) -> str:
@@ -138,9 +144,9 @@ async def set_endpoint(
 
     store = _secret_store()
     if clear_token:
-        store.delete(TOKEN_SECRET_REF)  # type: ignore[attr-defined]
+        store.delete(TOKEN_SECRET_REF)
     elif token and token.strip():
-        store.put(TOKEN_SECRET_REF, token.strip())  # type: ignore[attr-defined]
+        store.put(TOKEN_SECRET_REF, token.strip())
 
     return await get_endpoint(db)
 
@@ -164,10 +170,97 @@ async def apply_persisted_endpoint(db: AsyncSession) -> bool:
 
     settings.kernel_mode = "http"
     settings.kernel_url = view.url
-    token = _secret_store().get(TOKEN_SECRET_REF)  # type: ignore[attr-defined]
+    token = _secret_store().get(TOKEN_SECRET_REF)
     if token:
         settings.kernel_token = token
     if view.host_external_url:
         settings.host_external_url = view.host_external_url
     logger.info("applied persisted kernel endpoint: http %s", view.url)
     return True
+
+
+# ── "Test remote" probe ───────────────────────────────────────────────
+#
+# A pre-save readiness check, modelled on Hermes Desktop's "Test remote".
+# The load-bearing lesson there: a shallow ``/health`` "ready" check that
+# doesn't exercise what a live session actually needs gives a false green and
+# a flap loop. For us the live session needs BOTH directions:
+#   • host → kernel (control/events): probed for real — reachable + auth.
+#   • kernel → host (④ tool-callback): cannot be exercised without a running
+#     session, but its #1 failure mode (a loopback callback base a remote
+#     kernel can't reach) IS statically detectable — so the probe returns it
+#     as an explicit hint rather than pretending the endpoint is fully wired.
+
+
+def _callback_hint(host_external_url: str | None) -> str:
+    """Classify the ④ callback base: ``unset`` / ``loopback`` / ``ok``."""
+    base = (host_external_url or "").strip()
+    if not base:
+        return "unset"
+    if "127.0.0.1" in base or "localhost" in base or "[::1]" in base:
+        return "loopback"
+    return "ok"
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    kernel_reachable: bool  # host → kernel TCP/HTTP reached at all
+    auth_ok: bool  # the bearer token is accepted (authed read returned non-401)
+    kernel_status: int | None  # HTTP status of the authed read, if reached
+    callback_hint: str  # ④ direction: unset | loopback | ok (static)
+    ok: bool  # host→kernel fully good (reachable + auth)
+    detail: str  # human-readable summary / first error
+
+
+async def probe_endpoint(
+    *,
+    url: str,
+    token: str | None,
+    host_external_url: str | None = None,
+    transport: object | None = None,
+) -> ProbeResult:
+    """Probe a candidate remote-kernel endpoint before the user commits to it.
+
+    ``transport`` is an optional ``httpx`` transport for tests. The authed read
+    targets the owner-scoped sessions list, so it carries the same headers a
+    real host call does (bearer + ``X-Valuz-Owner-Id``); a 401 means a bad
+    token, a 200 means the kernel serves owner-scoped data for this host.
+    """
+    import httpx
+
+    base = url.strip().rstrip("/")
+    hint = _callback_hint(host_external_url)
+    headers = {"X-Valuz-Owner-Id": require_current_user_id()}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0, transport=transport) as client:  # type: ignore[arg-type]
+            resp = await client.get(f"{base}/api/v1/sessions", headers=headers)
+    except Exception as exc:  # noqa: BLE001 — any transport error = unreachable
+        return ProbeResult(
+            kernel_reachable=False,
+            auth_ok=False,
+            kernel_status=None,
+            callback_hint=hint,
+            ok=False,
+            detail=f"kernel not reachable at {base}: {exc}",
+        )
+
+    status = resp.status_code
+    auth_ok = status != 401
+    ok = auth_ok and status < 500
+    if status == 401:
+        detail = "reached the kernel, but the token was rejected (401)"
+    elif status >= 500:
+        detail = f"kernel reachable but returned {status}"
+    else:
+        detail = f"kernel reachable and token accepted ({status})"
+    return ProbeResult(
+        kernel_reachable=True,
+        auth_ok=auth_ok,
+        kernel_status=status,
+        callback_hint=hint,
+        ok=ok,
+        detail=detail,
+    )
