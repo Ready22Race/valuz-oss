@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   Button,
@@ -811,6 +811,20 @@ export const ProjectDetailPage = () => {
     defaultsLoading,
     composerTouched,
   ]);
+  // Seed the composer's agent ONCE from the project's last-used agent (usually
+  // the lead) instead of the first member. Ref-gated so it never clobbers a
+  // pick the user made afterwards or a later member reload. loadMembers' own
+  // ``mapped[0]`` is the fallback when the project has no prior session.
+  const agentSeededRef = useRef(false);
+  useEffect(() => {
+    if (agentSeededRef.current) return;
+    if (lastPickLoading || members.length === 0) return;
+    agentSeededRef.current = true;
+    const preferred = lastPick?.agent_slug;
+    if (preferred && members.some((m) => m.slug === preferred)) {
+      setSelectedAgentSlug(preferred);
+    }
+  }, [members, lastPick, lastPickLoading]);
   const { runtimes: runtimeList } = useRuntimes();
   useEffect(() => {
     // Wait for both the Settings-default fetch and the project last-pick

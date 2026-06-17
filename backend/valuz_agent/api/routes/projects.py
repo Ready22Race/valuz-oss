@@ -30,6 +30,8 @@ class LastSessionPickResponse(BaseModel):
     runtime_provider: str | None
     provider_id: str | None
     model_id: str | None
+    # The last-bound agent, so the project composer defaults to it.
+    agent_slug: str | None = None
 
 
 @router.get("")
@@ -166,6 +168,7 @@ async def get_last_session_pick(
         runtime_provider=pick.get("runtime_provider"),
         provider_id=pick.get("provider_id"),
         model_id=pick.get("model_id"),
+        agent_slug=pick.get("agent_slug"),
     )
 
 

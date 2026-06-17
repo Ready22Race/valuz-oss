@@ -2181,6 +2181,8 @@
       "subtaskReviewReworkNoFeedback": "⚠ Needs rework",
       "leadWorking": "Lead is working…"
     },
-    "viewSession": "View session →"
+    "viewSession": "View session →",
+    "needsConfirm": "Your confirmation needed",
+    "goConfirm": "Confirm now"
   }
 }

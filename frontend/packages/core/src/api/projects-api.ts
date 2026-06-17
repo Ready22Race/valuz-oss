@@ -43,6 +43,9 @@ export interface LastSessionPick {
   runtime_provider: string | null;
   provider_id: string | null;
   model_id: string | null;
+  /** The agent the last project conversation was bound to, so the composer
+   *  can default back to it (usually the project lead). */
+  agent_slug?: string | null;
 }
 
 export interface ProjectCreateRequest {

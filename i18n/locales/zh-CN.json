@@ -2181,6 +2181,8 @@
       "subtaskReviewReworkNoFeedback": "⚠ 打回重做",
       "leadWorking": "Lead 正在执行…"
     },
-    "viewSession": "查看会话 →"
+    "viewSession": "查看会话 →",
+    "needsConfirm": "需要你确认",
+    "goConfirm": "去确认"
   }
 }

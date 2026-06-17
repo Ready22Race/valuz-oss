@@ -264,6 +264,10 @@ class SessionService:
                 "runtime_provider": getattr(s, "runtime_provider", None) or None,
                 "provider_id": str(provider_id),
                 "model_id": s.model or None,
+                # The agent this project conversation was bound to — lets the
+                # composer default back to the user's last-picked agent (usually
+                # the project lead) instead of the first member every time.
+                "agent_slug": str(a) if (a := meta.get("agent_slug")) else None,
             }
         return None
 
