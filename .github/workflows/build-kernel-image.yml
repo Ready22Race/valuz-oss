@@ -1,0 +1,151 @@
+name: Build & Push Kernel Image
+
+# Builds the agent-harness KERNEL container image (the data plane that runs
+# inside a cloud sandbox — e.g. Tencent AGS, which is E2B-compatible) and
+# publishes it to GitHub Container Registry (ghcr.io). The host control plane
+# talks to it over HTTP via HttpKernelClient; see
+# docs/design/kernel-sandbox-deployment.md.
+#
+# Only the `standalone` image is built here (FROM python-slim, serves on :8000,
+# self-migrates its SQLite on boot). The Volcengine veFaaS / AIO-base variant is
+# not relevant to an E2B-compatible sandbox and is intentionally omitted.
+#
+# Image: ghcr.io/<owner-lowercased>/valuz-kernel:<tag>  (+ :latest)
+# The build is smoke-tested (boots + /health + auth gate) BEFORE it is pushed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag (default: short commit SHA)"
+        required: false
+        default: ""
+        type: string
+      push:
+        description: "Push to ghcr.io (off = build + smoke only)"
+        required: false
+        default: true
+        type: boolean
+      also_latest:
+        description: "Also tag :latest"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: build-kernel-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, smoke-test & push kernel image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Resolve the lowercase GHCR image ref + tags. GHCR requires the owner
+      #    segment to be lowercase; an org like "Ready22Race" must become
+      #    "ready22race". ────────────────────────────────────────────────────
+      - name: Resolve image ref
+        id: ref
+        run: |
+          owner_lc="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner_lc}/valuz-kernel"
+          tag="${{ inputs.tag }}"
+          [ -z "$tag" ] && tag="$(git rev-parse --short HEAD)"
+          tags="${image}:${tag}"
+          if [ "${{ inputs.also_latest }}" = "true" ]; then
+            tags="${tags}
+          ${image}:latest"
+          fi
+          {
+            echo "image=${image}"
+            echo "tag=${tag}"
+            echo "tags<<EOF"
+            echo "${tags}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "▸ image: ${image}:${tag} (latest=${{ inputs.also_latest }}, push=${{ inputs.push }})"
+
+      # ── Build into the runner's docker (no push yet) so we can smoke-test
+      #    the exact bytes before publishing. ──────────────────────────────────
+      - name: Build (load for smoke)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/docker/kernel.Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: valuz-kernel:verify
+          build-args: |
+            UV_DEFAULT_INDEX=${{ secrets.UV_DEFAULT_INDEX }}
+          cache-from: type=gha,scope=standalone
+          cache-to: type=gha,mode=max,scope=standalone
+
+      # ── Smoke: bundled runtime present, boots, serves /health, auth-gates. ──
+      - name: Smoke test
+        run: |
+          set -e
+          docker run --rm --entrypoint sh valuz-kernel:verify -c '
+            SDK=$(python -c "import claude_agent_sdk,os;print(os.path.dirname(claude_agent_sdk.__file__))")
+            ls -la "$SDK/_bundled/" || (echo "MISSING bundled claude" && exit 1)
+            command -v codex && codex --version || echo "codex: ABSENT (expected per linux override)"'
+          docker run -d --name ksmoke -p 8000:8000 -e KERNEL_AUTH_TOKEN=devtoken valuz-kernel:verify
+          ok=0; for _ in $(seq 1 45); do curl -fs localhost:8000/health >/dev/null 2>&1 && { ok=1; break; }; sleep 2; done
+          docker logs ksmoke | tail -30; test "$ok" = 1
+          test "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/api/v1/sessions)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer devtoken' localhost:8000/api/v1/sessions)" = 200
+          docker rm -f ksmoke; echo "✓ standalone image boots + serves + auth-gates"
+
+      # ── Publish only after the smoke passes. Re-uses the gha cache from the
+      #    build above, so this is layer-for-layer instant. ───────────────────
+      - name: Log in to GHCR
+        if: ${{ inputs.push }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to ghcr.io
+        if: ${{ inputs.push }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/docker/kernel.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.ref.outputs.tags }}
+          build-args: |
+            UV_DEFAULT_INDEX=${{ secrets.UV_DEFAULT_INDEX }}
+          cache-from: type=gha,scope=standalone
+
+      - name: Summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### Kernel image (standalone)"
+            echo "- ref: \`${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.tag }}\`"
+            echo "- pushed: ${{ inputs.push }}"
+            echo ""
+            echo "Pull (after the package is made visible):"
+            echo '```'
+            echo "docker pull ${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.tag }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

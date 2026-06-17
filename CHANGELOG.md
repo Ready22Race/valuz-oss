@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Features
+
+- Kernel: build a standalone OCI image and publish it to ghcr.io (build →
+  smoke-test → push CI), so the kernel can run as the data plane inside an
+  E2B-compatible cloud sandbox (e.g. Tencent AGS). Restores the image build
+  removed in #108, retargeted at GHCR; the host still talks to it over
+  `HttpKernelClient`. (#4 @Ready22Race)
+
 ## [0.1.7] - 2026-06-15
 
 ### Features
