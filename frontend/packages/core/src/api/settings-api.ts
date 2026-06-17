@@ -85,6 +85,9 @@ export interface SandboxConfig {
   ags_domain: string;
   ags_template: string;
   ags_mount_path: string;
+  /** ④ host-callback base — the address a cloud kernel reaches THIS host on so
+   *  the host's built-in MCP servers get a reachable URL (not 127.0.0.1). */
+  host_external_url: string;
   cos_bucket: string;
   cos_region: string;
   cos_endpoint: string;
@@ -99,6 +102,7 @@ export interface SandboxConfigPatch {
   ags_domain?: string;
   ags_template?: string;
   ags_mount_path?: string;
+  host_external_url?: string;
   cos_bucket?: string;
   cos_region?: string;
   cos_endpoint?: string;

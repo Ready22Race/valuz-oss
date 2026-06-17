@@ -50,6 +50,7 @@ async def test_set_roundtrip_secrets_redacted(sm) -> None:
             driver="ags",
             ags_domain="ap-beijing.tencentags.com",
             ags_template="valuz-dev-tutu",
+            host_external_url="https://host.example:8000",
             cos_bucket="valuz-test-1252068037",
             ags_api_key="e2b_secret",
             ags_kernel_token="tok-123",
@@ -59,6 +60,7 @@ async def test_set_roundtrip_secrets_redacted(sm) -> None:
         v = await sc.get_sandbox_config(db)
     assert v.driver == "ags"
     assert v.ags_template == "valuz-dev-tutu"
+    assert v.host_external_url == "https://host.example:8000"
     assert v.cos_bucket == "valuz-test-1252068037"
     # secrets never surfaced — presence only
     assert v.ags_api_key_present is True
@@ -81,12 +83,14 @@ async def test_apply_to_settings_populates_and_returns_ags(sm, monkeypatch) -> N
     monkeypatch.delenv("VALUZ_SANDBOX_DRIVER", raising=False)
     monkeypatch.setattr(settings, "ags_kernel_template", None)
     monkeypatch.setattr(settings, "cos_bucket", None)
+    monkeypatch.setattr(settings, "host_external_url", None)
     async with sm() as db:
         await sc.set_sandbox_config(
             db,
             driver="ags",
             ags_domain="ap-beijing.tencentags.com",
             ags_template="valuz-dev-tutu",
+            host_external_url="https://host.example:8000",
             cos_bucket="valuz-test-1252068037",
             ags_api_key="e2b_secret",
             ags_kernel_token="tok-xyz",
@@ -96,6 +100,7 @@ async def test_apply_to_settings_populates_and_returns_ags(sm, monkeypatch) -> N
         driver = await sc.apply_to_settings(db)
     assert driver == "ags"
     assert settings.ags_kernel_template == "valuz-dev-tutu"
+    assert settings.host_external_url == "https://host.example:8000"
     assert settings.cos_bucket == "valuz-test-1252068037"
     assert settings.ags_api_key == "e2b_secret"
     assert settings.ags_kernel_token == "tok-xyz"

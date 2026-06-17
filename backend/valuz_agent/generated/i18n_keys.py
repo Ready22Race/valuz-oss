@@ -1426,6 +1426,8 @@ I18nKey = Literal[
     "settings.sandbox.domainLabel",
     "settings.sandbox.endpointDesc",
     "settings.sandbox.endpointLabel",
+    "settings.sandbox.hostUrlDesc",
+    "settings.sandbox.hostUrlLabel",
     "settings.sandbox.localDesc",
     "settings.sandbox.localTitle",
     "settings.sandbox.mountDesc",
