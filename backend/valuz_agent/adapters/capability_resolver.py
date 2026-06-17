@@ -267,6 +267,10 @@ async def resolve_session_capabilities(
     if warnings:
         logger.warning("Skill resolution warnings: %s", warnings)
 
+    # Host-absolute skill dirs stay as-is here; when the kernel runs in a cloud
+    # sandbox they are translated to their COS-mount paths at the kernel seam
+    # (``HttpKernelClient``), where the matching content is pre-synced. Keeping
+    # host paths here leaves the resolver sandbox-agnostic.
     return ResolvedCapabilities(
         skills=tuple(skill_paths),
         mcp_servers=tuple(mcp_configs_list),

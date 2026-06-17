@@ -99,6 +99,9 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
         settings.kernel_mode = "http"
         settings.kernel_url = base_url
         settings.kernel_token = token
+        # A cloud kernel doesn't share the host FS — the seam strips host-only
+        # payloads (skill source dirs) for it.
+        settings.kernel_shares_host_fs = getattr(driver, "shares_host_fs", True)
         os.environ["VALUZ_KERNEL_MODE"] = "http"
         os.environ["VALUZ_KERNEL_URL"] = base_url
         os.environ["VALUZ_KERNEL_TOKEN"] = token
@@ -139,6 +142,12 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
     log.warning("kernel running in %s sandbox at %s", driver_name, result.endpoint.base_url)
     _wire(result.provider, result.endpoint.base_url, result.endpoint.token, result.static_roots)
     atexit.register(lambda: asyncio.run(result.provider.destroy("host-kernel")))
+    # Cloud kernel: pre-sync skill roots to COS so sessions can materialize them
+    # under the mount (cwds are staged per-session). Best-effort.
+    if not settings.kernel_shares_host_fs:
+        from valuz_agent.integrations.cos_sync import sync_skills_best_effort
+
+        asyncio.run(sync_skills_best_effort())
 
 
 def main(argv: list[str] | None = None) -> int:

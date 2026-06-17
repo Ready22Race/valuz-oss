@@ -176,6 +176,17 @@ class SandboxProvider(Protocol):
         """Revoke a prior ``bind_workspace`` grant. Idempotent."""
         ...
 
+    def project_path(self, host_path: str) -> str:
+        """Map a host absolute path to the path the kernel uses for it.
+
+        Identity for drivers that share the host filesystem (the kernel sees
+        the same paths); a cloud driver returns the in-sandbox mount path (see
+        ``sandbox_paths.mount_path_for``). PURE — no staging: callers use it for
+        content already present in the sandbox (pre-synced skills).
+        ``bind_workspace`` is the staging counterpart for fresh cwd content.
+        """
+        ...
+
 
 class SandboxProvisionError(RuntimeError):
     """A provider could not bring up a healthy kernel endpoint."""
@@ -224,6 +235,15 @@ class SandboxDriver(Protocol):
     """
 
     name: str
+
+    # Whether the kernel this driver provisions shares the host filesystem.
+    # ``True`` for in-host drivers (e.g. seatbelt) where host-absolute paths
+    # (skill source dirs, project cwd) are reachable; ``False`` for cloud
+    # drivers (AGS) whose FS is separate. Read at boot into
+    # ``settings.kernel_shares_host_fs`` so the kernel seam can strip
+    # host-only payloads. Defaults to ``True`` for overlay drivers that
+    # don't declare it.
+    shares_host_fs: bool = True
 
     def preflight(self) -> list[str]:
         """Reasons this host can't run the driver (empty = OK). Called BEFORE

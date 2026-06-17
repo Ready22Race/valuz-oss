@@ -147,6 +147,21 @@ class HttpKernelClient:
             kernel_cwd = await sandbox_runtime.ensure_workspace_granted(req.cwd)
             if kernel_cwd != req.cwd:
                 req = req.model_copy(update={"cwd": kernel_cwd})
+
+        # Skills are host-absolute source dirs. A kernel that doesn't share the
+        # host FS (cloud sandbox) sees them under the COS mount, not at their
+        # host path — translate each to its projected mount path (the matching
+        # content is pre-synced to COS, see cos_sync). One chokepoint covers
+        # EVERY session-create path (chat / project / task).
+        from valuz_agent.infra.config import settings
+
+        if not settings.kernel_shares_host_fs and req.skills:
+            from valuz_agent.integrations import sandbox_runtime
+
+            projected = [sandbox_runtime.project_path(s) for s in req.skills]
+            if projected != list(req.skills):
+                req = req.model_copy(update={"skills": projected})
+
         result = await self._request(
             "POST", "/api/v1/sessions", json_body=req.model_dump(mode="json"), owner=user_id
         )
@@ -200,6 +215,17 @@ class HttpKernelClient:
     async def update_session(
         self, user_id: str, session_id: str, req: UpdateSessionRequest
     ) -> SessionData:
+        # Same host-FS projection as create_session: a cloud kernel sees skills
+        # under the COS mount, so translate any mutation's skill dirs too (the
+        # docs-capability refresh re-installs valuz-project-docs every turn).
+        from valuz_agent.infra.config import settings
+
+        if not settings.kernel_shares_host_fs and req.skills:
+            from valuz_agent.integrations import sandbox_runtime
+
+            projected = [sandbox_runtime.project_path(s) for s in req.skills]
+            if projected != list(req.skills):
+                req = req.model_copy(update={"skills": projected})
         result = await self._request(
             "PATCH",
             f"/api/v1/sessions/{session_id}",

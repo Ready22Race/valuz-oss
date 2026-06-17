@@ -518,6 +518,11 @@ class SeatbeltSandboxProvider:
         except (httpx.HTTPError, ValueError):
             pass  # best-effort revoke; sandbox teardown reclaims everything
 
+    def project_path(self, host_path: str) -> str:
+        # Host and sandbox share the filesystem — the kernel sees host paths
+        # verbatim, so projection is the identity.
+        return host_path
+
     # ---- internals -----------------------------------------------------
 
     async def _migrate(self, kernel_db_path: str) -> None:

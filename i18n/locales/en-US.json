@@ -1422,6 +1422,10 @@
       "gateway": {
         "label": "Kernel",
         "desc": "Where the agent kernel runs"
+      },
+      "sandbox": {
+        "label": "Cloud Sandbox",
+        "desc": "Where the agent kernel runs (local / cloud)"
       }
     },
     "timezone": "Timezone",
@@ -1448,6 +1452,42 @@
       "testFailed": "Test failed",
       "callbackLoopback": "Kernel reachable, but the host callback URL is a loopback address a remote kernel can't reach back on — tool callbacks (memory, docs, tasks) will fail. Set a reachable host address.",
       "callbackUnset": "Kernel reachable, but no host callback URL is set — a remote kernel can't call back for tools. Set one."
+    },
+    "sandbox": {
+      "desc": "Choose where the agent kernel runs — in-process, or a remote AGS cloud sandbox with the workspace mounted from Tencent COS. Takes effect after restart.",
+      "localTitle": "Local (in-process)",
+      "localDesc": "The kernel runs in the app process (default).",
+      "agsTitle": "AGS cloud sandbox",
+      "agsDesc": "The kernel runs in a Tencent AGS sandbox; the workspace is mounted from COS.",
+      "agsGroupTitle": "AGS sandbox",
+      "cosGroupTitle": "COS object storage",
+      "apiKeyLabel": "API key",
+      "apiKeyDesc": "AGS / e2b-compatible API key (e2b_ prefix).",
+      "domainLabel": "Domain",
+      "domainDesc": "The AGS endpoint, e.g. ap-beijing.tencentags.com.",
+      "templateLabel": "Sandbox template",
+      "templateDesc": "The sandbox tool name created in the console.",
+      "tokenLabel": "Kernel token",
+      "tokenDesc": "Must match the sandbox tool's KERNEL_AUTH_TOKEN env.",
+      "mountLabel": "Mount path",
+      "mountDesc": "Where COS is mounted inside the sandbox (default /workspace).",
+      "bucketLabel": "Bucket",
+      "bucketDesc": "COS bucket name (with APPID).",
+      "regionLabel": "Region",
+      "endpointLabel": "Endpoint (optional)",
+      "endpointDesc": "Leave empty to derive from the region.",
+      "cosIdLabel": "SecretId",
+      "cosKeyLabel": "SecretKey",
+      "secretStored": "Stored · leave empty to keep",
+      "secretPlaceholder": "Enter to set",
+      "saveButton": "Save",
+      "saved": "Sandbox config saved",
+      "saveFailed": "Save failed",
+      "syncButton": "Sync workspace to cloud",
+      "syncDone": "Files synced",
+      "syncFailed": "Sync failed",
+      "restartNote": "Takes effect after restart.",
+      "cloudHint": "First create the sandbox tool in the AGS console (image, public network, resident, COS mount, KERNEL_AUTH_TOKEN env). After saving, click “Sync workspace to cloud”, then restart the app."
     }
   },
   "sidebar": {

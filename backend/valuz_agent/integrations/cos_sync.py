@@ -1,12 +1,17 @@
-"""User-scoped COS sync — the entry point that pushes a user's local mountable
-content (projects + skills) to COS so an AGS cloud sandbox can mount it.
+"""User-scoped COS sync — pushes a user's local mountable content (projects +
+skills) to COS so an AGS cloud sandbox can mount it.
 
 This is the explicit, ``user_id``-keyed counterpart to the per-session
 ``bind_workspace`` stage-in: given a user, enumerate the local dirs the kernel
 needs inside the sandbox (real projects, managed chat cwds, the skill roots —
-NOT the host's private kernel DB) and upload them to COS under a
-``{user_id}/...`` prefix. The AGS sandbox tool mounts the bucket, so the kernel
-sees them under ``{mount_path}/{user_id}/...``.
+NOT the host's private kernel DB) and upload them to COS.
+
+**Layout = prefix-preserving** (see ``sandbox_paths``): each dir lands at COS
+key ``{user_id}{realpath}`` — i.e. the host's absolute path mirrored under the
+user prefix. The AGS tool mounts ``{user_id}/`` at ``ags_mount_path``, so the
+kernel sees each dir at ``{mount_path}{realpath}`` — the exact path the kernel
+seam projects cwd and skill dirs onto. One layout, shared by sync, cwd staging,
+and skill translation.
 
 Invoke via the CLI: ``python -m valuz_agent.cli sync-cos``.
 """
@@ -25,11 +30,15 @@ logger = logging.getLogger("valuz_agent.sandbox")
 
 @dataclass(frozen=True)
 class SyncSource:
-    """One local dir to push, with the logical name it lands under in COS
-    (``{user_id}/{name}/...``)."""
+    """One local dir to push. ``name`` is a human label for logs only — the COS
+    key is derived from the dir's absolute realpath (prefix-preserving, see
+    ``sandbox_paths.cos_key_for``) so it lines up with the in-sandbox mount path
+    used for cwd and skill translation. ``is_skill`` marks the skill roots so a
+    cloud kernel can pre-sync just those (cwds are staged per-session)."""
 
     name: str
     local_dir: Path
+    is_skill: bool = False
 
 
 @dataclass(frozen=True)
@@ -41,21 +50,33 @@ class SyncReport:
     total_bytes: int = 0
 
 
+def _builtin_skills_root() -> Path:
+    """The package's bundled skills dir (``valuz-project-docs``, ``skill-creator``
+    parent) — ships inside the kernel image, but a cloud kernel resolves the
+    host's absolute path under the mount, so it must be synced like any other
+    skill root."""
+    import valuz_agent
+
+    return Path(valuz_agent.__file__).resolve().parent / "resources" / "builtin_skills"
+
+
 def local_sync_sources() -> list[SyncSource]:
-    """The local dirs to mount into a cloud sandbox — mirrors the Seatbelt
-    rw-mount manifest minus the kernel's private DB (the cloud image uses its
-    own). De-duplicated by realpath; only existing dirs are returned."""
+    """The local dirs to mount into a cloud sandbox — projects, managed chat
+    cwds, and every skill root (builtin / official / user / legacy). The
+    kernel's private DB is excluded (the cloud image uses its own).
+    De-duplicated by realpath; only existing dirs are returned."""
     from valuz_agent.infra.config import settings
     from valuz_agent.infra.fs_registry import fs_registry as fr
 
     candidates: list[SyncSource] = [
         SyncSource("projects", settings.user_project_root),
         SyncSource("chats", settings.data_dir / "projects"),
-        SyncSource("skills/official", fr.official_skill_root()),
-        SyncSource("skills/claude", fr.user_skill_root("claude")),
+        SyncSource("skills/builtin", _builtin_skills_root(), is_skill=True),
+        SyncSource("skills/official", fr.official_skill_root(), is_skill=True),
+        SyncSource("skills/claude", fr.user_skill_root("claude"), is_skill=True),
     ]
     for d in fr.legacy_user_skill_roots():
-        candidates.append(SyncSource(f"skills/legacy/{Path(d).name}", Path(d)))
+        candidates.append(SyncSource(f"skills/legacy/{Path(d).name}", Path(d), is_skill=True))
 
     seen: set[str] = set()
     out: list[SyncSource] = []
@@ -70,34 +91,43 @@ def local_sync_sources() -> list[SyncSource]:
     return out
 
 
+def skill_sync_sources() -> list[SyncSource]:
+    """Just the skill roots — what a cloud kernel needs pre-synced before a
+    session can materialize skills (cwds are staged per-session by
+    ``bind_workspace``)."""
+    return [s for s in local_sync_sources() if s.is_skill]
+
+
 async def sync_local_to_cos(
     user_id: str,
     *,
     store: ObjectStore,
     sources: list[SyncSource] | None = None,
 ) -> SyncReport:
-    """Upload each source dir to ``{user_id}/{name}/...`` in ``store``. Returns a
+    """Upload each source dir to COS key ``{user_id}{realpath}/...``. Returns a
     per-source report. Caps come from ``VALUZ_AGS_STAGE_MAX_*`` (per source)."""
     from valuz_agent.infra.config import settings
     from valuz_agent.integrations.object_store_s3 import stage_directory
+    from valuz_agent.integrations.sandbox_paths import cos_key_for
 
     srcs = sources if sources is not None else local_sync_sources()
     per_source: list[tuple[str, int, int]] = []
     total_files = 0
     total_bytes = 0
     for s in srcs:
-        prefix = f"{user_id}/{s.name}"
+        real = os.path.realpath(str(s.local_dir))
+        prefix = cos_key_for(real, user_id)
         n, b = await stage_directory(
             store,
             prefix,
-            str(s.local_dir),
+            real,
             max_files=settings.ags_stage_max_files,
             max_bytes=settings.ags_stage_max_bytes,
         )
         per_source.append((s.name, n, b))
         total_files += n
         total_bytes += b
-        logger.info("cos-sync: %s → %s (%d files, %d bytes)", s.local_dir, prefix, n, b)
+        logger.info("cos-sync: %s → %s (%d files, %d bytes)", real, prefix, n, b)
     return SyncReport(
         user_id=user_id,
         root_prefix=user_id,
@@ -105,3 +135,32 @@ async def sync_local_to_cos(
         total_files=total_files,
         total_bytes=total_bytes,
     )
+
+
+async def sync_skills_best_effort() -> None:
+    """Push the skill roots to COS for the local user so a cloud kernel can
+    resolve them under the mount. Best-effort: a no-op (logged) when COS is
+    unconfigured, and never raises — a sync failure must not block boot.
+    """
+    try:
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+        from valuz_agent.integrations.object_store_s3 import cos_object_store
+
+        store = cos_object_store()
+        if store is None:
+            logger.info("skill sync skipped: COS not configured")
+            return
+        report = await sync_local_to_cos(
+            resolve_local_user_id(), store=store, sources=skill_sync_sources()
+        )
+        logger.info(
+            "provision skill sync: %d files (%d bytes) for user %s",
+            report.total_files,
+            report.total_bytes,
+            report.user_id,
+        )
+    except Exception:  # noqa: BLE001 — best-effort; skills just won't be available
+        logger.warning(
+            "provision skill sync failed — skills may be unavailable in the cloud kernel",
+            exc_info=True,
+        )
