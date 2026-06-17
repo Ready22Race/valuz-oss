@@ -37,9 +37,21 @@ export const OnboardingFlow = () => {
 
   const go = (next: Step) => setStep(next);
 
-  // Terminal (skip path): mark done and route into the app without deploying
-  // a team.
-  const finish = () => {
+  // Terminal (skip path): best-effort seed the Valuz 小助手 so the user never
+  // lands in an empty agent library, then mark done and route into the app —
+  // ConversationPage defaults to `valuz-helper` when present, so it's pre-
+  // selected on arrival. Creation is best-effort: when no model channel is
+  // configured yet it 422s (e.g. skipping before ConnectStep), and any other
+  // failure is equally non-fatal. We swallow it and finish anyway — the
+  // outcome is the pre-fix empty workspace, so there's no regression, and we
+  // never trap the user in onboarding.
+  const finish = async () => {
+    try {
+      await onboardingApi.createAssistant();
+    } catch {
+      // No channel configured (422) or transient failure — leave the library
+      // as-is and still let the user out.
+    }
     markOnboarded();
     navigate("/");
   };
