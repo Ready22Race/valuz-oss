@@ -114,6 +114,48 @@ export interface KernelEndpointTestResult {
 }
 
 /**
+ * GET /v1/settings/sandbox — the persisted sandbox-DRIVER config (where the
+ * kernel runs: in-process or a remote AGS cloud sandbox). Secrets are never
+ * returned — only presence flags. Applied at the next (re)start.
+ */
+export interface SandboxConfig {
+  driver: "inprocess" | "ags";
+  ags_domain: string;
+  ags_template: string;
+  ags_mount_path: string;
+  cos_bucket: string;
+  cos_region: string;
+  cos_endpoint: string;
+  ags_api_key_present: boolean;
+  ags_kernel_token_present: boolean;
+  cos_secret_id_present: boolean;
+  cos_secret_key_present: boolean;
+}
+
+export interface SandboxConfigPatch {
+  driver?: "inprocess" | "ags";
+  ags_domain?: string;
+  ags_template?: string;
+  ags_mount_path?: string;
+  cos_bucket?: string;
+  cos_region?: string;
+  cos_endpoint?: string;
+  /** Secrets — omit to keep the stored value, "" to clear, set to write. */
+  ags_api_key?: string;
+  ags_kernel_token?: string;
+  cos_secret_id?: string;
+  cos_secret_key?: string;
+}
+
+export interface SyncWorkspaceResult {
+  user_id: string;
+  total_files: number;
+  total_bytes: number;
+  /** [name, files, bytes] per synced source. */
+  per_source: [string, number, number][];
+}
+
+/**
  * GET /v1/settings/model-options — the read model for the "pick a default
  * model" pickers (onboarding + Settings default-config). Distinct from
  * ``providersApi.list()`` (provider management): every model arrives fully
@@ -194,6 +236,24 @@ export const settingsApi = {
         body: JSON.stringify(payload),
       },
     );
+  },
+
+  getSandbox(): Promise<SandboxConfig> {
+    return fetchJson<SandboxConfig>("/v1/settings/sandbox");
+  },
+
+  patchSandbox(payload: SandboxConfigPatch): Promise<SandboxConfig> {
+    return fetchJson<SandboxConfig>("/v1/settings/sandbox", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  },
+
+  syncWorkspace(): Promise<SyncWorkspaceResult> {
+    return fetchJson<SyncWorkspaceResult>("/v1/settings/sandbox/sync-workspace", {
+      method: "POST",
+    });
   },
 
   getPreferences(): Promise<PreferencesResponse> {

@@ -40,6 +40,7 @@ async def test_default_is_inprocess(sm) -> None:
         v = await sc.get_sandbox_config(db)
     assert v.driver == "inprocess"
     assert v.ags_api_key_present is False
+    assert v.ags_kernel_token_present is False
 
 
 async def test_set_roundtrip_secrets_redacted(sm) -> None:
@@ -51,6 +52,7 @@ async def test_set_roundtrip_secrets_redacted(sm) -> None:
             ags_template="valuz-dev-tutu",
             cos_bucket="valuz-test-1252068037",
             ags_api_key="e2b_secret",
+            ags_kernel_token="tok-123",
             cos_secret_id="AKID",
             cos_secret_key="SK",
         )
@@ -60,9 +62,11 @@ async def test_set_roundtrip_secrets_redacted(sm) -> None:
     assert v.cos_bucket == "valuz-test-1252068037"
     # secrets never surfaced — presence only
     assert v.ags_api_key_present is True
+    assert v.ags_kernel_token_present is True
     assert v.cos_secret_id_present is True
     assert v.cos_secret_key_present is True
     assert sc._secret_store().get(sc.REF_AGS_API_KEY) == "e2b_secret"  # type: ignore[attr-defined]
+    assert sc._secret_store().get(sc.REF_AGS_KERNEL_TOKEN) == "tok-123"  # type: ignore[attr-defined]
 
 
 async def test_bad_driver_rejected(sm) -> None:
@@ -85,6 +89,7 @@ async def test_apply_to_settings_populates_and_returns_ags(sm, monkeypatch) -> N
             ags_template="valuz-dev-tutu",
             cos_bucket="valuz-test-1252068037",
             ags_api_key="e2b_secret",
+            ags_kernel_token="tok-xyz",
             cos_secret_id="AKID",
             cos_secret_key="SK",
         )
@@ -93,6 +98,7 @@ async def test_apply_to_settings_populates_and_returns_ags(sm, monkeypatch) -> N
     assert settings.ags_kernel_template == "valuz-dev-tutu"
     assert settings.cos_bucket == "valuz-test-1252068037"
     assert settings.ags_api_key == "e2b_secret"
+    assert settings.ags_kernel_token == "tok-xyz"
     assert settings.cos_secret_id == "AKID"
 
 

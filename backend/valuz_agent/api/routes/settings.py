@@ -240,6 +240,7 @@ class SandboxConfigResponse(BaseModel):
     cos_region: str
     cos_endpoint: str
     ags_api_key_present: bool
+    ags_kernel_token_present: bool
     cos_secret_id_present: bool
     cos_secret_key_present: bool
 
@@ -254,6 +255,7 @@ class SandboxConfigPatchPayload(BaseModel):
     cos_endpoint: str | None = None
     # Secrets — write-only; "" clears, omit to keep.
     ags_api_key: str | None = None
+    ags_kernel_token: str | None = None
     cos_secret_id: str | None = None
     cos_secret_key: str | None = None
 
@@ -268,6 +270,7 @@ def _sandbox_config_response(v: Any) -> "SandboxConfigResponse":
         cos_region=v.cos_region,
         cos_endpoint=v.cos_endpoint,
         ags_api_key_present=v.ags_api_key_present,
+        ags_kernel_token_present=v.ags_kernel_token_present,
         cos_secret_id_present=v.cos_secret_id_present,
         cos_secret_key_present=v.cos_secret_key_present,
     )
@@ -297,6 +300,7 @@ async def patch_sandbox(payload: SandboxConfigPatchPayload) -> SandboxConfigResp
                 cos_region=payload.cos_region,
                 cos_endpoint=payload.cos_endpoint,
                 ags_api_key=payload.ags_api_key,
+                ags_kernel_token=payload.ags_kernel_token,
                 cos_secret_id=payload.cos_secret_id,
                 cos_secret_key=payload.cos_secret_key,
             )

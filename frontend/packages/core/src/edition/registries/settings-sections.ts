@@ -23,6 +23,13 @@ export const personalSettingsSections: SettingsSectionModule[] = [
     edition: "personal",
   },
   {
+    id: "sandbox",
+    label: "settings.tab.sandbox.label",
+    description: "settings.tab.sandbox.desc",
+    icon: "server",
+    edition: "personal",
+  },
+  {
     id: "memory",
     label: "settings.tab.memory.label",
     description: "settings.tab.memory.desc",

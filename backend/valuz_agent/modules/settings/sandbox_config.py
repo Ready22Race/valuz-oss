@@ -40,6 +40,7 @@ KEY_COS_ENDPOINT = "kernel.sandbox.cos_endpoint"
 
 # Secrets → secret store (fixed refs; presence = "set").
 REF_AGS_API_KEY = "kernel/ags-api-key"
+REF_AGS_KERNEL_TOKEN = "kernel/ags-kernel-token"
 REF_COS_SECRET_ID = "kernel/cos-secret-id"
 REF_COS_SECRET_KEY = "kernel/cos-secret-key"
 
@@ -58,6 +59,7 @@ class SandboxConfigView:
     cos_region: str
     cos_endpoint: str
     ags_api_key_present: bool
+    ags_kernel_token_present: bool
     cos_secret_id_present: bool
     cos_secret_key_present: bool
 
@@ -103,6 +105,7 @@ async def get_sandbox_config(db: AsyncSession) -> SandboxConfigView:
         cos_region=(await _read(db, KEY_COS_REGION)) or "ap-beijing",
         cos_endpoint=await _read(db, KEY_COS_ENDPOINT),
         ags_api_key_present=store.get(REF_AGS_API_KEY) is not None,
+        ags_kernel_token_present=store.get(REF_AGS_KERNEL_TOKEN) is not None,
         cos_secret_id_present=store.get(REF_COS_SECRET_ID) is not None,
         cos_secret_key_present=store.get(REF_COS_SECRET_KEY) is not None,
     )
@@ -119,6 +122,7 @@ async def set_sandbox_config(
     cos_region: str | None = None,
     cos_endpoint: str | None = None,
     ags_api_key: str | None = None,
+    ags_kernel_token: str | None = None,
     cos_secret_id: str | None = None,
     cos_secret_key: str | None = None,
 ) -> SandboxConfigView:
@@ -142,6 +146,7 @@ async def set_sandbox_config(
     store = _secret_store()
     for ref, secret in (
         (REF_AGS_API_KEY, ags_api_key),
+        (REF_AGS_KERNEL_TOKEN, ags_kernel_token),
         (REF_COS_SECRET_ID, cos_secret_id),
         (REF_COS_SECRET_KEY, cos_secret_key),
     ):
@@ -185,7 +190,13 @@ async def apply_to_settings(db: AsyncSession) -> str | None:
     settings.ags_domain = cfg.ags_domain or None
     settings.ags_kernel_template = cfg.ags_template
     settings.ags_mount_path = cfg.ags_mount_path
-    settings.ags_kernel_token = store.get("kernel/endpoint-token") or settings.ags_kernel_token
+    # Prefer the sandbox panel's own token; fall back to the Gateway panel's
+    # endpoint token, then whatever env/default is already on settings.
+    settings.ags_kernel_token = (
+        store.get(REF_AGS_KERNEL_TOKEN)
+        or store.get("kernel/endpoint-token")
+        or settings.ags_kernel_token
+    )
     settings.cos_bucket = cfg.cos_bucket
     settings.cos_region = cfg.cos_region
     settings.cos_endpoint = cfg.cos_endpoint or None

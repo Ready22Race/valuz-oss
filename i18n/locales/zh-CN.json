@@ -1422,6 +1422,10 @@
       "gateway": {
         "label": "内核",
         "desc": "智能体内核的运行位置"
+      },
+      "sandbox": {
+        "label": "云沙箱",
+        "desc": "智能体内核的运行位置(本地 / 云沙箱)"
       }
     },
     "timezone": "时区",
@@ -1448,6 +1452,42 @@
       "testFailed": "测试失败",
       "callbackLoopback": "内核可达，但主机回调地址是回环地址，远程内核无法回连 —— 工具回调（记忆、文档、任务）将失败。请填写一个可被访问的主机地址。",
       "callbackUnset": "内核可达，但未设置主机回调地址 —— 远程内核将无法回调工具。请填写。"
+    },
+    "sandbox": {
+      "desc": "选择智能体内核的运行位置 —— 本地进程内,或远程 AGS 云沙箱(工作区挂载自腾讯云 COS)。配置保存后重启生效。",
+      "localTitle": "本地（进程内）",
+      "localDesc": "内核与应用同机运行(默认)。",
+      "agsTitle": "AGS 云沙箱",
+      "agsDesc": "内核运行在腾讯云 AGS 沙箱,工作区挂载自 COS。",
+      "agsGroupTitle": "AGS 沙箱",
+      "cosGroupTitle": "COS 对象存储",
+      "apiKeyLabel": "API Key",
+      "apiKeyDesc": "AGS / e2b 兼容 API Key(e2b_ 前缀)。",
+      "domainLabel": "域名（Domain）",
+      "domainDesc": "AGS 服务地址,如 ap-beijing.tencentags.com。",
+      "templateLabel": "沙箱模板",
+      "templateDesc": "控制台创建的沙箱工具名称。",
+      "tokenLabel": "内核令牌",
+      "tokenDesc": "须与沙箱工具的 KERNEL_AUTH_TOKEN 环境变量一致。",
+      "mountLabel": "挂载路径",
+      "mountDesc": "COS 在沙箱内的挂载点(默认 /workspace)。",
+      "bucketLabel": "存储桶",
+      "bucketDesc": "COS 存储桶名称(含 APPID)。",
+      "regionLabel": "地域（Region）",
+      "endpointLabel": "Endpoint（可选）",
+      "endpointDesc": "留空则按地域自动推断。",
+      "cosIdLabel": "SecretId",
+      "cosKeyLabel": "SecretKey",
+      "secretStored": "已保存 · 留空则不变",
+      "secretPlaceholder": "输入以设置",
+      "saveButton": "保存",
+      "saved": "沙箱配置已保存",
+      "saveFailed": "保存失败",
+      "syncButton": "同步工作区到云",
+      "syncDone": "已同步文件",
+      "syncFailed": "同步失败",
+      "restartNote": "重启后生效。",
+      "cloudHint": "需先在 AGS 控制台创建沙箱工具(镜像、公网、常驻、COS 挂载、KERNEL_AUTH_TOKEN 环境变量)。保存后请「同步工作区到云」,再重启应用。"
     }
   },
   "sidebar": {
