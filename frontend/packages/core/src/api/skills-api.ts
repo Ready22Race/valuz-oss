@@ -96,6 +96,10 @@ export interface SkillScanResponse {
   discovered: number;
 }
 
+export interface SkillRescanResponse {
+  indexed: number;
+}
+
 export interface SkillCreateRequest {
   name: string;
   description?: string;
@@ -199,6 +203,13 @@ export const skillsApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+  },
+
+  /** Re-scan the skill library on disk and refresh the index. Resolves with the
+   *  number of skills indexed. Emits SKILL_CHANGED server-side so open catalogs
+   *  refresh over SSE. */
+  rescan(): Promise<SkillRescanResponse> {
+    return fetchJson("/v1/skills/scan", { method: "POST" });
   },
 
   update(

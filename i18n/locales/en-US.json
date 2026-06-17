@@ -1478,6 +1478,9 @@
   },
   "skill": {
     "addBtn": "Add",
+    "rescan": "Rescan skill library",
+    "rescanDone": "Re-indexed {count} skill(s)",
+    "rescanFailed": "Rescan failed",
     "addSkill": "Add skill",
     "addSkillDesc": "Select skills to enable in this project",
     "aiCreate": "AI create",
