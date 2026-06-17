@@ -57,6 +57,27 @@ class Settings(BaseSettings):
         ``docs/design/kernel-sandbox-deployment.md`` §B.6 / B2–B5)."""
         return self.kernel_mode == "http"
 
+    @property
+    def kernel_callback_base_url(self) -> str:
+        """Base URL the kernel uses to call back into the host (④ face).
+
+        The host-served MCP servers (docs / automations / connectors /
+        harness) are injected into sessions against this base. In ``http``
+        mode an explicit ``host_external_url`` wins (the remote kernel can't
+        reach loopback); otherwise — and always in-process — it is the
+        host's own ``backend_base_url``."""
+        if self.is_http_kernel and self.host_external_url:
+            return self.host_external_url
+        return self.backend_base_url
+
+    @property
+    def kernel_callback_is_loopback(self) -> bool:
+        """True when the resolved callback base points at loopback — a
+        footgun for a remote kernel (it would dial the sandbox, not the
+        host). Boot warns on this in ``http`` mode."""
+        base = self.kernel_callback_base_url
+        return "127.0.0.1" in base or "localhost" in base or "[::1]" in base
+
     # ── Backend self-URL ─────────────────────────────────────────────
     # Where the host's own FastAPI is reachable from inside the same
     # process / container. Used to inject the in-process docs MCP server
@@ -66,6 +87,23 @@ class Settings(BaseSettings):
     # ``VALUZ_BACKEND_BASE_URL`` (e.g. ``http://127.0.0.1:18080``) when
     # the launcher pins a custom port.
     backend_base_url: str = "http://127.0.0.1:8000"
+
+    # ── Host callback URL for a REMOTE kernel (④ tool-callback face) ──
+    # The four host-served MCP servers (docs / automations / connectors /
+    # harness) are injected into every session as HTTP URLs the kernel's
+    # MCP client dials back into. With an in-process or same-host
+    # (Seatbelt) kernel, ``backend_base_url`` (loopback) is reachable and
+    # correct. With the kernel in a SEPARATE host the agent runs on — a
+    # cloud sandbox (e.g. Tencent AGS) — loopback points at the sandbox
+    # itself, not the host, and every callback tool (doc_search, memory,
+    # task dispatch…) would fail. Set this to an address the remote kernel
+    # can actually reach the host on (LAN / public / reverse-proxy URL).
+    # Only consulted in ``http`` kernel mode; ``kernel_callback_base_url``
+    # falls back to ``backend_base_url`` when unset. A NAT'd desktop host
+    # has no such address — that case needs the tunnel/queue transport
+    # (``docs/design/kernel-sandbox-deployment.md`` §3.6, deferred), not
+    # this setting. Override with ``VALUZ_HOST_EXTERNAL_URL``.
+    host_external_url: str | None = None
 
     # Custom URL scheme the desktop shell registers (Electron
     # ``setAsDefaultProtocolClient`` — see
