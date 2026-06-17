@@ -351,6 +351,20 @@ if ! $SKIP_FRONTEND; then
   if [ -d "$RELEASE_DIR" ]; then
     log "Desktop app built successfully."
     log "Output: $RELEASE_DIR"
+
+    # Linux AppImage files must be marked executable so users can run them
+    # directly (`./valuz-*.AppImage`). appimagetool sets the bit, but enforce
+    # it here so a downstream upload/copy never ships a non-runnable file.
+    if [ "$PLATFORM_TAG" = "linux" ]; then
+      shopt -s nullglob
+      appimages=( "$RELEASE_DIR"/*.AppImage )
+      shopt -u nullglob
+      for ai in "${appimages[@]}"; do
+        chmod +x "$ai"
+        log "chmod +x $(basename "$ai")"
+      done
+    fi
+
     # List bundle contents
     for d in "$RELEASE_DIR"/*/; do
       log "Bundle: $d"
