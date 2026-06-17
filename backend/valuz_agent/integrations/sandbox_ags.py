@@ -41,7 +41,6 @@ The e2b SDK API targeted here is **v2.x** (``timeout`` in seconds,
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import secrets
@@ -50,6 +49,7 @@ from typing import Literal
 import httpx
 
 from valuz_agent.infra.config import settings
+from valuz_agent.ports.object_store import ObjectStore
 from valuz_agent.ports.sandbox_provider import (
     MountGrant,
     SandboxBootContext,
@@ -64,50 +64,6 @@ logger = logging.getLogger("valuz_agent.sandbox")
 # Sentinel: the COS object store is resolved lazily, and ``None`` is a real
 # value (COS unconfigured), so we need a distinct "not yet resolved" marker.
 _UNSET = object()
-
-
-async def _stage_dir(store: object, prefix: str, host_dir: str) -> tuple[int, int]:
-    """Upload every file under ``host_dir`` to ``{prefix}/<relpath>`` in the
-    object store. Returns ``(file_count, total_bytes)``. Skips symlinks; stops
-    with a loud log (never silent truncation) if the file/byte caps are hit."""
-    import os as _os
-
-    from valuz_agent.infra.config import settings
-
-    count = 0
-    total = 0
-    for root, _dirs, files in _os.walk(host_dir):
-        for name in files:
-            fpath = _os.path.join(root, name)
-            if _os.path.islink(fpath):
-                continue
-            try:
-                data = await asyncio.to_thread(_read_file_bytes, fpath)
-            except OSError:
-                logger.warning("AGS stage: unreadable, skipped %s", fpath, exc_info=True)
-                continue
-            over_files = count >= settings.ags_stage_max_files
-            over_bytes = total + len(data) > settings.ags_stage_max_bytes
-            if over_files or over_bytes:
-                logger.warning(
-                    "AGS stage: cap hit at %d files / %d bytes staging %s — "
-                    "REMAINING FILES NOT UPLOADED. Raise VALUZ_AGS_STAGE_MAX_* or "
-                    "shrink the project.",
-                    count,
-                    total,
-                    host_dir,
-                )
-                return count, total
-            rel = _os.path.relpath(fpath, host_dir).replace(_os.sep, "/")
-            await store.put_bytes(f"{prefix}/{rel}", data)  # type: ignore[attr-defined]
-            count += 1
-            total += len(data)
-    return count, total
-
-
-def _read_file_bytes(path: str) -> bytes:
-    with open(path, "rb") as fh:
-        return fh.read()
 
 
 def _api_key() -> str | None:
@@ -295,12 +251,12 @@ class AgsSandboxProvider:
                         "AGS destroy: reconnect+kill failed for %s", e2b_id, exc_info=True
                     )
 
-    def _object_store(self) -> object | None:
+    def _object_store(self) -> ObjectStore | None:
         from valuz_agent.integrations.object_store_s3 import cos_object_store
 
         if self._store is _UNSET:
             self._store = cos_object_store()
-        return self._store
+        return self._store  # type: ignore[return-value]
 
     async def bind_workspace(
         self, sandbox_id: str, host_path: str, mode: Literal["rw", "ro"] = "rw"
@@ -333,7 +289,15 @@ class AgsSandboxProvider:
                 grant_id=f"ags-nostore:{digest}", kernel_cwd=kernel_cwd, host_path=real, mode=mode
             )
 
-        n, total = await _stage_dir(store, prefix, real)
+        from valuz_agent.integrations.object_store_s3 import stage_directory
+
+        n, total = await stage_directory(
+            store,
+            prefix,
+            real,
+            max_files=settings.ags_stage_max_files,
+            max_bytes=settings.ags_stage_max_bytes,
+        )
         logger.info(
             "AGS bind_workspace: staged %d files (%d bytes) of %s → COS %s (mounts at %s)",
             n,

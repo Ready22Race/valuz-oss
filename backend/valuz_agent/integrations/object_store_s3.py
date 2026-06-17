@@ -129,6 +129,54 @@ class S3ObjectStore:
         return deleted
 
 
+async def stage_directory(
+    store: ObjectStore,
+    prefix: str,
+    host_dir: str,
+    *,
+    max_files: int,
+    max_bytes: int,
+) -> tuple[int, int]:
+    """Upload every file under ``host_dir`` to ``{prefix}/<relpath>`` in
+    ``store``. Returns ``(file_count, total_bytes)``. Skips symlinks; stops with
+    a loud log (never silent truncation) when the file/byte caps are hit. Shared
+    by the AGS per-project stage-in and the user-scoped COS sync."""
+    import os
+
+    count = 0
+    total = 0
+    for root, _dirs, files in os.walk(host_dir):
+        for name in files:
+            fpath = os.path.join(root, name)
+            if os.path.islink(fpath):
+                continue
+            try:
+                data = await asyncio.to_thread(_read_file_bytes, fpath)
+            except OSError:
+                logger.warning("stage: unreadable, skipped %s", fpath, exc_info=True)
+                continue
+            if count >= max_files or total + len(data) > max_bytes:
+                logger.warning(
+                    "stage: cap hit at %d files / %d bytes staging %s → %s — "
+                    "REMAINING FILES NOT UPLOADED.",
+                    count,
+                    total,
+                    host_dir,
+                    prefix,
+                )
+                return count, total
+            rel = os.path.relpath(fpath, host_dir).replace(os.sep, "/")
+            await store.put_bytes(f"{prefix}/{rel}", data)
+            count += 1
+            total += len(data)
+    return count, total
+
+
+def _read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
 def _is_not_found(exc: Exception) -> bool:
     """True for an S3 404 / NoSuchKey regardless of SDK error class."""
     resp = getattr(exc, "response", None)

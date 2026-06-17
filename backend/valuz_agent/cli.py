@@ -156,5 +156,33 @@ def cleanup_seed_agents_cmd() -> None:
             typer.echo(f"  • {slug} ({why})")
 
 
+@app.command(name="sync-cos")
+def sync_cos_cmd(
+    user_id: str = typer.Option(
+        "", "--user-id", help="Owner to sync (default: this install's local user id)."
+    ),
+) -> None:
+    """Sync local mountable content (projects + skills) to COS under the user's
+    prefix, so an AGS cloud sandbox can mount it. Requires ``VALUZ_COS_*``."""
+    from valuz_agent.infra.local_identity import resolve_local_user_id
+    from valuz_agent.integrations.cos_sync import sync_local_to_cos
+    from valuz_agent.integrations.object_store_s3 import cos_object_store
+
+    store = cos_object_store()
+    if store is None:
+        typer.echo(
+            "COS is not configured — set VALUZ_COS_BUCKET / _SECRET_ID / _SECRET_KEY.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    uid = user_id or resolve_local_user_id()
+    report = asyncio.run(sync_local_to_cos(uid, store=store))
+    typer.echo(f"Synced user {uid} → COS prefix {report.root_prefix}/")
+    for name, n, b in report.per_source:
+        typer.echo(f"  • {name}: {n} files, {b} bytes")
+    typer.echo(f"Total: {report.total_files} files, {report.total_bytes} bytes")
+
+
 if __name__ == "__main__":
     app()
