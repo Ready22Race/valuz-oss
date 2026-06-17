@@ -75,6 +75,17 @@ class SystemLLMProvider:
             sync or async; resolution errors degrade silently to no labels.
             Use when overlay-supplied models have admin-set display names
             that the user shouldn't have to read as ``model_name`` slugs.
+        list_model_protocols: Optional ``{model_id: [protocol, ...]}`` resolver,
+            where each protocol is the kernel underscore form (``anthropic`` /
+            ``openai_completion`` / ``openai_response`` / ``gemini``). Lets a
+            SINGLE descriptor carry models that speak DIFFERENT protocols — so a
+            system channel reachable over both Anthropic and OpenAI shapes is one
+            card, not one descriptor per protocol. The model-options endpoint
+            (``GET /v1/settings/model-options``) reads this to resolve each
+            model's runnable runtimes; absent / missing entries fall back to the
+            descriptor's provider-level ``api_protocol``. An empty list for a
+            model id means "no declared protocol restriction". May be sync or
+            async; resolution errors degrade to the ``api_protocol`` fallback.
     """
 
     id: str
@@ -93,6 +104,9 @@ class SystemLLMProvider:
     )
     list_models: Callable[[], Awaitable[list[str]] | list[str]] | None = None
     list_model_labels: Callable[[], Awaitable[dict[str, str]] | dict[str, str]] | None = None
+    list_model_protocols: (
+        Callable[[], Awaitable[dict[str, list[str]]] | dict[str, list[str]]] | None
+    ) = None
 
 
 class SystemProviderImmutable(RuntimeError):  # noqa: N818 — domain error, not Error-suffixed

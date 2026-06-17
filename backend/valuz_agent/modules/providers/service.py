@@ -632,6 +632,44 @@ async def _resolve_descriptor_model_labels(d: SystemLLMProvider) -> dict[str, st
         return {}
 
 
+# Kernel underscore form → UI hyphen form for wire protocols. Mirrors the inline
+# map in ``_system_compatible_protocols``; unknown / already-hyphen values pass
+# through unchanged.
+_PROTOCOL_KERNEL_TO_UI: dict[str, str] = {
+    "anthropic": "anthropic",
+    "openai_completion": "openai-completion",
+    "openai_response": "openai-response",
+    "gemini": "gemini",
+}
+
+
+async def _resolve_descriptor_model_protocols(d: SystemLLMProvider) -> dict[str, list[str]]:
+    """Resolve a descriptor's ``{model_id: [protocol, ...]}`` map in UI hyphen form.
+
+    Lets one descriptor carry models speaking different protocols (a system
+    channel reachable over both Anthropic and OpenAI shapes). The model-options
+    builder reads this to resolve per-model runtimes. Returns ``{}`` when the
+    descriptor supplies no resolver, errors, or returns a non-dict — callers then
+    fall back to the descriptor's single provider-level ``api_protocol``.
+    """
+    import inspect
+
+    if d.list_model_protocols is None:
+        return {}
+    try:
+        result = d.list_model_protocols()
+        if inspect.isawaitable(result):
+            result = await result
+        if not isinstance(result, dict):
+            return {}
+        return {
+            str(mid): [_PROTOCOL_KERNEL_TO_UI.get(p, p) for p in (protos or [])]
+            for mid, protos in result.items()
+        }
+    except Exception:  # noqa: BLE001 — dynamic source must never break the picker
+        return {}
+
+
 def _descriptor_to_list_item(
     d: SystemLLMProvider,
     *,

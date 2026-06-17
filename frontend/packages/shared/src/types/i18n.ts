@@ -947,6 +947,7 @@ export type KnownI18nKey =
   | "onboarding.saveAndContinue"
   | "onboarding.sectionApiKey"
   | "onboarding.sectionLocalSubscription"
+  | "onboarding.sectionSystem"
   | "onboarding.selectConnection"
   | "onboarding.setDefaultFailed"
   | "onboarding.setupLater"

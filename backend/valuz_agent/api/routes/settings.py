@@ -9,7 +9,16 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import NoAvailableProvider, ProviderNotFound
-from valuz_agent.modules.providers.service import ProviderService
+from valuz_agent.modules.providers.service import (
+    ProviderService,
+    _resolve_descriptor_model_protocols,
+)
+from valuz_agent.modules.settings.model_options import (
+    CurrentDefault,
+    ModelOptionsResponse,
+    ProviderOptionInput,
+    build_model_options,
+)
 from valuz_agent.modules.settings.preferences import (
     detect_system_timezone,
     get_default_effort,
@@ -264,6 +273,66 @@ async def patch_model_defaults(
         raise HTTPException(status_code=422, detail={"reason": str(exc)}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ── Model options (read model for the "pick a default model" pickers) ──
+
+
+@router.get("/model-options")
+async def get_model_options(
+    user_id: str = Depends(require_current_user_id),
+) -> ModelOptionsResponse:
+    """Return the grouped, fully-resolved model options for the default-model
+    pickers (onboarding's ConnectStep + Settings default-config card).
+
+    Distinct from ``GET /v1/providers`` (provider management): every model here
+    carries the ``runtimes`` it can run on + a preferred ``default_runtime``,
+    same-named models inside a provider are disambiguated, and a system channel
+    collapses to a single provider. The picker UIs render this verbatim — they
+    no longer derive a runtime client-side.
+
+    Subscription providers come back ``status="client_resolved"``: their CLI
+    login state lives in the local keychain (invisible to the server), so the
+    client fills availability in from its own ``checkCliLogin`` probe.
+    """
+    async with async_unit_of_work(commit=False) as db:
+        defaults = await _read_model_defaults(db)
+        svc = ProviderService(
+            datastore=ProviderDatastore(db),
+            secret_store=_secret_store(),
+            event_bus=event_bus,
+        )
+        items = await svc.list_providers(user_id)
+        inputs: list[ProviderOptionInput] = []
+        for it in items:
+            # Per-model protocols only exist for overlay system descriptors; user
+            # rows fall back to the provider-level ``compatible_protocols``.
+            model_protocols: dict[str, list[str]] = {}
+            if it.source == "system":
+                descriptor = ext.llm_registry.get(it.id)
+                if descriptor is not None:
+                    model_protocols = await _resolve_descriptor_model_protocols(descriptor)
+            inputs.append(
+                ProviderOptionInput(
+                    id=it.id,
+                    name=it.name,
+                    provider_kind=it.provider_kind,
+                    source=it.source,
+                    auth_type=it.auth_type,
+                    enabled=it.enabled,
+                    unavailable_reason=it.unavailable_reason,
+                    compatible_protocols=it.compatible_protocols,
+                    model_options=it.model_options,
+                    model_labels=it.model_labels,
+                    model_protocols=model_protocols,
+                )
+            )
+        current = CurrentDefault(
+            runtime=defaults.default_runtime,
+            provider_id=defaults.default_provider_id,
+            model=defaults.default_model,
+        )
+        return build_model_options(inputs, current)
 
 
 @router.get("")

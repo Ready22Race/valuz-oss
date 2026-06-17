@@ -706,6 +706,7 @@
     "connectStatusNoDefault": "连接一个通道并选个默认模型",
     "connectLoading": "正在读取可用的模型通道…",
     "sectionLocalSubscription": "本机订阅",
+    "sectionSystem": "系统模型",
     "sectionApiKey": "API Key 通道",
     "addApiKeyChannel": "添加 API Key 通道",
     "addApiKeyHint": "DeepSeek、OpenRouter 或任何兼容 API",
