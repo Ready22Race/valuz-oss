@@ -41,6 +41,7 @@ The e2b SDK API targeted here is **v2.x** (``timeout`` in seconds,
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import secrets
@@ -60,9 +61,53 @@ from valuz_agent.ports.sandbox_provider import (
 
 logger = logging.getLogger("valuz_agent.sandbox")
 
-# Where the kernel image serves + stages a project workspace (matches
-# docker/kernel.Dockerfile: EXPOSE 8000, WORKDIR /app, /workspace prepared).
-_SANDBOX_WORKSPACE_ROOT = "/workspace"
+# Sentinel: the COS object store is resolved lazily, and ``None`` is a real
+# value (COS unconfigured), so we need a distinct "not yet resolved" marker.
+_UNSET = object()
+
+
+async def _stage_dir(store: object, prefix: str, host_dir: str) -> tuple[int, int]:
+    """Upload every file under ``host_dir`` to ``{prefix}/<relpath>`` in the
+    object store. Returns ``(file_count, total_bytes)``. Skips symlinks; stops
+    with a loud log (never silent truncation) if the file/byte caps are hit."""
+    import os as _os
+
+    from valuz_agent.infra.config import settings
+
+    count = 0
+    total = 0
+    for root, _dirs, files in _os.walk(host_dir):
+        for name in files:
+            fpath = _os.path.join(root, name)
+            if _os.path.islink(fpath):
+                continue
+            try:
+                data = await asyncio.to_thread(_read_file_bytes, fpath)
+            except OSError:
+                logger.warning("AGS stage: unreadable, skipped %s", fpath, exc_info=True)
+                continue
+            over_files = count >= settings.ags_stage_max_files
+            over_bytes = total + len(data) > settings.ags_stage_max_bytes
+            if over_files or over_bytes:
+                logger.warning(
+                    "AGS stage: cap hit at %d files / %d bytes staging %s — "
+                    "REMAINING FILES NOT UPLOADED. Raise VALUZ_AGS_STAGE_MAX_* or "
+                    "shrink the project.",
+                    count,
+                    total,
+                    host_dir,
+                )
+                return count, total
+            rel = _os.path.relpath(fpath, host_dir).replace(_os.sep, "/")
+            await store.put_bytes(f"{prefix}/{rel}", data)  # type: ignore[attr-defined]
+            count += 1
+            total += len(data)
+    return count, total
+
+
+def _read_file_bytes(path: str) -> bytes:
+    with open(path, "rb") as fh:
+        return fh.read()
 
 
 def _api_key() -> str | None:
@@ -147,6 +192,8 @@ class AgsSandboxProvider:
     def __init__(self) -> None:
         self._backends: dict[str, _AgsBackend] = {}
         self._endpoints: dict[str, SandboxEndpoint] = {}
+        self._store: object = _UNSET  # resolved lazily to an ObjectStore | None
+        self._grants: dict[str, str] = {}  # grant_id -> COS prefix
 
     @classmethod
     def from_existing(cls, sandbox_id: str, base_url: str, token: str) -> AgsSandboxProvider:
@@ -248,37 +295,62 @@ class AgsSandboxProvider:
                         "AGS destroy: reconnect+kill failed for %s", e2b_id, exc_info=True
                     )
 
+    def _object_store(self) -> object | None:
+        from valuz_agent.integrations.object_store_s3 import cos_object_store
+
+        if self._store is _UNSET:
+            self._store = cos_object_store()
+        return self._store
+
     async def bind_workspace(
         self, sandbox_id: str, host_path: str, mode: Literal["rw", "ro"] = "rw"
     ) -> MountGrant:
-        """⑤ materials face — stage ``host_path`` into the cloud sandbox.
+        """⑤ materials face — stage ``host_path`` into the cloud sandbox via COS.
 
-        NOT YET IMPLEMENTED (P3): file staging via the kernel File API +
-        ``RemoteWorkspaceHandle``. Until then the kernel runs in a fixed
-        in-sandbox workspace root rather than the host path (the local path
-        does not exist in the cloud), and the project files are absent. We
-        return a grant pointing at that root (not the host path) so session
-        creation doesn't hand the cloud kernel a bogus host path, and log the
-        gap loudly."""
+        The AGS sandbox tool mounts the COS bucket at ``settings.ags_mount_path``
+        (console-configured, not by this driver). We upload the project to COS
+        under a per-project prefix; the kernel then sees it at
+        ``{mount_path}/{prefix}`` and writes results straight back to COS
+        (the mount IS the sync — no separate write-back). If COS isn't
+        configured we fall back to an empty in-sandbox dir and warn.
+        """
         import hashlib
 
-        digest = hashlib.sha256(os.path.realpath(host_path).encode()).hexdigest()[:12]
-        kernel_cwd = f"{_SANDBOX_WORKSPACE_ROOT}/{digest}"
-        logger.warning(
-            "AGS bind_workspace: file staging is not implemented yet (P3) — %s "
-            "is NOT copied into the sandbox; the kernel runs in empty %s.",
-            host_path,
+        real = os.path.realpath(host_path)
+        digest = hashlib.sha256(real.encode()).hexdigest()[:12]
+        prefix = f"valuz-workspaces/{digest}"
+        kernel_cwd = f"{settings.ags_mount_path.rstrip('/')}/{prefix}"
+
+        store = self._object_store()
+        if store is None:
+            logger.warning(
+                "AGS bind_workspace: COS not configured — %s is NOT staged; the "
+                "kernel runs in empty %s. Set VALUZ_COS_* to enable staging.",
+                host_path,
+                kernel_cwd,
+            )
+            return MountGrant(
+                grant_id=f"ags-nostore:{digest}", kernel_cwd=kernel_cwd, host_path=real, mode=mode
+            )
+
+        n, total = await _stage_dir(store, prefix, real)
+        logger.info(
+            "AGS bind_workspace: staged %d files (%d bytes) of %s → COS %s (mounts at %s)",
+            n,
+            total,
+            real,
+            prefix,
             kernel_cwd,
         )
+        self._grants[f"cos:{prefix}"] = prefix
         return MountGrant(
-            grant_id=f"ags-pending:{digest}",
-            kernel_cwd=kernel_cwd,
-            host_path=os.path.realpath(host_path),
-            mode=mode,
+            grant_id=f"cos:{prefix}", kernel_cwd=kernel_cwd, host_path=real, mode=mode
         )
 
     async def unbind_workspace(self, sandbox_id: str, grant_id: str) -> None:
-        # No staging state to release until P3.
+        # Deliberately does NOT delete the COS prefix: results the kernel wrote
+        # there may not be read back yet (the host reads COS on demand). Staged
+        # data is reclaimed by a separate lifecycle/TTL policy, not here.
         return None
 
 

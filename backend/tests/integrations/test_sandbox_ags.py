@@ -2,7 +2,7 @@
 
 The vendor SDK is isolated in ``_AgsBackend``; these tests mock it out and
 exercise preflight gating, provision orchestration (env injection + health
-wait), the boot driver wiring, the cloud bind_workspace P3 stub, and the
+wait), the boot driver wiring, cloud bind_workspace COS staging, and the
 e2b-id-from-URL parsing. Live AGS provisioning is not covered (needs creds).
 """
 
@@ -155,16 +155,53 @@ async def test_provision_kills_on_unhealthy(ags_configured, monkeypatch):
     assert _FakeBackend.killed is True  # cleaned up the dead sandbox
 
 
-# ── bind_workspace P3 stub ─────────────────────────────────────────────
+# ── bind_workspace COS staging ─────────────────────────────────────────
 
 
-async def test_bind_workspace_returns_sandbox_path_not_host_path():
+async def test_bind_workspace_no_cos_falls_back(monkeypatch):
+    # COS unconfigured → no staging, but still returns an in-sandbox path (not
+    # the nonexistent-in-cloud host path) so session creation doesn't break.
+    monkeypatch.setattr("valuz_agent.integrations.object_store_s3.cos_object_store", lambda: None)
     provider = ags.AgsSandboxProvider()
     grant = await provider.bind_workspace("host-kernel", "/Users/me/proj", "rw")
-    # kernel_cwd is an in-sandbox path, NOT the (nonexistent-in-cloud) host path
     assert grant.kernel_cwd.startswith("/workspace/")
     assert grant.kernel_cwd != grant.host_path
-    assert grant.grant_id.startswith("ags-pending:")
+    assert grant.grant_id.startswith("ags-nostore:")
+
+
+async def test_bind_workspace_stages_to_cos(monkeypatch, tmp_path):
+    # A configured COS store → the project dir is uploaded under a prefix and
+    # the kernel_cwd is the mounted path {mount}/{prefix}.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.py").write_bytes(b"print(1)")
+    (tmp_path / "README.md").write_bytes(b"# hi")
+
+    class _MemStore:
+        def __init__(self):
+            self.objs: dict[str, bytes] = {}
+
+        async def put_bytes(self, key, data):
+            self.objs[key] = data
+
+    store = _MemStore()
+    monkeypatch.setattr(
+        "valuz_agent.integrations.object_store_s3.cos_object_store", lambda: store
+    )
+    from valuz_agent.infra.config import settings
+
+    monkeypatch.setattr(settings, "ags_mount_path", "/workspace")
+
+    provider = ags.AgsSandboxProvider()
+    grant = await provider.bind_workspace("host-kernel", str(tmp_path), "rw")
+
+    # files uploaded under the per-project prefix
+    prefix = grant.grant_id.split(":", 1)[1]
+    assert f"{prefix}/src/main.py" in store.objs
+    assert store.objs[f"{prefix}/src/main.py"] == b"print(1)"
+    assert f"{prefix}/README.md" in store.objs
+    # kernel cwd is the mounted path
+    assert grant.kernel_cwd == f"/workspace/{prefix}"
+    assert grant.grant_id.startswith("cos:")
 
 
 # ── boot driver ────────────────────────────────────────────────────────

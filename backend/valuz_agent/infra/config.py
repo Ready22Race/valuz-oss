@@ -59,6 +59,15 @@ class Settings(BaseSettings):
     ags_domain: str | None = None
     ags_kernel_template: str | None = None
     ags_kernel_port: int = 8000
+    # Path the AGS sandbox tool/template mounts the COS bucket at (the mount is
+    # configured on the sandbox tool in the console, NOT by this driver). The
+    # host stages a project to COS under a prefix and the kernel session cwd
+    # becomes ``{mount_path}/{prefix}``. Keep in sync with the console mount.
+    ags_mount_path: str = "/workspace"
+    # Safety caps on per-project stage-in (loud log + stop, never silent
+    # truncation): max files and max total bytes uploaded to COS.
+    ags_stage_max_files: int = 5000
+    ags_stage_max_bytes: int = 200_000_000
     # Sandbox lifetime hint (seconds). AGS 常驻 sandboxes are effectively
     # no-timeout; this is the create-time timeout the e2b SDK requires. Large
     # by default so a long-running kernel isn't reaped mid-session. (Stock e2b
