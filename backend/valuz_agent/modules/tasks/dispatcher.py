@@ -277,14 +277,24 @@ class DispatcherService:
 
             # Review model (VALUZ-TASK §6.1): a member going idle is NOT
             # completion — the lead decides via review_subtask. A genuine run
-            # failure (terminated/error) still fails the node so the lead sees
-            # it; otherwise the node goes to in_review awaiting the lead's call.
+            # failure (terminated/error) goes to ``rework`` (recoverable +
+            # dispatchable), NOT ``failed`` (which the gate refuses and resume
+            # can't relaunch) — matching ``_finalize_actor`` / ``reconcile`` /
+            # ``stop_member``; the error rides along as ``review_feedback``.
+            # Otherwise the node goes to in_review awaiting the lead's call.
             task_row2 = await task_ds2.get_task_by_project(
                 require_current_user_id(), project_id, task_id
             )
             plan2 = TaskPlan.from_dict(task_row2.plan) if task_row2 else None
             if plan2 is not None and plan2.get(subtask_key) is not None:
-                plan2.update_node(subtask_key, status="failed" if failed else "in_review")
+                if failed:
+                    plan2.update_node(
+                        subtask_key,
+                        status="rework",
+                        review_feedback=manifest.get("summary") or "上次运行因错误中断,请重试。",
+                    )
+                else:
+                    plan2.update_node(subtask_key, status="in_review")
                 task_row2.plan = plan2.to_dict()  # type: ignore[union-attr]
                 await task_ds2.update_task(task_row2)  # type: ignore[arg-type]
                 await planning.emit_plan_update(

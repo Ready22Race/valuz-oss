@@ -2042,6 +2042,7 @@
     "retryWithLeadHint": "继承目标 + 上下文快照，换不同主 Agent 新开一个 Run（即将上线）",
     "pause": "暂停",
     "resume": "恢复",
+    "retry": "重试",
     "stop": "停止",
     "subnav": {
       "task": "任务",
@@ -2115,6 +2116,7 @@
       "paused": "已暂停",
       "resumed": "已恢复",
       "stopped": "已停止",
+      "taskBlocked": "任务受阻",
       "taskCompleted": "任务完成",
       "taskFailed": "任务失败",
       "taskPlanned": "已规划任务",
