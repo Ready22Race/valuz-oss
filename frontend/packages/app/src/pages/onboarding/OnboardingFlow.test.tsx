@@ -3,12 +3,17 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { initI18n } from "@valuz/shared/i18n";
 
 // vi.hoisted so the (hoisted) vi.mock factories below can reference these.
-const { navigateMock, markOnboardedMock, createExampleProjectMock } =
-  vi.hoisted(() => ({
-    navigateMock: vi.fn(),
-    markOnboardedMock: vi.fn(),
-    createExampleProjectMock: vi.fn(),
-  }));
+const {
+  navigateMock,
+  markOnboardedMock,
+  createExampleProjectMock,
+  createAssistantMock,
+} = vi.hoisted(() => ({
+  navigateMock: vi.fn(),
+  markOnboardedMock: vi.fn(),
+  createExampleProjectMock: vi.fn(),
+  createAssistantMock: vi.fn(),
+}));
 
 // Mock the heavy step children to focus on the orchestrator's step machine —
 // ConnectStep/TeamStep hit real APIs on mount, which is tested elsewhere.
@@ -19,7 +24,10 @@ vi.mock("react-router-dom", async (importOriginal) => ({
 vi.mock("../../lib/onboarding", () => ({ markOnboarded: markOnboardedMock }));
 vi.mock("@valuz/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@valuz/core")>()),
-  onboardingApi: { createExampleProject: createExampleProjectMock },
+  onboardingApi: {
+    createExampleProject: createExampleProjectMock,
+    createAssistant: createAssistantMock,
+  },
 }));
 vi.mock("./WelcomeStep", () => ({
   WelcomeStep: ({ onStart }: { onStart: () => void }) => (
@@ -48,6 +56,8 @@ beforeEach(() => {
     project_id: "ws-1",
     project_name: "示例项目",
   });
+  createAssistantMock.mockReset();
+  createAssistantMock.mockResolvedValue({ agent_slug: "valuz-helper" });
 });
 
 describe("OnboardingFlow", () => {
@@ -76,10 +86,23 @@ describe("OnboardingFlow", () => {
     expect(navigateMock).toHaveBeenCalledWith("/projects/ws-1");
   });
 
-  it("should mark onboarded and go home when the guide is skipped", () => {
+  it("should seed the Valuz helper, mark onboarded, and go home when the guide is skipped", async () => {
     render(<OnboardingFlow />);
     fireEvent.click(screen.getByText("跳过引导"));
+    // Skip is best-effort: it seeds the default assistant so the user never
+    // lands in an empty library, then finishes.
+    await waitFor(() => expect(createAssistantMock).toHaveBeenCalled());
     expect(markOnboardedMock).toHaveBeenCalled();
+    expect(navigateMock).toHaveBeenCalledWith("/");
+  });
+
+  it("should still finish when seeding the helper fails (no model channel)", async () => {
+    // _ensure_valuz_helper 422s when no provider is configured. The skip must
+    // swallow that and finish anyway — never trap the user in onboarding.
+    createAssistantMock.mockRejectedValue(new Error("422 no channel"));
+    render(<OnboardingFlow />);
+    fireEvent.click(screen.getByText("跳过引导"));
+    await waitFor(() => expect(markOnboardedMock).toHaveBeenCalled());
     expect(navigateMock).toHaveBeenCalledWith("/");
   });
 });
