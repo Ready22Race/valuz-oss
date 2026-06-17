@@ -63,6 +63,17 @@ def _register_builtins() -> None:
     except Exception:  # noqa: BLE001 — never let a builtin import break dispatch
         _log.warning("failed to register the built-in seatbelt driver", exc_info=True)
 
+    # AGS / e2b-compatible cloud driver. Its module import is SDK-free (the
+    # ``e2b`` dep is imported lazily and gated by preflight), so registering it
+    # is safe even where the SDK / credentials are absent — preflight then
+    # reports the gap and dispatch falls back to in-process.
+    try:
+        from valuz_agent.integrations.sandbox_ags import AgsSandboxDriver
+
+        register(AgsSandboxDriver())
+    except Exception:  # noqa: BLE001 — never let a builtin import break dispatch
+        _log.warning("failed to register the built-in ags driver", exc_info=True)
+
 
 def _discover_entry_points() -> None:
     """Discover overlay drivers via the ``valuz.sandbox_drivers`` entry-point

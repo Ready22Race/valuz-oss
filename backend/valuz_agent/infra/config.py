@@ -47,6 +47,30 @@ class Settings(BaseSettings):
     kernel_url: str = "http://127.0.0.1:8400"
     kernel_token: str | None = None
 
+    # ── AGS / e2b cloud sandbox driver (VALUZ_SANDBOX_DRIVER=ags) ──────
+    # Provisions the kernel image (see docker/kernel.Dockerfile, published to
+    # ghcr.io) inside a Tencent AGS sandbox over the e2b-compatible SDK. All
+    # optional — the driver's preflight reports what's missing and the host
+    # falls back to in-process when unset. The API key may also come from the
+    # SDK's own ``E2B_API_KEY`` env; ``ags_domain`` points the SDK at AGS
+    # instead of e2b.dev. ``ags_kernel_template`` is the template/image the
+    # sandbox runs (the kernel image, registered as an AGS template).
+    ags_api_key: str | None = None
+    ags_domain: str | None = None
+    ags_kernel_template: str | None = None
+    ags_kernel_port: int = 8000
+    # Sandbox lifetime hint (seconds). AGS 常驻 sandboxes are effectively
+    # no-timeout; this is the create-time timeout the e2b SDK requires. Large
+    # by default so a long-running kernel isn't reaped mid-session. (Stock e2b
+    # caps this; AGS's true no-timeout is a backend-side convention.)
+    ags_sandbox_timeout_s: int = 86_400
+    # e2b ``secure``: when True the exposed sandbox URL is gated by an e2b
+    # traffic-access token (403 without it). We default FALSE because the
+    # kernel enforces its OWN bearer (``KERNEL_AUTH_TOKEN``) on every non-health
+    # route, so the host can reach it directly; flip True only if you also
+    # thread the e2b traffic token (not wired here).
+    ags_secure: bool = False
+
     @property
     def is_http_kernel(self) -> bool:
         """True when the kernel runs as a SEPARATE process (subprocess /

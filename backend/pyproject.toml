@@ -152,6 +152,12 @@ dev = [
     "jsonschema>=4.23",
     "httpx[socks]>=0.27",
 ]
+# AGS / e2b-compatible cloud sandbox driver (VALUZ_SANDBOX_DRIVER=ags). Optional
+# — only needed to run the kernel in a Tencent AGS / e2b sandbox; the driver's
+# preflight reports it missing and the host falls back to in-process.
+ags = [
+    "e2b>=1.0",
+]
 
 [tool.uv]
 # ``openai-codex-cli-bin`` — the version-pinned codex binary that
@@ -225,6 +231,13 @@ ignore_missing_imports = true
 # availability probe, so suppress its missing-stub error (mirrors the upstream
 # kernel's own ``ignore_missing_imports`` for this module).
 module = ["codex_cli_bin"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# ``e2b`` is an OPTIONAL dependency (extra ``ags``) — present only where the
+# AGS cloud sandbox driver is used. Suppress its missing-import error so the
+# default (no-extra) type check passes; the driver imports it lazily.
+module = ["e2b", "e2b.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
