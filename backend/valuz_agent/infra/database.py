@@ -71,9 +71,12 @@ if settings.is_sqlite:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA synchronous=NORMAL")
-        # busy_timeout: wait-and-retry on write contention instead of raising
-        # "database is locked" immediately (host + kernel async engines share
-        # the file).
+        # busy_timeout: wait on write contention instead of raising "database
+        # is locked" immediately. Within one process the main-loop connection
+        # pool and the background daemon threads each open their own connection
+        # to this file and compete for the single write slot. (busy_timeout
+        # can't cover the WAL read-snapshot→write deadlock — that path is
+        # handled by async_commit_with_retry in infra/db.py.)
         cursor.execute("PRAGMA busy_timeout=15000")
         cursor.close()
 

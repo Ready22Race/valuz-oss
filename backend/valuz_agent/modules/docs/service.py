@@ -495,10 +495,21 @@ class DocumentLibraryService:
         HTTP / user-triggered rescans should call ``start_rescan_kb``
         instead so the request returns immediately on large libraries.
         """
-        kb = await self._ds.get_kb(require_current_user_id(), kb_id)
-        if not kb:
+        user_id = require_current_user_id()
+        if not await self._ds.get_kb(user_id, kb_id):
             raise KbNotFound()
         task = await self._create_rescan_task(kb_id)
+        # Re-fetch the kb AFTER creating the task. ``create_import_task``
+        # commits, and under SQLite write contention its lock-retry rolls the
+        # session back — a rollback expires every ORM instance in it
+        # (regardless of ``expire_on_commit=False``). Reading ``kb.id`` /
+        # ``kb.root_path`` off the pre-commit instance would then fire an
+        # implicit sync reload on the AsyncSession and raise MissingGreenlet.
+        # A fresh fetch keeps ``_run_rescan``'s opening attribute reads loaded
+        # (mirrors the background-rescan path).
+        kb = await self._ds.get_kb(user_id, kb_id)
+        if not kb:
+            raise KbNotFound()
         await self._run_rescan(kb, task)
         return _task_to_result(task)
 
