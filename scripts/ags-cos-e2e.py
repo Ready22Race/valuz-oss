@@ -53,11 +53,7 @@ async def main() -> None:
     from valuz_agent.infra.config import settings
     from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.integrations.object_store_s3 import cos_object_store, stage_directory
-    from valuz_agent.integrations.sandbox_ags import (
-        _AgsBackend,
-        _sandbox_id_from_url,
-        ags_preflight,
-    )
+    from valuz_agent.integrations.sandbox_ags import ags_preflight
     from valuz_agent.ports.sandbox_provider import SandboxSpec
 
     _need("VALUZ_AGS_DOMAIN")
@@ -105,19 +101,30 @@ async def main() -> None:
     endpoint = await provider.provision(spec)
     print(f"   kernel up: {endpoint.base_url}  (③ /health passed)")
 
-    e2b_id = _sandbox_id_from_url(endpoint.base_url)
     try:
-        # 4. connect into the SAME sandbox and ls the COS mount
-        backend = await _AgsBackend.connect(e2b_id or "")
-        sbx = backend._handle  # raw e2b AsyncSandbox
-        res = await sbx.commands.run(f"ls -R {sandbox_path} 2>&1 || true")
-        listing = getattr(res, "stdout", str(res))
-        print(f"④ ls {sandbox_path}:\n{listing}")
-        ok = "main.py" in listing and "MARKER.txt" in listing
-        cat = await sbx.commands.run(f"cat {sandbox_path}/MARKER.txt 2>&1 || true")
-        print(f"   cat MARKER.txt: {getattr(cat, 'stdout', cat)!r}")
-        print("✅ COS mount E2E: staged files VISIBLE in the sandbox"
-              if ok else "✗ staged files NOT visible — check the tool's COS mount path")
+        # 4. Probe the KERNEL API through AGS's exposed port (AGS doesn't proxy
+        #    the e2b exec/commands API, so we verify via the kernel's own HTTP
+        #    surface — proving provision + reachability + bearer auth).
+        import httpx
+
+        headers = {
+            "Authorization": f"Bearer {endpoint.token}",
+            "X-Valuz-Owner-Id": user_id,
+        }
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(f"{endpoint.base_url}/api/v1/sessions", headers=headers)
+        print(f"④ kernel API GET /api/v1/sessions → {r.status_code}")
+        if r.status_code == 200:
+            print("✅ CONTROL-PLANE E2E: provision + /health + kernel API + auth "
+                  "all work through AGS.")
+        elif r.status_code == 401:
+            print("⚠ kernel reachable but 401 — the tool's KERNEL_AUTH_TOKEN must "
+                  "equal VALUZ_AGS_KERNEL_TOKEN.")
+        else:
+            print(f"⚠ kernel returned {r.status_code}: {r.text[:200]}")
+        print(f"   COS mount: the tool mounts the bucket at {settings.ags_mount_path}; "
+              f"a session cwd would be {sandbox_path}. (File-content visibility needs "
+              "a real session — AGS doesn't expose exec to ls it directly.)")
     finally:
         # 5. teardown + cleanup
         await provider.destroy("e2e")

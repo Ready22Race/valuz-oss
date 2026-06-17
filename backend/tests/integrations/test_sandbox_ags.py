@@ -94,8 +94,8 @@ def mock_backend(monkeypatch):
     _FakeBackend.last_envs = None
     _FakeBackend.killed = False
 
-    async def fake_create(*, envs):
-        _FakeBackend.last_envs = dict(envs)
+    async def fake_create(*, envs=None):
+        _FakeBackend.last_envs = dict(envs) if envs else None
         return _FakeBackend()
 
     monkeypatch.setattr(ags._AgsBackend, "create", staticmethod(fake_create))
@@ -124,6 +124,24 @@ async def test_provision_injects_env_and_returns_endpoint(ags_configured, mock_b
     assert envs["CODEX_TOOLKIT_BASE_URL"] == "https://host.example:8000"
     # cloud: control-plane env is NOT set (macOS-only)
     assert "KERNEL_SANDBOX_CONTROL" not in envs
+
+
+async def test_provision_static_token_skips_env_injection(
+    ags_configured, mock_backend, monkeypatch
+):
+    # AGS rejects create(envs=); a configured static token → use it + pass NO
+    # envs (rely on the tool's KERNEL_AUTH_TOKEN env).
+    monkeypatch.setattr(settings, "ags_kernel_token", "static-tok")
+    ep = await ags.AgsSandboxProvider().provision(
+        SandboxSpec(
+            sandbox_id="host-kernel",
+            kernel_db_path="/app/data/kernel.db",
+            env={"ANTHROPIC_API_KEY": "sk-x"},
+            host_callback_url="https://host:8000",
+        )
+    )
+    assert ep.token == "static-tok"
+    assert _FakeBackend.last_envs is None  # no create-time env sync attempted
 
 
 async def test_provision_preflight_failure_raises(monkeypatch):

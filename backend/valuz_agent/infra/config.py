@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     ags_domain: str | None = None
     ags_kernel_template: str | None = None
     ags_kernel_port: int = 8000
+    # AGS rejects the e2b ``create(envs=)`` per-sandbox env sync (500
+    # "post-create env sync failed"), so the kernel's bearer must be a STATIC
+    # env on the sandbox tool. Set this to that same token: the driver then
+    # skips create-time env injection and uses this token to auth to the
+    # kernel. Unset → dynamic mode (random token via create envs) for e2b
+    # backends that honour it.
+    ags_kernel_token: str | None = None
     # Path the AGS sandbox tool/template mounts the COS bucket at (the mount is
     # configured on the sandbox tool in the console, NOT by this driver). The
     # host stages a project to COS under a prefix and the kernel session cwd

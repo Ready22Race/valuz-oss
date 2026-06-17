@@ -100,28 +100,23 @@ class _AgsBackend:
         self._handle = handle
         self.sandbox_id = sandbox_id
 
-    @staticmethod
-    def _kwargs() -> dict[str, object]:
-        kw: dict[str, object] = {}
-        if _api_key():
-            kw["api_key"] = _api_key()
-        if settings.ags_domain:
-            kw["domain"] = settings.ags_domain
-        return kw
-
     @classmethod
-    async def create(cls, *, envs: dict[str, str]) -> _AgsBackend:
+    async def create(cls, *, envs: dict[str, str] | None = None) -> _AgsBackend:
         from e2b import AsyncSandbox
 
-        # secure=False: the exposed URL is reachable directly and the kernel's
-        # own KERNEL_AUTH_TOKEN gate is the authority (else e2b's traffic token
-        # would 403 the host's calls). timeout is in SECONDS in e2b v2.
+        # Explicit named args (not a **dict splat) so mypy validates them
+        # against the e2b signature when the SDK is installed. secure=False:
+        # the exposed URL is reachable directly and the kernel's own
+        # KERNEL_AUTH_TOKEN gate is the authority. timeout is SECONDS in e2b v2.
+        # envs=None when empty — AGS 500s on the post-create env sync, so the
+        # static-token path passes no envs (rely on the tool's env).
         sbx = await AsyncSandbox.create(
             settings.ags_kernel_template,
-            envs=envs,
+            envs=envs or None,
             timeout=settings.ags_sandbox_timeout_s,
             secure=settings.ags_secure,
-            **cls._kwargs(),
+            api_key=_api_key(),
+            domain=settings.ags_domain,
         )
         return cls(sbx, sbx.sandbox_id)
 
@@ -129,7 +124,9 @@ class _AgsBackend:
     async def connect(cls, sandbox_id: str) -> _AgsBackend:
         from e2b import AsyncSandbox
 
-        sbx = await AsyncSandbox.connect(sandbox_id, **cls._kwargs())
+        sbx = await AsyncSandbox.connect(
+            sandbox_id, api_key=_api_key(), domain=settings.ags_domain
+        )
         return cls(sbx, sandbox_id)
 
     def base_url(self) -> str:
@@ -168,16 +165,23 @@ class AgsSandboxProvider:
             raise SandboxProvisionError(
                 "AgsSandboxProvider preflight failed: " + "; ".join(problems)
             )
-        token = secrets.token_urlsafe(24)
-
-        # ⑥ L1 credentials + the kernel's required env. The cloud image
-        # self-migrates (entrypoint runs ``alembic upgrade head``) and defaults
-        # its SQLite under /app/data, so DATABASE_URL is left to the entrypoint.
-        # KERNEL_SANDBOX_CONTROL stays UNSET — the macOS-extension control plane
-        # is local-only; cloud dynamic mount goes through the File API (P3).
-        envs: dict[str, str] = {"KERNEL_AUTH_TOKEN": token, **spec.env}
-        if spec.host_callback_url:
-            envs["CODEX_TOOLKIT_BASE_URL"] = spec.host_callback_url  # ④ callback
+        # Token strategy. AGS rejects the e2b ``create(envs=)`` env sync, so
+        # when ``ags_kernel_token`` is set we use that STATIC token (which must
+        # match the KERNEL_AUTH_TOKEN env on the sandbox tool) and pass NO envs.
+        # Otherwise (dynamic mode, for e2b backends that honour it) we mint a
+        # random token and inject it + ⑥ L1 credentials via create envs.
+        envs: dict[str, str] | None
+        if settings.ags_kernel_token:
+            token = settings.ags_kernel_token
+            envs = None
+        else:
+            token = secrets.token_urlsafe(24)
+            # The cloud image self-migrates (entrypoint `alembic upgrade head`)
+            # and defaults its SQLite under /app/data. KERNEL_SANDBOX_CONTROL
+            # stays UNSET (macOS-only).
+            envs = {"KERNEL_AUTH_TOKEN": token, **spec.env}
+            if spec.host_callback_url:
+                envs["CODEX_TOOLKIT_BASE_URL"] = spec.host_callback_url  # ④ callback
 
         try:
             backend = await _AgsBackend.create(envs=envs)
