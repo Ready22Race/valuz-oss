@@ -182,6 +182,20 @@ async def init_kernel(app: FastAPI) -> None:
         from valuz_agent.boot.kernel import init_kernel_dependencies
 
         await init_kernel_dependencies()
+    elif settings.kernel_callback_is_loopback:
+        # http mode + loopback ④ callback base = footgun: a kernel running
+        # on a SEPARATE host (cloud sandbox) would dial these MCP servers at
+        # its own loopback, not the host's, so every callback tool
+        # (doc_search / memory / task dispatch) fails. Harmless for a
+        # same-host (Seatbelt) kernel; load-bearing to surface for a remote
+        # one. See ``Settings.host_external_url``.
+        logger.warning(
+            "http kernel mode with a loopback ④ callback base (%s): a remote "
+            "kernel cannot reach the host here — set VALUZ_HOST_EXTERNAL_URL to "
+            "a host address the kernel can reach, or use the tunnel transport "
+            "for a NAT'd host. (Fine for a same-host/Seatbelt kernel.)",
+            settings.kernel_callback_base_url,
+        )
 
     # Install the host toolkit MCP toolsets. The harness tools
     # (dispatch / orchestration / memory / submit_skill) are served by the
