@@ -1,6 +1,6 @@
 ---
 name: valuz-project-docs
-description: Search and reason over the project's bound knowledge base documents. Auto-loaded by the host for every project session. Use this when the user asks about facts, files, or context that should already exist inside the project's knowledge base. The current per-turn KB scope (which knowledge bases / folders / documents are bound) is announced inside the user message's `<additional-context>` block — consult it before guessing what's available.
+description: Search and reason over the project's bound knowledge base documents. Auto-loaded by the host for every project session. Use this when the user asks about facts or context that should already exist inside the project's knowledge base. The current per-turn KB scope (which knowledge bases / folders / documents are bound) is announced inside the user message's `<additional-context>` block — consult it before guessing what's available.
 origin-label: valuz · project knowledge base
 icon: 📚
 tags: [valuz, builtin, knowledge-base, docs]
@@ -9,9 +9,8 @@ tags: [valuz, builtin, knowledge-base, docs]
 # Project Knowledge Base
 
 Every project session in Valuz can be bound to one or more knowledge bases.
-When bound, those documents (and their indexed previews) are the canonical
-source of truth for "what does this project know?" — prefer them over the
-open web, your own recollection, or guesses.
+When bound, those documents (and their indexed previews) are one source for
+"what does this project know?".
 
 The session's current binding state is delivered per-turn inside the user
 message's `<additional-context>` block. If that block names a KB, folder,
@@ -31,9 +30,13 @@ context that lives in the project, e.g.
 - Any answer whose authority would come from already-uploaded material
   rather than your training data.
 
+When the user names a specific file, prefer the project's local files (the
+working directory / file tree) first — read it directly. Use knowledge-base
+retrieval as a fallback: if the local files turn up nothing, search the
+bound knowledge base.
+
 Use it _silently in the background_: don't ask the user "should I check the
-docs?". Search first, summarize what you found, cite document titles back
-to the user.
+docs?". Summarize what you found, cite document titles back to the user.
 
 ## How to search
 

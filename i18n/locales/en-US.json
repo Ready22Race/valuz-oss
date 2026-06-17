@@ -2069,6 +2069,7 @@
     "retryWithLeadHint": "Spin up a fresh Run with a different lead Agent, inheriting Goal + context snapshot (coming soon).",
     "pause": "Pause",
     "resume": "Resume",
+    "retry": "Retry",
     "stop": "Stop",
     "subnav": {
       "task": "Task",
@@ -2142,6 +2143,7 @@
       "paused": "Paused",
       "resumed": "Resumed",
       "stopped": "Stopped",
+      "taskBlocked": "Task blocked",
       "taskCompleted": "Task completed",
       "taskFailed": "Task failed",
       "taskPlanned": "Task planned",

@@ -553,15 +553,12 @@ def test_auto_finalize_blocks_when_plan_has_unresolved_nodes(db_factory, tmp_pat
     assert "task_blocked" in _events(db_factory)
 
 
-def test_auto_finalize_stays_active_on_error_with_empty_plan(db_factory, tmp_path) -> None:
-    """Lead turn errored BEFORE producing any plan nodes — task should stay
-    ``active`` instead of locking into ``blocked``. Bug from 2026-05-29:
-    an automation-fired lead session used Claude Agent SDK's EnterPlanMode +
-    nested Agent that hung; SDK cancelled the turn after ~3.5min; plan was
-    still empty. Old behaviour locked the task immediately, breaking the
-    user's next plan_task call with "task is blocked; plan is read-only".
-    New behaviour: leave task active, let the next driver (user message
-    or next fire) retry from a fresh turn."""
+def test_auto_finalize_blocks_on_terminated_with_empty_plan(db_factory, tmp_path) -> None:
+    """Lead turn ended ``terminated`` (driver flagged a hard failure — e.g. a
+    raised exception, or ``_resolve_turn_status`` elevating an idle-but-errored
+    turn) with no plan nodes. This is a genuine failure the user must see and be
+    able to retry, so it locks to ``blocked`` (not silently ``active``).
+    ``resume_task`` rebuilds the lead from the detail page's retry/继续 entry."""
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     asyncio.run(
@@ -572,24 +569,62 @@ def test_auto_finalize_stays_active_on_error_with_empty_plan(db_factory, tmp_pat
             final_status="terminated",
         )
     )
-    assert _task_status(db_factory) == "active"
-    assert "task_blocked" not in _events(db_factory)
+    assert _task_status(db_factory) == "blocked"
+    assert "task_blocked" in _events(db_factory)
 
 
-def test_auto_finalize_stays_active_on_stop_reason_error_with_empty_plan(
+def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
     db_factory, tmp_path, monkeypatch
 ) -> None:
-    """Same "empty plan + turn error" contract when the failure surfaces via
-    ``stop_reason`` instead of ``final_status``. With no in-flight work to
-    protect, the task stays active so the next driver can retry — only the
-    log warning records the turn-level error for auditing."""
+    """An API/exec error that surfaces via ``stop_reason`` (status stayed
+    ``idle``) with an empty plan → ``blocked``. This is the confirmed bug: a
+    socket-drop / ECONNRESET arrives as ``ResultMessage(is_error=True)``, the
+    kernel records ``stop_reason.type=='error'``; auto-finalize must mark the
+    task failed-but-resumable instead of ``completed``."""
     from types import SimpleNamespace
 
     from valuz_agent.modules.tasks import orchestrator as orch_mod
 
     _make_task(db_factory, tmp_path)
     fake_sess = SimpleNamespace(
-        stop_reason={"type": "error", "category": "execution_error", "message": "boom: skill x"}
+        stop_reason={
+            "type": "error",
+            "category": "api_error",
+            "message": "API Error: socket closed (ECONNRESET)",
+        }
+    )
+    monkeypatch.setattr(
+        orch_mod.kernel_client, "get_session", _as_async(lambda _uid, _sid: fake_sess)
+    )
+    orch = TaskOrchestrator()
+    asyncio.run(
+        orch._auto_finalize_lead_task(
+            lead_session_id="lead-sess",
+            task_id="t1",
+            project_id="w1",
+            final_status="idle",
+        )
+    )
+    assert _task_status(db_factory) == "blocked"
+    assert "task_blocked" in _events(db_factory)
+
+
+def test_auto_finalize_cancel_with_empty_plan_stays_active(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """Carve-out preserved from the 2026-05-29 EnterPlanMode-hang bug: a
+    user/host-driven cancellation (``category='user_interrupt'``) BEFORE any
+    plan node exists has no in-flight work to protect, so locking to
+    ``blocked`` would force a needless ``resume_task`` for what is effectively
+    a fresh kickoff. Stay ``active`` and let the next driver retry. Only a
+    *genuine* failure (other categories) blocks — see the sibling tests."""
+    from types import SimpleNamespace
+
+    from valuz_agent.modules.tasks import orchestrator as orch_mod
+
+    _make_task(db_factory, tmp_path)
+    fake_sess = SimpleNamespace(
+        stop_reason={"type": "error", "category": "user_interrupt", "message": "cancelled"}
     )
     monkeypatch.setattr(
         orch_mod.kernel_client, "get_session", _as_async(lambda _uid, _sid: fake_sess)
@@ -605,6 +640,86 @@ def test_auto_finalize_stays_active_on_stop_reason_error_with_empty_plan(
     )
     assert _task_status(db_factory) == "active"
     assert "task_blocked" not in _events(db_factory)
+
+
+def _make_member_run(db_factory, *, session_id="mem-1", subtask_key="a") -> None:
+    db = db_factory()
+    try:
+        db.add(
+            TaskSessionRow(
+                user_id="local-test-owner",
+                id="run-mem",
+                project_id="w1",
+                task_id="t1",
+                session_id=session_id,
+                agent_slug="researcher",
+                sequence=1,
+                kind="subtask",
+                subtask_key=subtask_key,
+                status="active",
+                dispatched_by="lead-sess",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_finalize_actor_member_error_sets_rework_not_failed(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """A member run ending terminated/error (incl. an API/socket drop that
+    ``_resolve_turn_status`` elevates to 'terminated') must land its plan node on
+    ``rework`` — recoverable + dispatchable — NOT ``failed`` (which the dispatch
+    gate refuses and a blocked→resume can't relaunch). Mirrors reconcile()/
+    stop_member; the error rides along as ``review_feedback`` and the timeline
+    still records a ``subtask_failed`` event."""
+    from valuz_agent.modules.sessions import run_orchestrator as run_orch
+    from valuz_agent.modules.tasks import orchestrator as orch_mod
+    from valuz_agent.modules.tasks.plan import TaskPlan
+
+    _make_task(db_factory, tmp_path)
+    asyncio.run(
+        planning.plan_task(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead-sess",
+            subtasks=[{"key": "a", "title": "A", "agent": "researcher"}],
+        )
+    )
+    _make_member_run(db_factory)
+
+    async def _noop(*_a: object, **_k: object) -> None: ...
+
+    async def _fake_manifest(*_a: object, **_k: object) -> dict[str, str]:
+        return {"session_id": "mem-1", "status": "terminated", "summary": "API Error: ECONNRESET"}
+
+    monkeypatch.setattr(run_orch, "_finalize_session", _noop)
+    monkeypatch.setattr(orch_mod, "collect_manifest", _fake_manifest)
+
+    orch = TaskOrchestrator()
+    asyncio.run(
+        orch._finalize_actor(
+            session_id="mem-1",
+            last_content="",
+            final_status="terminated",
+            role="subtask",
+            task_id="t1",
+            project_id="w1",
+            via_shutdown=False,  # type: ignore[call-arg]
+        )
+    )
+
+    db = db_factory()
+    try:
+        node = TaskPlan.from_dict(db.query(TaskRow).filter_by(id="t1").one().plan).get("a")
+        assert node is not None
+        assert node.status == "rework"  # NOT "failed" — re-dispatchable on resume
+        assert node.review_feedback  # the error is folded into the retry brief
+    finally:
+        db.close()
+    # The failed attempt is still recorded on the timeline.
+    assert "subtask_failed" in _events(db_factory)
 
 
 def test_auto_finalize_blocks_on_error_when_plan_has_unresolved_nodes(db_factory, tmp_path) -> None:
@@ -1365,7 +1480,9 @@ def test_lead_shutdown_exit_skips_auto_finalize(monkeypatch) -> None:
     async def _fake_auto(**kw: object) -> None:
         called.append(str(kw["task_id"]))
 
-    monkeypatch.setattr(orch, "_auto_finalize_lead_task", _fake_auto)
+    # _finalize_actor delegates to LifecycleService (ADR-023 Step 3c), whose
+    # implementation calls its own _auto_finalize_lead_task — patch it there.
+    monkeypatch.setattr(orch._lifecycle, "_auto_finalize_lead_task", _fake_auto)
 
     common = dict(
         session_id="L",

@@ -81,6 +81,33 @@ async def _restamp_always_on_mcp(session_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_turn_status(session: Any) -> str:
+    """Map a turn's resolved kernel session onto the actor-loop ``final_status``.
+
+    The kernel leaves ``status="idle"`` even when a turn failed at the API
+    transport layer: the SDK surfaces e.g. ``ECONNRESET`` / a dropped socket /
+    5xx as a ``ResultMessage(is_error=True)`` rather than a raised exception, so
+    ``run_turn`` returns normally and the failure lives *only* in
+    ``stop_reason`` (an ``Error``). Without this an errored lead turn would be
+    read as a clean idle → auto-finalize ``completed``, and an errored member
+    turn → ``subtask`` marked done; the lead then spins in ``await_members``.
+
+    Elevate such a turn to ``"terminated"`` — the one valid persistable status
+    (``created|idle|running|terminated``) every consumer already treats as a
+    failure (loop break, ``_finalize_actor`` ``ok=False``, lead auto-finalize
+    error branch). ``finalize_session`` preserves the existing ``Error``
+    stop_reason when no ``stop_reason_type`` is passed, so the reason survives.
+    """
+    if session is None:
+        return "idle"
+    status = getattr(session, "status", "idle")
+    sr = getattr(session, "stop_reason", None)
+    sr_type = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
+    if status == "idle" and isinstance(sr_type, str) and "error" in sr_type:
+        return "terminated"
+    return status
+
+
 async def run_session_to_idle(
     session_id: str,
     content: str,
@@ -170,7 +197,7 @@ async def run_session_to_idle(
                 additional_context=additional_context,
             )
             after_run = await kernel_client.get_session(require_current_user_id(), session_id)
-            final_status = after_run.status if after_run is not None else "idle"
+            final_status = _resolve_turn_status(after_run)
             if on_message is not None:
                 await on_message(message, after_run)
         except Exception as exc:  # noqa: BLE001
@@ -404,7 +431,7 @@ class ActorRunner:
             # itself (agent-harness 3e742fc) — no host pre-persist needed.
             await kernel_client.run_turn(require_current_user_id(), session_id, content)
             loaded = await kernel_client.get_session(require_current_user_id(), session_id)
-            return loaded.status if loaded is not None else "idle"
+            return _resolve_turn_status(loaded)
         except Exception as exc:  # noqa: BLE001
             logger.warning("actor turn failed for session %s: %s", session_id, exc)
             return "terminated"

@@ -126,6 +126,11 @@ const EVENT_META: Record<string, EventMeta> = {
     node: "bg-red-500/10 text-red-500",
     labelKey: "task.event.taskFailed",
   },
+  task_blocked: {
+    icon: XCircle,
+    node: "bg-red-500/10 text-red-500",
+    labelKey: "task.event.taskBlocked",
+  },
   task_planned: {
     icon: ListTodo,
     node: "bg-brand/10 text-brand",
@@ -417,6 +422,19 @@ export const TaskDetailPage = () => {
     void openArtifact(rootPath, t as Translator);
   }, [rootPath, t]);
 
+  // Open a project file from the right-rail file tree (double-click /
+  // right-click → open). The tree node's ``path`` is project-relative, so
+  // resolve it against the cwd and hand off to the same ``open_in_finder``
+  // IPC (``shell.openPath``) the artifact list uses — opens the file in its
+  // OS-associated app.
+  const handleOpenFile = useCallback(
+    (relPath: string) => {
+      if (!rootPath) return;
+      void openArtifact(resolveArtifactPath(relPath, rootPath), t as Translator);
+    },
+    [rootPath, t],
+  );
+
   // Render the right rail via AppShell's panel slot — same mechanism the
   // ProjectDetailPage uses, so the panel inherits the rounded card shell +
   // collapse toggle instead of being a bespoke inline ``<aside>``.
@@ -445,6 +463,7 @@ export const TaskDetailPage = () => {
         plannedSubtasks={plannedSubtasks}
         onRefreshFiles={refreshFileTree}
         onOpenInFinder={rootPath ? handleOpenProjectInFinder : undefined}
+        onOpenFile={rootPath ? handleOpenFile : undefined}
       />,
     );
     return () => setRightPanel(null);
@@ -685,6 +704,10 @@ export const TaskDetailPage = () => {
   const { task, events } = detail;
   const isActive = task.status === "active";
   const isPaused = task.status === "paused";
+  // ``blocked`` is the failed-but-resumable terminal (lead turn errored — e.g.
+  // an API/socket drop — or unresolved subtasks). Surface a retry/继续 entry
+  // that re-launches the lead via ``resume_task`` (the :intervene resume path).
+  const isBlocked = task.status === "blocked";
 
   // ``leadSessionId`` / ``subtaskRuns`` / ``activeSubtask`` used to live here
   // for the inline right-rail aside. The aside now lives in the AppShell's
@@ -1127,6 +1150,28 @@ export const TaskDetailPage = () => {
               disabled={busy}
             >
               {t("task.stop")}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Blocked (failed-but-resumable): the lead turn errored — e.g. an API /
+          socket drop — or left unresolved subtasks. Offer a single primary
+          "retry/继续" that re-launches the lead via ``resume_task`` (the
+          :intervene resume path, which accepts ``blocked``). */}
+      {isBlocked && (
+        <div className="sticky bottom-0 -mx-5 mt-auto overflow-hidden px-5 py-3">
+          <div className="absolute inset-0 bg-card/94 backdrop-blur-3xl" />
+          <div className="relative z-10 mx-auto flex w-full max-w-[760px] flex-wrap items-center justify-center gap-2 px-6">
+            <Button
+              size="sm"
+              className="text-[12px]"
+              onClick={() =>
+                void runIntervene({ action: "resume" }, "task.resumed")
+              }
+              disabled={busy}
+            >
+              {t("task.retry")}
             </Button>
           </div>
         </div>

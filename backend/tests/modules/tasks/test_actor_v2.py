@@ -224,6 +224,42 @@ async def test_terminal_turn_status_breaks_loop_immediately() -> None:
 
 
 # ---------------------------------------------------------------------------
+# _resolve_turn_status — elevate an idle-but-errored turn to a failure
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_turn_status_elevates_error_stop_reason() -> None:
+    """The kernel leaves status=='idle' even when a turn failed at the API
+    transport layer (SDK ResultMessage(is_error=True) → stop_reason.type
+    'error'). Elevate to 'terminated' so the loop breaks and the lead/member
+    finalize treat it as a failure. Accept both dict and attr-style stop_reason."""
+    from valuz_agent.modules.tasks.actor_runner import _resolve_turn_status
+
+    idle_err_dict = SimpleNamespace(status="idle", stop_reason={"type": "error"})
+    idle_err_attr = SimpleNamespace(status="idle", stop_reason=SimpleNamespace(type="error"))
+    assert _resolve_turn_status(idle_err_dict) == "terminated"
+    assert _resolve_turn_status(idle_err_attr) == "terminated"
+
+
+def test_resolve_turn_status_passes_through_clean_turns() -> None:
+    from valuz_agent.modules.tasks.actor_runner import _resolve_turn_status
+
+    assert _resolve_turn_status(None) == "idle"
+    # Clean end_turn stays idle.
+    assert (
+        _resolve_turn_status(SimpleNamespace(status="idle", stop_reason={"type": "end_turn"}))
+        == "idle"
+    )
+    # A turn with no stop_reason yet is untouched.
+    assert _resolve_turn_status(SimpleNamespace(status="idle", stop_reason=None)) == "idle"
+    # A genuinely-terminal status is passed through unchanged.
+    assert (
+        _resolve_turn_status(SimpleNamespace(status="terminated", stop_reason={"type": "error"}))
+        == "terminated"
+    )
+
+
+# ---------------------------------------------------------------------------
 # finish_task broadcast
 # ---------------------------------------------------------------------------
 
