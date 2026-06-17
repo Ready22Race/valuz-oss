@@ -2719,7 +2719,7 @@ wheels = [
 
 [[package]]
 name = "valuz-oss-backend"
-version = "0.1.7"
+version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiosqlite" },
