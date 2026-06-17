@@ -150,6 +150,43 @@ def svc(skill_root, monkeypatch):
 # ── Tests ────────────────────────────────────────────────────────────
 
 
+class TestIndexOfficialSkills:
+    """``index_official_skills`` deterministically upserts the bundled official
+    skills into the index, independent of the best-effort ``startup_scan``."""
+
+    async def test_should_upsert_official_skills_into_index(self, svc, tmp_path):
+        service, _bus = svc
+        from valuz_agent.integrations.skills_official import OfficialSkillSource
+
+        official_dir = tmp_path / "official"
+        _make_skill_dir(official_dir, "sector-overview")
+        _make_skill_dir(official_dir, "comps")
+        service._extra_sources = [OfficialSkillSource(official_dir=official_dir)]
+
+        count = await service.index_official_skills()
+
+        assert count == 2
+        rows = await service._ds.list_skills("u")
+        slugs = {r.slug for r in rows}
+        assert {"sector-overview", "comps"} <= slugs
+        assert all(r.scope == "official" for r in rows if r.slug in {"sector-overview", "comps"})
+        assert all(r.status == "available" for r in rows)
+
+    async def test_should_be_idempotent(self, svc, tmp_path):
+        service, _bus = svc
+        from valuz_agent.integrations.skills_official import OfficialSkillSource
+
+        official_dir = tmp_path / "official"
+        _make_skill_dir(official_dir, "dcf")
+        service._extra_sources = [OfficialSkillSource(official_dir=official_dir)]
+
+        await service.index_official_skills()
+        await service.index_official_skills()  # second pass updates, no duplicate row
+
+        rows = await service._ds.list_skills("u")
+        assert len([r for r in rows if r.slug == "dcf"]) == 1
+
+
 class TestListCatalog:
     async def test_should_return_name_and_description_fields(self, svc, skill_root):
         service, _ = svc

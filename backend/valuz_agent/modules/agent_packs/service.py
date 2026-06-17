@@ -127,6 +127,19 @@ class AgentPackService:
                 self._install_embedded_skills, embedded_skills_root, embedded
             )
 
+        # Index the just-materialized official/template skills NOW so the pack's
+        # agents resolve them immediately. Without this they're only picked up by
+        # the next boot scan, so a session started right after the team is created
+        # drops the skill ("Unknown skill" — the skill is on disk but not yet in
+        # valuz_skill_index, which resolve_skill_slugs_to_paths reads).
+        if bundled:
+            try:
+                from valuz_agent.modules.skills.service import reindex_official_skills
+
+                await reindex_official_skills()
+            except Exception:  # noqa: BLE001 — best-effort; the boot scan backstops it
+                logger.exception("reindex_official_skills after pack import failed")
+
         # Register the pack's connectors as the user's own ConnectorRows so they
         # activate on import (and actually resolve at session time — the runtime
         # reads ConnectorRow, never the catalog). Deferred from the default

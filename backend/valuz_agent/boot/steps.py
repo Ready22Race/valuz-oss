@@ -457,9 +457,23 @@ async def start_skills(app: FastAPI) -> None:
     skill_gen = get_skill_service()
     skill_svc = await skill_gen.__anext__()
     try:
-        await skill_svc.startup_scan()
-    except Exception:
-        pass
+        # Deterministically index the bundled official skills FIRST, in the
+        # same step that just synced them to disk. The broad startup_scan below
+        # is best-effort (errors swallowed); when finance-edition official
+        # skills land on disk out-of-band it can lag, leaving an agent that
+        # references them unable to resolve the skill. This targeted upsert
+        # guarantees they are in valuz_skill_index every boot.
+        try:
+            indexed = await skill_svc.index_official_skills()
+            logger.info("index_official_skills: indexed %d official skill(s)", indexed)
+        except Exception:
+            logger.exception("index_official_skills failed")
+        try:
+            await skill_svc.startup_scan()
+        except Exception:
+            # Best-effort, but no longer silent: a failed scan that leaves the
+            # index stale was exactly the bug this step hardens against.
+            logger.exception("startup_scan failed")
     finally:
         try:
             await skill_gen.__anext__()
