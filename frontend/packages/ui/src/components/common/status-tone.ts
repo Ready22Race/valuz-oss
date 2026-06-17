@@ -37,22 +37,22 @@ const TONE: Record<string, Tone> = {
 };
 
 const PILL_CLASS: Record<Tone, string> = {
-  brand: "bg-brand/10 text-brand",
+  brand: "bg-info-light text-info-text",
   success: "bg-success-light text-success-text",
   error: "bg-error-light text-error-text",
   warning: "bg-warning-light text-warning-text",
-  teal: "bg-teal-50 text-teal-600 dark:bg-teal-950 dark:text-teal-300",
-  draft: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300",
+  teal: "bg-[color-mix(in_oklab,var(--accent-teal)_14%,var(--background))] text-[color-mix(in_oklab,var(--accent-teal)_62%,var(--foreground))]",
+  draft: "bg-surface-2 text-ink-body",
   neutral: "bg-surface-muted text-ink-meta",
 };
 
 const DOT_CLASS: Record<Tone, string> = {
   brand: "bg-brand",
-  success: "bg-emerald-500",
-  error: "bg-red-500",
-  warning: "bg-amber-500",
-  teal: "bg-teal-500",
-  draft: "bg-slate-400",
+  success: "bg-success",
+  error: "bg-error",
+  warning: "bg-warning",
+  teal: "bg-accent-teal",
+  draft: "bg-ink-meta",
   neutral: "bg-ink-meta",
 };
 

@@ -553,7 +553,7 @@ export const SkillDetailPanel = ({
                       type="button"
                       aria-label={t("skill.deleteSkill")}
                       onClick={onDelete}
-                      className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-[#f54b4b] transition-colors hover:bg-[#f54b4b]/10 hover:text-[#f54b4b]"
+                      className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-error-text transition-colors hover:bg-error-light hover:text-error-text"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>

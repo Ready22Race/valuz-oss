@@ -26,6 +26,7 @@
   --accent-fuchsia: #d946ef;
 
   --fg-1: color-mix(in oklab, var(--foreground) 1%, var(--background));
+  --fg-2: color-mix(in oklab, var(--foreground) 2%, var(--background));
   --fg-3: color-mix(in oklab, var(--foreground) 3%, var(--background));
   --fg-5: color-mix(in oklab, var(--foreground) 5%, var(--background));
   --fg-8: color-mix(in oklab, var(--foreground) 8%, var(--background));
@@ -53,8 +54,12 @@
   --error-soft: color-mix(in oklab, var(--error) 10%, var(--background));
   --error-border: color-mix(in oklab, var(--error) 35%, var(--background));
   --error-text: color-mix(in oklab, var(--error) 65%, var(--foreground));
+  --error-strong: color-mix(in oklab, var(--error) 88%, #000);
+  --error-hover: color-mix(in oklab, var(--error-strong) 92%, #000);
+  --finance-up-text: color-mix(in oklab, var(--finance-up) 65%, var(--foreground));
+  --finance-down-text: color-mix(in oklab, var(--finance-down) 65%, var(--foreground));
   --info: var(--brand);
-  --info-soft: var(--brand-100);
+  --info-soft: var(--brand-50);
   --info-text: var(--brand-700);
 
   --shadow-rgb: 19 19 19;
@@ -129,6 +134,7 @@
   --brand-300: color-mix(in oklab, var(--brand) 45%, var(--background));
   --brand-600: color-mix(in oklab, var(--brand) 85%, white);
   --brand-700: color-mix(in oklab, var(--brand) 70%, white);
+  /* error-strong / error-hover are derived from the current mode's error. */
 
   --shadow-rgb: 0 0 0;
   --shadow-border-a: 0.18;
@@ -160,7 +166,7 @@
   --color-border: var(--fg-8);
   --color-input: var(--fg-8);
   --color-ring: var(--brand);
-  --color-destructive: var(--error);
+  --color-destructive: var(--error-strong);
   --color-destructive-foreground: #ffffff;
 
   --color-brand: var(--brand);
@@ -210,12 +216,16 @@
   --color-error: var(--error);
   --color-error-light: var(--error-soft);
   --color-error-text: var(--error-text);
+  --color-error-strong: var(--error-strong);
+  --color-error-hover: var(--error-hover);
   --color-info: var(--info);
   --color-info-light: var(--info-soft);
   --color-info-text: var(--info-text);
 
   --color-finance-up: var(--finance-up);
   --color-finance-down: var(--finance-down);
+  --color-finance-up-text: var(--finance-up-text);
+  --color-finance-down-text: var(--finance-down-text);
 
   --text-micro: 0.625rem;
   --text-2xs: 0.6875rem;

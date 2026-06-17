@@ -86,8 +86,8 @@ function TreeRow({
           "flex items-center gap-1.5 rounded-md py-1.5 pr-2 text-xs transition-colors",
           isMissing && "opacity-55",
           node.kind === "document"
-            ? "hover:bg-surface-muted/60"
-            : "hover:bg-surface-muted/40",
+            ? "hover:bg-[color:var(--fg-1)]"
+            : "hover:bg-[color:var(--fg-1)]",
         )}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
       >
@@ -243,7 +243,7 @@ export const KnowledgeFileTreePicker = ({
           type="button"
           aria-label={t("common.close")}
           onClick={onCancel}
-          className="flex h-6 w-6 items-center justify-center rounded-md text-ink-muted transition hover:bg-surface-muted hover:text-ink-heading focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden"
+          className="flex h-6 w-6 items-center justify-center rounded-md text-ink-muted transition hover:bg-[color:var(--fg-1)] hover:text-ink-heading focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:outline-hidden"
         >
           <X className="h-4 w-4" />
         </button>

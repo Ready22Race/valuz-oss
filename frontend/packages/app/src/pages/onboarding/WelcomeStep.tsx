@@ -85,7 +85,7 @@ export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
       {/* ---------- Right: live team feed ---------- */}
       <div className="relative hidden flex-col justify-center overflow-hidden border-l border-surface-border/70 bg-surface px-10 py-16 lg:flex lg:px-14">
         <div className="mx-auto w-full max-w-[560px]">
-          <p className="mb-8 max-w-[520px] font-display text-[14.5px] italic leading-6 text-ink-meta">
+          <p className="mb-8 max-w-[520px] font-display text-sm italic leading-6 text-ink-meta">
             {t("onboarding.heroQuote" as Parameters<typeof t>[0])}
           </p>
 
@@ -174,7 +174,7 @@ const FeedCardView = ({ card }: { card: FeedCard }) => {
         <span className="text-[13px] font-semibold text-ink-heading">
           {author}
         </span>
-        <span className="ml-auto font-mono text-[10.5px] tracking-wide text-ink-muted">
+        <span className="ml-auto font-mono text-micro tracking-wide text-ink-muted">
           {card.ref}
         </span>
       </div>

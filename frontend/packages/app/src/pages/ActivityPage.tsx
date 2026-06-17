@@ -540,10 +540,10 @@ export const ActivityPage = () => {
       {/* Toolbar — line-tab filter shared with project home / conversation
           right panel for visual consistency. */}
       <Tabs value={filter} onValueChange={(v) => setFilter(v as SourceFilter)}>
-        <div className="border-b border-surface-border">
+        <div>
           <TabsList
             variant="line"
-            className="h-9 justify-start gap-4 border-0 p-0"
+            className="h-auto justify-start"
           >
             {FILTERS.map((f) => (
               <TabsTrigger key={f.value} value={f.value}>
@@ -562,10 +562,10 @@ export const ActivityPage = () => {
       {displayRunning.length > 0 && (
         <section className="mt-5">
           <div className="mb-2 flex items-center gap-2 px-3">
-            <span className="text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+            <span className="text-2xs font-normal uppercase tracking-[0.06em] text-ink-body">
               {t(tk("activity.running"))}
             </span>
-            <span className="text-[11.5px] font-medium text-ink-meta">
+            <span className="text-2xs font-medium text-ink-meta">
               · {displayRunning.length}
             </span>
           </div>
@@ -586,7 +586,7 @@ export const ActivityPage = () => {
           <div className="flex flex-col gap-5">
             {BUCKET_ORDER.filter((b) => groupedHistory.has(b)).map((b) => (
               <div key={b}>
-                <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+                <div className="mb-1.5 px-3 text-2xs font-normal uppercase tracking-[0.06em] text-ink-body">
                   {t(tk(BUCKET_KEY[b]))}
                 </div>
                 {renderHistory(groupedHistory.get(b) ?? [])}

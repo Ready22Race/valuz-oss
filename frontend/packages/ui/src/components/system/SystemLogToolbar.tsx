@@ -43,10 +43,10 @@ const LEVEL_LABELS: Record<LogLevel, string> = {
 
 const LEVEL_TEXT_COLOR: Record<LogLevel, string> = {
   DEBUG: "text-ink-meta",
-  INFO: "text-emerald-600",
-  WARNING: "text-amber-600",
-  ERROR: "text-red-600",
-  CRITICAL: "text-red-700",
+  INFO: "text-info-text",
+  WARNING: "text-warning-text",
+  ERROR: "text-error-text",
+  CRITICAL: "font-semibold text-error-text",
   RAW: "text-ink-meta",
 };
 

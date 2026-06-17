@@ -247,7 +247,7 @@ function JobRow({ job, onAuthorize, onCancel, t }: JobRowProps) {
             })}
           </div>
           {job.error ? (
-            <div className="mt-1 text-xs text-red-600">{job.error}</div>
+            <div className="mt-1 text-xs text-error-text">{job.error}</div>
           ) : null}
           {isRunning ? (
             <ProgressBar

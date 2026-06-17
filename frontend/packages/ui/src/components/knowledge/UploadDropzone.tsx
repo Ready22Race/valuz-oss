@@ -16,12 +16,12 @@ export const UploadDropzone = ({
   return (
     <div
       className={cn(
-        "rounded-[22px] border border-dashed border-surface-border-hover",
+        "rounded-2xl border border-dashed border-surface-border-hover",
         "bg-[linear-gradient(135deg,var(--color-surface)_0%,var(--color-surface-soft)_100%)] px-5 py-5",
       )}
     >
       <div className="flex items-start gap-4">
-        <div className="flex h-10 w-10 items-center justify-center rounded-[14px] bg-surface">
+        <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-surface">
           <Upload className="h-5 w-5 text-ink-section" />
         </div>
         <div className="min-w-0 flex-1">

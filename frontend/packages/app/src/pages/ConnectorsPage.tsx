@@ -672,7 +672,7 @@ export const ConnectorsPage = () => {
                             c.status !== "connected" && (
                               <button
                                 type="button"
-                                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-[#f54b4b]/10 hover:text-[#f54b4b]"
+                                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-error-light hover:text-error-text"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setDeleteTarget(c);

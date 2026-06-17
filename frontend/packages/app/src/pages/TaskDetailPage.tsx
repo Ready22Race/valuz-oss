@@ -78,12 +78,12 @@ const EVENT_META: Record<string, EventMeta> = {
   },
   subtask_completed: {
     icon: CheckCircle2,
-    node: "bg-emerald-500/10 text-emerald-500",
+    node: "bg-success-light text-success-text",
     labelKey: "task.event.subtaskCompleted",
   },
   subtask_failed: {
     icon: XCircle,
-    node: "bg-red-500/10 text-red-500",
+    node: "bg-error-light text-error-text",
     labelKey: "task.event.subtaskFailed",
   },
   subtask_message: {
@@ -98,12 +98,12 @@ const EVENT_META: Record<string, EventMeta> = {
   },
   goal_revised: {
     icon: Target,
-    node: "bg-amber-500/10 text-amber-500",
+    node: "bg-warning-light text-warning-text",
     labelKey: "task.event.goalRevised",
   },
   paused: {
     icon: Pause,
-    node: "bg-amber-500/10 text-amber-500",
+    node: "bg-warning-light text-warning-text",
     labelKey: "task.event.paused",
   },
   resumed: {
@@ -118,12 +118,12 @@ const EVENT_META: Record<string, EventMeta> = {
   },
   task_completed: {
     icon: CheckCheck,
-    node: "bg-emerald-500/10 text-emerald-500",
+    node: "bg-success-light text-success-text",
     labelKey: "task.event.taskCompleted",
   },
   task_failed: {
     icon: XCircle,
-    node: "bg-red-500/10 text-red-500",
+    node: "bg-error-light text-error-text",
     labelKey: "task.event.taskFailed",
   },
   task_planned: {
@@ -133,7 +133,7 @@ const EVENT_META: Record<string, EventMeta> = {
   },
   plan_revised: {
     icon: ListTodo,
-    node: "bg-amber-500/10 text-amber-500",
+    node: "bg-warning-light text-warning-text",
     labelKey: "task.event.planRevised",
   },
   subtask_reviewed: {
@@ -915,17 +915,17 @@ export const TaskDetailPage = () => {
           failure event's error or reason. */}
         {(task.status === "failed" || task.status === "stopped") &&
           failureInfo && (
-            <section className="mt-3 w-full rounded-xl border border-red-500/30 bg-red-50 p-4 dark:bg-red-500/10">
+            <section className="mt-3 w-full rounded-xl border border-error-border bg-error-light p-4">
               <div className="mb-2 flex items-center gap-2">
-                <XCircle className="h-4 w-4 text-red-600" />
-                <span className="text-xs font-semibold text-red-700 dark:text-red-400">
+                <XCircle className="h-4 w-4 text-error-text" />
+                <span className="text-xs font-semibold text-error-text">
                   {t("task.failureReasonTitle" as Parameters<typeof t>[0])}
                 </span>
               </div>
               <div className="whitespace-pre-wrap text-sm leading-6 text-ink-body">
                 {failureInfo.reason}
               </div>
-              <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-red-500/20 pt-2 text-2xs text-ink-meta">
+              <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-error-border pt-2 text-2xs text-ink-meta">
                 {leadAgentName && (
                   <span>
                     {t("task.failureBy" as Parameters<typeof t>[0], {
@@ -1120,7 +1120,7 @@ export const TaskDetailPage = () => {
             <Button
               size="sm"
               variant="destructive"
-              className="bg-[#f54b4b] text-[12px] hover:bg-[#f54b4b]/90 focus-visible:ring-[#f54b4b]/20"
+              className="text-xs"
               onClick={() =>
                 void runIntervene({ action: "stop" }, "task.stopped")
               }
@@ -1427,7 +1427,7 @@ function GroupedEventCard({
         className={cn(
           "mt-2 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] leading-4",
           outcome
-            ? "bg-emerald-50 text-emerald-700"
+            ? "bg-success-light text-success-text"
             : "bg-surface-soft text-ink-meta",
         )}
       >

@@ -759,7 +759,7 @@ export const KnowledgePage = () => {
           ) : isEmpty ? (
             <div className="flex flex-1 justify-center pt-[160px]">
               <div className="flex flex-col items-center px-5 text-center">
-                <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-surface-soft text-ink-body">
+                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-surface-soft text-ink-body">
                   <FolderPlus className="h-5 w-5" />
                 </div>
                 <div className="mt-3 text-sm font-medium text-ink-heading">
@@ -945,7 +945,7 @@ export const KnowledgePage = () => {
               variant="outline"
               size="sm"
               aria-label={t("common.delete" as Parameters<typeof t>[0])}
-              className="h-8 w-8 p-0 text-ink-meta hover:text-[#f54b4b]"
+              className="h-8 w-8 p-0 text-ink-meta hover:bg-error-light hover:text-error-text"
               onClick={() => setDeleteKbOpen(true)}
             >
               <Trash2 className="h-3.5 w-3.5" />

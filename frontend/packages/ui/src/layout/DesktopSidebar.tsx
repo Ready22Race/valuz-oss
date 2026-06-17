@@ -165,7 +165,7 @@ const SectionLabel = ({
   // tracking 0.06em / color #6E7481. Folding chevron 12px stroke 2 #94A3B8,
   // rotates -90° when collapsed.
   const inner = (
-    <span className="flex items-center gap-1 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+    <span className="flex items-center gap-1 text-2xs font-normal uppercase tracking-[0.06em] text-ink-body">
       {children}
       <ChevronDown
         className={cn(
@@ -287,7 +287,7 @@ const SidebarLink = ({
     to={href}
     className={cn(
       "relative mx-1 flex cursor-default items-center gap-[9px] px-[10px] py-[7px] text-[13px] font-normal text-ink-heading outline-none transition-[background-color,box-shadow] duration-[120ms] focus-visible:outline-none focus-visible:ring-0 focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
-      editing ? "" : "rounded-[7px]",
+      editing ? "" : "rounded-md",
       editing
         ? ""
         : active
@@ -343,7 +343,7 @@ const ProjectRow = ({
           // ``group`` enables ``group-hover`` on the project-row ``...``
           // menu button (hidden until row hover; see below).
           "group relative grid h-[31px] cursor-default grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-[9px] px-[10px] text-[13px] font-normal text-ink-heading outline-none transition-[background-color,box-shadow] duration-[120ms] focus-visible:outline-none focus-visible:ring-0 focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
-          projectRenaming ? "" : "rounded-[7px]",
+          projectRenaming ? "" : "rounded-md",
           projectRenaming
             ? ""
             : isActiveProject
@@ -555,7 +555,7 @@ export const DesktopSidebar = ({
       <aside
         className={cn(
           "relative flex h-full shrink-0 flex-col transition-[width] duration-[180ms] ease-out",
-          collapsed ? "w-[56px]" : "w-[220px] rounded-[14px]",
+          collapsed ? "w-[56px]" : "w-[220px] rounded-2xl",
         )}
       >
         {collapsed ? (
@@ -743,7 +743,7 @@ export const DesktopSidebar = ({
                         return (
                           <div
                             key={`recent-${item.id}`}
-                            className="relative mx-1 flex items-center gap-2 py-[5px] pl-[33px] pr-[10px]"
+                            className="relative mx-1 flex h-[31px] items-center gap-2 pl-[33px] pr-[10px]"
                           >
                             <RenameInput
                               initial={item.title}
@@ -769,10 +769,10 @@ export const DesktopSidebar = ({
                           key={`recent-${item.id}`}
                           to={item.href}
                           className={cn(
-                            "group/recent-row relative mx-1 flex cursor-default items-center gap-2 rounded-[7px] py-[5px] pl-[33px] pr-[10px] text-[12.5px] outline-none transition-colors duration-[120ms] hover:bg-surface-soft hover:text-ink-heading focus-visible:outline-none focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
+                            "group/recent-row relative mx-1 flex h-[31px] cursor-default items-center gap-2 rounded-md pl-[33px] pr-[10px] text-[13px] outline-none transition-colors duration-[120ms] focus-visible:outline-none focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
                             active
-                              ? "bg-card text-ink-heading shadow-[0_6px_16px_rgba(17,24,39,0.12)] dark:bg-surface-muted dark:shadow-none"
-                              : "text-ink-meta",
+                              ? "z-20 bg-card text-ink-heading shadow-[0_6px_16px_rgba(17,24,39,0.12)] dark:bg-surface-muted dark:shadow-none"
+                              : "text-ink-meta hover:bg-[rgba(0,0,0,0.03)] hover:text-ink-heading dark:hover:bg-surface-muted",
                           )}
                         >
                           {item.isRunning && (
@@ -822,16 +822,13 @@ export const DesktopSidebar = ({
                                   </DropdownMenuItem>
                                 )}
                                 {onRecentDelete && (
-                                  <>
-                                    <DropdownMenuSeparator />
-                                    <DropdownMenuItem
-                                      variant="destructive"
-                                      onSelect={() => setRecentDeleting(item)}
-                                    >
-                                      <Trash2 />
-                                      {t("common.delete")}
-                                    </DropdownMenuItem>
-                                  </>
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    onSelect={() => setRecentDeleting(item)}
+                                  >
+                                    <Trash2 />
+                                    {t("common.delete")}
+                                  </DropdownMenuItem>
                                 )}
                               </DropdownMenuContent>
                             </DropdownMenu>
@@ -937,7 +934,7 @@ export const DesktopSidebar = ({
               {libraryItems.length > 0 && (
                 <>
                   <div className="pb-1 pl-[14px] pr-3 pt-1">
-                    <span className="text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+                    <span className="text-2xs font-normal uppercase tracking-[0.06em] text-ink-body">
                       {t("sidebar.library")}
                     </span>
                   </div>

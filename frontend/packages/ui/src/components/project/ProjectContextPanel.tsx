@@ -352,7 +352,7 @@ function KbTreeRow({
   const direct = isDirectlyBound?.(node.kind, node.id) ?? false;
   const covered = !direct && (isCoveredByParent?.(node.kind, node.id) ?? false);
   const checkboxClass = cn(
-    "h-3 w-3 shrink-0 rounded-[3px] border transition-colors",
+    "h-3 w-3 shrink-0 rounded-sm border transition-colors",
     direct
       ? "border-brand bg-brand text-white"
       : covered
@@ -364,7 +364,7 @@ function KbTreeRow({
     <>
       <div
         className={cn(
-          "group flex items-center gap-1.5 rounded-md py-1.5 pr-2 text-xs transition-colors hover:bg-surface-muted/60",
+          "group flex items-center gap-1.5 rounded-md py-1.5 pr-2 text-xs transition-colors hover:bg-[color:var(--fg-1)]",
           isMissing && "opacity-55",
         )}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
@@ -482,7 +482,7 @@ function KbTreeRow({
           <button
             type="button"
             onClick={() => onSelectAllInKb(node.id)}
-            className="shrink-0 rounded px-1 text-2xs text-ink-meta opacity-0 transition-colors hover:bg-surface-border hover:text-ink-body group-hover:opacity-100"
+            className="shrink-0 rounded px-1 text-2xs text-ink-meta opacity-0 transition-colors hover:bg-[color:var(--fg-1)] hover:text-ink-body group-hover:opacity-100"
           >
             {t("knowledge.selectAllKb")}
           </button>
@@ -491,7 +491,7 @@ function KbTreeRow({
           <button
             type="button"
             onClick={() => onRemoveKb(node.id)}
-            className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-muted opacity-0 transition-colors hover:bg-surface-border hover:text-error-text group-hover:opacity-100"
+            className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-muted opacity-0 transition-colors hover:bg-[color:var(--fg-1)] hover:text-error-text group-hover:opacity-100"
             title={t("common.remove")}
           >
             <X className="h-3 w-3" />
@@ -574,7 +574,7 @@ function TodosList({ items }: { items: TodoListItem[] }) {
           >
             <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
               {todo.status === "completed" ? (
-                <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                <Check className="h-3 w-3 text-success-text" />
               ) : todo.status === "in_progress" ? (
                 <Loader2 className="h-3 w-3 animate-spin text-brand" />
               ) : (
@@ -624,7 +624,7 @@ export function FileRefreshButton({ onClick }: { onClick: () => void }) {
           timerRef.current = null;
         }, 2000);
       }}
-      className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border disabled:pointer-events-none"
+      className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)] disabled:pointer-events-none"
       title={spinning ? t("system.refreshing") : t("system.refreshFiles")}
     >
       <RefreshCw className={cn("h-3.5 w-3.5", spinning && "animate-spin")} />
@@ -673,7 +673,7 @@ export function AccordionSection({
       {/* Hover lives on the row wrapper so background color spans the
           entire header (including the trailing action button), not just
           the toggle hit-area. */}
-      <div className="flex items-center transition-colors duration-[120ms] hover:bg-surface-muted/60">
+      <div className="flex items-center transition-colors duration-[120ms] hover:bg-[color:var(--fg-1)]">
         <button
           type="button"
           onClick={() => setOpen(!open)}
@@ -874,7 +874,7 @@ export const ProjectDetailContextPanel = ({
               <button
                 type="button"
                 onClick={() => toggleCollapsed(false)}
-                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition-colors duration-[120ms] hover:bg-surface-soft hover:text-ink-heading"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition-colors duration-[120ms] hover:bg-[color:var(--fg-1)] hover:text-ink-heading"
               >
                 <PanelRightOpen className="h-4 w-4" />
               </button>
@@ -895,7 +895,7 @@ export const ProjectDetailContextPanel = ({
           <button
             type="button"
             onClick={onOpenInFinder}
-            className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
+            className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
             title={t("project.inFinder")}
           >
             <FolderOpen className="h-3.5 w-3.5" />
@@ -970,7 +970,7 @@ export const ProjectDetailContextPanel = ({
                   e.stopPropagation();
                   onOpenInFinder();
                 }}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
                 title={t("project.inFinder")}
               >
                 <FolderOpen className="h-3.5 w-3.5" />
@@ -1015,7 +1015,7 @@ export const ProjectDetailContextPanel = ({
             return (
               <div
                 key={f.id}
-                className="group -mx-2 flex items-center gap-2.5 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-surface-muted/60"
+                className="group -mx-2 flex items-center gap-2.5 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-[color:var(--fg-1)]"
               >
                 {isKb ? (
                   <Database className="h-3.5 w-3.5 shrink-0 text-[#1d4ed8]" />
@@ -1102,7 +1102,7 @@ export const ProjectDetailContextPanel = ({
               <button
                 type="button"
                 onClick={() => instructionsEditorRef.current?.openEditor()}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
                 title={t("project.writeInstructions")}
               >
                 <FilePenLine className="h-3.5 w-3.5" />
@@ -1138,7 +1138,7 @@ export const ProjectDetailContextPanel = ({
                   event.currentTarget.blur();
                   onAddMember();
                 }}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
                 title={t("agent.addMember" as Parameters<typeof t>[0])}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1156,7 +1156,7 @@ export const ProjectDetailContextPanel = ({
                       <div className="h-px w-[301px] bg-surface-border/40 dark:bg-surface-border" />
                     ) : null}
                     <div className="group relative rounded-lg bg-card">
-                      <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-surface-muted/60" />
+                      <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[color:var(--fg-1)]" />
                       <div className="relative z-10 flex items-center gap-2.5 py-2.5">
                         {/* Row body opens the shared agent (global edit). */}
                         <button
@@ -1265,7 +1265,7 @@ export const ProjectDetailContextPanel = ({
                   event.currentTarget.blur();
                   onAddSkill();
                 }}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
                 title={t("project.addSkill")}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1346,7 +1346,7 @@ export const ProjectDetailContextPanel = ({
               <button
                 type="button"
                 onClick={() => setConnectorPickerOpen(true)}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
                 title={t("project.addConnector" as Parameters<typeof t>[0])}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1417,7 +1417,7 @@ export const ProjectDetailContextPanel = ({
                   e.stopPropagation();
                   onAddScheduledTask();
                 }}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
                 title={t("project.addScheduledTask")}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1432,7 +1432,7 @@ export const ProjectDetailContextPanel = ({
                   key={task.id}
                   className="group relative rounded-lg bg-card"
                 >
-                  <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-surface-muted/60" />
+                  <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[color:var(--fg-1)]" />
                   <div className="relative z-10 py-2.5">
                     <div className="flex items-center gap-2">
                       <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink-heading">
@@ -1442,7 +1442,7 @@ export const ProjectDetailContextPanel = ({
                         className={cn(
                           "rounded px-1.5 py-px text-2xs",
                           task.status === "on"
-                            ? "bg-emerald-50 text-emerald-600"
+                            ? "bg-success-light text-success-text"
                             : "bg-surface-soft text-ink-meta",
                         )}
                       >
@@ -1455,7 +1455,7 @@ export const ProjectDetailContextPanel = ({
                           <DropdownMenuTrigger asChild>
                             <button
                               type="button"
-                              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-label"
+                              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-[color:var(--fg-1)] hover:text-ink-label"
                               title={t("project.taskActions")}
                             >
                               <MoreHorizontal className="h-3.5 w-3.5" />
@@ -1535,7 +1535,7 @@ export const ProjectDetailContextPanel = ({
               <button
                 type="button"
                 onClick={onImportFile}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
                 title={t("knowledge.manageKb")}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1698,7 +1698,7 @@ export const ProjectDetailContextPanel = ({
                         {filteredReferencedDocs.map((doc) => (
                           <div
                             key={doc.id}
-                            className="group flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-surface-muted/60"
+                            className="group flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-[color:var(--fg-1)]"
                           >
                             <Checkbox
                               checked
@@ -1722,7 +1722,7 @@ export const ProjectDetailContextPanel = ({
                         {filteredReadyDocs.map((doc) => (
                           <label
                             key={doc.id}
-                            className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-surface-muted/60"
+                            className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-[color:var(--fg-1)]"
                           >
                             <Checkbox
                               onCheckedChange={() => onToggleDoc?.(doc.id)}

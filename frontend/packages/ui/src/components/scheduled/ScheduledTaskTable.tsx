@@ -62,8 +62,8 @@ const ScheduledTaskActionMenu = ({
         <Button
           type="button"
           variant="ghost"
-          size="icon-sm"
-          className="h-8 w-8 hover:bg-[#f3f4f6] hover:text-inherit dark:hover:bg-surface-muted"
+          size="icon"
+          className="hover:bg-[color:var(--fg-1)] hover:text-inherit data-[state=open]:bg-[color:var(--fg-1)]"
           aria-label={t("cron.actionColumn")}
         >
           <MoreHorizontal className="h-3.5 w-3.5" />
@@ -75,14 +75,12 @@ const ScheduledTaskActionMenu = ({
           onSelect={() => {
             if (canTest) onRunNow?.(task.id);
           }}
-          className="focus:bg-surface-2 focus:text-ink-heading"
         >
           <Play className="h-3.5 w-3.5" />
           运行测试
         </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => onToggle?.(task.id)}
-          className="focus:bg-surface-2 focus:text-ink-heading"
         >
           {task.status === "on" ? (
             <PowerOff className="h-3.5 w-3.5" />
@@ -93,9 +91,9 @@ const ScheduledTaskActionMenu = ({
         </DropdownMenuItem>
         <DropdownMenuItem
           onSelect={() => onDelete?.(task.id)}
-          className="text-[#f54b4b] focus:bg-[#f54b4b]/10 focus:text-[#f54b4b] [&_svg]:text-[#f54b4b]"
+          className="text-error-text focus:bg-[color:var(--fg-1)] focus:text-error-text [&_svg]:text-error-text"
         >
-          <Trash2 className="h-3.5 w-3.5 text-[#f54b4b]" />
+          <Trash2 className="h-3.5 w-3.5 text-error-text" />
           {t("common.delete")}
         </DropdownMenuItem>
       </DropdownMenuContent>

@@ -276,9 +276,9 @@ function renderChatplanStatusPill(
 
   const accentDot: Record<typeof accent, string> = {
     indigo: "bg-brand",
-    emerald: "bg-emerald-500",
+    emerald: "bg-success",
     rose: "bg-rose-500",
-    amber: "bg-amber-500",
+    amber: "bg-warning",
     slate: "bg-ink-muted",
   };
 
@@ -353,7 +353,7 @@ const SessionStatusPill = ({ status }: { status?: string }) => {
       : status === "created"
         ? "bg-brand/5 text-brand/80"
         : status === "failed"
-          ? "bg-red-500/10 text-red-600"
+          ? "bg-error-light text-error-text"
           : "bg-surface-soft text-ink-meta";
   return (
     <span
@@ -4192,7 +4192,7 @@ export const ConversationPage = () => {
               (isTempConversation &&
                 myAgentsLoaded &&
                 myAgents.length === 0)) && (
-              <div className="mx-auto mb-2 flex w-full max-w-3xl items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs dark:border-amber-900/40 dark:bg-amber-950/30">
+              <div className="mx-auto mb-2 flex w-full max-w-3xl items-center justify-between gap-3 rounded-lg border border-warning-border bg-warning-light px-3 py-2 text-xs">
                 <span className="text-ink-body">
                   {channelLoaded && !hasChannel
                     ? isTempConversation &&

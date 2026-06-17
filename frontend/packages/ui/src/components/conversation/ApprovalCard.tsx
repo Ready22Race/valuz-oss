@@ -101,22 +101,23 @@ const _SUBJECT_META: Record<
   shell_command: {
     icon: Terminal,
     titleKey: "conversation.requiresShellCommand",
-    tint: "text-amber-600 bg-amber-50",
+    tint: "text-warning-text bg-warning-light",
   },
   file_change: {
     icon: FileEdit,
     titleKey: "conversation.requiresFileChange",
-    tint: "text-sky-600 bg-sky-50",
+    tint:
+      "text-[color-mix(in_oklab,var(--accent-sky)_62%,var(--foreground))] bg-[color-mix(in_oklab,var(--accent-sky)_14%,var(--background))]",
   },
   mcp_tool_call: {
     icon: Plug,
     titleKey: "conversation.requiresMcpCall",
-    tint: "text-violet-600 bg-violet-50",
+    tint: "text-info-text bg-info-light",
   },
   tool_input: {
     icon: Wrench,
     titleKey: "conversation.requiresToolCall",
-    tint: "text-slate-600 bg-slate-50",
+    tint: "text-ink-body bg-surface-2",
   },
 };
 
@@ -158,8 +159,8 @@ function _renderPayload(
             className={cn(
               "mr-1.5 inline-flex rounded px-1.5 py-0.5 text-[10px] font-medium uppercase",
               kind === "create"
-                ? "bg-emerald-50 text-emerald-700"
-                : "bg-sky-50 text-sky-700",
+                ? "bg-success-light text-success-text"
+                : "bg-[color-mix(in_oklab,var(--accent-sky)_14%,var(--background))] text-[color-mix(in_oklab,var(--accent-sky)_62%,var(--foreground))]",
             )}
           >
             {kind || "edit"}
@@ -249,7 +250,7 @@ export const ApprovalCard = memo(function ApprovalCard({
   const [mode, setMode] = useState<"idle" | "rejecting" | "editing">("idle");
 
   return (
-    <div className="rounded-lg border-l-2 border-amber-400 bg-surface-soft shadow-sm">
+    <div className="rounded-lg border-l-2 border-warning bg-surface-soft shadow-sm">
       <div className="flex items-center gap-2 px-3 py-2">
         <div
           className={cn(

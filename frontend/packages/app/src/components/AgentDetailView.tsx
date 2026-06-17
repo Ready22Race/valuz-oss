@@ -535,7 +535,7 @@ export const AgentDetailView = ({
                 onClick={() => setDeleteOpen(true)}
                 title={t("common.delete")}
                 aria-label={t("common.delete")}
-                className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-[#f54b4b]/10 hover:text-[#f54b4b]"
+                className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-error-light hover:text-error-text"
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
@@ -651,10 +651,10 @@ export const AgentDetailView = ({
           black active underline), same as the Activity page. */}
       <div className="px-5 py-4">
         <Tabs defaultValue="model">
-          <div className="border-b border-surface-border">
+          <div>
             <TabsList
               variant="line"
-              className="h-9 justify-start gap-4 border-0 p-0"
+              className="h-auto justify-start"
             >
               <TabsTrigger value="model">{t("agent.tabModel")}</TabsTrigger>
               <TabsTrigger value="instructions">
@@ -709,7 +709,7 @@ export const AgentDetailView = ({
             </div>
             <div className="mt-3 flex flex-col gap-2">
               {agent.skills.length === 0 ? (
-                <div className="rounded-[14px] border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
+                <div className="rounded-2xl border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
                   {t("agent.noSkills")}
                 </div>
               ) : (
@@ -718,7 +718,7 @@ export const AgentDetailView = ({
                   return (
                     <div
                       key={s}
-                      className="flex items-start gap-3 rounded-[14px] border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
+                      className="flex items-start gap-3 rounded-2xl border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
                     >
                       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
                         <BookOpen className="h-4 w-4" />
@@ -737,7 +737,7 @@ export const AgentDetailView = ({
                         type="button"
                         onClick={() => toggleSkill(s)}
                         aria-label={t("common.delete")}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface-soft hover:text-[#f54b4b]"
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-error-light hover:text-error-text"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -760,7 +760,7 @@ export const AgentDetailView = ({
             </div>
             <div className="mt-3 flex flex-col gap-2">
               {agent.connector_types.length === 0 ? (
-                <div className="rounded-[14px] border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
+                <div className="rounded-2xl border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
                   {t("agent.noConnectors")}
                 </div>
               ) : (
@@ -769,7 +769,7 @@ export const AgentDetailView = ({
                   return (
                     <div
                       key={c}
-                      className="flex items-start gap-3 rounded-[14px] border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
+                      className="flex items-start gap-3 rounded-2xl border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
                     >
                       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
                         <Plug className="h-4 w-4" />
@@ -781,7 +781,7 @@ export const AgentDetailView = ({
                           </span>
                           <span
                             aria-hidden
-                            className="h-1.5 w-1.5 rounded-full bg-emerald-500"
+                            className="h-1.5 w-1.5 rounded-full bg-success"
                           />
                         </div>
                         {meta?.description && (
@@ -794,7 +794,7 @@ export const AgentDetailView = ({
                         type="button"
                         onClick={() => toggleConnector(c)}
                         aria-label={t("common.delete")}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface-soft hover:text-[#f54b4b]"
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-error-light hover:text-error-text"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>

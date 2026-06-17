@@ -41,7 +41,7 @@ export const ConnectionStatusBadge = ({
       {(connection.state === "connecting" ||
         connection.state === "reconnecting") && <Spinner className="size-3" />}
       {connection.state === "connected" && (
-        <span className="size-1.5 rounded-full bg-emerald-500" />
+        <span className="size-1.5 rounded-full bg-success" />
       )}
       <span>{label}</span>
       {connection.state === "reconnecting" &&

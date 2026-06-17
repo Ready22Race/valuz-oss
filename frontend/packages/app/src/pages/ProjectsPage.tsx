@@ -158,7 +158,7 @@ export const ProjectsPage = () => {
       return (
         <div className="flex flex-1 justify-center pt-[160px]">
           <div className="flex flex-col items-center px-5 text-center">
-            <div className="flex h-11 w-11 items-center justify-center rounded-[14px] bg-[#f7f8fa] text-[#444b54] dark:bg-surface-soft dark:text-ink-body">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-surface-soft text-ink-body">
               <FolderKanban className="h-5 w-5" />
             </div>
             <div className="mt-3 text-sm font-medium text-ink-heading">

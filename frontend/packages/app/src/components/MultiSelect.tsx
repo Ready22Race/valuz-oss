@@ -99,7 +99,7 @@ export const MultiSelect = ({
                     }}
                   >
                     {opt?.dot && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-success" />
                     )}
                     {opt?.label ?? v}
                     <X
@@ -145,7 +145,7 @@ export const MultiSelect = ({
                       )}
                     />
                     {opt.dot && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-success" />
                     )}
                     {opt.label}
                   </CommandItem>

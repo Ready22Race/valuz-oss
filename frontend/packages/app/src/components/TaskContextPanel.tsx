@@ -105,7 +105,7 @@ export interface TaskContextPanelProps {
  *
  * Sits inside AppShell's right-panel slot via
  * ``useWorkspaceOutlet().setRightPanel(<TaskContextPanel … />)`` so it
- * inherits the standard ``rounded-[14px] border bg-card`` card shell and
+ * inherits the standard rounded card shell and
  * the collapse toggle the rest of the workspace pages use.
  *
  * Deliberately removed in v30 (per PRD §3.5 v30 changelog):
@@ -251,7 +251,7 @@ export const TaskContextPanel = ({
                 <button
                   type="button"
                   onClick={(e) => e.stopPropagation()}
-                  className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
+                  className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
                   title={t(
                     "task.panel.planReviewTrigger" as Parameters<typeof t>[0],
                   )}
@@ -428,7 +428,7 @@ export const TaskContextPanel = ({
                   <button
                     type="button"
                     onClick={onOpenInFinder}
-                    className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
+                    className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
                     title={t("project.inFinder" as Parameters<typeof t>[0])}
                   >
                     <FolderOpen className="h-3.5 w-3.5" />
@@ -459,10 +459,10 @@ export const TaskContextPanel = ({
 
 function StatusIcon({ status }: { status: string }) {
   if (status === "completed") {
-    return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />;
+    return <CheckCircle2 className="h-3.5 w-3.5 text-success-text" />;
   }
   if (status === "failed" || status === "stopped") {
-    return <XCircle className="h-3.5 w-3.5 text-red-500" />;
+    return <XCircle className="h-3.5 w-3.5 text-error-text" />;
   }
   if (status === "paused") {
     return <PauseCircle className="h-3.5 w-3.5 text-ink-meta" />;
@@ -479,11 +479,11 @@ function SubtaskStatusChip({ status }: { status: string }) {
   const { t } = useTranslation();
   const map: Record<string, { cls: string; key: string }> = {
     completed: {
-      cls: "bg-emerald-500/10 text-emerald-600",
+      cls: "bg-success-light text-success-text",
       key: "task.subtaskStatus.completed",
     },
     failed: {
-      cls: "bg-red-500/10 text-red-600",
+      cls: "bg-error-light text-error-text",
       key: "task.subtaskStatus.failed",
     },
     active: { cls: "bg-brand/10 text-brand", key: "task.subtaskStatus.active" },
@@ -492,7 +492,7 @@ function SubtaskStatusChip({ status }: { status: string }) {
       key: "task.subtaskStatus.pending",
     },
     paused: {
-      cls: "bg-amber-500/10 text-amber-600",
+      cls: "bg-warning-light text-warning-text",
       key: "task.subtaskStatus.paused",
     },
   };
@@ -544,7 +544,7 @@ function PlanReviewPopover({
           <button
             type="button"
             onClick={onClose}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-heading"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-[color:var(--fg-1)] hover:text-ink-heading"
             aria-label={t("common.close" as Parameters<typeof t>[0])}
           >
             <X className="h-3.5 w-3.5" />
@@ -581,7 +581,7 @@ function PlanReviewPopover({
                     </span>
                     <SubtaskStatusChip status={task.status} />
                     {task.attempts !== undefined && task.attempts > 1 && (
-                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-2xs font-medium text-amber-700">
+                      <span className="rounded bg-warning-light px-1.5 py-0.5 text-2xs font-medium text-warning-text">
                         {t(
                           "task.panel.planRowAttempts" as Parameters<
                             typeof t
@@ -648,8 +648,8 @@ function PlanReviewPopover({
                   </div>
                 )}
                 {task.review_feedback && (
-                  <div className="mt-2 rounded-md border border-red-500/30 bg-red-50 px-3 py-2 dark:bg-red-500/10">
-                    <p className="text-2xs font-semibold text-red-700 dark:text-red-400">
+                  <div className="mt-2 rounded-md border border-error-border bg-error-light px-3 py-2">
+                    <p className="text-2xs font-semibold text-error-text">
                       {t(
                         "task.panel.planRowFeedback" as Parameters<typeof t>[0],
                       )}

@@ -70,7 +70,7 @@ const conflictLabelKeys: Record<StagingConflictKind, string> = {
 const conflictTone: Record<StagingConflictKind, string> = {
   none: "text-success",
   same_source: "text-brand",
-  diverged: "text-amber-500",
+  diverged: "text-warning-text",
 };
 
 interface SlugRowState {

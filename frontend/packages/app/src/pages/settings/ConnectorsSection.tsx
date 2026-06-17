@@ -1108,7 +1108,7 @@ export const ConnectorsSection = () => {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="h-7 w-7 p-0 text-[#f54b4b] hover:bg-[#f54b4b]/10 hover:text-[#f54b4b]"
+                          className="h-7 w-7 p-0 text-error-text hover:bg-error-light hover:text-error-text"
                           onClick={() =>
                             void handleDeleteConnector(connector.id)
                           }
@@ -1396,7 +1396,7 @@ export const ConnectorsSection = () => {
                             </button>
                             <button
                               type="button"
-                              className="px-1 text-ink-meta hover:text-red-500"
+                              className="px-1 text-ink-meta hover:text-error-text"
                               onClick={() =>
                                 setEditForm((f) => ({
                                   ...f,
@@ -1528,7 +1528,7 @@ export const ConnectorsSection = () => {
                             </button>
                             <button
                               type="button"
-                              className="px-1 text-ink-meta hover:text-red-500"
+                              className="px-1 text-ink-meta hover:text-error-text"
                               onClick={() =>
                                 setEditForm((f) => ({
                                   ...f,
@@ -1540,7 +1540,7 @@ export const ConnectorsSection = () => {
                             </button>
                           </div>
                           {p.secret && (
-                            <p className="rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] leading-4 text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                            <p className="rounded-md border border-warning-border bg-warning-light px-2 py-1 text-2xs leading-4 text-warning-text">
                               {t(
                                 "settings.connectors.secretParamWarning" as Parameters<
                                   typeof t
@@ -1639,7 +1639,7 @@ export const ConnectorsSection = () => {
                           />
                           <button
                             type="button"
-                            className="px-1 text-ink-meta hover:text-red-500"
+                            className="px-1 text-ink-meta hover:text-error-text"
                             onClick={() =>
                               setEditForm((f) => ({
                                 ...f,
@@ -2038,7 +2038,7 @@ export const ConnectorsSection = () => {
                       </button>
                       <button
                         type="button"
-                        className="px-1 text-ink-meta hover:text-red-500"
+                        className="px-1 text-ink-meta hover:text-error-text"
                         onClick={() =>
                           setAddHttpForm((f) => ({
                             ...f,
@@ -2157,7 +2157,7 @@ export const ConnectorsSection = () => {
                         </button>
                         <button
                           type="button"
-                          className="px-1 text-ink-meta hover:text-red-500"
+                          className="px-1 text-ink-meta hover:text-error-text"
                           onClick={() =>
                             setAddHttpForm((f) => ({
                               ...f,
@@ -2169,7 +2169,7 @@ export const ConnectorsSection = () => {
                         </button>
                       </div>
                       {p.secret && (
-                        <p className="rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] leading-4 text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                        <p className="rounded-md border border-warning-border bg-warning-light px-2 py-1 text-2xs leading-4 text-warning-text">
                           {t(
                             "settings.connectors.secretParamWarning" as Parameters<
                               typeof t
@@ -2323,7 +2323,7 @@ export const ConnectorsSection = () => {
                       />
                       <button
                         type="button"
-                        className="px-1 text-ink-meta hover:text-red-500"
+                        className="px-1 text-ink-meta hover:text-error-text"
                         onClick={() =>
                           setAddStdioForm((f) => ({
                             ...f,

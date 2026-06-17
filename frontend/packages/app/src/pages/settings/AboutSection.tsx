@@ -93,7 +93,7 @@ export const AboutSection = () => {
           </Button>
         )}
         {updaterStatus === "error" && (
-          <span className="text-xs text-red-500">
+          <span className="text-xs text-error-text">
             {t("settings.about.checkFailed")}
           </span>
         )}

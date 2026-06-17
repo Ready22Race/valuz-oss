@@ -1431,10 +1431,10 @@ export const ProjectDetailPage = () => {
               shows — empty state offers an "add task" affordance. */}
           <div className="mt-4 w-full pb-6">
             <Tabs defaultValue="tasks">
-              <div className="flex items-center border-b border-surface-border">
+              <div className="flex items-center">
                 <TabsList
                   variant="line"
-                  className="h-9 justify-start gap-4 border-0 p-0"
+                  className="h-auto justify-start"
                 >
                   <TabsTrigger value="tasks">
                     {t("project.tasksColumn" as Parameters<typeof t>[0])}

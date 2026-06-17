@@ -105,21 +105,25 @@ const RICH_TEXT_OVERRIDES = [
   "[&_pre]:m-0",
 
   // ── Tables ────────────────────────────────────────────────────
+  "[&_[data-streamdown='table-wrapper']]:relative",
   "[&_[data-streamdown='table-wrapper']]:rounded-lg",
   "[&_[data-streamdown='table-wrapper']]:border",
-  "[&_[data-streamdown='table-wrapper']]:border-surface-border",
+  "[&_[data-streamdown='table-wrapper']]:border-[color:var(--fg-3)]",
   "[&_[data-streamdown='table-wrapper']]:bg-surface",
+  "[&_[data-streamdown='table-wrapper']]:overflow-hidden",
   "[&_[data-streamdown='table-wrapper']]:p-0",
   "[&_[data-streamdown='table-wrapper']]:gap-0",
-  // Title region (toolbar) — matches code-block-header height/style.
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:bg-surface-soft",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:border-b",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:border-surface-border",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:pl-3",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:pr-2",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:h-8",
+  "[&_[data-streamdown='table-wrapper']]:text-[13px]",
+  // Toolbar region — overlay only, so it does not create a second header row.
+  "[&_[data-streamdown='table-wrapper']>div:has(button)]:absolute",
+  "[&_[data-streamdown='table-wrapper']>div:has(button)]:right-2",
+  "[&_[data-streamdown='table-wrapper']>div:has(button)]:top-1.5",
+  "[&_[data-streamdown='table-wrapper']>div:has(button)]:z-10",
+  "[&_[data-streamdown='table-wrapper']>div:has(button)]:h-5",
+  "[&_[data-streamdown='table-wrapper']>div:has(button)]:bg-transparent",
+  "[&_[data-streamdown='table-wrapper']>div:has(button)]:border-0",
+  "[&_[data-streamdown='table-wrapper']>div:has(button)]:p-0",
   "[&_[data-streamdown='table-wrapper']>div:has(button)]:items-center",
-  "[&_[data-streamdown='table-wrapper']>div:has(button)]:rounded-t-lg",
   // Table region — flat white, no inner border, bottom rounded.
   "[&_[data-streamdown='table-wrapper']>div:has([data-streamdown='table'])]:border-0",
   "[&_[data-streamdown='table-wrapper']>div:has([data-streamdown='table'])]:rounded-none",
@@ -127,22 +131,28 @@ const RICH_TEXT_OVERRIDES = [
   "[&_[data-streamdown='table-wrapper']>div:has([data-streamdown='table'])]:bg-surface",
   "[&_[data-streamdown='table']]:w-full",
   "[&_[data-streamdown='table']]:border-collapse",
-  "[&_[data-streamdown='table-header']]:bg-surface",
+  "[&_[data-streamdown='table']]:tabular-nums",
+  "[&_[data-streamdown='table-header']]:bg-[color:var(--fg-1)]",
   "[&_[data-streamdown='table-header']]:border-b",
-  "[&_[data-streamdown='table-header']]:border-surface-border",
-  "[&_[data-streamdown='table-header-cell']]:px-4",
-  "[&_[data-streamdown='table-header-cell']]:py-2.5",
-  "[&_[data-streamdown='table-header-cell']]:text-xs",
-  "[&_[data-streamdown='table-header-cell']]:font-normal",
-  "[&_[data-streamdown='table-header-cell']]:text-ink-meta",
-  "[&_[data-streamdown='table-header-cell']]:text-left",
+  "[&_[data-streamdown='table-header']]:border-[color:var(--fg-3)]",
+  "[&_[data-streamdown='table-header-cell']]:px-[14px]",
+  "[&_[data-streamdown='table-header-cell']]:py-2",
+  "[&_[data-streamdown='table-header-cell']]:text-2xs",
+  "[&_[data-streamdown='table-header-cell']]:font-medium",
+  "[&_[data-streamdown='table-header-cell']]:text-[color:var(--fg-60)]",
+  "[&_[data-streamdown='table-header-cell']]:text-right",
+  "[&_[data-streamdown='table-header-cell']:first-child]:text-left",
+  "[&_[data-streamdown='table-header-cell']:last-child]:text-transparent",
+  "[&_[data-streamdown='table-header-cell']:last-child]:select-none",
   "[&_[data-streamdown='table-row']]:border-b",
-  "[&_[data-streamdown='table-row']]:border-surface-border",
+  "[&_[data-streamdown='table-row']]:border-[color:var(--fg-3)]",
   "[&_[data-streamdown='table-row']:last-child]:border-b-0",
-  "[&_[data-streamdown='table-cell']]:px-4",
-  "[&_[data-streamdown='table-cell']]:py-3",
+  "[&_[data-streamdown='table-cell']]:px-[14px]",
+  "[&_[data-streamdown='table-cell']]:py-[9px]",
   "[&_[data-streamdown='table-cell']]:text-[13px]",
   "[&_[data-streamdown='table-cell']]:text-ink-heading",
+  "[&_[data-streamdown='table-cell']]:text-right",
+  "[&_[data-streamdown='table-cell']:first-child]:text-left",
   // Dropdown items (Markdown / CSV / TSV) inside copy/download dropdowns.
   "[&_[data-streamdown='table-wrapper']>div:has(button)>div>div>button:hover]:bg-surface-muted",
   "[&_[data-streamdown='table-wrapper']>div:has(button)>div>div>button]:cursor-default",
@@ -294,9 +304,9 @@ const GLOBAL_RICH_TEXT_CSS = `
 
 const FULLSCREEN_TABLE_CSS = `
   [data-streamdown="table-fullscreen"] > div {
-    background: white;
-    border-radius: 12px;
-    border: 1px solid #F0F1F3;
+    background: var(--surface);
+    border-radius: 8px;
+    border: 1px solid var(--fg-3);
     overflow: hidden;
     /* Top offset = workspace TopBar height (36px). AppShell's inner
        flex uses p-4 pt-0, so the main card sits flush under the
@@ -306,10 +316,10 @@ const FULLSCREEN_TABLE_CSS = `
     height: calc(100% - 52px);
   }
   [data-streamdown="table-fullscreen"] > div > div:first-child {
-    background: #F8F9FA;
-    border-bottom: 1px solid #F0F1F3;
-    padding: 0 16px;
-    height: 32px;
+    background: var(--fg-1);
+    border-bottom: 1px solid var(--fg-3);
+    padding: 0 14px;
+    height: 34px;
     align-items: center;
     gap: 4px;
   }
@@ -329,34 +339,43 @@ const FULLSCREEN_TABLE_CSS = `
   }
   [data-streamdown="table-fullscreen"] > div > div:nth-child(2) {
     padding: 0;
-    background: white;
+    background: var(--surface);
   }
   [data-streamdown="table-fullscreen"] table[data-streamdown="table"] {
     border: none;
     width: 100%;
     border-collapse: collapse;
+    font-size: 13px;
+    font-feature-settings: "tnum";
   }
   [data-streamdown="table-fullscreen"] [data-streamdown="table-header"] {
-    background: white;
-    border-bottom: 1px solid #F0F1F3;
+    background: var(--fg-1);
+    border-bottom: 1px solid var(--fg-3);
   }
   [data-streamdown="table-fullscreen"] [data-streamdown="table-header-cell"] {
-    padding: 10px 16px;
+    padding: 8px 14px;
+    text-align: right;
+    font-weight: 500;
+    font-size: 11px;
+    color: var(--fg-60);
+  }
+  [data-streamdown="table-fullscreen"] [data-streamdown="table-header-cell"]:first-child {
     text-align: left;
-    font-weight: 400;
-    font-size: 12px;
-    color: var(--color-ink-meta, #6e7481);
   }
   [data-streamdown="table-fullscreen"] [data-streamdown="table-row"] {
-    border-bottom: 1px solid #F0F1F3;
+    border-bottom: 1px solid var(--fg-3);
   }
   [data-streamdown="table-fullscreen"] [data-streamdown="table-row"]:last-child {
     border-bottom: none;
   }
   [data-streamdown="table-fullscreen"] [data-streamdown="table-cell"] {
-    padding: 12px 16px;
+    padding: 9px 14px;
     font-size: 13px;
     color: var(--color-ink-heading, #131313);
+    text-align: right;
+  }
+  [data-streamdown="table-fullscreen"] [data-streamdown="table-cell"]:first-child {
+    text-align: left;
   }
 `;
 
@@ -531,7 +550,7 @@ export const MarkdownContent = memo(function MarkdownContent({
       <div
         id="streamdown"
         className={cn(
-          "text-[13.5px] leading-[1.7] text-ink-heading",
+          "text-base leading-[1.7] text-ink-heading",
           ...RICH_TEXT_OVERRIDES,
           className,
         )}

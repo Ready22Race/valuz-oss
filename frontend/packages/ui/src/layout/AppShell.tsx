@@ -166,7 +166,7 @@ export const AppShell = ({
       >
         <main
           className={cn(
-            "flex min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card",
+            "flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-surface-border bg-card",
             mainClassName,
           )}
         >
@@ -231,7 +231,7 @@ export const AppShell = ({
               return (
                 <aside
                   className={cn(
-                    "hidden shrink-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card lg:flex",
+                    "hidden shrink-0 flex-col overflow-hidden rounded-2xl border border-surface-border bg-card lg:flex",
                     asideClassName,
                   )}
                 >
@@ -245,7 +245,7 @@ export const AppShell = ({
                 return (
                   <aside
                     className={cn(
-                      "hidden shrink-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card lg:flex",
+                      "hidden shrink-0 flex-col overflow-hidden rounded-2xl border border-surface-border bg-card lg:flex",
                       asideClassName,
                     )}
                   >

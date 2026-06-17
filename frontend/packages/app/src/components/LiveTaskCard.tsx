@@ -55,10 +55,10 @@ const STATUS_TONE: Record<string, string> = {
   in_progress: "text-brand",
   in_review: "text-brand",
   rework: "text-brand",
-  paused: "text-amber-600",
-  completed: "text-emerald-600",
-  done: "text-emerald-600",
-  failed: "text-rose-600",
+  paused: "text-warning-text",
+  completed: "text-success-text",
+  done: "text-success-text",
+  failed: "text-error-text",
 };
 
 const STATUS_DONE = new Set(["completed", "done"]);
@@ -297,9 +297,9 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
     status === "active"
       ? "bg-brand/10 text-brand ring-1 ring-brand/20"
       : status === "completed"
-        ? "bg-emerald-500/10 text-emerald-600 ring-1 ring-emerald-500/20"
+        ? "bg-success-light text-success-text ring-1 ring-success-border"
         : status === "failed" || status === "blocked"
-          ? "bg-rose-500/10 text-rose-600 ring-1 ring-rose-500/20"
+          ? "bg-error-light text-error-text ring-1 ring-error-border"
           : status === "abandoned" || status === "stopped"
             ? "bg-surface-soft text-ink-muted ring-1 ring-surface-border"
             : "bg-surface-soft text-ink-body ring-1 ring-surface-border";

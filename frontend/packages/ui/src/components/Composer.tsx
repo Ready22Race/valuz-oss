@@ -1479,10 +1479,10 @@ export const Composer = ({
                               "flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors",
                               disabled
                                 ? "cursor-not-allowed text-ink-muted"
-                                : "text-ink-heading hover:bg-surface-muted",
+                                : "text-ink-heading hover:bg-[color:var(--fg-1)]",
                               selected &&
                                 !disabled &&
-                                "bg-surface-muted group-hover/permission-menu:bg-transparent hover:!bg-surface-muted",
+                                "bg-[color:var(--fg-1)] group-hover/permission-menu:bg-transparent hover:!bg-[color:var(--fg-1)]",
                             )}
                             onClick={() => {
                               if (disabled) return;
@@ -1579,8 +1579,8 @@ export const Composer = ({
                           setProjectOpen(false);
                         }}
                         className={cn(
-                          "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted",
-                          selectedWorkspaceId == null && "bg-surface-muted",
+                          "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[color:var(--fg-1)]",
+                          selectedWorkspaceId == null && "bg-[color:var(--fg-1)]",
                         )}
                       >
                         <span className="flex min-w-0 flex-1 flex-col">
@@ -1617,8 +1617,8 @@ export const Composer = ({
                               setProjectOpen(false);
                             }}
                             className={cn(
-                              "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted",
-                              sel && "bg-surface-muted",
+                              "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[color:var(--fg-1)]",
+                              sel && "bg-[color:var(--fg-1)]",
                             )}
                           >
                             <span className="flex min-w-0 flex-1 flex-col">
@@ -1739,8 +1739,8 @@ export const Composer = ({
                                     type="button"
                                     disabled={agentLocked}
                                     className={cn(
-                                      "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent",
-                                      selected && "bg-surface-muted",
+                                      "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-default disabled:hover:bg-transparent",
+                                      selected && "bg-[color:var(--fg-1)]",
                                     )}
                                     onClick={() => {
                                       if (agentLocked) return;
@@ -1815,9 +1815,9 @@ export const Composer = ({
                                         "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors",
                                         row.key !== "effort" && modelLocked
                                           ? "cursor-default"
-                                          : "hover:bg-surface-muted",
+                                          : "hover:bg-[color:var(--fg-1)]",
                                         agentSubmenu === row.key &&
-                                          "bg-surface-muted",
+                                          "bg-[color:var(--fg-1)]",
                                       )}
                                       onMouseEnter={() => {
                                         if (row.key !== "effort" && modelLocked)
@@ -1870,9 +1870,9 @@ export const Composer = ({
                                               type="button"
                                               disabled={!r.available}
                                               className={cn(
-                                                "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50",
+                                                "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-not-allowed disabled:opacity-50",
                                                 r.id === selectedRuntimeId &&
-                                                  "bg-surface-muted",
+                                                  "bg-[color:var(--fg-1)]",
                                               )}
                                               onClick={() => {
                                                 onRuntimeChange?.(r.id);
@@ -1917,8 +1917,8 @@ export const Composer = ({
                                                     key={`${m.providerId}::${m.modelId}`}
                                                     type="button"
                                                     className={cn(
-                                                      "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-surface-muted",
-                                                      sel && "bg-surface-muted",
+                                                      "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-[color:var(--fg-1)]",
+                                                      sel && "bg-[color:var(--fg-1)]",
                                                     )}
                                                     onClick={() => {
                                                       onModelChange?.(
@@ -1947,8 +1947,8 @@ export const Composer = ({
                                                 key={level}
                                                 type="button"
                                                 className={cn(
-                                                  "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-surface-muted",
-                                                  sel && "bg-surface-muted",
+                                                  "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-[color:var(--fg-1)]",
+                                                  sel && "bg-[color:var(--fg-1)]",
                                                 )}
                                                 onClick={() => {
                                                   onEffortChange?.(level);
@@ -1974,7 +1974,7 @@ export const Composer = ({
                             <div className="border-t border-surface-border p-1">
                               <button
                                 type="button"
-                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-brand transition-colors hover:bg-surface-muted"
+                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-brand transition-colors hover:bg-[color:var(--fg-1)]"
                                 onClick={() => {
                                   setAgentOpen(false);
                                   onAddAgent();
@@ -2064,10 +2064,10 @@ export const Composer = ({
                             "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] transition-colors",
                             disabled
                               ? "cursor-not-allowed text-ink-muted"
-                              : "text-ink-heading hover:bg-surface-muted",
+                              : "text-ink-heading hover:bg-[color:var(--fg-1)]",
                             selected &&
                               !disabled &&
-                              "bg-surface-muted group-hover/runtime-menu:bg-transparent hover:!bg-surface-muted",
+                              "bg-[color:var(--fg-1)] group-hover/runtime-menu:bg-transparent hover:!bg-[color:var(--fg-1)]",
                           )}
                           onClick={() => {
                             if (disabled) return;
@@ -2209,9 +2209,9 @@ export const Composer = ({
                                       type="button"
                                       disabled={modelLocked}
                                       className={cn(
-                                        "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-surface-muted",
+                                        "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]",
                                         selected &&
-                                          "bg-surface-muted group-hover/model-menu:bg-transparent hover:!bg-surface-muted",
+                                          "bg-[color:var(--fg-1)] group-hover/model-menu:bg-transparent hover:!bg-[color:var(--fg-1)]",
                                         modelLocked &&
                                           "cursor-not-allowed opacity-50 hover:bg-transparent",
                                       )}
@@ -2264,7 +2264,7 @@ export const Composer = ({
                       >
                         <button
                           type="button"
-                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-surface-muted"
+                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]"
                           onClick={() => setEffortSubOpen(true)}
                         >
                           <span className="min-w-0 flex-1 truncate">
@@ -2287,8 +2287,8 @@ export const Composer = ({
                                   key={level}
                                   type="button"
                                   className={cn(
-                                    "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-surface-muted",
-                                    sel && "bg-surface-muted",
+                                    "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]",
+                                    sel && "bg-[color:var(--fg-1)]",
                                   )}
                                   onClick={() => {
                                     onEffortChange?.(level);

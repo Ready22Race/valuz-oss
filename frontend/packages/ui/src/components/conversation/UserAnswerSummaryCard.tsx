@@ -40,7 +40,7 @@ export const UserAnswerSummaryCard = memo(function UserAnswerSummaryCard({
   return (
     <div className="rounded-lg border border-surface-border bg-surface-soft shadow-sm">
       <div className="flex items-center gap-2 px-4 py-3">
-        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-emerald-50 text-emerald-700">
+        <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-success-light text-success-text">
           <Check className="h-3.5 w-3.5" />
         </div>
         <span className="text-sm font-medium text-ink-heading">
@@ -53,12 +53,12 @@ export const UserAnswerSummaryCard = memo(function UserAnswerSummaryCard({
           return (
             <div key={idx} className="space-y-0.5">
               {q.header ? (
-                <span className="inline-flex rounded-md bg-brand/10 px-1.5 py-0.5 text-[11px] font-medium uppercase tracking-wider text-brand">
+                <span className="inline-flex rounded-md bg-info-light px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wider text-info-text">
                   {q.header}
                 </span>
               ) : null}
-              <p className="text-[13px] text-ink-meta">{q.question}</p>
-              <p className="text-[13px] font-medium text-ink-heading">
+              <p className="text-sm text-ink-meta">{q.question}</p>
+              <p className="text-sm font-medium text-ink-heading">
                 <span className="mr-1 text-ink-meta/70">→</span>
                 {answerText}
               </p>

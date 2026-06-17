@@ -918,7 +918,7 @@ export const ModelSection = () => {
                             variant="outline"
                             size="sm"
                             aria-label={t("common.delete")}
-                            className="h-8 w-8 p-0 text-[#131313] hover:text-[#f54b4b]"
+                            className="h-8 w-8 p-0 text-ink-heading hover:bg-error-light hover:text-error-text"
                             onClick={() => setDeleteTarget(provider)}
                           >
                             <Trash2 className="h-3.5 w-3.5" />
