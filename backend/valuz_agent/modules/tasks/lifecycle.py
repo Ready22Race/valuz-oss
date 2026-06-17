@@ -773,70 +773,69 @@ class LifecycleService:
                 unresolved = []
 
             # A turn can ERROR yet still leave session.status == "idle" — the
-            # failure lives in stop_reason (e.g. a skill-materialization crash
-            # reports stop_reason.type=="error" with status idle and 0 assistant
-            # output). So check the driver's final_status AND the session's
-            # stop_reason; never mark an errored turn "completed".
+            # failure lives in stop_reason (e.g. a skill-materialization crash,
+            # or an API transport error like ECONNRESET / a dropped socket that
+            # the SDK surfaces as ResultMessage(is_error=True) — both report
+            # stop_reason.type=="error" with status idle and ~0 assistant
+            # output). Always consult stop_reason (it carries the ``category``
+            # needed below) and fall back to final_status; never mark an errored
+            # turn "completed".
             error_msg: str | None = None
-            if final_status in ("terminated", "error"):
+            error_category: str | None = None
+            try:
+                sess = await kernel_client.get_session(require_current_user_id(), lead_session_id)
+                sr = getattr(sess, "stop_reason", None) if sess is not None else None
+                if sr:
+                    typ = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
+                    if typ == "error" or (isinstance(typ, str) and "error" in typ):
+                        msg = (
+                            sr.get("message")
+                            if isinstance(sr, dict)
+                            else getattr(sr, "message", None)
+                        )
+                        error_msg = str(msg or "lead turn errored")
+                        error_category = (
+                            sr.get("category")
+                            if isinstance(sr, dict)
+                            else getattr(sr, "category", None)
+                        )
+            except Exception:  # noqa: BLE001
+                logger.debug("auto-finalize: stop_reason check failed for %s", lead_session_id)
+            if error_msg is None and final_status in ("terminated", "error"):
+                # Driver flagged a failure with no stop_reason to read (e.g. a
+                # raised exception). Treat as a genuine failure (category stays
+                # None → not a user cancellation).
                 error_msg = f"lead turn ended with status={final_status}"
-            else:
-                try:
-                    sess = await kernel_client.get_session(
-                        require_current_user_id(), lead_session_id
-                    )
-                    sr = getattr(sess, "stop_reason", None) if sess is not None else None
-                    if sr:
-                        typ = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
-                        if typ == "error" or (isinstance(typ, str) and "error" in typ):
-                            msg = (
-                                sr.get("message")
-                                if isinstance(sr, dict)
-                                else getattr(sr, "message", None)
-                            )
-                            error_msg = str(msg or "lead turn errored")
-                except Exception:  # noqa: BLE001
-                    logger.debug("auto-finalize: stop_reason check failed for %s", lead_session_id)
-
-            if error_msg and not unresolved:
-                # Lead turn errored BEFORE producing any plan nodes — there's
-                # no in-flight or half-done work the ``blocked`` state would
-                # protect, so locking the task here forces an
-                # unnecessary ``resume_task`` ceremony for what is effectively
-                # still a fresh kickoff. Common trigger from a real bug
-                # report (2026-05-29): an automation-fired lead session
-                # entered Claude Agent SDK's ``EnterPlanMode`` + spawned a
-                # nested ``Agent`` subagent that hung; the SDK cancelled the
-                # turn ~3.5 minutes later (``stop_reason.type='error',
-                # category='user_interrupt', message='cancelled'``); plan was
-                # still empty. With the old logic this immediately blocked
-                # the task and the lead's next turn (driven by the user
-                # opening the conversation to ask "why didn't you plan?")
-                # hit ``plan is read-only`` on the very first plan_task call.
-                #
-                # New behaviour: keep task ``active`` so the next driver
-                # (user message → kernel send_message → fresh turn; OR the
-                # next automation fire → fresh lead session) picks it up
-                # cleanly. The turn error is still surfaced via logger so
-                # backend.log retains the audit trail; no ``task_blocked``
-                # event is emitted because the task isn't actually blocked
-                # (no work pending, status unchanged).
-                logger.warning(
-                    "auto-finalize: task %s lead turn errored with empty plan "
-                    "(%s) — staying active for next driver",
-                    task_id,
-                    error_msg,
-                )
-                return
 
             if error_msg:
-                # Lead turn errored out mid-task. Per task_state.py: task-level
-                # ``failed`` is intentionally not in the enum — this scenario
-                # maps to ``blocked`` (recoverable; the lead crashed but the
-                # plan is intact, user can resume by re-engaging chat or
-                # creating a new lead session). The ``reason`` payload tags
-                # this as a lead-turn-error to distinguish from the
-                # unresolved-subtasks-no-error blocked case below.
+                if error_category in ("user_interrupt", "interrupted") and not unresolved:
+                    # User/host-driven cancellation BEFORE any plan node exists —
+                    # there's no in-flight or half-done work to protect, so locking
+                    # the task forces an unnecessary ``resume_task`` ceremony for
+                    # what is effectively still a fresh kickoff. Real bug report
+                    # (2026-05-29): an automation-fired lead entered the Claude
+                    # Agent SDK's ``EnterPlanMode`` + a nested ``Agent`` that hung;
+                    # the SDK cancelled the turn ~3.5 min later
+                    # (``category='user_interrupt'``); plan still empty. Keep the
+                    # task ``active`` so the next driver (user message → fresh turn;
+                    # or the next automation fire) picks it up cleanly. Logged for
+                    # the audit trail; no ``task_blocked`` event (nothing pending).
+                    logger.warning(
+                        "auto-finalize: task %s lead turn cancelled with empty plan "
+                        "(%s) — staying active for next driver",
+                        task_id,
+                        error_msg,
+                    )
+                    return
+
+                # Genuine failure (API/network/exec error, or a raised exception),
+                # OR a cancellation that left pending work. Per task_state.py:
+                # task-level ``failed`` is intentionally not in the enum — this
+                # maps to ``blocked`` (recoverable; the plan is intact, the user
+                # resumes via the detail page's retry/继续 entry → resume_task
+                # rebuilds the lead). The ``reason`` payload tags this as a
+                # lead-turn-error to distinguish from the unresolved-subtasks
+                # blocked case below.
                 await task_ds.update_task_status(require_current_user_id(), task_id, "blocked")
                 await event_ds.append_event(
                     require_current_user_id(),
@@ -848,11 +847,15 @@ class LifecycleService:
                     payload={
                         "reason": "lead_turn_error",
                         "error": error_msg,
+                        "category": error_category,
                         "pending_subtasks": unresolved,
                     },
                 )
                 logger.warning(
-                    "auto-finalize: task %s -> blocked (lead turn error: %s)", task_id, error_msg
+                    "auto-finalize: task %s -> blocked (lead turn error: %s, category=%s)",
+                    task_id,
+                    error_msg,
+                    error_category,
                 )
                 return
             if unresolved:
@@ -976,10 +979,18 @@ class LifecycleService:
                 )
                 # Review model (VALUZ-TASK §6.1): the actor loop ending is NOT
                 # subtask completion — the lead decides that via review_subtask. We
-                # only surface a terminal *failure* (terminated/error) here, and
-                # mark the plan node failed so the lead/panel sees it. A clean loop
-                # exit (idle-TTL / finish_task shutdown) emits no completion event;
-                # the node's status was already set by review / _mark_in_review.
+                # only surface a terminal *failure* (terminated/error) here. The
+                # node goes to ``rework`` (NOT ``failed``): a member run dying —
+                # including an API/socket drop that Layer-1 stamps as an
+                # ``Error(api_error)`` and ``_resolve_turn_status`` elevates to
+                # ``terminated`` — is recoverable. ``rework`` is dispatchable by
+                # the gate (planned/rework) and is the bucket both a live lead and
+                # a resumed lead re-dispatch, matching ``reconcile()`` /
+                # ``stop_member``. ``failed`` would strand it (excluded from
+                # ready_keys + non-dispatchable), so a blocked→resume could never
+                # relaunch it. The error rides along as ``review_feedback`` so the
+                # retry brief explains why; the ``subtask_failed`` event below
+                # still records the failed attempt on the timeline.
                 if not ok:
                     key = run.subtask_key if run else None
                     if key:
@@ -990,7 +1001,14 @@ class LifecycleService:
                         if task_row is not None:
                             plan = TaskPlan.from_dict(task_row.plan)
                             if plan.get(key) is not None:
-                                plan.update_node(key, status="failed")
+                                plan.update_node(
+                                    key,
+                                    status="rework",
+                                    review_feedback=(
+                                        manifest.get("summary")
+                                        or "上次运行因错误中断,请重试。"
+                                    ),
+                                )
                                 task_row.plan = plan.to_dict()
                                 await task_ds.update_task(task_row)
                                 await planning.emit_plan_update(
