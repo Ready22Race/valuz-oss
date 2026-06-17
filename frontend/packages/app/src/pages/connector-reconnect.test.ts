@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ConnectorItem } from "@valuz/core";
-import { reconnectAction } from "./connector-reconnect";
+import { reauthorizePayload, shouldReauthorize } from "./connector-reconnect";
 
 function makeConnector(overrides: Partial<ConnectorItem> = {}): ConnectorItem {
   return {
@@ -30,13 +30,19 @@ function makeConnector(overrides: Partial<ConnectorItem> = {}): ConnectorItem {
   };
 }
 
-describe("reconnectAction", () => {
-  it("re-runs the authorization flow when the connector uses OAuth", () => {
-    const action = reconnectAction(makeConnector({ auth_type: "oauth" }));
+describe("shouldReauthorize", () => {
+  it("escalates a failed re-probe to re-authorization for OAuth connectors", () => {
+    expect(shouldReauthorize(makeConnector({ auth_type: "oauth" }))).toBe(true);
+  });
 
-    expect(action.kind).toBe("reauthorize");
-    if (action.kind !== "reauthorize") throw new Error("unreachable");
-    expect(action.payload).toEqual({
+  it("does not re-authorize a non-OAuth connector", () => {
+    expect(shouldReauthorize(makeConnector({ auth_type: "none" }))).toBe(false);
+  });
+});
+
+describe("reauthorizePayload", () => {
+  it("mirrors the field-less catalog connect payload", () => {
+    expect(reauthorizePayload(makeConnector({ auth_type: "oauth" }))).toEqual({
       slug: "valuz-search",
       display_name: "Valuz · Search",
       transport: "http",
@@ -47,18 +53,9 @@ describe("reconnectAction", () => {
     });
   });
 
-  it("re-probes in place for a non-OAuth connector", () => {
-    const action = reconnectAction(makeConnector({ auth_type: "none" }));
-
-    expect(action.kind).toBe("test");
-  });
-
   it("falls back to http transport when the connector has none recorded", () => {
-    const action = reconnectAction(
-      makeConnector({ auth_type: "oauth", transport: "" }),
+    expect(reauthorizePayload(makeConnector({ transport: "" })).transport).toBe(
+      "http",
     );
-
-    if (action.kind !== "reauthorize") throw new Error("unreachable");
-    expect(action.payload.transport).toBe("http");
   });
 });

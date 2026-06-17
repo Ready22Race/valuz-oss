@@ -27,8 +27,10 @@ and consumed at (4).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from typing import Protocol
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -392,4 +394,153 @@ class McpOauthHelper:
         return resource
 
 
-__all__ = ["OAuthDiscoverHelper", "McpOauthHelper", "OauthMetadata"]
+# ---------------------------------------------------------------------------
+# Token lifecycle helpers (refresh + expiry tracking)
+# ---------------------------------------------------------------------------
+#
+# The access token is persisted as ``OAuthToken`` JSON under
+# ``connector/{id}/oauth_token``. ``OAuthToken`` carries only a *relative*
+# ``expires_in`` (no issue time), so the absolute expiry is recorded separately
+# in a sidecar key ``connector/{id}/oauth_token_expires_at`` (epoch ms). Readers
+# that want to refresh proactively consult the sidecar; the token blob keeps its
+# original shape so existing readers stay byte-compatible.
+
+
+class SecretStore(Protocol):
+    """The slice of ``FileSecretStore`` these helpers touch (kept narrow so the
+    helpers stay unit-testable with a plain dict-backed fake)."""
+
+    def get(self, key: str) -> str | None: ...
+    def put(self, key: str, value: str) -> None: ...
+    def delete(self, key: str) -> None: ...
+
+
+def oauth_token_ref(connector_id: str) -> str:
+    return f"connector/{connector_id}/oauth_token"
+
+
+def oauth_token_expiry_ref(connector_id: str) -> str:
+    return f"connector/{connector_id}/oauth_token_expires_at"
+
+
+def persist_oauth_token(
+    connector_id: str, token: OAuthToken, secrets: SecretStore, now_ms: int
+) -> None:
+    """Write the token blob and refresh the absolute-expiry sidecar."""
+    secrets.put(oauth_token_ref(connector_id), token.model_dump_json())
+    if token.expires_in:
+        secrets.put(
+            oauth_token_expiry_ref(connector_id),
+            str(now_ms + int(token.expires_in) * 1000),
+        )
+    else:
+        try:
+            secrets.delete(oauth_token_expiry_ref(connector_id))
+        except Exception:
+            pass
+
+
+def oauth_token_is_expired(
+    connector_id: str, secrets: SecretStore, now_ms: int, *, skew_ms: int = 60_000
+) -> bool:
+    """True only when the sidecar proves the token is at/near expiry.
+
+    Unknown expiry (no sidecar — tokens stored before expiry tracking, or
+    servers that omit ``expires_in``) returns False: callers must not refresh on
+    a guess, they refresh reactively on a real 401 instead.
+    """
+    raw = secrets.get(oauth_token_expiry_ref(connector_id))
+    if not raw:
+        return False
+    try:
+        expires_at = int(raw)
+    except (TypeError, ValueError):
+        return False
+    return now_ms + skew_ms >= expires_at
+
+
+async def try_refresh_connector_token(
+    *,
+    connector_id: str,
+    server_url: str,
+    oauth_metadata_json: str | None,
+    oauth_client_info_json: str | None,
+    redirect_uri: str,
+    secrets: SecretStore,
+    now_ms: int,
+) -> str | None:
+    """Refresh an OAuth connector's access token using its stored refresh token.
+
+    Returns the new access token (and persists the new token + expiry sidecar)
+    on success, or None when refresh is impossible (no stored token / no refresh
+    token / missing metadata) or the refresh request fails. Never raises — the
+    caller falls back to full re-authorization.
+    """
+    token_json = secrets.get(oauth_token_ref(connector_id))
+    if not token_json:
+        return None
+    try:
+        current = OAuthToken.model_validate_json(token_json)
+    except ValidationError:
+        return None
+    if not current.refresh_token or not oauth_metadata_json:
+        return None
+    try:
+        meta = OauthMetadata.model_validate_json(oauth_metadata_json)
+    except ValidationError:
+        return None
+
+    client_id: str | None = None
+    client_secret: str | None = None
+    if oauth_client_info_json:
+        try:
+            info = json.loads(oauth_client_info_json)
+            client_id = info.get("client_id")
+            client_secret = info.get("client_secret")
+        except (ValueError, AttributeError):
+            pass
+
+    client_meta = OAuthClientMetadata(
+        client_name="Valuz",
+        redirect_uris=[redirect_uri],  # type: ignore[list-item]
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        token_endpoint_auth_method="none",
+    )
+    helper = McpOauthHelper(
+        server_url=server_url,
+        client_metadata=client_meta,
+        token_endpoint=meta.token_endpoint,
+        authorization_endpoint=meta.authorization_endpoint,
+        resource=meta.resource,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    try:
+        new_token = await helper.refresh_access_token(current.refresh_token)
+    except Exception as exc:  # noqa: BLE001 — refresh is best-effort
+        logger.info("connector %s oauth token refresh failed: %s", connector_id, exc)
+        return None
+    finally:
+        await helper.close()
+
+    # Non-rotating servers omit refresh_token on the refresh response — keep the
+    # existing one so the next refresh still works.
+    if not new_token.refresh_token:
+        new_token.refresh_token = current.refresh_token
+
+    persist_oauth_token(connector_id, new_token, secrets, now_ms)
+    return new_token.access_token
+
+
+__all__ = [
+    "OAuthDiscoverHelper",
+    "McpOauthHelper",
+    "OauthMetadata",
+    "SecretStore",
+    "oauth_token_ref",
+    "oauth_token_expiry_ref",
+    "persist_oauth_token",
+    "oauth_token_is_expired",
+    "try_refresh_connector_token",
+]

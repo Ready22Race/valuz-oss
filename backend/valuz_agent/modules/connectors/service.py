@@ -467,6 +467,7 @@ class ConnectorService:
                 pass
         try:
             self._secrets.delete(f"connector/{connector_id}/oauth_token")
+            self._secrets.delete(f"connector/{connector_id}/oauth_token_expires_at")
         except Exception:
             pass
         return await self._ds.delete(user_id, connector_id)
