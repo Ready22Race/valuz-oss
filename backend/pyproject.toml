@@ -157,6 +157,8 @@ dev = [
 # preflight reports it missing and the host falls back to in-process.
 ags = [
     "e2b>=1.0",
+    # S3-compatible client for the COS-backed sandbox workspace (object_store_s3).
+    "boto3>=1.34",
 ]
 
 [tool.uv]
@@ -238,6 +240,12 @@ ignore_missing_imports = true
 # AGS cloud sandbox driver is used. Suppress its missing-import error so the
 # default (no-extra) type check passes; the driver imports it lazily.
 module = ["e2b", "e2b.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# ``boto3`` / ``botocore`` — optional (extra ``ags``), S3 client for the
+# COS-backed sandbox workspace (object_store_s3). Imported lazily.
+module = ["boto3", "boto3.*", "botocore", "botocore.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -71,6 +71,19 @@ class Settings(BaseSettings):
     # thread the e2b traffic token (not wired here).
     ags_secure: bool = False
 
+    # ── COS (object store backing the cloud sandbox workspace, ⑤) ─────
+    # Tencent COS is S3-compatible; the host writes the project here under a
+    # per-project prefix and AGS mounts the bucket so the kernel sees it as
+    # ``/workspace``. Secrets belong in ``.env`` (git-ignored) / the secret
+    # store, never in code — production should prefer a CAM role / STS over a
+    # long-lived SecretId/SecretKey. ``cos_endpoint`` defaults to the regional
+    # COS S3 endpoint when unset.
+    cos_bucket: str | None = None
+    cos_region: str = "ap-beijing"
+    cos_secret_id: str | None = None
+    cos_secret_key: str | None = None
+    cos_endpoint: str | None = None
+
     @property
     def is_http_kernel(self) -> bool:
         """True when the kernel runs as a SEPARATE process (subprocess /
