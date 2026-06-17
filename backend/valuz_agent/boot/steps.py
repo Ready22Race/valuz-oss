@@ -172,6 +172,32 @@ async def configure_i18n() -> None:
         set_locale(await get_default_locale(db))
 
 
+async def apply_persisted_kernel_endpoint() -> None:
+    """Apply a user-configured remote kernel endpoint (the "configure sandbox
+    address" feature) before the kernel client binds.
+
+    Runs after the schema + owner context exist and BEFORE ``init_kernel`` so
+    the http transport is selected before the in-process kernel singletons
+    (which ``init_kernel`` skips in http mode) would be created. An explicit
+    env / provisioned-sandbox http mode wins — this only acts when the host
+    would otherwise run in-process. See ``modules/settings/kernel_endpoint``.
+    """
+    if settings.is_http_kernel:
+        return  # explicit env / provisioned sandbox already selected http
+    from valuz_agent.adapters import kernel_client
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.settings.kernel_endpoint import apply_persisted_endpoint
+
+    try:
+        async with async_unit_of_work(commit=False) as db:
+            applied = await apply_persisted_endpoint(db)
+    except Exception:  # noqa: BLE001 — never block boot on settings read
+        logger.warning("failed to read persisted kernel endpoint", exc_info=True)
+        return
+    if applied:
+        kernel_client.rebind_client()
+
+
 async def init_kernel(app: FastAPI) -> None:
     # In-process kernel singletons (store + orchestrator) are NOT created
     # in http mode — the kernel runs as a separate process and the host
