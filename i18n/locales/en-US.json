@@ -1513,7 +1513,7 @@
     "fileStructure": "File structure",
     "generatedSkills": "Generated skills",
     "groupAgents": "Agents",
-    "groupClaude": ".claude",
+    "groupClaude": "Claude",
     "groupCodex": "Codex",
     "groupOfficial": "Built-in",
     "importFailed": "Import failed: {error}",
