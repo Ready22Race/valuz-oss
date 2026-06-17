@@ -731,9 +731,22 @@ WorkspaceHandle(本地) + L1 凭证 ≈「修 B2–B5 + 写一个 Seatbelt 驱�
 **启动**（env 开关,默认不变）：
 
 ```bash
-VALUZ_SANDBOX_DRIVER=seatbelt make dev     # 或 ./scripts/dev.sh
-make dev-sandbox                            # 等价便捷目标
+make dev-sandbox                            # 本地 Seatbelt 沙箱(= scripts/dev.sh --seatbelt)
+make dev-sandbox DRIVER=ags                 # 远程 AGS 云沙箱
+make dev-ags                                # 等价便捷目标(= scripts/dev.sh --ags)
+make dev-ags TARGET=backend                 # 只起后端(调试远程内核)
+
+# 脚本直呼(flag 形态;flag 与 target 顺序随意):
+./scripts/dev.sh --seatbelt
+./scripts/dev.sh --ags backend
 ```
+
+`--ags` 比 `--seatbelt` 多两步:① `source backend/.env`(pydantic `Settings`
+无 `env_file`,`VALUZ_AGS_*` / `VALUZ_COS_*` 必须进程内可见);② `uv sync
+--extra ags`(e2b SDK)。AGS 在 serving 前**同步** provision 云沙箱,故就绪等待
+放宽到 150s;云沙箱**常驻**(无 auto-timeout),Ctrl+C 时 dev.sh best-effort
+杀掉本次启动的那一个(从 backend.log 解析 sandbox id),被 `kill -9` 时需到
+AGS 控制台清理。这是 UI 驱动配置(Settings → 内核)之外的 env 驱动等价入口。
 
 env 经 make → dev.sh → `python -m valuz_agent` → `_provision_sandboxed_kernel`
 一路透传:host 在 `create_app` 前 provision 一个 Seatbelt 受限 kernel,切

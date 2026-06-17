@@ -1,4 +1,4 @@
-.PHONY: dev test typecheck lint seed help
+.PHONY: dev dev-sandbox dev-ags test typecheck lint seed help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -15,8 +15,11 @@ help: ## Show this help
 dev: ## Start backend + frontend (foreground; Ctrl+C stops both)
 	bash scripts/dev.sh $(or $(TARGET),all)
 
-dev-sandbox: ## Like dev, but run the kernel in a Seatbelt sandbox (macOS)
-	VALUZ_SANDBOX_DRIVER=seatbelt bash scripts/dev.sh $(or $(TARGET),all)
+dev-sandbox: ## Like dev, kernel in a sandbox (DRIVER=seatbelt|ags, default seatbelt; TARGET=all|backend|frontend)
+	bash scripts/dev.sh --$(or $(DRIVER),seatbelt) $(or $(TARGET),all)
+
+dev-ags: ## Like dev, kernel in a remote AGS cloud sandbox (needs backend/.env; TARGET=all|backend|frontend)
+	bash scripts/dev.sh --ags $(or $(TARGET),all)
 
 seed: ## Load seed data into database
 	cd backend && uv run python -m scripts.seed
