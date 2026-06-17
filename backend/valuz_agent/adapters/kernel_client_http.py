@@ -147,6 +147,17 @@ class HttpKernelClient:
             kernel_cwd = await sandbox_runtime.ensure_workspace_granted(req.cwd)
             if kernel_cwd != req.cwd:
                 req = req.model_copy(update={"cwd": kernel_cwd})
+
+        # Skills are host-absolute source dirs. A kernel that doesn't share the
+        # host FS (cloud sandbox) can't materialize them — strip them at this
+        # single chokepoint so EVERY session-create path (chat / project / task)
+        # is covered, regardless of which resolver injected them. Cloud skills
+        # (materialized from the COS /workspace mount) are a follow-up.
+        from valuz_agent.infra.config import settings
+
+        if not settings.kernel_shares_host_fs and req.skills:
+            req = req.model_copy(update={"skills": []})
+
         result = await self._request(
             "POST", "/api/v1/sessions", json_body=req.model_dump(mode="json"), owner=user_id
         )
@@ -200,6 +211,13 @@ class HttpKernelClient:
     async def update_session(
         self, user_id: str, session_id: str, req: UpdateSessionRequest
     ) -> SessionData:
+        # Same host-FS guard as create_session: a cloud kernel can't materialize
+        # host-absolute skill dirs, so strip them from any mutation too (the docs
+        # capability refresh re-installs valuz-project-docs on every turn).
+        from valuz_agent.infra.config import settings
+
+        if not settings.kernel_shares_host_fs and req.skills:
+            req = req.model_copy(update={"skills": []})
         result = await self._request(
             "PATCH",
             f"/api/v1/sessions/{session_id}",

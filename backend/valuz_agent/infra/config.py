@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     kernel_mode: str = "inprocess"
     kernel_url: str = "http://127.0.0.1:8400"
     kernel_token: str | None = None
+    # Whether the kernel shares the host filesystem. True for in-process and the
+    # local Seatbelt sandbox (which mounts the host's project/skill roots); a
+    # cloud driver (AGS) sets it False — its FS is separate, so host-absolute
+    # paths (skill source dirs) must NOT be sent to it. Runtime-only (not an env
+    # knob); the provisioning driver flips it.
+    kernel_shares_host_fs: bool = True
 
     # ── AGS / e2b cloud sandbox driver (VALUZ_SANDBOX_DRIVER=ags) ──────
     # Provisions the kernel image (see docker/kernel.Dockerfile, published to

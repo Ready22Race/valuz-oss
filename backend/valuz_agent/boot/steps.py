@@ -253,6 +253,9 @@ async def _provision_sandbox_at_boot(driver_name: str) -> None:
     settings.kernel_mode = "http"
     settings.kernel_url = result.endpoint.base_url
     settings.kernel_token = result.endpoint.token
+    # A cloud kernel doesn't share the host FS — the seam strips host-only
+    # payloads (skill source dirs) for it.
+    settings.kernel_shares_host_fs = getattr(driver, "shares_host_fs", True)
     os.environ["VALUZ_KERNEL_MODE"] = "http"
     os.environ["VALUZ_KERNEL_URL"] = result.endpoint.base_url
     os.environ["VALUZ_KERNEL_TOKEN"] = result.endpoint.token

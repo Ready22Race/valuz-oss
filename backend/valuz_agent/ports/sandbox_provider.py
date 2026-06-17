@@ -225,6 +225,15 @@ class SandboxDriver(Protocol):
 
     name: str
 
+    # Whether the kernel this driver provisions shares the host filesystem.
+    # ``True`` for in-host drivers (e.g. seatbelt) where host-absolute paths
+    # (skill source dirs, project cwd) are reachable; ``False`` for cloud
+    # drivers (AGS) whose FS is separate. Read at boot into
+    # ``settings.kernel_shares_host_fs`` so the kernel seam can strip
+    # host-only payloads. Defaults to ``True`` for overlay drivers that
+    # don't declare it.
+    shares_host_fs: bool = True
+
     def preflight(self) -> list[str]:
         """Reasons this host can't run the driver (empty = OK). Called BEFORE
         provisioning so an unsupported host (wrong OS / macOS version / missing

@@ -351,6 +351,9 @@ class AgsSandboxDriver:
     """The registrable ``ags`` driver — boot wiring around ``AgsSandboxProvider``."""
 
     name = "ags"
+    # Cloud FS is separate from the host's — host-absolute paths (skill source
+    # dirs, project cwd) aren't reachable, so the kernel seam strips them.
+    shares_host_fs = False
 
     def preflight(self) -> list[str]:
         return ags_preflight()

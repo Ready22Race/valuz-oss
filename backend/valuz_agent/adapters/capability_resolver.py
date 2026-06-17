@@ -267,6 +267,22 @@ async def resolve_session_capabilities(
     if warnings:
         logger.warning("Skill resolution warnings: %s", warnings)
 
+    # A kernel that does NOT share the host filesystem (cloud sandbox, e.g. AGS)
+    # can't materialize these host-absolute skill source dirs — sending them
+    # makes the runtime fail with "Skill source path not found". Drop them; the
+    # local Seatbelt sandbox shares the FS (mounts the skill roots) so it keeps
+    # them. Cloud skills, materialized from the COS /workspace mount, are a
+    # follow-up.
+    from valuz_agent.infra.config import settings as _cfg
+
+    if not _cfg.kernel_shares_host_fs and skill_paths:
+        logger.warning(
+            "remote kernel does not share the host FS — skipping %d host-path "
+            "skills (cloud COS-mounted skills not wired yet)",
+            len(skill_paths),
+        )
+        skill_paths = []
+
     return ResolvedCapabilities(
         skills=tuple(skill_paths),
         mcp_servers=tuple(mcp_configs_list),
