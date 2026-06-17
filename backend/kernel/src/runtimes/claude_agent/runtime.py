@@ -2133,8 +2133,23 @@ class ClaudeAgentRuntime:
                 )
             else:
                 match message.subtype:
+                    # ``subtype`` alone is NOT authoritative: the CLI returns
+                    # ``subtype="success"`` with ``is_error=True`` when an API
+                    # call failed after it exhausted its own retries (transient
+                    # 429/500/529, connection drop). So branch on ``is_error``
+                    # inside the success case — only a clean success is a real
+                    # EndTurn; a flagged one is a swallowed API/network failure
+                    # (``api_error_status`` holds the HTTP code, ``errors`` the
+                    # detail) and must surface as an error, not a silent EndTurn.
                     case "success":
-                        session.stop_reason = EndTurn()
+                        if message.is_error:
+                            session.stop_reason = Error(
+                                category="api_error",
+                                retry_status="exhausted",
+                                message=_result_error_message(message),
+                            )
+                        else:
+                            session.stop_reason = EndTurn()
                     case "error_max_turns":
                         session.stop_reason = BudgetExhausted(reason="max_turns")
                     case "error_max_budget_usd":
@@ -2143,13 +2158,13 @@ class ClaudeAgentRuntime:
                         session.stop_reason = Error(
                             category="execution_error",
                             retry_status="exhausted",
-                            message=message.result or "",
+                            message=_result_error_message(message),
                         )
                     case _:
                         session.stop_reason = Error(
                             category=message.subtype,
                             retry_status="exhausted",
-                            message=message.result or "",
+                            message=_result_error_message(message),
                         )
 
             usage_payload = _build_usage_payload(self.model, message)
@@ -2165,6 +2180,38 @@ class ClaudeAgentRuntime:
                     },
                 )
             )
+
+
+def _result_error_message(message: Any) -> str:
+    """Compose a human-readable error string from a failing ``ResultMessage``.
+
+    Several fields carry diagnostic detail when the conversation ends on an
+    error (per the SDK ``ResultMessage`` docs), and no single one is always
+    populated, so we combine the most specific available:
+
+    - ``api_error_status`` — HTTP status (e.g. 429/500/529) of the failing API
+      call when the CLI surfaced a transient failure as ``subtype="success"``;
+    - ``errors`` — a list of error strings the CLI collected;
+    - ``result`` — the model-facing result text;
+    - ``stop_reason`` — the SDK's own stop-reason string (last-resort hint).
+
+    Falls back to a generic line so the message is never empty.
+    """
+    parts: list[str] = []
+    status = getattr(message, "api_error_status", None)
+    if status is not None:
+        parts.append(f"API error (HTTP {status})")
+    errors = getattr(message, "errors", None)
+    if errors:
+        parts.append("; ".join(str(e) for e in errors))
+    result = getattr(message, "result", None)
+    if result:
+        parts.append(str(result))
+    if not parts:
+        sdk_stop = getattr(message, "stop_reason", None)
+        if sdk_stop:
+            parts.append(f"stop_reason={sdk_stop}")
+    return " — ".join(parts) if parts else "agent ended on an error"
 
 
 def _stop_reason_to_dict(reason: Any) -> dict[str, Any]:
