@@ -7,9 +7,9 @@ this module lets a user configure it **once, persisted** (app settings +
 secret store), and have the host provision the AGS kernel from that config at
 the next (re)start — no env, no scripts.
 
-Layout mirrors ``kernel_endpoint`` (its sibling): non-secret fields live in the
-``valuz_app_setting`` K-V table; the three secrets (AGS API key, COS SecretId /
-SecretKey) live in the OS secret store, never the DB. ``apply_to_settings``
+Layout: non-secret fields live in the ``valuz_app_setting`` K-V table; the
+secrets (AGS API key + kernel token, COS SecretId / SecretKey) live in the OS
+secret store, never the DB. ``apply_to_settings``
 copies the persisted config onto the ``settings`` singleton at boot so the
 existing driver + provision path runs unchanged; an explicit env always wins.
 """
@@ -190,16 +190,41 @@ async def apply_to_settings(db: AsyncSession) -> str | None:
     settings.ags_domain = cfg.ags_domain or None
     settings.ags_kernel_template = cfg.ags_template
     settings.ags_mount_path = cfg.ags_mount_path
-    # Prefer the sandbox panel's own token; fall back to the Gateway panel's
-    # endpoint token, then whatever env/default is already on settings.
-    settings.ags_kernel_token = (
-        store.get(REF_AGS_KERNEL_TOKEN)
-        or store.get("kernel/endpoint-token")
-        or settings.ags_kernel_token
-    )
+    # The sandbox panel's own token, else whatever env/default is on settings.
+    settings.ags_kernel_token = store.get(REF_AGS_KERNEL_TOKEN) or settings.ags_kernel_token
     settings.cos_bucket = cfg.cos_bucket
     settings.cos_region = cfg.cos_region
     settings.cos_endpoint = cfg.cos_endpoint or None
     settings.cos_secret_id = store.get(REF_COS_SECRET_ID)
     settings.cos_secret_key = store.get(REF_COS_SECRET_KEY)
     return "ags"
+
+
+async def apply_cos_to_settings(db: AsyncSession) -> bool:
+    """Copy the persisted COS config (bucket / region / endpoint + secrets) onto
+    the ``settings`` singleton, unconditionally.
+
+    Unlike ``apply_to_settings`` (which is the BOOT driver-selection path and
+    defers to an explicit ``VALUZ_SANDBOX_DRIVER`` env), this is for the
+    **sync-workspace action**: the user configured COS in the UI and clicked
+    sync, so their persisted config must reach ``cos_object_store()`` regardless
+    of how the kernel driver was selected (env-launched ``make dev-ags`` or
+    pure-UI ``make dev``). Persisted values fill in; anything the UI left blank
+    keeps whatever env already set. Returns True once bucket + both secrets are
+    present.
+    """
+    from valuz_agent.infra.config import settings
+
+    cfg = await get_sandbox_config(db)
+    store = _secret_store()
+    if cfg.cos_bucket:
+        settings.cos_bucket = cfg.cos_bucket
+    if cfg.cos_region:
+        settings.cos_region = cfg.cos_region
+    if cfg.cos_endpoint:
+        settings.cos_endpoint = cfg.cos_endpoint
+    if (sid := store.get(REF_COS_SECRET_ID)) is not None:
+        settings.cos_secret_id = sid
+    if (sk := store.get(REF_COS_SECRET_KEY)) is not None:
+        settings.cos_secret_key = sk
+    return bool(settings.cos_bucket and settings.cos_secret_id and settings.cos_secret_key)

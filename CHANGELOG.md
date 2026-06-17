@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-17
+
+### Features
+
+- Settings: server-resolved model options with dumb-render model pickers. (#188 @homeant)
+
+### Fixed
+
+- Tasks: mark API-errored sessions failed/recoverable instead of completed;
+  anchor the live task card to the lead session's task id. (#183, #184 @Ready22Race)
+- Onboarding: seed the Valuz helper on skip so the workspace is never empty. (#189 @zhourongyu)
+- Model picker: restore display names for subscription / built-in models. (#190 @homeant)
+- Updater toast is draggable and shows download progress instantly. (#191 @St0neWan9)
+- Desktop: align the splash window controls with the TopBar on Linux/Windows. (#187 @hanjixin)
+- Build: ship a full hicolor icon set for the Linux deb. (#186 @hanjixin)
+
+### Docs & Chore
+
+- CI: update the macOS runner version in the release workflow (fixes the x86_64
+  build). (#185 @hanjixin)
+
 ## [0.2.0] - 2026-06-17
 
 ### Features
@@ -257,6 +278,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename the single-writer lock file, drop a dead helper, and correct the rationale. (#29 @Ready22Race)
 - CI: Node.js 25 with dependency caching. (#14 @hanjixin)
 
+[0.2.1]: https://github.com/valuz-ai/valuz-oss/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.7...v0.2.0
 [0.1.7]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.5...v0.1.6

@@ -16,13 +16,6 @@ export const personalSettingsSections: SettingsSectionModule[] = [
     edition: "personal",
   },
   {
-    id: "gateway",
-    label: "settings.tab.gateway.label",
-    description: "settings.tab.gateway.desc",
-    icon: "radio",
-    edition: "personal",
-  },
-  {
     id: "sandbox",
     label: "settings.tab.sandbox.label",
     description: "settings.tab.sandbox.desc",

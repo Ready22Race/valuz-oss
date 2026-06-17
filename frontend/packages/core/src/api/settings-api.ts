@@ -76,44 +76,6 @@ export interface PreferencesPatchPayload {
 }
 
 /**
- * Kernel endpoint ("configure sandbox address") — where the agent kernel
- * runs. ``inprocess`` (default) runs it in the host; ``http`` drives a kernel
- * on a SEPARATE host (a cloud sandbox, e.g. Tencent AGS) over HTTP. NB this is
- * the host→kernel link, distinct from a desktop-shell→backend "gateway".
- */
-export interface KernelEndpointConfig {
-  mode: "inprocess" | "http";
-  url: string;
-  /** Address a remote kernel uses to call back into the host (④ tool
-   *  callback). ``null`` when unset; a loopback value can't be reached by a
-   *  remote kernel — surfaced by the Test probe. */
-  host_external_url: string | null;
-  /** Whether a bearer token is stored. The token itself is never returned. */
-  token_present: boolean;
-}
-
-export interface KernelEndpointPatch {
-  mode?: "inprocess" | "http";
-  url?: string;
-  host_external_url?: string;
-  /** Omit to keep the stored token; set to write a new one. */
-  token?: string;
-  /** Remove the stored token. */
-  clear_token?: boolean;
-}
-
-export interface KernelEndpointTestResult {
-  kernel_reachable: boolean;
-  auth_ok: boolean;
-  kernel_status: number | null;
-  /** ④ callback direction (static): a remote kernel can't reach a loopback
-   *  host. ``unset`` | ``loopback`` | ``ok``. */
-  callback_hint: "unset" | "loopback" | "ok";
-  ok: boolean;
-  detail: string;
-}
-
-/**
  * GET /v1/settings/sandbox — the persisted sandbox-DRIVER config (where the
  * kernel runs: in-process or a remote AGS cloud sandbox). Secrets are never
  * returned — only presence flags. Applied at the next (re)start.
@@ -209,35 +171,6 @@ export interface ModelOptionsResponse {
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const settingsApi = {
-  getKernelEndpoint(): Promise<KernelEndpointConfig> {
-    return fetchJson<KernelEndpointConfig>("/v1/settings/kernel-endpoint");
-  },
-
-  patchKernelEndpoint(
-    payload: KernelEndpointPatch,
-  ): Promise<KernelEndpointConfig> {
-    return fetchJson<KernelEndpointConfig>("/v1/settings/kernel-endpoint", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-  },
-
-  testKernelEndpoint(payload: {
-    url?: string;
-    token?: string;
-    host_external_url?: string;
-  }): Promise<KernelEndpointTestResult> {
-    return fetchJson<KernelEndpointTestResult>(
-      "/v1/settings/kernel-endpoint/test",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      },
-    );
-  },
-
   getSandbox(): Promise<SandboxConfig> {
     return fetchJson<SandboxConfig>("/v1/settings/sandbox");
   },
