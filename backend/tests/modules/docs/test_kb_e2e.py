@@ -334,6 +334,44 @@ class TestRescan:
         filenames = {d.filename for d in docs}
         assert "new_file.txt" in filenames
 
+    async def test_should_survive_lock_retry_rollback_during_rescan(
+        self,
+        svc,
+        tmp_kb_root,
+        monkeypatch,
+    ):
+        """Regression: under SQLite write contention ``create_import_task``'s
+        lock-retry rolls the session back, and a rollback expires every ORM
+        instance in it — including the kb ``rescan_kb`` loaded moments earlier.
+        Reading ``kb.id`` at the top of ``_run_rescan`` then fired an implicit
+        sync lazy-load on the AsyncSession and raised ``MissingGreenlet``.
+        ``rescan_kb`` must re-fetch the kb after the task-creating commit."""
+        kb = await _create_kb_and_settle(svc, name="LockRetry", root_path=str(tmp_kb_root))
+
+        orig = svc._ds.create_import_task
+        injected = {"done": False}
+
+        async def _rollback_then_create(user_id, row):
+            # Reproduce one lock-retry inside async_commit_with_retry: a
+            # rollback (which expires every persistent instance in the
+            # session) before the insert finally commits. One-shot so the
+            # inner reindex-task creation runs unperturbed.
+            if not injected["done"]:
+                injected["done"] = True
+                await svc._ds._db.rollback()
+            return await orig(user_id, row)
+
+        monkeypatch.setattr(svc._ds, "create_import_task", _rollback_then_create)
+
+        (tmp_kb_root / "extra.txt").write_text("x", encoding="utf-8")
+        # Must not raise MissingGreenlet.
+        await svc.rescan_kb(kb.id)
+        await _drain(svc)
+
+        assert injected["done"]
+        filenames = {d.filename for d in await svc.list_documents(kb_id=kb.id)}
+        assert "extra.txt" in filenames
+
     async def test_should_mark_missing_when_file_deleted(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="Missing", root_path=str(tmp_kb_root))
 
