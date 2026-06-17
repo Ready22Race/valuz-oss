@@ -92,9 +92,13 @@ Operational recipes:
   `gh release edit vX.Y.Z --notes-file <notes> --title "Valuz X.Y.Z"`.
 
 Runner quirks:
-- `macos-13` (the mac-x64 runner) is scarce and often sits `queued` for a long time,
-  stalling the whole push-triggered run. The other three platforms upload independently —
-  cancel the stuck run once they're done.
+- The mac-x64 job runs on `macos-15-intel` (arm64 on `macos-14`); see the
+  `runs-on:` labels in `release-desktop.yml`. If a runner is slow to pick up, the
+  other three platforms upload independently — cancel a stuck run once they're done.
+- Two `workflow_dispatch` runs on the same `--ref` share the
+  `release-desktop-${{ github.ref }}` concurrency group (`cancel-in-progress: true`),
+  so they cancel each other. To rebuild two platforms from `main`, either dispatch
+  `platform=all` once, or run them sequentially (wait for the first to finish).
 - Browser-verify any UI change before it goes into a release build.
 
 ## Verification
