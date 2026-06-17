@@ -207,13 +207,12 @@ async def _provision_sandbox_at_boot(driver_name: str) -> None:
     env-driven path) but reads the driver from settings the persisted config
     just populated, and runs inside the async lifespan. Degrades to in-process
     on any failure — never blocks boot."""
-    import asyncio
-    import atexit
     import os
 
-    from valuz_agent.adapters import kernel_client
-    from valuz_agent.integrations import sandbox_registry, sandbox_runtime
-    from valuz_agent.ports.sandbox_provider import SandboxBootContext
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.integrations import sandbox_registry
+    from valuz_agent.modules.settings import sandbox_config as sbx
+    from valuz_agent.ports.sandbox_provider import SandboxBootContext, SandboxEndpoint
 
     driver = sandbox_registry.get(driver_name)
     if driver is None:
@@ -238,31 +237,101 @@ async def _provision_sandbox_at_boot(driver_name: str) -> None:
             if (v := os.environ.get(k)) is not None
         },
     )
+
+    # ── 1. Reuse a still-alive sandbox from a previous run ──────────────
+    # A cloud sandbox is 常驻; provisioning a fresh one every restart wastes
+    # quota and re-syncs needlessly. Reattach when the remembered endpoint is
+    # healthy AND the config that made it is unchanged.
+    fingerprint = sbx.sandbox_fingerprint()
+    remembered: tuple[str, str] | None = None
+    try:
+        async with async_unit_of_work(commit=False) as db:
+            remembered = await sbx.recall_active_sandbox(db)
+    except Exception:  # noqa: BLE001 — memo is best-effort
+        logger.warning("failed to read remembered sandbox", exc_info=True)
+    if remembered:
+        old_url, old_fp = remembered
+        if old_fp == fingerprint and await _sandbox_alive(old_url):
+            endpoint = SandboxEndpoint(
+                sandbox_id="host-kernel",
+                base_url=old_url,
+                token=settings.ags_kernel_token or "",
+            )
+            _wire_kernel_endpoint(driver, driver.attach(ctx, endpoint))
+            logger.warning("reusing healthy %s sandbox at %s", driver_name, old_url)
+            return
+        # Stale (config changed) or dead — kill the orphan, then re-provision.
+        logger.info("remembered sandbox stale/unhealthy — replacing it")
+        await _kill_sandbox_quietly(driver, ctx, old_url, settings.ags_kernel_token or "")
+
+    # ── 2. Provision a fresh sandbox ───────────────────────────────────
     try:
         result = await driver.provision_for_boot(ctx)
     except Exception:  # noqa: BLE001 — degrade, don't block boot
         logger.warning("%s provision failed — running in-process", driver_name, exc_info=True)
         return
-
-    settings.kernel_mode = "http"
-    settings.kernel_url = result.endpoint.base_url
-    settings.kernel_token = result.endpoint.token
-    # A cloud kernel doesn't share the host FS — the seam strips host-only
-    # payloads (skill source dirs) for it.
-    settings.kernel_shares_host_fs = getattr(driver, "shares_host_fs", True)
-    os.environ["VALUZ_KERNEL_MODE"] = "http"
-    os.environ["VALUZ_KERNEL_URL"] = result.endpoint.base_url
-    os.environ["VALUZ_KERNEL_TOKEN"] = result.endpoint.token
-    kernel_client.rebind_client()
-    sandbox_runtime.activate(result.provider, "host-kernel", result.static_roots)
-    atexit.register(lambda: asyncio.run(result.provider.destroy("host-kernel")))
-    # Cloud kernel: pre-sync the skill roots to COS so sessions can materialize
-    # them under the mount (cwds are staged per-session). Best-effort.
+    _wire_kernel_endpoint(driver, result)
+    try:
+        async with async_unit_of_work() as db:
+            await sbx.remember_active_sandbox(db, result.endpoint.base_url, fingerprint)
+    except Exception:  # noqa: BLE001 — memo is best-effort
+        logger.warning("failed to remember sandbox endpoint", exc_info=True)
+    # Fresh sandbox: pre-sync the skill roots to COS so sessions can materialize
+    # them under the mount (a reattach skips this — they are already synced;
+    # use the panel's "Sync workspace" button to refresh). Best-effort.
     if not settings.kernel_shares_host_fs:
         from valuz_agent.integrations.cos_sync import sync_skills_best_effort
 
         await sync_skills_best_effort()
     logger.warning("kernel running in %s sandbox at %s", driver_name, result.endpoint.base_url)
+
+
+def _wire_kernel_endpoint(driver: object, result: object) -> None:
+    """Point the host at a provisioned/reattached kernel (http mode). No atexit
+    teardown — the cloud sandbox is 常驻 and reattached on the next boot."""
+    import os
+
+    from valuz_agent.adapters import kernel_client
+    from valuz_agent.integrations import sandbox_runtime
+
+    ep = result.endpoint  # type: ignore[attr-defined]
+    settings.kernel_mode = "http"
+    settings.kernel_url = ep.base_url
+    settings.kernel_token = ep.token
+    # A cloud kernel doesn't share the host FS — the seam strips host-only
+    # payloads (skill source dirs) for it.
+    settings.kernel_shares_host_fs = getattr(driver, "shares_host_fs", True)
+    os.environ["VALUZ_KERNEL_MODE"] = "http"
+    os.environ["VALUZ_KERNEL_URL"] = ep.base_url
+    os.environ["VALUZ_KERNEL_TOKEN"] = ep.token
+    kernel_client.rebind_client()
+    sandbox_runtime.activate(result.provider, "host-kernel", result.static_roots)  # type: ignore[attr-defined]
+
+
+async def _sandbox_alive(base_url: str) -> bool:
+    """True iff the kernel answers an unauthenticated ``/health`` at ``base_url``."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as c:
+            r = await c.get(f"{base_url}/health")
+        return r.status_code == 200
+    except Exception:  # noqa: BLE001 — unreachable == not alive
+        return False
+
+
+async def _kill_sandbox_quietly(driver: object, ctx: object, base_url: str, token: str) -> None:
+    """Best-effort teardown of an orphaned remembered sandbox (config changed /
+    it died). Never raises — a failure just leaves the 常驻 sandbox for the
+    operator to reap via the AGS console."""
+    from valuz_agent.ports.sandbox_provider import SandboxEndpoint
+
+    try:
+        ep = SandboxEndpoint(sandbox_id="host-kernel", base_url=base_url, token=token)
+        result = driver.attach(ctx, ep)  # type: ignore[attr-defined]
+        await result.provider.destroy("host-kernel")
+    except Exception:  # noqa: BLE001
+        logger.warning("could not tear down stale sandbox %s", base_url, exc_info=True)
 
 
 async def init_kernel(app: FastAPI) -> None:
