@@ -74,7 +74,15 @@ linux:
   target:
     - AppImage
     - deb
-  icon: build/iconRounded.png
+  # A directory of pre-sized PNGs, not a single file. electron-builder does
+  # NOT auto-resize a single PNG source for Linux (it only auto-generates
+  # from an SVG). With `icon: build/iconRounded.png` the deb shipped just
+  # /usr/share/icons/hicolor/1024x1024/apps/<name>.png — GNOME/KDE/XFCE
+  # couldn't find the smaller sizes they actually look up (16/24/32/48…)
+  # and fell back to a generic icon, so the launcher showed nothing even
+  # though Icon=<name> was valid. Files match the NxN.png pattern required
+  # by the freedesktop Icon Theme Spec.
+  icon: build/icons/
   category: Development
 win:
   target:
