@@ -4,6 +4,15 @@ protocols:
     - valuz-oss
 appId: io.valuz.oss.desktop
 productName: Valuz
+# Without this, electron-builder derives the executable name from
+# package.json's `name: "@valuz/desktop"` → `@valuzdesktop`, which is then
+# used as the .desktop filename, the `Icon=` field, and the hicolor PNG
+# filename. The leading `@` violates the freedesktop icon-name regex
+# ([A-Za-z0-9._-]+), so GNOME/KDE/gtk-icon-cache silently refuse to load
+# it — the app installs with no launcher icon. Pinning `valuz` makes every
+# path land as `/usr/share/applications/valuz.desktop`,
+# `Icon=valuz`, `/usr/share/icons/hicolor/NxN/apps/valuz.png`.
+executableName: valuz-oss
 # Distribution-package artifact name template. Edition comes from
 # VALUZ_EDITION (build-desktop.sh:94); platform+arch from VALUZ_DIST_TAG
 # (build-desktop.sh:137, no edition — keeps the tag arch-only).
