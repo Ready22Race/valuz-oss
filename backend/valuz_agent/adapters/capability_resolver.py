@@ -335,7 +335,11 @@ def always_on_http_mcp_servers(
         "X-Valuz-Internal": _settings.internal_mcp_token,
         "X-Valuz-Session-Id": session_id,
     }
-    base = _settings.backend_base_url
+    # ④ tool-callback base: the URL the (possibly remote) kernel dials to
+    # reach these host-served MCP servers. Resolves to the host's external
+    # URL for a remote kernel, loopback otherwise. See
+    # ``Settings.kernel_callback_base_url``.
+    base = _settings.kernel_callback_base_url
     return [
         McpHttpServerConfig(
             name="valuz_docs",

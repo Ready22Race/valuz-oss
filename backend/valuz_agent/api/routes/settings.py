@@ -10,6 +10,7 @@ from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import NoAvailableProvider, ProviderNotFound
 from valuz_agent.modules.providers.service import ProviderService
+from valuz_agent.modules.settings.kernel_endpoint import get_endpoint, set_endpoint
 from valuz_agent.modules.settings.preferences import (
     detect_system_timezone,
     get_default_effort,
@@ -95,6 +96,69 @@ async def patch_preferences(payload: PreferencesPatchPayload) -> PreferencesResp
             if payload.font_size is not None:
                 await set_font_size(db, payload.font_size)
             return await _read_preferences(db)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ── Kernel endpoint ("configure sandbox address") ────────────────────
+
+
+class KernelEndpointResponse(BaseModel):
+    mode: str
+    url: str
+    host_external_url: str | None = None
+    token_present: bool
+
+
+class KernelEndpointPatchPayload(BaseModel):
+    mode: str | None = Field(default=None)
+    url: str | None = Field(default=None)
+    host_external_url: str | None = Field(default=None)
+    token: str | None = Field(default=None)
+    clear_token: bool = False
+
+
+def _kernel_endpoint_response(view: Any) -> "KernelEndpointResponse":
+    return KernelEndpointResponse(
+        mode=view.mode,
+        url=view.url,
+        host_external_url=view.host_external_url,
+        token_present=view.token_present,
+    )
+
+
+@router.get("/kernel-endpoint")
+async def get_kernel_endpoint() -> KernelEndpointResponse:
+    """Return the persisted remote-kernel endpoint (the "configure sandbox
+    address" feature). The bearer token is never returned — only whether one
+    is stored. This config drives the host's kernel transport at the next
+    (re)start; an explicit env / provisioned sandbox always wins over it.
+    """
+    async with async_unit_of_work(commit=False) as db:
+        return _kernel_endpoint_response(await get_endpoint(db))
+
+
+@router.patch("/kernel-endpoint")
+async def patch_kernel_endpoint(payload: KernelEndpointPatchPayload) -> KernelEndpointResponse:
+    """Set the remote-kernel endpoint. Takes effect on the next restart (the
+    live transport is not swapped mid-session). Only sent keys change; omitting
+    ``token`` keeps the stored one, ``clear_token`` removes it. ``mode='http'``
+    requires a ``url`` (falling back to the persisted one if omitted).
+    """
+    try:
+        async with async_unit_of_work() as db:
+            current = await get_endpoint(db)
+            mode = payload.mode if payload.mode is not None else current.mode
+            url = payload.url if payload.url is not None else (current.url or None)
+            result = await set_endpoint(
+                db,
+                mode=mode,
+                url=url,
+                host_external_url=payload.host_external_url,
+                token=payload.token,
+                clear_token=payload.clear_token,
+            )
+            return _kernel_endpoint_response(result)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
