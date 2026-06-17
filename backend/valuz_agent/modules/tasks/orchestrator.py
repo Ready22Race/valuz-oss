@@ -82,7 +82,7 @@ from valuz_agent.modules.tasks.lifecycle import LifecycleService
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
+from valuz_agent.modules.tasks.plan import TaskPlan
 from valuz_agent.modules.tasks.recovery import RecoveryService
 
 
@@ -693,23 +693,6 @@ class TaskOrchestrator:
         """
         return await self._coordination._lead_idle_with_no_pending(task_id, project_id)
 
-    @staticmethod
-    async def _last_assistant_summary(session_id: str) -> str:
-        """Best-effort last assistant-message text, for an auto-finalize summary."""
-        try:
-            events = await kernel_client.get_events(
-                require_current_user_id(), session_id, limit=200
-            )
-            for event in reversed(events):
-                payload = event.data if hasattr(event, "data") else {}
-                if event.type in ("assistant_message", "text_delta", "content_block"):
-                    text = payload.get("text") or payload.get("content") or ""
-                    if text:
-                        return str(text)[:2000]
-        except Exception:  # noqa: BLE001
-            logger.debug("auto-finalize: summary extract failed for %s", session_id)
-        return ""
-
     async def _auto_finalize_lead_task(
         self,
         *,
@@ -718,171 +701,15 @@ class TaskOrchestrator:
         project_id: str,
         final_status: str,
     ) -> None:
-        """Close a task when its lead actor-loop ends without an explicit
-        ``finish_task`` call.
-
-        ``finish_task`` is the authoritative terminal, but a goal-mode lead
-        often satisfies a simple goal inline (does the work itself), the goal
-        evaluator auto-exits to default, and the loop ends at idle-TTL — never
-        calling finish_task. Without this the task is orphaned ``active``
-        forever. Restores the original §7.3 intent ("lead session naturally
-        ends → task_completed"). Disposition:
-          - status != active   → no-op (finish_task / stop / intervene won);
-          - members in flight   → no-op (defensive; not the terminal moment);
-          - turn errored (final_status terminated/error OR session.stop_reason
-            is an error — an errored turn can still leave status "idle") →
-            ``failed`` (never "completed"!);
-          - plan has unresolved nodes (no error) → ``blocked``;
-          - else → ``completed`` (summary = lead's last assistant message).
-        """
-        async with async_unit_of_work() as db:
-            task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
-            run_ds = TaskSessionDatastore(db)
-
-            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
-            if task is None or task.status != "active":
-                return  # already closed by finish_task / stop / intervene
-            if self._members.has_live_members(task_id):
-                return  # members still running — not the lead's terminal moment
-
-            try:
-                plan = TaskPlan.from_dict(task.plan)
-                unresolved = [
-                    n.key
-                    for n in plan.nodes
-                    if n.status in ("planned", "in_progress", "in_review", "rework")
-                ]
-            except PlanError:
-                unresolved = []
-
-            # A turn can ERROR yet still leave session.status == "idle" — the
-            # failure lives in stop_reason (e.g. a skill-materialization crash
-            # reports stop_reason.type=="error" with status idle and 0 assistant
-            # output). So check the driver's final_status AND the session's
-            # stop_reason; never mark an errored turn "completed".
-            error_msg: str | None = None
-            if final_status in ("terminated", "error"):
-                error_msg = f"lead turn ended with status={final_status}"
-            else:
-                try:
-                    sess = await kernel_client.get_session(
-                        require_current_user_id(), lead_session_id
-                    )
-                    sr = getattr(sess, "stop_reason", None) if sess is not None else None
-                    if sr:
-                        typ = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
-                        if typ == "error" or (isinstance(typ, str) and "error" in typ):
-                            msg = (
-                                sr.get("message")
-                                if isinstance(sr, dict)
-                                else getattr(sr, "message", None)
-                            )
-                            error_msg = str(msg or "lead turn errored")
-                except Exception:  # noqa: BLE001
-                    logger.debug("auto-finalize: stop_reason check failed for %s", lead_session_id)
-
-            if error_msg and not unresolved:
-                # Lead turn errored BEFORE producing any plan nodes — there's
-                # no in-flight or half-done work the ``blocked`` state would
-                # protect, so locking the task here forces an
-                # unnecessary ``resume_task`` ceremony for what is effectively
-                # still a fresh kickoff. Common trigger from a real bug
-                # report (2026-05-29): an automation-fired lead session
-                # entered Claude Agent SDK's ``EnterPlanMode`` + spawned a
-                # nested ``Agent`` subagent that hung; the SDK cancelled the
-                # turn ~3.5 minutes later (``stop_reason.type='error',
-                # category='user_interrupt', message='cancelled'``); plan was
-                # still empty. With the old logic this immediately blocked
-                # the task and the lead's next turn (driven by the user
-                # opening the conversation to ask "why didn't you plan?")
-                # hit ``plan is read-only`` on the very first plan_task call.
-                #
-                # New behaviour: keep task ``active`` so the next driver
-                # (user message → kernel send_message → fresh turn; OR the
-                # next automation fire → fresh lead session) picks it up
-                # cleanly. The turn error is still surfaced via logger so
-                # backend.log retains the audit trail; no ``task_blocked``
-                # event is emitted because the task isn't actually blocked
-                # (no work pending, status unchanged).
-                logger.warning(
-                    "auto-finalize: task %s lead turn errored with empty plan "
-                    "(%s) — staying active for next driver",
-                    task_id,
-                    error_msg,
-                )
-                return
-
-            if error_msg:
-                # Lead turn errored out mid-task. Per task_state.py: task-level
-                # ``failed`` is intentionally not in the enum — this scenario
-                # maps to ``blocked`` (recoverable; the lead crashed but the
-                # plan is intact, user can resume by re-engaging chat or
-                # creating a new lead session). The ``reason`` payload tags
-                # this as a lead-turn-error to distinguish from the
-                # unresolved-subtasks-no-error blocked case below.
-                await task_ds.update_task_status(require_current_user_id(), task_id, "blocked")
-                await event_ds.append_event(
-                    require_current_user_id(),
-                    project_id=project_id,
-                    task_id=task_id,
-                    type="task_blocked",
-                    actor=lead_session_id,
-                    session_id=lead_session_id,
-                    payload={
-                        "reason": "lead_turn_error",
-                        "error": error_msg,
-                        "pending_subtasks": unresolved,
-                    },
-                )
-                logger.warning(
-                    "auto-finalize: task %s -> blocked (lead turn error: %s)", task_id, error_msg
-                )
-                return
-            if unresolved:
-                # Lead stopped with planned work undispatched — surface as blocked
-                # (not a hard error, but not done either).
-                await task_ds.update_task_status(require_current_user_id(), task_id, "blocked")
-                await event_ds.append_event(
-                    require_current_user_id(),
-                    project_id=project_id,
-                    task_id=task_id,
-                    type="task_blocked",
-                    actor=lead_session_id,
-                    session_id=lead_session_id,
-                    payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
-                )
-                logger.warning(
-                    "auto-finalize: task %s -> blocked (unresolved=%s); lead ended without "
-                    "finish_task",
-                    task_id,
-                    unresolved,
-                )
-                return
-
-            summary = await self._last_assistant_summary(lead_session_id) or (
-                "(auto-finalized) Lead ended its turn with no pending subtasks; "
-                "task closed automatically."
-            )
-            await task_ds.update_task_status(require_current_user_id(), task_id, "completed")
-            await run_ds.update_run_by_session(
-                session_id=lead_session_id,
-                status="completed",
-                ended_at=now_ms(),
-            )
-            await event_ds.append_event(
-                require_current_user_id(),
-                project_id=project_id,
-                task_id=task_id,
-                type="task_completed",
-                actor=lead_session_id,
-                session_id=lead_session_id,
-                payload={"summary": summary, "artifacts": [], "auto_finalized": True},
-            )
-            logger.info(
-                "auto-finalize: task %s completed (lead natural end, no explicit finish_task)",
-                task_id,
-            )
+        """Host-side terminal fallback when a lead loop ends without finish_task
+        (ADR-023 Step 3c). Thin delegator onto :class:`LifecycleService` (kept as
+        a method so the loop seam + tests can drive ``orch._auto_finalize_lead_task``)."""
+        await self._lifecycle._auto_finalize_lead_task(
+            lead_session_id=lead_session_id,
+            task_id=task_id,
+            project_id=project_id,
+            final_status=final_status,
+        )
 
     # ------------------------------------------------------------------
     # Stop / resume (VALUZ-RESUME)
@@ -1343,128 +1170,22 @@ class TaskOrchestrator:
         project_id: str,
         via_shutdown: bool = False,
     ) -> None:
-        """Finalize a session once its actor loop ends; record member result.
+        """Finalize a session once its actor loop ends (ADR-023 Step 3c).
 
-        Each step is independent and best-effort: a slow/failed kernel finalize
-        or manifest scan must never prevent the terminal run record from being
-        written, otherwise a member is left stuck "active". The terminal write
-        is the last and most important step. Concurrent member completions
-        (from a finish_task shutdown burst) re-sequence safely inside
-        ``append_event`` (retry on the sequence unique-constraint collision).
+        Thin delegator onto :class:`LifecycleService`, which owns the single
+        implementation. Kept as a method so the ActorRunner can drive it via the
+        bound host (``run_actor_loop``'s ``finally`` resolves ``_finalize_actor``
+        onto this orchestrator).
         """
-        from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
-
-        from valuz_agent.adapters.kernel_client import KernelUnavailableError
-
-        try:
-            await _finalize_session(session_id, last_content, final_status)
-        except KernelUnavailableError:
-            # The backend is shutting down — the kernel store is already torn
-            # down (the actor loop was cancelled mid-flight and runs this
-            # finalize in its ``finally``). Finalize is pointless now: the
-            # session is left ``running`` and ``recover_running_sessions`` /
-            # ``recover_active_tasks`` reconcile it on the next boot. Skip
-            # quietly instead of spamming a "Dependencies not initialized"
-            # traceback for every in-flight session at shutdown.
-            logger.debug(
-                "_finalize_actor: kernel unavailable (shutdown) — deferring "
-                "finalize of %s to boot recovery",
-                session_id,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("_finalize_actor: finalize failed for %s", session_id)
-
-        if role == "lead":
-            # A ``shutdown``-triggered exit (pause / stop / finish_task
-            # broadcast) is externally managed: stop_task already set the task
-            # paused/stopped, finish_task set it terminal. Running auto-finalize
-            # here would race a concurrent resume (a rapid pause→resume flips the
-            # task back to ``active`` before this old loop's finalize runs, and
-            # auto-finalize then wrongly ``blocked``s the freshly-resumed task).
-            # Only NATURAL exits (idle-TTL / end_turn / terminal status) should
-            # auto-close the task.
-            if via_shutdown:
-                return
-            # Host-side terminal fallback: a lead loop can end (goal auto-exit
-            # to default, idle-TTL, normal end_turn) WITHOUT the model calling
-            # finish_task — common when a goal-mode lead satisfies a simple goal
-            # inline. finish_task is the only thing that closes the task, so
-            # without this the task is orphaned "active" forever (see the live
-            # 美湖/news-reporter case). Close it here based on the plan state.
-            await self._auto_finalize_lead_task(
-                lead_session_id=session_id,
-                task_id=task_id,
-                project_id=project_id,
-                final_status=final_status,
-            )
-            return
-
-        # Drop from the live-member set and write the terminal run record.
-        self._members.discard_member(task_id, session_id)
-        since = self._members.pop_dispatch_started(session_id)
-        try:
-            async with async_unit_of_work() as db:
-                run_ds = TaskSessionDatastore(db)
-                event_ds = TaskEventDatastore(db)
-                run = await run_ds.get_run(session_id)
-                run_dir = Path(run.run_dir) if run and run.run_dir else Path()
-                agent_slug = run.agent_slug if run else ""
-
-                # Manifest is best-effort — never let it block the terminal write.
-                try:
-                    manifest = await collect_manifest(
-                        session_id, run_dir, final_status, since_epoch=since
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception("_finalize_actor: manifest failed for %s", session_id)
-                    manifest = {"session_id": session_id, "status": final_status, "summary": ""}
-                manifest["agent"] = agent_slug
-
-                ok = final_status not in ("terminated", "error")
-                await run_ds.update_run_by_session(
-                    session_id=session_id,
-                    status="completed" if ok else "archived",
-                    result_manifest=manifest,
-                    ended_at=now_ms(),
-                )
-                # Review model (VALUZ-TASK §6.1): the actor loop ending is NOT
-                # subtask completion — the lead decides that via review_subtask. We
-                # only surface a terminal *failure* (terminated/error) here, and
-                # mark the plan node failed so the lead/panel sees it. A clean loop
-                # exit (idle-TTL / finish_task shutdown) emits no completion event;
-                # the node's status was already set by review / _mark_in_review.
-                if not ok:
-                    key = run.subtask_key if run else None
-                    if key:
-                        task_ds = TaskDatastore(db)
-                        task_row = await task_ds.get_task_by_project(
-                            require_current_user_id(), project_id, task_id
-                        )
-                        if task_row is not None:
-                            plan = TaskPlan.from_dict(task_row.plan)
-                            if plan.get(key) is not None:
-                                plan.update_node(key, status="failed")
-                                task_row.plan = plan.to_dict()
-                                await task_ds.update_task(task_row)
-                                await planning.emit_plan_update(
-                                    event_ds,
-                                    project_id=project_id,
-                                    task_id=task_id,
-                                    plan=plan,
-                                    actor=agent_slug,
-                                    session_id=session_id,
-                                )
-                    await event_ds.append_event(
-                        require_current_user_id(),
-                        project_id=project_id,
-                        task_id=task_id,
-                        type="subtask_failed",
-                        actor=agent_slug,
-                        session_id=session_id,
-                        payload={**manifest, **({"subtask_key": key} if key else {})},
-                    )
-        except Exception:  # noqa: BLE001
-            logger.exception("_finalize_actor: failed to record terminal run for %s", session_id)
+        await self._lifecycle._finalize_actor(
+            session_id=session_id,
+            last_content=last_content,
+            final_status=final_status,
+            role=role,
+            task_id=task_id,
+            project_id=project_id,
+            via_shutdown=via_shutdown,
+        )
 
     async def dispatch_async(
         self,
