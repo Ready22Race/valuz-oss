@@ -1513,7 +1513,7 @@
     "fileStructure": "文件结构",
     "generatedSkills": "已生成的技能",
     "groupAgents": "Agents",
-    "groupClaude": ".claude",
+    "groupClaude": "Claude",
     "groupCodex": "Codex",
     "groupOfficial": "内置",
     "importFailed": "导入失败: {error}",

@@ -183,7 +183,7 @@ function badgeForCategory(
     }
     return undefined;
   }
-  if (categoryId === "codex") return undefined;
+  if (categoryId === "codex") return { label: "Codex", tone: "codex" };
   // categoryId === "claude" or "_other"
   return { label: "Claude", tone: "claude" };
 }
