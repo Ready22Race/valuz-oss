@@ -272,9 +272,15 @@ class AgsSandboxProvider:
         """
         import hashlib
 
+        from valuz_agent.infra.auth_context import get_current_user_id
+
+        # User-scoped prefix, consistent with the ``sync-cos`` entry point so the
+        # whole bucket is laid out as ``<user_id>/...`` under the mount. Owner
+        # context is set on the create-session path; fall back to "local".
+        uid = get_current_user_id() or "local"
         real = os.path.realpath(host_path)
         digest = hashlib.sha256(real.encode()).hexdigest()[:12]
-        prefix = f"valuz-workspaces/{digest}"
+        prefix = f"{uid}/workspaces/{digest}"
         kernel_cwd = f"{settings.ags_mount_path.rstrip('/')}/{prefix}"
 
         store = self._object_store()
