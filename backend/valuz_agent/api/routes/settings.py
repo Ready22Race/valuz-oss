@@ -324,15 +324,22 @@ async def sync_workspace() -> SyncWorkspaceResponse:
     from valuz_agent.integrations.cos_sync import sync_local_to_cos
     from valuz_agent.integrations.object_store_s3 import cos_object_store
 
-    # Apply persisted COS config onto settings so cos_object_store() can build.
+    # Load the persisted (UI) COS config onto settings so cos_object_store()
+    # can build — unconditionally, since this action is UI-triggered and must
+    # work whether the driver was selected by env (make dev-ags) or persisted
+    # config (make dev). apply_to_settings alone defers to an env driver.
     async with async_unit_of_work(commit=False) as db:
-        from valuz_agent.modules.settings.sandbox_config import apply_to_settings
+        from valuz_agent.modules.settings.sandbox_config import apply_cos_to_settings
 
-        await apply_to_settings(db)
+        await apply_cos_to_settings(db)
     store = cos_object_store()
     if store is None:
         raise HTTPException(
-            status_code=422, detail="COS not configured — set it in Settings → Kernel."
+            status_code=422,
+            detail=(
+                "COS not configured — set the bucket and SecretId/SecretKey in "
+                "Settings → Cloud Sandbox, then Save."
+            ),
         )
     report = await sync_local_to_cos(resolve_local_user_id(), store=store)
     return SyncWorkspaceResponse(

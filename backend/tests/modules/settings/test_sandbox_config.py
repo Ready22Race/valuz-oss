@@ -114,3 +114,32 @@ async def test_apply_noop_when_incomplete(sm, monkeypatch) -> None:
     async with sm() as db:
         await sc.set_sandbox_config(db, driver="ags")  # no api_key/template/bucket
         assert await sc.apply_to_settings(db) is None
+
+
+async def test_apply_cos_loads_ui_config_even_under_env_driver(sm, monkeypatch) -> None:
+    # The sync-workspace path: UI-configured COS must reach settings even when an
+    # env driver (make dev-ags) made apply_to_settings bail. Regression for the
+    # "COS not configured" sync error.
+    from valuz_agent.infra.config import settings
+
+    monkeypatch.setenv("VALUZ_SANDBOX_DRIVER", "ags")
+    monkeypatch.setattr(settings, "cos_bucket", None)
+    monkeypatch.setattr(settings, "cos_secret_id", None)
+    monkeypatch.setattr(settings, "cos_secret_key", None)
+    async with sm() as db:
+        await sc.set_sandbox_config(
+            db,
+            driver="ags",
+            cos_bucket="valuz-test-1252068037",
+            cos_region="ap-beijing",
+            cos_secret_id="AKID",
+            cos_secret_key="SK",
+        )
+        # apply_to_settings is a no-op here (env wins) — proves the gap…
+        assert await sc.apply_to_settings(db) is None
+        # …and apply_cos_to_settings closes it.
+        ready = await sc.apply_cos_to_settings(db)
+    assert ready is True
+    assert settings.cos_bucket == "valuz-test-1252068037"
+    assert settings.cos_secret_id == "AKID"
+    assert settings.cos_secret_key == "SK"

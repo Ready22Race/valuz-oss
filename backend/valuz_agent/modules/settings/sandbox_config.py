@@ -203,3 +203,33 @@ async def apply_to_settings(db: AsyncSession) -> str | None:
     settings.cos_secret_id = store.get(REF_COS_SECRET_ID)
     settings.cos_secret_key = store.get(REF_COS_SECRET_KEY)
     return "ags"
+
+
+async def apply_cos_to_settings(db: AsyncSession) -> bool:
+    """Copy the persisted COS config (bucket / region / endpoint + secrets) onto
+    the ``settings`` singleton, unconditionally.
+
+    Unlike ``apply_to_settings`` (which is the BOOT driver-selection path and
+    defers to an explicit ``VALUZ_SANDBOX_DRIVER`` env), this is for the
+    **sync-workspace action**: the user configured COS in the UI and clicked
+    sync, so their persisted config must reach ``cos_object_store()`` regardless
+    of how the kernel driver was selected (env-launched ``make dev-ags`` or
+    pure-UI ``make dev``). Persisted values fill in; anything the UI left blank
+    keeps whatever env already set. Returns True once bucket + both secrets are
+    present.
+    """
+    from valuz_agent.infra.config import settings
+
+    cfg = await get_sandbox_config(db)
+    store = _secret_store()
+    if cfg.cos_bucket:
+        settings.cos_bucket = cfg.cos_bucket
+    if cfg.cos_region:
+        settings.cos_region = cfg.cos_region
+    if cfg.cos_endpoint:
+        settings.cos_endpoint = cfg.cos_endpoint
+    if (sid := store.get(REF_COS_SECRET_ID)) is not None:
+        settings.cos_secret_id = sid
+    if (sk := store.get(REF_COS_SECRET_KEY)) is not None:
+        settings.cos_secret_key = sk
+    return bool(settings.cos_bucket and settings.cos_secret_id and settings.cos_secret_key)

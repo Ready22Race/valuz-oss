@@ -41,10 +41,13 @@ BACKEND_PORT="${VALUZ_BACKEND_PORT:-8000}"
 RELOAD_FLAG=""
 [[ "${VALUZ_RELOAD:-}" == "1" ]] && RELOAD_FLAG="--reload"
 
-# uv extras the backend venv needs. ``dev`` (pytest/ruff/mypy) is always on; the
-# ``ags`` driver adds the optional e2b SDK extra. Honour an inherited
-# VALUZ_SANDBOX_DRIVER (e.g. set by the Makefile) before flag parsing.
-EXTRAS=(--extra dev)
+# uv extras the backend venv needs. ``dev`` = pytest/ruff/mypy. ``ags`` =
+# e2b + boto3, needed by the Settings → Cloud Sandbox panel (which is ALWAYS
+# present): configuring AGS/COS from the UI and clicking Sync/Save touches the
+# COS client even on a plain ``make dev``, so the dev venv carries it too —
+# otherwise the UI 500s with "No module named 'boto3'". (Packaged builds gate
+# this separately.) Honour an inherited VALUZ_SANDBOX_DRIVER before flag parsing.
+EXTRAS=(--extra dev --extra ags)
 SANDBOX_DRIVER="${VALUZ_SANDBOX_DRIVER:-}"
 
 GREEN='\033[0;32m'
@@ -180,7 +183,7 @@ configure_sandbox() {
             ;;
         ags)
             export VALUZ_SANDBOX_DRIVER=ags
-            EXTRAS=(--extra dev --extra ags)
+            # EXTRAS already includes --extra ags (default).
             # Settings has no env_file — AGS/COS config must be in the process
             # env. Source backend/.env (the same secrets the kill/e2e scripts
             # use); never commit it.
