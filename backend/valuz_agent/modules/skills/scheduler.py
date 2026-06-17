@@ -58,8 +58,12 @@ class SkillAutoScanScheduler:
         logger.info("skill auto-scan scheduler stopped")
 
     def _loop(self) -> None:
-        # The boot step already runs the first scan; wait one interval before
-        # the first periodic pass so they don't double-run at startup.
+        # Scan once on start, then every interval — matching the docs
+        # auto-discovery scheduler so the task is observable immediately
+        # (logs a pass at boot) rather than staying silent until the first
+        # 30-min tick. The boot step also scanned, but ``startup_scan`` is
+        # idempotent and cheap (~tens of ms), so the extra pass is harmless.
+        self._run_once()
         while not self._stop.wait(timeout=self._interval):
             self._run_once()
 
