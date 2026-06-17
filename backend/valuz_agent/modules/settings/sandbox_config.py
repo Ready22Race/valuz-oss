@@ -34,6 +34,11 @@ KEY_DRIVER = "kernel.sandbox.driver"  # "inprocess" | "ags"
 KEY_AGS_DOMAIN = "kernel.sandbox.ags_domain"
 KEY_AGS_TEMPLATE = "kernel.sandbox.ags_template"
 KEY_AGS_MOUNT_PATH = "kernel.sandbox.ags_mount_path"
+# ④ host-callback base: the address a cloud kernel reaches THIS host on, so the
+# host's built-in MCP servers (docs / automations / connectors / harness) are
+# injected with a reachable URL instead of 127.0.0.1. Feeds
+# ``settings.host_external_url`` → ``kernel_callback_base_url``.
+KEY_HOST_EXTERNAL_URL = "kernel.sandbox.host_external_url"
 KEY_COS_BUCKET = "kernel.sandbox.cos_bucket"
 KEY_COS_REGION = "kernel.sandbox.cos_region"
 KEY_COS_ENDPOINT = "kernel.sandbox.cos_endpoint"
@@ -55,6 +60,7 @@ class SandboxConfigView:
     ags_domain: str
     ags_template: str
     ags_mount_path: str
+    host_external_url: str
     cos_bucket: str
     cos_region: str
     cos_endpoint: str
@@ -101,6 +107,7 @@ async def get_sandbox_config(db: AsyncSession) -> SandboxConfigView:
         ags_domain=await _read(db, KEY_AGS_DOMAIN),
         ags_template=await _read(db, KEY_AGS_TEMPLATE),
         ags_mount_path=(await _read(db, KEY_AGS_MOUNT_PATH)) or "/workspace",
+        host_external_url=await _read(db, KEY_HOST_EXTERNAL_URL),
         cos_bucket=await _read(db, KEY_COS_BUCKET),
         cos_region=(await _read(db, KEY_COS_REGION)) or "ap-beijing",
         cos_endpoint=await _read(db, KEY_COS_ENDPOINT),
@@ -118,6 +125,7 @@ async def set_sandbox_config(
     ags_domain: str | None = None,
     ags_template: str | None = None,
     ags_mount_path: str | None = None,
+    host_external_url: str | None = None,
     cos_bucket: str | None = None,
     cos_region: str | None = None,
     cos_endpoint: str | None = None,
@@ -136,6 +144,7 @@ async def set_sandbox_config(
         (KEY_AGS_DOMAIN, ags_domain),
         (KEY_AGS_TEMPLATE, ags_template),
         (KEY_AGS_MOUNT_PATH, ags_mount_path),
+        (KEY_HOST_EXTERNAL_URL, host_external_url),
         (KEY_COS_BUCKET, cos_bucket),
         (KEY_COS_REGION, cos_region),
         (KEY_COS_ENDPOINT, cos_endpoint),
@@ -190,6 +199,10 @@ async def apply_to_settings(db: AsyncSession) -> str | None:
     settings.ags_domain = cfg.ags_domain or None
     settings.ags_kernel_template = cfg.ags_template
     settings.ags_mount_path = cfg.ags_mount_path
+    # ④ callback: the cloud kernel reaches the host's built-in MCP servers here.
+    # A persisted UI value applies on the pure-UI path; an explicit env
+    # (VALUZ_HOST_EXTERNAL_URL, e.g. make dev-ags) already on settings wins.
+    settings.host_external_url = cfg.host_external_url or settings.host_external_url
     # The sandbox panel's own token, else whatever env/default is on settings.
     settings.ags_kernel_token = store.get(REF_AGS_KERNEL_TOKEN) or settings.ags_kernel_token
     settings.cos_bucket = cfg.cos_bucket

@@ -117,6 +117,7 @@ class SandboxConfigResponse(BaseModel):
     ags_domain: str
     ags_template: str
     ags_mount_path: str
+    host_external_url: str
     cos_bucket: str
     cos_region: str
     cos_endpoint: str
@@ -131,6 +132,7 @@ class SandboxConfigPatchPayload(BaseModel):
     ags_domain: str | None = None
     ags_template: str | None = None
     ags_mount_path: str | None = None
+    host_external_url: str | None = None
     cos_bucket: str | None = None
     cos_region: str | None = None
     cos_endpoint: str | None = None
@@ -147,6 +149,7 @@ def _sandbox_config_response(v: Any) -> "SandboxConfigResponse":
         ags_domain=v.ags_domain,
         ags_template=v.ags_template,
         ags_mount_path=v.ags_mount_path,
+        host_external_url=v.host_external_url,
         cos_bucket=v.cos_bucket,
         cos_region=v.cos_region,
         cos_endpoint=v.cos_endpoint,
@@ -177,6 +180,7 @@ async def patch_sandbox(payload: SandboxConfigPatchPayload) -> SandboxConfigResp
                 ags_domain=payload.ags_domain,
                 ags_template=payload.ags_template,
                 ags_mount_path=payload.ags_mount_path,
+                host_external_url=payload.host_external_url,
                 cos_bucket=payload.cos_bucket,
                 cos_region=payload.cos_region,
                 cos_endpoint=payload.cos_endpoint,

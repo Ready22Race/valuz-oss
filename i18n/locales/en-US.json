@@ -1444,6 +1444,8 @@
       "tokenDesc": "Must match the sandbox tool's KERNEL_AUTH_TOKEN env.",
       "mountLabel": "Mount path",
       "mountDesc": "Where COS is mounted inside the sandbox (default /workspace).",
+      "hostUrlLabel": "Host callback URL",
+      "hostUrlDesc": "Where the cloud kernel reaches THIS host for built-in MCP / tool callbacks. Leave empty to use loopback — a cloud kernel can't reach the host then.",
       "bucketLabel": "Bucket",
       "bucketDesc": "COS bucket name (with APPID).",
       "regionLabel": "Region",

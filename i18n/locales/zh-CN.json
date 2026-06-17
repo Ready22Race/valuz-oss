@@ -1444,6 +1444,8 @@
       "tokenDesc": "须与沙箱工具的 KERNEL_AUTH_TOKEN 环境变量一致。",
       "mountLabel": "挂载路径",
       "mountDesc": "COS 在沙箱内的挂载点(默认 /workspace)。",
+      "hostUrlLabel": "主机回调地址",
+      "hostUrlDesc": "云沙箱里的内核回连本主机的地址,用于内置 MCP / 工具回调。留空则用本机回环地址,云内核将无法访问主机。",
       "bucketLabel": "存储桶",
       "bucketDesc": "COS 存储桶名称(含 APPID)。",
       "regionLabel": "地域（Region）",

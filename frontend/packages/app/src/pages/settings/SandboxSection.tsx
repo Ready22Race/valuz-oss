@@ -31,6 +31,7 @@ export const SandboxSection = () => {
   const [agsDomain, setAgsDomain] = useState("");
   const [agsTemplate, setAgsTemplate] = useState("");
   const [agsMount, setAgsMount] = useState("/workspace");
+  const [hostUrl, setHostUrl] = useState("");
   const [cosBucket, setCosBucket] = useState("");
   const [cosRegion, setCosRegion] = useState("ap-beijing");
   const [cosEndpoint, setCosEndpoint] = useState("");
@@ -53,6 +54,7 @@ export const SandboxSection = () => {
     setAgsDomain(c.ags_domain);
     setAgsTemplate(c.ags_template);
     setAgsMount(c.ags_mount_path || "/workspace");
+    setHostUrl(c.host_external_url);
     setCosBucket(c.cos_bucket);
     setCosRegion(c.cos_region || "ap-beijing");
     setCosEndpoint(c.cos_endpoint);
@@ -79,6 +81,7 @@ export const SandboxSection = () => {
               ags_domain: agsDomain,
               ags_template: agsTemplate,
               ags_mount_path: agsMount,
+              host_external_url: hostUrl,
               cos_bucket: cosBucket,
               cos_region: cosRegion,
               cos_endpoint: cosEndpoint,
@@ -231,6 +234,18 @@ export const SandboxSection = () => {
                   value={agsMount}
                   onChange={(e) => setAgsMount(e.target.value)}
                   placeholder="/workspace"
+                  className="w-[280px]"
+                />
+              </Field>
+              <Divider />
+              <Field
+                label={t(tk("settings.sandbox.hostUrlLabel"))}
+                desc={t(tk("settings.sandbox.hostUrlDesc"))}
+              >
+                <Input
+                  value={hostUrl}
+                  onChange={(e) => setHostUrl(e.target.value)}
+                  placeholder="https://<host-reachable>:8000"
                   className="w-[280px]"
                 />
               </Field>
