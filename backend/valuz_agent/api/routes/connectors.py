@@ -811,7 +811,7 @@ async def oauth_callback(
        (or shows an error).
     """
     from valuz_agent.infra.config import settings as _settings
-    from valuz_agent.integrations.connector_oauth import McpOauthHelper
+    from valuz_agent.integrations.connector_oauth import McpOauthHelper, persist_oauth_token
 
     secrets = FileSecretStore(_settings.secrets_dir)
     state_key = f"connector/oauth_state/{state}"
@@ -877,8 +877,9 @@ async def oauth_callback(
         finally:
             await helper.close()
 
-        token_ref = f"connector/{connector_id}/oauth_token"
-        secrets.put(token_ref, token.model_dump_json())
+        # Persist the token + an absolute-expiry sidecar so the runtime resolver
+        # can refresh proactively before the token lapses.
+        persist_oauth_token(connector_id, token, secrets, now_ms())
         secrets.delete(state_key)
 
         # Probe tools BEFORE writing status=connected so that tool_count and
@@ -1286,6 +1287,23 @@ def _tools_to_info(mcp_tools: object) -> list[ToolInfo]:
     return result
 
 
+def _is_unauthorized(exc: BaseException) -> bool:
+    """Detect a 401 from the MCP/httpx stack — i.e. an expired access token.
+
+    The MCP client may wrap the underlying error in an ``ExceptionGroup``; unwrap
+    to the leaf, prefer the typed ``HTTPStatusError`` status, and fall back to a
+    string match for transports that surface the 401 only in the message.
+    """
+    import httpx
+
+    inner: BaseException = exc
+    while isinstance(inner, BaseExceptionGroup) and inner.exceptions:
+        inner = inner.exceptions[0]
+    if isinstance(inner, httpx.HTTPStatusError):
+        return inner.response.status_code == 401
+    return "401" in str(inner)
+
+
 async def _probe_connector(
     connector_id: str, svc: ConnectorService, user_id: str
 ) -> TestConnectorResponse:
@@ -1445,16 +1463,43 @@ async def _probe_connector(
                         await s.initialize()
                         return _tools_to_info((await s.list_tools()).tools)
 
-    try:
+    async def _attempt() -> list[ToolInfo]:
         primary = view.transport if view.transport in ("http", "sse") else "http"
         fallback = "sse" if primary == "http" else "http"
         try:
-            tool_infos = await _http_probe(primary)
+            return await _http_probe(primary)
         except BaseException as first_exc:
             try:
-                tool_infos = await _http_probe(fallback)
+                return await _http_probe(fallback)
             except BaseException:
                 raise _unwrap(first_exc) from None
+
+    try:
+        try:
+            tool_infos = await _attempt()
+        except BaseException as exc:
+            # An OAuth connector whose access token expired answers 401. Try a
+            # silent refresh with the stored refresh_token, then retry once with
+            # the fresh token before giving up (a hard failure leaves the caller
+            # to re-authorize).
+            if view.auth_type == "oauth" and row2 is not None and _is_unauthorized(exc):
+                from valuz_agent.integrations.connector_oauth import try_refresh_connector_token
+
+                new_access = await try_refresh_connector_token(
+                    connector_id=connector_id,
+                    server_url=row2.url or "",
+                    oauth_metadata_json=row2.oauth_metadata_json,
+                    oauth_client_info_json=row2.oauth_client_info_json,
+                    redirect_uri=f"{_settings.backend_base_url}/v1/connectors/oauth/callback",
+                    secrets=FileSecretStore(_settings.secrets_dir),
+                    now_ms=now_ms(),
+                )
+                if not new_access:
+                    raise
+                ov_headers["Authorization"] = f"Bearer {new_access}"
+                tool_infos = await _attempt()
+            else:
+                raise
 
         await svc.record_test_result(user_id, connector_id, ok=True, tool_count=len(tool_infos))
         return TestConnectorResponse(

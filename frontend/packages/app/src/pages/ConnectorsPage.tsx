@@ -32,6 +32,7 @@ import {
   ConnectorConnectDialog,
 } from "@valuz/app/components";
 import type { ConnectorAddMode } from "@valuz/app/components";
+import { reauthorizePayload, shouldReauthorize } from "./connector-reconnect";
 
 /* ── Catalog flattening ─────────────────────────────────────────── */
 
@@ -479,16 +480,25 @@ export const ConnectorsPage = () => {
     [runConnect],
   );
 
-  // Re-probe an already-added connector that isn't currently connected.
+  // Reconnect an already-added connector that isn't currently connected.
+  // Test first — the probe now self-heals an expired OAuth token server-side
+  // (refresh + retry). Only a still-failing OAuth connector escalates to full
+  // re-authorization (browser re-consent); see ``connector-reconnect``.
   const handleReconnectInstalled = useCallback(
     (connector: ConnectorItem) => {
       setBusyKey(`installed:${connector.id}`);
       void (async () => {
         try {
           const res = await connectorsApi.test(connector.id);
-          if (!res.ok) {
-            toast.error(res.error || _t("settings.connectors.connectFailed"));
+          if (res.ok) {
+            await loadAll();
+            return;
           }
+          if (shouldReauthorize(connector)) {
+            await runConnect(reauthorizePayload(connector));
+            return;
+          }
+          toast.error(res.error || _t("settings.connectors.connectFailed"));
           await loadAll();
         } catch (err) {
           toast.error(
@@ -501,7 +511,7 @@ export const ConnectorsPage = () => {
         }
       })();
     },
-    [loadAll],
+    [loadAll, runConnect],
   );
 
   const handleDisconnect = useCallback(async () => {

@@ -12,6 +12,7 @@ land in the right server.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -33,6 +34,55 @@ from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.service import build_overrides, merge_params_into_url
 
 logger = logging.getLogger(__name__)
+
+# Single-flight guard so concurrent session builds for the same connector don't
+# fire overlapping refreshes (rotating refresh tokens are single-use). In-process
+# only — adequate for the desktop backend; a multi-instance deployment would race
+# at most one redundant refresh.
+_token_refresh_locks: dict[str, asyncio.Lock] = {}
+
+
+def _token_refresh_lock(connector_id: str) -> asyncio.Lock:
+    lock = _token_refresh_locks.get(connector_id)
+    if lock is None:
+        lock = _token_refresh_locks[connector_id] = asyncio.Lock()
+    return lock
+
+
+async def _ensure_fresh_oauth_token(row: Any, secrets: FileSecretStore, token_json: str) -> str:
+    """Proactively refresh an OAuth connector's token if the expiry sidecar shows
+    it has lapsed.
+
+    The resolver builds the server config ahead of time, so it can't react to a
+    runtime 401 — instead it refreshes *before* handing the token to the kernel.
+    Returns the (possibly refreshed) token JSON; on any failure it returns the
+    original blob so the caller still attempts the old token (and the runtime's
+    own 401 surfaces normally).
+    """
+    from valuz_agent.infra.config import settings as _settings
+    from valuz_agent.infra.time_utils import now_ms
+    from valuz_agent.integrations.connector_oauth import (
+        oauth_token_is_expired,
+        oauth_token_ref,
+        try_refresh_connector_token,
+    )
+
+    if not oauth_token_is_expired(row.id, secrets, now_ms()):
+        return token_json
+    async with _token_refresh_lock(row.id):
+        # Re-check under the lock: a sibling build may have refreshed already.
+        if not oauth_token_is_expired(row.id, secrets, now_ms()):
+            return secrets.get(oauth_token_ref(row.id)) or token_json
+        await try_refresh_connector_token(
+            connector_id=row.id,
+            server_url=row.url or "",
+            oauth_metadata_json=row.oauth_metadata_json,
+            oauth_client_info_json=row.oauth_client_info_json,
+            redirect_uri=f"{_settings.backend_base_url}/v1/connectors/oauth/callback",
+            secrets=secrets,
+            now_ms=now_ms(),
+        )
+        return secrets.get(oauth_token_ref(row.id)) or token_json
 
 
 async def resolve_mcp_servers(
@@ -85,11 +135,12 @@ async def _build_http_config(row, secrets: FileSecretStore) -> list[McpServerCon
 
     if row.auth_type == "oauth":
         # OAuth layers on AFTER build_overrides — it needs a live token.
-        oauth_token_ref = f"connector/{row.id}/oauth_token"
-        token_json = secrets.get(oauth_token_ref)
+        token_json = secrets.get(f"connector/{row.id}/oauth_token")
         if not token_json:
             logger.info("mcp resolver: connector %s oauth token not found", row.slug)
             return None
+        # Self-heal an expired token before the runtime ever makes a call.
+        token_json = await _ensure_fresh_oauth_token(row, secrets, token_json)
         try:
             token_data = json.loads(token_json)
             access_token = token_data.get("access_token", "")
