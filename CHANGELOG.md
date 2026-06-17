@@ -7,8 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.1] - 2026-06-17
 
-> Supersedes 0.2.0 (whose macOS x86_64 build did not publish); carries the full
-> 0.2.0 changelog plus the fixes below.
+### Features
+
+- Settings: server-resolved model options with dumb-render model pickers. (#188 @homeant)
+
+### Fixed
+
+- Tasks: mark API-errored sessions failed/recoverable instead of completed;
+  anchor the live task card to the lead session's task id. (#183, #184 @Ready22Race)
+- Onboarding: seed the Valuz helper on skip so the workspace is never empty. (#189 @zhourongyu)
+- Model picker: restore display names for subscription / built-in models. (#190 @homeant)
+- Updater toast is draggable and shows download progress instantly. (#191 @St0neWan9)
+- Desktop: align the splash window controls with the TopBar on Linux/Windows. (#187 @hanjixin)
+- Build: ship a full hicolor icon set for the Linux deb. (#186 @hanjixin)
+
+### Docs & Chore
+
+- CI: update the macOS runner version in the release workflow (fixes the x86_64
+  build). (#185 @hanjixin)
+
+## [0.2.0] - 2026-06-17
 
 ### Features
 
@@ -30,7 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connectors: self-heal expired OAuth connectors (silent refresh), re-authorize
   only on hard failure. (#173 @homeant)
 - Backend errors can carry an i18n key, rendered on send. (#145 @homeant)
-- Settings: server-resolved model options with dumb-render model pickers. (#188 @homeant)
 
 ### Changed
 
@@ -72,20 +89,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `claude` runtime: treat `ResultMessage(is_error=True)` as an error, not
   end-turn. (#181 @jiaoqsh)
 - Build: enforce `+x` on the Linux AppImage; pin `executableName` so the Linux
-  deb ships a valid icon; pin the Linux arm64 runner to ubuntu-22.04-arm; ship a
-  full hicolor icon set for the Linux deb. (#172, #180, #170, #186 @hanjixin)
-- Tasks: mark API-errored sessions failed/recoverable instead of completed;
-  anchor the live task card to the lead session's task id. (#183, #184 @Ready22Race)
-- Model picker: restore display names for subscription / built-in models. (#190 @homeant)
-- Updater toast is draggable and shows download progress instantly. (#191 @St0neWan9)
-- Desktop: align the splash window controls with the TopBar on Linux/Windows. (#187 @hanjixin)
+  deb ships a valid icon; pin the Linux arm64 runner to ubuntu-22.04-arm.
+  (#172, #180, #170 @hanjixin)
 
 ### Docs & Chore
 
 - Memory subsystem Tier-1 hygiene cleanup. (#137 @jiaoqsh)
 - Purge stale "0-migration / full-wipe" wording from the migration docs. (#152 @Ready22Race)
-- CI: update the macOS runner version in the release workflow (fixes the x86_64
-  build). (#185 @hanjixin)
 
 ## [0.1.7] - 2026-06-15
 
@@ -268,7 +278,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename the single-writer lock file, drop a dead helper, and correct the rationale. (#29 @Ready22Race)
 - CI: Node.js 25 with dependency caching. (#14 @hanjixin)
 
-[0.2.1]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.7...v0.2.1
+[0.2.1]: https://github.com/valuz-ai/valuz-oss/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.7...v0.2.0
 [0.1.7]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.4...v0.1.5
