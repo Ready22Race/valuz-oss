@@ -99,6 +99,10 @@ import { ConversationTurnList } from "@valuz/ui";
 import { usePlatform } from "@valuz/app/platform";
 import { useHasUsableChannel, useTranslation } from "@valuz/core";
 import { useProjectKbBindings, useKbDocTree } from "@valuz/app/hooks";
+import {
+  computePlanAnchors,
+  extractToolOutputJson,
+} from "./conversation-plan-anchors";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
@@ -124,61 +128,6 @@ function formatFileSize(bytes: number): string {
 }
 
 // ── VALUZ-CHATPLAN S3 helpers ────────────────────────────────────────────
-
-/** Tool outputs from the kernel are wrapped as a content-block repr
- *  ``[{'type': 'text', 'text': '<json>'}]`` (Python repr, single-quoted
- *  on the outer wrapper, JSON-quoted on the inner ``text`` payload).
- *  Pull the inner JSON object back out:
- *    1. Try a direct ``JSON.parse`` first — some runtimes do skip the wrap.
- *    2. Otherwise walk for the first ``{"`` (canonical JSON-object start)
- *       and balance-count braces forward to find its matching ``}``.
- *  A naive ``/{[\s\S]*}/`` greedy regex would land on the OUTER Python dict
- *  (single-quoted) and JSON.parse would fail every time. */
-function extractToolOutputJson(output: string): unknown | null {
-  try {
-    return JSON.parse(output);
-  } catch {
-    /* fall through */
-  }
-  const start = output.indexOf('{"');
-  if (start < 0) return null;
-  let depth = 0;
-  let end = -1;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < output.length; i++) {
-    const ch = output[i];
-    if (inString) {
-      if (escape) {
-        escape = false;
-      } else if (ch === "\\") {
-        escape = true;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
-    if (ch === "{") {
-      depth++;
-    } else if (ch === "}") {
-      depth--;
-      if (depth === 0) {
-        end = i + 1;
-        break;
-      }
-    }
-  }
-  if (end < 0) return null;
-  try {
-    return JSON.parse(output.slice(start, end));
-  } catch {
-    return null;
-  }
-}
 
 /** Compact one-line status pill for chatplan tool results. Each pill is a
  *  pure timeline anchor — the canonical "current state" view lives in the
@@ -989,51 +938,15 @@ export const ConversationPage = () => {
   // LiveTaskCard (subtask list + status + actions, SSE-subscribed). Earlier
   // plan writes for the same task degrade to compact history pills, so the
   // user always lands on the "current state" surface near the bottom of
-  // the timeline. ``richPlanToolByTask`` also doubles as a "this is a plan
-  // write for a known task" set for the pill renderer.
-  const planAnchors = useMemo(() => {
-    const PLAN_WRITE_NAMES = new Set(["plan_task", "modify_plan"]);
-    const matchesPlanWrite = (n: string) => {
-      if (PLAN_WRITE_NAMES.has(n)) return true;
-      for (const k of PLAN_WRITE_NAMES) {
-        if (n.endsWith(`__${k}`)) return true;
-      }
-      return false;
-    };
-    const richToolByTask = new Map<string, string>();
-    const taskByRichTool = new Map<string, string>();
-    for (const turn of turns) {
-      for (const block of turn.blocks) {
-        if (block.kind !== "tool") continue;
-        const tool = block.tool;
-        const name = tool.title || "";
-        if (!matchesPlanWrite(name)) continue;
-        // plan_task / modify_plan responses don't echo task_id; it lives
-        // in the input arg. Falling back to output regardless covers
-        // future runtimes that may echo it.
-        let tid: string | undefined;
-        if (tool.input) {
-          const parsedIn = extractToolOutputJson(tool.input) as {
-            task_id?: string;
-          } | null;
-          tid = parsedIn?.task_id;
-        }
-        if (!tid && tool.output) {
-          const parsed = extractToolOutputJson(tool.output) as {
-            task_id?: string;
-          } | null;
-          tid = parsed?.task_id;
-        }
-        if (!tid) continue;
-        // Last write wins — drop any earlier tool_use_id for this task.
-        const prev = richToolByTask.get(tid);
-        if (prev) taskByRichTool.delete(prev);
-        richToolByTask.set(tid, tool.id);
-        taskByRichTool.set(tool.id, tid);
-      }
-    }
-    return { taskByRichTool };
-  }, [turns]);
+  // the timeline. ``taskByRichTool`` also doubles as a "this is a plan
+  // write for a known task" set for the pill renderer. The task id is
+  // resolved from the lead session's ``metadata.valuz.task_id`` (the
+  // authoritative binding) rather than the unreliable tool args — see
+  // ``computePlanAnchors``.
+  const planAnchors = useMemo(
+    () => computePlanAnchors(turns, selectedSession?.task_id ?? null),
+    [turns, selectedSession],
+  );
   // Append the optimistic pending turn so the user sees their message +
   // a thinking hint immediately on Send. ``ConversationTurnList`` keys
   // off ``sending && isLatest`` to draw the waiting indicator on the

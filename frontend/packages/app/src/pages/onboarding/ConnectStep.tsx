@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Badge,
   Button,
-  DeleteConfirmDialog,
   ProviderAddDialog,
   Select,
   SelectContent,
@@ -14,15 +13,15 @@ import {
 import {
   providersApi,
   settingsApi,
-  type ModelDefaults,
+  type ModelOption,
+  type ModelOptionGroup,
+  type ModelOptionProvider,
+  type ModelOptionsResponse,
   type ProviderDescriptor,
-  type ProviderListItem,
-  type RuntimeId,
 } from "@valuz/core";
-import { useTranslation } from "@valuz/core";
-import { modelLabel } from "@valuz/shared";
+import { useCapabilities, useTranslation } from "@valuz/core";
 import { t as _t } from "@valuz/shared/i18n";
-import { Check, Loader2, Lock, Plus, Trash2 } from "lucide-react";
+import { Check, Loader2, Lock, Plus } from "lucide-react";
 import { toast } from "sonner";
 import {
   useCliLoginFlow,
@@ -34,17 +33,19 @@ import { OnboardingStep } from "./OnboardingShell";
 import { StepFooter } from "./StepFooter";
 
 /**
- * Step 2 · Connect a model channel — REAL providers, no mock. Lists the
- * backend's providers, lets the user connect one (CLI subscription login or an
- * API key), pick a model, and set it as the global default. The default is set
- * via settingsApi.patchModelDefaults — the EXACT same path Settings → Models
- * uses, so there's a single default mechanism, not two.
+ * Step 2 · Connect a model channel.
+ *
+ * Renders the server's already-resolved picker (`GET /v1/settings/model-options`)
+ * verbatim — the backend groups providers, resolves each model's runtimes,
+ * collapses a system channel to one card, and disambiguates same-named models.
+ * Picking a model writes the global default via `settingsApi.patchModelDefaults`
+ * using the model's own `(default_runtime, provider_id, model_id)` — the EXACT
+ * same default mechanism Settings → Models uses, no client-side runtime guessing.
+ *
+ * The one thing the server can't resolve is CLI-subscription login state (the
+ * credential lives in the local keychain): those providers come back
+ * `status="client_resolved"` and we fill availability in from `checkCliLogin`.
  */
-
-const SUBSCRIPTION_TOOL: Record<string, CliTool> = {
-  "claude-subscription": "claude",
-  "codex-subscription": "codex",
-};
 
 const API_KEY_DISPLAY: Record<string, string> = {
   anthropic: "Anthropic (Claude)",
@@ -57,17 +58,20 @@ const API_KEY_DISPLAY: Record<string, string> = {
 
 const DEFAULT_BADGE_CLASS =
   "h-4 rounded-[4px] px-1 py-0 text-[10px] leading-none font-normal";
-const AVAILABLE_BADGE_CLASS =
-  "rounded-full text-2xs";
+const AVAILABLE_BADGE_CLASS = "rounded-full text-2xs";
 
-/** The runtime a channel pins to — kept out of the UI, sent transparently so
- *  the global default carries a coherent (runtime, provider, model) triple and
- *  a deployed team lands on the right engine. Subscriptions pin their CLI;
- *  api-key / system channels run on the Valuz Agent (deepagents) runtime. */
-const runtimeForChannel = (p: ProviderListItem): RuntimeId => {
-  if (p.provider_kind === "claude-subscription") return "claude_agent";
-  if (p.provider_kind === "codex-subscription") return "codex";
-  return "deepagents";
+// group key → section header i18n key. api_key is handled separately (it always
+// shows the "add channel" affordance even with no configured providers).
+const SECTION_KEY: Record<string, string> = {
+  subscription: "onboarding.sectionLocalSubscription",
+  system: "onboarding.sectionSystem",
+  org: "onboarding.sectionSystem",
+};
+
+const EMPTY_CURRENT: ModelOptionsResponse["current"] = {
+  runtime: null,
+  provider_id: null,
+  model: null,
 };
 
 export const ConnectStep = ({
@@ -78,43 +82,34 @@ export const ConnectStep = ({
   onSkip: () => void;
 }) => {
   const { t } = useTranslation();
+  // When an org policy disallows members configuring their own model channels
+  // (member_custom_model_enabled=false → configureModelChannel=false), the whole
+  // "API Key channel" affordance is hidden — members pick from the platform /
+  // subscription channels only, with nothing to add.
+  const { configureModelChannel } = useCapabilities();
   const { checkCliLogin } = usePlatform();
-  const [providers, setProviders] = useState<ProviderListItem[]>([]);
+  const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
+  const [current, setCurrent] =
+    useState<ModelOptionsResponse["current"]>(EMPTY_CURRENT);
   const [descriptors, setDescriptors] = useState<ProviderDescriptor[]>([]);
-  const [defaults, setDefaults] = useState<ModelDefaults | null>(null);
   const [cliStatus, setCliStatus] = useState<
     Partial<Record<CliTool, CliLoginStatus>>
   >({});
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<string | null>(null);
+  // The model id currently being set as default (spinner on its card).
+  const [busyModel, setBusyModel] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
-  // The api-key channel pending deletion (subscriptions/system aren't deletable).
-  const [deleteTarget, setDeleteTarget] = useState<ProviderListItem | null>(
-    null,
-  );
-  // Which channel the user has TAPPED on. The actual default lives on the
-  // backend (defaults.default_provider_id); this is a local UI hint so the
-  // model picker below has somewhere to anchor BEFORE the user picks a model.
-  // Seeded from the backend default on load and after refresh — see the
-  // useEffect below.
-  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
-    null,
-  );
 
   const refresh = async () => {
-    const [list, md] = await Promise.all([
-      providersApi.list(),
-      settingsApi.getModelDefaults(),
-    ]);
-    setProviders(list.providers);
-    setDefaults(md);
+    const res = await settingsApi.getModelOptions();
+    setGroups(res.groups);
+    setCurrent(res.current);
   };
 
   const cliLogin = useCliLoginFlow({
     onProviderMarkedOAuth: () => void refresh(),
   });
 
-  // Initial load: providers list, model defaults, descriptors, CLI probe.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -146,81 +141,27 @@ export const ConnectStep = ({
     };
   }, [checkCliLogin]);
 
-  const defaultId = defaults?.default_provider_id ?? null;
-  const defaultModel = defaults?.default_model ?? null;
-  const hasDefault = Boolean(defaultId && defaultModel);
+  const hasDefault = Boolean(current.provider_id && current.model);
 
-  // Seed local selection from the backend default ONCE, the first time
-  // defaultId becomes known. Don't keep re-syncing — if the user toggles a
-  // row off (or picks a different one), that explicit intent must stick;
-  // re-running this effect on subsequent defaultId changes would clobber it.
-  const seededSelectionRef = useRef(false);
-  useEffect(() => {
-    if (defaultId && !seededSelectionRef.current) {
-      setSelectedProviderId(defaultId);
-      seededSelectionRef.current = true;
-    }
-  }, [defaultId]);
-
-  const setAsDefault = async (providerId: string, model: string) => {
-    setBusy(providerId);
+  const setAsDefault = async (m: ModelOption) => {
+    setBusyModel(m.model_id);
     try {
-      const provider = providers.find((p) => p.id === providerId);
-      // Same call Settings → Models makes — one default mechanism. Send the
-      // channel's runtime too so the default is a coherent triple and a
-      // deployed team runs on the right engine (not a hard-coded claude_agent).
-      const next = await settingsApi.patchModelDefaults({
-        default_runtime: provider ? runtimeForChannel(provider) : undefined,
-        default_provider_id: providerId,
-        default_model: model,
+      // The model carries its owning provider + preferred runtime — write the
+      // coherent triple straight through (same path Settings → Models uses).
+      await settingsApi.patchModelDefaults({
+        default_runtime: m.default_runtime,
+        default_provider_id: m.provider_id,
+        default_model: m.model_id,
       });
-      setDefaults(next);
       await refresh();
     } catch {
       toast.error(
         _t("onboarding.setDefaultFailed" as Parameters<typeof _t>[0]),
       );
     } finally {
-      setBusy(null);
+      setBusyModel(null);
     }
   };
-
-  const enableSubscription = async (providerId: string) => {
-    setBusy(providerId);
-    try {
-      await providersApi.enable(providerId);
-      await refresh();
-    } catch {
-      toast.error(_t("onboarding.enableFailed" as Parameters<typeof _t>[0]));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const handleDelete = async (provider: ProviderListItem) => {
-    setBusy(provider.id);
-    try {
-      await providersApi.delete(provider.id);
-      await refresh();
-    } catch {
-      toast.error(_t("common.error" as Parameters<typeof _t>[0]));
-    } finally {
-      setBusy(null);
-      setDeleteTarget(null);
-    }
-  };
-
-  const subscriptions = providers.filter((p) => p.auth_type === "oauth");
-  const apiKeyConnected = providers.filter(
-    (p) => p.auth_type !== "oauth" && p.credential_source !== "none",
-  );
-
-  // Both OAuth and api-key channels surface their model list via the same
-  // ``model_options`` field. For OAuth/subscription channels the backend
-  // hydrates the descriptor from ``valuz_agent/resources/subscription_models.json``
-  // (see ``_hydrate_subscription_providers``), so the picker stays in sync with
-  // the system settings + agent settings dropdowns without a frontend duplicate.
-  const modelsFor = (p: ProviderListItem): string[] => p.model_options;
 
   const handleCreate = async (payload: {
     name: string;
@@ -236,6 +177,25 @@ export const ConnectStep = ({
       _t("onboarding.providerConnected" as Parameters<typeof _t>[0]),
     );
   };
+
+  // api_key is rendered last with the always-present "add channel" button; the
+  // other groups (subscription / system) render in server order above it.
+  const apiKeyGroup = groups.find((g) => g.key === "api_key");
+  const otherGroups = groups.filter((g) => g.key !== "api_key");
+
+  const cliStatusFor = (p: ModelOptionProvider): CliLoginStatus | undefined =>
+    p.cli_tool ? cliStatus[p.cli_tool as CliTool] : undefined;
+
+  const renderCard = (p: ModelOptionProvider) => (
+    <OptionCard
+      key={p.provider_id}
+      provider={p}
+      cliStatus={cliStatusFor(p)}
+      busyModel={busyModel}
+      onPick={(m) => void setAsDefault(m)}
+      onLogin={() => p.cli_tool && void cliLogin.trigger(p.cli_tool as CliTool)}
+    />
+  );
 
   return (
     <OnboardingStep
@@ -258,74 +218,41 @@ export const ConnectStep = ({
         </div>
       ) : (
         <>
-          {subscriptions.length > 0 && (
+          {otherGroups.map((g) => (
             <Section
+              key={g.key}
               label={t(
-                "onboarding.sectionLocalSubscription" as Parameters<
-                  typeof t
-                >[0],
+                (SECTION_KEY[g.key] ?? g.key) as Parameters<typeof t>[0],
               )}
             >
+              <div className="space-y-2.5">{g.providers.map(renderCard)}</div>
+            </Section>
+          ))}
+
+          {/* BYOK "API Key channel" — hidden entirely when the org disallows
+              members configuring their own model channels. */}
+          {configureModelChannel && (
+            <Section
+              label={t("onboarding.sectionApiKey" as Parameters<typeof t>[0])}
+            >
               <div className="space-y-2.5">
-                {subscriptions.map((p) => (
-                  <ProviderRow
-                    key={p.id}
-                    provider={p}
-                    cliStatus={cliStatus[SUBSCRIPTION_TOOL[p.provider_kind]]}
-                    isDefault={p.id === defaultId}
-                    selected={p.id === selectedProviderId}
-                    busy={busy === p.id}
-                    models={modelsFor(p)}
-                    currentModel={p.id === defaultId ? defaultModel : null}
-                    onSelect={() =>
-                      setSelectedProviderId((prev) =>
-                        prev === p.id ? null : p.id,
-                      )
-                    }
-                    onPick={(m) => void setAsDefault(p.id, m)}
-                    onEnable={() => void enableSubscription(p.id)}
-                    onLogin={() =>
-                      void cliLogin.trigger(SUBSCRIPTION_TOOL[p.provider_kind])
-                    }
-                  />
-                ))}
+                {apiKeyGroup?.providers.map(renderCard)}
+                <button
+                  type="button"
+                  onClick={() => setAddOpen(true)}
+                  className="card-interactive flex w-full items-center gap-2.5 rounded-xl border border-dashed border-surface-border bg-surface px-4 py-3 text-left text-sm text-ink-body"
+                >
+                  <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-surface-soft">
+                    <Plus className="h-4 w-4 text-ink-meta" />
+                  </span>
+                  {t("onboarding.addApiKeyChannel" as Parameters<typeof t>[0])}
+                  <span className="ml-auto text-2xs text-ink-muted">
+                    {t("onboarding.addApiKeyHint" as Parameters<typeof t>[0])}
+                  </span>
+                </button>
               </div>
             </Section>
           )}
-
-          <Section
-            label={t("onboarding.sectionApiKey" as Parameters<typeof t>[0])}
-          >
-            <div className="space-y-2.5">
-              {apiKeyConnected.map((p) => (
-                <ProviderRow
-                  key={p.id}
-                  provider={p}
-                  isDefault={p.id === defaultId}
-                  selected={p.id === selectedProviderId}
-                  busy={busy === p.id}
-                  models={modelsFor(p)}
-                  currentModel={p.id === defaultId ? defaultModel : null}
-                  onSelect={() => setSelectedProviderId(p.id)}
-                  onPick={(m) => void setAsDefault(p.id, m)}
-                  onDelete={p.deletable ? () => setDeleteTarget(p) : undefined}
-                />
-              ))}
-              <button
-                type="button"
-                onClick={() => setAddOpen(true)}
-                className="card-interactive flex w-full items-center gap-2.5 rounded-xl border border-dashed border-surface-border bg-surface px-4 py-3 text-left text-sm text-ink-body"
-              >
-                <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-surface-soft">
-                  <Plus className="h-4 w-4 text-ink-meta" />
-                </span>
-                {t("onboarding.addApiKeyChannel" as Parameters<typeof t>[0])}
-                <span className="ml-auto text-2xs text-ink-muted">
-                  {t("onboarding.addApiKeyHint" as Parameters<typeof t>[0])}
-                </span>
-              </button>
-            </div>
-          </Section>
         </>
       )}
 
@@ -359,125 +286,78 @@ export const ConnectStep = ({
         onCreate={handleCreate}
       />
       {cliLogin.dialog}
-      <DeleteConfirmDialog
-        open={deleteTarget !== null}
-        onOpenChange={(o) => {
-          if (!o) setDeleteTarget(null);
-        }}
-        itemName={deleteTarget?.name}
-        onConfirm={() => deleteTarget && void handleDelete(deleteTarget)}
-      />
     </OnboardingStep>
   );
 };
 
 /* -------------------------------------------------------------------------- */
 
-const ProviderRow = ({
+const OptionCard = ({
   provider,
   cliStatus,
-  isDefault,
-  selected,
-  busy,
-  models,
-  currentModel,
-  onSelect,
+  busyModel,
   onPick,
-  onEnable,
   onLogin,
-  onDelete,
 }: {
-  provider: ProviderListItem;
+  provider: ModelOptionProvider;
   cliStatus?: CliLoginStatus;
-  /** True when this provider is the BACKEND default (gets the 「默认」 badge). */
-  isDefault: boolean;
-  /** True when the user has tapped this row. Drives the brand-tinted ring +
-   *  reveals the inline model picker below. Selecting alone doesn't set a
-   *  default — only picking a model in the inline picker does. */
-  selected: boolean;
-  busy?: boolean;
-  /** Model options surfaced by the inline picker — only used when selected
-   *  && connected. */
-  models?: string[];
-  /** Current model value to seed the inline picker — null when this row
-   *  isn't the backend default. */
-  currentModel?: string | null;
-  onSelect: () => void;
-  onPick?: (model: string) => void;
-  onEnable?: () => void;
-  onLogin?: () => void;
-  /** api-key channels only — shows a trash button that opens the confirm. */
-  onDelete?: () => void;
+  /** The model id currently being saved as default (drives the spinner). */
+  busyModel: string | null;
+  onPick: (model: ModelOption) => void;
+  onLogin: () => void;
 }) => {
   const { t } = useTranslation();
-  const isOAuth = provider.auth_type === "oauth";
-  // An OAuth subscription channel is "connected" (usable → 可用) only when its
-  // CLI is actually logged in — NOT merely because the seeded provider row is
-  // enabled. Builtin subscription rows seed enabled=True (seeds/providers.py),
-  // so keying off enabled alone made a freshly-seeded codex-subscription show
-  // 可用 even though the user never ran `codex /login`. This mirrors
-  // Settings → Model (ModelSection), which drives the OAuth badge off real CLI
-  // keychain state. While cliStatus is still loading it's undefined → not
-  // connected → the badge branches below stay hidden (no wrong-state flash),
-  // and the logged-in-but-not-enabled enable flow is preserved because that
-  // path requires enabled=False.
-  const connected = isOAuth
-    ? provider.enabled && cliStatus?.state === "logged_in"
-    : provider.credential_source !== "none";
-  // OAuth, installed-but-not-logged-in → show the terminal login hint.
+  // ``available`` / ``unavailable`` are server-authoritative. ``client_resolved``
+  // (CLI subscriptions) is decided here from the local keychain probe.
+  const isSubscription = provider.status === "client_resolved";
+  const connected =
+    provider.status === "available"
+      ? true
+      : isSubscription
+        ? cliStatus?.state === "logged_in"
+        : false;
   const needsLogin =
-    isOAuth && !connected && cliStatus
+    isSubscription && !connected && cliStatus
       ? !cliStatus.installed || cliStatus.state === "logged_out"
       : false;
-  const loggedInNotEnabled =
-    isOAuth && !connected && cliStatus?.state === "logged_in";
 
-  // Click-target ≠ <button> here because we want to host a real <Select>
-  // (which renders as a button) inside on the inline expansion. Nested buttons
-  // are invalid HTML; use role="button" on the header row instead.
-  const headerProps = connected
-    ? {
-        role: "button" as const,
-        tabIndex: 0,
-        onClick: onSelect,
-        onKeyDown: (e: React.KeyboardEvent) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onSelect();
-          }
-        },
-      }
-    : {};
+  // Onboarding prefers the Claude runtime: show only models runnable on
+  // claude_agent (a system model is often configured as a Claude variant + a
+  // Codex variant of the same product — surface the Claude one). Keep the
+  // current default even if it's a non-Claude model. Fall back to all models
+  // when a channel has none (e.g. a Codex-only subscription) so it's never
+  // empty. Settings (with its runtime selector) shows the full set.
+  const claudeModels = provider.models.filter(
+    (m) => m.runtimes.includes("claude_agent") || m.is_current_default,
+  );
+  const models = claudeModels.length > 0 ? claudeModels : provider.models;
+
+  const currentModel = models.find((m) => m.is_current_default) ?? null;
+  const isDefault = currentModel !== null;
+  const busy = models.some((m) => m.model_id === busyModel);
 
   return (
     <div
       className={`rounded-xl border transition-all ${
-        selected
-          ? "border-brand/60 bg-brand-light/20 ring-1 ring-brand/40"
-          : isDefault
-            ? "border-brand/30 bg-brand-light/10"
-            : "border-surface-border bg-surface"
+        isDefault
+          ? "border-brand/30 bg-brand-light/10"
+          : "border-surface-border bg-surface"
       }`}
     >
-      <div
-        {...headerProps}
-        className={`flex items-center gap-3.5 px-4 py-3.5 ${
-          connected ? "cursor-pointer" : ""
-        }`}
-      >
+      <div className="flex items-center gap-3.5 px-4 py-3.5">
         <div
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[13px] font-bold ${
-            selected || isDefault
+            isDefault
               ? "bg-brand/10 text-brand"
               : "bg-surface-soft text-ink-meta"
           }`}
         >
-          {provider.name.slice(0, 1)}
+          {provider.label.slice(0, 1)}
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-ink-heading">
-              {provider.name}
+              {provider.label}
             </span>
             {isDefault && (
               <Badge
@@ -487,52 +367,20 @@ const ProviderRow = ({
               </Badge>
             )}
           </div>
-          {!connected && !isOAuth && (
-            <p className="mt-1 text-xs leading-5 text-ink-body">
-              {provider.provider_kind.includes("claude")
-                ? t("onboarding.claudeSubDesc" as Parameters<typeof t>[0])
-                : provider.provider_kind.includes("codex")
-                  ? t("onboarding.codexSubDesc" as Parameters<typeof t>[0])
-                  : provider.name}
-            </p>
-          )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           {busy && <Loader2 className="h-4 w-4 animate-spin text-brand" />}
-          {onDelete && (
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete();
-              }}
-              aria-label={t("common.delete")}
-              title={t("common.delete")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-[#f54b4b]/10 hover:text-[#f54b4b]"
+          {connected && !isDefault && (
+            <Badge
+              className={`${AVAILABLE_BADGE_CLASS} gap-1 bg-[#f3f2ff] text-[#725cf9]`}
             >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
+              <span className="h-1.5 w-1.5 rounded-full bg-[#725cf9]" />
+              {t("onboarding.availableBadge" as Parameters<typeof t>[0])}
+            </Badge>
           )}
-          {/* Logged in via CLI but the channel row isn't enabled yet → a single
-              enable button, matching Settings → Model's action affordance. */}
-          {!connected && loggedInNotEnabled && (
-            <Button
-              size="sm"
-              className="text-xs"
-              disabled={busy}
-              onClick={(e) => {
-                e.stopPropagation();
-                onEnable?.();
-              }}
-            >
-              {t("onboarding.oneClickEnable" as Parameters<typeof t>[0])}
-            </Button>
-          )}
-          {/* Not installed / not logged in → a plain status LABEL (muted text,
-              no border so it doesn't read as a button) + one outline CLI-login
-              button. Reuses Settings → Model's exact label keys so the two
-              screens read identically. */}
-          {!connected && needsLogin && (
+          {connected && isDefault && <Check className="h-4 w-4 text-brand" />}
+          {/* CLI subscription that isn't logged in → status label + login CTA. */}
+          {needsLogin && (
             <>
               <span className="flex items-center gap-1 text-xs text-ink-meta">
                 <Lock className="h-3 w-3" />
@@ -544,10 +392,7 @@ const ProviderRow = ({
                 variant="outline"
                 size="sm"
                 className="text-xs"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onLogin?.();
-                }}
+                onClick={onLogin}
               >
                 {cliStatus && !cliStatus.installed
                   ? t("settings.model.installCli" as Parameters<typeof t>[0])
@@ -555,33 +400,33 @@ const ProviderRow = ({
               </Button>
             </>
           )}
-          {/* Connected → show 「可用」 so the user can tell at a glance which
-              channels are wired up. Inline model picker reveals on click. */}
-          {connected && !selected && (
-            <Badge
-              className={`${AVAILABLE_BADGE_CLASS} gap-1 bg-[#f3f2ff] text-[#725cf9]`}
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-[#725cf9]" />
-              {t("onboarding.availableBadge" as Parameters<typeof t>[0])}
-            </Badge>
+          {/* System / api_key channel the server marked unavailable (e.g. not
+              signed in to Valuz) → show the reason, no CLI affordance. */}
+          {provider.status === "unavailable" && (
+            <span className="flex items-center gap-1 text-xs text-ink-meta">
+              <Lock className="h-3 w-3" />
+              {provider.unavailable_reason ??
+                t("onboarding.notLoggedInBadge" as Parameters<typeof t>[0])}
+            </span>
           )}
-          {connected && selected && <Check className="h-4 w-4 text-brand" />}
         </div>
       </div>
 
-      {/* Inline model picker — anchored to the selected row, sharing its
-          card so the "Model · X" block visually belongs to it. */}
-      {connected && selected && onPick && (
+      {/* Inline model picker — shown on every usable card. */}
+      {connected && models.length > 0 && (
         <div className="border-t border-brand/20 px-4 pb-4 pt-3">
           <div className="mb-2 text-xs font-medium text-ink-meta">
             {t("onboarding.modelLabel" as Parameters<typeof t>[0], {
-              channel: provider.name,
+              channel: provider.label,
             })}
           </div>
           <Select
-            value={currentModel ?? ""}
-            onValueChange={onPick}
-            disabled={busy || (models?.length ?? 0) === 0}
+            value={currentModel?.model_id ?? ""}
+            onValueChange={(v) => {
+              const m = models.find((x) => x.model_id === v);
+              if (m) onPick(m);
+            }}
+            disabled={busy}
           >
             <SelectTrigger className="w-full text-xs">
               <SelectValue
@@ -591,18 +436,19 @@ const ProviderRow = ({
               />
             </SelectTrigger>
             <SelectContent>
-              {(models ?? []).map((m) => (
-                <SelectItem key={m} value={m} className="text-xs">
-                  {/* Show the human display name (e.g. "Opus 4.8"), same as
-                      Settings → Model; the wire-level id is still the value. */}
-                  {provider.model_labels?.[m] || modelLabel(m)}
+              {models.map((m) => (
+                <SelectItem
+                  key={m.model_id}
+                  value={m.model_id}
+                  className="text-xs"
+                >
+                  {m.label}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
         </div>
       )}
-
     </div>
   );
 };

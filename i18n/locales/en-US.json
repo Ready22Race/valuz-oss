@@ -706,6 +706,7 @@
     "connectStatusNoDefault": "Connect a channel and pick a default model",
     "connectLoading": "Loading available model channels…",
     "sectionLocalSubscription": "Local subscription",
+    "sectionSystem": "System models",
     "sectionApiKey": "API Key channel",
     "addApiKeyChannel": "Add API Key channel",
     "addApiKeyHint": "DeepSeek, OpenRouter, or any compatible API",
