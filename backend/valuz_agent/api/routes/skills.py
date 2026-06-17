@@ -113,6 +113,23 @@ async def list_tags(
     return SkillTagsResponse(tags=await svc.list_all_tags(project_id))
 
 
+class SkillRescanResponse(BaseModel):
+    indexed: int
+
+
+@router.post("/v1/skills/scan", response_model=SkillRescanResponse)
+async def rescan_skills(
+    svc: SkillLibraryService = Depends(get_skill_service),
+) -> SkillRescanResponse:
+    """Re-discover every skill on disk and refresh the index, then notify open
+    catalogs (via ``SKILL_CHANGED``) so they re-fetch. The manual counterpart of
+    the boot scan + periodic auto-scan — surfaced so a user who just added a
+    team or dropped a skill folder can pick it up without restarting."""
+    indexed = await svc.startup_scan()
+    event_bus.publish(SKILL_CHANGED, skill_id="*", reason="rescan")
+    return SkillRescanResponse(indexed=indexed)
+
+
 # ------------------------------------------------------------------
 # Import endpoints (static paths before {skill_id})
 # ------------------------------------------------------------------

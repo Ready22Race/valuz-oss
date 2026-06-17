@@ -292,14 +292,15 @@ class SkillLibraryService:
 
         return SkillsCatalog(project_id=project_id, skills=skills)
 
-    async def startup_scan(self) -> None:
+    async def startup_scan(self) -> int:
         # Serialize concurrent scans (see ``_scan_lock``): each acquirer commits
         # its rows before releasing, so the next scan sees them and does an
-        # UPDATE instead of a duplicate INSERT.
+        # UPDATE instead of a duplicate INSERT. Returns the number of skills
+        # discovered (indexed) this pass.
         async with _scan_lock:
-            await self._startup_scan_unlocked()
+            return await self._startup_scan_unlocked()
 
-    async def _startup_scan_unlocked(self) -> None:
+    async def _startup_scan_unlocked(self) -> int:
         from valuz_agent.modules.skills.contracts import RuntimeContext
 
         all_manifests: list = []
@@ -333,6 +334,8 @@ class SkillLibraryService:
             if row.id not in seen_ids:
                 row.status = "unavailable"
                 await self._ds.update(row)
+
+        return len(seen_ids)
 
     async def _upsert_manifest(self, manifest) -> None:  # type: ignore[no-untyped-def]
         """Create or refresh the index row for one manifest (see
