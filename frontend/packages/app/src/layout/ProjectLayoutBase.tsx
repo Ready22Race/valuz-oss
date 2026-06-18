@@ -17,6 +17,7 @@ import {
   useBranding,
   useGlobalShortcuts,
   usePanelStore,
+  useConnectorAlert,
   useRegistryStore,
   useRunningRuns,
   useSessionStore,
@@ -112,6 +113,7 @@ function useNavItems(): DesktopSidebarBottomItem[] {
   const { t } = useTranslation();
   const navItems = useRegistryStore((state) => state.navItems);
   const { count: runningCount } = useRunningRuns();
+  const { showDot: connectorAlert } = useConnectorAlert();
   return navItems.map((item) => ({
     id: item.id,
     label: t(item.label as Parameters<typeof t>[0]),
@@ -119,6 +121,7 @@ function useNavItems(): DesktopSidebarBottomItem[] {
     icon: NAV_ICON_MAP[item.id] ?? "settings",
     group: item.navGroup ?? "project",
     badgeCount: item.id === "activity" ? runningCount : undefined,
+    badgeDot: item.id === "connectors" ? connectorAlert : undefined,
   }));
 }
 
