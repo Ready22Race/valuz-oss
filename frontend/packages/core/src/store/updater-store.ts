@@ -5,6 +5,11 @@ export type UpdaterStatus =
   | "checking"
   | "available"
   | "downloading"
+  // macOS only: after the real network download, electron-updater hands the zip
+  // to Squirrel.Mac via a loopback server, which "re-downloads" it fast (0→100
+  // again). We surface that second pass as "preparing" (install hand-off) so the
+  // bar doesn't look like it downloads twice.
+  | "preparing"
   | "downloaded"
   | "error";
 
@@ -60,7 +65,22 @@ export const useUpdaterStore = create<UpdaterState>((set) => ({
   setDownloading: () =>
     set({ status: "downloading", progress: 0, errorMessage: null }),
   setProgress: (progress: number, bytesPerSecond: number) =>
-    set({ status: "downloading", progress, bytesPerSecond }),
+    set((s) => {
+      // Already in the local install hand-off → hold the bar full, ignore the
+      // fast second 0→100.
+      if (s.status === "preparing") {
+        return { progress: 100, bytesPerSecond: 0 };
+      }
+      // A sharp drop after we'd nearly finished = the network download is done
+      // and Squirrel.Mac is re-reading it from loopback. Show "preparing"
+      // instead of a second download bar. The >=90 / -10 guards keep mid-
+      // download jitter from tripping it; platforms without the hand-off never
+      // reset, so they never enter "preparing".
+      if (s.status === "downloading" && s.progress >= 90 && progress < s.progress - 10) {
+        return { status: "preparing", progress: 100, bytesPerSecond: 0 };
+      }
+      return { status: "downloading", progress, bytesPerSecond };
+    }),
   setDownloaded: () =>
     set({ status: "downloaded", progress: 100, dismissed: false }),
   setError: (message: string, toast = false) =>

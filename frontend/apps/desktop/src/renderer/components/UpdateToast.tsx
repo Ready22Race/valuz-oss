@@ -70,6 +70,7 @@ export const UpdateToast = () => {
     !dismissed &&
     (status === "available" ||
       status === "downloading" ||
+      status === "preparing" ||
       status === "downloaded" ||
       // Errors only reach the toast when flagged (menu/tray check, download);
       // the About-page check shows its own inline error instead.
@@ -77,6 +78,7 @@ export const UpdateToast = () => {
   if (!visible) return null;
 
   const isDownloading = status === "downloading";
+  const isPreparing = status === "preparing";
   const isDownloaded = status === "downloaded";
   const isError = status === "error";
   const ver = version ? ` v${version}` : "";
@@ -143,7 +145,7 @@ export const UpdateToast = () => {
               >
                 {t("updater.restartNow" as Parameters<typeof t>[0])}
               </Button>
-            ) : isDownloading ? null : (
+            ) : isDownloading || isPreparing ? null : (
               <Button
                 size="sm"
                 className="h-7 min-w-[68px] shrink-0"
@@ -154,12 +156,21 @@ export const UpdateToast = () => {
             )}
           </div>
 
-          {/* Row 2 — progress (while downloading) or description */}
-          {isDownloading ? (
+          {/* Row 2 — progress (downloading) / preparing / description. While
+              "preparing" (the fast macOS loopback hand-off after the real
+              download) the bar stays full and the percentage is replaced by a
+              "Preparing to install…" label, so it doesn't look like a second
+              download. */}
+          {isDownloading || isPreparing ? (
             <div className="mt-1 flex min-h-5 items-center gap-2">
-              <Progress value={progress} className="h-1.5 flex-1" />
+              <Progress
+                value={isPreparing ? 100 : progress}
+                className="h-1.5 flex-1"
+              />
               <span className="shrink-0 text-[11px] tabular-nums text-ink-muted">
-                {Math.round(progress)}%
+                {isPreparing
+                  ? t("updater.preparing" as Parameters<typeof t>[0])
+                  : `${Math.round(progress)}%`}
               </span>
             </div>
           ) : (

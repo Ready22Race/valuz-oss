@@ -1745,6 +1745,7 @@
     "downloadingDesc": "Downloading update, please wait...",
     "errorTitle": "Update failed",
     "errorUnknown": "Unknown error",
+    "preparing": "Preparing to install…",
     "restartNow": "Restart now",
     "updateAvailable": "Update available"
   },
