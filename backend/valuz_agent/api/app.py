@@ -17,6 +17,7 @@ from valuz_agent.api.routes.agent_templates import router as agent_templates_rou
 from valuz_agent.api.routes.agents import router as agents_router
 from valuz_agent.api.routes.analytics import router as analytics_router
 from valuz_agent.api.routes.automations import router as automations_router
+from valuz_agent.api.routes.browser import router as browser_router
 from valuz_agent.api.routes.connectors import router as connectors_router
 from valuz_agent.api.routes.decisions import router as decisions_router
 from valuz_agent.api.routes.docs import router as docs_router
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
 
     app.include_router(providers_router)
     app.include_router(connectors_router)
+    app.include_router(browser_router)
     app.include_router(runs_router)
     app.include_router(runtimes_router)
     app.include_router(system_router)

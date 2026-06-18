@@ -1,0 +1,8 @@
+{
+  "name": "valuz-vendored-chrome-devtools-mcp",
+  "private": true,
+  "description": "Pinned, vendored chrome-devtools-mcp engine for the Valuz browser feature. The node_modules tree here is committed and staged into libexec at build time (see scripts/build-desktop.sh Phase A4). Refresh with scripts/vendor-chrome-devtools-mcp.sh.",
+  "dependencies": {
+    "chrome-devtools-mcp": "1.2.0"
+  }
+}
