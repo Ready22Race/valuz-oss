@@ -272,6 +272,7 @@ const SidebarLink = ({
   href,
   LinkComponent,
   onContextMenu,
+  onClick,
   editing = false,
 }: {
   active?: boolean;
@@ -279,6 +280,10 @@ const SidebarLink = ({
   href: string;
   LinkComponent: NavLinkComponent;
   onContextMenu?: React.MouseEventHandler;
+  /** Fires on click in addition to navigation. Needed because react-router
+   * treats a click on the already-active route as a no-op (no location
+   * change), so an effect keyed on the path wouldn't re-run. */
+  onClick?: React.MouseEventHandler;
   /** When true, the row is in inline-rename mode — drop the rounded
    * background / hover bg so the inline input shows just its bottom border. */
   editing?: boolean;
@@ -298,6 +303,7 @@ const SidebarLink = ({
           : "hover:bg-[rgba(0,0,0,0.03)] dark:hover:bg-surface-muted",
     )}
     onContextMenu={onContextMenu}
+    onClick={onClick}
   >
     {children}
   </LinkComponent>
@@ -489,6 +495,10 @@ export interface DesktopSidebarProps {
   mascotSrc?: string | null;
   LinkComponent?: NavLinkComponent;
   primaryActionHref?: string;
+  /** Fires whenever the primary action ("新对话") is clicked, in addition to
+   * its navigation — including when the home route is already active (a
+   * same-path click that wouldn't otherwise trigger a route effect). */
+  onPrimaryAction?: () => void;
   /** Callback when the "+" button next to Projects is clicked */
   onAddProject?: () => void;
   /** Project row "..." actions. Pass ``undefined`` to hide an option. */
@@ -520,6 +530,7 @@ export const DesktopSidebar = ({
   mascotSrc = "./mascot.png",
   LinkComponent = DefaultNavLink,
   primaryActionHref = "/conversation/new",
+  onPrimaryAction,
   projectGroups,
   onAddProject,
   onProjectOpenInFinder,
@@ -570,6 +581,7 @@ export const DesktopSidebar = ({
                 <TooltipTrigger asChild>
                   <LinkComponent
                     to={primaryActionHref}
+                    onClick={onPrimaryAction}
                     className="flex h-9 w-9 cursor-default items-center justify-center rounded-lg text-ink-body transition-colors duration-[120ms] hover:bg-surface-soft"
                   >
                     <MessageCirclePlus className="h-4 w-4" />
@@ -680,6 +692,7 @@ export const DesktopSidebar = ({
                   href={primaryActionHref}
                   active={isActivePath(activePath, primaryActionHref)}
                   LinkComponent={LinkComponent}
+                  onClick={onPrimaryAction}
                 >
                   <MessageCirclePlus
                     className="h-3.5 w-3.5 shrink-0"

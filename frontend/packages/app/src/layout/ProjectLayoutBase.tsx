@@ -738,6 +738,7 @@ export function ProjectLayoutBase({
             mascotSrc={mascotSrc}
             LinkComponent={Link}
             primaryActionHref="/conversation/new"
+            onPrimaryAction={refreshConnectorAlert}
             collapsed={sidebarCollapsed}
             onAddProject={() => setCreateOpen(true)}
             onProjectOpenInFinder={(projectId) => {
