@@ -607,6 +607,7 @@
     "statusConnecting": "Connecting…",
     "statusConnected": "Connected",
     "statusError": "Connection failed",
+    "statusNotConnected": "Not connected",
     "groupOfficial": "Official",
     "groupBuiltin": "Built-in",
     "groupDirectory": "Connected",
