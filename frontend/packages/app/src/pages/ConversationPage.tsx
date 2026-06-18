@@ -51,8 +51,11 @@ import {
   parseTodosUpdate,
   parseRequiresAction,
   parseActionResolved,
+  parseWorkflowProgress,
   SESSION_REQUIRES_ACTION_EVENT,
   SESSION_ACTION_RESOLVED_EVENT,
+  SESSION_WORKFLOW_PROGRESS_EVENT,
+  type WorkflowState,
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
@@ -74,6 +77,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   UserAnswerSummaryCard,
+  WorkflowProgressCard,
   cn,
   Composer,
   KnowledgeFileTreePicker,
@@ -107,6 +111,15 @@ import { LiveTaskCard } from "../components/LiveTaskCard";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
 import { getLastTempAgent, setLastTempAgent } from "../lib/last-temp-agent";
+
+/** True while a workflow snapshot's status denotes an in-flight run (vs a
+ *  terminal ``completed`` / ``killed`` / ``failed`` verb). Used to decide
+ *  whether the turn-end safety net should coerce a card to ``completed``. */
+const isWorkflowRunning = (status: string): boolean =>
+  status === "running" ||
+  status === "active" ||
+  status === "queued" ||
+  status === "pending";
 
 function toFileTree(nodes: ProjectFileNode[], prefix = ""): FileTreeNode[] {
   return nodes.map((n) => {
@@ -505,6 +518,15 @@ export const ConversationPage = () => {
   // a TodoWrite snapshot for this session"; an empty array means
   // "all done" (kernel preserves it as a meaningful state).
   const [todos, setTodos] = useState<TodoItem[] | null>(null);
+  // Live progress of Claude dynamic-workflow (``Workflow`` tool) runs in this
+  // session, keyed by the launch tool_use_id. Fed by ``session.workflow_progress``
+  // SSE snapshots; ``renderToolCall`` reads it to render the progress card on the
+  // matching Workflow tool block. Live-only (the kernel never persists these), so
+  // it stays empty on history replay / reconnect — the persisted Workflow tool
+  // call then renders as a plain tool card. Cleared on session switch.
+  const [workflowStates, setWorkflowStates] = useState<
+    Map<string, WorkflowState>
+  >(() => new Map());
   // Optimistic pending user message — rendered IMMEDIATELY when the user
   // hits Send so they see their text in the conversation without waiting
   // for the (potentially multi-second) round-trip through ensureSession ⇒
@@ -1206,6 +1228,26 @@ export const ConversationPage = () => {
     (tool: { id: string; title: string; input?: string; output?: string }) => {
       const name = tool.title || "";
 
+      // Claude dynamic-workflow launch → WorkflowProgressCard. The kernel
+      // streams ``session.workflow_progress`` snapshots keyed by this tool's
+      // tool_use_id while the background runtime executes; we render the live
+      // overview (status + agents-done/total + per-agent list) in place of the
+      // opaque generic tool card. When no snapshot exists yet (history replay /
+      // reconnect — the progress is live-only and never persisted), fall through
+      // to the generic ToolCallCard so the launch still shows.
+      if (name === "Workflow") {
+        const wfState = workflowStates.get(tool.id);
+        if (wfState) {
+          return (
+            <WorkflowProgressCard
+              state={wfState}
+              fallbackTitle={name}
+              onOpenStateFile={revealInFinder}
+            />
+          );
+        }
+      }
+
       // ADR-021: automation tool result → AutomationToolCard. The MCP
       // server returns a structured JSON blob as ``tool.output``; we
       // parse it and hand off to the card. If the output is missing
@@ -1412,6 +1454,8 @@ export const ConversationPage = () => {
       askUserQuestionLocalAnswers,
       askUserQuestionSubmitRef,
       planAnchors,
+      workflowStates,
+      revealInFinder,
       selectedSessionId,
       navigate,
       t,
@@ -1656,6 +1700,9 @@ export const ConversationPage = () => {
     // "stacking" under the new session header.
     setEvents([]);
     setTodos(null);
+    // Workflow progress is live-only and per-session — drop the previous
+    // session's snapshots so a Workflow tool card can't leak across a switch.
+    setWorkflowStates(new Map());
     // The clarifying-pending ref is keyed to whatever session we're
     // leaving. Reset it so a stale pending_id from the previous session
     // can't get POSTed against the new one — and so the post-fetch walk
@@ -2320,6 +2367,26 @@ export const ConversationPage = () => {
           );
           if (refreshed) setTodos(refreshed);
         }
+        // Live workflow progress — Claude ``Workflow`` tool runs stream a
+        // snapshot per tick (phases / per-agent state / status), keyed by the
+        // launch tool_use_id. Merge into the per-tool map so the Workflow tool
+        // card renders live progress. ``script`` / ``scriptPath`` arrive only on
+        // the first snapshot, so carry them forward when a later tick omits them.
+        if (event.event.event_type === SESSION_WORKFLOW_PROGRESS_EVENT) {
+          const wp = parseWorkflowProgress(event);
+          if (wp) {
+            setWorkflowStates((prev) => {
+              const prevState = prev.get(wp.id);
+              const next = new Map(prev);
+              next.set(wp.id, {
+                ...wp.state,
+                scriptPath: wp.state.scriptPath ?? prevState?.scriptPath,
+                script: wp.state.script ?? prevState?.script,
+              });
+              return next;
+            });
+          }
+        }
         // ADR-013 approval contract: track the current unresolved
         // clarifying_questions pending so the AskUserQuestionCard's
         // submit can POST /actions with the right pending_id. Non-
@@ -2495,6 +2562,26 @@ export const ConversationPage = () => {
               status !== "running" &&
               status !== "created"));
         if (terminal) {
+          // Safety net for workflow cards: the turn is over, so any Workflow
+          // run is definitively finished (the kernel blocks the turn until the
+          // run completes, then force-emits a terminal snapshot). But that
+          // snapshot is live-only and can lose the race against this terminal
+          // event — which immediately ``stopSubscription()``s the SSE stream
+          // below, so a late terminal frame would never arrive. Coerce any
+          // still-"running" card to ``completed`` here so it can't get stuck
+          // pulsing. A card that already received a terminal status (completed
+          // / killed / failed) is left untouched.
+          setWorkflowStates((prev) => {
+            let changed = false;
+            const next = new Map(prev);
+            for (const [wfId, wfState] of prev) {
+              if (isWorkflowRunning(wfState.status)) {
+                next.set(wfId, { ...wfState, status: "completed" });
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
+          });
           stopSubscription();
         }
       };

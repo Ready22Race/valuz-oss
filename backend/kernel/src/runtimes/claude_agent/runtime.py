@@ -688,7 +688,11 @@ class ClaudeAgentRuntime:
             while True:
                 final = await asyncio.to_thread(self._read_workflow_state, state_path)
                 if final is not None:
-                    await self._emit_workflow_state(tool_use_id, run_id, final)
+                    await self._emit_workflow_state(
+                        tool_use_id,
+                        run_id,
+                        self._normalize_terminal_state(final, run_id, summary, state_path),
+                    )
                     return
                 # Read+parse journal.jsonl OFF the loop: it is re-read in full
                 # every poll tick and grows with the run, so a sync read here
@@ -808,6 +812,73 @@ class ClaudeAgentRuntime:
             return None
         return data if isinstance(data, dict) else None
 
+    @staticmethod
+    def _normalize_terminal_state(
+        raw: dict[str, Any], run_id: str, summary: str, state_path: str
+    ) -> dict[str, Any]:
+        """Fold the runtime's raw end-of-run ``wf_<id>.json`` onto the SAME
+        snapshot shape the live poller emits, so the UI consumes one contract.
+
+        The result file is a far richer (and heavier) document than a live
+        snapshot: it carries the full ``script``, ``logs``, per-agent
+        ``promptPreview`` / ``resultPreview`` blobs, folds ``workflow_phase``
+        rows into ``workflowProgress`` alongside the ``workflow_agent`` rows,
+        and — crucially — has NO top-level ``agentsDone``. Emitting it raw made
+        the terminal frame a *different shape* from every live frame: the UI
+        read ``agentsDone`` as 0 and the run looked unfinished (stuck at
+        "running"). We project it down to the live keys here.
+
+        We also surface the run's *output* so a finished card isn't a dead end:
+        ``resultQuestion`` / ``resultSummary`` (the workflow's returned
+        ``result.question`` / ``result.summary`` — the actual answer, NOT the
+        top-level meta ``summary``) for inline display, plus ``statePath`` so
+        the UI can link to the full result file for details.
+        """
+        progress = raw.get("workflowProgress")
+        agents = (
+            [p for p in progress if isinstance(p, dict) and isinstance(p.get("agentId"), str)]
+            if isinstance(progress, list)
+            else []
+        )
+        done = sum(1 for a in agents if a.get("state") == "done")
+        raw_status = raw.get("status")
+        # The run is over once its result file exists. A missing or still-
+        # "running"/"active" status means the runtime never stamped a terminal
+        # verb, so call it ``completed``; an explicit terminal verb (completed /
+        # killed / failed / aborted) is preserved so the UI can reflect it.
+        status = (
+            raw_status
+            if isinstance(raw_status, str) and raw_status not in ("running", "active")
+            else "completed"
+        )
+        agent_count = raw.get("agentCount")
+        if not isinstance(agent_count, int):
+            agent_count = len(agents)
+        # The workflow's returned value lives under ``result`` (e.g. the
+        # deep-research report's ``question`` / ``summary``). It's ``null`` for
+        # a run that didn't finish (killed/aborted) — surface what's there.
+        result = raw.get("result")
+        result_question = result.get("question") if isinstance(result, dict) else None
+        result_summary = result.get("summary") if isinstance(result, dict) else None
+        return {
+            "runId": raw.get("runId") or run_id,
+            "workflowName": raw.get("workflowName") or summary or None,
+            "status": status,
+            "agentCount": agent_count,
+            "agentsDone": done,
+            "workflowProgress": [
+                {
+                    "type": "workflow_agent",
+                    "agentId": a["agentId"],
+                    "state": "done" if a.get("state") == "done" else "progress",
+                }
+                for a in agents
+            ],
+            "statePath": state_path,
+            "resultQuestion": result_question if isinstance(result_question, str) else None,
+            "resultSummary": result_summary if isinstance(result_summary, str) else None,
+        }
+
     async def _stop_workflow_pollers(self) -> None:
         """Cancel pollers, then emit a final snapshot per active run — the result
         file may land just as the turn ends, after the poller's last tick. If it
@@ -823,13 +894,21 @@ class ClaudeAgentRuntime:
             await asyncio.gather(*pollers, return_exceptions=True)
         for wf in active:
             try:
-                final = await asyncio.to_thread(self._read_workflow_state, wf["state_path"])
-                if final is None:
+                raw = await asyncio.to_thread(self._read_workflow_state, wf["state_path"])
+                if raw is None:
+                    # No result file — the run ended without writing one (e.g.
+                    # interrupted). Synthesize a terminal snapshot from the
+                    # journal so the UI doesn't stay stuck on "running".
                     journal = await asyncio.to_thread(self._read_journal, wf["journal_path"])
-                    final = self._derive_live_state(
-                        wf["run_id"], wf["summary"], journal
-                    )
+                    final = self._derive_live_state(wf["run_id"], wf["summary"], journal)
                     final["status"] = "completed"
+                else:
+                    # Result file present — fold it onto the live snapshot shape
+                    # (correct status + agentsDone) rather than emitting the raw
+                    # document, which the UI can't read as finished.
+                    final = self._normalize_terminal_state(
+                        raw, wf["run_id"], wf["summary"], wf["state_path"]
+                    )
                 await self._emit_workflow_state(wf["tool_use_id"], wf["run_id"], final)
             except Exception:
                 logger.debug("claude_agent: final workflow snapshot failed", exc_info=True)
