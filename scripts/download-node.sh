@@ -81,8 +81,12 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "Downloading Node ${NODE_VERSION} for ${TARGET} ..."
-curl -fsSL --retry 3 --retry-delay 2 -o "$TMPDIR/$ARCHIVE" "$BASE_URL/$ARCHIVE"
-curl -fsSL --retry 3 --retry-delay 2 -o "$TMPDIR/SHASUMS256.txt" "$BASE_URL/SHASUMS256.txt"
+# --retry-all-errors: nodejs.org's CDN occasionally serves a transient 404 for a
+# valid archive (it hit both macOS runners on the v0.2.1 build). Plain --retry
+# only covers network/5xx errors, so a momentary 404 would kill the build; this
+# retries it too. The SHA256 check below is the real integrity boundary.
+curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "$TMPDIR/$ARCHIVE" "$BASE_URL/$ARCHIVE"
+curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "$TMPDIR/SHASUMS256.txt" "$BASE_URL/SHASUMS256.txt"
 
 echo "Verifying SHA256 ..."
 EXPECTED="$(grep "  ${ARCHIVE}\$" "$TMPDIR/SHASUMS256.txt" | awk '{print $1}')"
