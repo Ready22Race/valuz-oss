@@ -63,7 +63,9 @@ detect_target() {
 [ -n "$TARGET" ] || TARGET="$(detect_target)"
 
 case "$TARGET" in
-  *win*) EXT="zip";    INNER="node.exe" ;;
+  # NB: ``win-*`` not ``*win*`` — ``*win*`` also matches "dar**win**", which
+  # picked the .zip archive for macOS and 404'd both mac jobs on the v0.2.1 build.
+  win-*) EXT="zip";    INNER="node.exe" ;;
   linux-*) EXT="tar.xz"; INNER="bin/node" ;;
   darwin-*) EXT="tar.gz"; INNER="bin/node" ;;
   *) echo "Unsupported target: $TARGET" >&2; exit 1 ;;
@@ -75,18 +77,38 @@ if [ -z "$OUT" ]; then
 fi
 
 ARCHIVE="node-v${NODE_VERSION}-${TARGET}.${EXT}"
-BASE_URL="https://nodejs.org/dist/v${NODE_VERSION}"
+
+# Mirror bases tried in order until one serves the file. The official dist is
+# first; npmmirror (Alibaba) is a full mirror of the same layout, used as a
+# fallback when nodejs.org's CDN serves a transient 404 or is unreachable — it
+# hit both macOS runners on the v0.2.1 build. Override the whole list via the
+# NODE_MIRRORS env (space-separated bases; "/v<version>/<file>" is appended).
+NODE_MIRRORS="${NODE_MIRRORS:-https://nodejs.org/dist https://registry.npmmirror.com/-/binary/node}"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# fetch <relative-file> <out-path>: try each mirror, succeed on the first hit.
+# --retry-all-errors also retries a 4xx (plain --retry only covers network/5xx),
+# so a momentary CDN 404 doesn't kill the build. The SHA256 check below stays the
+# integrity boundary; SHASUMS is fetched independently (so it still prefers the
+# official list) — a mirror serving a bad archive is caught against it.
+fetch() {
+  local rel="$1" out="$2" base
+  for base in $NODE_MIRRORS; do
+    if curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors \
+         -o "$out" "${base}/v${NODE_VERSION}/${rel}"; then
+      return 0
+    fi
+    echo "  ${base} failed for ${rel}; trying next mirror ..." >&2
+  done
+  echo "ERROR: could not download ${rel} from any mirror (${NODE_MIRRORS})" >&2
+  return 1
+}
+
 echo "Downloading Node ${NODE_VERSION} for ${TARGET} ..."
-# --retry-all-errors: nodejs.org's CDN occasionally serves a transient 404 for a
-# valid archive (it hit both macOS runners on the v0.2.1 build). Plain --retry
-# only covers network/5xx errors, so a momentary 404 would kill the build; this
-# retries it too. The SHA256 check below is the real integrity boundary.
-curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "$TMPDIR/$ARCHIVE" "$BASE_URL/$ARCHIVE"
-curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o "$TMPDIR/SHASUMS256.txt" "$BASE_URL/SHASUMS256.txt"
+fetch "$ARCHIVE" "$TMPDIR/$ARCHIVE"
+fetch "SHASUMS256.txt" "$TMPDIR/SHASUMS256.txt"
 
 echo "Verifying SHA256 ..."
 EXPECTED="$(grep "  ${ARCHIVE}\$" "$TMPDIR/SHASUMS256.txt" | awk '{print $1}')"
