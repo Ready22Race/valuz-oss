@@ -16,12 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-agent workflows. (#214 @jiaoqsh)
 - Connector connection status surfaced: a red attention dot on the Connectors
   nav when a custom connector is configured but not connected, colored status
-  pills (已连接 / 连接中 / 连接失败 / 未连接) on the list rows, and the same dot
-  + pills on the agent detail's 连接器 tab. (#204, #205, #213 @St0neWan9)
+  pills (Connected / Connecting / Connection failed / Not connected) on the list
+  rows, and the same dot + pills on the agent detail's Connectors tab.
+  (#204, #205, #213 @St0neWan9)
 - Default Firecrawl connector: swapped into the catalog (Chrome DevTools out);
-  the onboarding Valuz 小助手 ships bound to valuz-search / valuz-stock /
-  firecrawl and installs them into 已添加; the connectors list collapses to
-  已添加 / 可用. (#213 @St0neWan9)
+  the onboarding Valuz Helper ships bound to valuz-search / valuz-stock /
+  firecrawl and installs them into the Added group; the connectors list
+  collapses to Added / Available. (#213 @St0neWan9)
 - Discoverable OAuth is optional: a freemium MCP server (e.g. Firecrawl) that
   advertises OAuth but serves anonymous calls stays auth-free instead of being
   forced into a login. (#211 @homeant)
@@ -30,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Connectors: a stuck OAuth "connecting" now reads as 未连接; Firecrawl's
+- Connectors: a stuck OAuth "connecting" now reads as Not connected; Firecrawl's
   transient anonymous 401 is tolerated on the probe and the create-time auth
   check; the onboarding deploy no longer crashes resolving an installed OAuth
   connector; the tool probe is cached per client session instead of
