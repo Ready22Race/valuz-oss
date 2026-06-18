@@ -831,21 +831,18 @@ export const ModelSection = () => {
                                 {t("settings.model.modelFollowsPlan")}
                               </span>
                             )}
-                            {!isManaged &&
-                              provider.model_options.length > 0 && (
-                                <span>
-                                  {t(
-                                    "common.modelsCount" as Parameters<
-                                      typeof t
-                                    >[0],
-                                    {
-                                      count: String(
-                                        provider.model_options.length,
-                                      ),
-                                    },
-                                  )}
-                                </span>
-                              )}
+                            {!isManaged && provider.models.length > 0 && (
+                              <span>
+                                {t(
+                                  "common.modelsCount" as Parameters<
+                                    typeof t
+                                  >[0],
+                                  {
+                                    count: String(provider.models.length),
+                                  },
+                                )}
+                              </span>
+                            )}
                             {(() => {
                               const compat = compatibleRuntimes(provider);
                               if (compat.length === 0) return null;
@@ -1121,7 +1118,7 @@ export const ModelSection = () => {
           }
           currentBaseUrl={editProvider.base_url ?? ""}
           currentProtocol={editProvider.protocol ?? null}
-          initialModels={editProvider.model_options}
+          initialModels={editProvider.models.map((m) => m.id)}
           supportsCustomBaseUrl={editProvider.supports_custom_base_url}
           supportsProtocolSelection={
             providers.find((p) => p.kind === editProvider.provider_kind)

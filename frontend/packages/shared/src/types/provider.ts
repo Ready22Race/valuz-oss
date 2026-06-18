@@ -43,6 +43,19 @@ export interface ProviderDescriptor {
   default_protocol: string;
 }
 
+/**
+ * One selectable model under a channel (ADR-011). Self-contained: its own
+ * ``protocols`` win; an empty list means "no declared restriction" → the
+ * consumer falls back to the channel-level ``compatible_protocols``.
+ */
+export interface ProviderModel {
+  id: string;
+  /** Display name; ``null`` → fall back to ``modelLabel(id)``. */
+  label: string | null;
+  /** Wire protocols THIS model speaks (UI hyphen form). */
+  protocols: ApiProtocol[];
+}
+
 export interface ProviderListItem {
   id: string;
   name: string;
@@ -72,16 +85,21 @@ export interface ProviderListItem {
    *  list. Drives the runtime-compatibility filter on the provider
    *  picker. */
   compatible_protocols: ApiProtocol[];
-  /** Available model ids — surfaced on the list response so the
-   *  Default-config picker can flatten (provider × model) entries
-   *  without an N+1 fetch. */
-  model_options: string[];
-  /** Optional ``{model_id: human_label}`` map for the picker UI. The
-   *  wire-level model id (the value in ``model_options``) is always what
-   *  the runtime sends as ``model``; ``model_labels`` only changes what
-   *  the user reads. Missing entries fall back to the id; ``{}`` for
-   *  providers without admin-set display names. */
-  model_labels: Record<string, string>;
+  /** Channel can drive the codex runtime (serves the OpenAI Responses
+   *  wire). A capability flag, not a source judgement — user api-key rows
+   *  are always ``false``; only codex-subscription (via kind) or a
+   *  contributed channel that opts in can drive codex. */
+  serves_responses: boolean;
+  /** Opaque grouping key (the frontend localizes it into a section
+   *  header) — e.g. ``subscription`` / ``system`` / ``org`` / ``api_key``.
+   *  Set by the producing side; OSS passes it through. */
+  group: string;
+  /** Group sort order, smaller = earlier. */
+  group_rank: number;
+  /** Per-model rows (ADR-011). Replaces the flat ``model_options`` /
+   *  ``model_labels``: each model carries its own ``id`` / ``label`` /
+   *  ``protocols``. The picker flattens (provider × model) from here. */
+  models: ProviderModel[];
   /** Human-readable reason the provider is currently disabled. Only
    *  populated for ``source="system"`` (overlay-contributed) when
    *  ``enabled=false`` — e.g. "未登录 Valuz 账户". Other providers

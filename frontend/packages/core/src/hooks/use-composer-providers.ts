@@ -176,13 +176,14 @@ export const useComposerProviders = (
           return canDriveAny(c, CODEX_PROTOCOLS);
         })
         .flatMap((c) => {
-          const models =
-            c.model_options.length > 0
-              ? c.model_options
+          // ADR-011: models are nested rows now — flatten to their ids.
+          const modelIds =
+            c.models.length > 0
+              ? c.models.map((m) => m.id)
               : c.default_model
                 ? [c.default_model]
                 : [];
-          return models.map((m) => ({
+          return modelIds.map((m) => ({
             providerId: c.id,
             providerName: c.name,
             modelId: m,

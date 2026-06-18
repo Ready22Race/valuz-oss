@@ -22,6 +22,7 @@ from typing import Any
 from valuz_agent.api.middleware import AuthMiddleware
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.llm_provider import LLMProviderRegistry, _InMemoryRegistry
+from valuz_agent.ports.provider_catalog import NoopProviderCatalog, ProviderCatalog
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
 
@@ -32,6 +33,10 @@ class Extensions:
     def __init__(self) -> None:
         self.billing: BillingPort = NoopBillingProvider()
         self.llm_registry: LLMProviderRegistry = _InMemoryRegistry()
+        # ADR-011: an overlay's single ProviderCatalog — contributes provider
+        # rows (list) and resolves their credentials (resolve). Supersedes the
+        # per-descriptor llm_registry; OSS default contributes nothing.
+        self.provider_catalog: ProviderCatalog = NoopProviderCatalog()
         self.policy: ProviderPolicyPort = AllowAllProviderPolicy()
         self.resource_list_hook: ResourceListHook = NoopResourceListHook()
         # The request auth middleware as a ``(cls, kwargs)`` tuple. Defaults to

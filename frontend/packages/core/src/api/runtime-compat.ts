@@ -150,14 +150,14 @@ export const RUNTIME_DISPLAY_NAME: Record<RuntimeId, string> = {
   deepagents: "Deep Agents",
 };
 
-/** Helper for callers that have a ProviderDetail (model_options known)
- *  and need the same filter as useComposerProviders flattened in line.
- *  Returns ``true`` if the provider has at least one model that could
- *  run on the given runtime. */
+/** Helper for callers that have a ProviderDetail (models known) and need
+ *  the same filter as useComposerProviders flattened in line. Returns
+ *  ``true`` if the provider has at least one model that could run on the
+ *  given runtime. */
 export const providerHasUsableModelForRuntime = (
   p: ProviderDetail,
   runtime: RuntimeId,
 ): boolean => {
   if (!isProviderRuntimeCompatible(p, runtime)) return false;
-  return p.model_options.length > 0 || !!p.default_model;
+  return p.models.length > 0 || !!p.default_model;
 };

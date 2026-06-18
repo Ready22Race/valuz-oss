@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from valuz_agent.adapters.runtime_registry import RUNTIME_REGISTRY
+from valuz_agent.modules.providers.schemas import ProviderModel
 
 # All UI (hyphen-form) wire protocols. An empty per-model protocol list means
 # "no declared restriction" (gateway semantics) → treat as every protocol so
@@ -50,9 +51,6 @@ _SUBSCRIPTION_KINDS: frozenset[str] = frozenset({"claude-subscription", "codex-s
 # (richest reasoning), then codex, then the generic deepagents.
 _RUNTIME_PRIORITY: tuple[str, ...] = ("claude_agent", "codex", "deepagents")
 
-# Display order of the groups in the picker.
-_GROUP_ORDER: tuple[str, ...] = ("subscription", "system", "api_key", "org")
-
 # provider_kind → the CLI tool the client probes / launches for login.
 _CLI_TOOL_BY_KIND: dict[str, str] = {
     "claude-subscription": "claude",
@@ -60,12 +58,19 @@ _CLI_TOOL_BY_KIND: dict[str, str] = {
 }
 
 
-def _runtimes_for_model(protocols: list[str], provider_kind: str) -> list[str]:
+def runtimes_for(
+    protocols: list[str] | tuple[str, ...],
+    *,
+    provider_kind: str,
+    serves_responses: bool,
+) -> list[str]:
     """Which runtimes can run a model speaking ``protocols``, priority-ordered.
 
-    Mirrors the frontend ``isProviderRuntimeCompatible`` but at the *model*
-    granularity (a system channel's models can speak different protocols). Empty
-    ``protocols`` = "no declared restriction" → treated as every protocol.
+    The exported runtime-derivation rule (ADR-011): runtime is NOT a provider
+    field — it's computed per model from ``(protocols, provider_kind,
+    serves_responses)``. Empty ``protocols`` = "no declared restriction" →
+    treated as every protocol. Mirrors the frontend ``isProviderRuntimeCompatible``
+    at *model* granularity.
     """
     protos = set(protocols) if protocols else set(_ALL_PROTOCOLS)
     out: set[str] = set()
@@ -74,14 +79,13 @@ def _runtimes_for_model(protocols: list[str], provider_kind: str) -> list[str]:
     if "anthropic" in protos & set(RUNTIME_REGISTRY["claude_agent"].supported_protocols):
         out.add("claude_agent")
 
-    # codex: its own ChatGPT subscription, OR a system/gateway channel serving
-    # the Responses API. A bare user OpenAI key can't drive codex (it walks its
-    # own keychain), so only codex-subscription / system qualify.
+    # codex: its own ChatGPT subscription, OR any channel serving the Responses
+    # API (gateway / contributed system channel). ``serves_responses`` is a
+    # capability flag, not a source judgement. A bare user OpenAI key can't drive
+    # codex (it walks its own keychain), so OSS user rows set it False.
     if provider_kind == "codex-subscription":
         out.add("codex")
-    elif provider_kind == "system" and (
-        protos & set(RUNTIME_REGISTRY["codex"].supported_protocols)
-    ):
+    elif serves_responses and (protos & set(RUNTIME_REGISTRY["codex"].supported_protocols)):
         out.add("codex")
 
     # deepagents: any non-subscription channel speaking a protocol it accepts.
@@ -91,17 +95,6 @@ def _runtimes_for_model(protocols: list[str], provider_kind: str) -> list[str]:
         out.add("deepagents")
 
     return [r for r in _RUNTIME_PRIORITY if r in out]
-
-
-def _group_key(source: str, auth_type: str) -> str:
-    """Bucket a provider into the picker's display groups."""
-    if source == "org":
-        return "org"
-    if source == "system":
-        return "system"
-    if auth_type == "oauth":
-        return "subscription"
-    return "api_key"
 
 
 # ── Wire schema ──────────────────────────────────────────────────────
@@ -161,9 +154,8 @@ class ModelOptionsResponse(BaseModel):
 
 @dataclass(frozen=True)
 class ProviderOptionInput:
-    """The subset of ``ProviderListItem`` the builder reads, plus per-model
-    protocols. Decoupled from the dataclass so the builder is pure + trivially
-    testable (no DB / registry)."""
+    """The subset of ``ProviderListItem`` the builder reads. Decoupled from the
+    dataclass so the builder is pure + trivially testable (no DB / catalog)."""
 
     id: str
     name: str
@@ -173,16 +165,19 @@ class ProviderOptionInput:
     enabled: bool
     unavailable_reason: str | None
     compatible_protocols: list[str]
-    model_options: list[str]
-    model_labels: dict[str, str]
-    # ``{model_id: [hyphen-form protocols]}`` for providers whose models speak
-    # different protocols (system channels). Empty → every model falls back to
-    # ``compatible_protocols``.
-    model_protocols: dict[str, list[str]]
+    # Per-model rows (ADR-011). Each model's own ``protocols`` win; ``()`` falls
+    # back to the channel-level ``compatible_protocols``.
+    models: list[ProviderModel]
+    # Channel can drive codex (serves the Responses API). Threaded into
+    # ``runtimes_for`` instead of a ``provider_kind == "system"`` special-case.
+    serves_responses: bool
+    # Opaque grouping key + sort, set by the producing side.
+    group: str
+    group_rank: int
 
 
-def _provider_status(p: ProviderOptionInput, group: str) -> tuple[str, str | None]:
-    if group == "subscription":
+def _provider_status(p: ProviderOptionInput) -> tuple[str, str | None]:
+    if p.group == "subscription":
         # Credential is the local CLI keychain — server can't see it.
         return "client_resolved", None
     if p.enabled:
@@ -196,25 +191,27 @@ def _build_raw_provider(
     """One input provider → a card (models NOT yet disambiguated). ``None`` when
     no model has a runnable runtime (the card would be empty noise)."""
     options: list[ModelOption] = []
-    for mid in p.model_options:
-        protocols = p.model_protocols.get(mid) or p.compatible_protocols
-        runtimes = _runtimes_for_model(protocols, p.provider_kind)
+    for m in p.models:
+        protocols = list(m.protocols) if m.protocols else p.compatible_protocols
+        runtimes = runtimes_for(
+            protocols, provider_kind=p.provider_kind, serves_responses=p.serves_responses
+        )
         if not runtimes:
             # No runtime can run this model → not a selectable default.
             continue
         options.append(
             ModelOption(
-                model_id=mid,
+                model_id=m.id,
                 provider_id=p.id,
-                label=p.model_labels.get(mid) or mid,
+                label=m.label or m.id,
                 runtimes=runtimes,
                 default_runtime=runtimes[0],
-                is_current_default=(p.id == current.provider_id and mid == current.model),
+                is_current_default=(p.id == current.provider_id and m.id == current.model),
             )
         )
     if not options:
         return None
-    status, reason = _provider_status(p, _group_key(p.source, p.auth_type))
+    status, reason = _provider_status(p)
     return ModelOptionProvider(
         provider_id=p.id,
         label=p.name,
@@ -271,10 +268,13 @@ def build_model_options(
     disambiguated last — after the merge.
     """
     by_group: dict[str, list[ModelOptionProvider]] = {}
+    rank: dict[str, int] = {}
     for p in providers:
         card = _build_raw_provider(p, current)
         if card is not None:
-            by_group.setdefault(_group_key(p.source, p.auth_type), []).append(card)
+            by_group.setdefault(p.group, []).append(card)
+            # A group's rank is the smallest group_rank any of its rows declares.
+            rank[p.group] = min(rank.get(p.group, p.group_rank), p.group_rank)
 
     # Merge only the system group: same-named cards there are a deliberate
     # "one logical channel, one descriptor per runtime" signal. Leave user-named
@@ -283,14 +283,15 @@ def build_model_options(
     if "system" in by_group:
         by_group["system"] = _merge_same_name(by_group["system"])
 
+    # Order groups by their declared ``group_rank`` (ADR-011 — picker reads the
+    # row fields, not a hardcoded source order); ties break on the group key.
     # No label disambiguation: each picker view filters by runtime (onboarding
     # prefers claude_agent; Settings has a runtime selector), so two same-named
     # models — a Claude variant + a Codex variant of one logical model — never
     # appear together in one view. Raw labels keep the picker clean.
     groups = [
         ModelOptionGroup(key=key, providers=by_group[key])
-        for key in _GROUP_ORDER
-        if key in by_group
+        for key in sorted(by_group, key=lambda g: (rank.get(g, 999), g))
     ]
     return ModelOptionsResponse(current=current, groups=groups)
 
@@ -303,4 +304,5 @@ __all__ = [
     "ModelOptionsResponse",
     "ProviderOptionInput",
     "build_model_options",
+    "runtimes_for",
 ]
