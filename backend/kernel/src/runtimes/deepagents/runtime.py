@@ -54,6 +54,7 @@ from src.core.types import (
     StopReason,
     UserMessage,
 )
+from src.runtimes.deepagents._patches import apply_deepagents_patches
 from src.runtimes.deepagents.approval_bridge import (
     _build_pending_payload,
     _classify_subject,
@@ -63,6 +64,11 @@ from src.runtimes.interruption import is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
+
+# Apply third-party deepagents shims once, before any graph is built. See
+# ``_patches`` — currently raises subagents above langgraph's default 25-step
+# recursion limit (which they otherwise never escape).
+apply_deepagents_patches()
 
 
 # Default location for the deepagents-specific checkpoint store. Kept separate
