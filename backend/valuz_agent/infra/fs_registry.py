@@ -57,6 +57,17 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def browser_profile_dir(self) -> Path:
+        """Dedicated, persistent Chrome ``--user-data-dir`` for the managed browser.
+
+        An ISOLATED profile (never the user's everyday Chrome): a full-access
+        agent only ever sees the logins the user puts here, which contains the
+        blast radius. See docs/design/browser-feature.md §6 (security).
+        """
+        path = settings.browser_profile_dir
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     # ---- FS-3 — project cwd (project.cwd in V5 kernel terms) ----
 
     def project_cwd(

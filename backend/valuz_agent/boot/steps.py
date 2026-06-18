@@ -6,6 +6,7 @@ Bodies are moved verbatim from the former ``@app.on_event`` hooks in
 expressed explicitly in ``boot/lifespan.py``.
 """
 
+import asyncio
 import logging
 
 from fastapi import FastAPI
@@ -194,6 +195,7 @@ async def init_kernel(app: FastAPI) -> None:
     # submit_skill. The lead gate stays enforced inside each handler.
     from valuz_agent.integrations.toolkit_mcp_server import install_toolkit_toolsets
     from valuz_agent.integrations.tools_skill_creator import build_submit_skill_tool_defs
+    from valuz_agent.modules.browser.tools import build_browser_tool_defs
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
     from valuz_agent.modules.tasks.dispatch_mcp import build_task_tool_defs
     from valuz_agent.modules.tasks.orchestrator import task_orchestrator
@@ -206,7 +208,7 @@ async def init_kernel(app: FastAPI) -> None:
     by_name = {t.name: t for t in task_defs}
     orchestration_names = [d.name for d in ORCHESTRATION_TOOL_DECLARATIONS]
     dispatch_names = [d.name for d in DISPATCH_TOOL_DECLARATIONS]
-    shared = build_memory_tool_defs() + build_submit_skill_tool_defs()
+    shared = build_memory_tool_defs() + build_submit_skill_tool_defs() + build_browser_tool_defs()
     install_toolkit_toolsets(
         base=tuple(by_name[n] for n in orchestration_names if n in by_name) + shared,
         lead=tuple(by_name[n] for n in dispatch_names if n in by_name) + shared,
@@ -562,6 +564,18 @@ def mark_boot_complete() -> None:
     from valuz_agent.modules.system.service import record_boot_complete
 
     record_boot_complete()
+
+
+async def stop_managed_browser() -> None:
+    """Best-effort: stop the chrome-devtools daemon so app exit doesn't leave an
+    orphan visible Chrome. The isolated profile persists (login state survives);
+    only the window/daemon closes. Bounded + never blocks teardown."""
+    try:
+        from valuz_agent.modules.browser import service as browser_service
+
+        await asyncio.wait_for(browser_service.stop(), timeout=10.0)
+    except Exception:  # noqa: BLE001 — shutdown best-effort
+        logger.warning("managed browser stop on shutdown failed", exc_info=True)
 
 
 async def shutdown_kernel() -> None:

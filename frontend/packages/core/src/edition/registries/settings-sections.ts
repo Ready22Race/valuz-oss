@@ -23,6 +23,13 @@ export const personalSettingsSections: SettingsSectionModule[] = [
     edition: "personal",
   },
   {
+    id: "browser",
+    label: "settings.tab.browser.label",
+    description: "settings.tab.browser.desc",
+    icon: "globe",
+    edition: "personal",
+  },
+  {
     id: "parsing",
     label: "settings.tab.parsing.label",
     description: "settings.tab.parsing.desc",

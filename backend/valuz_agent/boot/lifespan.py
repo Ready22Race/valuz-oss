@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from valuz_agent.infra.lifecycle import set_draining
 
     set_draining()
+    await steps.stop_managed_browser()
     await steps.stop_decision_aggregator(app)
     await steps.stop_automation_runner(app)
     steps.shutdown_parse_pool()

@@ -66,6 +66,12 @@ logger = logging.getLogger(__name__)
 # the project has at least one ``valuz_project_kb_binding`` row.
 _BUILTIN_SKILLS_DIR = Path(__file__).resolve().parents[1] / "resources" / "builtin_skills"
 _PROJECT_DOCS_SKILL_DIR = _BUILTIN_SKILLS_DIR / "valuz-project-docs"
+# Teaches the agent to drive the managed browser via the ``chrome-devtools`` CLI
+# (pairs with the ``browser_start``/``browser_stop`` toolkit tools). M0 ships it
+# always-on — progressive disclosure means the body is only read when a task
+# actually needs a browser; a later iteration may make it a deploy-per-agent
+# catalog skill instead.
+_BROWSER_SKILL_DIR = _BUILTIN_SKILLS_DIR / "browser"
 
 
 @dataclass(frozen=True)
@@ -275,23 +281,26 @@ async def resolve_session_capabilities(
 
 
 def always_on_skill_paths() -> list[str]:
-    """Bundled skills every session carries: ``valuz-project-docs`` + ``skill-creator``.
+    """Bundled skills every session carries: project-docs + skill-creator + browser.
 
     These are the skill half of the always-on baseline (the MCP half lives in
     ``always_on_http_mcp_servers``). ``valuz-project-docs`` teaches the
     ``doc_search`` / ``list_doc_scope`` tools that pair with the ``valuz_docs``
     MCP; ``skill-creator`` (+ its ``submit_skill`` in-process tool) lets any
-    session author skills. Returned as absolute dirs the kernel materialises
-    into the session cwd. Both are injected by every session-build path
-    (``resolve_session_capabilities`` for chat/project, ``build_member_session``
-    for task lead/member) so the baseline is identical everywhere. A missing
-    dir is skipped + logged so a partial install can't break session creation.
+    session author skills; ``browser`` teaches the ``chrome-devtools`` CLI that
+    pairs with the ``browser_start``/``browser_stop`` toolkit tools. Returned as
+    absolute dirs the kernel materialises into the session cwd. All are injected
+    by every session-build path (``resolve_session_capabilities`` for
+    chat/project, ``build_member_session`` for task lead/member) so the baseline
+    is identical everywhere. A missing dir is skipped + logged so a partial
+    install can't break session creation.
     """
     from valuz_agent.infra.fs_registry import fs_registry
 
     candidates = [
         _PROJECT_DOCS_SKILL_DIR,
         fs_registry.official_skill_root() / "skill-creator",
+        _BROWSER_SKILL_DIR,
     ]
     paths: list[str] = []
     for d in candidates:
