@@ -17,6 +17,7 @@ kernel sessions/messages via the kernel's async ``StorePort``.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -35,6 +36,8 @@ from valuz_agent.modules.tasks.datastore import (
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
+
+logger = logging.getLogger(__name__)
 
 SourceKind = Literal["assistant", "project_chat", "task"]
 
@@ -175,8 +178,10 @@ class RunsService:
                     continue
             elif effective not in _FINISHED_RUN_STATUS:
                 continue
-            out.append(
-                await self._build(
+            # Isolate per-session enrichment: a single malformed session must
+            # not blank the entire overview. Skip the offender, keep the rest.
+            try:
+                summary = await self._build(
                     sess,
                     task_session,
                     ws_map,
@@ -184,7 +189,13 @@ class RunsService:
                     effective,
                     project_id=proj_by_session.get(sess.id, ""),
                 )
-            )
+            except Exception:
+                logger.exception(
+                    "runs overview: skipping session %s — failed to build summary",
+                    sess.id,
+                )
+                continue
+            out.append(summary)
 
         out.sort(key=lambda r: r.updated_at, reverse=True)
         return out if status == "running" else out[:_FINISHED_LIMIT]
