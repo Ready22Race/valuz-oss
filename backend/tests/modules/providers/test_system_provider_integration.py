@@ -144,7 +144,6 @@ def _sys_row(
         enabled=enabled,
         unavailable_reason=unavailable_reason if not enabled else None,
         compatible_protocols=["anthropic"],
-        serves_responses=False,
         group="system",
         group_rank=20,
         default_model="claude-sonnet-4-6",

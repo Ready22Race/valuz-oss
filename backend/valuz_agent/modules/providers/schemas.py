@@ -27,15 +27,18 @@ class LLMModel:
         id: Wire id; rides the request ``model`` field as-is.
         label: Display name; ``None`` → the frontend falls back to
             ``modelLabel(id)``.
-        protocols: The wire protocols THIS model speaks (UI hyphen form:
-            ``anthropic`` / ``openai-completion`` / ``openai-response`` /
-            ``gemini``). ``()`` → "no declared restriction": the consumer
-            falls back to the channel-level ``compatible_protocols``.
+        runtimes: The runtimes this model can drive (``claude_agent`` / ``codex``
+            / ``deepagents``), declared by the producing side. ``None`` → "not
+            declared": the consumer derives them from the channel's
+            ``compatible_protocols`` + ``provider_kind`` (the OSS default path).
+            A producer declares them only when derivation can't know — e.g. the
+            Valuz codex gateway card declares ``("codex",)`` because a Responses
+            wire alone wouldn't otherwise imply codex.
     """
 
     id: str
     label: str | None = None
-    protocols: tuple[str, ...] = ()
+    runtimes: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -69,10 +72,7 @@ class LLMChannel:
     protocol: str | None = None
     effective_protocol: str = "openai-completion"
     compatible_protocols: list[str] = field(default_factory=list)
-    # ── capability / grouping ─────────────────────────────────────────
-    # Serves the Responses API → can drive the codex runtime. A capability
-    # flag, NOT a source judgement.
-    serves_responses: bool = False
+    # ── grouping ──────────────────────────────────────────────────────
     # Opaque grouping key (frontend localizes into a section header).
     group: str = "api_key"
     # Group sort, smaller = earlier.

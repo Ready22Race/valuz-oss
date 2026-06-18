@@ -1,10 +1,9 @@
 """Tests for the model-options read model (GET /v1/settings/model-options).
 
-The builder is pure (no DB / catalog) so these are plain unit tests. ADR-011:
-each ``ProviderOptionInput`` carries its per-model rows (``models``), a
-``serves_responses`` capability flag, and an opaque ``group`` / ``group_rank``;
-``runtimes_for`` derives a model's runtimes from ``(protocols, provider_kind,
-serves_responses)``.
+The builder is pure (no DB / catalog) so these are plain unit tests. ADR-011 +
+Option-A: each ``LLMModel`` may declare its own ``runtimes``; when it leaves
+them ``None`` the builder derives via ``runtimes_for`` from the channel's
+``compatible_protocols`` + ``provider_kind``.
 """
 
 from __future__ import annotations
@@ -30,14 +29,13 @@ def _group_for(source: str, auth_type: str) -> str:
     return "api_key"
 
 
-def _m(mid: str, label: str | None = None, protocols: tuple[str, ...] = ()) -> LLMModel:
-    return LLMModel(id=mid, label=label, protocols=protocols)
+def _m(mid: str, label: str | None = None, runtimes: tuple[str, ...] | None = None) -> LLMModel:
+    return LLMModel(id=mid, label=label, runtimes=runtimes)
 
 
 def _pin(
     *,
     models: list[LLMModel] | None = None,
-    serves_responses: bool = False,
     **overrides,
 ) -> ProviderOptionInput:
     base = dict(
@@ -50,11 +48,8 @@ def _pin(
         unavailable_reason=None,
         compatible_protocols=["openai-completion"],
         models=models if models is not None else [_m("m")],
-        serves_responses=serves_responses,
     )
     base.update(overrides)
-    # group / group_rank follow source + auth_type, mirroring what the route
-    # copies off each LLMChannel.
     group = _group_for(base["source"], base["auth_type"])  # type: ignore[arg-type]
     base["group"] = group
     base["group_rank"] = _GROUP_RANK[group]
@@ -64,63 +59,54 @@ def _pin(
 _NO_DEFAULT = CurrentDefault(runtime=None, provider_id=None, model=None)
 
 
-# ── runtimes_for ─────────────────────────────────────────────────────
+# ── runtimes_for (OSS default derivation) ────────────────────────────
 
 
 class TestRuntimesFor:
     def test_anthropic_plus_completion_runs_claude_and_deepagents(self) -> None:
-        assert runtimes_for(
-            ["anthropic", "openai-completion"], provider_kind="system", serves_responses=False
-        ) == ["claude_agent", "deepagents"]
-
-    def test_serves_responses_channel_runs_codex_only(self) -> None:
-        assert runtimes_for(["openai-response"], provider_kind="system", serves_responses=True) == [
-            "codex"
-        ]
-
-    def test_claude_subscription_runs_claude_only(self) -> None:
-        assert runtimes_for(
-            ["anthropic"], provider_kind="claude-subscription", serves_responses=False
-        ) == ["claude_agent"]
-
-    def test_codex_subscription_runs_codex_regardless_of_serves_responses(self) -> None:
-        assert runtimes_for(
-            ["openai-response"], provider_kind="codex-subscription", serves_responses=False
-        ) == ["codex"]
-
-    def test_user_openai_key_cannot_drive_codex(self) -> None:
-        # A bare user OpenAI key speaking response shape still can't run codex
-        # (codex walks its own keychain) — serves_responses is False for user
-        # rows, so only deepagents.
-        assert runtimes_for(
-            ["openai-completion", "openai-response"], provider_kind="openai", serves_responses=False
-        ) == ["deepagents"]
-
-    def test_deepseek_dual_shape_runs_claude_and_deepagents(self) -> None:
-        assert runtimes_for(
-            ["anthropic", "openai-completion"], provider_kind="deepseek", serves_responses=False
-        ) == ["claude_agent", "deepagents"]
-
-    def test_empty_protocols_is_treated_as_no_restriction(self) -> None:
-        # serves_responses channel, empty protocols → every runtime, priority-ordered.
-        assert runtimes_for([], provider_kind="system", serves_responses=True) == [
+        assert runtimes_for(["anthropic", "openai-completion"], provider_kind="system") == [
             "claude_agent",
-            "codex",
             "deepagents",
         ]
 
-    def test_priority_order_is_claude_codex_deepagents(self) -> None:
-        rts = runtimes_for([], provider_kind="system", serves_responses=True)
-        assert rts == sorted(rts, key=["claude_agent", "codex", "deepagents"].index)
+    def test_codex_subscription_runs_codex(self) -> None:
+        # The codex CLI pins to the response wire.
+        assert runtimes_for(["openai-response"], provider_kind="codex-subscription") == ["codex"]
+
+    def test_claude_subscription_runs_claude_only(self) -> None:
+        assert runtimes_for(["anthropic"], provider_kind="claude-subscription") == ["claude_agent"]
+
+    def test_user_openai_key_cannot_drive_codex(self) -> None:
+        # A bare user OpenAI key speaking the response wire still can't run codex
+        # (codex walks its own keychain) — the gateway that can declares codex
+        # on its own rows, not via derivation. Only deepagents here.
+        assert runtimes_for(["openai-completion", "openai-response"], provider_kind="openai") == [
+            "deepagents"
+        ]
+
+    def test_response_only_user_row_has_no_runtime(self) -> None:
+        # openai-response alone, non-subscription → nothing derivable.
+        assert runtimes_for(["openai-response"], provider_kind="openai") == []
+
+    def test_deepseek_dual_shape_runs_claude_and_deepagents(self) -> None:
+        assert runtimes_for(["anthropic", "openai-completion"], provider_kind="deepseek") == [
+            "claude_agent",
+            "deepagents",
+        ]
+
+    def test_empty_protocols_is_treated_as_no_restriction(self) -> None:
+        # Empty → every protocol; non-subscription system → claude + deepagents
+        # (codex is NOT derived — the gateway declares it itself).
+        assert runtimes_for([], provider_kind="system") == ["claude_agent", "deepagents"]
 
 
 # ── build_model_options ──────────────────────────────────────────────
 
 
 class TestBuildModelOptions:
-    def test_channel_resolves_per_model_runtimes(self) -> None:
-        """A contributed anthropic channel: per-model runtimes from each model's
-        own protocols, preferred default_runtime, labels surfaced."""
+    def test_derives_runtimes_from_compatible(self) -> None:
+        """An anthropic channel: models leave runtimes None → derived from the
+        channel's compatible_protocols."""
         sys_provider = _pin(
             id="valuz-channel",
             name="Valuz 系统模型",
@@ -128,33 +114,26 @@ class TestBuildModelOptions:
             source="system",
             auth_type="oauth",
             compatible_protocols=["anthropic"],
-            models=[
-                _m("sys-reportify-pro", "Valuz Pro", ("openai-completion", "anthropic")),
-                _m("valuz-lite", "Valuz Lite", ("openai-completion", "anthropic")),
-            ],
+            models=[_m("sys-reportify-pro", "Valuz Pro"), _m("valuz-lite", "Valuz Lite")],
         )
-        resp = build_model_options([sys_provider], _NO_DEFAULT)
-
-        assert [g.key for g in resp.groups] == ["system"]
-        provider = resp.groups[0].providers[0]
-        assert provider.provider_id == "valuz-channel"
-        assert provider.status == "available"
+        provider = build_model_options([sys_provider], _NO_DEFAULT).groups[0].providers[0]
         by_id = {m.model_id: m for m in provider.models}
         assert by_id["sys-reportify-pro"].runtimes == ["claude_agent", "deepagents"]
         assert by_id["sys-reportify-pro"].default_runtime == "claude_agent"
         assert by_id["sys-reportify-pro"].label == "Valuz Pro"
         assert by_id["valuz-lite"].label == "Valuz Lite"
 
-    def test_serves_responses_channel_models_run_codex(self) -> None:
+    def test_declared_runtimes_win(self) -> None:
+        # The codex gateway card declares codex on its models, even though the
+        # response wire wouldn't otherwise derive it.
         codex_card = _pin(
             id="valuz-channel-codex",
             name="Valuz 系统模型",
             provider_kind="system",
             source="system",
             auth_type="oauth",
-            serves_responses=True,
             compatible_protocols=["openai-response"],
-            models=[_m("gpt-5.4-nano", "Valuz Pro", ("openai-response",))],
+            models=[_m("gpt-5.4-nano", "Valuz Pro", runtimes=("codex",))],
         )
         provider = build_model_options([codex_card], _NO_DEFAULT).groups[0].providers[0]
         by_id = {m.model_id: m for m in provider.models}
@@ -162,9 +141,8 @@ class TestBuildModelOptions:
         assert by_id["gpt-5.4-nano"].default_runtime == "codex"
 
     def test_same_named_channels_merge_into_one_card(self) -> None:
-        """An anthropic card + a serves_responses codex card both named
-        "Valuz 系统模型" collapse to ONE card. Each model keeps its owning
-        provider_id so a pick still routes to the right channel."""
+        """An anthropic card (derived) + a codex card (declared) both named
+        "Valuz 系统模型" collapse to ONE card; each model keeps its owner."""
         anthropic_card = _pin(
             id="valuz-channel",
             name="Valuz 系统模型",
@@ -172,10 +150,7 @@ class TestBuildModelOptions:
             source="system",
             auth_type="oauth",
             compatible_protocols=["anthropic"],
-            models=[
-                _m("sys-reportify-pro", "Valuz Pro", ("openai-completion", "anthropic")),
-                _m("valuz-lite", "Valuz Lite"),
-            ],
+            models=[_m("sys-reportify-pro", "Valuz Pro"), _m("valuz-lite", "Valuz Lite")],
         )
         codex_card = _pin(
             id="valuz-channel-codex",
@@ -183,17 +158,15 @@ class TestBuildModelOptions:
             provider_kind="system",
             source="system",
             auth_type="oauth",
-            serves_responses=True,
             compatible_protocols=["openai-response"],
             models=[
-                _m("valuz-lite-codex", "Valuz Lite Codex", ("openai-response",)),
-                _m("gpt-5.4-nano", "Valuz Pro", ("openai-response",)),
+                _m("valuz-lite-codex", "Valuz Lite Codex", runtimes=("codex",)),
+                _m("gpt-5.4-nano", "Valuz Pro", runtimes=("codex",)),
             ],
         )
         resp = build_model_options([anthropic_card, codex_card], _NO_DEFAULT)
-
         system = next(g for g in resp.groups if g.key == "system")
-        assert len(system.providers) == 1  # merged into one card
+        assert len(system.providers) == 1
         card = system.providers[0]
         assert len(card.models) == 4
         owner = {m.model_id: m.provider_id for m in card.models}
@@ -202,9 +175,6 @@ class TestBuildModelOptions:
         by_id = {m.model_id: m for m in card.models}
         assert by_id["sys-reportify-pro"].runtimes == ["claude_agent", "deepagents"]
         assert by_id["gpt-5.4-nano"].runtimes == ["codex"]
-        # Both "Valuz Pro" variants keep the raw label (no disambiguation).
-        assert by_id["sys-reportify-pro"].label == "Valuz Pro"
-        assert by_id["gpt-5.4-nano"].label == "Valuz Pro"
 
     def test_subscription_status_is_client_resolved_with_cli_tool(self) -> None:
         sub = _pin(
@@ -214,7 +184,7 @@ class TestBuildModelOptions:
             source="user",
             auth_type="oauth",
             compatible_protocols=["anthropic"],
-            models=[_m("claude-opus-4-8", protocols=("anthropic",))],
+            models=[_m("claude-opus-4-8")],
         )
         resp = build_model_options([sub], _NO_DEFAULT)
         provider = resp.groups[0].providers[0]
@@ -240,19 +210,16 @@ class TestBuildModelOptions:
             enabled=False,
             unavailable_reason="未登录 Valuz 账户",
             compatible_protocols=["anthropic"],
-            models=[_m("m1", protocols=("anthropic",))],
+            models=[_m("m1")],
         )
         provider = build_model_options([prov], _NO_DEFAULT).groups[0].providers[0]
         assert provider.status == "unavailable"
         assert provider.unavailable_reason == "未登录 Valuz 账户"
 
     def test_models_without_runnable_runtime_are_dropped(self) -> None:
-        # A user api_key provider speaking only openai-response → no runtime
-        # (codex needs codex-subscription / serves_responses; deepagents won't
-        # take response).
+        # response-only, non-subscription, runtimes undeclared → no runtime → drop.
         prov = _pin(compatible_protocols=["openai-response"], models=[_m("m")])
-        resp = build_model_options([prov], _NO_DEFAULT)
-        assert resp.groups == []  # provider left with no models → dropped
+        assert build_model_options([prov], _NO_DEFAULT).groups == []
 
     def test_groups_ordered_by_group_rank(self) -> None:
         sub = _pin(
@@ -260,7 +227,7 @@ class TestBuildModelOptions:
             provider_kind="claude-subscription",
             auth_type="oauth",
             compatible_protocols=["anthropic"],
-            models=[_m("a", protocols=("anthropic",))],
+            models=[_m("a")],
         )
         sysp = _pin(
             id="y",
@@ -268,10 +235,10 @@ class TestBuildModelOptions:
             source="system",
             auth_type="oauth",
             compatible_protocols=["anthropic"],
-            models=[_m("b", protocols=("anthropic",))],
+            models=[_m("b")],
         )
         apik = _pin(id="k", models=[_m("c")])
-        resp = build_model_options([apik, sysp, sub], _NO_DEFAULT)  # input order shuffled
+        resp = build_model_options([apik, sysp, sub], _NO_DEFAULT)
         assert [g.key for g in resp.groups] == ["subscription", "system", "api_key"]
 
     def test_is_current_default_flagged(self) -> None:

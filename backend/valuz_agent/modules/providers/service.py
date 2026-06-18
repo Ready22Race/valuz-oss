@@ -549,11 +549,10 @@ def _row_to_list_item(row: ProviderRow) -> LLMChannel:
         protocol=row.protocol,
         effective_protocol=compatible[0],
         compatible_protocols=compatible,
-        # OSS user/builtin rows never drive codex: only codex-subscription
-        # (matched by provider_kind in runtimes_for) or a contributed channel
-        # that opts in. A bare user OpenAI key can't — codex walks its own
-        # keychain, not the host's.
-        serves_responses=False,
+        # models leave runtimes unset (None) → the picker derives them from
+        # compatible_protocols. OSS user/builtin rows never drive codex (codex
+        # walks its own keychain) except codex-subscription, which runtimes_for
+        # matches by provider_kind.
         group=group,
         group_rank=_GROUP_RANK[group],
         models=_models_for(_resolve_model_options(row)),
@@ -582,7 +581,6 @@ def _list_item_to_detail(it: LLMChannel) -> LLMChannelDetail:
         protocol=it.protocol,
         effective_protocol=it.effective_protocol,
         compatible_protocols=it.compatible_protocols,
-        serves_responses=it.serves_responses,
         group=it.group,
         group_rank=it.group_rank,
         models=it.models,
@@ -612,11 +610,7 @@ def _row_to_detail(row: ProviderRow) -> LLMChannelDetail:
         protocol=row.protocol,
         effective_protocol=compatible[0],
         compatible_protocols=compatible,
-        # OSS user/builtin rows never drive codex: only codex-subscription
-        # (matched by provider_kind in runtimes_for) or a contributed channel
-        # that opts in. A bare user OpenAI key can't — codex walks its own
-        # keychain, not the host's.
-        serves_responses=False,
+        # models leave runtimes unset (None) → the picker derives them.
         group=group,
         group_rank=_GROUP_RANK[group],
         models=_models_for(_resolve_model_options(row)),

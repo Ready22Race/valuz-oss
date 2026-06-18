@@ -64,7 +64,10 @@ def _set(
 
 
 def _row(
-    *, provider_id: str = "valuz-channel", compatible: list[str], serves_responses: bool = False
+    *,
+    provider_id: str = "valuz-channel",
+    compatible: list[str],
+    model_runtimes: tuple[str, ...] | None = None,
 ) -> LLMChannel:
     return LLMChannel(
         id=provider_id,
@@ -76,10 +79,9 @@ def _row(
         credential_source="system_managed",
         auth_type="oauth",
         compatible_protocols=compatible,
-        serves_responses=serves_responses,
         group="system",
         group_rank=20,
-        models=[LLMModel(id="m")],
+        models=[LLMModel(id="m", runtimes=model_runtimes)],
     )
 
 
@@ -138,8 +140,9 @@ class TestResolveModelProviderViaLLMProvider:
 
 
 class TestResolveRuntimeProviderViaLLMProvider:
-    async def test_runtime_derived_from_catalog_row(self) -> None:
-        # openai-completion, not serves_responses → deepagents only.
+    async def test_runtime_derived_from_compatible_when_undeclared(self) -> None:
+        # model.runtimes None → derive from compatible (openai-completion →
+        # deepagents).
         _set(rows=[_row(compatible=["openai-completion"])])
         rt = await resolve_runtime_provider(
             provider_id="valuz-channel",
@@ -148,8 +151,10 @@ class TestResolveRuntimeProviderViaLLMProvider:
         )
         assert rt == "deepagents"
 
-    async def test_serves_responses_row_derives_codex(self) -> None:
-        _set(rows=[_row(compatible=["openai-response"], serves_responses=True)])
+    async def test_declared_model_runtimes_win(self) -> None:
+        # The codex gateway declares codex on its model; the response wire alone
+        # wouldn't derive it.
+        _set(rows=[_row(compatible=["openai-response"], model_runtimes=("codex",))])
         rt = await resolve_runtime_provider(
             provider_id="valuz-channel",
             model_id="m",

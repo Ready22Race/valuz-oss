@@ -62,15 +62,17 @@ def runtimes_for(
     protocols: list[str] | tuple[str, ...],
     *,
     provider_kind: str,
-    serves_responses: bool,
 ) -> list[str]:
-    """Which runtimes can run a model speaking ``protocols``, priority-ordered.
+    """Derive the runtimes a model speaking ``protocols`` can drive (the OSS
+    default rule), priority-ordered.
 
-    The exported runtime-derivation rule (ADR-011): runtime is NOT a provider
-    field — it's computed per model from ``(protocols, provider_kind,
-    serves_responses)``. Empty ``protocols`` = "no declared restriction" →
-    treated as every protocol. Mirrors the frontend ``isProviderRuntimeCompatible``
-    at *model* granularity.
+    Used to fill ``LLMModel.runtimes`` when a producer leaves it ``None``. A
+    producer that knows better declares ``runtimes`` directly — notably the
+    Valuz codex gateway, which is why **codex is only derived here for a
+    ``codex-subscription``**: a bare credential speaking the Responses wire
+    can't drive codex (the codex CLI walks its own keychain); the hosted gateway
+    that can is a contributed row that declares ``("codex",)`` itself. Empty
+    ``protocols`` = "no declared restriction" → every protocol.
     """
     protos = set(protocols) if protocols else set(_ALL_PROTOCOLS)
     out: set[str] = set()
@@ -79,13 +81,9 @@ def runtimes_for(
     if "anthropic" in protos & set(RUNTIME_REGISTRY["claude_agent"].supported_protocols):
         out.add("claude_agent")
 
-    # codex: its own ChatGPT subscription, OR any channel serving the Responses
-    # API (gateway / contributed system channel). ``serves_responses`` is a
-    # capability flag, not a source judgement. A bare user OpenAI key can't drive
-    # codex (it walks its own keychain), so OSS user rows set it False.
+    # codex: only its own ChatGPT subscription is derivable here; the hosted
+    # Responses gateway declares codex on its own rows (see docstring).
     if provider_kind == "codex-subscription":
-        out.add("codex")
-    elif serves_responses and (protos & set(RUNTIME_REGISTRY["codex"].supported_protocols)):
         out.add("codex")
 
     # deepagents: any non-subscription channel speaking a protocol it accepts.
@@ -164,13 +162,12 @@ class ProviderOptionInput:
     auth_type: str
     enabled: bool
     unavailable_reason: str | None
+    # Channel-level protocols — used to derive runtimes for any model that didn't
+    # declare its own (the OSS default path).
     compatible_protocols: list[str]
-    # Per-model rows (ADR-011). Each model's own ``protocols`` win; ``()`` falls
-    # back to the channel-level ``compatible_protocols``.
+    # Per-model rows (ADR-011). Each model's ``runtimes`` win when declared;
+    # ``None`` → derive from ``compatible_protocols`` + ``provider_kind``.
     models: list[LLMModel]
-    # Channel can drive codex (serves the Responses API). Threaded into
-    # ``runtimes_for`` instead of a ``provider_kind == "system"`` special-case.
-    serves_responses: bool
     # Opaque grouping key + sort, set by the producing side.
     group: str
     group_rank: int
@@ -192,9 +189,11 @@ def _build_raw_provider(
     no model has a runnable runtime (the card would be empty noise)."""
     options: list[ModelOption] = []
     for m in p.models:
-        protocols = list(m.protocols) if m.protocols else p.compatible_protocols
-        runtimes = runtimes_for(
-            protocols, provider_kind=p.provider_kind, serves_responses=p.serves_responses
+        # Declared runtimes win; otherwise derive from the channel (OSS default).
+        runtimes = (
+            list(m.runtimes)
+            if m.runtimes is not None
+            else runtimes_for(p.compatible_protocols, provider_kind=p.provider_kind)
         )
         if not runtimes:
             # No runtime can run this model → not a selectable default.

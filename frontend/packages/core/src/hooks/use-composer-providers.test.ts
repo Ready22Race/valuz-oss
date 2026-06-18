@@ -9,7 +9,7 @@ import { useComposerProviders } from "./use-composer-providers";
 
 /** Wrap bare model ids into ADR-011 ``LLMModel`` rows. */
 const mdl = (ids: string[]): LLMModel[] =>
-  ids.map((id) => ({ id, label: null, protocols: [] }));
+  ids.map((id) => ({ id, label: null, runtimes: null }));
 
 const provider = (
   overrides: Partial<LLMChannelDetail> & Pick<LLMChannelDetail, "id" | "name">,
@@ -25,7 +25,6 @@ const provider = (
   auth_type: "api_key",
   base_url: null,
   models: [],
-  serves_responses: false,
   group: "api_key",
   group_rank: 40,
   unavailable_reason: null,

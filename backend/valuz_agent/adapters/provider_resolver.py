@@ -338,18 +338,20 @@ async def resolve_runtime_provider(
     provider = await providers.get_by_id(require_current_user_id(), provider_id)
     if provider is None:
         # Contributed (catalog) channel (ADR-011): runtime is NOT a provider
-        # field — derive it from the row's protocols + serves_responses, same
-        # rule the model-options picker uses. Falls back to deepagents.
+        # field. Prefer the picked model's declared ``runtimes``; otherwise
+        # derive from the channel's protocols (same rule the picker uses).
+        # Falls back to deepagents.
         from valuz_agent.modules.settings.model_options import runtimes_for
 
         for it in await ext.llm_provider.list():
-            if it.id == provider_id:
-                rts = runtimes_for(
-                    tuple(it.compatible_protocols),
-                    provider_kind=it.provider_kind,
-                    serves_responses=it.serves_responses,
-                )
-                return rts[0] if rts else "deepagents"  # type: ignore[return-value]
+            if it.id != provider_id:
+                continue
+            model = next((m for m in it.models if m.id == model_id), None)
+            if model is not None and model.runtimes is not None:
+                rts = list(model.runtimes)
+            else:
+                rts = runtimes_for(tuple(it.compatible_protocols), provider_kind=it.provider_kind)
+            return rts[0] if rts else "deepagents"  # type: ignore[return-value]
         return "deepagents"
 
     return _derive(provider.provider_kind)  # type: ignore[return-value]

@@ -303,9 +303,9 @@ async def get_model_options(
             event_bus=event_bus,
         )
         items = await svc.list_providers(user_id)
-        # ADR-011: every row already carries its per-model protocols
-        # (``it.models``), capability (``serves_responses``) and grouping —
-        # the builder reads them straight off, no per-source special-casing.
+        # ADR-011: each model carries its declared ``runtimes`` (or None →
+        # derive from compatible_protocols); the builder reads them straight off,
+        # no per-source special-casing.
         inputs = [
             ProviderOptionInput(
                 id=it.id,
@@ -317,7 +317,6 @@ async def get_model_options(
                 unavailable_reason=it.unavailable_reason,
                 compatible_protocols=it.compatible_protocols,
                 models=it.models,
-                serves_responses=it.serves_responses,
                 group=it.group,
                 group_rank=it.group_rank,
             )

@@ -44,16 +44,16 @@ export interface ProviderDescriptor {
 }
 
 /**
- * One selectable model under a channel (ADR-011). Self-contained: its own
- * ``protocols`` win; an empty list means "no declared restriction" → the
- * consumer falls back to the channel-level ``compatible_protocols``.
+ * One selectable model under a channel (ADR-011). Self-contained, one row.
  */
 export interface LLMModel {
   id: string;
   /** Display name; ``null`` → fall back to ``modelLabel(id)``. */
   label: string | null;
-  /** Wire protocols THIS model speaks (UI hyphen form). */
-  protocols: ApiProtocol[];
+  /** Runtimes this model can drive (``claude_agent`` / ``codex`` /
+   *  ``deepagents``), declared by the producing side. ``null`` → not declared:
+   *  derived from the channel's ``compatible_protocols`` + ``provider_kind``. */
+  runtimes: string[] | null;
 }
 
 export interface LLMChannel {
@@ -85,11 +85,6 @@ export interface LLMChannel {
    *  list. Drives the runtime-compatibility filter on the provider
    *  picker. */
   compatible_protocols: ApiProtocol[];
-  /** Channel can drive the codex runtime (serves the OpenAI Responses
-   *  wire). A capability flag, not a source judgement — user api-key rows
-   *  are always ``false``; only codex-subscription (via kind) or a
-   *  contributed channel that opts in can drive codex. */
-  serves_responses: boolean;
   /** Opaque grouping key (the frontend localizes it into a section
    *  header) — e.g. ``subscription`` / ``system`` / ``org`` / ``api_key``.
    *  Set by the producing side; OSS passes it through. */
@@ -98,7 +93,7 @@ export interface LLMChannel {
   group_rank: number;
   /** Per-model rows (ADR-011). Replaces the flat ``model_options`` /
    *  ``model_labels``: each model carries its own ``id`` / ``label`` /
-   *  ``protocols``. The picker flattens (provider × model) from here. */
+   *  ``runtimes``. The picker flattens (provider × model) from here. */
   models: LLMModel[];
   /** Human-readable reason the provider is currently disabled. Only
    *  populated for ``source="system"`` (overlay-contributed) when
