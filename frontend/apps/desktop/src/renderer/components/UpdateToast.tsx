@@ -26,6 +26,7 @@ export const UpdateToast = () => {
   const version = useUpdaterStore((s) => s.version);
   const progress = useUpdaterStore((s) => s.progress);
   const errorMessage = useUpdaterStore((s) => s.errorMessage);
+  const errorInToast = useUpdaterStore((s) => s.errorInToast);
   const dismissed = useUpdaterStore((s) => s.dismissed);
   const dismiss = useUpdaterStore((s) => s.dismiss);
   const setDownloading = useUpdaterStore((s) => s.setDownloading);
@@ -70,7 +71,9 @@ export const UpdateToast = () => {
     (status === "available" ||
       status === "downloading" ||
       status === "downloaded" ||
-      status === "error");
+      // Errors only reach the toast when flagged (menu/tray check, download);
+      // the About-page check shows its own inline error instead.
+      (status === "error" && errorInToast));
   if (!visible) return null;
 
   const isDownloading = status === "downloading";
@@ -125,9 +128,12 @@ export const UpdateToast = () => {
               <Download className="h-4 w-4 shrink-0 text-blue-500" />
             )}
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
-              {(isDownloaded
-                ? t("updater.downloadedTitle" as Parameters<typeof t>[0])
-                : t("updater.updateAvailable" as Parameters<typeof t>[0])) + ver}
+              {isError
+                ? t("updater.errorTitle" as Parameters<typeof t>[0])
+                : (isDownloaded
+                    ? t("updater.downloadedTitle" as Parameters<typeof t>[0])
+                    : t("updater.updateAvailable" as Parameters<typeof t>[0])) +
+                  ver}
             </span>
             {isDownloaded ? (
               <Button
