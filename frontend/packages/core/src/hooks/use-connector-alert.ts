@@ -2,8 +2,10 @@
  * Connector "needs attention" alert, shared across consumers.
  *
  * Drives the small red dot on the Connectors nav item: it shows when a custom
- * connector is configured but failed to connect (status === "error"), and the
- * user hasn't acknowledged it yet. Visiting the Connectors page acknowledges
+ * connector is configured but not connected — it either failed to connect
+ * (status === "error") or still needs authorization (status === "pending_auth",
+ * e.g. an OAuth connector like Valuz·搜索 sitting at a 401) — and the user
+ * hasn't acknowledged it yet. Visiting the Connectors page acknowledges
  * the currently-failing set ({@link acknowledgeConnectorAlert}) so the dot
  * clears. Acknowledgement is in-memory only, so it resets on app restart (the
  * dot comes back if a connector is still failing); a NEWLY failing connector
@@ -28,11 +30,15 @@ const _subscribers = new Set<() => void>();
 let _timer: number | null = null;
 let _inFlight = false;
 
-/** A custom connector that has settings but didn't connect — the backend sets
- * ``status === "error"`` after a failed connection attempt (vs "connecting" /
- * "connected" / "unknown"). That's the "配置了但没连上" signal. */
+/** A custom connector that has settings but isn't connected — the "配置了但没连上"
+ * signal. Two terminal "not connected" states qualify: ``"error"`` (the backend
+ * tried and the connection failed) and ``"pending_auth"`` (an OAuth connector
+ * still waiting to be authorized, e.g. a 401). Transient/intentional states do
+ * NOT —  "connecting" (in flight), "connected" (fine), "disabled" (user turned
+ * it off), and "unknown" (enabled but never probed). */
+const ATTENTION_STATUSES = new Set(["error", "pending_auth"]);
 const needsAttention = (c: ConnectorItem): boolean =>
-  c.connector_type === "custom" && c.status === "error";
+  c.connector_type === "custom" && ATTENTION_STATUSES.has(c.status);
 
 const failingIds = (): string[] =>
   _connectors.filter(needsAttention).map((c) => c.id);
