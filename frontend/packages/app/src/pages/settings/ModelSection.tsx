@@ -38,8 +38,8 @@ import {
   RUNTIME_DISPLAY_NAME,
   DEFAULT_EFFORT_VALUES,
   EFFORT_FALLBACK,
-  type ProviderListItem,
-  type ProviderDetail,
+  type LLMChannel,
+  type LLMChannelDetail,
   type ProviderDescriptor,
   type RuntimeListItem,
   type ModelDefaults,
@@ -112,7 +112,7 @@ export const ModelSection = () => {
   >({});
 
   // -- Provider state --
-  const [providersList, setProvidersList] = useState<ProviderListItem[]>([]);
+  const [providersList, setProvidersList] = useState<LLMChannel[]>([]);
   // False until the first provider-list fetch settles, so the "模型通道"
   // (manage-channels) section isn't shown with an empty card during the
   // initial page load — only after we actually have the list.
@@ -128,8 +128,8 @@ export const ModelSection = () => {
   const [modelOptionsLoaded, setModelOptionsLoaded] = useState(false);
   const [providers, setProviders] = useState<ProviderDescriptor[]>([]);
   const [addOpen, setAddOpen] = useState(false);
-  const [editProvider, setEditProvider] = useState<ProviderDetail | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ProviderListItem | null>(
+  const [editProvider, setEditProvider] = useState<LLMChannelDetail | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<LLMChannel | null>(
     null,
   );
   const [deleting, setDeleting] = useState(false);

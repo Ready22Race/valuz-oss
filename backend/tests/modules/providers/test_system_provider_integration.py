@@ -3,8 +3,8 @@
 Covers: list merge (catalog rows prepended), get fallback to the catalog,
 write-op guards by ``deletable``, empty-model rows dropped, user-row hiding.
 The provider table is exercised through the real datastore on an in-memory
-SQLite engine; contributed rows come from a fake ``ProviderCatalog`` bound to
-``ext.provider_catalog``.
+SQLite engine; contributed rows come from a fake ``LLMProvider`` bound to
+``ext.llm_provider``.
 """
 
 from __future__ import annotations
@@ -21,11 +21,11 @@ from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.models import Base, ProviderRow
-from valuz_agent.modules.providers.schemas import ProviderListItem, ProviderModel
+from valuz_agent.modules.providers.schemas import LLMChannel, LLMModel
 from valuz_agent.modules.providers.service import ProviderService
 from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.provider_catalog import (
-    NoopProviderCatalog,
+from valuz_agent.ports.llm_provider import (
+    NoopLLMProvider,
     ResolvedCredential,
     SystemProviderImmutable,
 )
@@ -46,17 +46,17 @@ class _InMemorySecretStore(SecretStorePort):
 
 
 class _FakeCatalog:
-    """A ``ProviderCatalog`` returning fixed rows + resolving fixed creds."""
+    """A ``LLMProvider`` returning fixed rows + resolving fixed creds."""
 
     def __init__(
         self,
-        rows: list[ProviderListItem],
+        rows: list[LLMChannel],
         creds: dict[str, ResolvedCredential] | None = None,
     ) -> None:
         self._rows = rows
         self._creds = creds or {}
 
-    async def list(self) -> list[ProviderListItem]:
+    async def list(self) -> list[LLMChannel]:
         return list(self._rows)
 
     async def resolve(self, provider_id: str) -> ResolvedCredential | None:
@@ -106,9 +106,9 @@ async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
 
 @pytest.fixture(autouse=True)
 def fresh_catalog() -> None:
-    ext.provider_catalog = NoopProviderCatalog()
+    ext.llm_provider = NoopLLMProvider()
     yield
-    ext.provider_catalog = NoopProviderCatalog()
+    ext.llm_provider = NoopLLMProvider()
 
 
 @pytest.fixture(autouse=True)
@@ -121,10 +121,8 @@ def _no_subscription_templates(monkeypatch) -> None:
     monkeypatch.setattr(settings, "subscription_login_enabled", False)
 
 
-def _set_catalog(
-    *rows: ProviderListItem, creds: dict[str, ResolvedCredential] | None = None
-) -> None:
-    ext.provider_catalog = _FakeCatalog(list(rows), creds)
+def _set_catalog(*rows: LLMChannel, creds: dict[str, ResolvedCredential] | None = None) -> None:
+    ext.llm_provider = _FakeCatalog(list(rows), creds)
 
 
 def _sys_row(
@@ -132,9 +130,9 @@ def _sys_row(
     provider_id: str = "valuz-channel",
     enabled: bool = True,
     unavailable_reason: str | None = None,
-    models: list[ProviderModel] | None = None,
-) -> ProviderListItem:
-    return ProviderListItem(
+    models: list[LLMModel] | None = None,
+) -> LLMChannel:
+    return LLMChannel(
         id=provider_id,
         name="Valuz 系统模型",
         provider_kind="system",
@@ -150,7 +148,7 @@ def _sys_row(
         group="system",
         group_rank=20,
         default_model="claude-sonnet-4-6",
-        models=models if models is not None else [ProviderModel(id="claude-sonnet-4-6")],
+        models=models if models is not None else [LLMModel(id="claude-sonnet-4-6")],
     )
 
 
@@ -267,7 +265,7 @@ class TestCatalogRowVisibility:
         _set_catalog(
             _sys_row(
                 provider_id="valuz-org",
-                models=[ProviderModel(id="org-gpt-4o"), ProviderModel(id="org-claude")],
+                models=[LLMModel(id="org-gpt-4o"), LLMModel(id="org-claude")],
             )
         )
         items = await svc.service.list_providers("local-test-owner")

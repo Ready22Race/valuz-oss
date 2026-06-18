@@ -2,8 +2,8 @@ import type {
   ProviderAuthType,
   ApiProtocol,
   ProviderDescriptor,
-  ProviderListItem,
-  ProviderDetail,
+  LLMChannel,
+  LLMChannelDetail,
   ConnectionTestResult,
   PingResponse,
   ProbeModelsResponse,
@@ -34,8 +34,8 @@ export type {
   ProviderAuthType,
   ApiProtocol,
   ProviderDescriptor,
-  ProviderListItem,
-  ProviderDetail,
+  LLMChannel,
+  LLMChannelDetail,
   ConnectionTestResult,
   PingResponse,
   ProbeModelsResponse,
@@ -90,23 +90,23 @@ export const providersApi = {
     return fetchJson("/v1/providers/config");
   },
 
-  async list(): Promise<{ providers: ProviderListItem[] }> {
-    const res = await fetchJson<{ providers: ProviderListItem[] }>(
+  async list(): Promise<{ providers: LLMChannel[] }> {
+    const res = await fetchJson<{ providers: LLMChannel[] }>(
       "/v1/providers",
     );
     _hydrateModelLabels(res.providers);
     return res;
   },
 
-  async get(providerId: string): Promise<ProviderDetail> {
-    const res = await fetchJson<ProviderDetail>(
+  async get(providerId: string): Promise<LLMChannelDetail> {
+    const res = await fetchJson<LLMChannelDetail>(
       `/v1/providers/${encodeURIComponent(providerId)}`,
     );
     _hydrateModelLabels([res]);
     return res;
   },
 
-  create(payload: ProviderCreateRequest): Promise<ProviderDetail> {
+  create(payload: ProviderCreateRequest): Promise<LLMChannelDetail> {
     return fetchJson("/v1/providers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -117,7 +117,7 @@ export const providersApi = {
   update(
     providerId: string,
     payload: ProviderUpdateRequest,
-  ): Promise<ProviderDetail> {
+  ): Promise<LLMChannelDetail> {
     return fetchJson(`/v1/providers/${encodeURIComponent(providerId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -172,7 +172,7 @@ export const providersApi = {
    * keychain, so the frontend tells it the login succeeded; the backend flips
    * ``enabled`` + ``credential_source="cli_keychain"``.
    */
-  enable(providerId: string): Promise<ProviderDetail> {
+  enable(providerId: string): Promise<LLMChannelDetail> {
     return fetchJson(`/v1/providers/${encodeURIComponent(providerId)}/enable`, {
       method: "POST",
     });

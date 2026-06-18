@@ -2,18 +2,18 @@
 import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import type { ProviderModel } from "@valuz/shared";
+import type { LLMModel } from "@valuz/shared";
 
-import type { ProviderDetail } from "../api/providers-api";
+import type { LLMChannelDetail } from "../api/providers-api";
 import { useComposerProviders } from "./use-composer-providers";
 
-/** Wrap bare model ids into ADR-011 ``ProviderModel`` rows. */
-const mdl = (ids: string[]): ProviderModel[] =>
+/** Wrap bare model ids into ADR-011 ``LLMModel`` rows. */
+const mdl = (ids: string[]): LLMModel[] =>
   ids.map((id) => ({ id, label: null, protocols: [] }));
 
 const provider = (
-  overrides: Partial<ProviderDetail> & Pick<ProviderDetail, "id" | "name">,
-): ProviderDetail => ({
+  overrides: Partial<LLMChannelDetail> & Pick<LLMChannelDetail, "id" | "name">,
+): LLMChannelDetail => ({
   provider_kind: "anthropic",
   source: "managed",
   enabled: true,

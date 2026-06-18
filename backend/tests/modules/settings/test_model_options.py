@@ -9,7 +9,7 @@ serves_responses)``.
 
 from __future__ import annotations
 
-from valuz_agent.modules.providers.schemas import ProviderModel
+from valuz_agent.modules.providers.schemas import LLMModel
 from valuz_agent.modules.settings.model_options import (
     CurrentDefault,
     ProviderOptionInput,
@@ -30,13 +30,13 @@ def _group_for(source: str, auth_type: str) -> str:
     return "api_key"
 
 
-def _m(mid: str, label: str | None = None, protocols: tuple[str, ...] = ()) -> ProviderModel:
-    return ProviderModel(id=mid, label=label, protocols=protocols)
+def _m(mid: str, label: str | None = None, protocols: tuple[str, ...] = ()) -> LLMModel:
+    return LLMModel(id=mid, label=label, protocols=protocols)
 
 
 def _pin(
     *,
-    models: list[ProviderModel] | None = None,
+    models: list[LLMModel] | None = None,
     serves_responses: bool = False,
     **overrides,
 ) -> ProviderOptionInput:
@@ -54,7 +54,7 @@ def _pin(
     )
     base.update(overrides)
     # group / group_rank follow source + auth_type, mirroring what the route
-    # copies off each ProviderListItem.
+    # copies off each LLMChannel.
     group = _group_for(base["source"], base["auth_type"])  # type: ignore[arg-type]
     base["group"] = group
     base["group_rank"] = _GROUP_RANK[group]

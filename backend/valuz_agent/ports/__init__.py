@@ -26,6 +26,12 @@ from valuz_agent.ports.billing import (
     set_billing_port,
 )
 from valuz_agent.ports.docs_runtime import DocsRuntimePort
+from valuz_agent.ports.llm_provider import (
+    LLMProvider,
+    NoopLLMProvider,
+    ResolvedCredential,
+    SystemProviderImmutable,
+)
 from valuz_agent.ports.mcp_catalog import McpCatalogPort
 from valuz_agent.ports.parser_backend import ParserBackend
 from valuz_agent.ports.parser_plugin import (
@@ -40,12 +46,6 @@ from valuz_agent.ports.parser_plugin import (
     SecretResolver,
     SetupRequirement,
     SplitPolicy,
-)
-from valuz_agent.ports.provider_catalog import (
-    NoopProviderCatalog,
-    ProviderCatalog,
-    ResolvedCredential,
-    SystemProviderImmutable,
 )
 from valuz_agent.ports.provider_policy import (
     AllowAllProviderPolicy,
@@ -68,7 +68,7 @@ __all__ = [
     "McpCatalogPort",
     "MeterEvent",
     "NoopBillingProvider",
-    "NoopProviderCatalog",
+    "NoopLLMProvider",
     "ParserBackend",
     "ParserCapabilityNotReady",
     "ParserPlugin",
@@ -78,7 +78,7 @@ __all__ = [
     "PluginCapability",
     "PolicyDecision",
     "AllowAllProviderPolicy",
-    "ProviderCatalog",
+    "LLMProvider",
     "ProviderPolicyPort",
     "ProviderWriteContext",
     "ResolvedCredential",

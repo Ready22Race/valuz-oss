@@ -30,12 +30,12 @@ from valuz_agent.modules.providers.errors import (
 )
 from valuz_agent.modules.providers.models import ProviderRow
 from valuz_agent.modules.providers.schemas import (
-    ProviderDetail,
-    ProviderListItem,
-    ProviderModel,
+    LLMChannel,
+    LLMChannelDetail,
+    LLMModel,
 )
 from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.provider_catalog import SystemProviderImmutable
+from valuz_agent.ports.llm_provider import SystemProviderImmutable
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +74,10 @@ class ConnectionTestResult:
     error_message: str | None = None
 
 
-# ``ProviderListItem`` / ``ProviderModel`` / ``ProviderDetail`` now live in
+# ``LLMChannel`` / ``LLMModel`` / ``LLMChannelDetail`` now live in
 # ``modules.providers.schemas`` — the shared contract OSS / overlay / frontend
 # all speak (ADR-011). The helpers below judge OSS's OWN rows onto that shape;
-# contributed rows (``ext.provider_catalog.list()``) arrive pre-judged.
+# contributed rows (``ext.llm_provider.list()``) arrive pre-judged.
 
 # Display order of provider groups in the model picker (smaller = earlier).
 # Mirrors ``modules.settings.model_options`` group ordering.
@@ -104,11 +104,11 @@ def _group_for(source: str, auth_type: str) -> str:
     return "api_key"
 
 
-def _models_for(model_ids: list[str]) -> list[ProviderModel]:
+def _models_for(model_ids: list[str]) -> list[LLMModel]:
     """Wrap a row's flat model-id list into per-model rows. OSS user/builtin rows
     carry no per-model protocol/label overrides — each model falls back to the
     channel-level ``compatible_protocols`` (``protocols=()``)."""
-    return [ProviderModel(id=m) for m in model_ids]
+    return [LLMModel(id=m) for m in model_ids]
 
 
 # ── Provider Registry ───────────────────────────────────────────────
@@ -376,7 +376,7 @@ async def reset_providers(
     *,
     drop_table: bool = False,
     engine: Any | None = None,
-) -> list[ProviderListItem]:
+) -> list[LLMChannel]:
     """Wipe ``valuz_provider`` and re-seed it from the current code.
 
     Use cases:
@@ -531,10 +531,10 @@ def _resolve_model_options(row: ProviderRow) -> list[str]:
     return fallback
 
 
-def _row_to_list_item(row: ProviderRow) -> ProviderListItem:
+def _row_to_list_item(row: ProviderRow) -> LLMChannel:
     compatible = _derive_compatible_protocols(row)
     group = _group_for(row.source, row.auth_type)
-    return ProviderListItem(
+    return LLMChannel(
         id=row.id,
         name=row.name,
         provider_kind=row.provider_kind,
@@ -560,14 +560,14 @@ def _row_to_list_item(row: ProviderRow) -> ProviderListItem:
     )
 
 
-def _list_item_to_detail(it: ProviderListItem) -> ProviderDetail:
+def _list_item_to_detail(it: LLMChannel) -> LLMChannelDetail:
     """Wrap a contributed (catalog) list row into a detail view.
 
     Catalog rows are system-managed: no editable base_url, no connection test.
     Used by ``get_provider`` so the edit dialog opens read-only on a row that
     has no ``valuz_provider`` table entry.
     """
-    return ProviderDetail(
+    return LLMChannelDetail(
         id=it.id,
         name=it.name,
         provider_kind=it.provider_kind,
@@ -593,11 +593,11 @@ def _list_item_to_detail(it: ProviderListItem) -> ProviderDetail:
     )
 
 
-def _row_to_detail(row: ProviderRow) -> ProviderDetail:
+def _row_to_detail(row: ProviderRow) -> LLMChannelDetail:
     provider = _PROVIDER_MAP.get(row.provider_kind)
     compatible = _derive_compatible_protocols(row)
     group = _group_for(row.source, row.auth_type)
-    return ProviderDetail(
+    return LLMChannelDetail(
         id=row.id,
         name=row.name,
         provider_kind=row.provider_kind,
@@ -689,7 +689,7 @@ def _builtin_subscription_row(entry: Any) -> ProviderRow | None:
     )
 
 
-def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[ProviderListItem]:
+def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[LLMChannel]:
     """Virtual list entries for OSS CLI-subscription channels (Claude Pro·Max,
     Codex) the caller hasn't configured yet.
 
@@ -713,7 +713,7 @@ def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[Pro
 
     if not settings.subscription_login_enabled:
         return []
-    items: list[ProviderListItem] = []
+    items: list[LLMChannel] = []
     for entry in load_provider_seeds().providers:
         if entry.provider_kind in configured_kinds:
             continue
@@ -724,7 +724,7 @@ def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[Pro
     return items
 
 
-def _virtual_builtin_subscription_detail(provider_id: str) -> ProviderDetail | None:
+def _virtual_builtin_subscription_detail(provider_id: str) -> LLMChannelDetail | None:
     """Detail for an unconfigured built-in OAuth subscription template.
 
     No DB row exists for a virtual template until the user logs in, so the edit
@@ -760,7 +760,7 @@ class ProviderService:
 
     # ── Queries ──────────────────────────────────────────────────
 
-    async def list_providers(self, user_id: str) -> list[ProviderListItem]:
+    async def list_providers(self, user_id: str) -> list[LLMChannel]:
         rows = await self._ds.list_providers(user_id)
         policy = ext.policy
         # When the caller's org locks custom models, hide their own
@@ -773,13 +773,13 @@ class ProviderService:
             if r.enabled and not (hide_user and r.source == "user")
         ]
         # Prepend overlay-contributed rows (ADR-011). The single
-        # ``ext.provider_catalog`` returns already-judged, key-free
-        # ``ProviderListItem`` rows (e.g. the commercial "Valuz 系统模型" +
+        # ``ext.llm_provider`` returns already-judged, key-free
+        # ``LLMChannel`` rows (e.g. the commercial "Valuz 系统模型" +
         # "组织模型" channels). OSS makes zero judgement on them — pure
         # append. A contributed row with no selectable models is dropped: a
         # card with nothing to pick is noise (e.g. the 组织模型 card when the
         # org has no model of that protocol).
-        extra_items = [it for it in await ext.provider_catalog.list() if it.models]
+        extra_items = [it for it in await ext.llm_provider.list() if it.models]
         # Virtual CLI-subscription templates for kinds not yet configured (no DB
         # row exists until the user logs in — see ``_materialize_builtin_subscription``).
         configured_kinds = {r.provider_kind for r in rows}
@@ -795,14 +795,14 @@ class ProviderService:
             combined = [it for it in combined if it.id not in hidden]
         return combined
 
-    async def get_provider(self, user_id: str, provider_id: str) -> ProviderDetail:
+    async def get_provider(self, user_id: str, provider_id: str) -> LLMChannelDetail:
         row = await self._ds.get_by_id(user_id, provider_id)
         if row is not None:
             return _row_to_detail(row)
         # Not a user row — maybe an overlay-contributed (catalog) channel
         # (ADR-011). Catalog ids don't collide with user UUIDs, so checking
         # the user table first is safe.
-        for it in await ext.provider_catalog.list():
+        for it in await ext.llm_provider.list():
             if it.id == provider_id:
                 return _list_item_to_detail(it)
         # Still nothing: the id may be an unconfigured built-in subscription
@@ -822,7 +822,7 @@ class ProviderService:
         row's ``deletable`` flag, not its source (ADR-011 治理). The route layer
         maps this to HTTP 409.
         """
-        for it in await ext.provider_catalog.list():
+        for it in await ext.llm_provider.list():
             if it.id == provider_id and not it.deletable:
                 raise SystemProviderImmutable(provider_id)
 
@@ -989,7 +989,7 @@ class ProviderService:
         default_model: str | None = None,
         protocol: str | None = None,
         models: list[str] | None = None,
-    ) -> ProviderDetail:
+    ) -> LLMChannelDetail:
         provider = get_provider(provider_kind)
 
         effective_base_url = base_url or provider.default_base_url
@@ -1140,7 +1140,7 @@ class ProviderService:
         protocol: str | None = None,
         auth_type: str | None = None,
         models: list[str] | None = None,
-    ) -> ProviderDetail:
+    ) -> LLMChannelDetail:
         await self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
@@ -1329,7 +1329,7 @@ class ProviderService:
 
         self._bus.publish("provider.deleted", provider_id=provider_id)
 
-    async def enable_provider(self, user_id: str, provider_id: str) -> ProviderDetail:
+    async def enable_provider(self, user_id: str, provider_id: str) -> LLMChannelDetail:
         """Mark an OAuth/subscription provider as enabled.
 
         For ``auth_type="oauth"`` providers (e.g. ``ch-claude-subscription``

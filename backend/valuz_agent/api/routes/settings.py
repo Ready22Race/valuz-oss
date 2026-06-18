@@ -42,7 +42,7 @@ from valuz_agent.modules.settings.service import (
     UpdateCheckResult,
 )
 from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.provider_catalog import SystemProviderImmutable
+from valuz_agent.ports.llm_provider import SystemProviderImmutable
 
 router = APIRouter(prefix="/v1/settings", tags=["settings"])
 
@@ -217,7 +217,7 @@ async def patch_model_defaults(
                     await set_default_provider_id(db, None)
                     await set_default_model(db, None)
                 elif any(
-                    it.id == payload.default_provider_id for it in await ext.provider_catalog.list()
+                    it.id == payload.default_provider_id for it in await ext.llm_provider.list()
                 ):
                     # Contributed (catalog) channel (e.g. the commercial
                     # "Valuz 系统模型" channel — ADR-011). It has no providers-table

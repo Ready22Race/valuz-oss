@@ -1,16 +1,16 @@
 """Shared provider-list contract (ADR-011).
 
-``ProviderListItem`` is the single "one channel, one row" display view shared
+``LLMChannel`` is the single "one channel, one row" display view shared
 across **frontend / OSS / extension point / overlay**. It is self-contained and
 key-free: a row carries everything the picker UIs need to render and group a
 channel, and nothing a credential resolver needs (those live on the
-``resolve`` path — see :mod:`valuz_agent.ports.provider_catalog`).
+``resolve`` path — see :mod:`valuz_agent.ports.llm_provider`).
 
 Field-ownership rule: **one value per channel goes on the outer item; anything
-that differs per model goes on its :class:`ProviderModel`.**
+that differs per model goes on its :class:`LLMModel`.**
 
 This module is a leaf — pure dataclasses, no imports from ``ports`` or other
-modules — so both the port (which annotates ``list() -> list[ProviderListItem]``)
+modules — so both the port (which annotates ``list() -> list[LLMChannel]``)
 and producers (OSS service + overlay catalogs) can depend on it without cycles.
 """
 
@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
-class ProviderModel:
+class LLMModel:
     """One selectable model under a channel — self-contained, one row.
 
     Attributes:
@@ -39,7 +39,7 @@ class ProviderModel:
 
 
 @dataclass
-class ProviderListItem:
+class LLMChannel:
     """A single channel row in the provider list.
 
     Producers fill their own rows (OSS judges its user rows; the extension
@@ -78,11 +78,11 @@ class ProviderListItem:
     # Group sort, smaller = earlier.
     group_rank: int = 50
     # ── models ────────────────────────────────────────────────────────
-    models: list[ProviderModel] = field(default_factory=list)
+    models: list[LLMModel] = field(default_factory=list)
 
 
 @dataclass
-class ProviderDetail(ProviderListItem):
+class LLMChannelDetail(LLMChannel):
     """The edit-dialog view — list row plus connection-management fields."""
 
     base_url: str | None = None
@@ -90,4 +90,4 @@ class ProviderDetail(ProviderListItem):
     supports_connection_test: bool = True
 
 
-__all__ = ["ProviderDetail", "ProviderListItem", "ProviderModel"]
+__all__ = ["LLMChannelDetail", "LLMChannel", "LLMModel"]

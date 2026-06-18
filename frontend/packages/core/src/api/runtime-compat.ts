@@ -23,8 +23,8 @@
 
 import type {
   ApiProtocol,
-  ProviderDetail,
-  ProviderListItem,
+  LLMChannelDetail,
+  LLMChannel,
 } from "./providers-api";
 import {
   ALLOWED_PROTOCOLS_BY_RUNTIME,
@@ -39,10 +39,10 @@ const SUBSCRIPTION_PROVIDER_KINDS = new Set([
 
 const ANTHROPIC_PROVIDER_KINDS = new Set(["anthropic", "claude-subscription"]);
 
-/** Subset of a provider this module needs. Accepts both ProviderListItem
- *  and ProviderDetail, plus any future shape that carries these fields. */
+/** Subset of a provider this module needs. Accepts both LLMChannel
+ *  and LLMChannelDetail, plus any future shape that carries these fields. */
 type CompatProvider = Pick<
-  ProviderListItem,
+  LLMChannel,
   "provider_kind" | "protocol" | "effective_protocol" | "compatible_protocols"
 >;
 
@@ -150,12 +150,12 @@ export const RUNTIME_DISPLAY_NAME: Record<RuntimeId, string> = {
   deepagents: "Deep Agents",
 };
 
-/** Helper for callers that have a ProviderDetail (models known) and need
+/** Helper for callers that have a LLMChannelDetail (models known) and need
  *  the same filter as useComposerProviders flattened in line. Returns
  *  ``true`` if the provider has at least one model that could run on the
  *  given runtime. */
 export const providerHasUsableModelForRuntime = (
-  p: ProviderDetail,
+  p: LLMChannelDetail,
   runtime: RuntimeId,
 ): boolean => {
   if (!isProviderRuntimeCompatible(p, runtime)) return false;

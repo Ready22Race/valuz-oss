@@ -1,7 +1,7 @@
 """Tests for the contributed-channel resolution path (ADR-011).
 
 When a provider id isn't in the user table, the resolver consults
-``ext.provider_catalog``: ``resolve`` synthesises a kernel ``ModelProvider``
+``ext.llm_provider``: ``resolve`` synthesises a kernel ``ModelProvider``
 from the returned credential, and ``resolve_runtime_provider`` derives the
 runtime from the catalog row's protocols + ``serves_responses``.
 """
@@ -18,9 +18,9 @@ from valuz_agent.adapters.provider_resolver import (
     resolve_model_provider,
     resolve_runtime_provider,
 )
-from valuz_agent.modules.providers.schemas import ProviderListItem, ProviderModel
+from valuz_agent.modules.providers.schemas import LLMChannel, LLMModel
 from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.provider_catalog import NoopProviderCatalog, ResolvedCredential
+from valuz_agent.ports.llm_provider import NoopLLMProvider, ResolvedCredential
 
 
 class _NoProviders:
@@ -36,13 +36,13 @@ class _UnusedSecrets:
 class _FakeCatalog:
     def __init__(
         self,
-        rows: list[ProviderListItem] | None = None,
+        rows: list[LLMChannel] | None = None,
         creds: dict[str, ResolvedCredential] | None = None,
     ) -> None:
         self._rows = rows or []
         self._creds = creds or {}
 
-    async def list(self) -> list[ProviderListItem]:
+    async def list(self) -> list[LLMChannel]:
         return list(self._rows)
 
     async def resolve(self, provider_id: str) -> ResolvedCredential | None:
@@ -51,22 +51,22 @@ class _FakeCatalog:
 
 @pytest.fixture(autouse=True)
 def fresh_catalog():
-    ext.provider_catalog = NoopProviderCatalog()
+    ext.llm_provider = NoopLLMProvider()
     yield
-    ext.provider_catalog = NoopProviderCatalog()
+    ext.llm_provider = NoopLLMProvider()
 
 
 def _set(
-    rows: list[ProviderListItem] | None = None,
+    rows: list[LLMChannel] | None = None,
     creds: dict[str, ResolvedCredential] | None = None,
 ) -> None:
-    ext.provider_catalog = _FakeCatalog(rows, creds)
+    ext.llm_provider = _FakeCatalog(rows, creds)
 
 
 def _row(
     *, provider_id: str = "valuz-channel", compatible: list[str], serves_responses: bool = False
-) -> ProviderListItem:
-    return ProviderListItem(
+) -> LLMChannel:
+    return LLMChannel(
         id=provider_id,
         name="Test System Channel",
         provider_kind="system",
@@ -79,11 +79,11 @@ def _row(
         serves_responses=serves_responses,
         group="system",
         group_rank=20,
-        models=[ProviderModel(id="m")],
+        models=[LLMModel(id="m")],
     )
 
 
-class TestResolveModelProviderCatalog:
+class TestResolveModelProviderViaLLMProvider:
     async def test_cred_resolves(self) -> None:
         _set(
             creds={"valuz-channel": ResolvedCredential("https://cloud.test/v1", "abc", "anthropic")}
@@ -127,7 +127,7 @@ class TestResolveModelProviderCatalog:
         assert mp.base_url is None
 
     async def test_unknown_id_raises_not_found(self) -> None:
-        # NoopProviderCatalog resolves nothing + user table empty → not found.
+        # NoopLLMProvider resolves nothing + user table empty → not found.
         with pytest.raises(ProviderNotResolvable, match="not found"):
             await resolve_model_provider(
                 provider_id="unknown",
@@ -137,7 +137,7 @@ class TestResolveModelProviderCatalog:
             )
 
 
-class TestResolveRuntimeProviderCatalog:
+class TestResolveRuntimeProviderViaLLMProvider:
     async def test_runtime_derived_from_catalog_row(self) -> None:
         # openai-completion, not serves_responses → deepagents only.
         _set(rows=[_row(compatible=["openai-completion"])])

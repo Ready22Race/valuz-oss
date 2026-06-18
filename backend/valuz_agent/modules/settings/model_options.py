@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from valuz_agent.adapters.runtime_registry import RUNTIME_REGISTRY
-from valuz_agent.modules.providers.schemas import ProviderModel
+from valuz_agent.modules.providers.schemas import LLMModel
 
 # All UI (hyphen-form) wire protocols. An empty per-model protocol list means
 # "no declared restriction" (gateway semantics) → treat as every protocol so
@@ -154,7 +154,7 @@ class ModelOptionsResponse(BaseModel):
 
 @dataclass(frozen=True)
 class ProviderOptionInput:
-    """The subset of ``ProviderListItem`` the builder reads. Decoupled from the
+    """The subset of ``LLMChannel`` the builder reads. Decoupled from the
     dataclass so the builder is pure + trivially testable (no DB / catalog)."""
 
     id: str
@@ -167,7 +167,7 @@ class ProviderOptionInput:
     compatible_protocols: list[str]
     # Per-model rows (ADR-011). Each model's own ``protocols`` win; ``()`` falls
     # back to the channel-level ``compatible_protocols``.
-    models: list[ProviderModel]
+    models: list[LLMModel]
     # Channel can drive codex (serves the Responses API). Threaded into
     # ``runtimes_for`` instead of a ``provider_kind == "system"`` special-case.
     serves_responses: bool

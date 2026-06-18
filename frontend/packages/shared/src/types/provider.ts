@@ -48,7 +48,7 @@ export interface ProviderDescriptor {
  * ``protocols`` win; an empty list means "no declared restriction" → the
  * consumer falls back to the channel-level ``compatible_protocols``.
  */
-export interface ProviderModel {
+export interface LLMModel {
   id: string;
   /** Display name; ``null`` → fall back to ``modelLabel(id)``. */
   label: string | null;
@@ -56,7 +56,7 @@ export interface ProviderModel {
   protocols: ApiProtocol[];
 }
 
-export interface ProviderListItem {
+export interface LLMChannel {
   id: string;
   name: string;
   provider_kind: string;
@@ -99,7 +99,7 @@ export interface ProviderListItem {
   /** Per-model rows (ADR-011). Replaces the flat ``model_options`` /
    *  ``model_labels``: each model carries its own ``id`` / ``label`` /
    *  ``protocols``. The picker flattens (provider × model) from here. */
-  models: ProviderModel[];
+  models: LLMModel[];
   /** Human-readable reason the provider is currently disabled. Only
    *  populated for ``source="system"`` (overlay-contributed) when
    *  ``enabled=false`` — e.g. "未登录 Valuz 账户". Other providers
@@ -107,7 +107,7 @@ export interface ProviderListItem {
   unavailable_reason: string | null;
 }
 
-export interface ProviderDetail extends ProviderListItem {
+export interface LLMChannelDetail extends LLMChannel {
   base_url: string | null;
   supports_custom_base_url: boolean;
   supports_connection_test: boolean;

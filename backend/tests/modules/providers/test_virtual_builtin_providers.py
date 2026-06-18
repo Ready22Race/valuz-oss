@@ -24,7 +24,7 @@ from valuz_agent.modules.providers.models import Base, ProviderRow
 from valuz_agent.modules.providers.service import ProviderService
 from valuz_agent.modules.settings.models import AppSettingRow
 from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.provider_catalog import NoopProviderCatalog
+from valuz_agent.ports.llm_provider import NoopLLMProvider
 
 OWNER = "owner-A"
 
@@ -80,9 +80,9 @@ async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
 def fresh_catalog() -> None:
     """Keep the contributed provider catalog empty so the list only carries the
     virtual templates under test."""
-    ext.provider_catalog = NoopProviderCatalog()
+    ext.llm_provider = NoopLLMProvider()
     yield
-    ext.provider_catalog = NoopProviderCatalog()
+    ext.llm_provider = NoopLLMProvider()
 
 
 class TestVirtualTemplates:

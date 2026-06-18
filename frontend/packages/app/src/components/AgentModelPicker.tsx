@@ -4,8 +4,8 @@ import {
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
-  type ProviderDetail,
-  type ProviderListItem,
+  type LLMChannelDetail,
+  type LLMChannel,
   type RuntimeProvider,
 } from "@valuz/core";
 import {
@@ -55,7 +55,7 @@ export const AgentModelPicker = ({
   layout = "grid",
 }: AgentModelPickerProps) => {
   const { t } = useI18n();
-  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const { runtimes } = useRuntimes();
   const { defaults } = useModelDefaults();
 
@@ -65,14 +65,14 @@ export const AgentModelPicker = ({
       try {
         const list = await providersApi
           .list()
-          .catch(() => ({ providers: [] as ProviderListItem[] }));
+          .catch(() => ({ providers: [] as LLMChannel[] }));
         const details = await Promise.all(
           list.providers
             .filter((p) => p.enabled)
             .map((p) => providersApi.get(p.id).catch(() => null)),
         );
         if (!cancelled) {
-          setProviders(details.filter((d): d is ProviderDetail => d !== null));
+          setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
         }
       } catch {
         if (!cancelled) setProviders([]);

@@ -165,7 +165,7 @@ async def resolve_model_provider(
         # catalog hands back a live credential, gated on its own long-lived key
         # (so this also works in background automations with no request JWT).
         # Returns None for ids it doesn't own.
-        cred = await ext.provider_catalog.resolve(provider_id)
+        cred = await ext.llm_provider.resolve(provider_id)
         if cred is not None:
             if cred.api_protocol not in {
                 "anthropic",
@@ -342,7 +342,7 @@ async def resolve_runtime_provider(
         # rule the model-options picker uses. Falls back to deepagents.
         from valuz_agent.modules.settings.model_options import runtimes_for
 
-        for it in await ext.provider_catalog.list():
+        for it in await ext.llm_provider.list():
             if it.id == provider_id:
                 rts = runtimes_for(
                     tuple(it.compatible_protocols),

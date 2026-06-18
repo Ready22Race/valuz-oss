@@ -42,8 +42,8 @@ import {
   type TodoItem,
   type ProjectDetail,
   type ProjectListItem,
-  type ProviderListItem,
-  type ProviderDetail,
+  type LLMChannel,
+  type LLMChannelDetail,
   type SkillView,
   type StagingSlugView,
   type StagingSyncStrategy,
@@ -537,7 +537,7 @@ export const ConversationPage = () => {
   } | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -1857,7 +1857,7 @@ export const ConversationPage = () => {
         projectsApi.list(),
         providersApi
           .list()
-          .catch(() => ({ providers: [] as ProviderListItem[] })),
+          .catch(() => ({ providers: [] as LLMChannel[] })),
       ]);
       setProjects(wsResponse.projects);
       const details = await Promise.all(
@@ -1865,7 +1865,7 @@ export const ConversationPage = () => {
           .filter((c) => c.enabled)
           .map((c) => providersApi.get(c.id).catch(() => null)),
       );
-      setProviders(details.filter((d): d is ProviderDetail => d !== null));
+      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
 
       // Two URL shapes drive the page:
       //
