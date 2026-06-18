@@ -608,6 +608,7 @@
     "statusConnected": "Connected",
     "statusError": "Connection failed",
     "statusNotConnected": "Not connected",
+    "groupInstalled": "Added",
     "groupOfficial": "Official",
     "groupBuiltin": "Built-in",
     "groupDirectory": "Connected",

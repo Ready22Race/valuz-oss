@@ -7,6 +7,7 @@ export * from "./use-has-usable-channel";
 export * from "./use-model-defaults";
 export * from "./use-project-last-used";
 export * from "./use-connector-alert";
+export * from "./use-connector-tools";
 export * from "./use-resource-categories";
 export * from "./use-resource-guard";
 export * from "./use-running-runs";
