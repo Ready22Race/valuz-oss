@@ -42,7 +42,7 @@ from valuz_agent.modules.settings.service import (
     UpdateCheckResult,
 )
 from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.llm_provider import SystemProviderImmutable
+from valuz_agent.ports.provider_catalog import SystemProviderImmutable
 
 router = APIRouter(prefix="/v1/settings", tags=["settings"])
 

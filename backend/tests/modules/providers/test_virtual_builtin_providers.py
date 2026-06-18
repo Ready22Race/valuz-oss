@@ -23,7 +23,8 @@ from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.models import Base, ProviderRow
 from valuz_agent.modules.providers.service import ProviderService
 from valuz_agent.modules.settings.models import AppSettingRow
-from valuz_agent.ports.llm_provider import _InMemoryRegistry, set_llm_registry
+from valuz_agent.ports.extensions import ext
+from valuz_agent.ports.provider_catalog import NoopProviderCatalog
 
 OWNER = "owner-A"
 
@@ -76,12 +77,12 @@ async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
 
 
 @pytest.fixture(autouse=True)
-def fresh_registry() -> None:
-    """Keep the system-provider registry empty so the list only carries the
+def fresh_catalog() -> None:
+    """Keep the contributed provider catalog empty so the list only carries the
     virtual templates under test."""
-    set_llm_registry(_InMemoryRegistry())
+    ext.provider_catalog = NoopProviderCatalog()
     yield
-    set_llm_registry(_InMemoryRegistry())
+    ext.provider_catalog = NoopProviderCatalog()
 
 
 class TestVirtualTemplates:

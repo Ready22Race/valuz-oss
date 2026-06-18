@@ -24,8 +24,11 @@ from valuz_agent.modules.providers.models import Base, ProviderRow
 from valuz_agent.modules.providers.schemas import ProviderListItem, ProviderModel
 from valuz_agent.modules.providers.service import ProviderService
 from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.llm_provider import SystemProviderImmutable
-from valuz_agent.ports.provider_catalog import NoopProviderCatalog, ResolvedCredential
+from valuz_agent.ports.provider_catalog import (
+    NoopProviderCatalog,
+    ResolvedCredential,
+    SystemProviderImmutable,
+)
 
 
 class _InMemorySecretStore(SecretStorePort):

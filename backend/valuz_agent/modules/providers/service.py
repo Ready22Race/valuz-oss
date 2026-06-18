@@ -35,7 +35,7 @@ from valuz_agent.modules.providers.schemas import (
     ProviderModel,
 )
 from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.llm_provider import SystemProviderImmutable
+from valuz_agent.ports.provider_catalog import SystemProviderImmutable
 
 logger = logging.getLogger(__name__)
 

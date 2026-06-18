@@ -67,4 +67,25 @@ class NoopProviderCatalog:
         return None
 
 
-__all__ = ["NoopProviderCatalog", "ProviderCatalog", "ResolvedCredential"]
+class SystemProviderImmutable(RuntimeError):  # noqa: N818 — domain error, not Error-suffixed
+    """Raised when a write op targets a non-deletable contributed provider.
+
+    A contributed (catalog) channel has ``deletable=False`` and no user-table
+    row, so it can't be edited / deleted / tested via the user CRUD path.
+    Carries the offending ``provider_id`` so the route layer can surface it;
+    mapped to HTTP 409 by the providers router.
+    """
+
+    def __init__(self, provider_id: str) -> None:
+        super().__init__(
+            f"provider {provider_id!r} is system-managed and cannot be edited or deleted"
+        )
+        self.provider_id = provider_id
+
+
+__all__ = [
+    "NoopProviderCatalog",
+    "ProviderCatalog",
+    "ResolvedCredential",
+    "SystemProviderImmutable",
+]

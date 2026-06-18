@@ -26,13 +26,6 @@ from valuz_agent.ports.billing import (
     set_billing_port,
 )
 from valuz_agent.ports.docs_runtime import DocsRuntimePort
-from valuz_agent.ports.llm_provider import (
-    LLMProviderRegistry,
-    SystemLLMProvider,
-    SystemProviderImmutable,
-    get_llm_registry,
-    set_llm_registry,
-)
 from valuz_agent.ports.mcp_catalog import McpCatalogPort
 from valuz_agent.ports.parser_backend import ParserBackend
 from valuz_agent.ports.parser_plugin import (
@@ -47,6 +40,12 @@ from valuz_agent.ports.parser_plugin import (
     SecretResolver,
     SetupRequirement,
     SplitPolicy,
+)
+from valuz_agent.ports.provider_catalog import (
+    NoopProviderCatalog,
+    ProviderCatalog,
+    ResolvedCredential,
+    SystemProviderImmutable,
 )
 from valuz_agent.ports.provider_policy import (
     AllowAllProviderPolicy,
@@ -66,10 +65,10 @@ __all__ = [
     "CapabilityStatus",
     "ConfigField",
     "DocsRuntimePort",
-    "LLMProviderRegistry",
     "McpCatalogPort",
     "MeterEvent",
     "NoopBillingProvider",
+    "NoopProviderCatalog",
     "ParserBackend",
     "ParserCapabilityNotReady",
     "ParserPlugin",
@@ -79,19 +78,18 @@ __all__ = [
     "PluginCapability",
     "PolicyDecision",
     "AllowAllProviderPolicy",
+    "ProviderCatalog",
     "ProviderPolicyPort",
     "ProviderWriteContext",
+    "ResolvedCredential",
     "SecretResolver",
     "SetupRequirement",
     "SkillRegistryPort",
     "SplitPolicy",
-    "SystemLLMProvider",
     "SystemProviderImmutable",
     "ToolProvider",
     "get_billing_port",
-    "get_llm_registry",
     "get_provider_policy",
     "set_billing_port",
     "set_provider_policy",
-    "set_llm_registry",
 ]

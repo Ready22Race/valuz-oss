@@ -15,7 +15,7 @@ from valuz_agent.modules.providers.service import (
     reset_providers,
 )
 from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.llm_provider import SystemProviderImmutable
+from valuz_agent.ports.provider_catalog import SystemProviderImmutable
 from valuz_agent.ports.provider_policy import (
     ProviderWriteContext,
 )
