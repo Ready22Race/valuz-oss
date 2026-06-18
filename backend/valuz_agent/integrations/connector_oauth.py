@@ -143,6 +143,52 @@ class OAuthDiscoverHelper:
 
         return OauthMetadata.model_validate(values)
 
+    async def server_allows_anonymous(self) -> bool:
+        """Whether the MCP server answers an *unauthenticated* ``initialize`` with success.
+
+        Discoverable OAuth metadata does **not** mean OAuth is mandatory.
+        Freemium MCP servers (e.g. Firecrawl) publish
+        ``/.well-known/oauth-protected-resource`` so signed-in users get
+        per-account attribution, yet still serve fully anonymous calls. A
+        successful unauthenticated ``initialize`` proves anonymous access works,
+        so a connector can stay ``auth_type="none"`` instead of being forced
+        into an OAuth flow it does not need.
+
+        Conservative on uncertainty: a 401 (auth genuinely required), any other
+        non-2xx, or a transport error returns ``False`` — preserving the
+        historical "OAuth metadata discovered ⇒ OAuth" behaviour for servers
+        that gate on auth. Uses a streaming send so a long-lived
+        ``text/event-stream`` response never blocks the probe on its body.
+        """
+        init_request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": LATEST_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "valuz-anonymous-probe", "version": "1.0"},
+            },
+        }
+        req = httpx.Request(
+            "POST",
+            self._server_url,
+            json=init_request,
+            headers={
+                "Accept": "application/json, text/event-stream",
+                MCP_PROTOCOL_VERSION: LATEST_PROTOCOL_VERSION,
+            },
+        )
+        try:
+            resp = await self._client.send(req, stream=True)
+        except httpx.HTTPError as exc:
+            logger.debug("anonymous probe failed for %s: %s", self._server_url, exc)
+            return False
+        try:
+            return 200 <= resp.status_code < 300
+        finally:
+            await resp.aclose()
+
     def _get_discovery_urls(self, auth_server_url: str | None = None) -> list[str]:
         target = auth_server_url or self._server_url
         parsed = urlparse(target)
