@@ -55,8 +55,8 @@ import {
   type Trigger,
   type ProjectDetail,
   type ProjectFileNode,
-  type ProviderDetail,
-  type ProviderListItem,
+  type LLMChannelDetail,
+  type LLMChannel,
   type ConnectorItem,
   type Task,
   type TaskEvent,
@@ -744,7 +744,7 @@ export const ProjectDetailPage = () => {
   const [sending, setSending] = useState(false);
   const [connectors, setConnectors] = useState<ConnectorItem[]>([]);
   const [selectedMcpSlugs, setSelectedMcpSlugs] = useState<string[]>([]);
-  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -909,7 +909,7 @@ export const ProjectDetailPage = () => {
           .catch(() => ({ files: [] as ProjectFileNode[] })),
         providersApi
           .list()
-          .catch(() => ({ providers: [] as ProviderListItem[] })),
+          .catch(() => ({ providers: [] as LLMChannel[] })),
       ]);
       setFileTree(toFileTree(filesRes.files));
       // Skills are bound on the Agent now (08-agents-module), not the
@@ -921,7 +921,7 @@ export const ProjectDetailPage = () => {
           .filter((c) => c.enabled)
           .map((c) => providersApi.get(c.id).catch(() => null)),
       );
-      setProviders(details.filter((d): d is ProviderDetail => d !== null));
+      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
 
       // Load automations for this project
       try {

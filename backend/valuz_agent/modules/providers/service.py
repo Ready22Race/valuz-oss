@@ -29,11 +29,13 @@ from valuz_agent.modules.providers.errors import (
     ProviderNotFound,
 )
 from valuz_agent.modules.providers.models import ProviderRow
-from valuz_agent.ports.extensions import ext
-from valuz_agent.ports.llm_provider import (
-    SystemLLMProvider,
-    SystemProviderImmutable,
+from valuz_agent.modules.providers.schemas import (
+    LLMChannel,
+    LLMChannelDetail,
+    LLMModel,
 )
+from valuz_agent.ports.extensions import ext
+from valuz_agent.ports.llm_provider import SystemProviderImmutable
 
 logger = logging.getLogger(__name__)
 
@@ -72,62 +74,44 @@ class ConnectionTestResult:
     error_message: str | None = None
 
 
-@dataclass
-class ProviderListItem:
-    id: str
-    name: str
-    provider_kind: str
-    source: str
-    enabled: bool
-    is_default: bool
-    deletable: bool
-    default_model: str | None
-    test_status: str
-    credential_source: str
-    auth_type: str = "api_key"
-    # Raw ``protocol`` value (may be None if the user never disambiguated).
-    # User-facing hyphen form: ``anthropic | openai-completion |
-    # openai-response | gemini``.
-    protocol: str | None = None
-    # Derived wire protocol the kernel runtime expects. Same hyphen
-    # form as ``protocol`` — one of ``"anthropic"`` / ``"openai-completion"``
-    # / ``"openai-response"`` / ``"gemini"``. Used as a fallback when only a
-    # single protocol matters; the full set of protocols this provider can
-    # speak is ``compatible_protocols``.
-    effective_protocol: str = "openai-completion"
-    # All wire protocols this provider can speak. Some upstream services
-    # (DeepSeek, Zhipu, Moonshot, MiniMax, plus user-defined custom
-    # endpoints) expose both an OpenAI-shape and an Anthropic-shape API
-    # — they should appear in BOTH "Claude Code" and "Deep Agents"
-    # runtime dropdowns. Subscription providers pin to their CLI's wire
-    # shape and have a single-element list. The frontend uses this set
-    # to compute "可用于" badges and the Default-config picker filter.
-    compatible_protocols: list[str] = field(default_factory=list)
-    # Available model ids for this provider — same data the
-    # ProviderDetail endpoint returns, surfaced on the list response so
-    # the Default-config picker can flatten (provider × model) entries
-    # in a single request. ``[]`` when the provider has no discoverable
-    # models (subscription providers, unconfigured api-key rows).
-    model_options: list[str] = field(default_factory=list)
-    # Optional ``{model_id: human_label}`` map for the picker UI. Populated
-    # for system providers whose overlay surfaces admin-set display names
-    # alongside the wire-level model id; the UI shows the label and still
-    # sends the id on the wire. Empty when the provider has no labels
-    # (typical: user api_key providers — model picker shows ids as-is).
-    model_labels: dict[str, str] = field(default_factory=dict)
-    # Human-readable reason the provider is currently disabled. Only
-    # populated for ``source="system"`` (overlay-contributed system
-    # providers) when ``enabled=False`` — e.g. "未登录 Valuz 账户". The
-    # SettingsPage card renders this next to the badge so users know
-    # what to do. ``None`` for everything else.
-    unavailable_reason: str | None = None
+# ``LLMChannel`` / ``LLMModel`` / ``LLMChannelDetail`` now live in
+# ``modules.providers.schemas`` — the shared contract OSS / overlay / frontend
+# all speak (ADR-011). The helpers below judge OSS's OWN rows onto that shape;
+# contributed rows (``ext.llm_provider.list()``) arrive pre-judged.
+
+# Display order of provider groups in the model picker (smaller = earlier).
+# Mirrors ``modules.settings.model_options`` group ordering.
+_GROUP_RANK: dict[str, int] = {
+    "subscription": 10,
+    "system": 20,
+    "org": 30,
+    "api_key": 40,
+}
 
 
-@dataclass
-class ProviderDetail(ProviderListItem):
-    base_url: str | None = None
-    supports_custom_base_url: bool = False
-    supports_connection_test: bool = True
+def _group_for(source: str, auth_type: str) -> str:
+    """Bucket an OSS-owned row into a picker group key.
+
+    Contributed (catalog) rows set their own ``group`` — this only judges OSS's
+    own rows. Mirrors ``modules.settings.model_options._group_key``.
+    """
+    if source == "org":
+        return "org"
+    if source == "system":
+        return "system"
+    if auth_type == "oauth":
+        return "subscription"
+    return "api_key"
+
+
+def _models_for(model_ids: list[str], labels: dict[str, str] | None = None) -> list[LLMModel]:
+    """Wrap a row's flat model-id list into per-model rows. The backend supplies a
+    display ``label`` for curated lists (the OAuth subscription channels, from
+    ``subscription_models.json``); other rows leave it ``None`` so the frontend
+    resolves the name. ``runtimes`` stays None → the picker derives it from the
+    channel's ``compatible_protocols``."""
+    labels = labels or {}
+    return [LLMModel(id=m, label=labels.get(m)) for m in model_ids]
 
 
 # ── Provider Registry ───────────────────────────────────────────────
@@ -144,6 +128,10 @@ class ProviderDescriptor:
     default_base_url: str = ""
     default_model: str = ""
     model_options: tuple[str, ...] = ()
+    # ``{model_id: display_name}`` for curated lists that ship friendly names
+    # (the OAuth subscription channels, from subscription_models.json). Empty for
+    # api-key descriptors — their model labels are resolved client-side.
+    model_labels: dict[str, str] = field(default_factory=dict)
     docs_url: str = ""
     # When ``supports_protocol_selection`` is True, the anthropic-shape
     # endpoint may live at a different path than ``default_base_url`` +
@@ -300,7 +288,22 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
             default_model = spec.get("default_model")
             if not isinstance(models, list):
                 continue
-            cleaned_models = tuple(m for m in models if isinstance(m, str) and m)
+            # A model entry is either a bare id (``"gpt-5.5"``) or
+            # ``{"id": ..., "label": ...}`` — the curated file ships friendly
+            # display names so the backend, not the frontend, owns them.
+            ids: list[str] = []
+            labels: dict[str, str] = {}
+            for item in models:
+                if isinstance(item, str) and item:
+                    ids.append(item)
+                elif isinstance(item, dict):
+                    mid = item.get("id")
+                    if isinstance(mid, str) and mid:
+                        ids.append(mid)
+                        lbl = item.get("label")
+                        if isinstance(lbl, str) and lbl.strip():
+                            labels[mid] = lbl
+            cleaned_models = tuple(ids)
             if not cleaned_models:
                 continue
             merged[kind] = {
@@ -308,6 +311,7 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
                 if isinstance(default_model, str) and default_model
                 else cleaned_models[0],
                 "model_options": cleaned_models,
+                "model_labels": labels,
             }
 
     try:
@@ -359,6 +363,7 @@ def _hydrate_subscription_providers(
                 provider,
                 default_model=spec["default_model"],
                 model_options=spec["model_options"],
+                model_labels=spec.get("model_labels", {}),
             )
         )
     return out
@@ -395,7 +400,7 @@ async def reset_providers(
     *,
     drop_table: bool = False,
     engine: Any | None = None,
-) -> list[ProviderListItem]:
+) -> list[LLMChannel]:
     """Wipe ``valuz_provider`` and re-seed it from the current code.
 
     Use cases:
@@ -550,8 +555,11 @@ def _resolve_model_options(row: ProviderRow) -> list[str]:
     return fallback
 
 
-def _row_to_list_item(row: ProviderRow) -> ProviderListItem:
-    return ProviderListItem(
+def _row_to_list_item(row: ProviderRow) -> LLMChannel:
+    compatible = _derive_compatible_protocols(row)
+    group = _group_for(row.source, row.auth_type)
+    descriptor = _PROVIDER_MAP.get(row.provider_kind)
+    return LLMChannel(
         id=row.id,
         name=row.name,
         provider_kind=row.provider_kind,
@@ -564,190 +572,57 @@ def _row_to_list_item(row: ProviderRow) -> ProviderListItem:
         credential_source=row.credential_source,
         auth_type=row.auth_type,
         protocol=row.protocol,
-        effective_protocol=_derive_effective_protocol(row),
-        compatible_protocols=_derive_compatible_protocols(row),
-        model_options=_resolve_model_options(row),
+        effective_protocol=compatible[0],
+        compatible_protocols=compatible,
+        # models leave runtimes unset (None) → the picker derives them from
+        # compatible_protocols. OSS user/builtin rows never drive codex (codex
+        # walks its own keychain) except codex-subscription, which runtimes_for
+        # matches by provider_kind.
+        group=group,
+        group_rank=_GROUP_RANK[group],
+        models=_models_for(
+            _resolve_model_options(row), descriptor.model_labels if descriptor else None
+        ),
     )
 
 
-def _system_compatible_protocols(api_protocol: str) -> list[str]:
-    """Map kernel underscore-form api_protocol to UI hyphen-form list.
+def _list_item_to_detail(it: LLMChannel) -> LLMChannelDetail:
+    """Wrap a contributed (catalog) list row into a detail view.
 
-    The frontend's "可用于" badges and the Default-config runtime filter
-    read ``compatible_protocols`` to decide which runtime each row
-    belongs to. System providers only declare one protocol, so the list
-    has a single entry mirroring ``effective_protocol``.
+    Catalog rows are system-managed: no editable base_url, no connection test.
+    Used by ``get_provider`` so the edit dialog opens read-only on a row that
+    has no ``valuz_provider`` table entry.
     """
-    mapping = {
-        "anthropic": "anthropic",
-        "openai_completion": "openai-completion",
-        "openai_response": "openai-response",
-        "gemini": "gemini",
-    }
-    mapped = mapping.get(api_protocol, "openai-completion")
-    return [mapped]
-
-
-async def _resolve_descriptor_model_options(d: SystemLLMProvider) -> list[str]:
-    """Resolve a descriptor's model list, preferring the dynamic ``list_models``
-    callable over the static ``model_options`` (ADR-007 Phase 2).
-
-    ``list_models`` may be sync or async. Any failure / empty result falls back
-    to the static ``model_options`` so a flaky dynamic source never blanks the
-    picker.
-    """
-    import inspect
-
-    if d.list_models is None:
-        return list(d.model_options)
-    try:
-        result = d.list_models()
-        if inspect.isawaitable(result):
-            result = await result
-        models = list(result) if result else []
-        return models or list(d.model_options)
-    except Exception:  # noqa: BLE001 — dynamic source must never break the list
-        return list(d.model_options)
-
-
-async def _resolve_descriptor_model_labels(d: SystemLLMProvider) -> dict[str, str]:
-    """Resolve a descriptor's ``{model_id: human_label}`` map.
-
-    Returns ``{}`` when the descriptor doesn't supply a label resolver, when the
-    resolver returns an empty / non-dict value, or when it raises — labels are a
-    UI nicety and must never break the picker. Callers pass the resulting dict
-    through to ``ProviderListItem.model_labels``; the frontend renders
-    ``labels.get(id, id)``, so missing entries naturally fall back to the id.
-    """
-    import inspect
-
-    if d.list_model_labels is None:
-        return {}
-    try:
-        result = d.list_model_labels()
-        if inspect.isawaitable(result):
-            result = await result
-        return dict(result) if isinstance(result, dict) else {}
-    except Exception:  # noqa: BLE001 — labels are decorative; never break the picker
-        return {}
-
-
-# Kernel underscore form → UI hyphen form for wire protocols. Mirrors the inline
-# map in ``_system_compatible_protocols``; unknown / already-hyphen values pass
-# through unchanged.
-_PROTOCOL_KERNEL_TO_UI: dict[str, str] = {
-    "anthropic": "anthropic",
-    "openai_completion": "openai-completion",
-    "openai_response": "openai-response",
-    "gemini": "gemini",
-}
-
-
-async def _resolve_descriptor_model_protocols(d: SystemLLMProvider) -> dict[str, list[str]]:
-    """Resolve a descriptor's ``{model_id: [protocol, ...]}`` map in UI hyphen form.
-
-    Lets one descriptor carry models speaking different protocols (a system
-    channel reachable over both Anthropic and OpenAI shapes). The model-options
-    builder reads this to resolve per-model runtimes. Returns ``{}`` when the
-    descriptor supplies no resolver, errors, or returns a non-dict — callers then
-    fall back to the descriptor's single provider-level ``api_protocol``.
-    """
-    import inspect
-
-    if d.list_model_protocols is None:
-        return {}
-    try:
-        result = d.list_model_protocols()
-        if inspect.isawaitable(result):
-            result = await result
-        if not isinstance(result, dict):
-            return {}
-        return {
-            str(mid): [_PROTOCOL_KERNEL_TO_UI.get(p, p) for p in (protos or [])]
-            for mid, protos in result.items()
-        }
-    except Exception:  # noqa: BLE001 — dynamic source must never break the picker
-        return {}
-
-
-def _descriptor_to_list_item(
-    d: SystemLLMProvider,
-    *,
-    model_options: list[str] | None = None,
-    model_labels: dict[str, str] | None = None,
-) -> ProviderListItem:
-    """Project a registry descriptor onto the ``ProviderListItem`` shape.
-
-    System providers reuse the existing schema so the UI renders them
-    next to user providers; ``source="system"`` + ``deletable=False``
-    tell the renderer to hide edit/delete and show an availability
-    badge instead.
-
-    ``model_options`` overrides the descriptor's static list when the caller
-    has resolved a dynamic ``list_models`` (see ``_resolve_descriptor_model_options``).
-    ``model_labels`` carries the resolved ``{id: human_label}`` map (see
-    ``_resolve_descriptor_model_labels``); empty when the descriptor doesn't
-    supply labels.
-    """
-    protocols = _system_compatible_protocols(d.api_protocol)
-    opts = model_options if model_options is not None else list(d.model_options)
-    labels = dict(model_labels) if model_labels else {}
-    return ProviderListItem(
-        id=d.id,
-        name=d.name,
-        provider_kind=d.provider_kind,
-        source="system",
-        enabled=d.enabled(),
-        is_default=False,
-        deletable=False,
-        default_model=d.default_model,
-        test_status="never",
-        credential_source="system_managed",
-        auth_type="oauth",
-        protocol=protocols[0],
-        effective_protocol=protocols[0],
-        compatible_protocols=protocols,
-        model_options=opts,
-        model_labels=labels,
-        unavailable_reason=d.unavailable_reason() if not d.enabled() else None,
-    )
-
-
-def _descriptor_to_detail(
-    d: SystemLLMProvider,
-    *,
-    model_options: list[str] | None = None,
-    model_labels: dict[str, str] | None = None,
-) -> ProviderDetail:
-    item = _descriptor_to_list_item(d, model_options=model_options, model_labels=model_labels)
-    return ProviderDetail(
-        id=item.id,
-        name=item.name,
-        provider_kind=item.provider_kind,
-        source=item.source,
-        enabled=item.enabled,
-        is_default=item.is_default,
-        deletable=item.deletable,
-        default_model=item.default_model,
-        test_status=item.test_status,
-        credential_source=item.credential_source,
-        auth_type=item.auth_type,
-        protocol=item.protocol,
-        effective_protocol=item.effective_protocol,
-        compatible_protocols=item.compatible_protocols,
-        model_options=item.model_options,
-        model_labels=item.model_labels,
-        unavailable_reason=item.unavailable_reason,
-        base_url=d.api_base,
+    return LLMChannelDetail(
+        id=it.id,
+        name=it.name,
+        provider_kind=it.provider_kind,
+        source=it.source,
+        enabled=it.enabled,
+        is_default=it.is_default,
+        deletable=it.deletable,
+        default_model=it.default_model,
+        test_status=it.test_status,
+        credential_source=it.credential_source,
+        auth_type=it.auth_type,
+        protocol=it.protocol,
+        effective_protocol=it.effective_protocol,
+        compatible_protocols=it.compatible_protocols,
+        group=it.group,
+        group_rank=it.group_rank,
+        models=it.models,
+        unavailable_reason=it.unavailable_reason,
+        base_url=None,
         supports_custom_base_url=False,
         supports_connection_test=False,
     )
 
 
-def _row_to_detail(row: ProviderRow) -> ProviderDetail:
+def _row_to_detail(row: ProviderRow) -> LLMChannelDetail:
     provider = _PROVIDER_MAP.get(row.provider_kind)
-    model_options = _resolve_model_options(row)
-    return ProviderDetail(
+    compatible = _derive_compatible_protocols(row)
+    group = _group_for(row.source, row.auth_type)
+    return LLMChannelDetail(
         id=row.id,
         name=row.name,
         provider_kind=row.provider_kind,
@@ -760,9 +635,14 @@ def _row_to_detail(row: ProviderRow) -> ProviderDetail:
         credential_source=row.credential_source,
         auth_type=row.auth_type,
         protocol=row.protocol,
-        effective_protocol=_derive_effective_protocol(row),
-        compatible_protocols=_derive_compatible_protocols(row),
-        model_options=model_options,
+        effective_protocol=compatible[0],
+        compatible_protocols=compatible,
+        # models leave runtimes unset (None) → the picker derives them.
+        group=group,
+        group_rank=_GROUP_RANK[group],
+        models=_models_for(
+            _resolve_model_options(row), provider.model_labels if provider else None
+        ),
         base_url=row.base_url,
         supports_custom_base_url=provider.supports_custom_base_url if provider else False,
         supports_connection_test=(
@@ -832,7 +712,7 @@ def _builtin_subscription_row(entry: Any) -> ProviderRow | None:
     )
 
 
-def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[ProviderListItem]:
+def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[LLMChannel]:
     """Virtual list entries for OSS CLI-subscription channels (Claude Pro·Max,
     Codex) the caller hasn't configured yet.
 
@@ -856,7 +736,7 @@ def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[Pro
 
     if not settings.subscription_login_enabled:
         return []
-    items: list[ProviderListItem] = []
+    items: list[LLMChannel] = []
     for entry in load_provider_seeds().providers:
         if entry.provider_kind in configured_kinds:
             continue
@@ -867,7 +747,7 @@ def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[Pro
     return items
 
 
-def _virtual_builtin_subscription_detail(provider_id: str) -> ProviderDetail | None:
+def _virtual_builtin_subscription_detail(provider_id: str) -> LLMChannelDetail | None:
     """Detail for an unconfigured built-in OAuth subscription template.
 
     No DB row exists for a virtual template until the user logs in, so the edit
@@ -903,7 +783,7 @@ class ProviderService:
 
     # ── Queries ──────────────────────────────────────────────────
 
-    async def list_providers(self, user_id: str) -> list[ProviderListItem]:
+    async def list_providers(self, user_id: str) -> list[LLMChannel]:
         rows = await self._ds.list_providers(user_id)
         policy = ext.policy
         # When the caller's org locks custom models, hide their own
@@ -915,30 +795,19 @@ class ProviderService:
             for r in rows
             if r.enabled and not (hide_user and r.source == "user")
         ]
-        # Prepend overlay-contributed system providers (ADR-007). System
-        # providers are the "platform-provided, no setup needed" option
-        # and belong at the top of the picker so users see them first.
-        # Each descriptor's ``enabled()`` is evaluated lazily so the UI
-        # can show "未登录" badges for SaaS users who haven't signed in.
-        #
-        # A descriptor whose resolved model list is empty is hidden: a
-        # system card with no selectable models is noise (e.g. a dynamic
-        # ``list_models`` source — like the commercial 组织模型 card — that
-        # has no model of that protocol for the current org).
-        system_items = []
-        for d in ext.llm_registry.all():
-            opts = await _resolve_descriptor_model_options(d)
-            if not opts:
-                continue
-            labels = await _resolve_descriptor_model_labels(d)
-            system_items.append(
-                _descriptor_to_list_item(d, model_options=opts, model_labels=labels)
-            )
+        # Prepend overlay-contributed rows (ADR-011). The single
+        # ``ext.llm_provider`` returns already-judged, key-free
+        # ``LLMChannel`` rows (e.g. the commercial "Valuz 系统模型" +
+        # "组织模型" channels). OSS makes zero judgement on them — pure
+        # append. A contributed row with no selectable models is dropped: a
+        # card with nothing to pick is noise (e.g. the 组织模型 card when the
+        # org has no model of that protocol).
+        extra_items = [it for it in await ext.llm_provider.list() if it.models]
         # Virtual CLI-subscription templates for kinds not yet configured (no DB
         # row exists until the user logs in — see ``_materialize_builtin_subscription``).
         configured_kinds = {r.provider_kind for r in rows}
         template_items = _builtin_subscription_template_items(configured_kinds)
-        combined = system_items + user_items + template_items
+        combined = extra_items + user_items + template_items
         # Richer visibility filter (overlay-bound policy): hide whole provider
         # ids the caller isn't allowed to see — e.g. builtin personal channels
         # (Claude Pro/Max, Codex) when the platform disables member-configured
@@ -949,35 +818,36 @@ class ProviderService:
             combined = [it for it in combined if it.id not in hidden]
         return combined
 
-    async def get_provider(self, user_id: str, provider_id: str) -> ProviderDetail:
-        descriptor = ext.llm_registry.get(provider_id)
-        if descriptor is not None:
-            return _descriptor_to_detail(
-                descriptor,
-                model_options=await _resolve_descriptor_model_options(descriptor),
-                model_labels=await _resolve_descriptor_model_labels(descriptor),
-            )
+    async def get_provider(self, user_id: str, provider_id: str) -> LLMChannelDetail:
         row = await self._ds.get_by_id(user_id, provider_id)
         if row is not None:
             return _row_to_detail(row)
-        # No row: the id may be an unconfigured built-in subscription template
-        # (virtualized in ``list_providers``) — resolve it so the edit dialog
-        # opens instead of erroring with "获取模型详情失败".
+        # Not a user row — maybe an overlay-contributed (catalog) channel
+        # (ADR-011). Catalog ids don't collide with user UUIDs, so checking
+        # the user table first is safe.
+        for it in await ext.llm_provider.list():
+            if it.id == provider_id:
+                return _list_item_to_detail(it)
+        # Still nothing: the id may be an unconfigured built-in subscription
+        # template (virtualized in ``list_providers``) — resolve it so the edit
+        # dialog opens instead of erroring with "获取模型详情失败".
         virtual = _virtual_builtin_subscription_detail(provider_id)
         if virtual is not None:
             return virtual
         raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
-    @staticmethod
-    def _guard_not_system(provider_id: str) -> None:
-        """Raise ``SystemProviderImmutable`` if id is registry-backed.
+    async def _guard_not_system(self, provider_id: str) -> None:
+        """Raise ``SystemProviderImmutable`` if id is a non-deletable
+        contributed (catalog) row.
 
-        Used by every write operation so overlay-contributed system
-        providers can't be edited / deleted / tested via the user CRUD
-        path. The route layer maps this to HTTP 409.
+        Used by every write operation so overlay-contributed channels can't be
+        edited / deleted / tested via the user CRUD path. The judgement is the
+        row's ``deletable`` flag, not its source (ADR-011 治理). The route layer
+        maps this to HTTP 409.
         """
-        if ext.llm_registry.get(provider_id) is not None:
-            raise SystemProviderImmutable(provider_id)
+        for it in await ext.llm_provider.list():
+            if it.id == provider_id and not it.deletable:
+                raise SystemProviderImmutable(provider_id)
 
     def list_provider_descriptors(self) -> list[ProviderDescriptor]:
         return list(BUILTIN_PROVIDERS)
@@ -1142,7 +1012,7 @@ class ProviderService:
         default_model: str | None = None,
         protocol: str | None = None,
         models: list[str] | None = None,
-    ) -> ProviderDetail:
+    ) -> LLMChannelDetail:
         provider = get_provider(provider_kind)
 
         effective_base_url = base_url or provider.default_base_url
@@ -1293,8 +1163,8 @@ class ProviderService:
         protocol: str | None = None,
         auth_type: str | None = None,
         models: list[str] | None = None,
-    ) -> ProviderDetail:
-        self._guard_not_system(provider_id)
+    ) -> LLMChannelDetail:
+        await self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             # Edit dialog on an unconfigured built-in subscription template: no
@@ -1413,7 +1283,7 @@ class ProviderService:
         ``ModelDiscoveryError`` and translated to 502 by the router.
         ``ProviderNotFound`` becomes 404.
         """
-        self._guard_not_system(provider_id)
+        await self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
@@ -1462,7 +1332,7 @@ class ProviderService:
         }
 
     async def delete_provider(self, user_id: str, provider_id: str) -> None:
-        self._guard_not_system(provider_id)
+        await self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
@@ -1482,7 +1352,7 @@ class ProviderService:
 
         self._bus.publish("provider.deleted", provider_id=provider_id)
 
-    async def enable_provider(self, user_id: str, provider_id: str) -> ProviderDetail:
+    async def enable_provider(self, user_id: str, provider_id: str) -> LLMChannelDetail:
         """Mark an OAuth/subscription provider as enabled.
 
         For ``auth_type="oauth"`` providers (e.g. ``ch-claude-subscription``
@@ -1500,7 +1370,7 @@ class ProviderService:
 
         System-managed providers are immutable (403 via ``SystemProviderImmutable``).
         """
-        self._guard_not_system(provider_id)
+        await self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             materialized = await self._materialize_builtin_subscription(user_id, provider_id)
@@ -1582,7 +1452,7 @@ class ProviderService:
         # providers table (no row exists). Users pin a system provider
         # as default through the settings-preferences path
         # (``PATCH /v1/settings/model-defaults``) instead.
-        self._guard_not_system(provider_id)
+        await self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             # Built-in CLI-subscription channels (claude/codex ``/login``) have
@@ -1734,7 +1604,7 @@ class ProviderService:
     # ── Connection Test ──────────────────────────────────────────
 
     async def test_provider(self, user_id: str, provider_id: str) -> ConnectionTestResult:
-        self._guard_not_system(provider_id)
+        await self._guard_not_system(provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
