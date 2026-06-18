@@ -27,6 +27,7 @@ and consumed at (4).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -143,7 +144,7 @@ class OAuthDiscoverHelper:
 
         return OauthMetadata.model_validate(values)
 
-    async def server_allows_anonymous(self) -> bool:
+    async def server_allows_anonymous(self, *, attempts: int = 3) -> bool:
         """Whether the MCP server answers an *unauthenticated* ``initialize`` with success.
 
         Discoverable OAuth metadata does **not** mean OAuth is mandatory.
@@ -154,11 +155,25 @@ class OAuthDiscoverHelper:
         so a connector can stay ``auth_type="none"`` instead of being forced
         into an OAuth flow it does not need.
 
-        Conservative on uncertainty: a 401 (auth genuinely required), any other
-        non-2xx, or a transport error returns ``False`` — preserving the
-        historical "OAuth metadata discovered ⇒ OAuth" behaviour for servers
-        that gate on auth. Uses a streaming send so a long-lived
-        ``text/event-stream`` response never blocks the probe on its body.
+        Tolerant of a transient throttle: a free anonymous tier can answer a
+        burst of probes with an intermittent 401, so we try a few times with a
+        short backoff and treat the server as anonymous if **any** attempt
+        succeeds — otherwise one unlucky 401 at create time would wrongly force
+        the connector into an OAuth login. Only a server that rejects *every*
+        attempt (or is unreachable) is treated as auth-required.
+        """
+        for i in range(attempts):
+            if i:
+                await asyncio.sleep(0.8 * i)  # 0.8s, 1.6s, … between attempts
+            if await self._anonymous_probe_once():
+                return True
+        return False
+
+    async def _anonymous_probe_once(self) -> bool:
+        """One unauthenticated ``initialize`` POST → ``True`` iff the server
+        answers 2xx. A 401/other non-2xx or a transport error is ``False``. Uses
+        a streaming send so a long-lived ``text/event-stream`` response never
+        blocks the probe on its body.
         """
         init_request = {
             "jsonrpc": "2.0",

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -1307,6 +1308,27 @@ def _tools_to_info(mcp_tools: object) -> list[ToolInfo]:
     return result
 
 
+async def _retry_async[T](
+    fn: Callable[[], Awaitable[T]],
+    *,
+    retry_if: Callable[[BaseException], bool],
+    delays: tuple[float, ...],
+) -> T:
+    """Await ``fn``; if it raises an exception matching ``retry_if``, back off and
+    retry — one extra attempt per entry in ``delays``. Re-raises the last error
+    once the retries are exhausted or the error doesn't match.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await fn()
+        except BaseException as exc:
+            if attempt >= len(delays) or not retry_if(exc):
+                raise
+            await asyncio.sleep(delays[attempt])
+            attempt += 1
+
+
 def _is_unauthorized(exc: BaseException) -> bool:
     """Detect a 401 from the MCP/httpx stack — i.e. an expired access token.
 
@@ -1496,7 +1518,17 @@ async def _probe_connector(
 
     try:
         try:
-            tool_infos = await _attempt()
+            # A no-auth connector answering 401 is anomalous — almost always a
+            # transient rate-limit on a free anonymous tier (e.g. Firecrawl
+            # throttles bursts), which is why the auto-probe sometimes fails
+            # while a manual reconnect a moment later succeeds. Retry with a
+            # short backoff so the default probe self-heals. OAuth 401s are real
+            # (token) and handled by the refresh path below — never retried here.
+            tool_infos = await _retry_async(
+                _attempt,
+                retry_if=lambda e: view.auth_type != "oauth" and _is_unauthorized(e),
+                delays=(1.5, 3.0),
+            )
         except BaseException as exc:
             # An OAuth connector whose access token expired answers 401. Try a
             # silent refresh with the stored refresh_token, then retry once with
