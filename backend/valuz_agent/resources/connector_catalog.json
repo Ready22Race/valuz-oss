@@ -106,26 +106,5 @@
     "url": "https://mcp.firecrawl.dev/v2/mcp",
     "auth_type": "none",
     "transport": "http"
-  },
-  {
-    "slug": "chrome-devtools",
-    "display_name": {
-      "zh-CN": "Chrome DevTools",
-      "en-US": "Chrome DevTools"
-    },
-    "description": {
-      "zh-CN": "通过 Chrome DevTools 协议调试、检查和自动化网页",
-      "en-US": "Debug, inspect and automate web pages via the Chrome DevTools Protocol"
-    },
-    "categories": [
-      "developer"
-    ],
-    "transport": "stdio",
-    "auth_type": "none",
-    "command": "npx",
-    "args": [
-      "-y",
-      "chrome-devtools-mcp@latest"
-    ]
   }
 ]
