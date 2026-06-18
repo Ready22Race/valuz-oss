@@ -1935,6 +1935,7 @@ I18nKey = Literal[
     "updater.downloadingDesc",
     "updater.errorTitle",
     "updater.errorUnknown",
+    "updater.preparing",
     "updater.restartNow",
     "updater.updateAvailable",
 ]

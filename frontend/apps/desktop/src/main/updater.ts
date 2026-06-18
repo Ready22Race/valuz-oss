@@ -113,9 +113,17 @@ export const setupUpdater = ({ getMainWindow, getUpdateWindow }: SetupUpdaterOpt
     userInitiated = true
     errorToast = true
     if (isDev) {
+      // Pass 1 — simulate the real network download (slower).
       for (let i = 0; i <= 100; i += 2) {
         await new Promise(r => setTimeout(r, 80))
         sendToAll('updater:progress', { percent: i, bytesPerSecond: 2_500_000 })
+      }
+      // Pass 2 — simulate the macOS Squirrel.Mac loopback hand-off (fast 0→100),
+      // which the renderer collapses into a "preparing" state instead of a
+      // second download bar.
+      for (let i = 0; i <= 100; i += 10) {
+        await new Promise(r => setTimeout(r, 25))
+        sendToAll('updater:progress', { percent: i, bytesPerSecond: 80_000_000 })
       }
       isDownloaded = true
       sendToAll('updater:downloaded', { version: currentVersion })

@@ -1929,6 +1929,7 @@ export type KnownI18nKey =
   | "updater.downloadingDesc"
   | "updater.errorTitle"
   | "updater.errorUnknown"
+  | "updater.preparing"
   | "updater.restartNow"
   | "updater.updateAvailable";
 
