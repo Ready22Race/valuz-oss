@@ -410,6 +410,7 @@ export type KnownI18nKey =
   | "connector.groupConnected"
   | "connector.groupCustom"
   | "connector.groupDirectory"
+  | "connector.groupInstalled"
   | "connector.groupNotConnected"
   | "connector.groupOfficial"
   | "connector.loadingTools"

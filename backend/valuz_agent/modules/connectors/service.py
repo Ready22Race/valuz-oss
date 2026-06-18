@@ -503,6 +503,22 @@ class ConnectorService:
         return _row_to_view(await self._ds.update(row))
 
 
+def _effective_status(row: ConnectorRow) -> str:
+    """Display status for the API, normalising one misleading case.
+
+    An OAuth connector connects through the login flow (``pending_auth`` →
+    ``connected``), never through a background "connecting" probe. A row left at
+    ``connecting`` — created before authorization and never logged in — is
+    really "not connected, needs login", so report it as ``pending_auth``.
+    Otherwise the UI shows a perpetual 连接中 (and the nav attention dot, which
+    ignores ``connecting``, never fires). Non-OAuth connectors are untouched:
+    their ``connecting`` is a real in-flight probe.
+    """
+    if row.auth_type == "oauth" and row.status == "connecting":
+        return "pending_auth"
+    return row.status
+
+
 def _row_to_view(row: ConnectorRow) -> ConnectorView:
     args: list[str] = []
     if row.args_json:
@@ -543,7 +559,7 @@ def _row_to_view(row: ConnectorRow) -> ConnectorView:
         headers=headers,
         params=params,
         enabled=row.enabled,
-        status=row.status,
+        status=_effective_status(row),
         tool_count=row.tool_count,
         last_tested_at=row.last_tested_at,
         error_message=row.error_message,

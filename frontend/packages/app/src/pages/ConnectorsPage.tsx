@@ -16,6 +16,8 @@ import { ResourceActionSlot } from "../components/ResourceActionSlot";
 import {
   acknowledgeConnectorAlert,
   connectorsApi,
+  invalidateConnectorTools,
+  useConnectorTools,
   usePanelStore,
   useResourceCategories,
   useTranslation,
@@ -23,7 +25,6 @@ import {
   type CatalogEntry,
   type ConnectorItem,
   type CreateConnectorRequest,
-  type ToolInfo,
 } from "@valuz/core";
 import { t as _t } from "@valuz/shared/i18n";
 import type { ResourceCategory } from "@valuz/shared";
@@ -120,32 +121,21 @@ const entryKey = (e: ConnectorListEntry): string =>
 function buildConnectorCategories(
   t: ReturnType<typeof useTranslation>["t"],
 ): ResourceCategory<ConnectorListEntry>[] {
+  // Two buckets only: everything the user has added (any connector_type) vs
+  // catalog entries not yet installed. Live connection state is shown per-row
+  // by the status pill, so the left grouping stays about install state — no
+  // more type-based "已连接" group that ignored real status.
   return [
     {
-      id: "builtin",
-      label: t("connector.groupOfficial" as Parameters<typeof t>[0]),
+      id: "installed",
+      label: t("connector.groupInstalled" as Parameters<typeof t>[0]),
       order: 0,
-      filter: (e: ConnectorListEntry) =>
-        e.kind === "installed" && e.item.connector_type === "builtin",
-    },
-    {
-      id: "custom",
-      label: t("connector.groupCustom" as Parameters<typeof t>[0]),
-      order: 1,
-      filter: (e: ConnectorListEntry) =>
-        e.kind === "installed" && e.item.connector_type === "custom",
-    },
-    {
-      id: "connected",
-      label: t("connector.groupConnected" as Parameters<typeof t>[0]),
-      order: 2,
-      filter: (e: ConnectorListEntry) =>
-        e.kind === "installed" && e.item.connector_type === "recommended",
+      filter: (e: ConnectorListEntry) => e.kind === "installed",
     },
     {
       id: "available",
       label: t("connector.groupAvailable" as Parameters<typeof t>[0]),
-      order: 3,
+      order: 1,
       filter: (e: ConnectorListEntry) => e.kind === "available",
       defaultCollapsed: false,
     },
@@ -177,16 +167,6 @@ export const ConnectorsPage = () => {
   const [connectEntry, setConnectEntry] = useState<CatalogConnector | null>(
     null,
   );
-
-  // Connected-view tool probe result, keyed by connector id so the value
-  // can be derived during render (tools for any *other* id read as
-  // "loading"). Keying avoids a synchronous reset-setState in the probe
-  // effect — the effect only writes inside its async callbacks.
-  const [toolsState, setToolsState] = useState<{
-    id: string;
-    tools: ToolInfo[];
-    error: string | null;
-  } | null>(null);
 
   // In-flight connect/disconnect target (drives button spinners).
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -357,45 +337,12 @@ export const ConnectorsPage = () => {
     !!activeInstalled && activeInstalled.status === "connected";
   const activeInstalledId = activeInstalled?.id ?? null;
 
-  useEffect(() => {
-    if (!activeInstalledId || !activeIsConnected) return;
-    let cancelled = false;
-    connectorsApi
-      .test(activeInstalledId)
-      .then((res) => {
-        if (cancelled) return;
-        setToolsState({
-          id: activeInstalledId,
-          tools: res.ok ? (res.tool_details ?? []) : [],
-          error: res.ok
-            ? null
-            : (res.error ?? _t("settings.connectors.testFailed")),
-        });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setToolsState({
-          id: activeInstalledId,
-          tools: [],
-          error: err instanceof Error ? err.message : "unknown",
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeInstalledId, activeIsConnected]);
-
-  // Derive the active connector's tools during render: a probe result only
-  // counts when it matches the current connector id; otherwise it reads as
-  // ``undefined`` (loading) — no reset-setState needed on connector switch.
-  const activeTools: ToolInfo[] | undefined =
-    activeIsConnected && toolsState && toolsState.id === activeInstalledId
-      ? toolsState.tools
-      : undefined;
-  const activeToolsError: string | null =
-    activeIsConnected && toolsState && toolsState.id === activeInstalledId
-      ? toolsState.error
-      : null;
+  // Probed once per client session and cached at module level, so re-selecting
+  // a connector — or leaving the page and coming back — never reconnects again.
+  const { tools: activeTools, error: activeToolsError } = useConnectorTools(
+    activeInstalledId,
+    activeIsConnected,
+  );
 
   /* ── Connect / disconnect ────────────────────────────────────── */
 
@@ -449,6 +396,7 @@ export const ConnectorsPage = () => {
   const runConnect = useCallback(
     async (payload: CreateConnectorRequest) => {
       const res = await connectorsApi.create(payload);
+      invalidateConnectorTools(res.id); // fresh connection → re-probe its tools
       await loadAll();
       if (res.needs_auth && res.authorization_url) {
         window.open(res.authorization_url, "_blank");
@@ -508,6 +456,8 @@ export const ConnectorsPage = () => {
   const handleReconnectInstalled = useCallback(
     (connector: ConnectorItem) => {
       setBusyKey(`installed:${connector.id}`);
+      // Tools may have changed on a fresh connect — drop the cached probe.
+      invalidateConnectorTools(connector.id);
       void (async () => {
         try {
           const res = await connectorsApi.test(connector.id);

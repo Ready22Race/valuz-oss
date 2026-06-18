@@ -416,6 +416,7 @@ I18nKey = Literal[
     "connector.groupConnected",
     "connector.groupCustom",
     "connector.groupDirectory",
+    "connector.groupInstalled",
     "connector.groupNotConnected",
     "connector.groupOfficial",
     "connector.loadingTools",

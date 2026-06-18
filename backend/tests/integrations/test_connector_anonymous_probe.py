@@ -33,6 +33,16 @@ async def _make_helper(handler) -> OAuthDiscoverHelper:
     return h
 
 
+@pytest.fixture(autouse=True)
+def _instant_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No real sleeps — server_allows_anonymous retries with a backoff."""
+
+    async def _no_sleep(*_a: object, **_k: object) -> None:
+        return None
+
+    monkeypatch.setattr(co.asyncio, "sleep", _no_sleep)
+
+
 # ---------------------------------------------------------------------------
 # server_allows_anonymous
 # ---------------------------------------------------------------------------
@@ -53,13 +63,38 @@ async def test_allows_anonymous_true_on_success() -> None:
 
 
 @pytest.mark.asyncio
-async def test_allows_anonymous_false_on_401() -> None:
+async def test_allows_anonymous_true_on_transient_401_then_success() -> None:
+    """A throttled 401 must not force OAuth: if a later attempt succeeds, the
+    server is anonymous-allowed."""
+    calls = {"n": 0}
+
     def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(401, headers={"www-authenticate": "Bearer"})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
+
+    h = await _make_helper(handler)
+    try:
+        assert await h.server_allows_anonymous() is True
+        assert calls["n"] == 2  # retried past the transient 401
+    finally:
+        await h.close()
+
+
+@pytest.mark.asyncio
+async def test_allows_anonymous_false_on_401() -> None:
+    """A server that rejects *every* attempt is genuinely auth-required."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
         return httpx.Response(401, headers={"www-authenticate": "Bearer"})
 
     h = await _make_helper(handler)
     try:
         assert await h.server_allows_anonymous() is False
+        assert calls["n"] == 3  # all attempts tried before giving up
     finally:
         await h.close()
 
