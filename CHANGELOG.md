@@ -5,6 +5,44 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-06-18
+
+### Features
+
+- Agent-driven managed browser: ships Node + `chrome-devtools-mcp` for the
+  packaged desktop and exposes a friendly `chrome-devtools` CLI, so an agent can
+  drive a real browser. (#206 @jiaoqsh)
+- Live dynamic-workflow progress surfaced in the conversation for Claude
+  multi-agent workflows. (#214 @jiaoqsh)
+- Connector connection status surfaced: a red attention dot on the Connectors
+  nav when a custom connector is configured but not connected, colored status
+  pills (已连接 / 连接中 / 连接失败 / 未连接) on the list rows, and the same dot
+  + pills on the agent detail's 连接器 tab. (#204, #205, #213 @St0neWan9)
+- Default Firecrawl connector: swapped into the catalog (Chrome DevTools out);
+  the onboarding Valuz 小助手 ships bound to valuz-search / valuz-stock /
+  firecrawl and installs them into 已添加; the connectors list collapses to
+  已添加 / 可用. (#213 @St0neWan9)
+- Discoverable OAuth is optional: a freemium MCP server (e.g. Firecrawl) that
+  advertises OAuth but serves anonymous calls stays auth-free instead of being
+  forced into a login. (#211 @homeant)
+- ADR-011 `LLMProvider` extension point with backend-owned model labels.
+  (#212 @homeant)
+
+### Fixed
+
+- Connectors: a stuck OAuth "connecting" now reads as 未连接; Firecrawl's
+  transient anonymous 401 is tolerated on the probe and the create-time auth
+  check; the onboarding deploy no longer crashes resolving an installed OAuth
+  connector; the tool probe is cached per client session instead of
+  reconnecting on every re-select. (#213 @St0neWan9)
+- Connectors: thread `user_id` through the connectors MCP tools for multi-user.
+  (#209 @St0neWan9)
+- Activity overview: isolate per-session failures so one bad run can't blank the
+  overview, and fix a TodoItem snapshot crash. (#207, #208 @jiaoqsh)
+- DeepAgents: apply the recursion limit to the main graph, not just subagents.
+  (#207, #210 @jiaoqsh)
+- Desktop: keep failed automatic update-checks silent. (#203 @St0neWan9)
+
 ## [0.2.0] - 2026-06-17
 
 ### Features
@@ -268,6 +306,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Rename the single-writer lock file, drop a dead helper, and correct the rationale. (#29 @Ready22Race)
 - CI: Node.js 25 with dependency caching. (#14 @hanjixin)
 
+[0.2.1]: https://github.com/valuz-ai/valuz-oss/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.7...v0.2.0
 [0.1.7]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/valuz-ai/valuz-oss/compare/v0.1.5...v0.1.6
