@@ -104,11 +104,14 @@ def _group_for(source: str, auth_type: str) -> str:
     return "api_key"
 
 
-def _models_for(model_ids: list[str]) -> list[LLMModel]:
-    """Wrap a row's flat model-id list into per-model rows. OSS user/builtin rows
-    carry no per-model protocol/label overrides — each model falls back to the
-    channel-level ``compatible_protocols`` (``protocols=()``)."""
-    return [LLMModel(id=m) for m in model_ids]
+def _models_for(model_ids: list[str], labels: dict[str, str] | None = None) -> list[LLMModel]:
+    """Wrap a row's flat model-id list into per-model rows. The backend supplies a
+    display ``label`` for curated lists (the OAuth subscription channels, from
+    ``subscription_models.json``); other rows leave it ``None`` so the frontend
+    resolves the name. ``runtimes`` stays None → the picker derives it from the
+    channel's ``compatible_protocols``."""
+    labels = labels or {}
+    return [LLMModel(id=m, label=labels.get(m)) for m in model_ids]
 
 
 # ── Provider Registry ───────────────────────────────────────────────
@@ -125,6 +128,10 @@ class ProviderDescriptor:
     default_base_url: str = ""
     default_model: str = ""
     model_options: tuple[str, ...] = ()
+    # ``{model_id: display_name}`` for curated lists that ship friendly names
+    # (the OAuth subscription channels, from subscription_models.json). Empty for
+    # api-key descriptors — their model labels are resolved client-side.
+    model_labels: dict[str, str] = field(default_factory=dict)
     docs_url: str = ""
     # When ``supports_protocol_selection`` is True, the anthropic-shape
     # endpoint may live at a different path than ``default_base_url`` +
@@ -281,7 +288,22 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
             default_model = spec.get("default_model")
             if not isinstance(models, list):
                 continue
-            cleaned_models = tuple(m for m in models if isinstance(m, str) and m)
+            # A model entry is either a bare id (``"gpt-5.5"``) or
+            # ``{"id": ..., "label": ...}`` — the curated file ships friendly
+            # display names so the backend, not the frontend, owns them.
+            ids: list[str] = []
+            labels: dict[str, str] = {}
+            for item in models:
+                if isinstance(item, str) and item:
+                    ids.append(item)
+                elif isinstance(item, dict):
+                    mid = item.get("id")
+                    if isinstance(mid, str) and mid:
+                        ids.append(mid)
+                        lbl = item.get("label")
+                        if isinstance(lbl, str) and lbl.strip():
+                            labels[mid] = lbl
+            cleaned_models = tuple(ids)
             if not cleaned_models:
                 continue
             merged[kind] = {
@@ -289,6 +311,7 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
                 if isinstance(default_model, str) and default_model
                 else cleaned_models[0],
                 "model_options": cleaned_models,
+                "model_labels": labels,
             }
 
     try:
@@ -340,6 +363,7 @@ def _hydrate_subscription_providers(
                 provider,
                 default_model=spec["default_model"],
                 model_options=spec["model_options"],
+                model_labels=spec.get("model_labels", {}),
             )
         )
     return out
@@ -534,6 +558,7 @@ def _resolve_model_options(row: ProviderRow) -> list[str]:
 def _row_to_list_item(row: ProviderRow) -> LLMChannel:
     compatible = _derive_compatible_protocols(row)
     group = _group_for(row.source, row.auth_type)
+    descriptor = _PROVIDER_MAP.get(row.provider_kind)
     return LLMChannel(
         id=row.id,
         name=row.name,
@@ -555,7 +580,9 @@ def _row_to_list_item(row: ProviderRow) -> LLMChannel:
         # matches by provider_kind.
         group=group,
         group_rank=_GROUP_RANK[group],
-        models=_models_for(_resolve_model_options(row)),
+        models=_models_for(
+            _resolve_model_options(row), descriptor.model_labels if descriptor else None
+        ),
     )
 
 
@@ -613,7 +640,9 @@ def _row_to_detail(row: ProviderRow) -> LLMChannelDetail:
         # models leave runtimes unset (None) → the picker derives them.
         group=group,
         group_rank=_GROUP_RANK[group],
-        models=_models_for(_resolve_model_options(row)),
+        models=_models_for(
+            _resolve_model_options(row), provider.model_labels if provider else None
+        ),
         base_url=row.base_url,
         supports_custom_base_url=provider.supports_custom_base_url if provider else False,
         supports_connection_test=(

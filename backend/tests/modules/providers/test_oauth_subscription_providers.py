@@ -98,6 +98,17 @@ def test_codex_subscription_recommends_known_codex_models() -> None:
     }
 
 
+def test_subscription_models_carry_backend_labels() -> None:
+    """The curated subscription_models.json ships server-authoritative display
+    names so the frontend doesn't have to label these ids itself."""
+    codex = get_provider("codex-subscription")
+    assert codex.model_labels["gpt-5.5"] == "GPT 5.5"
+    assert codex.model_labels["gpt-5.3-codex-spark"] == "GPT 5.3 Codex Spark"
+    claude = get_provider("claude-subscription")
+    assert claude.model_labels["claude-opus-4-8"] == "Opus 4.8"
+    assert claude.model_labels["claude-fable-5"] == "Fable 5"
+
+
 def test_claude_subscription_carries_login_command() -> None:
     provider = get_provider("claude-subscription")
     assert provider.oauth_login_command == "claude /login"
