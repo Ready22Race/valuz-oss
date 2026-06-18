@@ -26,6 +26,16 @@ interface DownloadedInfo {
 
 interface ErrorInfo {
   message?: string;
+  /** True when the failed operation was a manual check or a download. Errors
+   *  from background auto checks arrive with this false and are swallowed. */
+  userInitiated?: boolean;
+  /** True when the error should also pop the toast (menu/tray check, download);
+   *  false for the About-page check, which shows its own inline error. */
+  toast?: boolean;
+}
+
+interface CheckingInfo {
+  userInitiated?: boolean;
 }
 
 /**
@@ -40,8 +50,11 @@ export const UpdaterListener = () => {
     const bridge = getBridge();
     if (!bridge) return;
 
-    const onChecking = () => {
-      store.getState().setChecking();
+    const onChecking = (payload: unknown) => {
+      const info = (payload ?? {}) as CheckingInfo;
+      // Only show the "Checking…" state for a manual check — background auto
+      // checks run silently.
+      if (info.userInitiated) store.getState().setChecking();
     };
 
     const onAvailable = (payload: unknown) => {
@@ -72,7 +85,13 @@ export const UpdaterListener = () => {
 
     const onError = (payload: unknown) => {
       const info = (payload ?? {}) as ErrorInfo;
-      store.getState().setError(info.message ?? "Unknown error");
+      // Swallow errors from background auto checks — never pop the toast or
+      // flag a failure for a check the user didn't ask for. Only surface
+      // errors from a manual check or a download. ``toast`` then decides
+      // whether the error pops the floating toast (menu/tray/download) or
+      // stays inline on the About page.
+      if (!info.userInitiated) return;
+      store.getState().setError(info.message ?? "Unknown error", info.toast);
     };
 
     bridge.on(DESKTOP_EVENTS.updaterChecking, onChecking);

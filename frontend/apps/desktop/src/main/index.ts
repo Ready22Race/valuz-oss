@@ -43,7 +43,7 @@ const bootstrap = async () => {
   // also wires the periodic auto-check (see scheduleUpdateCheck below);
   // these handlers exist so the UI can drive it on demand.
   ipcMain.handle(DESKTOP_CHANNELS.updaterCheck, () =>
-    updater.checkForUpdates(),
+    updater.checkForUpdates('about'),
   );
   ipcMain.handle(DESKTOP_CHANNELS.updaterDownload, () =>
     updater.downloadUpdate(),
@@ -70,7 +70,7 @@ const bootstrap = async () => {
     Menu.setApplicationMenu(
       buildAppMenu({
         getMainWindow,
-        checkForUpdates: updater.checkForUpdates,
+        checkForUpdates: () => updater.checkForUpdates('menu'),
       }),
     );
   applyAppMenu();
@@ -90,7 +90,7 @@ const bootstrap = async () => {
 
   appTray = createAppTray({
     getMainWindow,
-    checkForUpdates: updater.checkForUpdates,
+    checkForUpdates: () => updater.checkForUpdates('menu'),
   });
 
   const deepLinkManager = setupDeepLinkManager({ getMainWindow });
