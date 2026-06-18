@@ -353,6 +353,20 @@ async def create_connector(
         _discover = OAuthDiscoverHelper(body.url)
         try:
             _discovered = await _discover.get_oauth_metadata()
+            # Discoverable OAuth metadata is NOT proof that OAuth is mandatory:
+            # freemium servers (e.g. Firecrawl) advertise
+            # ``/.well-known/oauth-protected-resource`` so signed-in users get
+            # per-account attribution, yet still serve fully anonymous calls.
+            # Only force the OAuth flow when the server actually rejects an
+            # unauthenticated ``initialize`` — otherwise keep ``auth_type=none``
+            # so the connector connects with no login the user never asked for.
+            if _discovered is not None and await _discover.server_allows_anonymous():
+                logger.info(
+                    "connector create: %s advertises OAuth but serves anonymous; "
+                    "keeping auth_type=none",
+                    body.url,
+                )
+                _discovered = None
         except Exception:
             _discovered = None
         finally:
@@ -632,6 +646,12 @@ async def discover_connector(body: DiscoverConnectorRequest) -> DiscoverConnecto
     discover = OAuthDiscoverHelper(body.url)
     try:
         meta = await discover.get_oauth_metadata()
+        # Discoverable OAuth ≠ mandatory OAuth: a server that also serves
+        # anonymous calls (e.g. Firecrawl) should report auth_type="none" so the
+        # UI never forces a login the user does not need. See
+        # ``OAuthDiscoverHelper.server_allows_anonymous``.
+        if meta is not None and await discover.server_allows_anonymous():
+            meta = None
     except Exception:
         meta = None
     finally:
