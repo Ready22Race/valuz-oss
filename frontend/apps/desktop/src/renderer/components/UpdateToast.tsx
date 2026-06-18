@@ -35,6 +35,10 @@ export const UpdateToast = () => {
   // mounted toast (resets to the anchor when it's dismissed and re-shown).
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
+  // Quitting + the native install (and waiting for the backend sidecar to exit)
+  // can take a few seconds, during which nothing visibly happens. Flip the
+  // restart button into a loading "Restarting…" state so the click has feedback.
+  const [restarting, setRestarting] = useState(false);
   const dragRef = useRef<{
     px: number;
     py: number;
@@ -91,6 +95,7 @@ export const UpdateToast = () => {
     void getBridge()?.invoke(DESKTOP_CHANNELS.updaterDownload);
   };
   const onRestart = () => {
+    setRestarting(true);
     void getBridge()?.invoke(DESKTOP_CHANNELS.updaterQuitAndInstall);
   };
 
@@ -141,9 +146,14 @@ export const UpdateToast = () => {
               <Button
                 size="sm"
                 className="h-7 min-w-[68px] shrink-0"
+                loading={restarting}
                 onClick={onRestart}
               >
-                {t("updater.restartNow" as Parameters<typeof t>[0])}
+                {t(
+                  (restarting
+                    ? "updater.restarting"
+                    : "updater.restartNow") as Parameters<typeof t>[0],
+                )}
               </Button>
             ) : isDownloading || isPreparing ? null : (
               <Button

@@ -1747,6 +1747,7 @@
     "errorUnknown": "Unknown error",
     "preparing": "Preparing to install…",
     "restartNow": "Restart now",
+    "restarting": "Restarting…",
     "updateAvailable": "Update available"
   },
   "ui": {
