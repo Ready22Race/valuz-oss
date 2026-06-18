@@ -21,6 +21,7 @@ import {
 } from "@valuz/core";
 import { useCapabilities, useTranslation } from "@valuz/core";
 import { t as _t } from "@valuz/shared/i18n";
+import { modelLabel } from "@valuz/shared";
 import { Check, Loader2, Lock, Plus } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -442,7 +443,13 @@ const OptionCard = ({
                   value={m.model_id}
                   className="text-xs"
                 >
-                  {m.label}
+                  {/* Server label wins when it's a real display name (system
+                      channels carry the admin display_name). For subscription /
+                      built-in rows the server has no label so ``m.label`` is the
+                      raw id — fall back to the static brand catalog (e.g.
+                      ``claude-sonnet-4-6`` → "Sonnet 4.6"), same as the Composer's
+                      AgentModelPicker. */}
+                  {m.label !== m.model_id ? m.label : modelLabel(m.model_id)}
                 </SelectItem>
               ))}
             </SelectContent>
