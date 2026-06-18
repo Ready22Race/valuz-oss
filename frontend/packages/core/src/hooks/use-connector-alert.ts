@@ -7,9 +7,11 @@
  * e.g. an OAuth connector like Valuz·搜索 sitting at a 401) — and the user
  * hasn't acknowledged it yet. Visiting the Connectors page acknowledges
  * the currently-failing set ({@link acknowledgeConnectorAlert}) so the dot
- * clears. Acknowledgement is in-memory only, so it resets on app restart (the
- * dot comes back if a connector is still failing); a NEWLY failing connector
- * (a fresh id) isn't acknowledged, so the dot reappears for it too.
+ * clears. Acknowledgement is in-memory only and is wiped whenever the user
+ * re-enters the home screen ({@link refreshConnectorAlert}) or restarts the
+ * app — so each return to home re-surfaces the dot for anything still
+ * unconnected. A NEWLY failing connector (a fresh id) isn't acknowledged, so
+ * the dot reappears for it too, even between those resets.
  *
  * A single module-level poller backs every mount (the nav badge), so we never
  * open N intervals — mirrors {@link useRunningRuns}.
@@ -113,12 +115,21 @@ export const acknowledgeConnectorAlert = (
 };
 
 /**
- * Force an immediate connector re-poll, independent of the lazy {@link POLL_MS}
- * interval. Call this when the user lands somewhere the dot must be fresh
- * (e.g. entering the home page) so a status that changed during the 5-minute
- * gap shows up at once instead of waiting for the next tick.
+ * Re-check connectors for the nav dot and re-surface it. Called when the user
+ * lands on the home screen: it (1) clears the in-memory acknowledgement so a
+ * still-unconnected connector the user dismissed earlier shows the dot again,
+ * and (2) forces an immediate re-poll, independent of the lazy {@link POLL_MS}
+ * interval, so a status that changed during the gap shows up at once. Visiting
+ * the Connectors page re-acknowledges and clears the dot until the next home
+ * entry / restart.
  */
 export const refreshConnectorAlert = (): void => {
+  if (_acknowledged.size > 0) {
+    // Re-surface immediately from the last snapshot, then refresh from the
+    // backend — the dot shouldn't wait on the network round-trip.
+    _acknowledged.clear();
+    _notify();
+  }
   void _poll(true);
 };
 
