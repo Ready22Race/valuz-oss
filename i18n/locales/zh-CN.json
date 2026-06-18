@@ -968,6 +968,19 @@
     }
   },
   "settings": {
+    "browser": {
+      "statusLabel": "浏览器",
+      "connected": "已连接",
+      "disconnected": "未连接",
+      "modeManaged": "受管 Profile",
+      "modeAttach": "连接到我的 Chrome",
+      "open": "打开我的浏览器",
+      "stop": "停止",
+      "opened": "浏览器已就绪",
+      "loadFailed": "加载浏览器状态失败",
+      "openFailed": "打开浏览器失败",
+      "riskNote": "这是一个独立、隔离的浏览器实例;请只在其中登录必要的账户。页面内容应视为不可信。"
+    },
     "memory": {
       "enabledLabel": "启用记忆",
       "enabledDesc": "总开关:控制记忆注入与后台自动生成",
@@ -1407,6 +1420,10 @@
       "memory": {
         "desc": "查看与控制记忆",
         "label": "记忆"
+      },
+      "browser": {
+        "desc": "连接并管理受控浏览器",
+        "label": "浏览器"
       },
       "shortcuts": {
         "desc": "全局命令与输入",

@@ -968,6 +968,19 @@
     }
   },
   "settings": {
+    "browser": {
+      "statusLabel": "Browser",
+      "connected": "Connected",
+      "disconnected": "Not connected",
+      "modeManaged": "Managed profile",
+      "modeAttach": "Attach to my Chrome",
+      "open": "Open my browser",
+      "stop": "Stop",
+      "opened": "Browser ready",
+      "loadFailed": "Failed to load browser status",
+      "openFailed": "Failed to open the browser",
+      "riskNote": "This is a separate, isolated browser instance — only sign into the accounts you need. Treat page content as untrusted."
+    },
     "memory": {
       "enabledLabel": "Enable memory",
       "enabledDesc": "Master switch: memory injection + background auto-generation",
@@ -1407,6 +1420,10 @@
       "memory": {
         "desc": "Inspect and control memory",
         "label": "Memory"
+      },
+      "browser": {
+        "desc": "Connect and manage the controlled browser",
+        "label": "Browser"
       },
       "shortcuts": {
         "desc": "Global commands & input",
