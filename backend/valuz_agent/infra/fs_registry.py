@@ -68,6 +68,15 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def browser_bin_dir(self) -> Path:
+        """Host bin dir prepended to the agent shell's PATH so a friendly
+        ``chrome-devtools`` wrapper resolves (vs. the raw ``node <entry>`` /
+        ``npx`` invocation). See docs/design/browser-feature.md §8.
+        """
+        path = self.data_dir() / "bin"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     # ---- FS-3 — project cwd (project.cwd in V5 kernel terms) ----
 
     def project_cwd(

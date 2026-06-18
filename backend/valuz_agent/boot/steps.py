@@ -195,6 +195,7 @@ async def init_kernel(app: FastAPI) -> None:
     # submit_skill. The lead gate stays enforced inside each handler.
     from valuz_agent.integrations.toolkit_mcp_server import install_toolkit_toolsets
     from valuz_agent.integrations.tools_skill_creator import build_submit_skill_tool_defs
+    from valuz_agent.modules.browser import service as browser_service
     from valuz_agent.modules.browser.tools import build_browser_tool_defs
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
     from valuz_agent.modules.tasks.dispatch_mcp import build_task_tool_defs
@@ -208,7 +209,19 @@ async def init_kernel(app: FastAPI) -> None:
     by_name = {t.name: t for t in task_defs}
     orchestration_names = [d.name for d in ORCHESTRATION_TOOL_DECLARATIONS]
     dispatch_names = [d.name for d in DISPATCH_TOOL_DECLARATIONS]
-    shared = build_memory_tool_defs() + build_submit_skill_tool_defs() + build_browser_tool_defs()
+    shared = build_memory_tool_defs() + build_submit_skill_tool_defs()
+    # browser_start/browser_stop only work when the engine (Node +
+    # chrome-devtools-mcp) is available; don't expose dead tools otherwise
+    # (e.g. headless/TUI without Node). See docs/design/browser-feature.md §8.
+    if browser_service.node_available():
+        shared = shared + build_browser_tool_defs()
+        # Install the friendly ``chrome-devtools`` wrapper on PATH now, at boot —
+        # before any session spawns its agent subprocess (which inherits env at
+        # spawn time). Lets the agent run a clean ``chrome-devtools <tool>``.
+        if browser_service.ensure_cli_on_path():
+            logger.info("browser CLI installed on PATH (chrome-devtools)")
+    else:
+        logger.info("browser engine unavailable — browser_start/browser_stop not registered")
     install_toolkit_toolsets(
         base=tuple(by_name[n] for n in orchestration_names if n in by_name) + shared,
         lead=tuple(by_name[n] for n in dispatch_names if n in by_name) + shared,

@@ -11,9 +11,10 @@ stable uids, keep it cheap.
 ## 0. Start the browser first (required)
 
 Before any browser command, call the **`browser_start`** tool. It launches (or
-reuses) the managed browser and returns a JSON object with a `cli_prefix`. **Use
-that exact `cli_prefix`** for every command below — never hardcode it (it encodes
-the pinned version / install path).
+reuses) the managed browser and returns a JSON object with a `cli_prefix`
+(normally `chrome-devtools`). **Use that exact `cli_prefix`** for every command
+below — read it from `browser_start` rather than assuming, so dev and packaged
+both work.
 
 If `browser_start` returns an error (e.g. Node not installed), relay the message
 to the user and stop — do not try to work around it.

@@ -825,10 +825,15 @@ class DeepAgentsRuntime:
         if self._graph is not None:
             return self._graph
 
+        # inherit_env=True so the agent shell sees the host's PATH / HOME / etc.
+        # (parity with Claude/Codex, which inherit os.environ). Its default is an
+        # EMPTY env — no PATH — so anything outside the shell's compiled-in
+        # default path fails to resolve: the chrome-devtools wrapper, and in dev
+        # even npx/node (nvm). See docs/design/browser-feature.md §8.
         backend = (
-            LocalShellBackend(root_dir=self.workspace_root)
+            LocalShellBackend(root_dir=self.workspace_root, inherit_env=True)
             if self.workspace_root
-            else LocalShellBackend()
+            else LocalShellBackend(inherit_env=True)
         )
 
         tools = self._build_tools()

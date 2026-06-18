@@ -8,6 +8,9 @@ CLI round-trip is exercised manually against the live engine, not here.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from valuz_agent.modules.browser import service
@@ -41,24 +44,48 @@ class FakeCli:
         return (0, "", "")
 
 
-# -- cli_prefix / node detection -------------------------------------------
+# -- engine argv / node detection ------------------------------------------
 
 
-def test_cli_prefix_npx(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("VALUZ_CDT_PATH", raising=False)
+def _clear_engine_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VALUZ_NODE_PATH", raising=False)
+    monkeypatch.delenv("VALUZ_CDT_ENTRY", raising=False)
+
+
+def test_engine_argv_npx(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_engine_env(monkeypatch)
     monkeypatch.setattr(service.settings, "chrome_devtools_version", "1.2.0")
-    assert service.cli_prefix() == "npx -y -p chrome-devtools-mcp@1.2.0 chrome-devtools"
+    assert service._engine_argv() == [
+        "npx",
+        "-y",
+        "-p",
+        "chrome-devtools-mcp@1.2.0",
+        "chrome-devtools",
+    ]
 
 
-def test_cli_prefix_vendored_bin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VALUZ_CDT_PATH", "/opt/cdt/chrome-devtools")
-    assert service.cli_prefix() == "/opt/cdt/chrome-devtools"
-    # a vendored bin implies a bundled runtime → node considered available
+def test_engine_argv_vendored_node_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VALUZ_NODE_PATH", "/opt/node/bin/node")
+    monkeypatch.setenv("VALUZ_CDT_ENTRY", "/opt/cdt/chrome-devtools.js")
+    # vendored → invoke node by absolute path, no npx
+    assert service._engine_argv() == ["/opt/node/bin/node", "/opt/cdt/chrome-devtools.js"]
+    # both vars set imply a bundled runtime → node considered available
     assert service.node_available() is True
 
 
+def test_engine_argv_partial_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only one of the two vars set → not a complete vendored engine → npx.
+    monkeypatch.setenv("VALUZ_NODE_PATH", "/opt/node/bin/node")
+    monkeypatch.delenv("VALUZ_CDT_ENTRY", raising=False)
+    monkeypatch.setattr(service.settings, "chrome_devtools_version", "1.2.0")
+    monkeypatch.setattr(service.shutil, "which", lambda name: None)
+    assert service._engine_argv()[0] == "npx"
+    # …and a partial env does not count as available without Node on PATH
+    assert service.node_available() is False
+
+
 def test_node_available_uses_which(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("VALUZ_CDT_PATH", raising=False)
+    _clear_engine_env(monkeypatch)
 
     def has_node(name: str) -> str | None:
         return "/usr/bin/node" if name == "node" else None
@@ -67,6 +94,54 @@ def test_node_available_uses_which(monkeypatch: pytest.MonkeyPatch) -> None:
     assert service.node_available() is True
     monkeypatch.setattr(service.shutil, "which", lambda name: None)
     assert service.node_available() is False
+
+
+# -- friendly chrome-devtools wrapper / cli_prefix -------------------------
+
+
+def _use_tmp_bin(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point both the creating + read-only bin-dir resolvers at a temp dir."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    monkeypatch.setattr(service._fs, "browser_bin_dir", lambda: bin_dir)
+    monkeypatch.setattr(service, "_bin_dir", lambda: bin_dir)
+    return bin_dir
+
+
+def test_ensure_cli_on_path_installs_wrapper(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    _clear_engine_env(monkeypatch)  # dev → npx engine baked into the wrapper
+    monkeypatch.setattr(service.settings, "chrome_devtools_version", "1.2.0")
+    monkeypatch.setattr(service.shutil, "which", lambda name: "/usr/bin/node")
+    bin_dir = _use_tmp_bin(monkeypatch, tmp_path)
+    monkeypatch.setenv("PATH", "/usr/bin")  # bin_dir not yet on PATH
+
+    assert service.ensure_cli_on_path() == "chrome-devtools"
+
+    wrapper = service._wrapper_path(bin_dir)
+    assert wrapper.is_file()
+    assert "chrome-devtools-mcp@1.2.0" in wrapper.read_text(encoding="utf-8")
+    # bin dir is now first on PATH …
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(bin_dir)
+    # … so cli_prefix is the friendly name
+    assert service.cli_prefix() == "chrome-devtools"
+    # idempotent: a second call doesn't duplicate the PATH entry
+    service.ensure_cli_on_path()
+    assert os.environ["PATH"].split(os.pathsep).count(str(bin_dir)) == 1
+
+
+def test_ensure_cli_on_path_noop_without_engine(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    _clear_engine_env(monkeypatch)
+    monkeypatch.setattr(service.shutil, "which", lambda name: None)  # no node
+    _use_tmp_bin(monkeypatch, tmp_path)
+    assert service.ensure_cli_on_path() is None
+
+
+def test_cli_prefix_fallback_when_not_installed(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    _clear_engine_env(monkeypatch)
+    monkeypatch.setattr(service.settings, "chrome_devtools_version", "1.2.0")
+    _use_tmp_bin(monkeypatch, tmp_path)
+    monkeypatch.setenv("PATH", "/usr/bin")  # bin dir NOT on PATH, no wrapper
+    assert service.cli_prefix() == "npx -y -p chrome-devtools-mcp@1.2.0 chrome-devtools"
 
 
 # -- status ----------------------------------------------------------------

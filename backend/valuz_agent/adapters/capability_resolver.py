@@ -281,14 +281,15 @@ async def resolve_session_capabilities(
 
 
 def always_on_skill_paths() -> list[str]:
-    """Bundled skills every session carries: project-docs + skill-creator + browser.
+    """Bundled skills every session carries: project-docs + skill-creator (+ browser).
 
     These are the skill half of the always-on baseline (the MCP half lives in
     ``always_on_http_mcp_servers``). ``valuz-project-docs`` teaches the
     ``doc_search`` / ``list_doc_scope`` tools that pair with the ``valuz_docs``
     MCP; ``skill-creator`` (+ its ``submit_skill`` in-process tool) lets any
     session author skills; ``browser`` teaches the ``chrome-devtools`` CLI that
-    pairs with the ``browser_start``/``browser_stop`` toolkit tools. Returned as
+    pairs with the ``browser_start``/``browser_stop`` toolkit tools (injected
+    only when the browser engine is available). Returned as
     absolute dirs the kernel materialises into the session cwd. All are injected
     by every session-build path (``resolve_session_capabilities`` for
     chat/project, ``build_member_session`` for task lead/member) so the baseline
@@ -296,12 +297,17 @@ def always_on_skill_paths() -> list[str]:
     install can't break session creation.
     """
     from valuz_agent.infra.fs_registry import fs_registry
+    from valuz_agent.modules.browser import service as browser_service
 
     candidates = [
         _PROJECT_DOCS_SKILL_DIR,
         fs_registry.official_skill_root() / "skill-creator",
-        _BROWSER_SKILL_DIR,
     ]
+    # The browser skill teaches the ``chrome-devtools`` CLI, which only works
+    # when the engine (Node + chrome-devtools-mcp) is available; don't inject a
+    # dead skill otherwise. See docs/design/browser-feature.md §8.
+    if browser_service.node_available():
+        candidates.append(_BROWSER_SKILL_DIR)
     paths: list[str] = []
     for d in candidates:
         if d.is_dir():
