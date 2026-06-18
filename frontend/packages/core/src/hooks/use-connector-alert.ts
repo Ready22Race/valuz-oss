@@ -20,9 +20,10 @@ import { useEffect, useState } from "react";
 import { connectorsApi } from "../api/connectors-api";
 import type { ConnectorItem } from "@valuz/shared";
 
-// Connector status changes are infrequent (connect / fail / self-heal), so a
-// slower cadence than the running-runs poll is plenty.
-const POLL_MS = 30000;
+// Connector status changes are rare (connect / fail / self-heal) and never
+// urgent for the nav dot, so a lazy 5-minute cadence is plenty — a forced poll
+// on mount / focus still repaints promptly when the user actually looks.
+const POLL_MS = 300000;
 
 let _connectors: ConnectorItem[] = [];
 const _acknowledged = new Set<string>();
@@ -109,6 +110,16 @@ export const acknowledgeConnectorAlert = (
     }
   }
   if (changed) _notify();
+};
+
+/**
+ * Force an immediate connector re-poll, independent of the lazy {@link POLL_MS}
+ * interval. Call this when the user lands somewhere the dot must be fresh
+ * (e.g. entering the home page) so a status that changed during the 5-minute
+ * gap shows up at once instead of waiting for the next tick.
+ */
+export const refreshConnectorAlert = (): void => {
+  void _poll(true);
 };
 
 export interface ConnectorAlertResult {

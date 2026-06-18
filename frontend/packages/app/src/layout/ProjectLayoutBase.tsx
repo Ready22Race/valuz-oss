@@ -18,6 +18,7 @@ import {
   useGlobalShortcuts,
   usePanelStore,
   useConnectorAlert,
+  refreshConnectorAlert,
   useRegistryStore,
   useRunningRuns,
   useSessionStore,
@@ -178,6 +179,15 @@ export function ProjectLayoutBase({
     () => (window.history.state as { idx?: number } | null)?.idx ?? 0,
   );
   const [historyMaxIdx, setHistoryMaxIdx] = useState<number>(historyIdx);
+
+  // The connector nav dot polls lazily (5 min). Landing on the home screen
+  // (``/`` redirects to ``/conversation/new``) forces a fresh check so a status
+  // that flipped during the gap shows up at once instead of on the next tick.
+  useEffect(() => {
+    if (location.pathname === "/conversation/new" || location.pathname === "/") {
+      refreshConnectorAlert();
+    }
+  }, [location.pathname]);
 
   // Window maximize state for the custom window controls (Windows/Linux).
   const [isMaximized, setIsMaximized] = useState(false);

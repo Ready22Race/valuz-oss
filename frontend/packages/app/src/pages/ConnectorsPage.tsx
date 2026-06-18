@@ -403,6 +403,10 @@ export const ConnectorsPage = () => {
     (connectorId: string, timeoutMs = 30_000) => {
       if (pollRef.current) clearTimeout(pollRef.current);
       const deadline = Date.now() + timeoutMs;
+      // A connect rarely settles in <1s, and the OAuth flow already has a
+      // postMessage fast-path, so this fallback polls calmly (5s) rather than
+      // hammering once a status switch is imminent.
+      const intervalMs = 5_000;
       const poll = async () => {
         if (Date.now() > deadline) {
           toast.error(_t("settings.connectors.connectTimeout"));
@@ -433,9 +437,9 @@ export const ConnectorsPage = () => {
         } catch {
           // transient — keep polling
         }
-        pollRef.current = setTimeout(() => void poll(), 2000);
+        pollRef.current = setTimeout(() => void poll(), intervalMs);
       };
-      pollRef.current = setTimeout(() => void poll(), 2000);
+      pollRef.current = setTimeout(() => void poll(), intervalMs);
     },
     [loadAll],
   );
