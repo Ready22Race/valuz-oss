@@ -14,6 +14,7 @@ import {
 } from "@valuz/ui";
 import { ResourceActionSlot } from "../components/ResourceActionSlot";
 import {
+  acknowledgeConnectorAlert,
   connectorsApi,
   usePanelStore,
   useResourceCategories,
@@ -195,6 +196,9 @@ export const ConnectorsPage = () => {
       if (!mountedRef.current) return;
       setConnectors(listRes.connectors);
       setCatalog(flattenCatalog(dirRes.items));
+      // Viewing the page clears the connector nav dot for whatever is failing
+      // right now (acknowledge against this freshly-loaded list).
+      acknowledgeConnectorAlert(listRes.connectors);
     } catch (err) {
       if (mountedRef.current) {
         console.error("[Connectors] load error", err);

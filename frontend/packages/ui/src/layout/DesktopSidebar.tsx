@@ -103,6 +103,9 @@ export interface DesktopSidebarBottomItem {
   /** Optional trailing count badge (e.g. running-runs count on Activity).
    *  Falsy / 0 → no badge. */
   badgeCount?: number;
+  /** Optional trailing red attention dot (e.g. a failing connector). Shown
+   *  only when there's no ``badgeCount``. */
+  badgeDot?: boolean;
 }
 
 const BOTTOM_ICON_MAP = {
@@ -624,9 +627,12 @@ export const DesktopSidebar = ({
                       <TooltipTrigger asChild>
                         <LinkComponent
                           to={item.href}
-                          className="flex h-9 w-9 cursor-default items-center justify-center rounded-lg text-ink-body transition-colors duration-[120ms] hover:bg-surface-soft"
+                          className="relative flex h-9 w-9 cursor-default items-center justify-center rounded-lg text-ink-body transition-colors duration-[120ms] hover:bg-surface-soft"
                         >
                           <Icon className="h-4 w-4" />
+                          {item.badgeDot ? (
+                            <span className="absolute right-1.5 top-1.5 h-1.5 w-1.5 rounded-full bg-[#f54b4b]" />
+                          ) : null}
                         </LinkComponent>
                       </TooltipTrigger>
                       <TooltipContent side="right">{item.label}</TooltipContent>
@@ -709,6 +715,10 @@ export const DesktopSidebar = ({
                               )}
                             />
                             {item.badgeCount}
+                          </span>
+                        ) : item.badgeDot ? (
+                          <span className="ml-auto flex items-center">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[#f54b4b]" />
                           </span>
                         ) : null}
                       </SidebarLink>
@@ -955,6 +965,11 @@ export const DesktopSidebar = ({
                           strokeWidth={2}
                         />
                         <span>{item.label}</span>
+                        {item.badgeDot ? (
+                          <span className="ml-auto flex items-center">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[#f54b4b]" />
+                          </span>
+                        ) : null}
                       </SidebarLink>
                     );
                   })}
