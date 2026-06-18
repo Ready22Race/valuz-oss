@@ -1937,6 +1937,7 @@ I18nKey = Literal[
     "updater.errorUnknown",
     "updater.preparing",
     "updater.restartNow",
+    "updater.restarting",
     "updater.updateAvailable",
 ]
 # fmt: on
