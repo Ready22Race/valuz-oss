@@ -890,6 +890,9 @@ export const ConversationPage = () => {
   const sidebarSessions = useSessionStore((state) => state.sessions);
   const setSidebarSessions = useSessionStore((state) => state.setSessions);
   const fetchSidebarSessions = useSessionStore((state) => state.fetchSessions);
+  const setStoreActiveProjectId = useSessionStore(
+    (state) => state.setActiveProjectId,
+  );
   const upsertProject = useProjectStore((s) => s.upsertProject);
   // Server-stored attachments + async parse status, owned by the shared hook:
   // upload-on-attach, poll ``parsing → ready|failed``, and live progress for
@@ -952,6 +955,16 @@ export const ConversationPage = () => {
     () => sessions.find((s) => s.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
   );
+
+  // Publish the open conversation's project to the store so the sidebar keeps
+  // that project's accordion expanded — authoritative and immediate (straight
+  // from the loaded session detail), unlike the lagging runs list. Cleared when
+  // the conversation is project-less or this page unmounts.
+  const openConversationProjectId = selectedSession?.project_id ?? null;
+  useEffect(() => {
+    setStoreActiveProjectId(openConversationProjectId);
+    return () => setStoreActiveProjectId(null);
+  }, [openConversationProjectId, setStoreActiveProjectId]);
   const rawTurns = useMemo(() => buildTurns(events), [events]);
   const turns = useStableTurns(rawTurns);
 

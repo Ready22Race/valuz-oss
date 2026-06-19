@@ -6,8 +6,10 @@ describe("DesktopSidebar", () => {
   it("nests a project's chats/tasks under it and renders the Chats group", () => {
     render(
       <DesktopSidebar
-        // Active route is the project itself, so its accordion auto-expands.
+        // Active route is the project itself; the host resolves it to the owning
+        // project id, which pins that project's accordion open.
         activePath="/projects/p1"
+        activeProjectId="p1"
         projectGroups={[
           {
             id: "p1",

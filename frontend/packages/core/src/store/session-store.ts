@@ -5,10 +5,17 @@ import { sessionsApi } from "../api/sessions-api";
 interface SessionStoreState {
   sessions: SessionListItem[];
   activeSessionId: string | null;
+  /** The project that owns the conversation currently open in the main view,
+   *  published by the conversation page from its loaded session detail. This is
+   *  the authoritative, immediate answer to "which project am I in?" — used by
+   *  the sidebar to keep that project's accordion expanded. ``null`` when the
+   *  open conversation is project-less or no conversation is open. */
+  activeProjectId: string | null;
   loading: boolean;
 
   setSessions: (sessions: SessionListItem[]) => void;
   setActiveSession: (sessionId: string | null) => void;
+  setActiveProjectId: (projectId: string | null) => void;
 
   fetchSessions: (projectId?: string) => Promise<void>;
   createSession: (
@@ -22,10 +29,12 @@ interface SessionStoreState {
 export const useSessionStore = create<SessionStoreState>((set) => ({
   sessions: [],
   activeSessionId: null,
+  activeProjectId: null,
   loading: false,
 
   setSessions: (sessions) => set({ sessions }),
   setActiveSession: (activeSessionId) => set({ activeSessionId }),
+  setActiveProjectId: (activeProjectId) => set({ activeProjectId }),
 
   fetchSessions: async (projectId?: string) => {
     set({ loading: true });
