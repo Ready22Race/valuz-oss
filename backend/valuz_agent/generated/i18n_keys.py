@@ -1505,6 +1505,7 @@ I18nKey = Literal[
     "settings.timezone",
     "settings.title",
     "sidebar.automation",
+    "sidebar.chats",
     "sidebar.collapse",
     "sidebar.collapsePanel",
     "sidebar.deleteFailed",

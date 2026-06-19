@@ -1493,6 +1493,7 @@
     "tasks": "Tasks",
     "noTasks": "No tasks yet",
     "sessions": "Conversations",
+    "chats": "Chats",
     "taskStatus": {
       "active": "Running",
       "paused": "Paused",

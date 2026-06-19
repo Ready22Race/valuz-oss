@@ -1499,6 +1499,7 @@ export type KnownI18nKey =
   | "settings.timezone"
   | "settings.title"
   | "sidebar.automation"
+  | "sidebar.chats"
   | "sidebar.collapse"
   | "sidebar.collapsePanel"
   | "sidebar.deleteFailed"
