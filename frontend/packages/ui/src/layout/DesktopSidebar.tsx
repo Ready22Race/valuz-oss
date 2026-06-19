@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, type ReactNode } from "react";
+import { useState, useRef, useEffect, useMemo, type ReactNode } from "react";
 import {
   Activity,
   BookOpen,
@@ -60,14 +60,17 @@ export interface DesktopSidebarRecents {
   earlier?: DesktopSidebarItem[];
 }
 
-/** A project project entry in the sidebar's "项目" section. Sessions no
- * longer nest under projects — all sessions (project + chat) live in the
- * unified RECENTS section below. */
+/** A project entry in the sidebar's "项目" section. Each project is an
+ * accordion: its own chats + tasks (newest first) nest under it via ``items``
+ * and are revealed when the project is expanded. */
 export interface DesktopSidebarProjectGroup {
   id: string;
   label: string;
   /** Link target for the project landing page. */
   href: string;
+  /** This project's chats + tasks, newest first. The sidebar caps the
+   *  visible count and offers a "show more" toggle. */
+  items?: DesktopSidebarRecentItem[];
 }
 
 /** A task entry in the sidebar's "任务" section. Tasks are split out from
@@ -317,6 +320,17 @@ interface ProjectRowProps {
   project: DesktopSidebarProjectGroup;
   activePath: string;
   LinkComponent: NavLinkComponent;
+  /** Whether this project has any chats/tasks to reveal. Controls the
+   * accordion chevron; the column is always reserved so labels stay aligned
+   * whether or not a project has items. */
+  expandable?: boolean;
+  /** Whether this project's chats/tasks are currently expanded. */
+  expanded?: boolean;
+  /** Toggle this project's accordion (expand / collapse its chats/tasks). */
+  onToggleExpanded?: () => void;
+  /** Fires when the row navigates to the project (not the chevron). Lets the
+   * parent resume "follow the active project" auto-expand. */
+  onNavigate?: () => void;
   /** True when this project is currently in inline-rename mode (header span
    * swaps to a RenameInput). */
   projectRenaming?: boolean;
@@ -331,6 +345,10 @@ const ProjectRow = ({
   project,
   activePath,
   LinkComponent,
+  expandable = false,
+  expanded = false,
+  onToggleExpanded,
+  onNavigate,
   projectRenaming = false,
   onProjectRenameStart,
   onProjectRenameConfirm,
@@ -348,10 +366,11 @@ const ProjectRow = ({
     <div className="mx-1">
       <LinkComponent
         to={project.href}
+        onClick={onNavigate}
         className={cn(
           // ``group`` enables ``group-hover`` on the project-row ``...``
           // menu button (hidden until row hover; see below).
-          "group relative grid h-[31px] cursor-default grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-[9px] px-[10px] text-[13px] font-normal text-ink-heading outline-none transition-[background-color,box-shadow] duration-[120ms] focus-visible:outline-none focus-visible:ring-0 focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
+          "group relative grid h-[31px] cursor-default grid-cols-[16px_14px_minmax(0,1fr)_auto] items-center gap-[7px] px-[10px] text-[13px] font-normal text-ink-heading outline-none transition-[background-color,box-shadow] duration-[120ms] focus-visible:outline-none focus-visible:ring-0 focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
           projectRenaming ? "" : "rounded-[7px]",
           projectRenaming
             ? ""
@@ -360,6 +379,31 @@ const ProjectRow = ({
               : "hover:bg-[rgba(0,0,0,0.03)] dark:hover:bg-surface-muted",
         )}
       >
+        {/* Accordion chevron. The column is always reserved (a spacer when the
+            project has no chats/tasks) so every project label aligns. */}
+        {expandable ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onToggleExpanded?.();
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            aria-label={expanded ? t("sidebar.showLess") : t("sidebar.showMore")}
+            className="flex h-4 w-4 items-center justify-start rounded text-ink-muted transition-colors hover:text-ink-body"
+          >
+            <ChevronDown
+              className={cn(
+                "h-3 w-3 transition-transform duration-[150ms]",
+                !expanded && "-rotate-90",
+              )}
+              strokeWidth={2}
+            />
+          </button>
+        ) : (
+          <span aria-hidden className="h-4 w-4" />
+        )}
         <FolderOpen
           className="h-3.5 w-3.5 shrink-0 text-ink-meta"
           strokeWidth={2}
@@ -466,8 +510,8 @@ const ProjectRow = ({
 
 /* ── Main sidebar ──────────────────────────────────────────── */
 
-/** One row in the sidebar's RECENTS strip — a chat session or a task.
- * Surfaced under the Activity link so the user can resume their last few
+/** One chat/task row in the sidebar — either nested under its project or in
+ * the loose "对话 / Chats" group. Lets the user resume their last few
  * conversations / tasks without leaving the current page. */
 export interface DesktopSidebarRecentItem {
   id: string;
@@ -484,9 +528,11 @@ export interface DesktopSidebarProps {
   /** One entry per project project. */
   projectGroups: DesktopSidebarProjectGroup[];
   bottomItems: DesktopSidebarBottomItem[];
-  /** Optional Recents list rendered under the Activity link. Folded shows
-   * 3 rows, expanded shows up to 8. Pass an empty array / omit to hide. */
-  recents?: DesktopSidebarRecentItem[];
+  /** Loose chats + tasks that don't belong to any project — rendered in the
+   * "对话 / Chats" group below Projects. Newest first; the sidebar caps the
+   * visible count with a "show more" toggle. Pass an empty array / omit to
+   * hide the group. */
+  chats?: DesktopSidebarRecentItem[];
   /** Optional content rendered at the very top of the sidebar, above the
    * primary action ("新对话"). Overlay editions use this to inject an org /
    * account switcher. Rendered in both collapsed and expanded states. */
@@ -524,7 +570,7 @@ export interface DesktopSidebarProps {
 export const DesktopSidebar = ({
   activePath,
   bottomItems,
-  recents,
+  chats = [],
   sidebarHeader,
   sidebarExtraItems,
   mascotSrc = "./mascot.png",
@@ -545,22 +591,186 @@ export const DesktopSidebar = ({
     null,
   );
   const [projectsSectionOpen, setProjectsSectionOpen] = useState(true);
-  // Recents fold state: collapsed by default (only 3 rows), opens to 8.
-  // Lives here (not lifted) because no other sidebar feature needs to
-  // observe it.
-  const [recentsExpanded, setRecentsExpanded] = useState(false);
-  // Inline rename + delete confirmation state for the RECENTS chat rows.
-  // Both null when nothing is in flight.
+  const [chatsSectionOpen, setChatsSectionOpen] = useState(true);
+  // Accordion: at most one project's chats/tasks expanded at a time. ``null``
+  // = follow the active project; a project id pins that one open; "" = the
+  // user explicitly collapsed the active one. Resolved into
+  // ``effectiveOpenProjectId`` below.
+  const [openProjectId, setOpenProjectId] = useState<string | null>(null);
+  // Per-group "show more" state (keyed by project id, or "chats" for the
+  // loose group): false → first few rows, true → all rows.
+  const [groupExpanded, setGroupExpanded] = useState<Record<string, boolean>>(
+    {},
+  );
+  // Inline rename + delete confirmation state for chat rows (in projects and
+  // the Chats group alike). Both null when nothing is in flight.
   const [recentRenamingId, setRecentRenamingId] = useState<string | null>(null);
   const [recentDeleting, setRecentDeleting] =
     useState<DesktopSidebarRecentItem | null>(null);
   const [recentDeleteInFlight, setRecentDeleteInFlight] = useState(false);
-  const RECENTS_COLLAPSED = 3;
-  const RECENTS_EXPANDED = 8;
-  const visibleRecents = recents
-    ? recents.slice(0, recentsExpanded ? RECENTS_EXPANDED : RECENTS_COLLAPSED)
-    : [];
-  const canExpandRecents = (recents?.length ?? 0) > RECENTS_COLLAPSED;
+  const RUNS_COLLAPSED = 5;
+
+  // The project that owns the active route — its landing page or one of its
+  // chats/tasks. Drives auto-expand so navigating into a project reveals its
+  // list.
+  const activeProjectId = useMemo(() => {
+    for (const project of projectGroups) {
+      if (isActivePath(activePath, project.href)) return project.id;
+      if (project.items?.some((it) => isActivePath(activePath, it.href)))
+        return project.id;
+    }
+    return null;
+  }, [projectGroups, activePath]);
+  // Derived (not synced via an effect, which would be a setState-in-effect):
+  // null → follow the active project; "" → user collapsed the active one;
+  // otherwise the pinned project id.
+  const effectiveOpenProjectId =
+    openProjectId === null
+      ? activeProjectId
+      : openProjectId === ""
+        ? null
+        : openProjectId;
+
+  const toggleGroup = (key: string) =>
+    setGroupExpanded((m) => ({ ...m, [key]: !m[key] }));
+
+  // One chat/task row. ``depth`` sets the left indent so project-nested rows
+  // sit under the project label while Chats-group rows align with the section
+  // label. Chat rows carry a Rename/Delete menu; tasks don't (no task-rename
+  // / task-delete endpoint).
+  const renderRunRow = (
+    item: DesktopSidebarRecentItem,
+    depth: "project" | "chats",
+  ) => {
+    // Chats-group rows align strictly with the "对话" section header: the row
+    // carries mx-1 (4px) that the header doesn't, so pl-[10px] lands the text
+    // at the same x as the header (14px). Project-nested rows indent under the
+    // project label.
+    const padClass = depth === "project" ? "pl-[40px]" : "pl-[10px]";
+    const dotClass = depth === "project" ? "left-[22px]" : "left-[2px]";
+    const active = isActivePath(activePath, item.href);
+    if (recentRenamingId === item.id) {
+      return (
+        <div
+          key={`run-${item.id}`}
+          className={cn(
+            "relative mx-1 flex items-center gap-2 py-[5px] pr-[10px]",
+            padClass,
+          )}
+        >
+          <RenameInput
+            initial={item.title}
+            onConfirm={(v) => {
+              onRecentRename?.(item.id, v);
+              setRecentRenamingId(null);
+            }}
+            onCancel={() => setRecentRenamingId(null)}
+          />
+        </div>
+      );
+    }
+    const showRowMenu =
+      item.kind === "chat" && (onRecentRename || onRecentDelete);
+    return (
+      <LinkComponent
+        key={`run-${item.id}`}
+        to={item.href}
+        className={cn(
+          "group/recent-row relative mx-1 flex cursor-default items-center gap-2 rounded-[7px] py-[5px] pr-[10px] text-[12.5px] outline-none transition-colors duration-[120ms] hover:bg-surface-soft hover:text-ink-heading focus-visible:outline-none focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
+          padClass,
+          active
+            ? "bg-card text-ink-heading shadow-[0_6px_16px_rgba(17,24,39,0.12)] dark:bg-surface-muted dark:shadow-none"
+            : "text-ink-meta",
+        )}
+      >
+        {item.isRunning && (
+          <span
+            aria-label={t("sidebar.runningIndicator")}
+            className={cn(
+              "pointer-events-none absolute top-1/2 h-1.5 w-1.5 -translate-y-1/2 rounded-full bg-brand animate-pulse",
+              dotClass,
+            )}
+          />
+        )}
+        <span className="min-w-0 flex-1 truncate">{item.title}</span>
+        {showRowMenu && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                onClick={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
+                aria-label={t("sidebar.moreActions")}
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-muted opacity-0 transition-opacity hover:bg-surface-muted hover:text-ink-body focus-visible:opacity-100 group-hover/recent-row:opacity-100 data-[state=open]:opacity-100"
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              className="min-w-[160px]"
+              onCloseAutoFocus={(e) => e.preventDefault()}
+            >
+              {onRecentRename && (
+                <DropdownMenuItem onSelect={() => setRecentRenamingId(item.id)}>
+                  <FilePenLine />
+                  {t("sidebar.rename")}
+                </DropdownMenuItem>
+              )}
+              {onRecentDelete && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => setRecentDeleting(item)}
+                  >
+                    <Trash2 />
+                    {t("common.delete")}
+                  </DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </LinkComponent>
+    );
+  };
+
+  // A group's rows (project-nested or the Chats group), capped at
+  // ``RUNS_COLLAPSED`` with a trailing show-more / show-less toggle.
+  const renderGroupItems = (
+    key: string,
+    items: DesktopSidebarRecentItem[],
+    depth: "project" | "chats",
+  ) => {
+    const expanded = !!groupExpanded[key];
+    const visible = expanded ? items : items.slice(0, RUNS_COLLAPSED);
+    const padClass = depth === "project" ? "pl-[40px]" : "pl-[10px]";
+    return (
+      <>
+        {visible.map((item) => renderRunRow(item, depth))}
+        {items.length > RUNS_COLLAPSED && (
+          <button
+            type="button"
+            onClick={() => toggleGroup(key)}
+            className={cn(
+              "mx-1 flex items-center gap-1 py-[3px] pr-[10px] text-[11.5px] text-ink-muted transition-colors hover:text-ink-body",
+              padClass,
+            )}
+          >
+            {expanded ? t("sidebar.showLess") : t("sidebar.showMore")}
+            <ChevronDown
+              className={cn(
+                "h-3 w-3 transition-transform duration-[150ms]",
+                expanded && "rotate-180",
+              )}
+              strokeWidth={2}
+            />
+          </button>
+        )}
+      </>
+    );
+  };
 
   const libraryItems = bottomItems.filter((item) => item.group === "library");
 
@@ -739,156 +949,6 @@ export const DesktopSidebar = ({
                   })}
                 {sidebarExtraItems}
 
-                {/* RECENTS — rendered as Activity's sub-items: no group
-                    label, no row icons, title indented to line up with
-                    Activity's label (pl-[33px] matches the project-link
-                    icon column). Color steps down to ``ink-meta`` so the
-                    rows read as secondary to the top-level nav. Folded
-                    shows 3; a tail chevron toggles to 8. Live runs get a
-                    small brand-tinted pulsing dot on the right. */}
-                {visibleRecents.length > 0 && (
-                  // ``group/recents`` lets the tail toggle reveal on hover
-                  // anywhere within the recents block — over the rows or
-                  // the trailing white space. Default-hidden keeps the
-                  // sidebar visually quiet when the user isn't pointing
-                  // at this region.
-                  <div className="group/recents">
-                    {visibleRecents.map((item, idx) => {
-                      const active = isActivePath(activePath, item.href);
-                      const showTailToggle =
-                        canExpandRecents && idx === visibleRecents.length - 1;
-                      const isRenamingThis = recentRenamingId === item.id;
-                      // Inline rename mode: the row swaps to a plain
-                      // input wrapper (no LinkComponent) so the typing
-                      // session is never interrupted by the row's own
-                      // navigation. Same pattern as project rename.
-                      if (isRenamingThis) {
-                        return (
-                          <div
-                            key={`recent-${item.id}`}
-                            className="relative mx-1 flex items-center gap-2 py-[5px] pl-[33px] pr-[10px]"
-                          >
-                            <RenameInput
-                              initial={item.title}
-                              onConfirm={(v) => {
-                                onRecentRename?.(item.id, v);
-                                setRecentRenamingId(null);
-                              }}
-                              onCancel={() => setRecentRenamingId(null)}
-                            />
-                          </div>
-                        );
-                      }
-                      // Chat rows get a ``...`` menu (Rename + Delete);
-                      // tasks don't (no rename / no delete endpoint, see
-                      // openapi.yaml). The menu is hover-revealed via
-                      // ``group-hover`` and stays open while the Radix
-                      // dropdown is showing (``data-state=open``).
-                      const showRowMenu =
-                        item.kind === "chat" &&
-                        (onRecentRename || onRecentDelete);
-                      return (
-                        <LinkComponent
-                          key={`recent-${item.id}`}
-                          to={item.href}
-                          className={cn(
-                            "group/recent-row relative mx-1 flex cursor-default items-center gap-2 rounded-[7px] py-[5px] pl-[33px] pr-[10px] text-[12.5px] outline-none transition-colors duration-[120ms] hover:bg-surface-soft hover:text-ink-heading focus-visible:outline-none focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
-                            active
-                              ? "bg-card text-ink-heading shadow-[0_6px_16px_rgba(17,24,39,0.12)] dark:bg-surface-muted dark:shadow-none"
-                              : "text-ink-meta",
-                          )}
-                        >
-                          {item.isRunning && (
-                            // Absolutely-positioned dot in the row's
-                            // "icon column" — visually aligned with the
-                            // Activity nav icon above. Out of flow so the
-                            // title's pl-[33px] anchor stays stable
-                            // whether the run is live or not (no horizontal
-                            // shift when isRunning toggles).
-                            <span
-                              aria-label={t("sidebar.runningIndicator")}
-                              className="pointer-events-none absolute left-[14px] top-1/2 h-1.5 w-1.5 -translate-y-1/2 rounded-full bg-brand animate-pulse"
-                            />
-                          )}
-                          <span className="min-w-0 flex-1 truncate">
-                            {item.title}
-                          </span>
-                          {showRowMenu && (
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <button
-                                  type="button"
-                                  // Suppress LinkComponent navigation
-                                  // when opening the menu (Radix opens on
-                                  // pointerdown, so block both).
-                                  onClick={(e) => e.stopPropagation()}
-                                  onPointerDown={(e) => e.stopPropagation()}
-                                  aria-label={t("sidebar.moreActions")}
-                                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-muted opacity-0 transition-opacity hover:bg-surface-muted hover:text-ink-body focus-visible:opacity-100 group-hover/recent-row:opacity-100 data-[state=open]:opacity-100"
-                                >
-                                  <MoreHorizontal className="h-3.5 w-3.5" />
-                                </button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent
-                                align="end"
-                                className="min-w-[160px]"
-                                onCloseAutoFocus={(e) => e.preventDefault()}
-                              >
-                                {onRecentRename && (
-                                  <DropdownMenuItem
-                                    onSelect={() =>
-                                      setRecentRenamingId(item.id)
-                                    }
-                                  >
-                                    <FilePenLine />
-                                    {t("sidebar.rename")}
-                                  </DropdownMenuItem>
-                                )}
-                                {onRecentDelete && (
-                                  <>
-                                    <DropdownMenuSeparator />
-                                    <DropdownMenuItem
-                                      variant="destructive"
-                                      onSelect={() => setRecentDeleting(item)}
-                                    >
-                                      <Trash2 />
-                                      {t("common.delete")}
-                                    </DropdownMenuItem>
-                                  </>
-                                )}
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          )}
-                          {showTailToggle && (
-                            <button
-                              type="button"
-                              aria-label={
-                                recentsExpanded
-                                  ? t("sidebar.showLess")
-                                  : t("sidebar.showMore")
-                              }
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setRecentsExpanded((v) => !v);
-                              }}
-                              className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-muted opacity-0 transition-opacity hover:text-ink-body focus-visible:opacity-100 group-hover/recents:opacity-100"
-                            >
-                              <ChevronDown
-                                className={cn(
-                                  "h-3 w-3 transition-transform duration-[150ms]",
-                                  recentsExpanded && "rotate-180",
-                                )}
-                                strokeWidth={2}
-                              />
-                            </button>
-                          )}
-                        </LinkComponent>
-                      );
-                    })}
-                  </div>
-                )}
-
                 <SectionLabel
                   open={projectsSectionOpen}
                   onToggle={() => setProjectsSectionOpen((v) => !v)}
@@ -909,27 +969,63 @@ export const DesktopSidebar = ({
                     {t("sidebar.noProjects")}
                   </div>
                 ) : (
-                  projectGroups.map((project) => (
-                    <ProjectRow
-                      key={project.id}
-                      project={project}
-                      activePath={activePath}
-                      LinkComponent={LinkComponent}
-                      projectRenaming={projectRenamingId === project.id}
-                      onProjectRenameStart={
-                        onProjectRename
-                          ? (id) => setProjectRenamingId(id)
-                          : undefined
-                      }
-                      onProjectRenameConfirm={(id, newName) => {
-                        onProjectRename?.(id, newName);
-                        setProjectRenamingId(null);
-                      }}
-                      onProjectRenameCancel={() => setProjectRenamingId(null)}
-                      onProjectOpenInFinder={onProjectOpenInFinder}
-                      onProjectRemove={onProjectRemove}
-                    />
-                  ))
+                  projectGroups.map((project) => {
+                    const expandable = (project.items?.length ?? 0) > 0;
+                    const expanded =
+                      expandable && effectiveOpenProjectId === project.id;
+                    return (
+                      <div key={project.id}>
+                        <ProjectRow
+                          project={project}
+                          activePath={activePath}
+                          LinkComponent={LinkComponent}
+                          expandable={expandable}
+                          expanded={expanded}
+                          onToggleExpanded={() =>
+                            setOpenProjectId(
+                              effectiveOpenProjectId === project.id
+                                ? ""
+                                : project.id,
+                            )
+                          }
+                          onNavigate={() => setOpenProjectId(null)}
+                          projectRenaming={projectRenamingId === project.id}
+                          onProjectRenameStart={
+                            onProjectRename
+                              ? (id) => setProjectRenamingId(id)
+                              : undefined
+                          }
+                          onProjectRenameConfirm={(id, newName) => {
+                            onProjectRename?.(id, newName);
+                            setProjectRenamingId(null);
+                          }}
+                          onProjectRenameCancel={() =>
+                            setProjectRenamingId(null)
+                          }
+                          onProjectOpenInFinder={onProjectOpenInFinder}
+                          onProjectRemove={onProjectRemove}
+                        />
+                        {expanded &&
+                          project.items &&
+                          renderGroupItems(project.id, project.items, "project")}
+                      </div>
+                    );
+                  })
+                )}
+
+                {/* 对话 / Chats — chats + tasks that don't belong to any
+                    project (quick conversations, project-less tasks). */}
+                {chats.length > 0 && (
+                  <>
+                    <SectionLabel
+                      open={chatsSectionOpen}
+                      onToggle={() => setChatsSectionOpen((v) => !v)}
+                    >
+                      {t("sidebar.chats")}
+                    </SectionLabel>
+                    {chatsSectionOpen &&
+                      renderGroupItems("chats", chats, "chats")}
+                  </>
                 )}
               </div>
             </nav>
@@ -938,8 +1034,8 @@ export const DesktopSidebar = ({
                 (above the settings link), z-0 so the scrollable nav
                 sits above it. When the session list is short, the
                 empty space at the bottom of the nav reveals the
-                mascot. When the user expands the recents and the
-                list gets long, the nav content scrolls over the
+                mascot. When the user expands a project / the Chats
+                group and the list gets long, the nav scrolls over the
                 mascot — line-drawing bleeds through behind the
                 links so it's still felt without obscuring text. */}
             {mascotSrc ? (

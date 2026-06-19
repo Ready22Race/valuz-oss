@@ -296,15 +296,16 @@ export function ProjectLayoutBase({
     }
   }, [location.pathname, fetchSessions, fetchProjects, fetchAllTasks]);
 
-  const projectGroups: DesktopSidebarProjectGroup[] = useMemo(
+  // Set of real project ids — the grouping key for "does this run belong to a
+  // project?". Runs whose ``project_id`` isn't in here (quick assistant chats,
+  // project-less tasks) fall into the loose "Chats" group instead.
+  const projectIdSet = useMemo(
     () =>
-      allProjects
-        .filter((project) => project.kind === "project")
-        .map((project) => ({
-          id: project.id,
-          label: project.name,
-          href: `/projects/${project.id}`,
-        })),
+      new Set(
+        allProjects
+          .filter((project) => project.kind === "project")
+          .map((project) => project.id),
+      ),
     [allProjects],
   );
 
@@ -388,33 +389,59 @@ export function ProjectLayoutBase({
     };
   }, [refreshFinishedRuns]);
 
-  const recentItems: DesktopSidebarRecentItem[] = useMemo(() => {
+  // Merge live + finished runs (dedupe by session), newest first, then split
+  // into per-project buckets and a loose "Chats" list. Each project's chats +
+  // tasks nest under it in the sidebar; everything project-less goes to Chats.
+  const { projectRunItems, chatItems } = useMemo(() => {
     const byId = new Map<string, RunSummary>();
     for (const r of liveRuns) byId.set(r.session_id, r);
     for (const r of finishedRuns) {
       if (!byId.has(r.session_id)) byId.set(r.session_id, r);
     }
     const liveSet = new Set(liveRuns.map((r) => r.session_id));
-    return [...byId.values()]
-      .sort(
-        (a, b) =>
-          new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
-      )
-      .slice(0, 8)
-      .map((r) => ({
-        id: r.session_id,
-        title: r.title,
-        // Tasks have their own page; chats route to the conversation
-        // view. Fall back to the conversation if a task somehow lacks a
-        // ``task_id`` so the row is always clickable.
-        href:
-          r.source_kind === "task" && r.task_id
-            ? `/tasks/${encodeURIComponent(r.task_id)}`
-            : `/conversation/${encodeURIComponent(r.session_id)}`,
-        kind: r.source_kind === "task" ? "task" : "chat",
-        isRunning: liveSet.has(r.session_id),
-      }));
-  }, [liveRuns, finishedRuns]);
+    const toItem = (r: RunSummary): DesktopSidebarRecentItem => ({
+      id: r.session_id,
+      title: r.title,
+      // Tasks have their own page; chats route to the conversation view. Fall
+      // back to the conversation if a task somehow lacks a ``task_id`` so the
+      // row is always clickable.
+      href:
+        r.source_kind === "task" && r.task_id
+          ? `/tasks/${encodeURIComponent(r.task_id)}`
+          : `/conversation/${encodeURIComponent(r.session_id)}`,
+      kind: r.source_kind === "task" ? "task" : "chat",
+      isRunning: liveSet.has(r.session_id),
+    });
+    const sorted = [...byId.values()].sort(
+      (a, b) => b.updated_at - a.updated_at,
+    );
+    const byProject = new Map<string, DesktopSidebarRecentItem[]>();
+    const loose: DesktopSidebarRecentItem[] = [];
+    for (const r of sorted) {
+      const item = toItem(r);
+      if (r.project_id && projectIdSet.has(r.project_id)) {
+        const arr = byProject.get(r.project_id);
+        if (arr) arr.push(item);
+        else byProject.set(r.project_id, [item]);
+      } else {
+        loose.push(item);
+      }
+    }
+    return { projectRunItems: byProject, chatItems: loose };
+  }, [liveRuns, finishedRuns, projectIdSet]);
+
+  const projectGroups: DesktopSidebarProjectGroup[] = useMemo(
+    () =>
+      allProjects
+        .filter((project) => project.kind === "project")
+        .map((project) => ({
+          id: project.id,
+          label: project.name,
+          href: `/projects/${project.id}`,
+          items: projectRunItems.get(project.id) ?? [],
+        })),
+    [allProjects, projectRunItems],
+  );
 
   const handleCreateProject = async () => {
     const trimmedName = newName.trim();
@@ -697,7 +724,7 @@ export function ProjectLayoutBase({
             activePath={location.pathname}
             projectGroups={projectGroups}
             bottomItems={navItemsList}
-            recents={recentItems}
+            chats={chatItems}
             onRecentRename={(sessionId, newName) => {
               const trimmed = newName.trim();
               if (!trimmed) return;

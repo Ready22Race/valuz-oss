@@ -1493,6 +1493,7 @@
     "tasks": "任务",
     "noTasks": "暂无任务",
     "sessions": "对话",
+    "chats": "对话",
     "taskStatus": {
       "active": "运行中",
       "paused": "已暂停",
