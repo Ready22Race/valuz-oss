@@ -147,6 +147,9 @@ export function ProjectLayoutBase({
   const navItemsList = useNavItems();
   const desktopRoutes = useRegistryStore((state) => state.desktopRoutes);
   const fetchSessions = useSessionStore((state) => state.fetchSessions);
+  const openConversationProjectId = useSessionStore(
+    (state) => state.activeProjectId,
+  );
   const fetchAllTasks = useTaskStore((state) => state.fetchAllTasks);
   const allProjects = useProjectStore((state) => state.projects);
   const setAllProjects = useProjectStore((state) => state.setProjects);
@@ -443,6 +446,31 @@ export function ProjectLayoutBase({
     [allProjects, projectRunItems],
   );
 
+  // The project that owns the current route — resolved fast so its accordion
+  // auto-expands the instant you open a project conversation. A project landing
+  // is read straight from the URL; a conversation maps its session id → the
+  // owning project via the session store (populated the moment the session is
+  // created), which runs well ahead of the runs list that backs
+  // ``projectRunItems``. Tasks / anything else fall back to matching the route
+  // against the run items.
+  const activeProjectId = useMemo<string | null>(() => {
+    const path = location.pathname;
+    const projMatch = path.match(/^\/projects\/([^/]+)/);
+    if (projMatch) return decodeURIComponent(projMatch[1]);
+    // A conversation's owning project is published to the store by the
+    // conversation page (authoritative, straight from the loaded session
+    // detail) — immediate, unlike the lagging runs list.
+    if (path.startsWith("/conversation/") && openConversationProjectId) {
+      return openConversationProjectId;
+    }
+    // Tasks / anything else: match the route against the run items.
+    for (const [pid, items] of projectRunItems) {
+      if (items.some((it) => path === it.href || path.startsWith(`${it.href}/`)))
+        return pid;
+    }
+    return null;
+  }, [location.pathname, openConversationProjectId, projectRunItems]);
+
   const handleCreateProject = async () => {
     const trimmedName = newName.trim();
     const trimmedPath = newRootPath.trim();
@@ -722,6 +750,7 @@ export function ProjectLayoutBase({
         sidebar={
           <DesktopSidebar
             activePath={location.pathname}
+            activeProjectId={activeProjectId}
             projectGroups={projectGroups}
             bottomItems={navItemsList}
             chats={chatItems}
