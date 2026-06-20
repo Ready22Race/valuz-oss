@@ -596,7 +596,14 @@ export const Composer = ({
     const rect = el.getBoundingClientRect();
     // Need room for two nested levels (~220px each + a small gap) on the right.
     const needRight = 2 * (220 + 6);
-    const roomRight = window.innerWidth - rect.right;
+    // Measure to the conversation column's right edge, not the viewport — a
+    // right-hand context panel sits beyond it and must not be drawn over, so
+    // the nested menus flip left when the panel leaves no room.
+    const main = el.closest("main");
+    const rightEdge = main
+      ? main.getBoundingClientRect().right
+      : window.innerWidth;
+    const roomRight = rightEdge - rect.right;
     setSubmenuSide(roomRight >= needRight ? "right" : "left");
   }, []);
   // Lay out a nested flyout (a 三级 runtime/model/effort picker, or the Agent
@@ -645,10 +652,16 @@ export const Composer = ({
     (el: HTMLDivElement | null) => layoutFlyout(el, setRowMenuVAlign),
     [layoutFlyout],
   );
-  const measureAgentListV = useCallback(
-    (el: HTMLDivElement | null) => layoutFlyout(el, setAgentListVAlign),
-    [layoutFlyout],
-  );
+  // The roster caps + scrolls via CSS (flex column with a pinned footer), so it
+  // only needs the grow direction here.
+  const measureAgentListV = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return;
+    const anchor = el.parentElement?.getBoundingClientRect();
+    if (!anchor) return;
+    setAgentListVAlign(
+      anchor.top + el.offsetHeight <= window.innerHeight - 8 ? "top" : "bottom",
+    );
+  }, []);
   useEffect(() => {
     if (!agentOpen) {
       setAgentSubmenu(null);
@@ -1848,7 +1861,7 @@ export const Composer = ({
                               )}
                             />
                             <span className="flex min-w-0 flex-1 flex-col">
-                              <span className="truncate text-[14px] leading-[18px]">
+                              <span className="truncate text-[12.5px] leading-[18px]">
                                 {item.label}
                               </span>
                               <span className="truncate text-[11px] leading-[15px] text-ink-meta">
@@ -1932,7 +1945,7 @@ export const Composer = ({
                         className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted"
                       >
                         <span className="flex min-w-0 flex-1 flex-col">
-                          <span className="truncate text-[14px] text-ink-heading">
+                          <span className="truncate text-[12.5px] text-ink-heading">
                             {t(
                               "conversation.tempChat" as Parameters<
                                 typeof t
@@ -1967,7 +1980,7 @@ export const Composer = ({
                             className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted"
                           >
                             <span className="flex min-w-0 flex-1 flex-col">
-                              <span className="truncate text-[14px] text-ink-heading">
+                              <span className="truncate text-[12.5px] text-ink-heading">
                                 {p.name}
                               </span>
                               {(p.memberCount != null || p.description) && (
@@ -2004,9 +2017,10 @@ export const Composer = ({
                   // the user can see the session's brain and tweak effort
                   // (which live-reconciles); runtime/model stay frozen
                   // (ADR-006).
-                  const canOpen =
-                    !agentLocked ||
-                    (allowAgentBrainOverride && !!selectedAgentSlug);
+                  // A locked session still opens (read-only) so the effort can
+                  // be tweaked via the Default entry's submenu; the selection
+                  // (agent / default) itself stays frozen.
+                  const canOpen = !agentLocked || allowAgentBrainOverride;
                   // When locked to a session whose bound agent is no longer in
                   // the candidate list (e.g. the library agent was deleted
                   // after the session was created), fall back to the raw slug
@@ -2091,7 +2105,10 @@ export const Composer = ({
                             {allowAgentBrainOverride && (
                               <button
                                 type="button"
-                                disabled={agentLocked}
+                                // Frozen on a locked agent run (nothing editable);
+                                // a locked Default run stays hoverable so the
+                                // effort can still be changed.
+                                disabled={agentLocked && !!selectedAgentSlug}
                                 className={cn(
                                   "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent",
                                   // Highlight only while its 二级菜单 is open;
@@ -2103,21 +2120,21 @@ export const Composer = ({
                                   setAgentSubmenu(null);
                                   setAgentListMenuOpen(false);
                                   // The runtime/model 二级菜单 belongs to the
-                                  // Default entry; open it on hover only when
-                                  // Default is the current selection.
+                                  // Default selection (effort stays editable when
+                                  // locked); an agent run keeps it frozen.
                                   if (!selectedAgentSlug)
                                     setDefaultBrainMenuOpen(true);
                                 }}
                                 onClick={() => {
+                                  // Selection is frozen once a session exists; the
+                                  // submenu (effort) is still reachable on hover.
                                   if (agentLocked) return;
-                                  // Select Default and reveal its runtime/model
-                                  // 二级菜单; keep the dropdown open.
                                   onAgentChange?.(null);
                                   setDefaultBrainMenuOpen(true);
                                 }}
                               >
                                 <span className="flex min-w-0 flex-1 flex-col">
-                                  <span className="truncate text-[14px] text-ink-heading">
+                                  <span className="truncate text-[12.5px] text-ink-heading">
                                     {t(
                                       "conversation.defaultBrain" as Parameters<
                                         typeof t
@@ -2131,9 +2148,11 @@ export const Composer = ({
                                 {!selectedAgentSlug && (
                                   <Check className="h-3.5 w-3.5 shrink-0 text-ink-heading" />
                                 )}
-                                {/* The ▸ always shows — Default always carries a
-                                    runtime/model 二级菜单. */}
-                                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-meta" />
+                                {/* ▸ shows whenever the submenu can open — hidden
+                                    on a locked agent run (everything frozen). */}
+                                {!(agentLocked && selectedAgentSlug) && (
+                                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-meta" />
+                                )}
                               </button>
                             )}
                             {allowAgentBrainOverride ? (
@@ -2145,7 +2164,10 @@ export const Composer = ({
                                 onMouseEnter={() => {
                                   setDefaultBrainMenuOpen(false);
                                   setAgentSubmenu(null);
-                                  setAgentListMenuOpen(true);
+                                  // No agent switching once the session is locked
+                                  // — the roster stays closed; the entry is inert
+                                  // (like the frozen Default selection).
+                                  if (!agentLocked) setAgentListMenuOpen(true);
                                 }}
                               >
                                 <button
@@ -2163,7 +2185,7 @@ export const Composer = ({
                                   }}
                                 >
                                   <span className="flex min-w-0 flex-1 flex-col">
-                                    <span className="truncate text-[14px] text-ink-heading">
+                                    <span className="truncate text-[12.5px] text-ink-heading">
                                       {selectedAgent
                                         ? selectedAgent.name
                                         : t(
@@ -2182,13 +2204,16 @@ export const Composer = ({
                                   {!!selectedAgentSlug && (
                                     <Check className="h-3.5 w-3.5 shrink-0 text-ink-heading" />
                                   )}
-                                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-meta" />
+                                  {/* No ▸ when locked — the roster can't open. */}
+                                  {!agentLocked && (
+                                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-meta" />
+                                  )}
                                 </button>
                                 {agentListMenuOpen && (
                                   <div
                                     ref={measureAgentListV}
                                     className={cn(
-                                      "absolute z-50 flex max-h-[240px] min-w-[200px] flex-col overflow-y-auto rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
+                                      "absolute z-50 flex max-h-[320px] min-w-[200px] flex-col rounded-lg border border-surface-border bg-surface shadow-lg",
                                       submenuSide === "left"
                                         ? "right-full mr-2"
                                         : "left-full ml-2",
@@ -2197,53 +2222,55 @@ export const Composer = ({
                                         : "bottom-0",
                                     )}
                                   >
-                                    {agents && agents.length > 0 ? (
-                                      agents.map((a) => {
-                                        const selected =
-                                          a.slug === selectedAgentSlug;
-                                        return (
-                                          <button
-                                            key={a.slug}
-                                            type="button"
-                                            disabled={agentLocked}
-                                            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent"
-                                            onClick={() => {
-                                              if (agentLocked) return;
-                                              onAgentChange?.(a.slug);
-                                              setAgentOpen(false);
-                                            }}
-                                          >
-                                            <span className="flex min-w-0 flex-1 flex-col">
-                                              <span className="truncate text-[14px] text-ink-heading">
-                                                {a.name}
+                                    <div className="min-h-0 flex-1 overflow-y-auto p-1">
+                                      {agents && agents.length > 0 ? (
+                                        agents.map((a) => {
+                                          const selected =
+                                            a.slug === selectedAgentSlug;
+                                          return (
+                                            <button
+                                              key={a.slug}
+                                              type="button"
+                                              disabled={agentLocked}
+                                              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent"
+                                              onClick={() => {
+                                                if (agentLocked) return;
+                                                onAgentChange?.(a.slug);
+                                                setAgentOpen(false);
+                                              }}
+                                            >
+                                              <span className="flex min-w-0 flex-1 flex-col">
+                                                <span className="truncate text-[12.5px] text-ink-heading">
+                                                  {a.name}
+                                                </span>
+                                                <span className="truncate text-2xs text-ink-meta">
+                                                  {a.runtimeLabel} ·{" "}
+                                                  {a.modelLabel}
+                                                </span>
                                               </span>
-                                              <span className="truncate text-2xs text-ink-meta">
-                                                {a.runtimeLabel} · {a.modelLabel}
-                                              </span>
-                                            </span>
-                                            {selected && (
-                                              <Check className="h-3.5 w-3.5 shrink-0 text-ink-heading" />
-                                            )}
-                                          </button>
-                                        );
-                                      })
-                                    ) : (
-                                      <div className="px-2 py-3 text-center text-xs text-ink-meta">
-                                        {t(
-                                          "conversation.noAgents" as Parameters<
-                                            typeof t
-                                          >[0],
-                                        )}
-                                      </div>
-                                    )}
+                                              {selected && (
+                                                <Check className="h-3.5 w-3.5 shrink-0 text-ink-heading" />
+                                              )}
+                                            </button>
+                                          );
+                                        })
+                                      ) : (
+                                        <div className="px-2 py-3 text-center text-xs text-ink-meta">
+                                          {t(
+                                            "conversation.noAgents" as Parameters<
+                                              typeof t
+                                            >[0],
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
                                     {onAddAgent && !agentLocked && (
-                                      <>
-                                        {/* 管理技能-style entry: separator above,
-                                            muted icon, plain text (not brand). */}
-                                        <div className="-mx-1 my-1 border-t border-surface-border" />
+                                      // Pinned footer — stays visible even when
+                                      // the agent list above it scrolls.
+                                      <div className="shrink-0 border-t border-surface-border p-1">
                                         <button
                                           type="button"
-                                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-surface-muted"
+                                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
                                           onClick={() => {
                                             setAgentOpen(false);
                                             onAddAgent();
@@ -2258,7 +2285,7 @@ export const Composer = ({
                                             )}
                                           </span>
                                         </button>
-                                      </>
+                                      </div>
                                     )}
                                   </div>
                                 )}
@@ -2279,7 +2306,7 @@ export const Composer = ({
                                     }}
                                   >
                                     <span className="flex min-w-0 flex-1 flex-col">
-                                      <span className="truncate text-[14px] text-ink-heading">
+                                      <span className="truncate text-[12.5px] text-ink-heading">
                                         {a.name}
                                       </span>
                                       <span className="truncate text-2xs text-ink-meta">
@@ -2349,7 +2376,7 @@ export const Composer = ({
                                     <button
                                       type="button"
                                       className={cn(
-                                        "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors",
+                                        "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",
                                         row.key !== "effort" && modelLocked
                                           ? "cursor-default"
                                           : "hover:bg-surface-muted",
@@ -2414,7 +2441,7 @@ export const Composer = ({
                                               key={r.id}
                                               type="button"
                                               disabled={!r.available}
-                                              className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
+                                              className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
                                               onClick={() => {
                                                 onRuntimeChange?.(r.id);
                                                 setAgentSubmenu(null);
@@ -2457,7 +2484,7 @@ export const Composer = ({
                                                   <button
                                                     key={`${m.providerId}::${m.modelId}`}
                                                     type="button"
-                                                    className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-surface-muted"
+                                                    className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-muted"
                                                     onClick={() => {
                                                       onModelChange?.(
                                                         m.providerId,
@@ -2484,7 +2511,7 @@ export const Composer = ({
                                               <button
                                                 key={level}
                                                 type="button"
-                                                className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-surface-muted"
+                                                className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-muted"
                                                 onClick={() => {
                                                   onEffortChange?.(level);
                                                   setAgentSubmenu(null);
@@ -2512,7 +2539,7 @@ export const Composer = ({
                             <div className="border-t border-surface-border p-1">
                               <button
                                 type="button"
-                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-brand transition-colors hover:bg-surface-muted"
+                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-brand transition-colors hover:bg-surface-muted"
                                 onClick={() => {
                                   setAgentOpen(false);
                                   onAddAgent();
@@ -2599,7 +2626,7 @@ export const Composer = ({
                           type="button"
                           disabled={disabled}
                           className={cn(
-                            "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] transition-colors",
+                            "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",
                             disabled
                               ? "cursor-not-allowed text-ink-muted"
                               : "text-ink-heading hover:bg-surface-muted",
@@ -2744,7 +2771,7 @@ export const Composer = ({
                                       type="button"
                                       disabled={modelLocked}
                                       className={cn(
-                                        "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-surface-muted",
+                                        "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted",
                                         modelLocked &&
                                           "cursor-not-allowed opacity-50 hover:bg-transparent",
                                       )}
@@ -2797,7 +2824,7 @@ export const Composer = ({
                       >
                         <button
                           type="button"
-                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-surface-muted"
+                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
                           onClick={() => setEffortSubOpen(true)}
                         >
                           <span className="min-w-0 flex-1 truncate">
@@ -2819,7 +2846,7 @@ export const Composer = ({
                                 <button
                                   key={level}
                                   type="button"
-                                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-surface-muted"
+                                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
                                   onClick={() => {
                                     onEffortChange?.(level);
                                     setEffortSubOpen(false);
