@@ -2035,6 +2035,13 @@ export const Composer = ({
                         : t(
                             "conversation.selectAgent" as Parameters<typeof t>[0],
                           );
+                  // When an agent is selected use its own host-computed model
+                  // label (correct for project members, whose model id may not
+                  // resolve against the composer's own provider list — that path
+                  // falls back to a placeholder). Default/agentless uses the
+                  // composer's resolved model.
+                  const triggerModelLabel =
+                    selectedAgent?.modelLabel ?? selectedModelLabel;
                   return (
                     <>
                       <button
@@ -2067,12 +2074,12 @@ export const Composer = ({
                             {triggerLabel}
                           </span>
                           {/* The bound model as a muted hint inside the trigger
-                              — always shown (Default or agent) so the collapsed
-                              button reads e.g. "默认 · claude-opus-4-8". The
-                              picker lives in the dropdown's rows. */}
-                          {allowAgentBrainOverride && selectedModelLabel && (
+                              — always shown (Default, library agent, or project
+                              member) so the button reads e.g. "行业分析师 ·
+                              Sonnet 4.6". The picker lives in the dropdown rows. */}
+                          {triggerModelLabel && (
                             <span className="max-w-[120px] truncate leading-none text-ink-muted">
-                              {selectedModelLabel}
+                              {triggerModelLabel}
                             </span>
                           )}
                           {canOpen && (
@@ -2539,13 +2546,13 @@ export const Composer = ({
                             <div className="border-t border-surface-border p-1">
                               <button
                                 type="button"
-                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-brand transition-colors hover:bg-surface-muted"
+                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
                                 onClick={() => {
                                   setAgentOpen(false);
                                   onAddAgent();
                                 }}
                               >
-                                <Plus className="h-3.5 w-3.5 shrink-0" />
+                                <Plus className="h-4 w-4 shrink-0 text-ink-meta" />
                                 <span className="truncate">
                                   {t(
                                     "conversation.addAgent" as Parameters<
