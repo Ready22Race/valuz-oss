@@ -599,26 +599,56 @@ export const Composer = ({
     const roomRight = window.innerWidth - rect.right;
     setSubmenuSide(roomRight >= needRight ? "right" : "left");
   }, []);
-  // A row's 三级 flyout: grow down from the row top unless it would overflow
-  // the viewport bottom, in which case grow up from the row bottom.
-  const measureRowMenuV = useCallback((el: HTMLDivElement | null) => {
-    if (!el) return;
-    const anchor = el.parentElement?.getBoundingClientRect();
-    if (!anchor) return;
-    setRowMenuVAlign(
-      anchor.top + el.offsetHeight <= window.innerHeight - 8 ? "top" : "bottom",
-    );
-  }, []);
-  // The collapsed "Agent" entry's roster flyout: same grow-down-unless-overflow
-  // rule as the 三级 rows.
-  const measureAgentListV = useCallback((el: HTMLDivElement | null) => {
-    if (!el) return;
-    const anchor = el.parentElement?.getBoundingClientRect();
-    if (!anchor) return;
-    setAgentListVAlign(
-      anchor.top + el.offsetHeight <= window.innerHeight - 8 ? "top" : "bottom",
-    );
-  }, []);
+  // Lay out a nested flyout (a 三级 runtime/model/effort picker, or the Agent
+  // roster): cap its height at a fixed maximum, but snap that cap DOWN to the
+  // last whole row so the bottom item is shown in full rather than sliced in
+  // half. A short list shows at its own height; a long one stops at the cap and
+  // scrolls — the height never grows past the cap.
+  const layoutFlyout = useCallback(
+    (el: HTMLDivElement | null, setAlign: (v: "top" | "bottom") => void) => {
+      if (!el) return;
+      const anchor = el.parentElement?.getBoundingClientRect();
+      if (!anchor) return;
+      const MARGIN = 8;
+      const CHROME = 5; // the flyout's own bottom padding (p-1) + border
+      const CAP = 240; // fixed max height; never grows past this
+      const content = el.scrollHeight;
+      let maxH = Math.min(content, CAP);
+      el.style.maxHeight = `${maxH}px`;
+      if (content > maxH) {
+        // Scrolling is unavoidable — pull the cap up so it ends right after the
+        // last WHOLE row, so the bottom item is never sliced in half. Measured
+        // in viewport coords (precise across border/sub-pixel rounding).
+        const menuRect = el.getBoundingClientRect();
+        const contentBottom = menuRect.bottom - CHROME;
+        let lastFullBottom = 0;
+        for (const row of Array.from(
+          el.querySelectorAll<HTMLElement>("button, [class*='uppercase']"),
+        )) {
+          const rb = row.getBoundingClientRect().bottom;
+          if (rb <= contentBottom + 1) lastFullBottom = rb;
+          else break;
+        }
+        if (lastFullBottom > 0) {
+          maxH = Math.floor(maxH - (menuRect.bottom - (lastFullBottom + CHROME)));
+          el.style.maxHeight = `${maxH}px`;
+        }
+      }
+      // Grow down unless the capped menu would run past the viewport bottom.
+      setAlign(
+        anchor.top + maxH <= window.innerHeight - MARGIN ? "top" : "bottom",
+      );
+    },
+    [],
+  );
+  const measureRowMenuV = useCallback(
+    (el: HTMLDivElement | null) => layoutFlyout(el, setRowMenuVAlign),
+    [layoutFlyout],
+  );
+  const measureAgentListV = useCallback(
+    (el: HTMLDivElement | null) => layoutFlyout(el, setAgentListVAlign),
+    [layoutFlyout],
+  );
   useEffect(() => {
     if (!agentOpen) {
       setAgentSubmenu(null);
@@ -2158,7 +2188,7 @@ export const Composer = ({
                                   <div
                                     ref={measureAgentListV}
                                     className={cn(
-                                      "absolute z-50 flex max-h-[300px] min-w-[200px] flex-col overflow-y-auto rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
+                                      "absolute z-50 flex max-h-[240px] min-w-[200px] flex-col overflow-y-auto rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
                                       submenuSide === "left"
                                         ? "right-full mr-2"
                                         : "left-full ml-2",
@@ -2365,7 +2395,7 @@ export const Composer = ({
                                       <div
                                         ref={measureRowMenuV}
                                         className={cn(
-                                          "absolute z-50 max-h-[300px] min-w-[200px] overflow-y-auto rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
+                                          "absolute z-50 max-h-[240px] min-w-[200px] overflow-y-auto rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
                                           // mr-2/ml-2 (not mr-1): this flyout
                                           // anchors to the row, which sits inside
                                           // the 二级's p-1 padding — the extra 4px
