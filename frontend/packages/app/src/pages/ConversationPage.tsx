@@ -93,6 +93,7 @@ import {
   type UploadedFileItem,
   type ComposerAgentItem,
   type ComposerProjectItem,
+  type ComposerConnector,
 } from "@valuz/ui";
 import { modelLabel } from "@valuz/shared";
 import { t as _t } from "@valuz/shared/i18n";
@@ -650,22 +651,44 @@ export const ConversationPage = () => {
   // pre-select every connected connector at session-creation time so the
   // new session inherits the user's globally-enabled data sources.
   const [selectedMcpSlugs, setSelectedMcpSlugs] = useState<string[]>([]);
+  // Connected connectors shown in the composer "+" menu. On a new conversation
+  // they're toggleable (the selection is handed to the session at creation); on
+  // an existing one they're read-only (connectors lock at creation). Fetched +
+  // defaulted to all-on once on mount, so a new conversation keeps the user's
+  // pick across the new→existing URL transition (which reuses this component).
+  const [connectorOptions, setConnectorOptions] = useState<ComposerConnector[]>(
+    [],
+  );
   const isNewSession = id === NEW_SESSION_ID;
   useEffect(() => {
-    if (!isNewSession) return;
     connectorsApi
       .list()
       .then(({ connectors: list }) => {
-        setSelectedMcpSlugs(
-          list
-            .filter((c) => c.enabled && c.status === "connected")
-            .map((c) => c.slug),
+        const connected = list.filter((c) => c.status === "connected");
+        setConnectorOptions(
+          connected.map((c) => ({
+            slug: c.slug,
+            label: c.display_name,
+            description: c.description ?? undefined,
+          })),
         );
+        setSelectedMcpSlugs(connected.map((c) => c.slug));
       })
       .catch(() => {
         /* non-fatal */
       });
-  }, [isNewSession]);
+    // Mount-only: re-running on the new→existing id change would reset the
+    // user's connector selection right after they created the session.
+  }, []);
+  const toggleConnector = useCallback((slug: string, enabled: boolean) => {
+    setSelectedMcpSlugs((prev) =>
+      enabled
+        ? prev.includes(slug)
+          ? prev
+          : [...prev, slug]
+        : prev.filter((s) => s !== slug),
+    );
+  }, []);
   // Per-``submit_skill`` tool_use state — keyed by tool_use id so multiple
   // submissions in the same conversation render independently. Persists
   // for the lifetime of the page; on refresh the cards re-render in
@@ -1607,13 +1630,6 @@ export const ConversationPage = () => {
   // Whether this conversation's model diverges from the bound agent's default
   // (i.e. the user actually overrode it). Drives the muted model hint in the
   // agent button — hidden until an override happens, so a default chat is clean.
-  const agentModelOverridden = useMemo(
-    () =>
-      !!selectedAgentBrain &&
-      (selectedModelId ?? null) !== (selectedAgentBrain.model ?? null),
-    [selectedAgentBrain, selectedModelId],
-  );
-
   // Slug → display name, so the header chip shows the agent's full name
   // ("研究分析师") rather than the raw kernel slug.
   const agentNameBySlug = useMemo(
@@ -2097,20 +2113,30 @@ export const ConversationPage = () => {
       if (agentParam && myAgents.some((a) => a.slug === agentParam))
         return agentParam;
       if (prev && myAgents.some((a) => a.slug === prev)) return prev;
-      // 10-new-conversation-guidance slice 3: prefer the agent from the last
-      // 临时对话 (per-device memory), then fall back to the first library agent.
-      const lastUsed = getLastTempAgent();
-      if (lastUsed && myAgents.some((a) => a.slug === lastUsed))
-        return lastUsed;
-      // Then the onboarding-seeded Valuz 小助手 as the general default.
-      if (myAgents.some((a) => a.slug === "valuz-helper"))
-        return "valuz-helper";
-      return myAgents[0]?.slug ?? null;
+      // Skill-creator still needs an agent (its create flow binds one), so keep
+      // the old defaulting there: last-used → Valuz 小助手 → first library agent.
+      if (isSkillCreatorMode) {
+        const lastUsed = getLastTempAgent();
+        if (lastUsed && myAgents.some((a) => a.slug === lastUsed))
+          return lastUsed;
+        if (myAgents.some((a) => a.slug === "valuz-helper"))
+          return "valuz-helper";
+        return myAgents[0]?.slug ?? null;
+      }
+      // A normal new conversation now defaults to NO agent — an agentless quick
+      // chat on the global default model (the model-defaults effect seeds it).
+      return null;
     });
     // Re-run only on the data that decides the default — existence of a
-    // session (frozen), the project kind, the candidate roster, and the
-    // explicit ?agent= hand-off.
-  }, [activeProject?.kind, myAgents, selectedSession, agentParam]);
+    // session (frozen), the project kind, the candidate roster, the explicit
+    // ?agent= hand-off, and whether this is the skill-creator flow.
+  }, [
+    activeProject?.kind,
+    myAgents,
+    selectedSession,
+    agentParam,
+    isSkillCreatorMode,
+  ]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Load bound skills for project project context panel
@@ -2175,9 +2201,9 @@ export const ConversationPage = () => {
     // agent. There is no agentless path; the backend derives
     // runtime/model/provider/effort/skills/connectors from the agent, so the
     // model-picker fields below are ignored when it resolves the brain.
-    // handleSend guards the empty-library case; this throw is the
-    // type-narrowing backstop (10-new-conversation-guidance).
-    if (!selectedAgentSlug) {
+    // Skill-creator must bind an agent; a normal conversation may be agentless
+    // (the create below sends ``agent_slug: undefined`` → backend chat path).
+    if (isSkillCreatorMode && !selectedAgentSlug) {
       throw new Error("No agent selected.");
     }
     let created: Awaited<ReturnType<typeof sessionsApi.create>>;
@@ -2199,7 +2225,7 @@ export const ConversationPage = () => {
     } else {
       created = await sessionsApi.create({
         project_id: isChat ? "chat-default" : selectedProjectId,
-        agent_slug: selectedAgentSlug,
+        agent_slug: selectedAgentSlug ?? undefined,
         provider_id: selectedProviderId ?? undefined,
         model_id: selectedModelId ?? undefined,
         runtime_id: selectedRuntimeId ?? undefined,
@@ -2211,7 +2237,7 @@ export const ConversationPage = () => {
     }
     // 10-new-conversation-guidance slice 3: remember which agent this 临时对话
     // used so the next new conversation pre-selects it.
-    if (isChat) setLastTempAgent(selectedAgentSlug);
+    if (isChat && selectedAgentSlug) setLastTempAgent(selectedAgentSlug);
     // Update local state IMMEDIATELY (before navigate / sendMessage)
     // so the rest of ``handleSend`` and the SSE subscription closures
     // — which capture ``selectedProjectId`` and friends — see the
@@ -2688,11 +2714,10 @@ export const ConversationPage = () => {
   // uploads — it just mints/reuses the session and posts the message.
   const performSend = async () => {
     if (!draft.trim() || sending) return;
-    // 10-new-conversation-guidance: every conversation binds an agent. A new
-    // 临时对话 with an empty library / no pick has no agent — nudge the user to
-    // pick (via the 🤖 「+ Agent」 menu or the banner) instead of creating a
-    // session with a null agent.
-    if (!selectedSession && !selectedAgentSlug) {
+    // Skill-creator binds an agent (its create flow needs one) — nudge if none.
+    // A normal new 临时对话 may now be agentless (a quick chat on the default
+    // model), so it sends without an agent pick.
+    if (!selectedSession && !selectedAgentSlug && isSkillCreatorMode) {
       toast.error(_t("conversation.selectAgentFirst" as I18nKey));
       return;
     }
@@ -4367,15 +4392,15 @@ export const ConversationPage = () => {
             // EXISTING temp session runtime/model are read-only (frozen,
             // ADR-006) but visible, and effort stays editable (live-reconcile).
             allowAgentBrainOverride={!isProjectProject}
-            agentModelOverridden={agentModelOverridden}
             // ADR-006: once a session exists both chips freeze (the locked
             // 🤖 chip shows the bound ``sessionAgentSlug``).
             agentLocked={selectedSession != null}
             onAgentChange={(slug) => {
               setSelectedAgentSlug(slug);
-              // Clear the "touched" flag so the override re-seeds from the
-              // newly-bound agent's brain (see the seeding effect).
-              setComposerTouched(false);
+              // Switching to an agent re-seeds runtime/model/effort from that
+              // agent's brain. Picking "Default" (slug = null) keeps whatever
+              // you already chose in the rows below — don't reset it.
+              if (slug) setComposerTouched(false);
             }}
             // 09-assistant 📁 project chip: switches the draft between 临时对话
             // (chat-default) and a project project. The page stores the
@@ -4480,6 +4505,12 @@ export const ConversationPage = () => {
             }}
             onLocalUpload={handleLocalFilesAttach}
             onFileDrop={handleLocalFilesAttach}
+            connectors={connectorOptions}
+            selectedConnectorSlugs={selectedMcpSlugs}
+            onToggleConnector={toggleConnector}
+            connectorsReadOnly={!isNewSession}
+            onManageSkills={() => navigate("/skills")}
+            onManageConnectors={() => navigate("/connectors")}
           />
           <AttachmentParsingDialog
             open={parsingConfirmOpen}
