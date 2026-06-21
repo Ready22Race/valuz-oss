@@ -60,6 +60,51 @@ def test_symlink_reflects_live_source_edits(tmp_path: Path) -> None:
     assert (root / "alpha" / "SKILL.md").read_text(encoding="utf-8") == "# edited\n"
 
 
+# -- Cyclic / self-referential sources are skipped, not linked --------------
+
+
+def test_skips_source_living_inside_skills_root(tmp_path: Path) -> None:
+    """A skill authored in-place under ``.agents/skills`` must not be linked to
+    itself. ``os.symlink(abspath(src), src)`` would create a self-referential
+    link whose ``SKILL.md`` then raises ``OSError(ELOOP)`` on read."""
+    cwd = tmp_path / "cwd"
+    skills_root = cwd / ".agents" / "skills"
+    in_place = skills_root / "autoplan"
+    in_place.mkdir(parents=True)
+    (in_place / "SKILL.md").write_text("# autoplan\n", encoding="utf-8")
+
+    root = Path(sm.prepare_deepagents_skills(str(cwd), [str(in_place)]))
+
+    # The real directory is left exactly where it sits — readable, not a link.
+    assert not (root / "autoplan").is_symlink()
+    assert (root / "autoplan" / "SKILL.md").read_text(encoding="utf-8") == "# autoplan\n"
+    # ...and it is not recorded as a managed entry.
+    manifest = _manifest(cwd, sm.AGENTS_MANIFEST)
+    assert manifest == {"managed": []}
+
+
+def test_skips_source_reaching_skills_root_through_symlink(tmp_path: Path) -> None:
+    """Indirect cycles (the user-library entry is itself a symlink back into the
+    project skills root) are caught on the real, resolved path."""
+    cwd = tmp_path / "cwd"
+    skills_root = cwd / ".agents" / "skills"
+    skills_root.mkdir(parents=True)
+    materialized = skills_root / "autoplan"
+    materialized.mkdir()
+    (materialized / "SKILL.md").write_text("# autoplan\n", encoding="utf-8")
+
+    # A user-library path that resolves (via symlink) back into the skills root.
+    lib = tmp_path / "lib" / "autoplan"
+    lib.parent.mkdir(parents=True)
+    lib.symlink_to(materialized, target_is_directory=True)
+
+    root = Path(sm.prepare_deepagents_skills(str(cwd), [str(lib)]))
+
+    assert not (root / "autoplan").is_symlink()
+    manifest = _manifest(cwd, sm.AGENTS_MANIFEST)
+    assert manifest == {"managed": []}
+
+
 # -- Windows fallback: copy when the link primitive is unavailable ----------
 
 
