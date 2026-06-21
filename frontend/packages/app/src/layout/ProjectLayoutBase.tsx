@@ -81,6 +81,8 @@ import {
 } from "../components/DecisionInbox";
 import { usePlatform } from "../platform";
 import { UpdateButton } from "../components/UpdateButton";
+import { useAgentDeployPicker } from "../components/agent-deploy-picker";
+import { AgentCheckboxList } from "../components/AgentDeployField";
 import type { ProjectOutletContext } from "./types";
 
 export type DirectoryFieldMode = "input" | "picker";
@@ -178,6 +180,8 @@ export function ProjectLayoutBase({
   const [newName, setNewName] = useState("");
   const [newRootPath, setNewRootPath] = useState("");
   const [createError, setCreateError] = useState("");
+  // Initial members for the create dialog (shared with the projects-page entry).
+  const memberPicker = useAgentDeployPicker();
   const [historyIdx, setHistoryIdx] = useState<number>(
     () => (window.history.state as { idx?: number } | null)?.idx ?? 0,
   );
@@ -481,9 +485,14 @@ export function ProjectLayoutBase({
         name: trimmedName,
         root_path: trimmedPath,
       });
+      const failed = await memberPicker.deploy(ws.id);
+      if (failed > 0) {
+        toast.warning(t("project.deployPartialFail", { count: failed }));
+      }
       toast.success(t("project.created", { name: trimmedName }));
       setNewName("");
       setNewRootPath("");
+      memberPicker.reset();
       setCreateOpen(false);
       await fetchProjects();
       navigate(`/projects/${ws.id}`);
@@ -857,7 +866,10 @@ export function ProjectLayoutBase({
         open={createOpen}
         onOpenChange={(open) => {
           setCreateOpen(open);
-          if (!open) setCreateError("");
+          if (!open) {
+            setCreateError("");
+            memberPicker.reset();
+          }
         }}
       >
         <DialogContent>
@@ -927,6 +939,12 @@ export function ProjectLayoutBase({
               {createError ? (
                 <p className="text-xs text-destructive">{createError}</p>
               ) : null}
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground">
+                {t("project.deployAgents")}
+              </label>
+              <AgentCheckboxList picker={memberPicker} />
             </div>
             {projectDialogExtraFields}
           </div>
