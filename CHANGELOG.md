@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build — which ran under Rosetta (slow) and tripped macOS's "Intel app" warning.
   A merge step now combines both arches into a single `latest-mac.yml`, so each
   Mac auto-updates to its native build; Apple Silicon users on the Intel 0.2.2
-  update straight to the arm64 build here. (#238 @St0neWan9)
+  update straight to the arm64 build here. (#240 @St0neWan9)
 
 ## [0.2.2] - 2026-06-22
 
