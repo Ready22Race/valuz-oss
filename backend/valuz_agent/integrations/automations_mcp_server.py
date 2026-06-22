@@ -143,9 +143,7 @@ async def _build_automation_service(db: Any) -> Any:
     plumbing. The settings-preferences helpers are async and awaited directly
     on the given async ``db`` session.
     """
-    from valuz_agent.infra.config import settings
     from valuz_agent.infra.eventbus import event_bus
-    from valuz_agent.infra.secret_store import FileSecretStore
     from valuz_agent.modules.agents.service import AgentService
     from valuz_agent.modules.automations.service import AutomationService
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
@@ -166,10 +164,7 @@ async def _build_automation_service(db: Any) -> Any:
         datastore=ProjectDatastore(db),
         event_bus=event_bus,
     )
-    connector_svc = ConnectorService(
-        datastore=ConnectorDatastore(db),
-        secrets=FileSecretStore(settings.secrets_dir),
-    )
+    connector_svc = ConnectorService(datastore=ConnectorDatastore(db))
     agent_svc = AgentService(db=db, connector_service=connector_svc)
     return AutomationService(
         db=db,

@@ -131,10 +131,7 @@ def cleanup_seed_agents_cmd() -> None:
         deleted: list[str] = []
         skipped: list[tuple[str, str]] = []
         async with async_unit_of_work() as db:
-            connector_svc = ConnectorService(
-                datastore=ConnectorDatastore(db),
-                secrets=None,  # type: ignore[arg-type]
-            )
+            connector_svc = ConnectorService(datastore=ConnectorDatastore(db))
             svc = AgentService(db=db, connector_service=connector_svc)  # type: ignore[arg-type]
             for row in await svc.list_agents(resolve_local_user_id(), source="official"):
                 if row.slug in keep:

@@ -22,7 +22,7 @@ from valuz_agent.modules.agent_packs.service import AgentPackService
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.agents.service import AgentService
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
-from valuz_agent.modules.connectors.models import ConnectorRow
+from valuz_agent.modules.connectors.models import ConnectorAttrRow, ConnectorRow
 from valuz_agent.modules.connectors.service import ConnectorService
 
 USER = "user-1"
@@ -48,6 +48,7 @@ async def _build_service(workdir):  # type: ignore[no-untyped-def]
                 AgentRow.__table__,
                 ProjectMemberRow.__table__,
                 ConnectorRow.__table__,
+                ConnectorAttrRow.__table__,
             ],
         )
     session = async_sessionmaker(bind=engine, expire_on_commit=False)()

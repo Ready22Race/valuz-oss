@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.api.deps import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.models import AuthType, ConnectorRow, TransportType
@@ -29,10 +28,16 @@ from valuz_agent.modules.connectors.service import (
     build_overrides,
     merge_params_into_url,
 )
+from valuz_agent.ports.extensions import ext
 
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
 logger = logging.getLogger(__name__)
+
+
+def _pkce_cache_key(state: str) -> str:
+    """Namespaced ``ext.cache`` key for a connector OAuth PKCE handoff."""
+    return f"connector:oauth_pkce:{state}"
 
 
 # RFC 7230 token charset — also a safe (conservative) query-param name set.
@@ -286,12 +291,7 @@ class CreateConnectorResponse(BaseModel):
 async def _get_service(
     db: AsyncSession = Depends(get_async_session),
 ) -> ConnectorService:
-    from valuz_agent.infra.config import settings
-
-    return ConnectorService(
-        datastore=ConnectorDatastore(db),
-        secrets=FileSecretStore(settings.secrets_dir),
-    )
+    return ConnectorService(datastore=ConnectorDatastore(db))
 
 
 # ---------------------------------------------------------------------------
@@ -531,20 +531,24 @@ async def create_connector(
             existing.updated_at = now_ms()
             saved_row = await svc._ds.update(existing)
 
-        connector_id = saved_row.id
-        secrets = FileSecretStore(_settings.secrets_dir)
-        pkce_payload = json.dumps(
-            {
-                "connector_id": connector_id,
-                "user_id": user_id,
-                "code_verifier": code_verifier,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "server_url": server_url,
-                "redirect_uri": redirect_uri,
-            }
+        # Stash the transient PKCE handoff in the ephemeral state store (a file
+        # store locally, Redis on the shared backend), keyed by the unguessable
+        # ``state`` and expiring after a few minutes.
+        await ext.cache.set(
+            _pkce_cache_key(state),
+            json.dumps(
+                {
+                    "connector_id": saved_row.id,
+                    "user_id": user_id,
+                    "code_verifier": code_verifier,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "server_url": server_url,
+                    "redirect_uri": redirect_uri,
+                }
+            ),
+            ttl_seconds=600,
         )
-        secrets.put(f"connector/oauth_state/{state}", pkce_payload)
 
         return CreateConnectorResponse(
             id=saved_row.id,
@@ -590,10 +594,7 @@ async def create_connector(
     async def _background_probe() -> None:
         try:
             async with _async_unit_of_work() as db:
-                bg_svc = ConnectorService(
-                    datastore=ConnectorDatastore(db),
-                    secrets=FileSecretStore(_settings.secrets_dir),
-                )
+                bg_svc = ConnectorService(datastore=ConnectorDatastore(db))
                 await _probe_connector(connector_id_nonauth, bg_svc, user_id)
         except Exception as exc:
             logger.warning("Background probe failed for %s: %s", connector_id_nonauth, exc)
@@ -823,7 +824,7 @@ async def oauth_callback(
     The browser is redirected here by the authorization server after the
     user grants access. This endpoint:
 
-    1. Looks up the PKCE state blob from FileSecretStore.
+    1. Looks up the PKCE handoff in the ephemeral state store, keyed by ``state``.
     2. Exchanges the code for an ``OAuthToken``.
     3. Stores the token JSON at ``connector/{id}/oauth_token``.
     4. Sets the connector status to ``connected`` + ``enabled=True``.
@@ -831,16 +832,11 @@ async def oauth_callback(
     6. Returns a tiny HTML page that signals success to the Electron shell
        (or shows an error).
     """
-    from valuz_agent.infra.config import settings as _settings
     from valuz_agent.integrations.connector_oauth import McpOauthHelper, persist_oauth_token
 
-    secrets = FileSecretStore(_settings.secrets_dir)
-    state_key = f"connector/oauth_state/{state}"
-    pkce_json = secrets.get(state_key)
-
+    pkce_json = await ext.cache.get(_pkce_cache_key(state))
     if not pkce_json:
         return _oauth_html_result(ok=False, error="OAuth state not found or expired")
-
     try:
         pkce = json.loads(pkce_json)
     except json.JSONDecodeError:
@@ -894,14 +890,15 @@ async def oauth_callback(
             row.error_message = str(exc)
             row.updated_at = now_ms()
             await ds.update(row)
+            await ext.cache.delete(_pkce_cache_key(state))
             return _oauth_html_result(ok=False, error=str(exc))
         finally:
             await helper.close()
 
-        # Persist the token + an absolute-expiry sidecar so the runtime resolver
-        # can refresh proactively before the token lapses.
-        persist_oauth_token(connector_id, token, secrets, now_ms())
-        secrets.delete(state_key)
+        # Persist the token onto the row (with its absolute expiry); the final
+        # ds.update below commits it with the connected status.
+        persist_oauth_token(row, token, now_ms())
+        await ext.cache.delete(_pkce_cache_key(state))
 
         # Probe tools BEFORE writing status=connected so that tool_count and
         # status land in the DB together — no race with the frontend poller.
@@ -1218,17 +1215,12 @@ async def update_connector(
 
     # Re-probe if connection params changed (status was reset to "connecting")
     if view.status == "connecting":
-        from valuz_agent.infra.config import settings as _settings
-
         _cid = view.id
 
         async def _background_probe() -> None:
             try:
                 async with async_unit_of_work() as db:
-                    bg_svc = ConnectorService(
-                        datastore=ConnectorDatastore(db),
-                        secrets=FileSecretStore(_settings.secrets_dir),
-                    )
+                    bg_svc = ConnectorService(datastore=ConnectorDatastore(db))
                     await _probe_connector(_cid, bg_svc, user_id)
             except Exception as exc:
                 logger.warning("Background probe failed for %s: %s", _cid, exc)
@@ -1465,13 +1457,11 @@ async def _probe_connector(
         ov_headers: dict[str, str] = {}
         ov_params: dict[str, str] = {}
     else:
-        ov_headers, ov_params = build_overrides(row2, FileSecretStore(_settings.secrets_dir))
+        ov_headers, ov_params = build_overrides(row2)
 
     if view.auth_type == "oauth":
         # OAuth layers on AFTER build_overrides — mirrors the resolver.
-        token_json = FileSecretStore(_settings.secrets_dir).get(
-            f"connector/{connector_id}/oauth_token"
-        )
+        token_json = row2.oauth_token_json if row2 is not None else None
         if token_json:
             try:
                 from mcp.shared.auth import OAuthToken
@@ -1538,16 +1528,14 @@ async def _probe_connector(
                 from valuz_agent.integrations.connector_oauth import try_refresh_connector_token
 
                 new_access = await try_refresh_connector_token(
-                    connector_id=connector_id,
-                    server_url=row2.url or "",
-                    oauth_metadata_json=row2.oauth_metadata_json,
-                    oauth_client_info_json=row2.oauth_client_info_json,
+                    row2,
                     redirect_uri=f"{_settings.backend_base_url}/v1/connectors/oauth/callback",
-                    secrets=FileSecretStore(_settings.secrets_dir),
                     now_ms=now_ms(),
                 )
                 if not new_access:
                     raise
+                # Persist the refreshed token columns before retrying the probe.
+                await svc._ds.update(row2)
                 ov_headers["Authorization"] = f"Bearer {new_access}"
                 tool_infos = await _attempt()
             else:
