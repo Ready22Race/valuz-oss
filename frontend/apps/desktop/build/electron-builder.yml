@@ -116,13 +116,13 @@ afterSign: build/afterSign.cjs
 # (src/main/updater.ts) reads app-update.yml at runtime unless
 # VALUZ_UPDATER_URL overrides it.
 #
-# Live feed is hosted on Tencent COS + Tencent CDN (files.valuz.io). The
+# Live feed is hosted on Tencent COS + Tencent CDN (files.valuz.cn). The
 # generic provider only stamps app-update.yml with the feed URL — it does
 # NOT perform HTTP uploads (unlike the GitHub provider). CI uploads the
 # artifacts and manifests via scripts/upload-to-cos.sh (wrapping `tccli cos`).
 # See docs/superpowers/specs/2026-06-22-tencent-cos-auto-update-design.md.
 #
-# VALUZ_UPDATER_URL defaults to https://files.valuz.io/valuz-${EDITION}/
+# VALUZ_UPDATER_URL defaults to https://files.valuz.cn/valuz-${EDITION}/
 # (set in scripts/build-desktop.sh). Override locally for testing.
 publish:
   provider: generic

@@ -166,7 +166,7 @@ jobs:
           gh release upload "$TAG" "${files[@]}" --clobber --repo valuz-ai/valuz-oss
 
       # ── Mirror artifacts + live manifest to Tencent COS ────────────
-      # Auto-update reads from COS via CDN (files.valuz.io); GitHub Releases
+      # Auto-update reads from COS via CDN (files.valuz.cn); GitHub Releases
       # is the manual-download + backup path. The merge job overwrites this
       # single-arch manifest with a merged multi-arch one on a full tag push.
       # On a single-platform mac dispatch (merge skipped) this becomes live.
@@ -473,7 +473,7 @@ jobs:
           gh release upload "$TAG" "${files[@]}" --clobber --repo valuz-ai/valuz-oss
 
       # ── Mirror artifacts + live manifest to Tencent COS ────────────
-      # Auto-update reads from COS via CDN (files.valuz.io); GitHub Releases
+      # Auto-update reads from COS via CDN (files.valuz.cn); GitHub Releases
       # is the manual-download + backup path.
       - name: Setup tccli
         run: pip install tccli
@@ -613,7 +613,7 @@ jobs:
           gh release upload "$TAG" "${files[@]}" --clobber --repo valuz-ai/valuz-oss
 
       # ── Mirror artifacts + live manifest to Tencent COS ────────────
-      # Auto-update reads from COS via CDN (files.valuz.io); GitHub Releases
+      # Auto-update reads from COS via CDN (files.valuz.cn); GitHub Releases
       # is the manual-download + backup path. shell: bash because the windows
       # runner default is pwsh.
       - name: Setup tccli
@@ -701,7 +701,7 @@ jobs:
           PY
       # Merged latest-mac.yml goes to BOTH targets: GitHub Releases (manual
       # download + backup) and Tencent COS (the live auto-update feed, CDN-served
-      # via files.valuz.io). This is the authoritative mac manifest — overwrites
+      # via files.valuz.cn). This is the authoritative mac manifest — overwrites
       # whatever the individual mac jobs pushed as single-arch manifests.
       - name: Setup tccli
         run: pip install tccli
@@ -735,4 +735,4 @@ jobs:
             --bucket "$TENCENT_COS_BUCKET" \
             --local-path latest-mac.yml.live \
             --cos-path "/${VALUZ_EDITION}/latest-mac.yml"
-          echo "Live mac manifest: https://files.valuz.io/${VALUZ_EDITION}/latest-mac.yml"
+          echo "Live mac manifest: https://files.valuz.cn/${VALUZ_EDITION}/latest-mac.yml"

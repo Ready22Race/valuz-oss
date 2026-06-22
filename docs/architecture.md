@@ -278,8 +278,8 @@ desktop implementations.
 ### Auto-update feed
 
 The desktop client's auto-updater reads from Tencent COS + Tencent CDN
-(`files.valuz.io`), not GitHub Releases. The packaged client's `app-update.yml`
-points at `https://files.valuz.io/valuz-<edition>/`; the manifests
+(`files.valuz.cn`), not GitHub Releases. The packaged client's `app-update.yml`
+points at `https://files.valuz.cn/valuz-<edition>/`; the manifests
 `latest-mac.yml` / `latest-linux-arm64.yml` / `latest.yml` live at that base.
 CI uploads every build to both Tencent COS (auto-update feed) and GitHub
 Releases (manual download + backup) — see
