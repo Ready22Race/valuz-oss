@@ -35,6 +35,22 @@ export default defineConfig({
       `${resolvePath("./apps")}/**/src/**/*.test.{ts,tsx}`,
       `${resolvePath("./packages")}/**/src/**/*.test.{ts,tsx}`,
     ],
-    exclude: ["**/node_modules/**", "**/dist/**", "**/.turbo/**"],
+    // ``**/node_modules/**`` alone does NOT stop the duplication: pnpm
+    // symlinks every ``@valuz/*`` package into the other packages' (and
+    // apps') ``node_modules``, and the include globs' ``**`` follows those
+    // symlinks. Worse, the links nest
+    // (``apps/desktop/node_modules/@valuz/app/node_modules/@valuz/core/…``),
+    // so the same ``packages/<pkg>/src/**`` test files get collected
+    // combinatorially — ~36× — ballooning one run to 10k+ tests / 1k+ files
+    // and making it appear to hang. The ``/@valuz/`` path segment only ever
+    // appears on those symlink-traversed copies (real sources live under
+    // ``packages/<pkg>/src``), so excluding it collapses the run back to the
+    // real ~57 files without dropping any genuine test.
+    exclude: [
+      "**/node_modules/**",
+      "**/@valuz/**",
+      "**/dist/**",
+      "**/.turbo/**",
+    ],
   },
 });
