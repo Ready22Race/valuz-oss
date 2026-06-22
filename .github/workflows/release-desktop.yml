@@ -664,6 +664,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Needed for the later "Setup coscli" / COS-upload steps, which run
+      # scripts/install-coscli.sh and scripts/upload-to-cos.sh — this job
+      # otherwise only downloads artifacts and never checks the repo out.
+      - name: Check out
+        uses: actions/checkout@v4
       - name: Download arm64 manifest
         uses: actions/download-artifact@v4
         with:
