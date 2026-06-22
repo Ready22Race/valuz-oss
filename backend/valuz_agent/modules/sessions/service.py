@@ -99,6 +99,34 @@ from valuz_agent.modules.skills.datastore import SkillDatastore
 logger = logging.getLogger(__name__)
 
 
+async def _enforce_budget(session: object) -> None:
+    """Channel-aware wallet pre-check before a turn runs.
+
+    Resolves the session's owner and its **locked channel** (``locked_provider_id``)
+    and hands both to the billing port. Passing the channel lets a billing
+    overlay skip enforcement for channels it does not meter — a user's own
+    direct API-key channel or an org BYOK channel never consume platform
+    credits, so an empty wallet must not block them. Raises ``BudgetExceeded``
+    (carrying the overlay's i18n key) when the port rejects.
+    """
+    from valuz_agent.infra.auth_context import get_current_user_id
+    from valuz_agent.ports.extensions import ext
+
+    uid = session.metadata.get("owner_user_id") or get_current_user_id()  # type: ignore[attr-defined]
+    if uid is None:
+        # Explicit-identity contract: budget enforcement without an owner is
+        # meaningless — fail loudly rather than bill nobody.
+        raise LookupError("owner context not set — cannot check budget")
+    locked = _valuz_meta(session).get("locked_provider_id")
+    budget = await ext.billing.check_budget(uid, provider_id=str(locked) if locked else None)
+    if not budget.allowed:
+        raise BudgetExceeded(
+            budget.reason or "insufficient credits",
+            message_key=budget.message_key,
+            message_params=budget.message_params,
+        )
+
+
 # ---------------------------------------------------------------------------
 # SessionService
 # ---------------------------------------------------------------------------
@@ -998,21 +1026,7 @@ class SessionService:
         if status in ("cancelled", "archived"):
             raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
 
-        from valuz_agent.infra.auth_context import get_current_user_id
-        from valuz_agent.ports.extensions import ext
-
-        uid = session.metadata.get("owner_user_id") or get_current_user_id()
-        if uid is None:
-            # Explicit-identity contract: budget enforcement without an owner
-            # is meaningless — fail loudly rather than bill nobody.
-            raise LookupError("owner context not set — cannot check budget")
-        budget = await ext.billing.check_budget(uid)
-        if not budget.allowed:
-            raise BudgetExceeded(
-                budget.reason or "insufficient credits",
-                message_key=budget.message_key,
-                message_params=budget.message_params,
-            )
+        await _enforce_budget(session)
 
         old_status = status
 
@@ -1088,19 +1102,7 @@ class SessionService:
         if status in ("cancelled", "archived"):
             raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
 
-        from valuz_agent.infra.auth_context import get_current_user_id
-        from valuz_agent.ports.extensions import ext
-
-        uid = session.metadata.get("owner_user_id") or get_current_user_id()
-        if uid is None:
-            raise LookupError("owner context not set — cannot check budget")
-        budget = await ext.billing.check_budget(uid)
-        if not budget.allowed:
-            raise BudgetExceeded(
-                budget.reason or "insufficient credits",
-                message_key=budget.message_key,
-                message_params=budget.message_params,
-            )
+        await _enforce_budget(session)
 
         # Mirror ``send_message``: flip the session to ``status="running"``
         # before driving the turn. The frontend's auto-resume effect on

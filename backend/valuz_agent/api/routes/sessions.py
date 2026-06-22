@@ -20,10 +20,10 @@ from valuz_agent.modules.sessions.dto import (
     SessionListItem,
     SessionRunResponse,
 )
+from valuz_agent.modules.sessions.errors import BudgetExceeded
 from valuz_agent.modules.sessions.models import SessionAttachmentRow
 from valuz_agent.modules.sessions.schemas import SessionEffortRequest, SessionModelSelection
 from valuz_agent.modules.sessions.service import SessionService
-from valuz_agent.ports.extensions import ext
 
 logger = logging.getLogger(__name__)
 
@@ -291,25 +291,26 @@ async def send_message(
     """Start agent execution in background. Returns immediately with running status."""
     from valuz_agent.infra.auth_context import get_current_user_id
 
-    user_id = get_current_user_id()
-    if user_id is None:
+    if get_current_user_id() is None:
         raise HTTPException(status_code=401, detail="Unauthenticated")
-    budget = await ext.billing.check_budget(user_id, estimated_cost=0.0)
-    if not budget.allowed:
-        # Structured detail: an overlay (e.g. commercial billing) may attach an
-        # i18n ``key`` (+ ``params``) for the client to render; ``message`` is
-        # the no-translation fallback. OSS/Noop only ever sets ``message``.
+    try:
+        return await svc.send_message(
+            session_id, body.prompt, provider_id=body.provider_id, model_id=body.model_id
+        )
+    except BudgetExceeded as exc:
+        # The session service runs a channel-aware wallet pre-check before the
+        # turn. Surface its rejection as a 402 carrying the overlay's i18n
+        # ``key`` (+ ``params``) for the client to render; ``message`` is the
+        # no-translation fallback. (The global ValuzError handler returns 400
+        # and drops ``message_key``, so map it explicitly here.)
         raise HTTPException(
             status_code=402,
             detail={
-                "message_key": budget.message_key,
-                "message_params": budget.message_params,
-                "message": budget.reason or "Budget exceeded",
+                "message_key": exc.message_key,
+                "message_params": exc.message_params,
+                "message": exc.message or "Budget exceeded",
             },
-        )
-    return await svc.send_message(
-        session_id, body.prompt, provider_id=body.provider_id, model_id=body.model_id
-    )
+        ) from exc
 
 
 @router.post("/{session_id}/messages/sync")

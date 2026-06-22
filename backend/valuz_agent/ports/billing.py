@@ -49,8 +49,23 @@ class BillingPort(Protocol):
         """Record a billable event."""
         ...
 
-    async def check_budget(self, user_id: str, estimated_cost: float = 0.0) -> BudgetStatus:
-        """Check whether the user has sufficient budget to proceed."""
+    async def check_budget(
+        self,
+        user_id: str,
+        estimated_cost: float = 0.0,
+        *,
+        provider_id: str | None = None,
+    ) -> BudgetStatus:
+        """Check whether the user has sufficient budget to proceed.
+
+        ``provider_id`` is the **effective channel** the upcoming turn will use
+        — the session's locked channel (or a request override). A billing
+        overlay MAY use it to skip enforcement for channels it does not meter:
+        e.g. a user's own direct API-key channel or an org BYOK channel never
+        consume platform credits, so an empty wallet must not block them. When
+        ``None`` (the caller could not resolve a channel) the provider should
+        apply its default policy.
+        """
         ...
 
     async def get_balance(self, user_id: str) -> Balance:
@@ -64,7 +79,13 @@ class NoopBillingProvider:
     async def meter(self, event: MeterEvent) -> None:
         pass
 
-    async def check_budget(self, user_id: str, estimated_cost: float = 0.0) -> BudgetStatus:
+    async def check_budget(
+        self,
+        user_id: str,
+        estimated_cost: float = 0.0,
+        *,
+        provider_id: str | None = None,
+    ) -> BudgetStatus:
         return BudgetStatus(allowed=True)
 
     async def get_balance(self, user_id: str) -> Balance:

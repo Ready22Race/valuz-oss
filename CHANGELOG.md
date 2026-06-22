@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Billing pre-check is now channel-aware: `BillingPort.check_budget` takes the
+  session's effective `provider_id`, so a billing overlay can skip enforcement
+  for channels it does not meter (a user's own direct API-key channel, org
+  BYOK). Previously an empty wallet blocked *every* turn — including channels
+  that never spend a platform credit — with "insufficient balance". The
+  duplicated route-level pre-check was folded into the session service so there
+  is a single, channel-aware gate.
+
 ## [0.2.1] - 2026-06-18
 
 ### Features
