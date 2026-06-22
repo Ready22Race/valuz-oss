@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # upload-to-cos.sh — Upload desktop release artifacts to Tencent COS.
 #
+# Uses coscli (Tencent's official Go CLI for COS). tccli does NOT have a cos
+# subcommand — COS has its own API surface separate from the Tencent Cloud API
+# 3.0 that tccli wraps. See scripts/install-coscli.sh for setup.
+#
 # Uploads two things from a release directory:
 #   1. Every distributable artifact (*.dmg, *.zip, *.exe, *.AppImage, *.deb,
 #      *.blockmap, latest*.yml) to ${EDITION}/v${VERSION}/ — immutable per release.
@@ -62,46 +66,64 @@ fi
 for v in TENCENT_SECRET_ID TENCENT_SECRET_KEY TENCENT_COS_BUCKET TENCENT_COS_REGION; do
   [ -n "${!v:-}" ] || { echo "ERROR: env $v required when not --dry-run" >&2; exit 1; }
 done
-command -v tccli >/dev/null 2>&1 || { echo "ERROR: tccli not installed (pip install tccli)" >&2; exit 1; }
+command -v coscli >/dev/null 2>&1 || { echo "ERROR: coscli not installed (run scripts/install-coscli.sh)" >&2; exit 1; }
 
-tccli configure set \
-  secretId   "$TENCENT_SECRET_ID" \
-  secretKey  "$TENCENT_SECRET_KEY" \
-  region     "$TENCENT_COS_REGION"
+# coscli reads its bucket / credential config from ~/.coscli/config.yaml. The
+# bucket alias is "valuz" — every COS path below uses cos://valuz/<key>. The
+# TENCENT_COS_BUCKET secret must already be in <name>-<appid> form (standard
+# Tencent COS naming — coscli rejects a bare bucket name).
+COS_CONFIG_DIR="$HOME/.coscli"
+mkdir -p "$COS_CONFIG_DIR"
+cat > "$COS_CONFIG_DIR/config.yaml" <<YAML
+cos:
+  base:
+    secretid: ${TENCENT_SECRET_ID}
+    secretkey: ${TENCENT_SECRET_KEY}
+    sessiontoken: ""
+  buckets:
+    - name: ${TENCENT_COS_BUCKET}
+      alias: valuz
+      region: ${TENCENT_COS_REGION}
+YAML
 
+# Upload all distributable artifacts to the versioned (immutable) prefix.
+# coscli's --include filters are glob patterns matched against the full local
+# path; multiple --include flags OR together. Ship only the artifacts that
+# electron-builder produces for distribution + the latest*.yml manifests. The
+# release dir also contains builder-internal files (*.yaml, unpacked/ dirs)
+# we don't want on the CDN.
 echo "[cos] Uploading artifacts → /${VERSIONED_PREFIX}/"
-tccli cos UploadBunch \
-  --bucket     "$TENCENT_COS_BUCKET" \
-  --local-path "$RELEASE_DIR" \
-  --cos-dir    "/${VERSIONED_PREFIX}/" \
-  --include    "*.dmg;*.zip;*.exe;*.AppImage;*.deb;*.blockmap;latest*.yml" \
-  --skip-dotdir \
-  --recursive
+coscli cp "$RELEASE_DIR" "cos://valuz/${VERSIONED_PREFIX}/" \
+  --recursive \
+  --include "*.dmg" \
+  --include "*.zip" \
+  --include "*.exe" \
+  --include "*.AppImage" \
+  --include "*.deb" \
+  --include "*.blockmap" \
+  --include "latest*.yml" \
+  --force
 
+# Overwrite each named manifest at the live prefix, with url:/path: fields
+# rewritten to carry the v${VERSION}/ prefix. The live manifest sits at
+# ${LIVE_PREFIX}/<name>, but its artifacts live one level down at
+# ${VERSIONED_PREFIX}/. electron-builder emits the manifest with bare filenames
+# (url: Valuz-x.y.z-arm64.dmg), which would resolve to ${LIVE_PREFIX}/Valuz-... —
+# a 404. The rewrite fixes that. The versioned copy above keeps the bare URLs
+# because the artifacts sit next to it.
 for m in $MANIFESTS; do
   if [ ! -f "$RELEASE_DIR/$m" ]; then
     echo "WARN: manifest $m not in $RELEASE_DIR — skipping live copy" >&2
     continue
   fi
 
-  # The live manifest sits at ${LIVE_PREFIX}/<name>, but its artifacts live
-  # one level down at ${VERSIONED_PREFIX}/. electron-builder emits the
-  # manifest with bare filenames (url: Valuz-x.y.z-arm64.dmg), which would
-  # resolve to ${LIVE_PREFIX}/Valuz-x.y.z-arm64.dmg — a 404. Rewrite the
-  # url:/path: fields to carry the v${VERSION}/ prefix so they resolve
-  # correctly. The original manifest is already archived unchanged at
-  # ${VERSIONED_PREFIX}/<name> by UploadBunch above; its relative URLs
-  # work bare because the artifacts sit next to it.
   tmp="$(mktemp)"
   sed -e 's|url: |url: v'"${VERSION}"'/|g' \
       -e 's|^path: |path: v'"${VERSION}"'/|' \
       "$RELEASE_DIR/$m" > "$tmp"
 
   echo "[cos] $m → /${LIVE_PREFIX}/${m} (artifacts prefixed with v${VERSION}/)"
-  tccli cos PutObject \
-    --bucket     "$TENCENT_COS_BUCKET" \
-    --local-path "$tmp" \
-    --cos-path   "/${LIVE_PREFIX}/${m}"
+  coscli cp "$tmp" "cos://valuz/${LIVE_PREFIX}/${m}" --force
   rm -f "$tmp"
 done
 

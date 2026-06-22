@@ -170,8 +170,8 @@ jobs:
       # is the manual-download + backup path. The merge job overwrites this
       # single-arch manifest with a merged multi-arch one on a full tag push.
       # On a single-platform mac dispatch (merge skipped) this becomes live.
-      - name: Setup tccli
-        run: pip install tccli
+      - name: Setup coscli
+        run: bash scripts/install-coscli.sh
 
       - name: Upload to Tencent COS
         env:
@@ -331,8 +331,8 @@ jobs:
       # ── Mirror artifacts + live manifest to Tencent COS ────────────
       # See build-mac for the rationale. The merge job overwrites this
       # single-arch manifest with the merged multi-arch one on a full tag push.
-      - name: Setup tccli
-        run: pip install tccli
+      - name: Setup coscli
+        run: bash scripts/install-coscli.sh
 
       - name: Upload to Tencent COS
         env:
@@ -475,8 +475,8 @@ jobs:
       # ── Mirror artifacts + live manifest to Tencent COS ────────────
       # Auto-update reads from COS via CDN (files.valuz.cn); GitHub Releases
       # is the manual-download + backup path.
-      - name: Setup tccli
-        run: pip install tccli
+      - name: Setup coscli
+        run: bash scripts/install-coscli.sh
 
       - name: Upload to Tencent COS
         env:
@@ -616,8 +616,8 @@ jobs:
       # Auto-update reads from COS via CDN (files.valuz.cn); GitHub Releases
       # is the manual-download + backup path. shell: bash because the windows
       # runner default is pwsh.
-      - name: Setup tccli
-        run: pip install tccli
+      - name: Setup coscli
+        run: bash scripts/install-coscli.sh
 
       - name: Upload to Tencent COS
         shell: bash
@@ -703,8 +703,8 @@ jobs:
       # download + backup) and Tencent COS (the live auto-update feed, CDN-served
       # via files.valuz.cn). This is the authoritative mac manifest — overwrites
       # whatever the individual mac jobs pushed as single-arch manifests.
-      - name: Setup tccli
-        run: pip install tccli
+      - name: Setup coscli
+        run: bash scripts/install-coscli.sh
 
       - name: Upload merged latest-mac.yml to GitHub Release
         env:
@@ -721,9 +721,20 @@ jobs:
           VALUZ_EDITION: oss
           VALUZ_VERSION: ${{ needs.set-version.outputs.version }}
         run: |
-          tccli configure set secretId "$TENCENT_SECRET_ID" \
-                secretKey "$TENCENT_SECRET_KEY" \
-                region "$TENCENT_COS_REGION"
+          # coscli reads bucket/credential config from ~/.coscli/config.yaml.
+          # The TENCENT_COS_BUCKET secret must be in <name>-<appid> form.
+          mkdir -p "$HOME/.coscli"
+          cat > "$HOME/.coscli/config.yaml" <<YAML
+          cos:
+            base:
+              secretid: ${TENCENT_SECRET_ID}
+              secretkey: ${TENCENT_SECRET_KEY}
+              sessiontoken: ""
+            buckets:
+              - name: ${TENCENT_COS_BUCKET}
+                alias: valuz
+                region: ${TENCENT_COS_REGION}
+          YAML
           # Rewrite url:/path: to carry the v${VERSION}/ prefix — the live
           # manifest sits at ${EDITION}/ but its artifacts live one level
           # down at ${EDITION}/v${VERSION}/. See scripts/upload-to-cos.sh
@@ -731,8 +742,5 @@ jobs:
           sed -e 's|url: |url: v'"$VALUZ_VERSION"'/|g' \
               -e 's|^path: |path: v'"$VALUZ_VERSION"'/|' \
               latest-mac.yml > latest-mac.yml.live
-          tccli cos PutObject \
-            --bucket "$TENCENT_COS_BUCKET" \
-            --local-path latest-mac.yml.live \
-            --cos-path "/${VALUZ_EDITION}/latest-mac.yml"
+          coscli cp latest-mac.yml.live "cos://valuz/${VALUZ_EDITION}/latest-mac.yml" --force
           echo "Live mac manifest: https://files.valuz.cn/${VALUZ_EDITION}/latest-mac.yml"
