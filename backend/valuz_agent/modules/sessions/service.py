@@ -216,11 +216,9 @@ class SessionService:
 
         try:
             if is_project:
-                # ``get_project_connectors`` is SYNC (it reads a JSON config
-                # file) — awaiting it raised "object list can't be used in
-                # 'await' expression", caught below, so project sessions
-                # silently got no auto-default connector slugs.
-                return self._connectors.get_project_connectors(project_row)  # type: ignore[arg-type]
+                return await self._connectors.get_project_connectors(
+                    require_current_user_id(), project_id
+                )
             # Chat project: all enabled connectors that are connected or unknown
             return [
                 conn.slug
@@ -886,7 +884,6 @@ class SessionService:
                 skill_source=self._skill_source,
                 extra_skill_sources=self._extra_skill_sources,
                 official_entitled=await self._has_official_entitlement(),
-                secrets=self._secrets,
                 enabled_mcp_provider_slugs=effective_mcp_slugs,
                 connectors=self._connectors,
                 docs=self._docs,

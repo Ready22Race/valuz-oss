@@ -155,6 +155,15 @@ async def bootstrap_schema() -> None:
     async with async_unit_of_work() as db:
         await seed_all(db)
 
+    # 5. One-time backfill of the connector module's legacy filesystem stores
+    #    (project-config.json selection + FileSecretStore secrets) into the
+    #    connector DB tables/columns. Idempotent + marker-gated; a no-op on
+    #    fresh / shared backends.
+    from valuz_agent.boot.backfill_connector_fs import backfill_connector_fs
+
+    async with async_unit_of_work() as db:
+        await backfill_connector_fs(db)
+
 
 async def configure_i18n() -> None:
     """Resolve the user's ``ui.default_locale`` once (async) and push it

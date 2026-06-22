@@ -232,8 +232,6 @@ async def _ensure_valuz_helper(user_id: str, db) -> str:  # type: ignore[no-unty
     # and the binding below resolves. Idempotent + best-effort.
     await _ensure_default_connectors(user_id, db)
 
-    # Real secret store: creating/resolving the helper touches its OAuth
-    # connectors (Valuz), and reading a token off a None store would crash.
     connector_svc = ConnectorService.with_defaults(db)
     agent_svc = AgentService(db=db, connector_service=connector_svc)
 
@@ -312,9 +310,6 @@ async def create_example_project(
             datastore=ProjectDatastore(db),
             event_bus=event_bus,
         )
-        # Real secret store: deploying a team agent resolves its connectors,
-        # and an OAuth connector (Valuz) reads its token — a None store crashes
-        # the mcp resolver, sinking the whole team deploy.
         connector_svc = ConnectorService.with_defaults(db)
         agent_svc = AgentService(db=db, connector_service=connector_svc)  # type: ignore[arg-type]
 

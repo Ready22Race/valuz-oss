@@ -36,7 +36,6 @@ from app.schemas import (
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters.mcp_resolver import resolve_mcp_servers
 from valuz_agent.infra.auth_context import require_current_user_id
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
@@ -92,7 +91,6 @@ async def resolve_session_capabilities(
     skill_source: FilesystemSkillSource | None = None,
     extra_skill_sources: list[_SkillSource] | None = None,
     official_entitled: bool = False,
-    secrets: FileSecretStore | None = None,
     enabled_mcp_provider_slugs: list[str] | None = None,
     connectors: ConnectorDatastore | None = None,
     docs: DocumentDatastore | None = None,
@@ -241,10 +239,9 @@ async def resolve_session_capabilities(
     #    missing (no credentials, unknown slug, disabled provider) is logged
     #    inside ``mcp_resolver`` and silently skipped here.
     mcp_configs_list: list[McpServerConfig] = []
-    if secrets is not None:
+    if connectors is not None:
         mcp_configs_list.extend(
             await resolve_mcp_servers(
-                secrets=secrets,
                 enabled_slugs=enabled_mcp_provider_slugs or [],
                 connectors=connectors,
             )

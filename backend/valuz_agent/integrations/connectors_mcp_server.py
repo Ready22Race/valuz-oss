@@ -38,15 +38,10 @@ def _make_connector_service(db: Any) -> Any:
     DI machinery. MCP tools instead open their own ``async_unit_of_work``
     and construct the service here, then ``await`` its async methods.
     """
-    from valuz_agent.infra.config import settings
-    from valuz_agent.infra.secret_store import FileSecretStore
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
     from valuz_agent.modules.connectors.service import ConnectorService
 
-    return ConnectorService(
-        datastore=ConnectorDatastore(db),
-        secrets=FileSecretStore(settings.secrets_dir),
-    )
+    return ConnectorService(datastore=ConnectorDatastore(db))
 
 
 # ---------------------------------------------------------------------------

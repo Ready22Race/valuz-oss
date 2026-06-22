@@ -1,11 +1,11 @@
 """Resolving an installed-but-unauthorised OAuth connector must skip, not crash.
 
-Regression for the onboarding crash: ``create_example_project`` /
-``_ensure_valuz_helper`` built a ``ConnectorService`` with ``secrets=None``, so
-deploying a team agent bound to an installed OAuth connector (Valuz) hit
-``secrets.get(...)`` on ``None`` → ``AttributeError`` and the whole team deploy
-failed ("created 0 agent(s)"). With a real secret store, a token-less OAuth
-connector resolves to nothing and is simply skipped.
+Regression for the onboarding crash: deploying a team agent bound to an
+installed OAuth connector (Valuz) with no stored token must resolve to nothing
+and be skipped, never raise. Connector OAuth tokens now live on the row
+(``oauth_token_json``, in the ``valuz_connector_attr`` side table), so a
+token-less connector simply yields no MCP server — there is no separate secret
+store to be ``None`` and crash the resolver.
 """
 
 from __future__ import annotations
@@ -20,9 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 # ``app.schemas``.
 import valuz_agent.boot.kernel  # noqa: F401,E402
 from valuz_agent.infra.database import Base
-from valuz_agent.infra.secret_store import FileSecretStore
-from valuz_agent.modules.connectors.datastore import ConnectorDatastore
-from valuz_agent.modules.connectors.models import ConnectorRow
+from valuz_agent.modules.connectors.models import ConnectorAttrRow, ConnectorRow
 from valuz_agent.modules.connectors.service import ConnectorService
 
 USER = "local-test-owner"  # matches the autouse owner-context fixture
@@ -32,7 +30,10 @@ USER = "local-test-owner"  # matches the autouse owner-context fixture
 async def db(tmp_path) -> AsyncIterator:
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'resolve.db'}")
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all, tables=[ConnectorRow.__table__])
+        await conn.run_sync(
+            Base.metadata.create_all,
+            tables=[ConnectorRow.__table__, ConnectorAttrRow.__table__],
+        )
     factory = async_sessionmaker(bind=engine, expire_on_commit=False)
     session = factory()
     try:
@@ -60,24 +61,11 @@ async def _install_valuz(db) -> None:
     await db.commit()
 
 
-async def test_real_secret_store_skips_unauthorised_oauth(db, tmp_path) -> None:
-    """The fixed path: a real (empty) secret store → no token → skip, no crash."""
+async def test_tokenless_oauth_connector_skips_without_crash(db) -> None:
+    """A token-less OAuth connector resolves to nothing and is skipped — no crash."""
     await _install_valuz(db)
-    svc = ConnectorService(
-        datastore=ConnectorDatastore(db),
-        secrets=FileSecretStore(tmp_path / "secrets"),
-    )
+    svc = ConnectorService.with_defaults(db)
 
     out = await svc.resolve_mcp_servers(["valuz-search"])
 
-    assert out == []  # skipped because there's no stored OAuth token — and no crash
-
-
-async def test_none_secret_store_reproduces_the_crash(db) -> None:
-    """The bug: a None secret store crashes when an OAuth connector is resolved
-    (this is what onboarding's ``secrets=None`` did)."""
-    await _install_valuz(db)
-    svc = ConnectorService(datastore=ConnectorDatastore(db), secrets=None)  # type: ignore[arg-type]
-
-    with pytest.raises(AttributeError):
-        await svc.resolve_mcp_servers(["valuz-search"])
+    assert out == []  # no stored OAuth token → skipped, and no crash

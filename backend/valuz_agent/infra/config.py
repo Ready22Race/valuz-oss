@@ -166,6 +166,11 @@ class Settings(BaseSettings):
     def secrets_dir(self) -> Path:
         return self.data_dir / "secrets"
 
+    @property
+    def cache_dir(self) -> Path:
+        # Generic ephemeral cache (FileCache default — e.g. connector OAuth PKCE).
+        return self.data_dir / "cache"
+
     # ── Installation identity ────────────────────────────────────────
     # Where the locally-generated owner id (int32) is persisted. Lives
     # OUTSIDE the business tables so a DB clean-up rebuild never loses it
