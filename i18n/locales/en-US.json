@@ -10,7 +10,8 @@
     "actionNew": "New",
     "agentHint": "Execution model / runtime follow the selected agent.",
     "agentLabel": "Agent",
-    "targetLabel": "Target",
+    "targetLabelTask": "Project",
+    "targetChat": "Quick chat",
     "timezoneLabel": "Timezone",
     "nextRunPreview": "Next run",
     "agentPlaceholderEmpty": "No agents available — add one first",
@@ -2181,6 +2182,8 @@
       "subtaskReviewReworkNoFeedback": "⚠ Needs rework",
       "leadWorking": "Lead is working…"
     },
-    "viewSession": "View session →"
+    "viewSession": "View session →",
+    "needsConfirm": "Your confirmation needed",
+    "goConfirm": "Confirm now"
   }
 }
