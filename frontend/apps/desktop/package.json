@@ -28,6 +28,7 @@
     "@valuz/parser-plugins": "workspace:*",
     "@valuz/shared": "workspace:*",
     "@valuz/ui": "workspace:*",
+    "electron-log": "^5.4.4",
     "electron-updater": "^6.6.2",
     "lucide-react": "^1.8.0",
     "react": "^19.1.0",

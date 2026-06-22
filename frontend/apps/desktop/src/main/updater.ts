@@ -1,5 +1,6 @@
 import { app, type BrowserWindow } from 'electron'
 import updaterModule from 'electron-updater'
+import log from 'electron-log/main'
 
 const { autoUpdater } = updaterModule
 
@@ -28,6 +29,17 @@ let errorToast = false
 type CheckTrigger = 'auto' | 'about' | 'menu'
 
 export const setupUpdater = ({ getMainWindow, getUpdateWindow }: SetupUpdaterOptions) => {
+  // Route electron-updater's logs to a file (macOS: ~/Library/Logs/Valuz/main.log,
+  // Windows: %USERPROFILE%\AppData\Roaming\Valuz\logs\main.log). By default they
+  // only go to the console, which a packaged app discards — so a full-download
+  // fallback was untraceable. The differential downloader logs "Download block
+  // maps …" and "Cannot download differentially, fallback to full download:
+  // <reason>" through this logger, so we can now see whether an update actually
+  // ran as a delta and, if not, why.
+  log.initialize()
+  log.transports.file.level = 'info'
+  autoUpdater.logger = log
+
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 
