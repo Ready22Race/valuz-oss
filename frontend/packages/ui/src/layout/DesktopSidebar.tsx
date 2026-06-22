@@ -636,7 +636,11 @@ export const DesktopSidebar = ({
   const [recentDeleting, setRecentDeleting] =
     useState<DesktopSidebarRecentItem | null>(null);
   const [recentDeleteInFlight, setRecentDeleteInFlight] = useState(false);
+  // Project-nested runs collapse early (each project keeps a short preview);
+  // the no-project chats group is the main recents list, so it shows more
+  // before the show-more toggle appears.
   const RUNS_COLLAPSED = 5;
+  const CHATS_COLLAPSED = 10;
 
   // Auto-expand on *entry*: when the route moves into a different project's
   // conversation, open that project once. Keyed on activeProjectId so it fires
@@ -772,12 +776,16 @@ export const DesktopSidebar = ({
     depth: "project" | "chats",
   ) => {
     const expanded = !!groupExpanded[key];
-    const visible = expanded ? items : items.slice(0, RUNS_COLLAPSED);
-    const padClass = depth === "project" ? "pl-[40px]" : "pl-[10px]";
+    const collapsedLimit =
+      depth === "chats" ? CHATS_COLLAPSED : RUNS_COLLAPSED;
+    const visible = expanded ? items : items.slice(0, collapsedLimit);
+    // Match renderRunRow's indent (pl-[33px] project / pl-[10px] chats) so the
+    // show-more toggle's text lines up with the rows above it.
+    const padClass = depth === "project" ? "pl-[33px]" : "pl-[10px]";
     return (
       <>
         {visible.map((item) => renderRunRow(item, depth))}
-        {items.length > RUNS_COLLAPSED && (
+        {items.length > collapsedLimit && (
           <button
             type="button"
             onClick={() => toggleGroup(key)}
@@ -976,7 +984,16 @@ export const DesktopSidebar = ({
                     );
                   })}
                 {sidebarExtraItems}
-
+              </div>
+              {/* Scrollable region: projects + conversations. The block above
+                  (新对话 + utility links) stays pinned; this list owns the
+                  ``overflow-y-auto`` so a long project / chat list scrolls
+                  within the nav instead of bleeding past it into the footer.
+                  ``min-h-0`` lets it actually shrink under flex. ``-mr-3 pr-3``
+                  pushes the scrollbar out to the sidebar's right edge (against
+                  the gap before the main panel) while keeping the rows inset, so
+                  the bar rides the edge instead of overlapping the row text. */}
+              <div className="-mr-3 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-3">
                 <SectionLabel
                   open={projectsSectionOpen}
                   onToggle={() => setProjectsSectionOpen((v) => !v)}
@@ -1085,8 +1102,11 @@ export const DesktopSidebar = ({
                 Connectors / Knowledge) sits right above Settings so resource
                 management groups with app config; the scrollable nav above
                 stays focused on project verbs + projects. ``relative z-10``
-                so links sit in front of the absolute-positioned mascot. */}
-            <div className="relative z-10 flex flex-col gap-0.5 px-3 pb-4 pt-2">
+                so links sit in front of the absolute-positioned mascot; the
+                opaque ``bg-background`` (the sidebar's own colour) hides the
+                scrollable nav when a long list scrolls up behind it instead of
+                letting the text bleed through. */}
+            <div className="relative z-10 flex flex-col gap-0.5 bg-background px-3 pb-4 pt-2">
               {libraryItems.length > 0 && (
                 <>
                   <div className="pb-1 pl-[14px] pr-3 pt-1">
