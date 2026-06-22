@@ -13,12 +13,53 @@ import io
 import json
 import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from valuz_agent.modules.agent_packs.manifest import AgentPackManifest
 
 MANIFEST_NAME = "manifest.json"
 SKILLS_DIR = "skills"
+
+
+def clean_skill_slug(entry: str) -> str:
+    """Reduce a skill reference to a safe, relative pack slug (its basename).
+
+    An agent may reference a skill by SLUG (``price-audit``) OR by an absolute
+    on-disk path — ``C:\\Users\\x\\.agents\\skills\\price-audit`` on Windows,
+    ``/home/x/.agents/skills/price-audit`` on POSIX. The pack stores skills as
+    ``skills/<slug>/`` and the manifest references them by slug, so the slug
+    MUST be a single safe path component. Using an absolute path verbatim is
+    what produced ``skills/C:/Users/.../SKILL.md`` archive entries that the
+    importer rejected with "unsafe path in archive". Idempotent on clean slugs.
+    """
+    s = str(entry).replace("\\", "/").strip()
+    name = PurePosixPath(s).name  # last component — drops any drive + parent dirs
+    if not name or name in (".", "..") or name.endswith(":"):
+        # Degenerate input (bare drive, traversal); fall back to a stripped form
+        # rather than emit something unsafe.
+        return s.replace(":", "").strip("/") or str(entry)
+    return name
+
+
+def _safe_member_path(name: str) -> str | None:
+    """Sanitize an archive member name to a safe RELATIVE posix path.
+
+    Drops drive letters, leading separators, and ``.``/``..`` components so a
+    malformed or hostile entry can never escape the extraction root (zip-slip).
+    This rescues legacy packs whose skill files were stored under an absolute
+    path (the pre-fix Windows export bug) instead of hard-failing the import.
+    Returns ``None`` if nothing safe remains.
+    """
+    parts: list[str] = []
+    for part in str(name).replace("\\", "/").split("/"):
+        part = part.strip()
+        if not part or part in (".", ".."):
+            continue
+        if len(part) == 2 and part[1] == ":" and part[0].isalpha():  # drive 'C:'
+            continue
+        parts.append(part)
+    return "/".join(parts) or None
+
 
 # Mirror the skill importer's caps — a pack is a small bundle of text + skill
 # files, not a data dump.
@@ -47,11 +88,16 @@ def build_archive(manifest: AgentPackManifest, skill_dirs: dict[str, Path]) -> b
         for slug, src in skill_dirs.items():
             if not src.is_dir():
                 continue
+            # Defense in depth: never let an absolute path leak into the arcname
+            # (the Windows export bug that produced ``skills/C:/Users/.../SKILL.md``
+            # entries the importer rejected). Callers should already pass clean
+            # slugs; this is idempotent on those.
+            safe_slug = clean_skill_slug(slug)
             for path in sorted(src.rglob("*")):
                 if not path.is_file():
                     continue
                 rel = path.relative_to(src).as_posix()
-                zf.write(path, f"{SKILLS_DIR}/{slug}/{rel}")
+                zf.write(path, f"{SKILLS_DIR}/{safe_slug}/{rel}")
     return buffer.getvalue()
 
 
@@ -88,7 +134,15 @@ def extract_archive(data: bytes) -> tuple[AgentPackManifest, Path]:
 
     root = Path(tempfile.mkdtemp(prefix="valuz-pack-import-"))
     for info in infos:
-        dest = root / info.filename
+        # Sanitize rather than reject: a pre-fix Windows export wrote skill files
+        # under an absolute path (``skills/C:/Users/.../SKILL.md``), which would
+        # otherwise hard-fail the whole import. Drop drive/leading-sep/traversal
+        # components down to a safe relative path.
+        safe = _safe_member_path(info.filename)
+        if safe is None:
+            continue
+        dest = root / safe
+        # Defense in depth: the sanitized path must still resolve within root.
         if not _is_within(root, dest):
             raise PackArchiveError(f"unsafe path in archive: {info.filename!r}")
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -99,9 +153,7 @@ def extract_archive(data: bytes) -> tuple[AgentPackManifest, Path]:
     if not manifest_path.is_file():
         raise PackArchiveError("archive is missing manifest.json")
     try:
-        manifest = AgentPackManifest.model_validate_json(
-            manifest_path.read_text(encoding="utf-8")
-        )
+        manifest = AgentPackManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
     except (ValueError, json.JSONDecodeError) as exc:
         raise PackArchiveError(f"invalid manifest.json: {exc}") from exc
 

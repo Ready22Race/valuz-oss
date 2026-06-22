@@ -166,9 +166,7 @@ async def test_import_pack_idempotent(svc: AgentPackService) -> None:
 
 
 async def test_partial_import_only_fills_missing(svc: AgentPackService) -> None:
-    await svc._agents.create_agent(
-        USER, {"slug": "inv-model-builder", "name": "manual", **DEPLOY}
-    )
+    await svc._agents.create_agent(USER, {"slug": "inv-model-builder", "name": "manual", **DEPLOY})
     res = await svc.import_pack(USER, "investment", **DEPLOY)
     assert res["created"] == 3
     assert res["skipped"] == 1
@@ -252,6 +250,87 @@ def test_extract_rejects_non_zip() -> None:
         extract_archive(b"not a zip file")
 
 
+def test_clean_skill_slug_normalizes_absolute_paths() -> None:
+    from valuz_agent.modules.agent_packs.packaging import clean_skill_slug
+
+    # Windows absolute path (the reported bug) → bare slug
+    assert clean_skill_slug(r"C:\Users\Think\.agents\skills\price-audit") == "price-audit"
+    # POSIX absolute path → bare slug
+    assert clean_skill_slug("/home/x/.agents/skills/price-audit") == "price-audit"
+    # already a clean slug → unchanged (idempotent)
+    assert clean_skill_slug("price-audit") == "price-audit"
+    assert clean_skill_slug("price-audit") == clean_skill_slug(clean_skill_slug("price-audit"))
+    # trailing separator tolerated
+    assert clean_skill_slug("/home/x/skills/price-audit/") == "price-audit"
+
+
+def test_build_archive_never_emits_absolute_arcname(tmp_path) -> None:
+    """Even if a caller passes an absolute path as the skill key (the pre-fix
+    Windows export), the archive entry must be a safe relative ``skills/<slug>/``
+    path — not ``skills/C:/Users/.../SKILL.md`` (which the importer rejected)."""
+    import zipfile
+
+    from valuz_agent.modules.agent_packs.manifest import (
+        AgentPackManifest,
+        PackAgent,
+        PackCollection,
+        PackSkill,
+    )
+    from valuz_agent.modules.agent_packs.packaging import build_archive
+
+    skill_src = tmp_path / "price-audit"
+    skill_src.mkdir()
+    (skill_src / "SKILL.md").write_text("# Price Audit\n", encoding="utf-8")
+
+    manifest = AgentPackManifest(
+        collection=PackCollection(name="P"),
+        agents=[PackAgent(slug="a1", name="A1", instructions="x", skills=["price-audit"])],
+        skills=[PackSkill(slug="price-audit", source="embedded")],
+    )
+    # Caller passes an absolute-path key (what the buggy export did on Windows).
+    data = build_archive(manifest, {str(skill_src): skill_src})
+
+    names = zipfile.ZipFile(__import__("io").BytesIO(data)).namelist()
+    skill_entries = [n for n in names if n != "manifest.json"]
+    assert skill_entries == ["skills/price-audit/SKILL.md"]
+    for n in names:
+        assert ":" not in n, f"arcname must not carry a drive letter: {n!r}"
+        assert not n.startswith("/"), f"arcname must be relative: {n!r}"
+
+
+def test_extract_sanitizes_legacy_absolute_path_entry() -> None:
+    """A legacy pack created by the buggy Windows export stored skill files under
+    an absolute path. Import must SANITIZE (not hard-fail) so the team still
+    imports."""
+    import io
+    import zipfile
+
+    from valuz_agent.modules.agent_packs.manifest import (
+        AgentPackManifest,
+        PackAgent,
+        PackCollection,
+        PackSkill,
+    )
+    from valuz_agent.modules.agent_packs.packaging import extract_archive
+
+    manifest = AgentPackManifest(
+        collection=PackCollection(name="Legacy"),
+        agents=[PackAgent(slug="a1", name="A1", instructions="x", skills=["price-audit"])],
+        skills=[PackSkill(slug="price-audit", source="embedded")],
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("manifest.json", manifest.model_dump_json())
+        # The exact malformed entry from the bug report.
+        zf.writestr("skills/C:/Users/Think/.agents/skills/price-audit/SKILL.md", "# PA\n")
+
+    # Previously raised PackArchiveError("unsafe path in archive: ...").
+    parsed, root = extract_archive(buf.getvalue())
+    assert parsed.agents[0].slug == "a1"
+    # The drive component was dropped; nothing with a ':' landed on disk.
+    assert not any(":" in p.name for p in root.rglob("*"))
+
+
 async def test_export_import_roundtrip(svc: AgentPackService, tmp_path, monkeypatch) -> None:
     from valuz_agent.modules.agent_packs.errors import PackImportFailed
     from valuz_agent.modules.agent_packs.manifest import (
@@ -311,6 +390,57 @@ async def test_export_import_roundtrip(svc: AgentPackService, tmp_path, monkeypa
         # the staged preview is consumed — confirming again fails
         with pytest.raises(PackImportFailed):
             await dest.confirm_import(USER, preview["preview_id"], **DEPLOY)
+    finally:
+        await session2.close()
+        await engine2.dispose()
+
+
+async def test_export_normalizes_absolute_skill_path(svc, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Regression for the Windows bug: an agent that references a skill by an
+    ABSOLUTE PATH exports to a pack with clean ``skills/<slug>/`` entries and
+    re-imports cleanly — the agent's skill ref is normalized to the bare slug and
+    the embedded skill files are carried (previously the archive held an
+    ``skills/C:/Users/.../SKILL.md`` entry the importer rejected)."""
+    import io
+    import zipfile
+
+    # A real on-disk user skill, referenced by absolute path (the Windows case).
+    skill_dir = tmp_path / "src-user-skills" / "price-audit"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Price Audit\n", encoding="utf-8")
+
+    await svc._agents.create_agent(
+        USER,
+        {
+            "slug": "auditor",
+            "name": "Auditor",
+            "description": "",
+            "instructions": "audit",
+            "skills": [str(skill_dir)],  # absolute path, not a slug
+            "connector_types": [],
+            "avatar": None,
+            **DEPLOY,
+        },
+    )
+
+    data = await svc.export_agents(USER, ["auditor"], collection={"name": "Team"})
+    names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+    assert "skills/price-audit/SKILL.md" in names
+    assert all(":" not in n and not n.startswith("/") for n in names)
+
+    # Re-import into a fresh install: the agent references the bare slug and the
+    # embedded skill lands in the user skill library.
+    monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(tmp_path / "dest-official"))
+    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "dest-user-skills"))
+    dest, session2, engine2 = await _build_service(tmp_path / "dest")
+    try:
+        preview = await dest.preview_import(USER, data)
+        assert {s["slug"] for s in preview["skills"]} == {"price-audit"}
+        await dest.confirm_import(USER, preview["preview_id"], **DEPLOY)
+        agent = await dest._agents.get_agent(USER, "auditor")
+        assert agent.skills == ["price-audit"]
+        installed = tmp_path / "dest-user-skills" / "price-audit" / "SKILL.md"
+        assert installed.read_text(encoding="utf-8") == "# Price Audit\n"
     finally:
         await session2.close()
         await engine2.dispose()

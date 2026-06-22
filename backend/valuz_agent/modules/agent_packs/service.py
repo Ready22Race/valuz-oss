@@ -36,6 +36,7 @@ from valuz_agent.modules.agent_packs.manifest import (
 )
 from valuz_agent.modules.agent_packs.packaging import (
     build_archive,
+    clean_skill_slug,
     embedded_skill_dir,
     extract_archive,
 )
@@ -116,16 +117,16 @@ class AgentPackService:
         ``bundled`` and materialize from the app's vendored tree)."""
         # Materialize bundled skills (deferred from boot so an un-imported pack's
         # skills don't clutter the library). Idempotent + off the event loop.
-        bundled = [s.slug for s in manifest.skills if s.source == "bundled"]
+        # ``clean_skill_slug`` normalizes a legacy pack whose slugs were stored as
+        # absolute paths (the pre-fix Windows export) back to plain slugs.
+        bundled = [clean_skill_slug(s.slug) for s in manifest.skills if s.source == "bundled"]
         if bundled:
             await asyncio.to_thread(materialize_template_skills, bundled)
 
         # Install embedded (user-authored) skills carried inside the archive.
-        embedded = [s.slug for s in manifest.skills if s.source == "embedded"]
+        embedded = [clean_skill_slug(s.slug) for s in manifest.skills if s.source == "embedded"]
         if embedded and embedded_skills_root is not None:
-            await asyncio.to_thread(
-                self._install_embedded_skills, embedded_skills_root, embedded
-            )
+            await asyncio.to_thread(self._install_embedded_skills, embedded_skills_root, embedded)
 
         # Index the just-materialized official/template skills NOW so the pack's
         # agents resolve them immediately. Without this they're only picked up by
@@ -168,7 +169,7 @@ class AgentPackService:
                     # Honor the pack's recommended effort; fall back to the
                     # deploy default when the pack leaves it unset.
                     "effort": agent.effort or effort,
-                    "skills": list(agent.skills),
+                    "skills": [clean_skill_slug(s) for s in agent.skills],
                     "connector_types": list(agent.connectors),
                     "avatar": agent.avatar,
                 },
@@ -177,9 +178,7 @@ class AgentPackService:
             created += 1
 
         pack_id = manifest.collection.id if manifest.collection else "agent-pack"
-        logger.info(
-            "agent-packs: import %r — created=%d skipped=%d", pack_id, created, skipped
-        )
+        logger.info("agent-packs: import %r — created=%d skipped=%d", pack_id, created, skipped)
         return {
             "template_id": pack_id,
             "created": created,
@@ -215,9 +214,25 @@ class AgentPackService:
     ) -> tuple[AgentPackManifest, dict[str, Path]]:
         from valuz_agent.adapters.capability_resolver import resolve_skill_slugs_to_paths
 
-        pack_agents: list[PackAgent] = []
+        # A skill reference may be a clean slug OR an absolute on-disk path
+        # (e.g. a user skill at ``C:\\Users\\x\\.agents\\skills\\price-audit``).
+        # Normalize EVERY reference to a clean pack slug (its basename) so the
+        # manifest, the agents' skill lists, and the archive's ``skills/<slug>/``
+        # entries all agree on a safe, relative identifier — never an absolute
+        # path (which produced unreadable ``skills/C:/Users/...`` archive entries).
         skill_slugs: list[str] = []
         connector_slugs: list[str] = []
+        for a in agents:
+            for s in a.skills or []:
+                if s not in skill_slugs:
+                    skill_slugs.append(s)
+            for c in a.connector_types or []:
+                if c not in connector_slugs:
+                    connector_slugs.append(c)
+
+        slug_map = {raw: clean_skill_slug(raw) for raw in skill_slugs}
+
+        pack_agents: list[PackAgent] = []
         for a in agents:
             pack_agents.append(
                 PackAgent(
@@ -229,16 +244,10 @@ class AgentPackService:
                     runtime=a.runtime,
                     model_hint=a.model or None,
                     effort=a.effort,
-                    skills=list(a.skills or []),
+                    skills=[slug_map.get(s, clean_skill_slug(s)) for s in (a.skills or [])],
                     connectors=list(a.connector_types or []),
                 )
             )
-            for s in a.skills or []:
-                if s not in skill_slugs:
-                    skill_slugs.append(s)
-            for c in a.connector_types or []:
-                if c not in connector_slugs:
-                    connector_slugs.append(c)
 
         # Skills: embed every skill that's on disk as files, so the pack is
         # self-contained on any install — a recipient may not have a "bundled"
@@ -246,17 +255,20 @@ class AgentPackService:
         # skills we genuinely can't find degrade to a bundled reference.
         skills_idx: list[PackSkill] = []
         skill_dirs: dict[str, Path] = {}
-        for slug in skill_slugs:
-            paths = await resolve_skill_slugs_to_paths([slug], None)
+        for raw in skill_slugs:
+            pack_slug = slug_map[raw]
+            paths = await resolve_skill_slugs_to_paths([raw], None)
             path = Path(paths[0]).resolve() if paths else None
             if path is not None and path.is_dir():
-                skills_idx.append(PackSkill(slug=slug, source="embedded"))
-                skill_dirs[slug] = path
+                skills_idx.append(PackSkill(slug=pack_slug, source="embedded"))
+                skill_dirs[pack_slug] = path
             else:
                 # Not on disk — reference by slug; the importer surfaces it as
                 # missing if the recipient doesn't have it either.
-                logger.warning("agent-packs: skill %s not on disk, exporting as a reference", slug)
-                skills_idx.append(PackSkill(slug=slug, source="bundled"))
+                logger.warning(
+                    "agent-packs: skill %s not on disk, exporting as a reference", pack_slug
+                )
+                skills_idx.append(PackSkill(slug=pack_slug, source="bundled"))
 
         # Connectors: full definition, secrets stripped.
         views = {v.slug: v for v in await self._agents._connectors.list_connectors(user_id)}
@@ -340,7 +352,9 @@ class AgentPackService:
                 }
                 for a in manifest.agents
             ],
-            "skills": [{"slug": s.slug, "source": s.source} for s in manifest.skills],
+            "skills": [
+                {"slug": clean_skill_slug(s.slug), "source": s.source} for s in manifest.skills
+            ],
             "connectors": [
                 {
                     "slug": c.slug,
