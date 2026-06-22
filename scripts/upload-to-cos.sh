@@ -92,6 +92,10 @@ YAML
 # electron-builder produces for distribution + the latest*.yml manifests. The
 # release dir also contains builder-internal files (*.yaml, unpacked/ dirs)
 # we don't want on the CDN.
+#
+# coscli v1.0.8 overwrites same-name objects by default (governed by
+# --forbid-overwrite, default false), so no force flag is needed — and its `cp`
+# has no --force flag at all (passing it aborts: "unknown flag: --force").
 echo "[cos] Uploading artifacts → /${VERSIONED_PREFIX}/"
 coscli cp "$RELEASE_DIR" "cos://valuz/${VERSIONED_PREFIX}/" \
   --recursive \
@@ -101,8 +105,7 @@ coscli cp "$RELEASE_DIR" "cos://valuz/${VERSIONED_PREFIX}/" \
   --include "*.AppImage" \
   --include "*.deb" \
   --include "*.blockmap" \
-  --include "latest*.yml" \
-  --force
+  --include "latest*.yml"
 
 # Overwrite each named manifest at the live prefix, with url:/path: fields
 # rewritten to carry the v${VERSION}/ prefix. The live manifest sits at
@@ -123,7 +126,7 @@ for m in $MANIFESTS; do
       "$RELEASE_DIR/$m" > "$tmp"
 
   echo "[cos] $m → /${LIVE_PREFIX}/${m} (artifacts prefixed with v${VERSION}/)"
-  coscli cp "$tmp" "cos://valuz/${LIVE_PREFIX}/${m}" --force
+  coscli cp "$tmp" "cos://valuz/${LIVE_PREFIX}/${m}"
   rm -f "$tmp"
 done
 
