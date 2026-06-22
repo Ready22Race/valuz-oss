@@ -7,15 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-22
+
+### Features
+
+- Composer agent/model selector and input-box menus redesigned into one
+  consistent system: a unified dropdown with a "Default" entry that owns the
+  runtime / model / reasoning-effort submenu, a collapsed agent roster, nested
+  flyouts capped to a whole-row height at a consistent 12.5px, flyout direction
+  that flips away from an open right-hand context panel, and read-only freezing
+  in an existing conversation (the agent and its model menu freeze; a Default
+  run still changes only the effort). Project conversations show the bound model
+  on the agent button. (#223, #224, #225, #226 @St0neWan9)
+- Sidebar projects are a multi-open accordion that nests each project's chats /
+  tasks, with a separate "Chats" group for project-less conversations.
+  (#221, #222 @St0neWan9)
+- New-project dialog can deploy an initial team: a "deploy agents" multi-select
+  (Valuz Helper pre-selected and listed first) so a project starts with members
+  instead of empty. (#227 @St0neWan9)
+- Desktop update flow shows a "Restarting…" state on the restart button.
+  (#220 @St0neWan9)
+
 ### Fixed
 
-- Billing pre-check is now channel-aware: `BillingPort.check_budget` takes the
-  session's effective `provider_id`, so a billing overlay can skip enforcement
-  for channels it does not meter (a user's own direct API-key channel, org
-  BYOK). Previously an empty wallet blocked *every* turn — including channels
-  that never spend a platform credit — with "insufficient balance". The
-  duplicated route-level pre-check was folded into the session service so there
-  is a single, channel-aware gate.
+- Agent packs: a skill whose slug was stored as a full path (Windows drive
+  letters / POSIX absolute paths) no longer breaks `.valuzpack` import with
+  "unsafe path in archive" — slugs are sanitized on export and legacy packs are
+  rescued on import, with the zip-slip guard intact. (#234 @St0neWan9)
+- Sidebar: the conversation list scrolls within the nav, so a long project /
+  chat list no longer overflows into and overlaps the pinned resource footer;
+  the show-more toggle aligns with its rows and the no-project chats list shows
+  more before collapsing. (#233 @St0neWan9)
+- Parser: bundle the magika model in the frozen build and record the parse-error
+  reason, fixing Windows `.docx` parsing. (#231 @Ready22Race)
+- Skills: bump deepagents to >=0.5.5 to fix a `SKILL.md` symlink-loop crash.
+  (#228 @Ready22Race)
+- Conversation: the AskUserQuestion card renders live — tool cards re-render when
+  their streaming input changes. (#229 @jiaoqsh)
+- Billing pre-check is channel-aware: `check_budget` takes the session's
+  effective `provider_id`, so an empty wallet no longer blocks turns on channels
+  it does not meter (a user's own direct API-key channel, org BYOK); the
+  duplicated route-level pre-check was folded into the session service.
+  (#232 @homeant)
+- Desktop: the Windows taskbar / app icon fills its canvas. (#236 @St0neWan9)
+- Desktop: the macOS update install hand-off reads as "preparing" instead of a
+  second download. (#219 @St0neWan9)
+- Build: pick the correct macOS Node archive and add a mirror fallback; retry a
+  transient CDN 404 when vendoring Node. (#217, #218 @St0neWan9)
+
+### Docs & Chore
+
+- Frontend tests no longer collect duplicates through `node_modules` symlinks.
+  (#230 @jiaoqsh)
+- Changelog: English-only labels in the 0.2.1 entry. (#216 @St0neWan9)
 
 ## [0.2.1] - 2026-06-18
 
