@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mac auto-updates to its native build; Apple Silicon users on the Intel 0.2.2
   update straight to the arm64 build here. (#240 @St0neWan9)
 
+- The packaged desktop client looked for updates at the wrong COS feed prefix:
+  `build-desktop.sh` stamped `app-update.yml` with
+  `files.valuz.cn/valuz-<edition>/` while CI publishes manifests and artifacts
+  under `files.valuz.cn/<edition>/`. Drop the `valuz-` prefix so the baked feed
+  URL matches where artifacts land. (#252 @St0neWan9)
+
 ### Docs & Chore
 
 - Route the auto-updater's logs to a file via electron-log
@@ -28,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows). They previously went to the console, which a packaged app discards,
   so whether an update ran as a delta (vs a full download) and why was
   untraceable. (#241 @St0neWan9)
+
+- Fix the Tencent COS publish pipeline for coscli v1.0.8: write the config to
+  `~/.cos.yaml` in its schema, drop the unsupported `--force` flag, upload each
+  artifact individually (its `--include` filter matched nothing at the release
+  root), and check the repo out in the manifest-merge job. (#246 #249 #251
+  @St0neWan9)
 
 ## [0.2.2] - 2026-06-22
 
