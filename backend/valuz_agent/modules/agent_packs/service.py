@@ -38,6 +38,7 @@ from valuz_agent.modules.agent_packs.packaging import (
     build_archive,
     embedded_skill_dir,
     extract_archive,
+    sanitize_skill_slug,
 )
 from valuz_agent.modules.agents.service import AgentService
 
@@ -229,7 +230,10 @@ class AgentPackService:
                     runtime=a.runtime,
                     model_hint=a.model or None,
                     effort=a.effort,
-                    skills=list(a.skills or []),
+                    # Sanitize each slug to a single safe segment — some installs
+                    # stored it as a full path (Windows drive letters etc.), which
+                    # must not leak into the portable manifest or the archive.
+                    skills=[sanitize_skill_slug(s) for s in (a.skills or [])],
                     connectors=list(a.connector_types or []),
                 )
             )
@@ -247,16 +251,21 @@ class AgentPackService:
         skills_idx: list[PackSkill] = []
         skill_dirs: dict[str, Path] = {}
         for slug in skill_slugs:
+            # Resolve with the raw slug (that's how it's indexed locally) but
+            # emit a sanitized slug everywhere portable — the archive dir, the
+            # manifest, and the agent references — so a path-shaped local slug
+            # never reaches the recipient.
             paths = await resolve_skill_slugs_to_paths([slug], None)
             path = Path(paths[0]).resolve() if paths else None
+            clean = sanitize_skill_slug(slug)
             if path is not None and path.is_dir():
-                skills_idx.append(PackSkill(slug=slug, source="embedded"))
-                skill_dirs[slug] = path
+                skills_idx.append(PackSkill(slug=clean, source="embedded"))
+                skill_dirs[clean] = path
             else:
                 # Not on disk — reference by slug; the importer surfaces it as
                 # missing if the recipient doesn't have it either.
                 logger.warning("agent-packs: skill %s not on disk, exporting as a reference", slug)
-                skills_idx.append(PackSkill(slug=slug, source="bundled"))
+                skills_idx.append(PackSkill(slug=clean, source="bundled"))
 
         # Connectors: full definition, secrets stripped.
         views = {v.slug: v for v in await self._agents._connectors.list_connectors(user_id)}
