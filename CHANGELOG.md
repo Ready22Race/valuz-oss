@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-22
+
+### Fixed
+
+- macOS auto-update served the Intel (x86_64) build to Apple Silicon Macs. The
+  two separate mac build jobs (arm64 + x64) each published an arch-specific
+  `latest-mac.yml` to the release and the later one overwrote the other, so the
+  published manifest listed only one architecture's artifacts. electron-updater
+  on an Apple Silicon Mac then found no arm64 entry and fell back to the Intel
+  build — which ran under Rosetta (slow) and tripped macOS's "Intel app" warning.
+  A merge step now combines both arches into a single `latest-mac.yml`, so each
+  Mac auto-updates to its native build; Apple Silicon users on the Intel 0.2.2
+  update straight to the arm64 build here. (#238 @St0neWan9)
+
 ## [0.2.2] - 2026-06-22
 
 ### Features
