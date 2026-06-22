@@ -43,9 +43,11 @@ export interface LastSessionPick {
   runtime_provider: string | null;
   provider_id: string | null;
   model_id: string | null;
-  /** The agent the last project conversation was bound to, so the composer
-   *  can default back to it (usually the project lead). */
+  /** The last chat conversation's agent — seeds the composer's Chat mode. */
   agent_slug?: string | null;
+  /** The Lead of the last task — seeds the composer's Task mode, remembered
+   *  separately from the chat agent so each mode keeps its own role. */
+  task_agent_slug?: string | null;
 }
 
 export interface ProjectCreateRequest {

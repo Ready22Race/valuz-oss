@@ -30,8 +30,11 @@ class LastSessionPickResponse(BaseModel):
     runtime_provider: str | None
     provider_id: str | None
     model_id: str | None
-    # The last-bound agent, so the project composer defaults to it.
+    # The last chat conversation's agent — seeds the composer's Chat mode.
     agent_slug: str | None = None
+    # The Lead of the last task — seeds the composer's Task mode, separately
+    # from the chat agent so each mode remembers its own role.
+    task_agent_slug: str | None = None
 
 
 @router.get("")
@@ -169,6 +172,7 @@ async def get_last_session_pick(
         provider_id=pick.get("provider_id"),
         model_id=pick.get("model_id"),
         agent_slug=pick.get("agent_slug"),
+        task_agent_slug=pick.get("task_agent_slug"),
     )
 
 
