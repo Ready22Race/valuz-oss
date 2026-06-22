@@ -1579,6 +1579,7 @@ export const ProjectDetailPage = () => {
           name: entry.agent?.name ?? entry.member.agent_slug,
         }))}
         allowTaskMode
+        fixedTargetName={displayName}
       />
 
       <DeployAgentsDialog
