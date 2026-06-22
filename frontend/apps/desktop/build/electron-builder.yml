@@ -111,20 +111,19 @@ win:
   icon: build/icon.ico
 afterSign: build/afterSign.cjs
 # Auto-update channel. electron-builder writes app-update.yml into the
-# packaged app from this block and emits latest-mac.yml / latest.yml next
-# to each artifact. electron-updater (src/main/updater.ts) reads
-# app-update.yml at runtime unless VALUZ_UPDATER_URL overrides it.
+# packaged app from this block and emits latest-mac.yml / latest.yml /
+# latest-linux*.yml next to each artifact. electron-updater
+# (src/main/updater.ts) reads app-update.yml at runtime unless
+# VALUZ_UPDATER_URL overrides it.
 #
-# Per-edition isolation: each edition publishes to its own repo
-# (e.g. owner=valuz-io, repo=valuz-${edition}) so an OSS user never
-# discovers the enterprise build. Drive the values from env so the build
-# script can stamp them per edition without editing this file.
+# Live feed is hosted on Tencent COS + Tencent CDN (files.valuz.io). The
+# generic provider only stamps app-update.yml with the feed URL — it does
+# NOT perform HTTP uploads (unlike the GitHub provider). CI uploads the
+# artifacts and manifests via scripts/upload-to-cos.sh (wrapping `tccli cos`).
+# See docs/superpowers/specs/2026-06-22-tencent-cos-auto-update-design.md.
 #
-# Releasing: `GH_TOKEN=… VALUZ_GH_OWNER=… VALUZ_GH_REPO=… electron-builder
-# --publish always`. Without --publish, the .yml manifest is generated
-# locally but nothing is uploaded.
+# VALUZ_UPDATER_URL defaults to https://files.valuz.io/valuz-${EDITION}/
+# (set in scripts/build-desktop.sh). Override locally for testing.
 publish:
-  provider: github
-  owner: valuz-ai
-  repo: valuz-oss
-  releaseType: release
+  provider: generic
+  url: "${env.VALUZ_UPDATER_URL}"

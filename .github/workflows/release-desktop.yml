@@ -122,7 +122,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VALUZ_VERSION: ${{ needs.set-version.outputs.version }}
         run: |
-          bash scripts/build-desktop.sh --signed --publish=always
+          bash scripts/build-desktop.sh --signed
 
       - name: List artifacts
         run: ls -lh frontend/apps/desktop/release/
@@ -164,6 +164,28 @@ jobs:
           fi
           echo "Uploading ${#files[@]} artifact(s) to release $TAG"
           gh release upload "$TAG" "${files[@]}" --clobber --repo valuz-ai/valuz-oss
+
+      # ── Mirror artifacts + live manifest to Tencent COS ────────────
+      # Auto-update reads from COS via CDN (files.valuz.io); GitHub Releases
+      # is the manual-download + backup path. The merge job overwrites this
+      # single-arch manifest with a merged multi-arch one on a full tag push.
+      # On a single-platform mac dispatch (merge skipped) this becomes live.
+      - name: Setup tccli
+        run: pip install tccli
+
+      - name: Upload to Tencent COS
+        env:
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
+          TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
+          VALUZ_EDITION: oss
+        run: |
+          bash scripts/upload-to-cos.sh \
+            --edition="$VALUZ_EDITION" \
+            --version="${{ needs.set-version.outputs.version }}" \
+            --release-dir=frontend/apps/desktop/release/ \
+            --manifests="latest-mac.yml"
 
       # Save this arch's manifest for the merge job. The two mac jobs each emit
       # an arch-specific latest-mac.yml and would otherwise overwrite each other
@@ -264,7 +286,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VALUZ_VERSION: ${{ needs.set-version.outputs.version }}
         run: |
-          bash scripts/build-desktop.sh --signed --publish=always
+          bash scripts/build-desktop.sh --signed
 
       - name: List artifacts
         run: ls -lh frontend/apps/desktop/release/
@@ -305,6 +327,26 @@ jobs:
           fi
           echo "Uploading ${#files[@]} artifact(s) to release $TAG"
           gh release upload "$TAG" "${files[@]}" --clobber --repo valuz-ai/valuz-oss
+
+      # ── Mirror artifacts + live manifest to Tencent COS ────────────
+      # See build-mac for the rationale. The merge job overwrites this
+      # single-arch manifest with the merged multi-arch one on a full tag push.
+      - name: Setup tccli
+        run: pip install tccli
+
+      - name: Upload to Tencent COS
+        env:
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
+          TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
+          VALUZ_EDITION: oss
+        run: |
+          bash scripts/upload-to-cos.sh \
+            --edition="$VALUZ_EDITION" \
+            --version="${{ needs.set-version.outputs.version }}" \
+            --release-dir=frontend/apps/desktop/release/ \
+            --manifests="latest-mac.yml"
 
       # Save this arch's manifest for the merge job (mirror of build-mac).
       - name: Save mac manifest (x64) for the merge
@@ -385,7 +427,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VALUZ_VERSION: ${{ needs.set-version.outputs.version }}
         run: |
-          bash scripts/build-desktop.sh --publish=always
+          bash scripts/build-desktop.sh
 
       - name: List artifacts
         run: ls -lh frontend/apps/desktop/release/
@@ -429,6 +471,26 @@ jobs:
           fi
           echo "Uploading ${#files[@]} artifact(s) to release $TAG"
           gh release upload "$TAG" "${files[@]}" --clobber --repo valuz-ai/valuz-oss
+
+      # ── Mirror artifacts + live manifest to Tencent COS ────────────
+      # Auto-update reads from COS via CDN (files.valuz.io); GitHub Releases
+      # is the manual-download + backup path.
+      - name: Setup tccli
+        run: pip install tccli
+
+      - name: Upload to Tencent COS
+        env:
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
+          TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
+          VALUZ_EDITION: oss
+        run: |
+          bash scripts/upload-to-cos.sh \
+            --edition="$VALUZ_EDITION" \
+            --version="${{ needs.set-version.outputs.version }}" \
+            --release-dir=frontend/apps/desktop/release/ \
+            --manifests="latest-linux-arm64.yml"
 
       # ── Upload build log on failure ────────────────────────────
       - name: Upload build artifacts on failure
@@ -505,7 +567,7 @@ jobs:
           TEMP: ${{ runner.temp }}
         shell: bash
         run: |
-          bash scripts/build-desktop.sh --publish=always
+          bash scripts/build-desktop.sh
 
       - name: List artifacts
         shell: bash
@@ -549,6 +611,28 @@ jobs:
           fi
           echo "Uploading ${#files[@]} artifact(s) to release $TAG"
           gh release upload "$TAG" "${files[@]}" --clobber --repo valuz-ai/valuz-oss
+
+      # ── Mirror artifacts + live manifest to Tencent COS ────────────
+      # Auto-update reads from COS via CDN (files.valuz.io); GitHub Releases
+      # is the manual-download + backup path. shell: bash because the windows
+      # runner default is pwsh.
+      - name: Setup tccli
+        run: pip install tccli
+
+      - name: Upload to Tencent COS
+        shell: bash
+        env:
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
+          TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
+          VALUZ_EDITION: oss
+        run: |
+          bash scripts/upload-to-cos.sh \
+            --edition="$VALUZ_EDITION" \
+            --version="${{ needs.set-version.outputs.version }}" \
+            --release-dir=frontend/apps/desktop/release/ \
+            --manifests="latest.yml"
 
       # ── Upload build log on failure ────────────────────────────
       - name: Upload build artifacts on failure
@@ -615,8 +699,32 @@ jobs:
               yaml.safe_dump(merged, fh, sort_keys=False, default_flow_style=False, width=4096)
           print(open("latest-mac.yml").read())
           PY
-      - name: Upload the merged latest-mac.yml to the release
+      # Merged latest-mac.yml goes to BOTH targets: GitHub Releases (manual
+      # download + backup) and Tencent COS (the live auto-update feed, CDN-served
+      # via files.valuz.io). This is the authoritative mac manifest — overwrites
+      # whatever the individual mac jobs pushed as single-arch manifests.
+      - name: Setup tccli
+        run: pip install tccli
+
+      - name: Upload merged latest-mac.yml to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "v${{ needs.set-version.outputs.version }}" latest-mac.yml --clobber --repo valuz-ai/valuz-oss
+
+      - name: Upload merged latest-mac.yml to Tencent COS
+        env:
+          TENCENT_SECRET_ID: ${{ secrets.TENCENT_SECRET_ID }}
+          TENCENT_SECRET_KEY: ${{ secrets.TENCENT_SECRET_KEY }}
+          TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
+          TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
+          VALUZ_EDITION: oss
+        run: |
+          tccli configure set secretId "$TENCENT_SECRET_ID" \
+                secretKey "$TENCENT_SECRET_KEY" \
+                region "$TENCENT_COS_REGION"
+          tccli cos PutObject \
+            --bucket "$TENCENT_COS_BUCKET" \
+            --local-path latest-mac.yml \
+            --cos-path "/${VALUZ_EDITION}/latest-mac.yml"
+          echo "Live mac manifest: https://files.valuz.io/${VALUZ_EDITION}/latest-mac.yml"

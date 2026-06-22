@@ -49,6 +49,19 @@ Releases are **tag-driven** and published by `.github/workflows/release-desktop.
 version — CI strips the `v`, sets `VALUZ_VERSION`, and `build-desktop.sh` overwrites
 `frontend/apps/desktop/package.json`. **Do not hand-bump the version.**
 
+**Two publish targets, by design:**
+
+- **Tencent COS + CDN** (`files.valuz.io`) — the **auto-updater feed**. CI uploads
+  every artifact here, and the packaged client's `app-update.yml` points at
+  `https://files.valuz.io/valuz-<edition>/`. `electron-updater` reads
+  `latest-*.yml` from there.
+- **GitHub Releases** — the **manual-download + backup** surface. CI mirrors every
+  artifact here too (`gh release upload`). If COS ever has an issue, the GitHub
+  release still carries every artifact for manual install.
+
+Required GitHub secrets: `TENCENT_SECRET_ID`, `TENCENT_SECRET_KEY`,
+`TENCENT_COS_BUCKET`, `TENCENT_COS_REGION`.
+
 Cutting `vX.Y.Z`:
 
 1. **Pick the version** (SemVer, pre-1.0): bug-fix / small batch → patch (`0.1.x`);
@@ -62,33 +75,45 @@ Cutting `vX.Y.Z`:
    ```
    `<notes>` is the `[X.Y.Z]` section of the CHANGELOG. Title is always `Valuz X.Y.Z`.
 4. CI builds **4 platforms** — mac arm64 (signed+notarized), mac x64 (signed), linux
-   arm64, windows x64 — and electron-builder (`releaseType: release`, `--publish=always`)
-   uploads each artifact to the release matching the tag. It does **not** overwrite the
-   release body, so the notes from step 3 stick.
+   arm64, windows x64. Each platform uploads artifacts to **both** GitHub Releases
+   (`gh release upload`) and Tencent COS (`scripts/upload-to-cos.sh`). The
+   `merge-mac-manifest` job merges arm64+x64 manifests and uploads the merged
+   `latest-mac.yml` to both targets as the authoritative mac feed.
 
-**The release MUST stay mutable — keep GitHub "immutable releases" OFF for this repo.**
-Immutable releases break the flow two ways:
-- An immutable (published) release **rejects electron-builder's asset upload**
-  (`422 Cannot upload assets to an immutable release`): the build succeeds but publishes
-  nothing.
-- A tag once used by an immutable release is **permanently burned** — it can never be
-  recreated (`Cannot create ref due to creations being restricted`), even after disabling
-  the setting and deleting the release+tag. If a tag gets burned, bump to the next version
-  (this is why `v0.1.3` was abandoned for `v0.1.4`).
+**GitHub Releases should stay mutable** — keep GitHub "immutable releases" OFF for
+this repo. A burned tag still breaks the GitHub mirror path (`422 Cannot upload
+assets to an immutable release`), but it's no longer catastrophic because
+auto-update reads COS — COS overwrites are always free. If a tag gets burned,
+bump to the next version for the GitHub mirror; the COS feed can be republished
+under any version without restriction.
 
 Operational recipes:
-- **Rebuild the same version with newer code** (only safe while the release is mutable —
-  deleting a mutable release does NOT burn the tag):
+- **Rebuild the same version with newer code** — re-run the workflow (tag push, or
+  `workflow_dispatch` with `platform=all`). COS overwrites cleanly with no risk.
+  GitHub Releases: delete + recreate still works while mutable.
   ```bash
   gh release delete vX.Y.Z --yes --cleanup-tag
   gh release create vX.Y.Z --target main --title "Valuz X.Y.Z" --notes-file <notes>
   ```
-- **Re-run one platform** (uploads to the existing release, no re-tag):
+- **Re-run one platform** (uploads to both GitHub Release + COS live feed for that
+  platform, no re-tag):
   ```bash
   gh workflow run release-desktop.yml --ref main -f version=vX.Y.Z \
     -f platform={mac-arm64|mac-x64|linux-arm64|windows-x64}
   ```
-- **Fix release notes after the fact** (release is mutable):
+- **Roll back to vX.Y.Z on the live COS feed** (artifact URLs in the versioned
+  manifest already point at `vX.Y.Z/...` which is immutable, so this just
+  promotes the old manifest back to live):
+  ```bash
+  for m in latest-mac.yml latest-linux-arm64.yml latest.yml; do
+    tccli cos CopyObject \
+      --bucket "$TENCENT_COS_BUCKET" \
+      --cos-path "oss/$m" \
+      --source-oss-path "oss/vX.Y.Z/$m"
+  done
+  ```
+  CDN picks up the change within the manifest TTL (60–300s).
+- **Fix release notes after the fact** (GitHub release is mutable):
   `gh release edit vX.Y.Z --notes-file <notes> --title "Valuz X.Y.Z"`.
 
 Runner quirks:
