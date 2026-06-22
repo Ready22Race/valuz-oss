@@ -666,34 +666,44 @@ async def upload_attachment(
 
 def _write_parse_result(
     result: Any, dest_dir: Path, base_name: str
-) -> tuple[str | None, str, str | None]:
+) -> tuple[str | None, str, str | None, str | None]:
     """Write a ``ParseResult``'s markdown into ``dest_dir`` as
     ``{base_name}.parsed.md`` and classify the outcome.
 
-    Returns ``(parsed_path, parse_status, engine)``:
-    - ``("…/x.parsed.md", "ready", <plugin/engine>)`` when the parser produced
-      real markdown and reported no error.
-    - ``(None, "failed", <plugin/engine>)`` when there is no markdown OR the
-      result carries ``metadata["error"]`` (unsupported file, parser failure,
-      or a fallback-disabled cloud failure). Callers fall back to the raw
-      ``stored_path`` so the agent at least sees the original file.
+    Returns ``(parsed_path, parse_status, engine, error_message)``:
+    - ``("…/x.parsed.md", "ready", <plugin/engine>, None)`` when the parser
+      produced real markdown and reported no error.
+    - ``(None, "failed", <plugin/engine>, <reason>)`` when there is no markdown
+      OR the result carries ``metadata["error"]`` (unsupported file, parser
+      failure, or a fallback-disabled cloud failure). Callers fall back to the
+      raw ``stored_path`` so the agent at least sees the original file.
 
     ``engine`` records WHICH parser ran (``metadata["plugin_id"]`` — e.g.
     ``mineru`` / ``paddleocr`` / ``light_local`` — falling back to the
     per-format ``engine`` label) for provenance on the attachment row.
+
+    ``error_message`` carries the parser-reported reason on the failure path.
+    Parsers signal failure by RETURNING a ``ParseResult`` with
+    ``metadata["error"]`` (they don't raise — see ``ParserRouter`` /
+    ``LightLocalParser``), so without surfacing it here the real cause — e.g.
+    ``"model not found at …/magika/…"`` from a frozen build missing magika's
+    model data — was discarded with the markdown, leaving the attachment row's
+    ``error_message`` NULL and the failure undiagnosable from the DB.
     """
     meta = dict(getattr(result, "metadata", None) or {})
     engine = meta.get("plugin_id") or meta.get("engine")
     markdown = getattr(result, "markdown", "") or ""
-    if not markdown or meta.get("error"):
-        return None, "failed", engine
+    error = meta.get("error")
+    if not markdown or error:
+        reason = str(error) if error else "parser produced no content"
+        return None, "failed", engine, reason[:2000]
     target = dest_dir / f"{base_name}.parsed.md"
     i = 1
     while target.exists():
         target = dest_dir / f"{base_name}-{i}.parsed.md"
         i += 1
     target.write_text(markdown, encoding="utf-8")
-    return str(target), "ready", engine
+    return str(target), "ready", engine, None
 
 
 async def _build_attachment_parser(db: Any) -> Any:
@@ -786,7 +796,9 @@ def _spawn_attachment_parse(
                 # Bound concurrent CPU-bound local parses (see semaphore note).
                 async with _LOCAL_PARSE_SEMAPHORE:
                     result = await asyncio.to_thread(router.parse_sync, source_path)
-            parsed_path, parse_status, engine = _write_parse_result(result, dest_dir, base_name)
+            parsed_path, parse_status, engine, error_message = _write_parse_result(
+                result, dest_dir, base_name
+            )
         except Exception as exc:  # noqa: BLE001 — contain; never crash the loop
             logger.exception("Background parse failed for attachment %s", attachment_id)
             error_message = str(exc)
