@@ -44,11 +44,11 @@ Non-goals:
 ```
                          ┌──► GitHub Releases  (manual download + backup)
 CI build (4 platforms) ──┤
-                         └──► Tencent COS  ──►  CDN (files.valuz.io)  ──►  electron-updater
+                         └──► Tencent COS  ──►  CDN (files.valuz.cn)  ──►  electron-updater
 ```
 
 - CI **double-writes** every artifact: GitHub Releases (existing path) and COS.
-- The packaged client's `app-update.yml` points at `https://files.valuz.io/valuz-<edition>/`.
+- The packaged client's `app-update.yml` points at `https://files.valuz.cn/valuz-<edition>/`.
 - `electron-updater` fetches `latest-mac.yml` / `latest-linux-arm64.yml` /
   `latest.yml` from that base and downloads the per-version artifact the
   manifest references (same CDN).
@@ -99,7 +99,7 @@ perform HTTP uploads, so `--publish=always` becomes a no-op and we drop it.
 ```yaml
 publish:
   provider: generic
-  url: "${env.VALUZ_UPDATER_URL}"    # https://files.valuz.io/valuz-oss/
+  url: "${env.VALUZ_UPDATER_URL}"    # https://files.valuz.cn/valuz-oss/
 ```
 
 `VALUZ_UPDATER_URL` is set by `build-desktop.sh` (next section) with a per-edition
@@ -113,7 +113,7 @@ default, overridable for local testing.
 - Set `VALUZ_UPDATER_URL` from edition if unset:
 
   ```bash
-  : "${VALUZ_UPDATER_URL:=https://files.valuz.io/valuz-${EDITION}/}"
+  : "${VALUZ_UPDATER_URL:=https://files.valuz.cn/valuz-${EDITION}/}"
   export VALUZ_UPDATER_URL
   ```
 
@@ -193,7 +193,7 @@ Responsibilities:
 | `TENCENT_COS_REGION` | e.g. `ap-shanghai` |
 
 `VALUZ_UPDATER_URL` is **not** a secret — it's derived from `VALUZ_EDITION` in
-`build-desktop.sh` (production default: `https://files.valuz.io/valuz-${EDITION}/`).
+`build-desktop.sh` (production default: `https://files.valuz.cn/valuz-${EDITION}/`).
 
 ## 9. CDN Cache Policy (Tencent CDN console — manual one-time config)
 
@@ -205,7 +205,7 @@ Responsibilities:
 - Serve range requests (electron-updater uses them for `.blockmap` differential
   downloads).
 
-These are configured in the Tencent CDN console against the `files.valuz.io`
+These are configured in the Tencent CDN console against the `files.valuz.cn`
 domain, not in this repo.
 
 ## 10. Docs Updates
@@ -225,7 +225,7 @@ domain, not in this repo.
 ### 10.2 `docs/architecture.md` §"Distribution"
 
 Add a short note: the live auto-update feed lives at
-`https://files.valuz.io/valuz-<edition>/latest-*.yml`, backed by Tencent COS,
+`https://files.valuz.cn/valuz-<edition>/latest-*.yml`, backed by Tencent COS,
 served via Tencent CDN. GitHub Releases remains for manual download.
 
 ## 11. Operational Recipes
@@ -255,7 +255,7 @@ served via Tencent CDN. GitHub Releases remains for manual download.
 ## 12. First-Release Bootstrapping
 
 The first release that ships with this design produces a client whose
-`app-update.yml` points at `https://files.valuz.io/valuz-oss/`. Existing users
+`app-update.yml` points at `https://files.valuz.cn/valuz-oss/`. Existing users
 on prior versions still check GitHub until they manually install this release
 once — both feeds coexist, so nothing breaks during the cutover.
 

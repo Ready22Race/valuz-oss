@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Move the desktop auto-updater feed from GitHub Releases to a self-hosted Tencent COS bucket fronted by Tencent CDN (`files.valuz.io`); CI double-writes to both targets.
+**Goal:** Move the desktop auto-updater feed from GitHub Releases to a self-hosted Tencent COS bucket fronted by Tencent CDN (`files.valuz.cn`); CI double-writes to both targets.
 
-**Architecture:** `electron-builder` `publish:` block switches to `provider: generic` with `url: ${env.VALUZ_UPDATER_URL}`, so the `app-update.yml` baked into the bundle points at `https://files.valuz.io/valuz-<edition>/`. CI invokes a new `scripts/upload-to-cos.sh` helper (wrapping `tccli cos`) after each platform build to push artifacts to `cos://<bucket>/<edition>/v<version>/` and to overwrite the live `latest-*.yml` at `<edition>/`. GitHub Releases upload (`gh release upload`) stays as the manual-download + backup path. Final commit is one unified commit covering the whole change (per user preference, not per-task commits).
+**Architecture:** `electron-builder` `publish:` block switches to `provider: generic` with `url: ${env.VALUZ_UPDATER_URL}`, so the `app-update.yml` baked into the bundle points at `https://files.valuz.cn/valuz-<edition>/`. CI invokes a new `scripts/upload-to-cos.sh` helper (wrapping `tccli cos`) after each platform build to push artifacts to `cos://<bucket>/<edition>/v<version>/` and to overwrite the live `latest-*.yml` at `<edition>/`. GitHub Releases upload (`gh release upload`) stays as the manual-download + backup path. Final commit is one unified commit covering the whole change (per user preference, not per-task commits).
 
 **Tech Stack:** electron-builder, electron-updater (unchanged on the client), `tccli` (Tencent Cloud CLI), GitHub Actions, bash.
 
@@ -30,7 +30,7 @@
 Before the first release ships, these one-time actions must be done by a human in the Tencent Cloud console and GitHub:
 
 - [ ] COS bucket created, public-read (or per-prefix public-read for `valuz-*`).
-- [ ] Tencent CDN domain `files.valuz.io` bound to the bucket, origin-pull configured.
+- [ ] Tencent CDN domain `files.valuz.cn` bound to the bucket, origin-pull configured.
 - [ ] CDN cache rules: `latest-*.yml` TTL 60–300s; everything else ≥ 1 day; no 4xx/5xx caching.
 - [ ] GitHub repo secrets set: `TENCENT_SECRET_ID`, `TENCENT_SECRET_KEY`, `TENCENT_COS_BUCKET`, `TENCENT_COS_REGION`.
 
@@ -199,13 +199,13 @@ In `frontend/apps/desktop/build/electron-builder.yml`, find lines 113-130 (the c
 # (src/main/updater.ts) reads app-update.yml at runtime unless
 # VALUZ_UPDATER_URL overrides it.
 #
-# Live feed is hosted on Tencent COS + Tencent CDN (files.valuz.io). The
+# Live feed is hosted on Tencent COS + Tencent CDN (files.valuz.cn). The
 # generic provider only stamps app-update.yml with the feed URL — it does
 # NOT perform HTTP uploads (unlike the GitHub provider). CI uploads the
 # artifacts and manifests via scripts/upload-to-cos.sh (wrapping `tccli cos`).
 # See docs/superpowers/specs/2026-06-22-tencent-cos-auto-update-design.md.
 #
-# VALUZ_UPDATER_URL defaults to https://files.valuz.io/valuz-${EDITION}/
+# VALUZ_UPDATER_URL defaults to https://files.valuz.cn/valuz-${EDITION}/
 # (set in scripts/build-desktop.sh). Override locally for testing.
 publish:
   provider: generic
@@ -221,7 +221,7 @@ Expected: no output, exit 0.
 
 Run (from `frontend/apps/desktop`):
 ```bash
-VALUZ_UPDATER_URL="https://files.valuz.io/valuz-oss/" \
+VALUZ_UPDATER_URL="https://files.valuz.cn/valuz-oss/" \
   pnpm exec electron-builder --config build/electron-builder.yml --help \
   | head -20
 ```
@@ -243,7 +243,7 @@ After the line `export VALUZ_EDITION="$EDITION"` (around line 97), add:
 # Local dev builds don't publish, so the value only matters for packaged
 # builds — but electron-builder reads it unconditionally when stamping
 # app-update.yml.
-: "${VALUZ_UPDATER_URL:=https://files.valuz.io/valuz-${EDITION}/}"
+: "${VALUZ_UPDATER_URL:=https://files.valuz.cn/valuz-${EDITION}/}"
 export VALUZ_UPDATER_URL
 ```
 
@@ -259,10 +259,10 @@ Run:
 unset VALUZ_UPDATER_URL
 # Source only the env-default lines (extract via sed), to avoid the full build:
 VALUZ_EDITION="oss"
-: "${VALUZ_UPDATER_URL:=https://files.valuz.io/valuz-${VALUZ_EDITION}/}"
+: "${VALUZ_UPDATER_URL:=https://files.valuz.cn/valuz-${VALUZ_EDITION}/}"
 echo "$VALUZ_UPDATER_URL"
 ```
-Expected: `https://files.valuz.io/valuz-oss/`
+Expected: `https://files.valuz.cn/valuz-oss/`
 
 ---
 
@@ -325,7 +325,7 @@ Each job gets the same 2 new steps in the same position. The `--manifests` arg d
 
 ```yaml
       # ── Mirror artifacts + live manifest to Tencent COS ────────────
-      # Auto-update reads from COS via CDN (files.valuz.io); GitHub Releases
+      # Auto-update reads from COS via CDN (files.valuz.cn); GitHub Releases
       # is the manual-download + backup path. The mac merge job is what makes
       # latest-mac.yml multi-arch — this single-arch upload is a transient
       # state the merge job overwrites on a full tag push. On a single-platform
@@ -444,7 +444,7 @@ Replace with:
             --bucket "$TENCENT_COS_BUCKET" \
             --local-path latest-mac.yml \
             --cos-path "/${VALUZ_EDITION}/latest-mac.yml"
-          echo "Live mac manifest: https://files.valuz.io/${VALUZ_EDITION}/latest-mac.yml"
+          echo "Live mac manifest: https://files.valuz.cn/${VALUZ_EDITION}/latest-mac.yml"
 ```
 
 Note: the merge job produces `latest-mac.yml` in its own working dir (the Python heredoc writes to `./latest-mac.yml`), so we upload directly without going through the helper.
@@ -475,9 +475,9 @@ version — CI strips the `v`, sets `VALUZ_VERSION`, and `build-desktop.sh` over
 
 **Two publish targets, by design:**
 
-- **Tencent COS + CDN** (`files.valuz.io`) — the **auto-updater feed**. CI uploads
+- **Tencent COS + CDN** (`files.valuz.cn`) — the **auto-updater feed**. CI uploads
   every artifact here, and the packaged client's `app-update.yml` points at
-  `https://files.valuz.io/valuz-<edition>/`. `electron-updater` reads
+  `https://files.valuz.cn/valuz-<edition>/`. `electron-updater` reads
   `latest-*.yml` from there.
 - **GitHub Releases** — the **manual-download + backup** surface. CI mirrors every
   artifact here too (`gh release upload`). If COS ever has an issue, the GitHub
@@ -571,8 +571,8 @@ Find the §"8. Distribution" section. After the table of components and the exis
 ### Auto-update feed
 
 The desktop client's auto-updater reads from Tencent COS + Tencent CDN
-(`files.valuz.io`), not GitHub Releases. The packaged client's
-`app-update.yml` points at `https://files.valuz.io/valuz-<edition>/`; the
+(`files.valuz.cn`), not GitHub Releases. The packaged client's
+`app-update.yml` points at `https://files.valuz.cn/valuz-<edition>/`; the
 manifests `latest-mac.yml` / `latest-linux-arm64.yml` / `latest.yml` live at
 that base. CI uploads every build to both Tencent COS (auto-update feed) and
 GitHub Releases (manual download + backup) — see
@@ -616,7 +616,7 @@ Expected: prints `jobs: ['set-version', 'build-mac', 'build-mac-x64', 'build-lin
 
 Run (from `frontend/apps/desktop`):
 ```bash
-VALUZ_UPDATER_URL="https://files.valuz.io/valuz-oss/" \
+VALUZ_UPDATER_URL="https://files.valuz.cn/valuz-oss/" \
   pnpm exec electron-builder --config build/electron-builder.yml --version
 ```
 Expected: electron-builder prints its version, no config-parse errors.
@@ -644,7 +644,7 @@ git add scripts/upload-to-cos.sh \
 git commit -m "$(cat <<'EOF'
 build(release): move desktop auto-update feed to Tencent COS + CDN
 
-The packaged client now checks https://files.valuz.io/valuz-<edition>/
+The packaged client now checks https://files.valuz.cn/valuz-<edition>/
 for updates instead of GitHub Releases. CI double-writes every artifact
 to Tencent COS (auto-update feed) and GitHub Releases (manual download
 + backup).
