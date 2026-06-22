@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mac auto-updates to its native build; Apple Silicon users on the Intel 0.2.2
   update straight to the arm64 build here. (#240 @St0neWan9)
 
+### Docs & Chore
+
+- Route the auto-updater's logs to a file via electron-log
+  (`~/Library/Logs/Valuz/main.log` on macOS, `%AppData%\Valuz\logs\main.log` on
+  Windows). They previously went to the console, which a packaged app discards,
+  so whether an update ran as a delta (vs a full download) and why was
+  untraceable. (#241 @St0neWan9)
+
 ## [0.2.2] - 2026-06-22
 
 ### Features
