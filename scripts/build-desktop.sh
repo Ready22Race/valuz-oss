@@ -96,6 +96,13 @@ case "$EDITION" in
 esac
 export VALUZ_EDITION="$EDITION"
 
+# Default the auto-update feed URL. CI overrides per-edition via matrix env.
+# Local dev builds don't publish, so the value only matters for packaged
+# builds — but electron-builder reads it unconditionally when stamping
+# app-update.yml (publish: provider=generic in build/electron-builder.yml).
+: "${VALUZ_UPDATER_URL:=https://files.valuz.io/valuz-${EDITION}/}"
+export VALUZ_UPDATER_URL
+
 log()  { echo "[build] $*"; }
 warn() { echo "[build] WARNING: $*" >&2; }
 die()  { echo "[build] ERROR: $*" >&2; exit 1; }
