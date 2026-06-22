@@ -83,11 +83,26 @@ for m in $MANIFESTS; do
     echo "WARN: manifest $m not in $RELEASE_DIR — skipping live copy" >&2
     continue
   fi
-  echo "[cos] $m → /${LIVE_PREFIX}/${m}"
+
+  # The live manifest sits at ${LIVE_PREFIX}/<name>, but its artifacts live
+  # one level down at ${VERSIONED_PREFIX}/. electron-builder emits the
+  # manifest with bare filenames (url: Valuz-x.y.z-arm64.dmg), which would
+  # resolve to ${LIVE_PREFIX}/Valuz-x.y.z-arm64.dmg — a 404. Rewrite the
+  # url:/path: fields to carry the v${VERSION}/ prefix so they resolve
+  # correctly. The original manifest is already archived unchanged at
+  # ${VERSIONED_PREFIX}/<name> by UploadBunch above; its relative URLs
+  # work bare because the artifacts sit next to it.
+  tmp="$(mktemp)"
+  sed -e 's|url: |url: v'"${VERSION}"'/|g' \
+      -e 's|^path: |path: v'"${VERSION}"'/|' \
+      "$RELEASE_DIR/$m" > "$tmp"
+
+  echo "[cos] $m → /${LIVE_PREFIX}/${m} (artifacts prefixed with v${VERSION}/)"
   tccli cos PutObject \
     --bucket     "$TENCENT_COS_BUCKET" \
-    --local-path "$RELEASE_DIR/$m" \
+    --local-path "$tmp" \
     --cos-path   "/${LIVE_PREFIX}/${m}"
+  rm -f "$tmp"
 done
 
 echo "[cos] Done."

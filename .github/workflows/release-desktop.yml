@@ -719,12 +719,20 @@ jobs:
           TENCENT_COS_BUCKET: ${{ secrets.TENCENT_COS_BUCKET }}
           TENCENT_COS_REGION: ${{ secrets.TENCENT_COS_REGION }}
           VALUZ_EDITION: oss
+          VALUZ_VERSION: ${{ needs.set-version.outputs.version }}
         run: |
           tccli configure set secretId "$TENCENT_SECRET_ID" \
                 secretKey "$TENCENT_SECRET_KEY" \
                 region "$TENCENT_COS_REGION"
+          # Rewrite url:/path: to carry the v${VERSION}/ prefix — the live
+          # manifest sits at ${EDITION}/ but its artifacts live one level
+          # down at ${EDITION}/v${VERSION}/. See scripts/upload-to-cos.sh
+          # for the same transform on the per-platform live manifests.
+          sed -e 's|url: |url: v'"$VALUZ_VERSION"'/|g' \
+              -e 's|^path: |path: v'"$VALUZ_VERSION"'/|' \
+              latest-mac.yml > latest-mac.yml.live
           tccli cos PutObject \
             --bucket "$TENCENT_COS_BUCKET" \
-            --local-path latest-mac.yml \
+            --local-path latest-mac.yml.live \
             --cos-path "/${VALUZ_EDITION}/latest-mac.yml"
           echo "Live mac manifest: https://files.valuz.io/${VALUZ_EDITION}/latest-mac.yml"
