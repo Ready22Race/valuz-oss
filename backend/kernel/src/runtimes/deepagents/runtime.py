@@ -54,6 +54,10 @@ from src.core.types import (
     StopReason,
     UserMessage,
 )
+from src.runtimes.deepagents._patches import (
+    MAIN_GRAPH_RECURSION_LIMIT,
+    apply_deepagents_patches,
+)
 from src.runtimes.deepagents.approval_bridge import (
     _build_pending_payload,
     _classify_subject,
@@ -63,6 +67,13 @@ from src.runtimes.interruption import is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
+
+# Apply third-party deepagents shims once, before any graph is built. See
+# ``_patches`` — raises *subagents* above langgraph's default 25-step recursion
+# limit (which they otherwise never escape). The *main* graph's limit is fixed
+# separately, in ``stream_config`` below, because ``astream_events`` drops the
+# bound budget deepagents sets — see ``MAIN_GRAPH_RECURSION_LIMIT``.
+apply_deepagents_patches()
 
 
 # Default location for the deepagents-specific checkpoint store. Kept separate
@@ -228,7 +239,15 @@ class DeepAgentsRuntime:
                 now=datetime.now().astimezone(),
             )
             stream_input: Any = {"messages": [{"role": "user", "content": prompt}]}
-            stream_config: dict[str, Any] = {"configurable": {"thread_id": str(thread_id)}}
+            # ``recursion_limit`` MUST be set here, in the call-time config:
+            # ``astream_events`` (below) ignores the budget deepagents binds onto
+            # the graph with ``.with_config``, so without this the main loop runs
+            # at langgraph's default of 25 and dies on any non-trivial turn. See
+            # ``_patches.MAIN_GRAPH_RECURSION_LIMIT``.
+            stream_config: dict[str, Any] = {
+                "configurable": {"thread_id": str(thread_id)},
+                "recursion_limit": MAIN_GRAPH_RECURSION_LIMIT,
+            }
 
             usage_totals = {
                 "input_tokens": 0,
@@ -825,10 +844,15 @@ class DeepAgentsRuntime:
         if self._graph is not None:
             return self._graph
 
+        # inherit_env=True so the agent shell sees the host's PATH / HOME / etc.
+        # (parity with Claude/Codex, which inherit os.environ). Its default is an
+        # EMPTY env — no PATH — so anything outside the shell's compiled-in
+        # default path fails to resolve: the chrome-devtools wrapper, and in dev
+        # even npx/node (nvm). See docs/design/browser-feature.md §8.
         backend = (
-            LocalShellBackend(root_dir=self.workspace_root)
+            LocalShellBackend(root_dir=self.workspace_root, inherit_env=True)
             if self.workspace_root
-            else LocalShellBackend()
+            else LocalShellBackend(inherit_env=True)
         )
 
         tools = self._build_tools()

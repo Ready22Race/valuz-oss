@@ -21,7 +21,7 @@ import {
   usePanelStore,
   useSessionAttachments,
   projectsApi,
-  type ProviderDetail,
+  type LLMChannelDetail,
   type RuntimeId,
   type SessionListItem,
   type SkillView,
@@ -38,7 +38,7 @@ export const ConversationsHomePage = () => {
   const [recentSessions, setRecentSessions] = useState<SessionListItem[]>([]);
   const [dataSources, setDataSources] = useState<DataSourceOption[]>([]);
   const [enabledSlugs, setEnabledSlugs] = useState<string[]>([]);
-  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -205,7 +205,7 @@ export const ConversationsHomePage = () => {
           .filter((c) => c.enabled)
           .map((c) => providersApi.get(c.id).catch(() => null)),
       );
-      setProviders(details.filter((d): d is ProviderDetail => d !== null));
+      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
     } catch {
       // Silently fail — Composer model picker just shows empty state.
     }

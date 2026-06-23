@@ -99,6 +99,34 @@ from valuz_agent.modules.skills.datastore import SkillDatastore
 logger = logging.getLogger(__name__)
 
 
+async def _enforce_budget(session: object) -> None:
+    """Channel-aware wallet pre-check before a turn runs.
+
+    Resolves the session's owner and its **locked channel** (``locked_provider_id``)
+    and hands both to the billing port. Passing the channel lets a billing
+    overlay skip enforcement for channels it does not meter — a user's own
+    direct API-key channel or an org BYOK channel never consume platform
+    credits, so an empty wallet must not block them. Raises ``BudgetExceeded``
+    (carrying the overlay's i18n key) when the port rejects.
+    """
+    from valuz_agent.infra.auth_context import get_current_user_id
+    from valuz_agent.ports.extensions import ext
+
+    uid = session.metadata.get("owner_user_id") or get_current_user_id()  # type: ignore[attr-defined]
+    if uid is None:
+        # Explicit-identity contract: budget enforcement without an owner is
+        # meaningless — fail loudly rather than bill nobody.
+        raise LookupError("owner context not set — cannot check budget")
+    locked = _valuz_meta(session).get("locked_provider_id")
+    budget = await ext.billing.check_budget(uid, provider_id=str(locked) if locked else None)
+    if not budget.allowed:
+        raise BudgetExceeded(
+            budget.reason or "insufficient credits",
+            message_key=budget.message_key,
+            message_params=budget.message_params,
+        )
+
+
 # ---------------------------------------------------------------------------
 # SessionService
 # ---------------------------------------------------------------------------
@@ -188,11 +216,9 @@ class SessionService:
 
         try:
             if is_project:
-                # ``get_project_connectors`` is SYNC (it reads a JSON config
-                # file) — awaiting it raised "object list can't be used in
-                # 'await' expression", caught below, so project sessions
-                # silently got no auto-default connector slugs.
-                return self._connectors.get_project_connectors(project_row)  # type: ignore[arg-type]
+                return await self._connectors.get_project_connectors(
+                    require_current_user_id(), project_id
+                )
             # Chat project: all enabled connectors that are connected or unknown
             return [
                 conn.slug
@@ -208,36 +234,65 @@ class SessionService:
     # ------------------------------------------------------------------ #
 
     async def get_project_last_pick(self, project_id: str) -> dict[str, str | None] | None:
-        """Return the most recent (runtime, provider, model) the user picked
-        in this project.
+        """Per-project composer memory, seeded on new-session entry.
 
-        Reads the latest kernel session of the project and surfaces the
-        three composer-relevant fields. The frontend uses this to seed
-        the picker on new-session entry so users don't have to re-pick
-        the same runtime/model every time they re-open the same project.
+        Returns two independent agent memories plus the chat-side
+        (runtime, provider, model):
 
-        Returns ``None`` if the project has no sessions yet (caller
-        falls back to the global Settings → Default tuple).
+        - ``agent_slug`` + ``runtime_provider`` / ``provider_id`` /
+          ``model_id`` — from the most recent **conversation** (``chat``).
+          ``user_only`` drops task-internal runs so a task the user just ran
+          doesn't masquerade as the last chat.
+        - ``task_agent_slug`` — the Lead of the most recent **task**
+          (``task_lead``), remembered separately so the composer's Task mode
+          defaults back to the last Lead, not the last chat agent (the two
+          roles usually differ).
 
         Skips sessions whose ``locked_provider_id`` is missing — OAuth
-        subscription rows and partially-created sessions have an empty
-        slot and would yield a useless ``(runtime, None, None)`` triple.
-        Scans a small recent window in case the very latest is one of
-        those incomplete rows.
+        subscription rows and partially-created sessions have an empty slot
+        and would yield a useless ``(runtime, None, None)`` triple. Scans a
+        small recent window in case the very latest is one of those.
+
+        Returns ``None`` only when the project has neither a usable chat nor
+        any task (caller falls back to the global Settings → Default tuple).
         """
-        ids = await project_index.list_session_ids(project_id, limit=10)
-        sessions = await kernel_client.list_sessions(require_current_user_id(), ids=ids, limit=10)
-        for s in sessions:
+        uid = require_current_user_id()
+        # Chat memory: runtime/provider/model + the conversation's agent.
+        chat_ids = await project_index.list_session_ids(project_id, user_only=True, limit=10)
+        chat_sessions = await kernel_client.list_sessions(uid, ids=chat_ids, limit=10)
+        chat_pick: dict[str, str | None] | None = None
+        for s in chat_sessions:
             meta = _valuz_meta(s)
             provider_id = meta.get("locked_provider_id") or None
             if not provider_id:
                 continue
-            return {
+            chat_pick = {
                 "runtime_provider": getattr(s, "runtime_provider", None) or None,
                 "provider_id": str(provider_id),
                 "model_id": s.model or None,
+                "agent_slug": str(a) if (a := meta.get("agent_slug")) else None,
             }
-        return None
+            break
+
+        # Task memory: the Lead agent of the most recent task in this project.
+        lead_ids = await project_index.list_session_ids(project_id, kind="task_lead", limit=10)
+        lead_sessions = await kernel_client.list_sessions(uid, ids=lead_ids, limit=10)
+        task_agent_slug: str | None = None
+        for s in lead_sessions:
+            if a := _valuz_meta(s).get("agent_slug"):
+                task_agent_slug = str(a)
+                break
+
+        if chat_pick is None and task_agent_slug is None:
+            return None
+        pick: dict[str, str | None] = chat_pick or {
+            "runtime_provider": None,
+            "provider_id": None,
+            "model_id": None,
+            "agent_slug": None,
+        }
+        pick["task_agent_slug"] = task_agent_slug
+        return pick
 
     async def list_sessions(
         self,
@@ -829,7 +884,6 @@ class SessionService:
                 skill_source=self._skill_source,
                 extra_skill_sources=self._extra_skill_sources,
                 official_entitled=await self._has_official_entitlement(),
-                secrets=self._secrets,
                 enabled_mcp_provider_slugs=effective_mcp_slugs,
                 connectors=self._connectors,
                 docs=self._docs,
@@ -998,21 +1052,7 @@ class SessionService:
         if status in ("cancelled", "archived"):
             raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
 
-        from valuz_agent.infra.auth_context import get_current_user_id
-        from valuz_agent.ports.extensions import ext
-
-        uid = session.metadata.get("owner_user_id") or get_current_user_id()
-        if uid is None:
-            # Explicit-identity contract: budget enforcement without an owner
-            # is meaningless — fail loudly rather than bill nobody.
-            raise LookupError("owner context not set — cannot check budget")
-        budget = await ext.billing.check_budget(uid)
-        if not budget.allowed:
-            raise BudgetExceeded(
-                budget.reason or "insufficient credits",
-                message_key=budget.message_key,
-                message_params=budget.message_params,
-            )
+        await _enforce_budget(session)
 
         old_status = status
 
@@ -1088,19 +1128,7 @@ class SessionService:
         if status in ("cancelled", "archived"):
             raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
 
-        from valuz_agent.infra.auth_context import get_current_user_id
-        from valuz_agent.ports.extensions import ext
-
-        uid = session.metadata.get("owner_user_id") or get_current_user_id()
-        if uid is None:
-            raise LookupError("owner context not set — cannot check budget")
-        budget = await ext.billing.check_budget(uid)
-        if not budget.allowed:
-            raise BudgetExceeded(
-                budget.reason or "insufficient credits",
-                message_key=budget.message_key,
-                message_params=budget.message_params,
-            )
+        await _enforce_budget(session)
 
         # Mirror ``send_message``: flip the session to ``status="running"``
         # before driving the turn. The frontend's auto-resume effect on

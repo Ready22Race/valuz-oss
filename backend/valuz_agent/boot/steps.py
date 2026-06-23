@@ -6,6 +6,7 @@ Bodies are moved verbatim from the former ``@app.on_event`` hooks in
 expressed explicitly in ``boot/lifespan.py``.
 """
 
+import asyncio
 import logging
 
 from fastapi import FastAPI
@@ -153,6 +154,15 @@ async def bootstrap_schema() -> None:
     # 4. Pure-insert seeds for built-in rows.
     async with async_unit_of_work() as db:
         await seed_all(db)
+
+    # 5. One-time backfill of the connector module's legacy filesystem stores
+    #    (project-config.json selection + FileSecretStore secrets) into the
+    #    connector DB tables/columns. Idempotent + marker-gated; a no-op on
+    #    fresh / shared backends.
+    from valuz_agent.boot.backfill_connector_fs import backfill_connector_fs
+
+    async with async_unit_of_work() as db:
+        await backfill_connector_fs(db)
 
 
 async def configure_i18n() -> None:
@@ -406,6 +416,8 @@ async def init_kernel(app: FastAPI) -> None:
     # submit_skill. The lead gate stays enforced inside each handler.
     from valuz_agent.integrations.toolkit_mcp_server import install_toolkit_toolsets
     from valuz_agent.integrations.tools_skill_creator import build_submit_skill_tool_defs
+    from valuz_agent.modules.browser import service as browser_service
+    from valuz_agent.modules.browser.tools import build_browser_tool_defs
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
     from valuz_agent.modules.tasks.dispatch_mcp import build_task_tool_defs
     from valuz_agent.modules.tasks.orchestrator import task_orchestrator
@@ -419,6 +431,18 @@ async def init_kernel(app: FastAPI) -> None:
     orchestration_names = [d.name for d in ORCHESTRATION_TOOL_DECLARATIONS]
     dispatch_names = [d.name for d in DISPATCH_TOOL_DECLARATIONS]
     shared = build_memory_tool_defs() + build_submit_skill_tool_defs()
+    # browser_start/browser_stop only work when the engine (Node +
+    # chrome-devtools-mcp) is available; don't expose dead tools otherwise
+    # (e.g. headless/TUI without Node). See docs/design/browser-feature.md §8.
+    if browser_service.node_available():
+        shared = shared + build_browser_tool_defs()
+        # Install the friendly ``chrome-devtools`` wrapper on PATH now, at boot —
+        # before any session spawns its agent subprocess (which inherits env at
+        # spawn time). Lets the agent run a clean ``chrome-devtools <tool>``.
+        if browser_service.ensure_cli_on_path():
+            logger.info("browser CLI installed on PATH (chrome-devtools)")
+    else:
+        logger.info("browser engine unavailable — browser_start/browser_stop not registered")
     install_toolkit_toolsets(
         base=tuple(by_name[n] for n in orchestration_names if n in by_name) + shared,
         lead=tuple(by_name[n] for n in dispatch_names if n in by_name) + shared,
@@ -774,6 +798,18 @@ def mark_boot_complete() -> None:
     from valuz_agent.modules.system.service import record_boot_complete
 
     record_boot_complete()
+
+
+async def stop_managed_browser() -> None:
+    """Best-effort: stop the chrome-devtools daemon so app exit doesn't leave an
+    orphan visible Chrome. The isolated profile persists (login state survives);
+    only the window/daemon closes. Bounded + never blocks teardown."""
+    try:
+        from valuz_agent.modules.browser import service as browser_service
+
+        await asyncio.wait_for(browser_service.stop(), timeout=10.0)
+    except Exception:  # noqa: BLE001 — shutdown best-effort
+        logger.warning("managed browser stop on shutdown failed", exc_info=True)
 
 
 async def shutdown_kernel() -> None:

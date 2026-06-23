@@ -2,12 +2,18 @@
 import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import type { ProviderDetail } from "../api/providers-api";
+import type { LLMModel } from "@valuz/shared";
+
+import type { LLMChannelDetail } from "../api/providers-api";
 import { useComposerProviders } from "./use-composer-providers";
 
+/** Wrap bare model ids into ADR-011 ``LLMModel`` rows. */
+const mdl = (ids: string[]): LLMModel[] =>
+  ids.map((id) => ({ id, label: null, runtimes: null }));
+
 const provider = (
-  overrides: Partial<ProviderDetail> & Pick<ProviderDetail, "id" | "name">,
-): ProviderDetail => ({
+  overrides: Partial<LLMChannelDetail> & Pick<LLMChannelDetail, "id" | "name">,
+): LLMChannelDetail => ({
   provider_kind: "anthropic",
   source: "managed",
   enabled: true,
@@ -18,8 +24,9 @@ const provider = (
   credential_source: "secret_ref",
   auth_type: "api_key",
   base_url: null,
-  model_options: [],
-  model_labels: {},
+  models: [],
+  group: "api_key",
+  group_rank: 40,
   unavailable_reason: null,
   supports_custom_base_url: false,
   supports_connection_test: true,
@@ -35,12 +42,12 @@ describe("useComposerProviders", () => {
       provider({
         id: "ch-anthropic",
         name: "Anthropic",
-        model_options: ["claude-sonnet-4-6", "claude-opus-4-7"],
+        models: mdl(["claude-sonnet-4-6", "claude-opus-4-7"]),
       }),
       provider({
         id: "ch-openai",
         name: "OpenAI",
-        model_options: ["gpt-4o"],
+        models: mdl(["gpt-4o"]),
       }),
     ];
 
@@ -57,13 +64,13 @@ describe("useComposerProviders", () => {
       provider({
         id: "ch-on",
         name: "On",
-        model_options: ["m1"],
+        models: mdl(["m1"]),
       }),
       provider({
         id: "ch-off",
         name: "Off",
         enabled: false,
-        model_options: ["m2"],
+        models: mdl(["m2"]),
       }),
     ];
 
@@ -98,13 +105,13 @@ describe("useComposerProviders", () => {
         id: "ch-anthropic",
         name: "Anthropic",
         provider_kind: "anthropic",
-        model_options: ["claude-sonnet-4-6"],
+        models: mdl(["claude-sonnet-4-6"]),
       }),
       provider({
         id: "ch-openai",
         name: "OpenAI",
         provider_kind: "openai",
-        model_options: ["gpt-4o"],
+        models: mdl(["gpt-4o"]),
       }),
       provider({
         id: "ch-claude-subscription",
@@ -112,7 +119,7 @@ describe("useComposerProviders", () => {
         provider_kind: "claude-subscription",
         credential_source: "none",
         auth_type: "oauth",
-        model_options: ["claude-sonnet-4-6"],
+        models: mdl(["claude-sonnet-4-6"]),
       }),
       provider({
         id: "ch-codex-subscription",
@@ -120,7 +127,7 @@ describe("useComposerProviders", () => {
         provider_kind: "codex-subscription",
         credential_source: "none",
         auth_type: "oauth",
-        model_options: ["gpt-5-codex"],
+        models: mdl(["gpt-5-codex"]),
       }),
     ];
 
@@ -148,7 +155,7 @@ describe("useComposerProviders", () => {
         name: "Anthropic",
         provider_kind: "anthropic",
         protocol: null,
-        model_options: ["claude-sonnet-4-6"],
+        models: mdl(["claude-sonnet-4-6"]),
       }),
       // Built-in subscription: provider_kind claude-subscription,
       // protocol blank → derived anthropic. SHOULD appear.
@@ -159,7 +166,7 @@ describe("useComposerProviders", () => {
         protocol: null,
         credential_source: "none",
         auth_type: "oauth",
-        model_options: ["claude-sonnet-4-6"],
+        models: mdl(["claude-sonnet-4-6"]),
       }),
       // User provider: deepseek kind, anthropic protocol explicit.
       // SHOULD appear under the protocol-based filter.
@@ -169,7 +176,7 @@ describe("useComposerProviders", () => {
         provider_kind: "deepseek",
         protocol: "anthropic",
         credential_source: "secret_ref",
-        model_options: ["deepseek-v4"],
+        models: mdl(["deepseek-v4"]),
       }),
       // DeepSeek (dual-protocol built-in): backend marks it as both
       // anthropic + openai capable via ``compatible_protocols``. SHOULD
@@ -182,7 +189,7 @@ describe("useComposerProviders", () => {
         protocol: null,
         compatible_protocols: ["anthropic", "openai-completion"],
         credential_source: "secret_ref",
-        model_options: ["deepseek-v4-flash"],
+        models: mdl(["deepseek-v4-flash"]),
       }),
       // OpenAI-protocol provider — should NOT appear.
       provider({
@@ -191,7 +198,7 @@ describe("useComposerProviders", () => {
         provider_kind: "openai",
         protocol: null,
         compatible_protocols: ["openai-completion"],
-        model_options: ["gpt-4o"],
+        models: mdl(["gpt-4o"]),
       }),
       provider({
         id: "ch-compat-openai",
@@ -199,7 +206,7 @@ describe("useComposerProviders", () => {
         provider_kind: "compatible",
         protocol: "openai-completion",
         compatible_protocols: ["openai-completion"],
-        model_options: ["custom-gpt"],
+        models: mdl(["custom-gpt"]),
       }),
       // Codex subscription — speaks openai-response (kernel V5+bba3014
       // 4-value enum), must be excluded from the deepagents picker
@@ -212,7 +219,7 @@ describe("useComposerProviders", () => {
         compatible_protocols: ["openai-response"],
         credential_source: "none",
         auth_type: "oauth",
-        model_options: ["gpt-5-codex"],
+        models: mdl(["gpt-5-codex"]),
       }),
     ];
 
@@ -235,7 +242,7 @@ describe("useComposerProviders", () => {
         provider_kind: "codex-subscription",
         credential_source: "none",
         auth_type: "oauth",
-        model_options: ["gpt-5-codex"],
+        models: mdl(["gpt-5-codex"]),
       }),
       // Claude subscription — codex CLI can't authenticate to Anthropic's
       // API (reads its own keychain via codex /login), so the picker
@@ -246,7 +253,7 @@ describe("useComposerProviders", () => {
         provider_kind: "claude-subscription",
         credential_source: "none",
         auth_type: "oauth",
-        model_options: ["claude-sonnet-4-6"],
+        models: mdl(["claude-sonnet-4-6"]),
       }),
       // OpenAI api_key provider — codex CLI only speaks the Responses
       // API, not arbitrary openai-compatible endpoints, so the picker
@@ -255,7 +262,7 @@ describe("useComposerProviders", () => {
         id: "ch-openai",
         name: "OpenAI",
         provider_kind: "openai",
-        model_options: ["gpt-4o"],
+        models: mdl(["gpt-4o"]),
       }),
     ];
 
@@ -279,7 +286,7 @@ describe("useComposerProviders", () => {
         credential_source: "none",
         auth_type: "oauth",
         compatible_protocols: ["openai-response"],
-        model_options: ["gpt-5-codex"],
+        models: mdl(["gpt-5-codex"]),
       }),
       provider({
         id: "valuz-channel-codex",
@@ -289,7 +296,7 @@ describe("useComposerProviders", () => {
         credential_source: "system_managed",
         auth_type: "oauth",
         compatible_protocols: ["openai-response"],
-        model_options: ["gpt-5.4-nano"],
+        models: mdl(["gpt-5.4-nano"]),
       }),
       // Anthropic-only system provider — must NOT leak into the codex card.
       provider({
@@ -300,7 +307,7 @@ describe("useComposerProviders", () => {
         credential_source: "system_managed",
         auth_type: "oauth",
         compatible_protocols: ["anthropic"],
-        model_options: ["sys-reportify-pro"],
+        models: mdl(["sys-reportify-pro"]),
       }),
     ];
 
@@ -327,7 +334,7 @@ describe("useComposerProviders", () => {
         credential_source: "system_managed",
         auth_type: "oauth",
         compatible_protocols: ["anthropic"],
-        model_options: ["sys-reportify-pro"],
+        models: mdl(["sys-reportify-pro"]),
       }),
       // openai-response-only system provider — should be filtered out.
       provider({
@@ -338,7 +345,7 @@ describe("useComposerProviders", () => {
         credential_source: "system_managed",
         auth_type: "oauth",
         compatible_protocols: ["openai-response"],
-        model_options: ["gpt-5.4-nano"],
+        models: mdl(["gpt-5.4-nano"]),
       }),
     ];
 
@@ -353,12 +360,12 @@ describe("useComposerProviders", () => {
       provider({
         id: "ch-anthropic",
         name: "Anthropic",
-        model_options: ["m1"],
+        models: mdl(["m1"]),
       }),
       provider({
         id: "ch-openai",
         name: "OpenAI",
-        model_options: ["m2"],
+        models: mdl(["m2"]),
       }),
     ];
 
@@ -378,7 +385,7 @@ describe("useComposerProviders", () => {
         id: "ch-anthropic-configured",
         name: "Anthropic",
         credential_source: "secret_ref",
-        model_options: ["m1"],
+        models: mdl(["m1"]),
       }),
       // empty — should be filtered out
       provider({
@@ -386,7 +393,7 @@ describe("useComposerProviders", () => {
         name: "Anthropic blank",
         credential_source: "none",
         auth_type: "api_key",
-        model_options: ["m2"],
+        models: mdl(["m2"]),
       }),
     ];
 
@@ -403,7 +410,7 @@ describe("useComposerProviders", () => {
         name: "Claude (订阅)",
         credential_source: "none",
         auth_type: "oauth",
-        model_options: ["claude-sonnet-4-6"],
+        models: mdl(["claude-sonnet-4-6"]),
       }),
     ];
 
@@ -420,7 +427,7 @@ describe("useComposerProviders", () => {
         name: "Valuz",
         credential_source: "account_connection",
         auth_type: "api_key",
-        model_options: ["reportify-lite"],
+        models: mdl(["reportify-lite"]),
       }),
     ];
 

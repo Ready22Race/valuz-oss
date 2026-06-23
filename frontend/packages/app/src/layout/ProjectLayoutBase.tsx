@@ -17,6 +17,8 @@ import {
   useBranding,
   useGlobalShortcuts,
   usePanelStore,
+  useConnectorAlert,
+  refreshConnectorAlert,
   useRegistryStore,
   useRunningRuns,
   useSessionStore,
@@ -79,6 +81,8 @@ import {
 } from "../components/DecisionInbox";
 import { usePlatform } from "../platform";
 import { UpdateButton } from "../components/UpdateButton";
+import { useAgentDeployPicker } from "../components/agent-deploy-picker";
+import { AgentCheckboxList } from "../components/AgentDeployField";
 import type { ProjectOutletContext } from "./types";
 
 export type DirectoryFieldMode = "input" | "picker";
@@ -112,6 +116,7 @@ function useNavItems(): DesktopSidebarBottomItem[] {
   const { t } = useTranslation();
   const navItems = useRegistryStore((state) => state.navItems);
   const { count: runningCount } = useRunningRuns();
+  const { showDot: connectorAlert } = useConnectorAlert();
   return navItems.map((item) => ({
     id: item.id,
     label: t(item.label as Parameters<typeof t>[0]),
@@ -119,6 +124,7 @@ function useNavItems(): DesktopSidebarBottomItem[] {
     icon: NAV_ICON_MAP[item.id] ?? "settings",
     group: item.navGroup ?? "project",
     badgeCount: item.id === "activity" ? runningCount : undefined,
+    badgeDot: item.id === "connectors" ? connectorAlert : undefined,
   }));
 }
 
@@ -143,6 +149,9 @@ export function ProjectLayoutBase({
   const navItemsList = useNavItems();
   const desktopRoutes = useRegistryStore((state) => state.desktopRoutes);
   const fetchSessions = useSessionStore((state) => state.fetchSessions);
+  const openConversationProjectId = useSessionStore(
+    (state) => state.activeProjectId,
+  );
   const fetchAllTasks = useTaskStore((state) => state.fetchAllTasks);
   const allProjects = useProjectStore((state) => state.projects);
   const setAllProjects = useProjectStore((state) => state.setProjects);
@@ -171,10 +180,21 @@ export function ProjectLayoutBase({
   const [newName, setNewName] = useState("");
   const [newRootPath, setNewRootPath] = useState("");
   const [createError, setCreateError] = useState("");
+  // Initial members for the create dialog (shared with the projects-page entry).
+  const memberPicker = useAgentDeployPicker();
   const [historyIdx, setHistoryIdx] = useState<number>(
     () => (window.history.state as { idx?: number } | null)?.idx ?? 0,
   );
   const [historyMaxIdx, setHistoryMaxIdx] = useState<number>(historyIdx);
+
+  // The connector nav dot polls lazily (5 min). Landing on the home screen
+  // (``/`` redirects to ``/conversation/new``) forces a fresh check so a status
+  // that flipped during the gap shows up at once instead of on the next tick.
+  useEffect(() => {
+    if (location.pathname === "/conversation/new" || location.pathname === "/") {
+      refreshConnectorAlert();
+    }
+  }, [location.pathname]);
 
   // Window maximize state for the custom window controls (Windows/Linux).
   const [isMaximized, setIsMaximized] = useState(false);
@@ -283,15 +303,16 @@ export function ProjectLayoutBase({
     }
   }, [location.pathname, fetchSessions, fetchProjects, fetchAllTasks]);
 
-  const projectGroups: DesktopSidebarProjectGroup[] = useMemo(
+  // Set of real project ids — the grouping key for "does this run belong to a
+  // project?". Runs whose ``project_id`` isn't in here (quick assistant chats,
+  // project-less tasks) fall into the loose "Chats" group instead.
+  const projectIdSet = useMemo(
     () =>
-      allProjects
-        .filter((project) => project.kind === "project")
-        .map((project) => ({
-          id: project.id,
-          label: project.name,
-          href: `/projects/${project.id}`,
-        })),
+      new Set(
+        allProjects
+          .filter((project) => project.kind === "project")
+          .map((project) => project.id),
+      ),
     [allProjects],
   );
 
@@ -375,33 +396,84 @@ export function ProjectLayoutBase({
     };
   }, [refreshFinishedRuns]);
 
-  const recentItems: DesktopSidebarRecentItem[] = useMemo(() => {
+  // Merge live + finished runs (dedupe by session), newest first, then split
+  // into per-project buckets and a loose "Chats" list. Each project's chats +
+  // tasks nest under it in the sidebar; everything project-less goes to Chats.
+  const { projectRunItems, chatItems } = useMemo(() => {
     const byId = new Map<string, RunSummary>();
     for (const r of liveRuns) byId.set(r.session_id, r);
     for (const r of finishedRuns) {
       if (!byId.has(r.session_id)) byId.set(r.session_id, r);
     }
     const liveSet = new Set(liveRuns.map((r) => r.session_id));
-    return [...byId.values()]
-      .sort(
-        (a, b) =>
-          new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
-      )
-      .slice(0, 8)
-      .map((r) => ({
-        id: r.session_id,
-        title: r.title,
-        // Tasks have their own page; chats route to the conversation
-        // view. Fall back to the conversation if a task somehow lacks a
-        // ``task_id`` so the row is always clickable.
-        href:
-          r.source_kind === "task" && r.task_id
-            ? `/tasks/${encodeURIComponent(r.task_id)}`
-            : `/conversation/${encodeURIComponent(r.session_id)}`,
-        kind: r.source_kind === "task" ? "task" : "chat",
-        isRunning: liveSet.has(r.session_id),
-      }));
-  }, [liveRuns, finishedRuns]);
+    const toItem = (r: RunSummary): DesktopSidebarRecentItem => ({
+      id: r.session_id,
+      title: r.title,
+      // Tasks have their own page; chats route to the conversation view. Fall
+      // back to the conversation if a task somehow lacks a ``task_id`` so the
+      // row is always clickable.
+      href:
+        r.source_kind === "task" && r.task_id
+          ? `/tasks/${encodeURIComponent(r.task_id)}`
+          : `/conversation/${encodeURIComponent(r.session_id)}`,
+      kind: r.source_kind === "task" ? "task" : "chat",
+      isRunning: liveSet.has(r.session_id),
+    });
+    const sorted = [...byId.values()].sort(
+      (a, b) => b.updated_at - a.updated_at,
+    );
+    const byProject = new Map<string, DesktopSidebarRecentItem[]>();
+    const loose: DesktopSidebarRecentItem[] = [];
+    for (const r of sorted) {
+      const item = toItem(r);
+      if (r.project_id && projectIdSet.has(r.project_id)) {
+        const arr = byProject.get(r.project_id);
+        if (arr) arr.push(item);
+        else byProject.set(r.project_id, [item]);
+      } else {
+        loose.push(item);
+      }
+    }
+    return { projectRunItems: byProject, chatItems: loose };
+  }, [liveRuns, finishedRuns, projectIdSet]);
+
+  const projectGroups: DesktopSidebarProjectGroup[] = useMemo(
+    () =>
+      allProjects
+        .filter((project) => project.kind === "project")
+        .map((project) => ({
+          id: project.id,
+          label: project.name,
+          href: `/projects/${project.id}`,
+          items: projectRunItems.get(project.id) ?? [],
+        })),
+    [allProjects, projectRunItems],
+  );
+
+  // The project that owns the current route — resolved fast so its accordion
+  // auto-expands the instant you open a project conversation. A project landing
+  // is read straight from the URL; a conversation maps its session id → the
+  // owning project via the session store (populated the moment the session is
+  // created), which runs well ahead of the runs list that backs
+  // ``projectRunItems``. Tasks / anything else fall back to matching the route
+  // against the run items.
+  const activeProjectId = useMemo<string | null>(() => {
+    const path = location.pathname;
+    const projMatch = path.match(/^\/projects\/([^/]+)/);
+    if (projMatch) return decodeURIComponent(projMatch[1]);
+    // A conversation's owning project is published to the store by the
+    // conversation page (authoritative, straight from the loaded session
+    // detail) — immediate, unlike the lagging runs list.
+    if (path.startsWith("/conversation/") && openConversationProjectId) {
+      return openConversationProjectId;
+    }
+    // Tasks / anything else: match the route against the run items.
+    for (const [pid, items] of projectRunItems) {
+      if (items.some((it) => path === it.href || path.startsWith(`${it.href}/`)))
+        return pid;
+    }
+    return null;
+  }, [location.pathname, openConversationProjectId, projectRunItems]);
 
   const handleCreateProject = async () => {
     const trimmedName = newName.trim();
@@ -413,9 +485,14 @@ export function ProjectLayoutBase({
         name: trimmedName,
         root_path: trimmedPath,
       });
+      const failed = await memberPicker.deploy(ws.id);
+      if (failed > 0) {
+        toast.warning(t("project.deployPartialFail", { count: failed }));
+      }
       toast.success(t("project.created", { name: trimmedName }));
       setNewName("");
       setNewRootPath("");
+      memberPicker.reset();
       setCreateOpen(false);
       await fetchProjects();
       navigate(`/projects/${ws.id}`);
@@ -682,9 +759,10 @@ export function ProjectLayoutBase({
         sidebar={
           <DesktopSidebar
             activePath={location.pathname}
+            activeProjectId={activeProjectId}
             projectGroups={projectGroups}
             bottomItems={navItemsList}
-            recents={recentItems}
+            chats={chatItems}
             onRecentRename={(sessionId, newName) => {
               const trimmed = newName.trim();
               if (!trimmed) return;
@@ -725,6 +803,7 @@ export function ProjectLayoutBase({
             mascotSrc={mascotSrc}
             LinkComponent={Link}
             primaryActionHref="/conversation/new"
+            onPrimaryAction={refreshConnectorAlert}
             collapsed={sidebarCollapsed}
             onAddProject={() => setCreateOpen(true)}
             onProjectOpenInFinder={(projectId) => {
@@ -787,7 +866,10 @@ export function ProjectLayoutBase({
         open={createOpen}
         onOpenChange={(open) => {
           setCreateOpen(open);
-          if (!open) setCreateError("");
+          if (!open) {
+            setCreateError("");
+            memberPicker.reset();
+          }
         }}
       >
         <DialogContent>
@@ -857,6 +939,12 @@ export function ProjectLayoutBase({
               {createError ? (
                 <p className="text-xs text-destructive">{createError}</p>
               ) : null}
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-foreground">
+                {t("project.deployAgents")}
+              </label>
+              <AgentCheckboxList picker={memberPicker} />
             </div>
             {projectDialogExtraFields}
           </div>

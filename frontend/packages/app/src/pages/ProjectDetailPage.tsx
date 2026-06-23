@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   Button,
@@ -55,8 +55,8 @@ import {
   type Trigger,
   type ProjectDetail,
   type ProjectFileNode,
-  type ProviderDetail,
-  type ProviderListItem,
+  type LLMChannelDetail,
+  type LLMChannel,
   type ConnectorItem,
   type Task,
   type TaskEvent,
@@ -576,10 +576,14 @@ export const ProjectDetailPage = () => {
   } | null>(null);
   const [pendingDeleteBusy, setPendingDeleteBusy] = useState(false);
   // Project conversations bind to one of the project's configured agents
-  // (instead of a raw model). This is the picker for the next session.
-  const [selectedAgentSlug, setSelectedAgentSlug] = useState<string | null>(
-    null,
-  );
+  // (instead of a raw model). The composer remembers the agent PER MODE —
+  // Chat keeps the last chat agent, Task keeps the last Lead — because the
+  // two roles usually differ (a Lead orchestrates; a chat agent is a
+  // specialist). ``selectedAgentSlug`` is derived from the active mode below.
+  const [agentByMode, setAgentByMode] = useState<{
+    chat: string | null;
+    task: string | null;
+  }>({ chat: null, task: null });
   // Library agents + add-agent dialog state. The config panel's
   // "Agents" [+] opens the same dialog the project tasks page uses.
   const [libraryAgents, setLibraryAgents] = useState<Agent[]>([]);
@@ -612,15 +616,20 @@ export const ProjectDetailPage = () => {
       });
       setMembers(mapped);
       setRawMembers(res.agents);
-      setSelectedAgentSlug((prev) =>
+      // Keep each mode's pick if it's still a valid member, else fall back to
+      // the first member — applied independently to chat and task.
+      const keepOrFirst = (prev: string | null) =>
         prev && mapped.some((m) => m.slug === prev)
           ? prev
-          : (mapped[0]?.slug ?? null),
-      );
+          : (mapped[0]?.slug ?? null);
+      setAgentByMode((prev) => ({
+        chat: keepOrFirst(prev.chat),
+        task: keepOrFirst(prev.task),
+      }));
     } catch {
       setMembers([]);
       setRawMembers([]);
-      setSelectedAgentSlug(null);
+      setAgentByMode({ chat: null, task: null });
     }
   }, [id]);
 
@@ -740,11 +749,14 @@ export const ProjectDetailPage = () => {
   // session; ``task`` kicks off a background Task via tasksApi.kickoff
   // and routes to the task detail page.
   const [composerMode, setComposerMode] = useState<"chat" | "task">("chat");
+  // Active agent = the remembered pick for the current mode. Switching mode
+  // swaps the agent to that mode's memory (Chat agent ↔ last Lead).
+  const selectedAgentSlug = agentByMode[composerMode];
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [connectors, setConnectors] = useState<ConnectorItem[]>([]);
   const [selectedMcpSlugs, setSelectedMcpSlugs] = useState<string[]>([]);
-  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -811,6 +823,25 @@ export const ProjectDetailPage = () => {
     defaultsLoading,
     composerTouched,
   ]);
+  // Seed each mode's agent ONCE from the project's last-used picks: Chat from
+  // the last conversation's agent, Task from the last Lead. Ref-gated so it
+  // never clobbers a pick the user made afterwards or a later member reload.
+  // Each mode only overrides when its seed is a current member; otherwise
+  // loadMembers' ``mapped[0]`` fallback stands (fresh project / no prior run).
+  const agentSeededRef = useRef(false);
+  useEffect(() => {
+    if (agentSeededRef.current) return;
+    if (lastPickLoading || members.length === 0) return;
+    agentSeededRef.current = true;
+    const valid = (slug: string | null | undefined) =>
+      slug && members.some((m) => m.slug === slug) ? slug : null;
+    const chatSeed = valid(lastPick?.agent_slug);
+    const taskSeed = valid(lastPick?.task_agent_slug);
+    setAgentByMode((prev) => ({
+      chat: chatSeed ?? prev.chat,
+      task: taskSeed ?? prev.task,
+    }));
+  }, [members, lastPick, lastPickLoading]);
   const { runtimes: runtimeList } = useRuntimes();
   useEffect(() => {
     // Wait for both the Settings-default fetch and the project last-pick
@@ -909,7 +940,7 @@ export const ProjectDetailPage = () => {
           .catch(() => ({ files: [] as ProjectFileNode[] })),
         providersApi
           .list()
-          .catch(() => ({ providers: [] as ProviderListItem[] })),
+          .catch(() => ({ providers: [] as LLMChannel[] })),
       ]);
       setFileTree(toFileTree(filesRes.files));
       // Skills are bound on the Agent now (08-agents-module), not the
@@ -921,7 +952,7 @@ export const ProjectDetailPage = () => {
           .filter((c) => c.enabled)
           .map((c) => providersApi.get(c.id).catch(() => null)),
       );
-      setProviders(details.filter((d): d is ProviderDetail => d !== null));
+      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
 
       // Load automations for this project
       try {
@@ -1458,10 +1489,12 @@ export const ProjectDetailPage = () => {
               agents={composerAgents}
               selectedAgentSlug={selectedAgentSlug}
               // First attach mints the chat session, freezing the agent
-              // (ADR-006) — lock the picker once that happens.
-              agentLocked={chatSessionId != null}
+              // (ADR-006) — lock the picker once that happens. Only the Chat
+              // mode is frozen by a minted chat session; Task mode keeps its
+              // own pick (kickoff navigates away, so it never mints one here).
+              agentLocked={composerMode === "chat" && chatSessionId != null}
               onAgentChange={(slug) => {
-                setSelectedAgentSlug(slug);
+                setAgentByMode((m) => ({ ...m, [composerMode]: slug }));
                 setComposerTouched(true);
               }}
               onAddAgent={() => setAddAgentOpen(true)}
@@ -1565,6 +1598,7 @@ export const ProjectDetailPage = () => {
           name: entry.agent?.name ?? entry.member.agent_slug,
         }))}
         allowTaskMode
+        fixedTargetName={displayName}
       />
 
       <DeployAgentsDialog

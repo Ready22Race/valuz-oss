@@ -26,6 +26,7 @@ export const UpdateToast = () => {
   const version = useUpdaterStore((s) => s.version);
   const progress = useUpdaterStore((s) => s.progress);
   const errorMessage = useUpdaterStore((s) => s.errorMessage);
+  const errorInToast = useUpdaterStore((s) => s.errorInToast);
   const dismissed = useUpdaterStore((s) => s.dismissed);
   const dismiss = useUpdaterStore((s) => s.dismiss);
   const setDownloading = useUpdaterStore((s) => s.setDownloading);
@@ -34,6 +35,10 @@ export const UpdateToast = () => {
   // mounted toast (resets to the anchor when it's dismissed and re-shown).
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
+  // Quitting + the native install (and waiting for the backend sidecar to exit)
+  // can take a few seconds, during which nothing visibly happens. Flip the
+  // restart button into a loading "Restarting…" state so the click has feedback.
+  const [restarting, setRestarting] = useState(false);
   const dragRef = useRef<{
     px: number;
     py: number;
@@ -69,11 +74,15 @@ export const UpdateToast = () => {
     !dismissed &&
     (status === "available" ||
       status === "downloading" ||
+      status === "preparing" ||
       status === "downloaded" ||
-      status === "error");
+      // Errors only reach the toast when flagged (menu/tray check, download);
+      // the About-page check shows its own inline error instead.
+      (status === "error" && errorInToast));
   if (!visible) return null;
 
   const isDownloading = status === "downloading";
+  const isPreparing = status === "preparing";
   const isDownloaded = status === "downloaded";
   const isError = status === "error";
   const ver = version ? ` v${version}` : "";
@@ -86,6 +95,7 @@ export const UpdateToast = () => {
     void getBridge()?.invoke(DESKTOP_CHANNELS.updaterDownload);
   };
   const onRestart = () => {
+    setRestarting(true);
     void getBridge()?.invoke(DESKTOP_CHANNELS.updaterQuitAndInstall);
   };
 
@@ -125,19 +135,27 @@ export const UpdateToast = () => {
               <Download className="h-4 w-4 shrink-0 text-blue-500" />
             )}
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
-              {(isDownloaded
-                ? t("updater.downloadedTitle" as Parameters<typeof t>[0])
-                : t("updater.updateAvailable" as Parameters<typeof t>[0])) + ver}
+              {isError
+                ? t("updater.errorTitle" as Parameters<typeof t>[0])
+                : (isDownloaded
+                    ? t("updater.downloadedTitle" as Parameters<typeof t>[0])
+                    : t("updater.updateAvailable" as Parameters<typeof t>[0])) +
+                  ver}
             </span>
             {isDownloaded ? (
               <Button
                 size="sm"
                 className="h-7 min-w-[68px] shrink-0"
+                loading={restarting}
                 onClick={onRestart}
               >
-                {t("updater.restartNow" as Parameters<typeof t>[0])}
+                {t(
+                  (restarting
+                    ? "updater.restarting"
+                    : "updater.restartNow") as Parameters<typeof t>[0],
+                )}
               </Button>
-            ) : isDownloading ? null : (
+            ) : isDownloading || isPreparing ? null : (
               <Button
                 size="sm"
                 className="h-7 min-w-[68px] shrink-0"
@@ -148,12 +166,21 @@ export const UpdateToast = () => {
             )}
           </div>
 
-          {/* Row 2 — progress (while downloading) or description */}
-          {isDownloading ? (
+          {/* Row 2 — progress (downloading) / preparing / description. While
+              "preparing" (the fast macOS loopback hand-off after the real
+              download) the bar stays full and the percentage is replaced by a
+              "Preparing to install…" label, so it doesn't look like a second
+              download. */}
+          {isDownloading || isPreparing ? (
             <div className="mt-1 flex min-h-5 items-center gap-2">
-              <Progress value={progress} className="h-1.5 flex-1" />
+              <Progress
+                value={isPreparing ? 100 : progress}
+                className="h-1.5 flex-1"
+              />
               <span className="shrink-0 text-[11px] tabular-nums text-ink-muted">
-                {Math.round(progress)}%
+                {isPreparing
+                  ? t("updater.preparing" as Parameters<typeof t>[0])
+                  : `${Math.round(progress)}%`}
               </span>
             </div>
           ) : (

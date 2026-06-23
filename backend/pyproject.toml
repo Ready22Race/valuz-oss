@@ -1,6 +1,6 @@
 [project]
 name = "valuz-oss-backend"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.12,<3.14"
 dependencies = [
     "fastapi>=0.115",
@@ -24,7 +24,12 @@ dependencies = [
     "openai-agents>=0.14.6",
     # Routes OpenAI-compatible models (incl. Reportify proxy on
     # http://172.20.2.240:8080) through the kernel's deepagents runtime.
-    "deepagents>=0.5.3",
+    # Floor >=0.5.5: first release with the FilesystemBackend symlink-loop fix
+    # (langchain-ai/deepagents#3035) — earlier versions re-raise OSError(ELOOP)
+    # from a symlinked/cyclic SKILL.md, crashing skill discovery for the whole
+    # session. We were pinned to 0.5.3 and resolving 0.5.4, the last release
+    # without the fix.
+    "deepagents>=0.5.5",
     "langchain-openai>=1.2.1",
     # Loaded by the kernel's DeepAgentsRuntime when a session pairs
     # ``runtime_provider="deepagents"`` with ``api_protocol="anthropic"``.

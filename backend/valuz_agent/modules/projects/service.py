@@ -246,8 +246,7 @@ class ProjectService:
             raise KeyError(project_id)
         if not self._connectors:
             return []
-        # Pure filesystem read (.claude/project-config.json) — stays sync.
-        return self._connectors.get_project_connectors(row)
+        return await self._connectors.get_project_connectors(user_id, project_id)
 
     async def set_connectors(self, user_id: str, project_id: str, slugs: list[str]) -> None:
         row = await self._ds.get_by_id(user_id, project_id)
@@ -255,8 +254,7 @@ class ProjectService:
             raise KeyError(project_id)
         if not self._connectors:
             raise RuntimeError("connector_datastore not wired")
-        # Pure filesystem write (.claude/project-config.json) — stays sync.
-        self._connectors.set_project_connectors(row, slugs)
+        await self._connectors.set_project_connectors(user_id, project_id, slugs)
 
     async def preview_delete(self, user_id: str, project_id: str) -> ProjectDeletePreview:
         row = await self._ds.get_by_id(user_id, project_id)

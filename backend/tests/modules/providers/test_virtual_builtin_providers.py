@@ -23,7 +23,8 @@ from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.models import Base, ProviderRow
 from valuz_agent.modules.providers.service import ProviderService
 from valuz_agent.modules.settings.models import AppSettingRow
-from valuz_agent.ports.llm_provider import _InMemoryRegistry, set_llm_registry
+from valuz_agent.ports.extensions import ext
+from valuz_agent.ports.llm_provider import NoopLLMProvider
 
 OWNER = "owner-A"
 
@@ -60,9 +61,7 @@ class _SvcHandle:
 async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
     db_file = tmp_path / "providers.db"
     sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(
-        sync_engine, tables=[ProviderRow.__table__, AppSettingRow.__table__]
-    )
+    Base.metadata.create_all(sync_engine, tables=[ProviderRow.__table__, AppSettingRow.__table__])
     sync_factory = sessionmaker(bind=sync_engine, expire_on_commit=False)
 
     async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
@@ -78,12 +77,12 @@ async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
 
 
 @pytest.fixture(autouse=True)
-def fresh_registry() -> None:
-    """Keep the system-provider registry empty so the list only carries the
+def fresh_catalog() -> None:
+    """Keep the contributed provider catalog empty so the list only carries the
     virtual templates under test."""
-    set_llm_registry(_InMemoryRegistry())
+    ext.llm_provider = NoopLLMProvider()
     yield
-    set_llm_registry(_InMemoryRegistry())
+    ext.llm_provider = NoopLLMProvider()
 
 
 class TestVirtualTemplates:
@@ -201,9 +200,7 @@ class TestSetDefaultMaterializes:
 
     async def test_set_default_with_model_materializes(self, svc: _SvcHandle) -> None:
         ds = svc.service._ds  # noqa: SLF001
-        await svc.service.set_default(
-            OWNER, "ch-codex-subscription", default_model="gpt-5-codex"
-        )
+        await svc.service.set_default(OWNER, "ch-codex-subscription", default_model="gpt-5-codex")
         rows = await ds.list_providers(OWNER)
         codex = [r for r in rows if r.provider_kind == "codex-subscription"]
         assert len(codex) == 1
@@ -226,7 +223,7 @@ class TestGetVirtualTemplate:
         assert detail.source == "builtin"
         assert detail.auth_type == "oauth"
         assert detail.supports_connection_test is False
-        assert detail.model_options  # recommended subscription catalog, non-empty
+        assert detail.models  # recommended subscription catalog, non-empty
 
     async def test_get_unknown_id_still_404s(self, svc: _SvcHandle) -> None:
         with pytest.raises(ProviderNotFound):

@@ -110,7 +110,8 @@ def test_should_not_touch_kernel_tables_on_reset(tmp_path) -> None:
     survive — the kernel chain owns its own lifecycle."""
     engine = create_engine(f"sqlite:///{tmp_path / 'mixed.db'}")
     with engine.begin() as conn:
-        _create_host_shape(conn, stamp="0004")
+        # A foreign/unknown stamp triggers the host reset (any non-chain id).
+        _create_host_shape(conn, stamp="0099")
         conn.execute(text("CREATE TABLE sessions (id TEXT PRIMARY KEY)"))
         conn.execute(text("CREATE TABLE alembic_version (version_num TEXT PRIMARY KEY)"))
 

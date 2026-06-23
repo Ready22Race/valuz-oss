@@ -68,18 +68,23 @@ async def list_session_ids(
     project_id: str | None = None,
     *,
     user_only: bool = False,
+    kind: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[str]:
     """Session ids, newest first. ``user_only`` keeps conversation kinds
-    (``chat``) and drops task-internal runs (lead / subtask)."""
+    (``chat``) and drops task-internal runs (lead / subtask). ``kind`` filters
+    to one exact ``ProjectSessionRow.kind`` (e.g. ``"task_lead"``) and takes
+    precedence over ``user_only`` when both are given."""
     async with async_unit_of_work(commit=False) as db:
         stmt = select(ProjectSessionRow.session_id).where(
             ProjectSessionRow.user_id == require_current_user_id()
         )
         if project_id is not None:
             stmt = stmt.where(ProjectSessionRow.project_id == project_id)
-        if user_only:
+        if kind is not None:
+            stmt = stmt.where(ProjectSessionRow.kind == kind)
+        elif user_only:
             stmt = stmt.where(ProjectSessionRow.kind == "chat")
         stmt = stmt.order_by(ProjectSessionRow.created_at.desc()).offset(offset).limit(limit)
         return list((await db.execute(stmt)).scalars().all())

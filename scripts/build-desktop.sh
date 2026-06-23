@@ -59,6 +59,7 @@ SKIP_BACKEND=false
 SKIP_FRONTEND=false
 SKIP_CLI=false
 SKIP_RG=false
+SKIP_NODE=false
 SKIP_NOTICES=false
 SIGNED=false
 VERBOSE=false
@@ -71,6 +72,7 @@ for arg in "$@"; do
     --skip-frontend) SKIP_FRONTEND=true ;;
     --skip-cli)      SKIP_CLI=true ;;
     --skip-rg)       SKIP_RG=true ;;
+    --skip-node)     SKIP_NODE=true ;;
     --skip-notices)  SKIP_NOTICES=true ;;
     --signed)        SIGNED=true ;;
     --verbose)       VERBOSE=true ;;
@@ -78,7 +80,7 @@ for arg in "$@"; do
     --publish)       PUBLISH="always" ;;
     --edition=*)     EDITION="${arg#--edition=}" ;;
     --help|-h)
-      echo "Usage: $0 [--edition=oss|enterprise|finance] [--signed] [--skip-backend] [--skip-frontend] [--skip-cli] [--skip-rg] [--skip-notices] [--verbose] [--publish[=always|never|onTag]]"
+      echo "Usage: $0 [--edition=oss|enterprise|finance] [--signed] [--skip-backend] [--skip-frontend] [--skip-cli] [--skip-rg] [--skip-node] [--skip-notices] [--verbose] [--publish[=always|never|onTag]]"
       exit 0
       ;;
     *)
@@ -93,6 +95,13 @@ case "$EDITION" in
   *) echo "[build] ERROR: unknown edition $EDITION (expected: oss | enterprise | finance)" >&2; exit 1 ;;
 esac
 export VALUZ_EDITION="$EDITION"
+
+# Default the auto-update feed URL. CI overrides per-edition via matrix env.
+# Local dev builds don't publish, so the value only matters for packaged
+# builds — but electron-builder reads it unconditionally when stamping
+# app-update.yml (publish: provider=generic in build/electron-builder.yml).
+: "${VALUZ_UPDATER_URL:=https://files.valuz.cn/${EDITION}/}"
+export VALUZ_UPDATER_URL
 
 log()  { echo "[build] $*"; }
 warn() { echo "[build] WARNING: $*" >&2; }
@@ -205,6 +214,42 @@ else
 fi
 
 # ============================================================
+# Phase A1: Override bundled Claude Code CLI (Linux only)
+# ============================================================
+# PyInstaller stages whatever `claude` ships inside the `claude_agent_sdk`
+# Python package (~220 MB) at `_internal/claude_agent_sdk/_bundled/claude`.
+# On Linux we overwrite that with the pinned official Claude Code release from
+# github.com/anthropics/claude-code — the SDK's bundled binary is not what we
+# want shipped. macOS/Windows keep the SDK's binary. No --skip flag: this is
+# a no-op on non-Linux hosts and when the bundled binary wasn't staged
+# (--skip-backend, or claude_agent_sdk changes its layout).
+
+if [ "$PLATFORM_TAG" = "linux" ] && ! $SKIP_BACKEND; then
+  log "=== Phase A1: Override bundled Claude Code CLI (Linux only) ==="
+
+  # Map Valuz dist arch → Claude Code release-asset token. The amd64→x64
+  # rename is the same one download-node.sh applies for the Node binary.
+  case "$ARCH_TAG" in
+    amd64) CLAUDE_TARGET="linux-x64" ;;
+    arm64) CLAUDE_TARGET="linux-arm64" ;;
+    *)     die "No Claude Code release asset for arch=$ARCH_TAG on Linux" ;;
+  esac
+
+  CLAUDE_BIN="$RESOURCES_LIBEXEC/_internal/claude_agent_sdk/_bundled/claude"
+  if [ ! -f "$CLAUDE_BIN" ]; then
+    warn "Expected PyInstaller-staged claude not found at $CLAUDE_BIN — skipping override"
+  else
+    log "Overriding Linux Claude Code CLI → v${CLAUDE_CODE_VERSION:-2.1.185} ($CLAUDE_TARGET)"
+    bash "$SCRIPT_DIR/download-claude-code.sh" \
+      --target="$CLAUDE_TARGET" \
+      --out="$CLAUDE_BIN"
+    log "Claude Code override complete: $CLAUDE_BIN ($(du -h "$CLAUDE_BIN" | cut -f1))"
+  fi
+else
+  log "=== Phase A1: Skipping Claude Code override (non-Linux or --skip-backend) ==="
+fi
+
+# ============================================================
 # Phase A2: Build product CLI (Go)
 # ============================================================
 
@@ -259,6 +304,61 @@ else
 fi
 
 # ============================================================
+# Phase A4: Stage browser engine (chrome-devtools-mcp + node)
+# ============================================================
+# The browser feature drives Chrome via the chrome-devtools-mcp CLI run under a
+# real node binary (sidecar.ts sets VALUZ_NODE_PATH + VALUZ_CDT_ENTRY to these
+# absolute libexec paths). Both halves are fetched at build time (only their
+# pins are committed) — nothing third-party lives in the repo tree:
+#   - JS tree: `npm ci` from the pinned backend/vendor/chrome-devtools-mcp/
+#     {package.json,package-lock.json} (platform-independent; integrity-verified
+#     via the lockfile's SHAs).
+#   - node binary: downloaded + SHA256-verified via scripts/download-node.sh
+#     (~100 MB/platform).
+# See docs/design/browser-feature.md §8.
+
+if ! $SKIP_NODE; then
+  log "=== Phase A4: Staging browser engine (chrome-devtools-mcp + node) ==="
+
+  command -v npm >/dev/null 2>&1 || die "npm is required to install chrome-devtools-mcp (Phase A4)."
+
+  # -- chrome-devtools-mcp JS tree (npm ci from committed pin + lockfile) --
+  CDT_VENDOR_DIR="$BACKEND_DIR/vendor/chrome-devtools-mcp"
+  CDT_ENTRY_REL="chrome-devtools-mcp/build/src/bin/chrome-devtools.js"
+  [ -f "$CDT_VENDOR_DIR/package-lock.json" ] || \
+    die "Missing $CDT_VENDOR_DIR/package-lock.json. Refresh: bash scripts/vendor-chrome-devtools-mcp.sh"
+  log "Installing chrome-devtools-mcp (npm ci) ..."
+  ( cd "$CDT_VENDOR_DIR" && npm ci --omit=dev --no-audit --no-fund --loglevel=error )
+  [ -f "$CDT_VENDOR_DIR/node_modules/$CDT_ENTRY_REL" ] || \
+    die "npm ci did not produce $CDT_ENTRY_REL"
+  CDT_TARGET="$RESOURCES_LIBEXEC/chrome-devtools-mcp"
+  rm -rf "$CDT_TARGET"
+  mkdir -p "$CDT_TARGET"
+  cp -R "$CDT_VENDOR_DIR/node_modules" "$CDT_TARGET/"
+  log "chrome-devtools-mcp staged at: $CDT_TARGET/node_modules ($(du -sh "$CDT_TARGET" | cut -f1))"
+
+  # -- node binary (downloaded + verified) --
+  # Map the Valuz dist tag (platform-arch) to Node's release token.
+  case "$VALUZ_DIST_TAG" in
+    darwin-arm64)  NODE_TARGET="darwin-arm64" ;;
+    darwin-amd64)  NODE_TARGET="darwin-x64" ;;
+    linux-arm64)   NODE_TARGET="linux-arm64" ;;
+    linux-amd64)   NODE_TARGET="linux-x64" ;;
+    windows-amd64) NODE_TARGET="win-x64" ;;
+    windows-arm64) NODE_TARGET="win-arm64" ;;
+    *) die "No node mapping for dist tag $VALUZ_DIST_TAG" ;;
+  esac
+  NODE_OUT="$RESOURCES_LIBEXEC/node"
+  [ "$PLATFORM_TAG" = "windows" ] && NODE_OUT="$RESOURCES_LIBEXEC/node.exe"
+  mkdir -p "$RESOURCES_LIBEXEC"
+  bash "$SCRIPT_DIR/download-node.sh" --target="$NODE_TARGET" --out="$NODE_OUT"
+  [ -f "$NODE_OUT" ] || die "node download did not produce $NODE_OUT"
+  log "node staged at: $NODE_OUT ($(du -sh "$NODE_OUT" | cut -f1))"
+else
+  log "=== Phase A4: Skipping browser engine staging (--skip-node) ==="
+fi
+
+# ============================================================
 # Phase B: Build frontend (Electron)
 # ============================================================
 
@@ -304,7 +404,7 @@ if ! $SKIP_FRONTEND; then
   BACKEND_PYPROJECT="$BACKEND_DIR/pyproject.toml"
   if [ -f "$BACKEND_PYPROJECT" ]; then
     log "Setting backend version: $BUILD_VERSION"
-    sed -i.bak -E 's/^version[[:space:]]*=[[:space:]]*"[^"]*"/version = "'"'"$BUILD_VERSION"'"'"/' "$BACKEND_PYPROJECT"
+    sed -i.bak -E 's/^version[[:space:]]*=[[:space:]]*"[^"]*"/version = "'"$BUILD_VERSION"'"/' "$BACKEND_PYPROJECT"
     rm -f "$BACKEND_PYPROJECT.bak"
   else
     warn "backend/pyproject.toml not found at $BACKEND_PYPROJECT — skipping version sync"

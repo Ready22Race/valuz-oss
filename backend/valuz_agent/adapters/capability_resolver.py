@@ -36,7 +36,6 @@ from app.schemas import (
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters.mcp_resolver import resolve_mcp_servers
 from valuz_agent.infra.auth_context import require_current_user_id
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
@@ -66,6 +65,12 @@ logger = logging.getLogger(__name__)
 # the project has at least one ``valuz_project_kb_binding`` row.
 _BUILTIN_SKILLS_DIR = Path(__file__).resolve().parents[1] / "resources" / "builtin_skills"
 _PROJECT_DOCS_SKILL_DIR = _BUILTIN_SKILLS_DIR / "valuz-project-docs"
+# Teaches the agent to drive the managed browser via the ``chrome-devtools`` CLI
+# (pairs with the ``browser_start``/``browser_stop`` toolkit tools). M0 ships it
+# always-on — progressive disclosure means the body is only read when a task
+# actually needs a browser; a later iteration may make it a deploy-per-agent
+# catalog skill instead.
+_BROWSER_SKILL_DIR = _BUILTIN_SKILLS_DIR / "browser"
 
 
 @dataclass(frozen=True)
@@ -86,7 +91,6 @@ async def resolve_session_capabilities(
     skill_source: FilesystemSkillSource | None = None,
     extra_skill_sources: list[_SkillSource] | None = None,
     official_entitled: bool = False,
-    secrets: FileSecretStore | None = None,
     enabled_mcp_provider_slugs: list[str] | None = None,
     connectors: ConnectorDatastore | None = None,
     docs: DocumentDatastore | None = None,
@@ -235,10 +239,9 @@ async def resolve_session_capabilities(
     #    missing (no credentials, unknown slug, disabled provider) is logged
     #    inside ``mcp_resolver`` and silently skipped here.
     mcp_configs_list: list[McpServerConfig] = []
-    if secrets is not None:
+    if connectors is not None:
         mcp_configs_list.extend(
             await resolve_mcp_servers(
-                secrets=secrets,
                 enabled_slugs=enabled_mcp_provider_slugs or [],
                 connectors=connectors,
             )
@@ -279,24 +282,33 @@ async def resolve_session_capabilities(
 
 
 def always_on_skill_paths() -> list[str]:
-    """Bundled skills every session carries: ``valuz-project-docs`` + ``skill-creator``.
+    """Bundled skills every session carries: project-docs + skill-creator (+ browser).
 
     These are the skill half of the always-on baseline (the MCP half lives in
     ``always_on_http_mcp_servers``). ``valuz-project-docs`` teaches the
     ``doc_search`` / ``list_doc_scope`` tools that pair with the ``valuz_docs``
     MCP; ``skill-creator`` (+ its ``submit_skill`` in-process tool) lets any
-    session author skills. Returned as absolute dirs the kernel materialises
-    into the session cwd. Both are injected by every session-build path
-    (``resolve_session_capabilities`` for chat/project, ``build_member_session``
-    for task lead/member) so the baseline is identical everywhere. A missing
-    dir is skipped + logged so a partial install can't break session creation.
+    session author skills; ``browser`` teaches the ``chrome-devtools`` CLI that
+    pairs with the ``browser_start``/``browser_stop`` toolkit tools (injected
+    only when the browser engine is available). Returned as
+    absolute dirs the kernel materialises into the session cwd. All are injected
+    by every session-build path (``resolve_session_capabilities`` for
+    chat/project, ``build_member_session`` for task lead/member) so the baseline
+    is identical everywhere. A missing dir is skipped + logged so a partial
+    install can't break session creation.
     """
     from valuz_agent.infra.fs_registry import fs_registry
+    from valuz_agent.modules.browser import service as browser_service
 
     candidates = [
         _PROJECT_DOCS_SKILL_DIR,
         fs_registry.official_skill_root() / "skill-creator",
     ]
+    # The browser skill teaches the ``chrome-devtools`` CLI, which only works
+    # when the engine (Node + chrome-devtools-mcp) is available; don't inject a
+    # dead skill otherwise. See docs/design/browser-feature.md §8.
+    if browser_service.node_available():
+        candidates.append(_BROWSER_SKILL_DIR)
     paths: list[str] = []
     for d in candidates:
         if d.is_dir():

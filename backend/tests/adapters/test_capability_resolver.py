@@ -15,6 +15,7 @@ import pytest
 # resolver tries to import ``McpServerConfig`` at module load.
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters.capability_resolver import (
+    _BROWSER_SKILL_DIR,
     _PROJECT_DOCS_SKILL_DIR,
     always_on_skill_paths,
     resolve_session_capabilities,
@@ -349,6 +350,21 @@ def test_project_does_not_auto_include_official_skills(
     # The valuz-project-docs builtin may be present (auto-injected for
     # projects); only the bundled official skill must NOT be.
     assert str(skill_dir.resolve(strict=False)) not in caps.skills
+
+
+def test_browser_skill_gated_on_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The always-on browser skill is injected only when the browser engine
+    (Node + chrome-devtools-mcp) is available, so headless/TUI hosts without
+    Node don't advertise a dead skill. See docs/design/browser-feature.md §8."""
+    from valuz_agent.modules.browser import service as browser_service
+
+    browser_path = str(_BROWSER_SKILL_DIR.resolve(strict=False))
+
+    monkeypatch.setattr(browser_service, "node_available", lambda: True)
+    assert browser_path in always_on_skill_paths()
+
+    monkeypatch.setattr(browser_service, "node_available", lambda: False)
+    assert browser_path not in always_on_skill_paths()
 
 
 def test_unknown_project_raises_key_error() -> None:

@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings
 
@@ -262,6 +263,11 @@ class Settings(BaseSettings):
     def secrets_dir(self) -> Path:
         return self.data_dir / "secrets"
 
+    @property
+    def cache_dir(self) -> Path:
+        # Generic ephemeral cache (FileCache default — e.g. connector OAuth PKCE).
+        return self.data_dir / "cache"
+
     # ── Installation identity ────────────────────────────────────────
     # Where the locally-generated owner id (int32) is persisted. Lives
     # OUTSIDE the business tables so a DB clean-up rebuild never loses it
@@ -321,6 +327,29 @@ class Settings(BaseSettings):
     # Base directory for user-visible projects (not hidden).
     # Defaults to ~/Valuz; override with VALUZ_USER_PROJECT_ROOT.
     user_project_root: Path = Path.home() / "Valuz"
+
+    # ── Browser feature (chrome-devtools-mcp) ──────────────────────
+    # A dedicated, persistent Chrome profile the managed browser uses —
+    # an ISOLATED profile (never the user's everyday Chrome) so a
+    # full-access agent's blast radius is contained to whatever the user
+    # logs into HERE. Sibling of docs/secrets under data_dir. See
+    # docs/design/browser-feature-*.md.
+    browser_profile_subdir: str = "browser-chrome"
+    # Daemon mode: "managed" launches a visible Chrome on the dedicated
+    # profile; "attach" connects to a user-launched Chrome at
+    # ``browser_attach_url`` (started with --remote-debugging-port).
+    # Override with VALUZ_BROWSER_MODE.
+    browser_mode: Literal["managed", "attach"] = "managed"
+    browser_attach_url: str = "http://127.0.0.1:9222"
+    # Pinned chrome-devtools-mcp version. The CLI is invoked via
+    # ``npx -p chrome-devtools-mcp@<ver> chrome-devtools``; pinning keeps
+    # the bundled skill's command vocabulary in sync. GA vendors the bin
+    # and sets VALUZ_CDT_PATH instead of npx.
+    chrome_devtools_version: str = "1.2.0"
+
+    @property
+    def browser_profile_dir(self) -> Path:
+        return self.data_dir / self.browser_profile_subdir
 
     model_config = {"env_prefix": "VALUZ_"}
 

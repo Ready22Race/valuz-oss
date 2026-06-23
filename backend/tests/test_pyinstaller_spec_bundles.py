@@ -34,3 +34,35 @@ def test_spec_bundles_sibling_package(spec_source: str, package: str) -> None:
         f"(expected datas entry {entry!r}). The frozen build will fail to "
         f"import it."
     )
+
+
+def test_spec_collects_magika_data_files(spec_source: str) -> None:
+    """magika ships its ONNX model + config as PACKAGE DATA, loaded eagerly by
+    ``MarkItDown.__init__``. If it's not in ``_data_pkgs`` (which drives
+    ``collect_data_files``), the frozen build raises ``MagikaError: model not
+    found`` and EVERY office parse (.docx/.xlsx/.pptx) fails while PDF/text
+    keep working. No pyinstaller-hooks-contrib hook covers magika, so this
+    explicit entry is the only thing that bundles it."""
+    assert '"magika"' in spec_source, (
+        "PyInstaller spec no longer lists 'magika' in _data_pkgs. The frozen "
+        "build will ship MarkItDown without magika's model.onnx/config, so "
+        "docx/xlsx/pptx parsing fails with 'model not found'."
+    )
+
+
+def test_magika_data_files_are_collectable() -> None:
+    """Sanity-check the assumption behind the spec entry: magika really does
+    expose its model + config via ``collect_data_files`` (and they include the
+    .onnx model). Guards against a magika layout change silently breaking the
+    bundle even while the spec still names it."""
+    # PyInstaller is a build-only tool — skip when it isn't installed (the
+    # static spec-source assertion above still guards the spec everywhere).
+    pytest.importorskip("PyInstaller")
+    from PyInstaller.utils.hooks import collect_data_files
+
+    collected = collect_data_files("magika", include_py_files=False)
+    sources = [src for src, _dest in collected]
+    assert any(s.endswith("model.onnx") for s in sources), (
+        f"magika no longer exposes model.onnx via collect_data_files; the "
+        f"frozen office-parsing bundle may be incomplete. Collected: {sources}"
+    )

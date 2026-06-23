@@ -42,8 +42,8 @@ import {
   type TodoItem,
   type ProjectDetail,
   type ProjectListItem,
-  type ProviderListItem,
-  type ProviderDetail,
+  type LLMChannel,
+  type LLMChannelDetail,
   type SkillView,
   type StagingSlugView,
   type StagingSyncStrategy,
@@ -51,8 +51,11 @@ import {
   parseTodosUpdate,
   parseRequiresAction,
   parseActionResolved,
+  parseWorkflowProgress,
   SESSION_REQUIRES_ACTION_EVENT,
   SESSION_ACTION_RESOLVED_EVENT,
+  SESSION_WORKFLOW_PROGRESS_EVENT,
+  type WorkflowState,
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
@@ -74,6 +77,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   UserAnswerSummaryCard,
+  WorkflowProgressCard,
   cn,
   Composer,
   KnowledgeFileTreePicker,
@@ -89,6 +93,7 @@ import {
   type UploadedFileItem,
   type ComposerAgentItem,
   type ComposerProjectItem,
+  type ComposerConnector,
 } from "@valuz/ui";
 import { modelLabel } from "@valuz/shared";
 import { t as _t } from "@valuz/shared/i18n";
@@ -107,6 +112,15 @@ import { LiveTaskCard } from "../components/LiveTaskCard";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
 import { getLastTempAgent, setLastTempAgent } from "../lib/last-temp-agent";
+
+/** True while a workflow snapshot's status denotes an in-flight run (vs a
+ *  terminal ``completed`` / ``killed`` / ``failed`` verb). Used to decide
+ *  whether the turn-end safety net should coerce a card to ``completed``. */
+const isWorkflowRunning = (status: string): boolean =>
+  status === "running" ||
+  status === "active" ||
+  status === "queued" ||
+  status === "pending";
 
 function toFileTree(nodes: ProjectFileNode[], prefix = ""): FileTreeNode[] {
   return nodes.map((n) => {
@@ -505,6 +519,15 @@ export const ConversationPage = () => {
   // a TodoWrite snapshot for this session"; an empty array means
   // "all done" (kernel preserves it as a meaningful state).
   const [todos, setTodos] = useState<TodoItem[] | null>(null);
+  // Live progress of Claude dynamic-workflow (``Workflow`` tool) runs in this
+  // session, keyed by the launch tool_use_id. Fed by ``session.workflow_progress``
+  // SSE snapshots; ``renderToolCall`` reads it to render the progress card on the
+  // matching Workflow tool block. Live-only (the kernel never persists these), so
+  // it stays empty on history replay / reconnect — the persisted Workflow tool
+  // call then renders as a plain tool card. Cleared on session switch.
+  const [workflowStates, setWorkflowStates] = useState<
+    Map<string, WorkflowState>
+  >(() => new Map());
   // Optimistic pending user message — rendered IMMEDIATELY when the user
   // hits Send so they see their text in the conversation without waiting
   // for the (potentially multi-second) round-trip through ensureSession ⇒
@@ -537,7 +560,7 @@ export const ConversationPage = () => {
   } | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -628,22 +651,44 @@ export const ConversationPage = () => {
   // pre-select every connected connector at session-creation time so the
   // new session inherits the user's globally-enabled data sources.
   const [selectedMcpSlugs, setSelectedMcpSlugs] = useState<string[]>([]);
+  // Connected connectors shown in the composer "+" menu. On a new conversation
+  // they're toggleable (the selection is handed to the session at creation); on
+  // an existing one they're read-only (connectors lock at creation). Fetched +
+  // defaulted to all-on once on mount, so a new conversation keeps the user's
+  // pick across the new→existing URL transition (which reuses this component).
+  const [connectorOptions, setConnectorOptions] = useState<ComposerConnector[]>(
+    [],
+  );
   const isNewSession = id === NEW_SESSION_ID;
   useEffect(() => {
-    if (!isNewSession) return;
     connectorsApi
       .list()
       .then(({ connectors: list }) => {
-        setSelectedMcpSlugs(
-          list
-            .filter((c) => c.enabled && c.status === "connected")
-            .map((c) => c.slug),
+        const connected = list.filter((c) => c.status === "connected");
+        setConnectorOptions(
+          connected.map((c) => ({
+            slug: c.slug,
+            label: c.display_name,
+            description: c.description ?? undefined,
+          })),
         );
+        setSelectedMcpSlugs(connected.map((c) => c.slug));
       })
       .catch(() => {
         /* non-fatal */
       });
-  }, [isNewSession]);
+    // Mount-only: re-running on the new→existing id change would reset the
+    // user's connector selection right after they created the session.
+  }, []);
+  const toggleConnector = useCallback((slug: string, enabled: boolean) => {
+    setSelectedMcpSlugs((prev) =>
+      enabled
+        ? prev.includes(slug)
+          ? prev
+          : [...prev, slug]
+        : prev.filter((s) => s !== slug),
+    );
+  }, []);
   // Per-``submit_skill`` tool_use state — keyed by tool_use id so multiple
   // submissions in the same conversation render independently. Persists
   // for the lifetime of the page; on refresh the cards re-render in
@@ -868,6 +913,9 @@ export const ConversationPage = () => {
   const sidebarSessions = useSessionStore((state) => state.sessions);
   const setSidebarSessions = useSessionStore((state) => state.setSessions);
   const fetchSidebarSessions = useSessionStore((state) => state.fetchSessions);
+  const setStoreActiveProjectId = useSessionStore(
+    (state) => state.setActiveProjectId,
+  );
   const upsertProject = useProjectStore((s) => s.upsertProject);
   // Server-stored attachments + async parse status, owned by the shared hook:
   // upload-on-attach, poll ``parsing → ready|failed``, and live progress for
@@ -930,6 +978,16 @@ export const ConversationPage = () => {
     () => sessions.find((s) => s.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
   );
+
+  // Publish the open conversation's project to the store so the sidebar keeps
+  // that project's accordion expanded — authoritative and immediate (straight
+  // from the loaded session detail), unlike the lagging runs list. Cleared when
+  // the conversation is project-less or this page unmounts.
+  const openConversationProjectId = selectedSession?.project_id ?? null;
+  useEffect(() => {
+    setStoreActiveProjectId(openConversationProjectId);
+    return () => setStoreActiveProjectId(null);
+  }, [openConversationProjectId, setStoreActiveProjectId]);
   const rawTurns = useMemo(() => buildTurns(events), [events]);
   const turns = useStableTurns(rawTurns);
 
@@ -1206,6 +1264,26 @@ export const ConversationPage = () => {
     (tool: { id: string; title: string; input?: string; output?: string }) => {
       const name = tool.title || "";
 
+      // Claude dynamic-workflow launch → WorkflowProgressCard. The kernel
+      // streams ``session.workflow_progress`` snapshots keyed by this tool's
+      // tool_use_id while the background runtime executes; we render the live
+      // overview (status + agents-done/total + per-agent list) in place of the
+      // opaque generic tool card. When no snapshot exists yet (history replay /
+      // reconnect — the progress is live-only and never persisted), fall through
+      // to the generic ToolCallCard so the launch still shows.
+      if (name === "Workflow") {
+        const wfState = workflowStates.get(tool.id);
+        if (wfState) {
+          return (
+            <WorkflowProgressCard
+              state={wfState}
+              fallbackTitle={name}
+              onOpenStateFile={revealInFinder}
+            />
+          );
+        }
+      }
+
       // ADR-021: automation tool result → AutomationToolCard. The MCP
       // server returns a structured JSON blob as ``tool.output``; we
       // parse it and hand off to the card. If the output is missing
@@ -1412,6 +1490,8 @@ export const ConversationPage = () => {
       askUserQuestionLocalAnswers,
       askUserQuestionSubmitRef,
       planAnchors,
+      workflowStates,
+      revealInFinder,
       selectedSessionId,
       navigate,
       t,
@@ -1550,13 +1630,6 @@ export const ConversationPage = () => {
   // Whether this conversation's model diverges from the bound agent's default
   // (i.e. the user actually overrode it). Drives the muted model hint in the
   // agent button — hidden until an override happens, so a default chat is clean.
-  const agentModelOverridden = useMemo(
-    () =>
-      !!selectedAgentBrain &&
-      (selectedModelId ?? null) !== (selectedAgentBrain.model ?? null),
-    [selectedAgentBrain, selectedModelId],
-  );
-
   // Slug → display name, so the header chip shows the agent's full name
   // ("研究分析师") rather than the raw kernel slug.
   const agentNameBySlug = useMemo(
@@ -1656,6 +1729,9 @@ export const ConversationPage = () => {
     // "stacking" under the new session header.
     setEvents([]);
     setTodos(null);
+    // Workflow progress is live-only and per-session — drop the previous
+    // session's snapshots so a Workflow tool card can't leak across a switch.
+    setWorkflowStates(new Map());
     // The clarifying-pending ref is keyed to whatever session we're
     // leaving. Reset it so a stale pending_id from the previous session
     // can't get POSTed against the new one — and so the post-fetch walk
@@ -1857,7 +1933,7 @@ export const ConversationPage = () => {
         projectsApi.list(),
         providersApi
           .list()
-          .catch(() => ({ providers: [] as ProviderListItem[] })),
+          .catch(() => ({ providers: [] as LLMChannel[] })),
       ]);
       setProjects(wsResponse.projects);
       const details = await Promise.all(
@@ -1865,7 +1941,7 @@ export const ConversationPage = () => {
           .filter((c) => c.enabled)
           .map((c) => providersApi.get(c.id).catch(() => null)),
       );
-      setProviders(details.filter((d): d is ProviderDetail => d !== null));
+      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
 
       // Two URL shapes drive the page:
       //
@@ -2037,20 +2113,30 @@ export const ConversationPage = () => {
       if (agentParam && myAgents.some((a) => a.slug === agentParam))
         return agentParam;
       if (prev && myAgents.some((a) => a.slug === prev)) return prev;
-      // 10-new-conversation-guidance slice 3: prefer the agent from the last
-      // 临时对话 (per-device memory), then fall back to the first library agent.
-      const lastUsed = getLastTempAgent();
-      if (lastUsed && myAgents.some((a) => a.slug === lastUsed))
-        return lastUsed;
-      // Then the onboarding-seeded Valuz 小助手 as the general default.
-      if (myAgents.some((a) => a.slug === "valuz-helper"))
-        return "valuz-helper";
-      return myAgents[0]?.slug ?? null;
+      // Skill-creator still needs an agent (its create flow binds one), so keep
+      // the old defaulting there: last-used → Valuz 小助手 → first library agent.
+      if (isSkillCreatorMode) {
+        const lastUsed = getLastTempAgent();
+        if (lastUsed && myAgents.some((a) => a.slug === lastUsed))
+          return lastUsed;
+        if (myAgents.some((a) => a.slug === "valuz-helper"))
+          return "valuz-helper";
+        return myAgents[0]?.slug ?? null;
+      }
+      // A normal new conversation now defaults to NO agent — an agentless quick
+      // chat on the global default model (the model-defaults effect seeds it).
+      return null;
     });
     // Re-run only on the data that decides the default — existence of a
-    // session (frozen), the project kind, the candidate roster, and the
-    // explicit ?agent= hand-off.
-  }, [activeProject?.kind, myAgents, selectedSession, agentParam]);
+    // session (frozen), the project kind, the candidate roster, the explicit
+    // ?agent= hand-off, and whether this is the skill-creator flow.
+  }, [
+    activeProject?.kind,
+    myAgents,
+    selectedSession,
+    agentParam,
+    isSkillCreatorMode,
+  ]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Load bound skills for project project context panel
@@ -2115,9 +2201,9 @@ export const ConversationPage = () => {
     // agent. There is no agentless path; the backend derives
     // runtime/model/provider/effort/skills/connectors from the agent, so the
     // model-picker fields below are ignored when it resolves the brain.
-    // handleSend guards the empty-library case; this throw is the
-    // type-narrowing backstop (10-new-conversation-guidance).
-    if (!selectedAgentSlug) {
+    // Skill-creator must bind an agent; a normal conversation may be agentless
+    // (the create below sends ``agent_slug: undefined`` → backend chat path).
+    if (isSkillCreatorMode && !selectedAgentSlug) {
       throw new Error("No agent selected.");
     }
     let created: Awaited<ReturnType<typeof sessionsApi.create>>;
@@ -2139,7 +2225,7 @@ export const ConversationPage = () => {
     } else {
       created = await sessionsApi.create({
         project_id: isChat ? "chat-default" : selectedProjectId,
-        agent_slug: selectedAgentSlug,
+        agent_slug: selectedAgentSlug ?? undefined,
         provider_id: selectedProviderId ?? undefined,
         model_id: selectedModelId ?? undefined,
         runtime_id: selectedRuntimeId ?? undefined,
@@ -2151,7 +2237,7 @@ export const ConversationPage = () => {
     }
     // 10-new-conversation-guidance slice 3: remember which agent this 临时对话
     // used so the next new conversation pre-selects it.
-    if (isChat) setLastTempAgent(selectedAgentSlug);
+    if (isChat && selectedAgentSlug) setLastTempAgent(selectedAgentSlug);
     // Update local state IMMEDIATELY (before navigate / sendMessage)
     // so the rest of ``handleSend`` and the SSE subscription closures
     // — which capture ``selectedProjectId`` and friends — see the
@@ -2319,6 +2405,26 @@ export const ConversationPage = () => {
             refreshed,
           );
           if (refreshed) setTodos(refreshed);
+        }
+        // Live workflow progress — Claude ``Workflow`` tool runs stream a
+        // snapshot per tick (phases / per-agent state / status), keyed by the
+        // launch tool_use_id. Merge into the per-tool map so the Workflow tool
+        // card renders live progress. ``script`` / ``scriptPath`` arrive only on
+        // the first snapshot, so carry them forward when a later tick omits them.
+        if (event.event.event_type === SESSION_WORKFLOW_PROGRESS_EVENT) {
+          const wp = parseWorkflowProgress(event);
+          if (wp) {
+            setWorkflowStates((prev) => {
+              const prevState = prev.get(wp.id);
+              const next = new Map(prev);
+              next.set(wp.id, {
+                ...wp.state,
+                scriptPath: wp.state.scriptPath ?? prevState?.scriptPath,
+                script: wp.state.script ?? prevState?.script,
+              });
+              return next;
+            });
+          }
         }
         // ADR-013 approval contract: track the current unresolved
         // clarifying_questions pending so the AskUserQuestionCard's
@@ -2495,6 +2601,26 @@ export const ConversationPage = () => {
               status !== "running" &&
               status !== "created"));
         if (terminal) {
+          // Safety net for workflow cards: the turn is over, so any Workflow
+          // run is definitively finished (the kernel blocks the turn until the
+          // run completes, then force-emits a terminal snapshot). But that
+          // snapshot is live-only and can lose the race against this terminal
+          // event — which immediately ``stopSubscription()``s the SSE stream
+          // below, so a late terminal frame would never arrive. Coerce any
+          // still-"running" card to ``completed`` here so it can't get stuck
+          // pulsing. A card that already received a terminal status (completed
+          // / killed / failed) is left untouched.
+          setWorkflowStates((prev) => {
+            let changed = false;
+            const next = new Map(prev);
+            for (const [wfId, wfState] of prev) {
+              if (isWorkflowRunning(wfState.status)) {
+                next.set(wfId, { ...wfState, status: "completed" });
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
+          });
           stopSubscription();
         }
       };
@@ -2588,11 +2714,10 @@ export const ConversationPage = () => {
   // uploads — it just mints/reuses the session and posts the message.
   const performSend = async () => {
     if (!draft.trim() || sending) return;
-    // 10-new-conversation-guidance: every conversation binds an agent. A new
-    // 临时对话 with an empty library / no pick has no agent — nudge the user to
-    // pick (via the 🤖 「+ Agent」 menu or the banner) instead of creating a
-    // session with a null agent.
-    if (!selectedSession && !selectedAgentSlug) {
+    // Skill-creator binds an agent (its create flow needs one) — nudge if none.
+    // A normal new 临时对话 may now be agentless (a quick chat on the default
+    // model), so it sends without an agent pick.
+    if (!selectedSession && !selectedAgentSlug && isSkillCreatorMode) {
       toast.error(_t("conversation.selectAgentFirst" as I18nKey));
       return;
     }
@@ -4267,15 +4392,15 @@ export const ConversationPage = () => {
             // EXISTING temp session runtime/model are read-only (frozen,
             // ADR-006) but visible, and effort stays editable (live-reconcile).
             allowAgentBrainOverride={!isProjectProject}
-            agentModelOverridden={agentModelOverridden}
             // ADR-006: once a session exists both chips freeze (the locked
             // 🤖 chip shows the bound ``sessionAgentSlug``).
             agentLocked={selectedSession != null}
             onAgentChange={(slug) => {
               setSelectedAgentSlug(slug);
-              // Clear the "touched" flag so the override re-seeds from the
-              // newly-bound agent's brain (see the seeding effect).
-              setComposerTouched(false);
+              // Switching to an agent re-seeds runtime/model/effort from that
+              // agent's brain. Picking "Default" (slug = null) keeps whatever
+              // you already chose in the rows below — don't reset it.
+              if (slug) setComposerTouched(false);
             }}
             // 09-assistant 📁 project chip: switches the draft between 临时对话
             // (chat-default) and a project project. The page stores the
@@ -4380,6 +4505,12 @@ export const ConversationPage = () => {
             }}
             onLocalUpload={handleLocalFilesAttach}
             onFileDrop={handleLocalFilesAttach}
+            connectors={connectorOptions}
+            selectedConnectorSlugs={selectedMcpSlugs}
+            onToggleConnector={toggleConnector}
+            connectorsReadOnly={!isNewSession}
+            onManageSkills={() => navigate("/skills")}
+            onManageConnectors={() => navigate("/connectors")}
           />
           <AttachmentParsingDialog
             open={parsingConfirmOpen}

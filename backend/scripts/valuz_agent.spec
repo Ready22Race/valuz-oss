@@ -133,6 +133,17 @@ _data_pkgs = [
     "codex_cli_bin",      # bin/codex CLI binary (~75MB)
     "pymupdf",            # libmupdf.dylib + ONNX layout models (~51MB)
     "cron_descriptor",    # locale/*.mo translation catalogs
+    # magika is MarkItDown's filetype detector — constructed eagerly in
+    # ``MarkItDown.__init__`` (``magika.Magika()``). It loads an ONNX model +
+    # config that live as PACKAGE DATA (``magika/models/standard_v3_3/model.onnx``,
+    # ``magika/config/content_types_kb.min.json``). ``collect_submodules`` only
+    # grabs .py, so without collecting these data files ``Magika()`` raises
+    # ``MagikaError: model not found`` in the frozen build — and since every
+    # office format (.docx/.xlsx/.pptx) goes through MarkItDown, ALL office
+    # parsing fails ("*Office parse error: model not found...*") while PDF
+    # (pymupdf) and plain text keep working. No pyinstaller-hooks-contrib hook
+    # covers magika, so this explicit entry is the only thing that bundles it.
+    "magika",
 ]
 _extra_datas = []
 for _dpkg in _data_pkgs:

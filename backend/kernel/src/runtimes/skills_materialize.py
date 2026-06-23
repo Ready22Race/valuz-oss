@@ -122,6 +122,7 @@ def _materialize(plan: _Plan, skills: list[str]) -> str:
 
     new_entries: list[tuple[str, str]] = []
     created: dict[str, str] = {}  # name -> kind, for same-call duplicate basenames
+    real_skills_root = os.path.realpath(plan.skills_root)
     for src in skills:
         if not os.path.isdir(src):
             raise SkillSourceMissingError(f"Skill source path not found or not a directory: {src}")
@@ -129,6 +130,23 @@ def _materialize(plan: _Plan, skills: list[str]) -> str:
         if not name:
             raise SkillSourceMissingError(f"Skill source path has no basename: {src}")
         dst = os.path.join(plan.skills_root, name)
+        # Never link a source that lives at / inside the skills root, or whose
+        # tree contains the skills root. Either case yields a self-referential
+        # or recursive symlink — reading ``<skills_root>/<name>/SKILL.md`` then
+        # fails with ``OSError(ELOOP)`` ("Too many levels of symbolic links"),
+        # which crashes the runtime's skill discovery. A skill authored
+        # in-place under ``.agents/skills`` is already readable where it sits,
+        # so skip + warn rather than corrupt the tree.
+        real_src = os.path.realpath(src)
+        if _is_cyclic_link(real_src, real_skills_root, name):
+            logger.warning(
+                "Skipping skill %r: source %s would create a self-referential or "
+                "recursive link under %s.",
+                name,
+                src,
+                plan.skills_root,
+            )
+            continue
         # Clear a same-named entry created earlier in THIS call (duplicate
         # basenames). ``created.get(name)`` lets us remove a prior copy too;
         # a leftover real dir we never wrote is left to raise FileExistsError.
@@ -139,6 +157,31 @@ def _materialize(plan: _Plan, skills: list[str]) -> str:
 
     _write_manifest(plan.manifest_path, new_entries)
     return plan.skills_root
+
+
+def _is_cyclic_link(real_src: str, real_skills_root: str, name: str) -> bool:
+    """True if linking ``<skills_root>/<name>`` -> ``real_src`` would loop.
+
+    Two cases produce a cycle once the link is read as ``.../<name>/...``:
+
+    - the resolved source *is* the destination, or otherwise lives at or under
+      the skills root (a skill authored in-place, or a stale self-link); and
+    - the skills root lives at or under the resolved source (the link would
+      contain itself).
+
+    Comparison is on real (symlink-resolved) paths so an indirect cycle through
+    an existing symlink is caught too.
+    """
+    real_dst = os.path.join(real_skills_root, name)
+    if real_src == real_dst:
+        return True
+    return _is_within(real_src, real_skills_root) or _is_within(real_skills_root, real_src)
+
+
+def _is_within(child: str, parent: str) -> bool:
+    """True if ``child`` is ``parent`` or a path nested under it."""
+    parent = parent.rstrip(os.sep)
+    return child == parent or child.startswith(parent + os.sep)
 
 
 def _create_managed_entry(src_abs: str, dst: str) -> str:

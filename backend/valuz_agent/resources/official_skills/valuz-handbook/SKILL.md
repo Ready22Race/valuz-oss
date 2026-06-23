@@ -1,7 +1,7 @@
 ---
 name: valuz-handbook
-description: Valuz 产品使用手册——核心概念、常见操作、最佳实践。当用户问 Valuz 怎么用、如何创建任务/项目/Agent、如何配置模型/技能/连接器时使用。
-version: 1
+description: Valuz 产品使用手册——核心概念、常见操作、最佳实践、官方资源（官网 / GitHub）。当用户问 Valuz 怎么用、如何创建任务/项目/Agent、如何配置模型/技能/连接器，或问官网 / GitHub / 源码地址时使用。
+version: 2
 tags: [official, reference]
 ---
 
@@ -56,7 +56,14 @@ Valuz 是一个 Agent（智能体）协作平台。核心心智模型是：
   在项目里派一个更专业的 Agent，或从预设团队里选。
 - **模型 / 推理强度**：日常问答用默认即可；需要深度推理的复杂任务调高 effort。
 
-## 5. 边界
+## 5. 官方资源
+
+- **官网**：https://valuz.io
+- **开源仓库（GitHub）**：https://github.com/valuz-ai/valuz-oss
+
+当用户问「官网 / 官方网站 / 在哪下载 / 源码 / GitHub / 开源地址」时，给上面对应的链接。
+
+## 6. 边界
 
 手册没写到的产品细节，不要猜测或编造。引导用户去对应的设置页自己确认，
 或老实回答「这个我不确定」。

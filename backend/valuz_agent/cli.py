@@ -76,7 +76,7 @@ def reset_providers_cmd(
     from valuz_agent.infra.database import async_engine
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.providers.datastore import ProviderDatastore
-    from valuz_agent.modules.providers.service import ProviderListItem, reset_providers
+    from valuz_agent.modules.providers.service import LLMChannel, reset_providers
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     # Ensure the host schema exists via the SAME path as app startup — Alembic
@@ -85,7 +85,7 @@ def reset_providers_cmd(
     # ``alembic_version_host`` stamp, which the next ``serve`` boot would wipe.
     run_host_migrations()
 
-    async def _run() -> list[ProviderListItem]:
+    async def _run() -> list[LLMChannel]:
         from valuz_agent.infra.local_identity import resolve_local_user_id
 
         async with async_unit_of_work() as db:
@@ -131,10 +131,7 @@ def cleanup_seed_agents_cmd() -> None:
         deleted: list[str] = []
         skipped: list[tuple[str, str]] = []
         async with async_unit_of_work() as db:
-            connector_svc = ConnectorService(
-                datastore=ConnectorDatastore(db),
-                secrets=None,  # type: ignore[arg-type]
-            )
+            connector_svc = ConnectorService(datastore=ConnectorDatastore(db))
             svc = AgentService(db=db, connector_service=connector_svc)  # type: ignore[arg-type]
             for row in await svc.list_agents(resolve_local_user_id(), source="official"):
                 if row.slug in keep:
