@@ -28,6 +28,7 @@ import { ResourceActionSlot } from "../components/ResourceActionSlot";
 import {
   agentsApi,
   usePanelStore,
+  useResourceCategories,
   useTranslation,
   type Agent,
 } from "@valuz/core";
@@ -173,7 +174,10 @@ export const AgentsPage = () => {
 
   const visibleAgents = agents;
 
-  const categories = useMemo(() => buildAgentCategories(t), [t]);
+  const categories = useResourceCategories<Agent>(
+    "agent",
+    buildAgentCategories(t),
+  );
 
   // Keep the detail panel stable across tab switches: honour the explicit
   // selection if it still exists, otherwise fall back to the first agent in
