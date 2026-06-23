@@ -24,6 +24,7 @@ import {
   PanelRightOpen,
   AlertTriangle,
   Link2,
+  Sparkles,
 } from "lucide-react";
 import { modelLabel } from "@valuz/shared";
 import {
@@ -165,6 +166,21 @@ export interface UploadedFileItem {
 }
 
 /**
+ * One agent-delivered deliverable — the "生成文件" list, recorded by the
+ * built-in ``deliver_artifacts`` MCP tool. The inverse of
+ * {@link UploadedFileItem} (user uploads): these are files the agent produced
+ * and explicitly marked as outputs. Read-only; the row click opens the file.
+ */
+export interface GeneratedArtifactItem {
+  id: string;
+  name: string;
+  /** Optional human-readable byte size, e.g. "1.2 MB". */
+  size?: string;
+  /** Absolute path the row opens via ``onOpenGeneratedFile``. */
+  path: string;
+}
+
+/**
  * One entry in the agent's TODO list snapshot. Matches the kernel
  * ``Session.todos`` element shape (which mirrors the Claude Agent SDK's
  * ``TodoWrite`` payload verbatim — camelCase ``activeForm`` is the wire
@@ -244,6 +260,15 @@ export interface ProjectContextPanelProps {
   uploadedFiles?: UploadedFileItem[];
   onUploadFile?: () => void;
   onRemoveUploadedFile?: (id: string) => void;
+  /**
+   * Files the agent delivered as finished outputs (the "生成文件" list,
+   * recorded by the ``deliver_artifacts`` tool). Provide the array (even
+   * empty) to render the section; ``undefined`` hides it. Read-only — rows
+   * open via {@link onOpenGeneratedFile}.
+   */
+  generatedFiles?: GeneratedArtifactItem[];
+  /** Open one delivered artifact (its absolute path) in the OS. */
+  onOpenGeneratedFile?: (path: string) => void;
   /**
    * Latest TODO snapshot from the agent (kernel V5+messages emits this
    * via ``todo_update`` events whenever the agent calls TodoWrite). The
@@ -838,6 +863,8 @@ export const ProjectDetailContextPanel = ({
   onSelectAllInKb,
   uploadedFiles,
   onRemoveUploadedFile,
+  generatedFiles,
+  onOpenGeneratedFile,
   todos,
   scheduledTasks,
   onAddScheduledTask,
@@ -882,6 +909,8 @@ export const ProjectDetailContextPanel = ({
     (kbTree !== undefined && kbTree !== null) || (docs && docs.length > 0);
   const showUploadedFiles = uploadedFiles !== undefined;
   const visibleUploadedFiles = uploadedFiles ?? [];
+  const showGeneratedFiles = generatedFiles !== undefined;
+  const visibleGeneratedFiles = generatedFiles ?? [];
   // Files section shows whenever the caller provides a fileTree array. Chat
   // projects should pass ``undefined`` to hide the section altogether.
   const showFiles = fileTree !== undefined;
@@ -1147,6 +1176,42 @@ export const ProjectDetailContextPanel = ({
         </div>
       ) : (
         <p className="text-2xs text-ink-meta">{t("knowledge.noUploadFiles")}</p>
+      )}
+    </AccordionSection>
+  ) : null;
+
+  const generatedFilesSection = showGeneratedFiles ? (
+    <AccordionSection
+      {...sectionState("generated", visibleGeneratedFiles.length > 0)}
+      title={t("conversation.generatedFiles")}
+      icon={Sparkles}
+      iconClassName="text-brand"
+      contentClassName="px-5 py-2"
+      count={visibleGeneratedFiles.length || undefined}
+    >
+      {visibleGeneratedFiles.length > 0 ? (
+        <div className="space-y-1">
+          {visibleGeneratedFiles.map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              onClick={() => onOpenGeneratedFile?.(f.path)}
+              disabled={!onOpenGeneratedFile}
+              className="group -mx-2 flex w-[calc(100%+1rem)] items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-surface-muted/60 disabled:cursor-default disabled:hover:bg-transparent"
+              title={f.path}
+            >
+              <FileTypeIcon filename={f.name} />
+              <span className="flex-1 truncate text-ink-heading">{f.name}</span>
+              {f.size ? (
+                <span className="shrink-0 text-2xs text-ink-meta">{f.size}</span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="text-2xs text-ink-meta">
+          {t("conversation.noGeneratedFiles")}
+        </p>
       )}
     </AccordionSection>
   ) : null;
@@ -1490,6 +1555,9 @@ export const ProjectDetailContextPanel = ({
 
       {/* Uploaded files (session attachments) */}
       {uploadedFilesSection}
+
+      {/* Generated files (agent-delivered artifacts — the 生成文件 list) */}
+      {generatedFilesSection}
 
       {/* Scheduled — project-only; chat project omits this. */}
       {showScheduled && (

@@ -978,3 +978,54 @@ async def delete_attachment(
             logger.exception("Failed to unlink attachment file %s", path)
     await ds.delete_attachment(user_id, attachment_id)
     return Response(status_code=204)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Artifacts (agent-delivered deliverables — the "生成文件" list)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class ArtifactItem(BaseModel):
+    id: str
+    session_id: str
+    file_path: str  # absolute path the agent wrote; the client opens this
+    file_name: str
+    file_size: int
+    mime_type: str | None = None
+    created_at: int
+
+
+class ArtifactListResponse(BaseModel):
+    items: list[ArtifactItem]
+
+
+@router.get("/{session_id}/artifacts")
+async def list_artifacts(
+    session_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(require_current_user_id),
+) -> ArtifactListResponse:
+    """Return the files the agent delivered for ``session_id``.
+
+    These are recorded by the built-in ``deliver_artifacts`` MCP tool (the
+    inverse of the upload pipeline) and rendered in the session panel's
+    "生成文件" section. Durable — no per-turn staging — so the full set is
+    returned every time.
+    """
+    if await kernel_client.get_session(user_id, session_id) is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+    rows = await SessionDatastore(db).list_artifacts(user_id, session_id)
+    return ArtifactListResponse(
+        items=[
+            ArtifactItem(
+                id=r.id,
+                session_id=r.session_id,
+                file_path=r.file_path,
+                file_name=r.file_name,
+                file_size=r.file_size,
+                mime_type=r.mime_type,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+    )

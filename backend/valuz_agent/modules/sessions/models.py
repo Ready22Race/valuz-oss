@@ -70,3 +70,28 @@ class SessionAttachmentRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # pending set, so the "uploaded files" bar reads as a staging
     # area that clears after each send.
     consumed_at: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class SessionArtifactRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
+    """Agent-delivered deliverables for a session — the "生成文件" list.
+
+    Distinct from ``SessionAttachmentRow`` (which is the per-turn *upload*
+    staging set, files the **user** hands the agent). This table is the
+    inverse: files the **agent** declares as finished outputs by calling the
+    built-in ``deliver_artifacts`` MCP tool. Rows are durable (no per-turn
+    consume marker) and the side panel renders them as a curated, read-only
+    list the user can click to open.
+
+    ``stored_path`` is the absolute path the agent wrote inside the session's
+    working directory; there is no copy — the row is a live reference. A
+    re-delivery of the same ``(session_id, stored_path)`` upserts (refreshes
+    size / mime / name) rather than appending a duplicate.
+    """
+
+    __tablename__ = "valuz_session_artifact"
+
+    session_id: Mapped[str] = mapped_column(String(36), index=True)
+    file_path: Mapped[str] = mapped_column(Text)
+    file_name: Mapped[str] = mapped_column(String(512))
+    file_size: Mapped[int] = mapped_column(Integer, default=0)
+    mime_type: Mapped[str | None] = mapped_column(String(128))
