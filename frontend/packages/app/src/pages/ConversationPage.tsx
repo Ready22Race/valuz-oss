@@ -3836,7 +3836,7 @@ export const ConversationPage = () => {
                     onClick={() =>
                       navigate(`/tasks/${encodeURIComponent(fromTaskId)}`)
                     }
-                    className="inline-flex shrink-0 items-center gap-1 text-ink-meta transition-colors hover:text-ink-heading"
+                    className="inline-flex shrink-0 items-center gap-1 text-[13px] text-ink-meta transition-colors hover:text-ink-heading"
                   >
                     <ArrowLeft className="h-3.5 w-3.5" />
                     <span>
