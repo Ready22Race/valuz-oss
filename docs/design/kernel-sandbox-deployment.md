@@ -1,6 +1,8 @@
 # Kernel 沙箱化部署 — 供给面与 Environment 设计（S 线 / C 线执行计划）
 
-> **Status**: planned · **Date**: 2026-06-11 · **Owner**: backend
+> **Status**: §1–§8 设计 = planned（2026-06-11）；**C 线最小闭环已落地并真机验证**
+> （腾讯云 AGS / e2b 兼容沙箱 + COS 挂载，Ready22Race fork）。决策确认 · 实施
+> 进度 · 后续规划 · 竞品对比见 **§9**（2026-06-22）。 · **Owner**: backend
 > **前置**: PR [#85](https://github.com/valuz-ai/valuz-oss/pull/85)（已合并）+
 > [#86](https://github.com/valuz-ai/valuz-oss/pull/86)（P0.3，工具面 MCP 统一）
 >
@@ -517,6 +519,149 @@ egress sidecar；microVM → 网关。CMA 的「cloud sandbox 网络默认关闭
   实现）、microVM 密度数据
 - anthropic-experimental/sandbox-runtime（srt）：Seatbelt/bubblewrap profile
   生成、代理收口网络、违规监控——S1 的直接依赖候选
+
+---
+
+## 9 · 讨论项确认 · C 线实施进度 · 后续规划（2026-06-22）
+
+> 本节是 §1–§8 设计落地后的**状态确认 + 进度 + 路线**。C 线（云端托管 kernel）
+> 已在 Ready22Race fork 跑通最小闭环（腾讯云 AGS / e2b 兼容沙箱 + COS 挂载），
+> 真机验证。下表「现状」均指向已合并代码（`integrations/sandbox_ags.py`、
+> `integrations/sandbox_paths.py`、`integrations/cos_sync.py`、
+> `modules/settings/sandbox_config.py`、`boot/steps.py`、设置→云沙箱面板）。
+
+### 9.0 一句话现状
+
+- ① 供给：`SandboxProvider` + `SandboxDriver` 注册表已建（上游 PR #90 / #110）；
+  `seatbelt`（本地）+ `ags`（云端 e2b 兼容）两个驱动落地。
+- C 线最小闭环：云内核在 AGS 沙箱里运行、COS 挂载 `/workspace`、**真机验证**
+  agent 在投影后的 project cwd 里 `cat` 到文件、`valuz-project-docs` /
+  `skill-creator` 以 symlink materialize 进 COS 挂载（无 `SkillSourceMissing`）。
+- 配置纯 UI 驱动（设置→云沙箱），零 env、零脚本；跨重启**复用**沙箱。
+
+### 9.1 常驻 or 即启即用 —— 决策：**常驻 + 跨重启复用（reattach）**
+
+讨论项：每会话即启即弃（§3.5 原设想的 lazy provision→idle stop→resume），还是常驻复用？
+
+**确认：常驻（resident）+ 跨重启复用。**
+- AGS 沙箱本身**常驻**（无 auto-timeout）；按会话即启即弃会浪费配额、反复冷启动 +
+  重复同步。
+- 现状（已实现，`boot/steps.py` + `sandbox_config`）：provision 后记住端点
+  `base_url` + **配置指纹**（template/domain/mount 的 hash）；下次启动先 recall →
+  指纹一致且 `/health`==200 → **reattach 复用**（跳过 provision + 跳过技能 re-sync）；
+  否则杀掉孤儿 + 重新 provision。切回本地内核时回收常驻沙箱。**真机验证：重启复用
+  同一沙箱，0 次新建，~4s vs ~60s。**
+- 与 §3.5「每项目一沙箱」正交：粒度仍是项目/host 级单沙箱；「常驻」是其生命周期策略。
+- 代价：常驻沙箱需显式回收（切本地内核自动回收；配置变更杀旧建新；否则常驻不退）。
+- **后续**：空闲 hibernation / 暂停-恢复（依赖供应商 snapshot 能力，AGS 暂不支持）；
+  SaaS 阶段的暖池 + microVM 密度。
+
+### 9.2 同步机制与原则 · 持久化：文件挂载 + SaaS kernel.db
+
+**(a) 文件挂载（物料 in/out）—— 已实现：COS 对象存储挂载 + 前缀保持投影**
+- 实测偏离 §3.7.1「cwd 必须块存储、FUSE-S3 不做 cwd」的原始结论：C 线最小闭环用
+  AGS 原生 **COS 挂载**（COSFS）承载 `/workspace`，**实测可用**（含 kernel
+  materializer 创建的 symlink）。块存储 / JuiceFS 仍是高频负载下的性能优选，记为
+  企业版 / 规模化选项。
+- **前缀保持投影**（`sandbox_paths.py`，本轮核心抽象）：一条规则
+  `mount = mount_prefix + realpath(host_path)`、`cos_key = user_id + realpath`，
+  **cwd 暂存 / 技能翻译 / 同步布局三处共用** —— 无重映射表、无内核改动。per-user
+  隔离 = COS 挂载 root 在 `{user_id}/`。
+- 同步策略（对齐 §3.7.1 host-正本「进=stage / 出=write-back」，**出暂缓**）：
+  - **进**：cwd 每会话即时 stage（保新鲜）；技能 provision 时同步一次 +
+    面板「同步工作区到云」按钮（变动少，不每会话同步）。
+  - **出**：当前**结果留在 COS**（rw 挂载吸收内核写入），host 按需读；
+    **COS→本地下行回写（turn_end write-back）暂未实现** —— 这是 local-first
+    「正本在本地」的下一步。
+
+**(b) SaaS kernel.db 同步 —— 现状：云内核用镜像内自带 kernel.db，未回传**
+- 云内核运行自己的 `kernel.db`（sessions/events/langgraph checkpoint），即 §3 的
+  存储分家（上游 PR #163）。host 经 `KernelClient`（HTTP）实时读云内核的
+  sessions/events（控制面），但 **DB 本体不落回 host**。
+- 原则确认：
+  - **host-正本部署（OSS / 本地 host）**：kernel.db 应在回合边界快照写回 host
+    （§3.7.1 `turn_end`），让本地保有完整会话历史 —— **待实现**。
+  - **sandbox/SaaS-正本部署（企业托管）**：kernel.db 正本在云端持久卷，host 是
+    查看器 —— SaaS 形态的天然选择，无需回写。
+- **后续**：host-正本下 kernel.db 的 turn_end 写回（WAL checkpoint → copy）；或共享
+  Postgres 让两层 co-locate（`database_url` 已支持）。
+
+### 9.3 沙箱形态 × OSS/企业版 × local/SaaS host 矩阵
+
+把 §3.2/§3.6 的两轴显式成矩阵。三维：**沙箱驱动**（kernel 跑哪）×
+**host 形态**（业务层跑哪）× **版本**（OSS / 企业）。
+
+| host 形态 ＼ 沙箱 | 进程内（无沙箱） | 本地 Seatbelt | 云端 AGS/e2b |
+|---|---|---|---|
+| **本地桌面 host（OSS）** | 默认，离线可用 | `make dev-sandbox`，本机强隔离 | ✅ 已通（UI 配置 / `make dev-ags`）；④ 受 NAT 限：host 在 NAT 后云内核回连不到，memory/docs/task 工具受限，**基础聊天 + cwd + 技能 OK** |
+| **LAN headless host（OSS）** | ✓ | ✓ | ④ 在 LAN 内可达则全通 |
+| **SaaS 集群 host（企业版）** | — | — | **目标形态**：host 与沙箱同在云侧，④ 内网直连无 NAT；多租户 owner 贯穿，密度交 microVM |
+
+要点：
+- **OSS = 本地/LAN host**（local-first，数据留用户机器）；沙箱可选进程内 /
+  Seatbelt / 云端 AGS。云端 AGS 在 OSS 下的痛点是 ④ NAT（已记录，P4）。
+- **企业版 = SaaS 集群 host**（host 实现在企业 overlay）；host + 沙箱同云，④ 无 NAT。
+- 沙箱**驱动**层 OSS/企业共用（`SandboxDriver` 注册表 + entry-point 插件，§9.6）；
+  云驱动（e2b/vefaas/AGS）的 SaaS-host 编排放企业 overlay。
+
+### 9.4 沙箱服务运行内容：kernel or kernel+host —— 决策：**kernel only**
+
+**确认：沙箱内只跑 kernel（valuz-server 的 kernel 子集 + runtimes），host（UI +
+`valuz_*` 业务层 + 内置 MCP 工具面）始终在用户侧（OSS）或 SaaS 集群（企业）。**
+- 对齐 §2.1：沙箱 = 执行单元，host = 控制面 + 业务表 + 内置工具。两者只经六个面交互。
+- **不把 host 塞进沙箱**：host 的 `valuz.db`（业务库 + 单写者锁）、OS 钥匙串永不进
+  沙箱（§3.7.1 红线）。
+- 推论：云内核要用 host 的内置工具（docs/automations/connectors/harness），必须能
+  回连 host —— 即 §9.5 的 `host_external_url`（本轮新增字段）+ ④ transport。
+
+### 9.5 安全机制
+
+| 机制 | 设计（§3.8–3.10） | C 线现状 | 后续 |
+|---|---|---|---|
+| 凭证 L1（引用化+注入） | env 注入，本地终态 | AGS **静态 token 模式**（沙箱工具的 `KERNEL_AUTH_TOKEN` env；host 带同 token bearer）；LLM 凭证经 per-session provider 配置下发，**不写镜像** | codex 订阅渠道的显式 env 声明 |
+| 凭证 L2/L3（短效令牌 / egress） | OAuth 短效 / 网关注入 | 未做 | 多租户阶段 |
+| per-user 隔离 | owner 贯穿 + 沙箱即租户边界 | **COS 挂载只挂当前 `user_id` 子树**（`{user_id}/` 为挂载 root；前缀保持投影保证不串户）；`X-Valuz-Owner-Id` owner 作用域读 | SaaS owner per-request |
+| 网络策略 | deny-by-default + 域名白名单 | AGS 沙箱工具：公网 + 常驻（当前为可达性放开）；egress 白名单未收口 | deny-by-default + egress sidecar/网关 |
+| 密钥红线 | valuz.db / 钥匙串不进沙箱 | ✅ 沙箱只挂 COS 的 user 子树 + kernel 镜像；host secrets 留 host 钥匙串 | — |
+| 配置密钥落盘 | UI 配的 AGS/COS 密钥 | 存 host **OS secret store**（不入 DB、不入代码）；`.env` 仅 env 驱动路径用 | — |
+
+### 9.6 沙箱层面的服务化抽象 —— 现状：已建成
+
+- `SandboxProvider`（运行时操作：`provision` / `health` / `destroy` /
+  `bind_workspace` / `project_path`）+ `SandboxDriver`（boot 装配：`preflight` /
+  `provision_for_boot` / `attach`；`shares_host_fs` 等元数据）。
+- **驱动注册表 + entry-point 插件**（上游 PR #110）：OSS 注册 `seatbelt`；
+  `ags` / `e2b` / `vefaas` 经 pip 包 + `valuz.sandbox_drivers` entry-point 注册，
+  **不改 OSS**。
+- 供给面与控制面在 `(base_url, token)` 交棒喂 `HttpKernelClient`（§3.3 原则保持）；
+  沙箱原语（exec / 文件 IO）不进协议。
+- 物料投影抽象：`SandboxProvider.project_path`（seatbelt=identity，AGS=前缀）+
+  `bind_workspace`（stage + 投影）+ `sandbox_paths`（纯规则），三处共用一条投影律。
+
+### 9.7 竞品对比：Trae Solo / TRAE Work 的 Sandbox
+
+字节跳动产品，**闭源 SaaS**（客户端开源，运行时后端闭源）。"sandbox" 一词双关：
+本地 `sandbox-exec` 命令围栏 + 云端**每会话**隔离容器（预装 Skills 镜像）。
+
+| 维度 | Trae Sandbox | Valuz（本设计） |
+|---|---|---|
+| 形态 | 云端每会话隔离容器 + 本地 `sandbox-exec` 命令围栏 | 本地 Seatbelt 进程沙箱 + 云端 e2b/AGS 沙箱 |
+| 生命周期 | 每会话 on-demand；无文档化的常驻 / 复用 / 休眠 | **常驻 + 跨重启复用**（§9.1） |
+| 持久化 | 项目「受控挂载」进容器；跨会话不可见；任务状态三端实时同步（非工作区对象存储同步） | **用户自有 COS/S3 对象存储挂载** + 前缀保持投影；正本归属可配 |
+| 跑什么 | agent 命令 + 预装 Skills 镜像 | **kernel only**；host 内置工具经 ④ 回调 |
+| 部署 | **仅云、闭源后端**；运行时不可换 | **OSS 可自托管 + 运行时中立**（claude/codex/deepagents）+ 企业 SaaS |
+| 工具 | 烤进镜像的 Skills | **host-工具缝**（kernel→host 内置 MCP，`host_external_url`） |
+| 隔离 | 每会话隔离；本地 FS 白名单 + 高危命令拦截；云端网络策略未文档化 | per-user COS 子树；沙箱即租户边界；deny-by-default（规划中） |
+
+**Trae 验证了什么**：「每会话隔离云容器 + 受控项目挂载 + 本地命令围栏」这个形状是
+对的（和我们 in-process / Seatbelt / 云端三档同构）。
+
+**我们的差异化（Trae 没有的）**：① OSS + 可自托管；② **用户自有对象存储挂载**
+（Trae 是其账户存储里的「受控挂载」，非你拥有的 S3/COS）；③ **常驻 + 跨重启复用**；
+④ **运行时中立的 kernel**；⑤ **host-工具回调缝**。
+
+**可借鉴（纳入后续安全/体验项）**：高危命令拦截（skip/whitelist/run 提示）、显式
+FS allow/deny 表、预装工具镜像的零配置 UX、多端任务状态实时同步。
 
 ---
 
