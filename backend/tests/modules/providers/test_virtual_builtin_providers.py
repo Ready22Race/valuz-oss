@@ -252,3 +252,69 @@ class TestGetVirtualTemplate:
         # row — configure/login the channel first.
         with pytest.raises(ProviderNotFound):
             await svc.service.update_provider(OWNER, "ch-claude-subscription", name="Renamed")
+
+
+class TestSubscriptionLoginGate:
+    """A logged-out subscription channel keeps its card but drops its models — but
+    ONLY on the per-channel detail path (``get_provider``), which is what the chat
+    composer fetches. ``list_providers`` (which feeds model-options →
+    onboarding ConnectStep + Settings default-model picker) is deliberately NOT
+    gated: those surfaces already gate client-side on the keychain probe, and
+    stripping there would drop the channel from model-options and break the
+    onboarding login card. Covers the virtual template AND a persisted
+    ``cli_keychain`` row (the real-world repro — logged in once, keychain since
+    cleared, composer still showing Claude·Codex models)."""
+
+    @staticmethod
+    def _set_logged_out(monkeypatch) -> None:
+        async def _no(_tool: str) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "valuz_agent.modules.providers.service.detect_cli_login", _no, raising=True
+        )
+
+    async def test_detail_models_hidden_when_logged_out(self, svc: _SvcHandle, monkeypatch) -> None:
+        self._set_logged_out(monkeypatch)
+        detail = await svc.service.get_provider(OWNER, "ch-claude-subscription")
+        assert detail.models == []  # card stays, models gone
+        assert detail.default_model is None
+
+    async def test_list_not_gated_so_onboarding_keeps_models(
+        self, svc: _SvcHandle, monkeypatch
+    ) -> None:
+        # Even logged out, the list feed must keep its models — model-options /
+        # onboarding gate client-side, and an empty list drops the login card.
+        self._set_logged_out(monkeypatch)
+        by_id = {i.id: i for i in await svc.service.list_providers(OWNER)}
+        assert by_id["ch-claude-subscription"].models
+
+    async def test_detail_models_shown_when_logged_in(self, svc: _SvcHandle) -> None:
+        # Default autouse fixture = logged in → recommended catalog surfaces.
+        detail = await svc.service.get_provider(OWNER, "ch-claude-subscription")
+        assert detail.models
+
+    async def test_persisted_keychain_row_detail_hidden_when_logged_out(
+        self, svc: _SvcHandle, monkeypatch
+    ) -> None:
+        svc.seed(
+            ProviderRow(
+                user_id=OWNER,
+                id="my-claude",
+                name="Claude Pro / Max",
+                provider_kind="claude-subscription",
+                source="user",
+                enabled=True,
+                is_default=False,
+                deletable=True,
+                default_model="claude-sonnet-4-6",
+                test_status="never",
+                credential_source="cli_keychain",
+                auth_type="oauth",
+                model_ids=None,  # tracks the live recommended catalog
+            )
+        )
+        self._set_logged_out(monkeypatch)
+        detail = await svc.service.get_provider(OWNER, "my-claude")
+        assert detail.models == []
+        assert detail.default_model is None

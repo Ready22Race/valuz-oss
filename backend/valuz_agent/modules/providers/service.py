@@ -15,6 +15,13 @@ from valuz_agent.i18n import t
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.infra.time_utils import now_ms
+from valuz_agent.modules.providers.cli_login_probe import (
+    CliTool,
+    detect_cli_login,
+)
+from valuz_agent.modules.providers.cli_login_probe import (
+    invalidate as invalidate_cli_login,
+)
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.discover import (
     ModelDiscoveryError,
@@ -49,6 +56,62 @@ def derive_runtime_provider(provider_kind: str) -> str:
     if provider_kind == "codex-subscription":
         return "codex"
     return "deepagents"
+
+
+# provider_kind → the CLI tool whose keychain holds its credential. Subscription
+# channels are gated on this CLI being logged in (see ``_gate_subscription_login``).
+_SUBSCRIPTION_KIND_TO_TOOL: dict[str, CliTool] = {
+    "claude-subscription": "claude",
+    "codex-subscription": "codex",
+}
+
+
+async def _gate_subscription_login(channels: list[LLMChannel]) -> None:
+    """Hide a subscription channel's models when its CLI keychain isn't logged in.
+
+    The Claude Pro·Max / Codex·ChatGPT credential lives in the CLI's own keychain
+    — only ``claude auth status`` / ``codex login status`` know whether it's
+    usable (see :mod:`cli_login_probe`). The chat composer flattens a channel's
+    ``models`` straight into its picker while trusting ``auth_type == "oauth"``
+    (no client-side keychain probe), so a logged-out subscription channel would
+    offer models that 422 at session creation. Clearing ``models`` /
+    ``default_model`` leaves the card but removes the bad picks.
+
+    Applied on the **per-channel detail path** (``get_provider``) ONLY — that is
+    what the composer fetches. It is deliberately NOT applied to ``list_providers``:
+    that list feeds ``GET /v1/settings/model-options`` (onboarding ConnectStep +
+    Settings default-model picker), which already gate subscription rows
+    client-side on the keychain probe; stripping there drops the channel from
+    model-options and breaks the onboarding login card.
+
+    Mutates ``channels`` in place. Probes once per tool (cached); skipped entirely
+    when subscription login is disabled (cloud / shared multi-user, no local
+    keychain) or when no subscription channel is present.
+    """
+    from valuz_agent.infra.config import settings
+
+    if not settings.subscription_login_enabled:
+        return
+    present = {c.provider_kind for c in channels if c.provider_kind in _SUBSCRIPTION_KIND_TO_TOOL}
+    if not present:
+        return
+    logged_in = {kind: await detect_cli_login(_SUBSCRIPTION_KIND_TO_TOOL[kind]) for kind in present}
+    for c in channels:
+        if c.provider_kind in _SUBSCRIPTION_KIND_TO_TOOL and not logged_in.get(c.provider_kind):
+            c.models = []
+            c.default_model = None
+
+
+def _invalidate_login_cache(provider_kind: str) -> None:
+    """Force a re-probe of ``provider_kind``'s CLI login on the next list.
+
+    Called after a subscription login is materialized (``enable_provider``) so the
+    freshly logged-in channel's models surface immediately instead of waiting out
+    the probe's TTL. No-op for non-subscription kinds.
+    """
+    tool = _SUBSCRIPTION_KIND_TO_TOOL.get(provider_kind)
+    if tool is not None:
+        invalidate_cli_login(tool)
 
 
 # ── Value Objects ───────────────────────────────────────────────────
@@ -690,6 +753,10 @@ def _builtin_subscription_row(entry: Any) -> ProviderRow | None:
     (``_virtual_builtin_subscription_detail``) so the virtual template a user
     sees in the list opens identically in the edit dialog. ``model_ids=None``
     keeps the picker tracking the live recommended subscription catalog.
+
+    The template carries its full recommended model list here; whether those
+    models are actually surfaced is decided later by ``_gate_subscription_login``
+    (stripped when the CLI keychain isn't logged in).
     """
     descriptor = _PROVIDER_MAP.get(entry.provider_kind)
     if descriptor is None or descriptor.auth_type != "oauth":
@@ -816,12 +883,24 @@ class ProviderService:
         hidden = await policy.hidden_provider_ids(combined)
         if hidden:
             combined = [it for it in combined if it.id not in hidden]
+        # NB: subscription-login gating is applied in ``get_provider`` (the
+        # per-channel detail the composer fetches), NOT here. The list feeds
+        # ``GET /v1/settings/model-options`` (onboarding ConnectStep + Settings
+        # default-model picker), which already gate subscription rows client-side
+        # on the CLI keychain probe (``status="client_resolved"`` +
+        # ``isModelProviderUsable``). Stripping models here would drop the channel
+        # from model-options entirely and break the onboarding login card.
         return combined
 
     async def get_provider(self, user_id: str, provider_id: str) -> LLMChannelDetail:
         row = await self._ds.get_by_id(user_id, provider_id)
         if row is not None:
-            return _row_to_detail(row)
+            detail = _row_to_detail(row)
+            # Same login gate as ``list_providers`` — the composer fetches the
+            # per-channel detail, so a logged-out subscription row must hide its
+            # models here too.
+            await _gate_subscription_login([detail])
+            return detail
         # Not a user row — maybe an overlay-contributed (catalog) channel
         # (ADR-011). Catalog ids don't collide with user UUIDs, so checking
         # the user table first is safe.
@@ -833,6 +912,7 @@ class ProviderService:
         # dialog opens instead of erroring with "获取模型详情失败".
         virtual = _virtual_builtin_subscription_detail(provider_id)
         if virtual is not None:
+            await _gate_subscription_login([virtual])
             return virtual
         raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
@@ -1376,6 +1456,9 @@ class ProviderService:
             materialized = await self._materialize_builtin_subscription(user_id, provider_id)
             if materialized is None:
                 raise ProviderNotFound(f"Provider {provider_id!r} not found")
+            # The frontend calls enable right after detecting a fresh CLI login —
+            # drop the cached logged-out state so the new models surface at once.
+            _invalidate_login_cache(materialized.provider_kind)
             self._bus.publish("provider.updated", provider_id=materialized.id)
             return _row_to_detail(materialized)
 
@@ -1388,6 +1471,7 @@ class ProviderService:
             row.credential_source = "cli_keychain"
         row.updated_at = now_ms()
         await self._ds.update(row)
+        _invalidate_login_cache(row.provider_kind)
         self._bus.publish("provider.updated", provider_id=row.id)
         return _row_to_detail(row)
 
