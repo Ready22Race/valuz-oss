@@ -22,7 +22,11 @@ from valuz_agent.infra.database import Base
 from valuz_agent.modules.agents.datastore import AgentDatastore, ProjectMemberDatastore
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.agents.seed import DEFAULT_ASSISTANT_SLUG
-from valuz_agent.modules.connectors.models import ConnectorAttrRow, ConnectorRow
+from valuz_agent.modules.connectors.models import (
+    ConnectorAttrRow,
+    ConnectorOAuthRow,
+    ConnectorRow,
+)
 from valuz_agent.modules.sessions import service as session_service
 from valuz_agent.modules.sessions.errors import SessionNotRunnable
 from valuz_agent.modules.sessions.service import SessionService
@@ -39,6 +43,7 @@ async def db(tmp_path) -> AsyncIterator:
                 ProjectMemberRow.__table__,
                 ConnectorRow.__table__,
                 ConnectorAttrRow.__table__,
+                ConnectorOAuthRow.__table__,
             ],
         )
     session = async_sessionmaker(bind=engine, expire_on_commit=False)()

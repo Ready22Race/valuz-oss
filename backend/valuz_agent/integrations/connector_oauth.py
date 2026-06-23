@@ -471,9 +471,7 @@ class McpOauthHelper:
 def persist_oauth_token(row: ConnectorRow, token: OAuthToken, now_ms: int) -> None:
     """Write the token blob + absolute expiry onto the connector row (caller commits)."""
     row.oauth_token_json = token.model_dump_json()
-    row.oauth_token_expires_at = (
-        now_ms + int(token.expires_in) * 1000 if token.expires_in else None
-    )
+    row.oauth_token_expires_at = now_ms + int(token.expires_in) * 1000 if token.expires_in else None
 
 
 def oauth_token_is_expired(row: ConnectorRow, now_ms: int, *, skew_ms: int = 60_000) -> bool:
@@ -506,10 +504,10 @@ async def try_refresh_connector_token(
         current = OAuthToken.model_validate_json(token_json)
     except ValidationError:
         return None
-    if not current.refresh_token or not row.oauth_metadata_json:
+    if not current.refresh_token or not row.oauth_metadata:
         return None
     try:
-        meta = OauthMetadata.model_validate_json(row.oauth_metadata_json)
+        meta = OauthMetadata.model_validate_json(row.oauth_metadata)
     except ValidationError:
         return None
 
