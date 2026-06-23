@@ -34,7 +34,7 @@ class _FakeRow:
 
     id: str = "c1"
     url: str = "https://mcp.example/mcp"
-    oauth_metadata_json: str | None = _META
+    oauth_metadata: str | None = _META
     oauth_client_info_json: str | None = None
     oauth_token_json: str | None = None
     oauth_token_expires_at: int | None = None

@@ -19,7 +19,11 @@ from valuz_agent.api.routes.onboarding import (
     _ensure_default_connectors,
 )
 from valuz_agent.infra.database import Base
-from valuz_agent.modules.connectors.models import ConnectorAttrRow, ConnectorRow
+from valuz_agent.modules.connectors.models import (
+    ConnectorAttrRow,
+    ConnectorOAuthRow,
+    ConnectorRow,
+)
 
 USER = "local-test-owner"
 
@@ -31,7 +35,11 @@ async def db(tmp_path) -> AsyncIterator:
     async with engine.begin() as conn:
         await conn.run_sync(
             Base.metadata.create_all,
-            tables=[ConnectorRow.__table__, ConnectorAttrRow.__table__],
+            tables=[
+                ConnectorRow.__table__,
+                ConnectorAttrRow.__table__,
+                ConnectorOAuthRow.__table__,
+            ],
         )
     factory = async_sessionmaker(bind=engine, expire_on_commit=False)
     session = factory()

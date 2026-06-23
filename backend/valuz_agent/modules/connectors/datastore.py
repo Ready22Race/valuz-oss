@@ -8,6 +8,8 @@ backend has no per-user local filesystem, so nothing here touches disk.
 
 from __future__ import annotations
 
+from typing import cast
+
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +17,7 @@ from valuz_agent.infra.db import async_commit_with_retry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.connectors.models import (
     ConnectorAttrRow,
+    ConnectorOAuthRow,
     ConnectorRow,
     ProjectConnectorRow,
 )
@@ -25,7 +28,7 @@ class ConnectorDatastore:
         self._db = db
 
     async def list_all(self, user_id: str) -> list[ConnectorRow]:
-        return list(
+        rows = list(
             (
                 await self._db.execute(
                     select(ConnectorRow)
@@ -36,9 +39,11 @@ class ConnectorDatastore:
             .scalars()
             .all()
         )
+        await self._hydrate(rows)
+        return rows
 
     async def list_enabled(self, user_id: str) -> list[ConnectorRow]:
-        return list(
+        rows = list(
             (
                 await self._db.execute(
                     select(ConnectorRow)
@@ -49,9 +54,11 @@ class ConnectorDatastore:
             .scalars()
             .all()
         )
+        await self._hydrate(rows)
+        return rows
 
     async def get_by_id(self, user_id: str, connector_id: str) -> ConnectorRow | None:
-        return (
+        row = (
             (
                 await self._db.execute(
                     select(ConnectorRow).where(
@@ -62,9 +69,12 @@ class ConnectorDatastore:
             .scalars()
             .first()
         )
+        if row is not None:
+            await self._hydrate([row])
+        return row
 
     async def get_by_slug(self, user_id: str, slug: str) -> ConnectorRow | None:
-        return (
+        row = (
             (
                 await self._db.execute(
                     select(ConnectorRow).where(
@@ -75,42 +85,137 @@ class ConnectorDatastore:
             .scalars()
             .first()
         )
+        if row is not None:
+            await self._hydrate([row])
+        return row
 
     async def create(self, user_id: str, row: ConnectorRow) -> ConnectorRow:
-        # Owner passed explicitly (no ContextVar write-stamp default). Stamp the
-        # row AND its sparse attr rows — the latter may have been built (via the
-        # property setters) before the owner was known at construction time.
+        # Owner passed explicitly (no ContextVar write-stamp default). The side
+        # data (attrs + oauth) was built into the row's holders via the property
+        # setters; persist it explicitly after the row gets its id.
         row.user_id = user_id
-        for attr in row._attrs.values():
-            attr.user_id = user_id
+        attrs = row._attr_store()
+        oauth = row._oauth_store()
         self._db.add(row)
+        await self._db.flush()  # assigns row.id (+ client-side default columns)
+        await self._persist_children(row.id, user_id, attrs, oauth)
         await self._db.commit()
         await self._db.refresh(row)
+        row.__dict__["_attrs"] = attrs
+        row.__dict__["_oauth"] = oauth
         return row
 
     async def update(self, row: ConnectorRow) -> ConnectorRow:
-        # ``row`` came from an owner-scoped read; merge preserves its user_id.
-        # Re-stamp the attr rows too: a setter run during this update (e.g. a
-        # refreshed OAuth token) creates a new attr row that must inherit the
-        # owner. ``_attrs`` is selectin-loaded, so this touches no DB.
-        for attr in row._attrs.values():
-            attr.user_id = row.user_id
+        # ``row`` came from an owner-scoped read; merge preserves its user_id and
+        # writes the mapped columns. The side data is replaced wholesale (the
+        # holders are the desired state) — not an ORM relationship, so the
+        # datastore owns its persistence.
+        attrs = row._attr_store()
+        oauth = row._oauth_store()
         merged = await self._db.merge(row)
+        await self._persist_children(row.id, row.user_id, attrs, oauth)
         await self._db.commit()
         await self._db.refresh(merged)
+        merged.__dict__["_attrs"] = attrs
+        merged.__dict__["_oauth"] = oauth
         return merged
+
+    async def _hydrate(self, rows: list[ConnectorRow]) -> None:
+        """Load each connector's side-table data (attrs + oauth) into its plain
+        in-memory holders. Column-only selects, so the side rows are NOT added to
+        the session identity map — the datastore replaces them wholesale on
+        write rather than mutating tracked ORM objects."""
+        if not rows:
+            return
+        ids = [r.id for r in rows]
+
+        attr_pairs = (
+            await self._db.execute(
+                select(
+                    ConnectorAttrRow.connector_id,
+                    ConnectorAttrRow.key,
+                    ConnectorAttrRow.value,
+                ).where(ConnectorAttrRow.connector_id.in_(ids))
+            )
+        ).all()
+        attrs_by_conn: dict[str, dict[str, str]] = {}
+        for connector_id, key, value in attr_pairs:
+            attrs_by_conn.setdefault(connector_id, {})[key] = value
+
+        oauth_pairs = (
+            await self._db.execute(
+                select(
+                    ConnectorOAuthRow.connector_id,
+                    ConnectorOAuthRow.client_info,
+                    ConnectorOAuthRow.token,
+                    ConnectorOAuthRow.expires_at,
+                ).where(ConnectorOAuthRow.connector_id.in_(ids))
+            )
+        ).all()
+        oauth_by_conn: dict[str, dict[str, object]] = {}
+        for connector_id, client_info, token, expires_at in oauth_pairs:
+            oauth_by_conn[connector_id] = {
+                k: v
+                for k, v in (
+                    ("client_info", client_info),
+                    ("token", token),
+                    ("expires_at", expires_at),
+                )
+                if v is not None
+            }
+
+        for r in rows:
+            r.__dict__["_attrs"] = attrs_by_conn.get(r.id, {})
+            r.__dict__["_oauth"] = oauth_by_conn.get(r.id, {})
+
+    async def _persist_children(
+        self,
+        connector_id: str,
+        user_id: str,
+        attrs: dict[str, str],
+        oauth: dict[str, object],
+    ) -> None:
+        """Desired-state replace of a connector's side rows. The Core deletes run
+        immediately (before the pending inserts flush), so re-inserting the same
+        keys never collides on the primary key."""
+        await self._db.execute(
+            delete(ConnectorAttrRow).where(ConnectorAttrRow.connector_id == connector_id)
+        )
+        await self._db.execute(
+            delete(ConnectorOAuthRow).where(ConnectorOAuthRow.connector_id == connector_id)
+        )
+        for key, value in attrs.items():
+            self._db.add(
+                ConnectorAttrRow(connector_id=connector_id, key=key, value=value, user_id=user_id)
+            )
+        if oauth:
+            self._db.add(
+                ConnectorOAuthRow(
+                    connector_id=connector_id,
+                    client_info=cast("str | None", oauth.get("client_info")),
+                    token=cast("str | None", oauth.get("token")),
+                    expires_at=cast("int | None", oauth.get("expires_at")),
+                    user_id=user_id,
+                )
+            )
 
     async def delete(self, user_id: str, connector_id: str) -> bool:
         row = await self.get_by_id(user_id, connector_id)
         if row is None:
             return False
-        # Drop the connector's extension attributes explicitly (a Core bulk
-        # delete bypasses ORM cascade, and test sqlite engines don't enable the
-        # FK ON DELETE CASCADE the app engine sets).
+        # Drop the connector's side rows (attrs + oauth) explicitly — they are
+        # not an ORM relationship and there is no DB-level FK cascade, so the
+        # datastore owns the cleanup.
         await self._db.execute(
             delete(ConnectorAttrRow).where(
                 ConnectorAttrRow.connector_id == connector_id,
                 ConnectorAttrRow.user_id == user_id,
+            )
+        )
+        await self._db.execute(
+            delete(ConnectorOAuthRow).where(
+                ConnectorOAuthRow.connector_id == connector_id,
+                ConnectorOAuthRow.user_id == user_id,
             )
         )
         await self._db.execute(
@@ -145,9 +250,7 @@ class ConnectorDatastore:
         )
         return [r.slug for r in rows]
 
-    async def set_project_connectors(
-        self, user_id: str, project_id: str, slugs: list[str]
-    ) -> None:
+    async def set_project_connectors(self, user_id: str, project_id: str, slugs: list[str]) -> None:
         # Desired-state replace: drop this project's rows, re-insert the new set.
         await self._db.execute(
             delete(ProjectConnectorRow).where(
@@ -164,6 +267,4 @@ class ConnectorDatastore:
                 for slug in slugs
             ]
         )
-        await async_commit_with_retry(
-            self._db, where="ConnectorDatastore.set_project_connectors"
-        )
+        await async_commit_with_retry(self._db, where="ConnectorDatastore.set_project_connectors")

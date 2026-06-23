@@ -22,7 +22,11 @@ from valuz_agent.modules.agent_packs.service import AgentPackService
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.agents.service import AgentService
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
-from valuz_agent.modules.connectors.models import ConnectorAttrRow, ConnectorRow
+from valuz_agent.modules.connectors.models import (
+    ConnectorAttrRow,
+    ConnectorOAuthRow,
+    ConnectorRow,
+)
 from valuz_agent.modules.connectors.service import ConnectorService
 
 USER = "user-1"
@@ -49,6 +53,7 @@ async def _build_service(workdir):  # type: ignore[no-untyped-def]
                 ProjectMemberRow.__table__,
                 ConnectorRow.__table__,
                 ConnectorAttrRow.__table__,
+                ConnectorOAuthRow.__table__,
             ],
         )
     session = async_sessionmaker(bind=engine, expire_on_commit=False)()
@@ -167,9 +172,7 @@ async def test_import_pack_idempotent(svc: AgentPackService) -> None:
 
 
 async def test_partial_import_only_fills_missing(svc: AgentPackService) -> None:
-    await svc._agents.create_agent(
-        USER, {"slug": "inv-model-builder", "name": "manual", **DEPLOY}
-    )
+    await svc._agents.create_agent(USER, {"slug": "inv-model-builder", "name": "manual", **DEPLOY})
     res = await svc.import_pack(USER, "investment", **DEPLOY)
     assert res["created"] == 3
     assert res["skipped"] == 1
