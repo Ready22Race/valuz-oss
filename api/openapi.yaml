@@ -629,6 +629,59 @@ paths:
               schema:
                 $ref: "#/components/schemas/SystemStatusResponse"
 
+  # ── Browser (managed chrome-devtools daemon; Settings panel) ──────────
+
+  /v1/browser/status:
+    get:
+      summary: Managed-browser status & environment readiness
+      operationId: getBrowserStatus
+      tags: [browser]
+      description: |
+        Cheap, read-only snapshot for the Settings "Browser" panel: whether Node
+        is present, whether the chrome-devtools daemon is running, the active
+        mode, and any user-facing hints. Safe to poll.
+      responses:
+        "200":
+          description: Current managed-browser status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrowserStatus"
+
+  /v1/browser/open:
+    post:
+      summary: Start (or reuse) the managed browser
+      operationId: openBrowser
+      tags: [browser]
+      description: |
+        Login helper: launches (or reuses) the managed, visible Chrome on the
+        isolated profile so the user can sign into sites. Returns the active mode
+        and the CLI prefix. 422 when the environment isn't ready (e.g. Node
+        missing); the message is shown as a hint.
+      responses:
+        "200":
+          description: Browser started or already running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrowserStartResult"
+
+  /v1/browser/stop:
+    post:
+      summary: Stop the managed browser
+      operationId: stopBrowser
+      tags: [browser]
+      description: |
+        Stops the chrome-devtools daemon (best-effort). The isolated profile
+        persists, so login state survives; only the window/daemon closes.
+      responses:
+        "200":
+          description: Browser stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrowserStopResult"
+
   # ── Parser plugin setup (user-authorized model downloads) ──────────
 
   /v1/system/parser/setup:
@@ -2332,6 +2385,30 @@ paths:
 
 components:
   schemas:
+    BrowserStatus:
+      type: object
+      required: [daemon_running, mode, node_ok, cli_prefix, hints]
+      properties:
+        daemon_running: {type: boolean}
+        mode: {type: string, enum: [managed, attach]}
+        node_ok: {type: boolean}
+        cli_prefix: {type: string}
+        pid: {type: integer, nullable: true}
+        hints:
+          type: array
+          items: {type: string}
+    BrowserStartResult:
+      type: object
+      required: [status, mode, cli_prefix]
+      properties:
+        status: {type: string}
+        mode: {type: string}
+        cli_prefix: {type: string}
+    BrowserStopResult:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string}
     MemoryTarget:
       type: string
       enum: [user, global, project]

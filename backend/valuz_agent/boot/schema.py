@@ -35,7 +35,7 @@ VERSION_TABLE = "alembic_version_host"
 # chain is incremental now: ``drop_stale_host_tables`` trusts any DB on a
 # *known* revision and lets ``alembic upgrade head`` migrate it forward
 # (data-preserving); only an unknown/foreign/corrupt stamp is dropped + rebuilt.
-BASELINE_REVISION = "0003"
+BASELINE_REVISION = "0004"
 
 
 def _known_host_revisions() -> set[str]:

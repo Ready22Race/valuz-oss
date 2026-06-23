@@ -93,24 +93,18 @@
     "oauth_credentials_schema": []
   },
   {
-    "slug": "chrome-devtools",
-    "display_name": {
-      "zh-CN": "Chrome DevTools",
-      "en-US": "Chrome DevTools"
-    },
+    "slug": "firecrawl",
+    "display_name": "Firecrawl",
     "description": {
-      "zh-CN": "通过 Chrome DevTools 协议调试、检查和自动化网页",
-      "en-US": "Debug, inspect and automate web pages via the Chrome DevTools Protocol"
+      "zh-CN": "网页抓取、爬取与搜索，提取结构化网页内容（免费匿名档，无需登录）",
+      "en-US": "Scrape, crawl and search the web; extract structured page content (free anonymous tier, no login)"
     },
+    "icon_url": "https://www.firecrawl.dev/favicon.ico",
     "categories": [
       "developer"
     ],
-    "transport": "stdio",
+    "url": "https://mcp.firecrawl.dev/v2/mcp",
     "auth_type": "none",
-    "command": "npx",
-    "args": [
-      "-y",
-      "chrome-devtools-mcp@latest"
-    ]
+    "transport": "http"
   }
 ]

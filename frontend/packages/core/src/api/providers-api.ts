@@ -2,8 +2,8 @@ import type {
   ProviderAuthType,
   ApiProtocol,
   ProviderDescriptor,
-  ProviderListItem,
-  ProviderDetail,
+  LLMChannel,
+  LLMChannelDetail,
   ConnectionTestResult,
   PingResponse,
   ProbeModelsResponse,
@@ -12,15 +12,21 @@ import type {
 import { registerDynamicModelLabels } from "@valuz/shared";
 import { createFetchJson } from "./fetch-json";
 
-/** Project every provider's ``model_labels`` map into the global
- * ``modelLabel`` resolver overlay so downstream UIs (Composer, AgentDetailView,
+/** Project every provider's per-model labels into the global ``modelLabel``
+ * resolver overlay so downstream UIs (Composer, AgentDetailView,
  * ProjectContextPanel, …) render the admin-set human label without having to
- * pass providers in by hand. Safe to call repeatedly — last-write-wins. */
+ * pass providers in by hand. ADR-011: labels now live on ``models[].label``.
+ * Safe to call repeatedly — last-write-wins. */
 function _hydrateModelLabels(
-  items: { model_labels?: Record<string, string> }[],
+  items: { models?: { id: string; label: string | null }[] }[],
 ): void {
   for (const p of items) {
-    if (p.model_labels) registerDynamicModelLabels(p.model_labels);
+    if (!p.models) continue;
+    const labels: Record<string, string> = {};
+    for (const m of p.models) {
+      if (m.label) labels[m.id] = m.label;
+    }
+    if (Object.keys(labels).length > 0) registerDynamicModelLabels(labels);
   }
 }
 
@@ -28,8 +34,8 @@ export type {
   ProviderAuthType,
   ApiProtocol,
   ProviderDescriptor,
-  ProviderListItem,
-  ProviderDetail,
+  LLMChannel,
+  LLMChannelDetail,
   ConnectionTestResult,
   PingResponse,
   ProbeModelsResponse,
@@ -84,23 +90,23 @@ export const providersApi = {
     return fetchJson("/v1/providers/config");
   },
 
-  async list(): Promise<{ providers: ProviderListItem[] }> {
-    const res = await fetchJson<{ providers: ProviderListItem[] }>(
+  async list(): Promise<{ providers: LLMChannel[] }> {
+    const res = await fetchJson<{ providers: LLMChannel[] }>(
       "/v1/providers",
     );
     _hydrateModelLabels(res.providers);
     return res;
   },
 
-  async get(providerId: string): Promise<ProviderDetail> {
-    const res = await fetchJson<ProviderDetail>(
+  async get(providerId: string): Promise<LLMChannelDetail> {
+    const res = await fetchJson<LLMChannelDetail>(
       `/v1/providers/${encodeURIComponent(providerId)}`,
     );
     _hydrateModelLabels([res]);
     return res;
   },
 
-  create(payload: ProviderCreateRequest): Promise<ProviderDetail> {
+  create(payload: ProviderCreateRequest): Promise<LLMChannelDetail> {
     return fetchJson("/v1/providers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -111,7 +117,7 @@ export const providersApi = {
   update(
     providerId: string,
     payload: ProviderUpdateRequest,
-  ): Promise<ProviderDetail> {
+  ): Promise<LLMChannelDetail> {
     return fetchJson(`/v1/providers/${encodeURIComponent(providerId)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -166,7 +172,7 @@ export const providersApi = {
    * keychain, so the frontend tells it the login succeeded; the backend flips
    * ``enabled`` + ``credential_source="cli_keychain"``.
    */
-  enable(providerId: string): Promise<ProviderDetail> {
+  enable(providerId: string): Promise<LLMChannelDetail> {
     return fetchJson(`/v1/providers/${encodeURIComponent(providerId)}/enable`, {
       method: "POST",
     });

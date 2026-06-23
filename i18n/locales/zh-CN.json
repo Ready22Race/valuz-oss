@@ -10,7 +10,8 @@
     "actionNew": "新建",
     "agentHint": "执行所用的模型 / 运行时跟随所选智能体。",
     "agentLabel": "智能体",
-    "targetLabel": "运行目标",
+    "targetLabelTask": "所属项目",
+    "targetChat": "快速对话",
     "timezoneLabel": "时区",
     "nextRunPreview": "下次运行",
     "agentPlaceholderEmpty": "没有可用智能体 — 请先添加",
@@ -236,6 +237,15 @@
     "fileTruncated": "\n… (文件过大，已截断)",
     "filesChanged": "{count} 个文件已更改",
     "fromKnowledgeBase": "从知识库选择",
+    "composerSkills": "技能",
+    "composerConnectors": "连接器",
+    "composerConnectorsLocked": "连接器在会话开始时已锁定,不可更改",
+    "composerPlusTooltip": "添加附件、技能和连接器",
+    "defaultBrain": "默认",
+    "composerSearchConnectors": "搜索连接器…",
+    "composerManageSkills": "管理技能",
+    "composerManageConnectors": "管理连接器",
+    "composerNoMatches": "无匹配项",
     "generatedFailed": "生成失败",
     "generatedFiles": "生成文件",
     "generatedFilesCount": "{count}个",
@@ -256,9 +266,9 @@
     "matchedPaths": "匹配了 {count} 个路径",
     "modelDefault": "默认",
     "modelLocked": "模型在会话创建时已锁定。需要换模型请新建对话。",
-    "selectAgent": "选择 Agent",
+    "selectAgent": "选择智能体",
     "noAgents": "暂无 Agent，去创建后再开始对话。",
-    "addAgent": "添加 Agent",
+    "addAgent": "添加智能体",
     "noAgentBanner": "你还没有可用的 Agent，先创建一个或完成引导配置",
     "noAgentBannerCta": "去配置",
     "noChannelBanner": "当前没有可用的模型通道，先连接一个",
@@ -269,6 +279,19 @@
     "taskCreated": "已创建任务",
     "openTask": "查看任务",
     "backToTask": "返回任务",
+    "workflow": {
+      "title": "工作流",
+      "agentsDone": "{done}/{total} 个智能体",
+      "statusRunning": "执行中",
+      "statusCompleted": "已完成",
+      "statusStopped": "已停止",
+      "statusFailed": "已失败",
+      "stateDone": "完成",
+      "stateRunning": "进行中",
+      "question": "问题",
+      "summary": "摘要",
+      "viewDetails": "查看完整结果"
+    },
     "brainOverride": "仅本次对话覆盖",
     "pillDrafted": "已起草任务",
     "pillPlanned": "已制定计划 v{version}（{count} 个子任务）",
@@ -607,6 +630,8 @@
     "statusConnecting": "连接中…",
     "statusConnected": "已连接",
     "statusError": "连接失败",
+    "statusNotConnected": "未连接",
+    "groupInstalled": "已添加",
     "groupOfficial": "官方",
     "groupBuiltin": "内置",
     "groupDirectory": "已连接",
@@ -887,6 +912,10 @@
     "createTitle": "创建新项目",
     "created": "项目「{name}」已创建",
     "deleteTask": "删除",
+    "deployAgents": "部署智能体",
+    "deployAgentsHint": "可多选，默认部署 Valuz 小助手；成员之后也能在项目里增减",
+    "deployPartialFail": "{count} 个智能体部署失败，可稍后在项目里重试",
+    "noAgentsToDeploy": "智能体库为空，可稍后在项目里添加成员",
     "dirAlreadyBound": "该目录已绑定到其他项目",
     "dirHint": "选择一个本地目录作为项目根目录，每个目录只能绑定一个项目。",
     "disable": "禁用",
@@ -967,6 +996,19 @@
     }
   },
   "settings": {
+    "browser": {
+      "statusLabel": "浏览器",
+      "connected": "已连接",
+      "disconnected": "未连接",
+      "modeManaged": "受管 Profile",
+      "modeAttach": "连接到我的 Chrome",
+      "open": "打开我的浏览器",
+      "stop": "停止",
+      "opened": "浏览器已就绪",
+      "loadFailed": "加载浏览器状态失败",
+      "openFailed": "打开浏览器失败",
+      "riskNote": "这是一个独立、隔离的浏览器实例;请只在其中登录必要的账户。页面内容应视为不可信。"
+    },
     "memory": {
       "enabledLabel": "启用记忆",
       "enabledDesc": "总开关:控制记忆注入与后台自动生成",
@@ -1407,6 +1449,10 @@
         "desc": "查看与控制记忆",
         "label": "记忆"
       },
+      "browser": {
+        "desc": "连接并管理受控浏览器",
+        "label": "浏览器"
+      },
       "shortcuts": {
         "desc": "全局命令与输入",
         "label": "快捷键"
@@ -1503,6 +1549,7 @@
     "tasks": "任务",
     "noTasks": "暂无任务",
     "sessions": "对话",
+    "chats": "对话",
     "taskStatus": {
       "active": "运行中",
       "paused": "已暂停",
@@ -1755,7 +1802,9 @@
     "downloadingDesc": "正在下载更新，请稍候...",
     "errorTitle": "更新失败",
     "errorUnknown": "未知错误",
+    "preparing": "正在准备安装…",
     "restartNow": "立即重启",
+    "restarting": "正在重启…",
     "updateAvailable": "发现新版本"
   },
   "ui": {
@@ -2175,6 +2224,8 @@
       "subtaskReviewReworkNoFeedback": "⚠ 打回重做",
       "leadWorking": "Lead 正在执行…"
     },
-    "viewSession": "查看会话 →"
+    "viewSession": "查看会话 →",
+    "needsConfirm": "需要你确认",
+    "goConfirm": "去确认"
   }
 }

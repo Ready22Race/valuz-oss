@@ -17,10 +17,12 @@ kernel sessions/messages via the kernel's async ``StorePort``.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.schemas import SessionData as KernelSession
+from app.schemas import TodoItem
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel on sys.path
 from valuz_agent.adapters import kernel_client
@@ -34,6 +36,8 @@ from valuz_agent.modules.tasks.datastore import (
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
+
+logger = logging.getLogger(__name__)
 
 SourceKind = Literal["assistant", "project_chat", "task"]
 
@@ -108,26 +112,25 @@ def _map_status(kernel_status: str) -> str:
     return {"terminated": "failed"}.get(kernel_status, kernel_status)
 
 
-def _pick_todo(todos: list[dict[str, Any]] | None) -> TodoSnapshot | None:
+def _pick_todo(todos: list[TodoItem] | None) -> TodoSnapshot | None:
     """The most relevant TODO step: the in-progress one, else the first
-    pending, else the last entry. ``None`` when there's no usable content."""
+    pending, else the last entry. ``None`` when there's no usable content.
+
+    ``todos`` are kernel ``TodoItem`` models (pydantic), not dicts — use
+    attribute access, not ``.get``.
+    """
     if not todos:
         return None
-    chosen: dict[str, Any] | None = None
-    for todo in todos:
-        if todo.get("status") == "in_progress":
-            chosen = todo
-            break
+    chosen = next((t for t in todos if t.status == "in_progress"), None)
     if chosen is None:
-        chosen = next((t for t in todos if t.get("status") == "pending"), todos[-1])
-    content = str(chosen.get("content") or "")
+        chosen = next((t for t in todos if t.status == "pending"), todos[-1])
+    content = str(chosen.content or "")
     if not content:
         return None
-    active_form = chosen.get("activeForm")
     return TodoSnapshot(
         content=content,
-        status=str(chosen.get("status") or "pending"),
-        activeForm=str(active_form) if active_form else None,
+        status=str(chosen.status or "pending"),
+        activeForm=str(chosen.activeForm) if chosen.activeForm else None,
     )
 
 
@@ -175,8 +178,10 @@ class RunsService:
                     continue
             elif effective not in _FINISHED_RUN_STATUS:
                 continue
-            out.append(
-                await self._build(
+            # Isolate per-session enrichment: a single malformed session must
+            # not blank the entire overview. Skip the offender, keep the rest.
+            try:
+                summary = await self._build(
                     sess,
                     task_session,
                     ws_map,
@@ -184,7 +189,13 @@ class RunsService:
                     effective,
                     project_id=proj_by_session.get(sess.id, ""),
                 )
-            )
+            except Exception:
+                logger.exception(
+                    "runs overview: skipping session %s — failed to build summary",
+                    sess.id,
+                )
+                continue
+            out.append(summary)
 
         out.sort(key=lambda r: r.updated_at, reverse=True)
         return out if status == "running" else out[:_FINISHED_LIMIT]

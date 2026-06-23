@@ -292,7 +292,10 @@ async def test_spawn_parser_exception_marks_failed(db, tmp_path, monkeypatch) ->
 
 async def test_spawn_result_with_error_metadata_marks_failed(db, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """S1-08: an unsupported/binary file (parser returns metadata['error'])
-    is classified failed, not written as a bogus parsed.md."""
+    is classified failed, not written as a bogus parsed.md — and the
+    parser-reported reason is persisted to ``error_message`` (parsers signal
+    failure by RETURNING metadata['error'], never raising, so without this the
+    real cause is lost and the row's error_message stays NULL)."""
     router = _SpyRouter(
         mode=ParserPluginMode.SYNC,
         markdown="*Unsupported file type: .bin*",
@@ -305,6 +308,34 @@ async def test_spawn_result_with_error_metadata_marks_failed(db, tmp_path, monke
     got = await _run_spawn(rid, tmp_path / "f.bin", dest, "f.bin")
     assert got.parse_status == "failed"
     assert got.parsed_path is None
+    assert got.error_message == "unsupported extension .bin"
+
+
+async def test_spawn_office_error_reason_is_persisted(db, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Regression for the Windows docx report: a frozen build missing magika's
+    model makes MarkItDown raise, which light_local catches and RETURNS as
+    metadata['error']="*…model not found…*". The reason must reach the
+    ``error_message`` column instead of being discarded (which previously left
+    parse_status=failed / parse_mode=light_local / error_message=NULL — the
+    exact, undiagnosable row the user pulled from SQLite)."""
+    router = _SpyRouter(
+        mode=ParserPluginMode.SYNC,
+        markdown="*Office parse error: model not found at .../magika/models/standard_v3_3*",
+        metadata={
+            "plugin_id": "light_local",
+            "engine": "markitdown",
+            "error": "model not found at .../magika/models/standard_v3_3/model.onnx",
+        },
+    )
+    _inject_router(monkeypatch, router)
+    dest = tmp_path / "att"
+    dest.mkdir()
+    rid = await _make_parsing_row(stored_path=str(tmp_path / "r.docx"), filename="r.docx")
+    got = await _run_spawn(rid, tmp_path / "r.docx", dest, "r.docx")
+    assert got.parse_status == "failed"
+    assert got.parse_mode == "light_local"
+    assert got.parsed_path is None
+    assert got.error_message and "model not found" in got.error_message
 
 
 async def test_spawn_image_parse_miss_marks_native_not_failed(db, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]

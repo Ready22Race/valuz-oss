@@ -1,30 +1,24 @@
-"""Connector service — CRUD, credential split, desired-state updates.
+"""Connector service — CRUD, credential storage, desired-state updates.
 
-Credential model (see docs/exec-plans/active/connector-credential-schema.md):
+Credential model:
 
 - The client sends ``headers`` / ``params`` as object-lists
   ``[{key, secret, value}]``. ``key`` is the *actual* header / query-param
   name; ``value`` is the final complete value (no prefix synthesis).
-- Per-entry ``secret`` decides the storage lane:
-    * custom connector → client ``secret`` is authoritative.
-    * catalog connector → the catalog ``fields`` are authoritative
-      (client ``secret`` is ignored — anti-tamper). Matching is by
-      ``entry.key == field.name`` within the same ``target``.
-  Secret → ``secret_store["connector/{id}/cred/{target}.{key}"]`` + a
-  ``cred_manifest_json`` entry ``{key,target,name,secret_ref}``.
-  Plaintext → ``headers_json`` / ``params_json``.
+- Both plaintext and secret entries live together in ``headers_json`` /
+  ``params_json`` as ``{name: {"value": v, "secret": bool}}`` — each entry
+  self-describes. ``secret`` decides only whether the value is withheld from
+  ``GET`` (it is stored plaintext either way). A catalog connector's declared
+  ``fields`` can FORCE ``secret`` true (anti-tamper); otherwise the client's
+  per-entry flag wins.
 - Update is *desired-state*: a provided list is the full set. Non-empty
-  value = set/rotate; empty/missing value = preserve original; an
-  existing item absent from the list = delete (plaintext removed; secret
-  ref deleted + manifest entry dropped). A ``None`` list = not provided
-  (that target untouched). No deletion guard — the client must resend the
-  full list, including blank-value secret entries.
+  value = set/rotate; blank value = preserve original; an existing entry
+  absent from the list = delete. A ``None`` list = not provided (that target
+  untouched).
 
-The object-list is the only credential path: ``api_key`` /
-``auth_header_name`` were retired in Phase B. Connectors migrated from the
-legacy bearer model keep working because the migration backfilled an
-equivalent ``cred_manifest_json`` entry; ``build_overrides`` reads only the
-manifest + plaintext json (never ``auth_type`` / ``auth_header_name``).
+The object-list is the only credential path: ``api_key`` / ``auth_header_name``
+were retired in Phase B. ``build_overrides`` injects every stored value (never
+branches on ``auth_type`` / ``auth_header_name``).
 """
 
 from __future__ import annotations
@@ -35,7 +29,6 @@ from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.models import AuthType, ConnectorRow, TransportType
@@ -96,27 +89,12 @@ class ConnectorView:
     updated_at: int
 
 
-def _resolve_field(
-    entry_key: str,
-    target: str,
-    catalog_fields: list[CatalogFieldSpec] | None,
-) -> tuple[bool, str, str]:
-    """Return ``(effective_secret, identity_key, name)`` for one entry.
+def _parse_cred_entries(raw: str | None) -> dict[str, dict[str, Any]]:
+    """Parse ``headers_json`` / ``params_json`` → ``{name: {"value", "secret"}}``.
 
-    Catalog connectors: a field matching ``name == entry_key`` and the
-    same ``target`` is authoritative over ``secret`` and contributes the
-    stable manifest identity (its logical ``key``). Anything else (custom
-    connector, or an extra entry not declared by the catalog) falls back
-    to the client flag, with identity == name == the actual header name.
+    Tolerant of a legacy ``{name: value}`` (plain string) entry — it is read as a
+    non-secret entry so a row written by the pre-unified model still injects.
     """
-    if catalog_fields:
-        for f in catalog_fields:
-            if f.target == target and f.name == entry_key:
-                return f.secret, f.key, f.name
-    return False, entry_key, entry_key
-
-
-def _parse_json_dict(raw: str | None) -> dict[str, str]:
     if not raw:
         return {}
     try:
@@ -125,121 +103,75 @@ def _parse_json_dict(raw: str | None) -> dict[str, str]:
         return {}
     if not isinstance(parsed, dict):
         return {}
-    return {str(k): str(v) for k, v in parsed.items()}
-
-
-def _parse_manifest(raw: str | None) -> list[dict[str, str]]:
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(parsed, list):
-        return []
-    out: list[dict[str, str]] = []
-    for m in parsed:
-        if (
-            isinstance(m, dict)
-            and {"key", "target", "name", "secret_ref"} <= set(m)
-            and m["target"] in ("header", "param")
-        ):
-            out.append({k: str(m[k]) for k in ("key", "target", "name", "secret_ref")})
+    out: dict[str, dict[str, Any]] = {}
+    for k, v in parsed.items():
+        if isinstance(v, dict) and isinstance(v.get("value"), str):
+            out[str(k)] = {"value": v["value"], "secret": bool(v.get("secret", False))}
+        elif isinstance(v, str):  # legacy plaintext shape
+            out[str(k)] = {"value": v, "secret": False}
     return out
+
+
+def _is_secret_entry(
+    e: CredEntry, target: str, catalog_fields: list[CatalogFieldSpec] | None
+) -> bool:
+    """Whether a client entry is a secret.
+
+    A catalog field can FORCE secret (anti-tamper — a client can't downgrade a
+    known-secret field); otherwise the client's per-entry flag decides.
+    """
+    if catalog_fields:
+        for f in catalog_fields:
+            if f.target == target and f.name == e.key and f.secret:
+                return True
+    return e.secret
 
 
 @dataclass
 class _Storage:
     headers_json: str | None
     params_json: str | None
-    manifest_json: str | None
 
 
 def _compute_storage(
     *,
-    connector_id: str,
-    secrets: FileSecretStore,
     headers: list[CredEntry] | None,
     params: list[CredEntry] | None,
     catalog_fields: list[CatalogFieldSpec] | None,
     existing_headers_json: str | None,
     existing_params_json: str | None,
-    existing_manifest_json: str | None,
 ) -> _Storage:
-    """Compute the three storage columns from desired-state inputs.
+    """Compute ``headers_json`` / ``params_json`` from desired-state inputs.
 
-    A ``None`` ``headers`` / ``params`` list means "not provided" — that
-    target's existing plaintext + manifest entries are carried verbatim
-    (no desired-state diff, no orphan deletion) so a PATCH that touches
-    only one of them leaves the other intact.
+    Each entry is stored self-describing: ``{name: {"value", "secret"}}``. A
+    ``None`` list means "not provided" → that target is carried verbatim. For a
+    provided list (the full desired set): a non-empty value sets/rotates; a
+    blank value preserves the existing entry; an existing entry absent from the
+    list is dropped (its value — secret or not — disappears with it).
     """
-    ex_plain_h = _parse_json_dict(existing_headers_json)
-    ex_plain_p = _parse_json_dict(existing_params_json)
-    ex_manifest = _parse_manifest(existing_manifest_json)
-    ex_manifest_by_id: dict[tuple[str, str], dict[str, str]] = {
-        (m["target"], m["key"]): m for m in ex_manifest
-    }
 
-    new_plain: dict[tuple[str, str], str] = {}
-    new_manifest_by_id: dict[tuple[str, str], dict[str, str]] = {}
-
-    def _carry_existing(target: str, plain: dict[str, str]) -> None:
-        for name, val in plain.items():
-            new_plain[(target, name)] = val
-        for (mt, mk), m in ex_manifest_by_id.items():
-            if mt == target:
-                new_manifest_by_id[(mt, mk)] = m
-
-    def _apply(target: str, entries: list[CredEntry], plain: dict[str, str]) -> None:
+    def _build(
+        entries: list[CredEntry] | None, existing_json: str | None, target: str
+    ) -> dict[str, dict[str, Any]]:
+        existing = _parse_cred_entries(existing_json)
+        if entries is None:
+            return existing  # not provided → carry verbatim
+        new: dict[str, dict[str, Any]] = {}
         for e in entries:
-            eff_secret, idk, name = _resolve_field(e.key, target, catalog_fields)
-            if not (catalog_fields and eff_secret):
-                # Custom connector / non-declared extra entry: client decides.
-                eff_secret = e.secret
-                idk = name = e.key
-            v = e.value
-            if v:
-                if eff_secret:
-                    ref = f"connector/{connector_id}/cred/{target}.{idk}"
-                    secrets.put(ref, v)
-                    new_manifest_by_id[(target, idk)] = {
-                        "key": idk,
-                        "target": target,
-                        "name": name,
-                        "secret_ref": ref,
-                    }
-                else:
-                    new_plain[(target, name)] = v
-            else:  # empty/missing value → preserve original
-                if (target, idk) in ex_manifest_by_id:
-                    new_manifest_by_id[(target, idk)] = ex_manifest_by_id[(target, idk)]
-                elif name in plain:
-                    new_plain[(target, name)] = plain[name]
+            if e.value:
+                new[e.key] = {
+                    "value": e.value,
+                    "secret": _is_secret_entry(e, target, catalog_fields),
+                }
+            elif e.key in existing:  # blank value → preserve original
+                new[e.key] = existing[e.key]
+        return new
 
-    if headers is None:
-        _carry_existing("header", ex_plain_h)
-    else:
-        _apply("header", headers, ex_plain_h)
-    if params is None:
-        _carry_existing("param", ex_plain_p)
-    else:
-        _apply("param", params, ex_plain_p)
-
-    # ── Orphan secret cleanup: existing manifest entry not carried over ──
-    for (mt, mk), m in ex_manifest_by_id.items():
-        if (mt, mk) not in new_manifest_by_id:
-            try:
-                secrets.delete(m["secret_ref"])
-            except Exception:
-                pass
-
-    h = {name: v for (t, name), v in new_plain.items() if t == "header"}
-    p = {name: v for (t, name), v in new_plain.items() if t == "param"}
-    manifest = list(new_manifest_by_id.values())
+    h = _build(headers, existing_headers_json, "header")
+    p = _build(params, existing_params_json, "param")
     return _Storage(
         headers_json=json.dumps(h) if h else None,
         params_json=json.dumps(p) if p else None,
-        manifest_json=json.dumps(manifest) if manifest else None,
     )
 
 
@@ -247,17 +179,14 @@ class ConnectorService:
     def __init__(
         self,
         datastore: ConnectorDatastore,
-        secrets: FileSecretStore,
         remote_catalog: object | None = None,
     ) -> None:
         self._ds = datastore
-        self._secrets = secrets
         self._remote_catalog = remote_catalog
 
     @classmethod
     def with_defaults(cls, db: Any) -> ConnectorService:
-        """Build a ConnectorService over an existing DB session with the
-        default (filesystem keychain) secret store.
+        """Build a ConnectorService over an existing DB session.
 
         Cohesion seam for callers outside this module: they may not import
         ``ConnectorDatastore`` directly (module-boundary rule), so this is the
@@ -265,12 +194,7 @@ class ConnectorService:
         ``AgentService`` resolving an agent's ``connector_types`` into MCP
         servers on session-creation paths that have no DI container.
         """
-        from valuz_agent.infra.config import settings
-
-        return cls(
-            datastore=ConnectorDatastore(db),
-            secrets=FileSecretStore(settings.secrets_dir),
-        )
+        return cls(datastore=ConnectorDatastore(db))
 
     async def list_connectors(
         self, user_id: str, *, org_id: str | None = None
@@ -300,7 +224,6 @@ class ConnectorService:
         from valuz_agent.adapters.mcp_resolver import resolve_mcp_servers
 
         return await resolve_mcp_servers(
-            secrets=self._secrets,
             enabled_slugs=slugs,
             connectors=self._ds,
         )
@@ -370,18 +293,14 @@ class ConnectorService:
         saved = await self._ds.create(user_id, row)
 
         storage = _compute_storage(
-            connector_id=saved.id,
-            secrets=self._secrets,
             headers=headers,
             params=params,
             catalog_fields=catalog_fields,
             existing_headers_json=None,
             existing_params_json=None,
-            existing_manifest_json=None,
         )
         saved.headers_json = storage.headers_json
         saved.params_json = storage.params_json
-        saved.cred_manifest_json = storage.manifest_json
         return _row_to_view(await self._ds.update(saved))
 
     async def update_connector(
@@ -425,18 +344,14 @@ class ConnectorService:
         creds_touched = headers is not None or params is not None
         if creds_touched:
             storage = _compute_storage(
-                connector_id=connector_id,
-                secrets=self._secrets,
                 headers=headers,
                 params=params,
                 catalog_fields=catalog_fields,
                 existing_headers_json=row.headers_json,
                 existing_params_json=row.params_json,
-                existing_manifest_json=row.cred_manifest_json,
             )
             row.headers_json = storage.headers_json
             row.params_json = storage.params_json
-            row.cred_manifest_json = storage.manifest_json
 
         if enabled is not None:
             row.enabled = enabled
@@ -457,19 +372,8 @@ class ConnectorService:
             return False
         if row.connector_type == "builtin":
             return False
-        # Drop every credential this connector owns: manifest-referenced
-        # secrets (the Slice-2 backfill already points migrated bearer
-        # connectors here too) and the OAuth token.
-        for m in _parse_manifest(row.cred_manifest_json):
-            try:
-                self._secrets.delete(m["secret_ref"])
-            except Exception:
-                pass
-        try:
-            self._secrets.delete(f"connector/{connector_id}/oauth_token")
-            self._secrets.delete(f"connector/{connector_id}/oauth_token_expires_at")
-        except Exception:
-            pass
+        # Secret material (creds + OAuth token) lives in this connector's own
+        # columns, so deleting the row drops every credential with it.
         return await self._ds.delete(user_id, connector_id)
 
     async def set_enabled(
@@ -503,6 +407,22 @@ class ConnectorService:
         return _row_to_view(await self._ds.update(row))
 
 
+def _effective_status(row: ConnectorRow) -> str:
+    """Display status for the API, normalising one misleading case.
+
+    An OAuth connector connects through the login flow (``pending_auth`` →
+    ``connected``), never through a background "connecting" probe. A row left at
+    ``connecting`` — created before authorization and never logged in — is
+    really "not connected, needs login", so report it as ``pending_auth``.
+    Otherwise the UI shows a perpetual 连接中 (and the nav attention dot, which
+    ignores ``connecting``, never fires). Non-OAuth connectors are untouched:
+    their ``connecting`` is a real in-flight probe.
+    """
+    if row.auth_type == "oauth" and row.status == "connecting":
+        return "pending_auth"
+    return row.status
+
+
 def _row_to_view(row: ConnectorRow) -> ConnectorView:
     args: list[str] = []
     if row.args_json:
@@ -513,16 +433,17 @@ def _row_to_view(row: ConnectorRow) -> ConnectorView:
         except json.JSONDecodeError:
             pass
 
-    plain_h = _parse_json_dict(row.headers_json)
-    plain_p = _parse_json_dict(row.params_json)
-    headers: list[CredView] = [CredView(key=k, secret=False, value=v) for k, v in plain_h.items()]
-    params: list[CredView] = [CredView(key=k, secret=False, value=v) for k, v in plain_p.items()]
-    for m in _parse_manifest(row.cred_manifest_json):
-        view_entry = CredView(key=m["name"], secret=True, value=None)
-        if m["target"] == "param":
-            params.append(view_entry)
-        else:
-            headers.append(view_entry)
+    h_entries = _parse_cred_entries(row.headers_json)
+    p_entries = _parse_cred_entries(row.params_json)
+    # Secret entries are withheld (value=None); plaintext entries are echoed.
+    headers: list[CredView] = [
+        CredView(key=k, secret=e["secret"], value=None if e["secret"] else e["value"])
+        for k, e in h_entries.items()
+    ]
+    params: list[CredView] = [
+        CredView(key=k, secret=e["secret"], value=None if e["secret"] else e["value"])
+        for k, e in p_entries.items()
+    ]
 
     return ConnectorView(
         id=row.id,
@@ -536,14 +457,15 @@ def _row_to_view(row: ConnectorRow) -> ConnectorView:
         transport=cast(TransportType, row.transport),
         url=row.url,
         auth_type=cast(AuthType, row.auth_type),
-        has_api_key=bool(_parse_manifest(row.cred_manifest_json)),
+        has_api_key=any(e["secret"] for e in h_entries.values())
+        or any(e["secret"] for e in p_entries.values()),
         command=row.command,
         args=args,
         working_dir=row.working_dir,
         headers=headers,
         params=params,
         enabled=row.enabled,
-        status=row.status,
+        status=_effective_status(row),
         tool_count=row.tool_count,
         last_tested_at=row.last_tested_at,
         error_message=row.error_message,
@@ -553,38 +475,28 @@ def _row_to_view(row: ConnectorRow) -> ConnectorView:
 
 
 def build_overrides(
-    row: ConnectorRow, secrets: FileSecretStore
+    row: ConnectorRow,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Single source of truth for connector header/param injection.
 
-    Returns ``(headers, params)``: plaintext ``headers_json`` /
-    ``params_json`` as the base, then every ``cred_manifest_json`` entry's
-    secret value placed by ``target``. **Does not** branch on ``auth_type``
-    and **does not** read ``auth_header_name`` — the manifest is
-    authoritative (Slice 2 backfilled legacy bearer connectors into it).
-    OAuth is layered on by the caller *after* this (it needs a live token
-    fetch), per the exec-plan.
+    Returns ``(headers, params)`` — every stored value from ``headers_json`` /
+    ``params_json``, secret or not. **Does not** branch on ``auth_type``. OAuth
+    is layered on by the caller *after* this (it needs a live token fetch).
 
-    Transitional compat (removed in Slice 7): an ``Authorization`` header
-    whose resolved secret value does not already start with ``Bearer ``
-    gets the ``Bearer `` prefix. New-model values are sent final by the
-    client (catalog ``prefix`` prefills ``Bearer `` in the form), so they
-    pass through untouched; legacy / Slice-2-migrated secrets store the raw
-    token and rely on this to stay byte-identical to the old injection.
+    Transitional compat: a *secret* ``Authorization`` whose stored value does
+    not already start with ``Bearer `` gets the ``Bearer `` prefix — legacy /
+    migrated tokens are stored raw and rely on this to inject byte-identically.
     """
-    headers: dict[str, str] = dict(_parse_json_dict(row.headers_json))
-    params: dict[str, str] = dict(_parse_json_dict(row.params_json))
-    for m in _parse_manifest(row.cred_manifest_json):
-        val = secrets.get(m["secret_ref"])
-        if val is None:
-            continue
-        if m["target"] == "param":
-            params[m["name"]] = val
-        else:
-            name = m["name"]
-            if name.lower() == "authorization" and not val.lower().startswith("bearer "):
-                val = f"Bearer {val}"
-            headers[name] = val
+    headers: dict[str, str] = {}
+    for name, e in _parse_cred_entries(row.headers_json).items():
+        val = e["value"]
+        is_bare_auth = name.lower() == "authorization" and not val.lower().startswith("bearer ")
+        if e["secret"] and is_bare_auth:
+            val = f"Bearer {val}"
+        headers[name] = val
+    params: dict[str, str] = {
+        name: e["value"] for name, e in _parse_cred_entries(row.params_json).items()
+    }
     return headers, params
 
 

@@ -5,26 +5,134 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.1] - 2026-06-17
+## [Unreleased]
 
-### Features
-
-- Settings: server-resolved model options with dumb-render model pickers. (#188 @homeant)
+## [0.2.3] - 2026-06-22
 
 ### Fixed
 
-- Tasks: mark API-errored sessions failed/recoverable instead of completed;
-  anchor the live task card to the lead session's task id. (#183, #184 @Ready22Race)
-- Onboarding: seed the Valuz helper on skip so the workspace is never empty. (#189 @zhourongyu)
-- Model picker: restore display names for subscription / built-in models. (#190 @homeant)
-- Updater toast is draggable and shows download progress instantly. (#191 @St0neWan9)
-- Desktop: align the splash window controls with the TopBar on Linux/Windows. (#187 @hanjixin)
-- Build: ship a full hicolor icon set for the Linux deb. (#186 @hanjixin)
+- macOS auto-update served the Intel (x86_64) build to Apple Silicon Macs. The
+  two separate mac build jobs (arm64 + x64) each published an arch-specific
+  `latest-mac.yml` to the release and the later one overwrote the other, so the
+  published manifest listed only one architecture's artifacts. electron-updater
+  on an Apple Silicon Mac then found no arm64 entry and fell back to the Intel
+  build — which ran under Rosetta (slow) and tripped macOS's "Intel app" warning.
+  A merge step now combines both arches into a single `latest-mac.yml`, so each
+  Mac auto-updates to its native build; Apple Silicon users on the Intel 0.2.2
+  update straight to the arm64 build here. (#240 @St0neWan9)
+
+- The packaged desktop client looked for updates at the wrong COS feed prefix:
+  `build-desktop.sh` stamped `app-update.yml` with
+  `files.valuz.cn/valuz-<edition>/` while CI publishes manifests and artifacts
+  under `files.valuz.cn/<edition>/`. Drop the `valuz-` prefix so the baked feed
+  URL matches where artifacts land. (#252 @St0neWan9)
 
 ### Docs & Chore
 
-- CI: update the macOS runner version in the release workflow (fixes the x86_64
-  build). (#185 @hanjixin)
+- Route the auto-updater's logs to a file via electron-log
+  (`~/Library/Logs/Valuz/main.log` on macOS, `%AppData%\Valuz\logs\main.log` on
+  Windows). They previously went to the console, which a packaged app discards,
+  so whether an update ran as a delta (vs a full download) and why was
+  untraceable. (#241 @St0neWan9)
+
+- Fix the Tencent COS publish pipeline for coscli v1.0.8: write the config to
+  `~/.cos.yaml` in its schema, drop the unsupported `--force` flag, upload each
+  artifact individually (its `--include` filter matched nothing at the release
+  root), and check the repo out in the manifest-merge job. (#246 #249 #251
+  @St0neWan9)
+
+## [0.2.2] - 2026-06-22
+
+### Features
+
+- Composer agent/model selector and input-box menus redesigned into one
+  consistent system: a unified dropdown with a "Default" entry that owns the
+  runtime / model / reasoning-effort submenu, a collapsed agent roster, nested
+  flyouts capped to a whole-row height at a consistent 12.5px, flyout direction
+  that flips away from an open right-hand context panel, and read-only freezing
+  in an existing conversation (the agent and its model menu freeze; a Default
+  run still changes only the effort). Project conversations show the bound model
+  on the agent button. (#223, #224, #225, #226 @St0neWan9)
+- Sidebar projects are a multi-open accordion that nests each project's chats /
+  tasks, with a separate "Chats" group for project-less conversations.
+  (#221, #222 @St0neWan9)
+- New-project dialog can deploy an initial team: a "deploy agents" multi-select
+  (Valuz Helper pre-selected and listed first) so a project starts with members
+  instead of empty. (#227 @St0neWan9)
+- Desktop update flow shows a "Restarting…" state on the restart button.
+  (#220 @St0neWan9)
+
+### Fixed
+
+- Agent packs: a skill whose slug was stored as a full path (Windows drive
+  letters / POSIX absolute paths) no longer breaks `.valuzpack` import with
+  "unsafe path in archive" — slugs are sanitized on export and legacy packs are
+  rescued on import, with the zip-slip guard intact. (#234 @St0neWan9)
+- Sidebar: the conversation list scrolls within the nav, so a long project /
+  chat list no longer overflows into and overlaps the pinned resource footer;
+  the show-more toggle aligns with its rows and the no-project chats list shows
+  more before collapsing. (#233 @St0neWan9)
+- Parser: bundle the magika model in the frozen build and record the parse-error
+  reason, fixing Windows `.docx` parsing. (#231 @Ready22Race)
+- Skills: bump deepagents to >=0.5.5 to fix a `SKILL.md` symlink-loop crash.
+  (#228 @Ready22Race)
+- Conversation: the AskUserQuestion card renders live — tool cards re-render when
+  their streaming input changes. (#229 @jiaoqsh)
+- Billing pre-check is channel-aware: `check_budget` takes the session's
+  effective `provider_id`, so an empty wallet no longer blocks turns on channels
+  it does not meter (a user's own direct API-key channel, org BYOK); the
+  duplicated route-level pre-check was folded into the session service.
+  (#232 @homeant)
+- Desktop: the Windows taskbar / app icon fills its canvas. (#236 @St0neWan9)
+- Desktop: the macOS update install hand-off reads as "preparing" instead of a
+  second download. (#219 @St0neWan9)
+- Build: pick the correct macOS Node archive and add a mirror fallback; retry a
+  transient CDN 404 when vendoring Node. (#217, #218 @St0neWan9)
+
+### Docs & Chore
+
+- Frontend tests no longer collect duplicates through `node_modules` symlinks.
+  (#230 @jiaoqsh)
+- Changelog: English-only labels in the 0.2.1 entry. (#216 @St0neWan9)
+
+## [0.2.1] - 2026-06-18
+
+### Features
+
+- Agent-driven managed browser: ships Node + `chrome-devtools-mcp` for the
+  packaged desktop and exposes a friendly `chrome-devtools` CLI, so an agent can
+  drive a real browser. (#206 @jiaoqsh)
+- Live dynamic-workflow progress surfaced in the conversation for Claude
+  multi-agent workflows. (#214 @jiaoqsh)
+- Connector connection status surfaced: a red attention dot on the Connectors
+  nav when a custom connector is configured but not connected, colored status
+  pills (Connected / Connecting / Connection failed / Not connected) on the list
+  rows, and the same dot + pills on the agent detail's Connectors tab.
+  (#204, #205, #213 @St0neWan9)
+- Default Firecrawl connector: swapped into the catalog (Chrome DevTools out);
+  the onboarding Valuz Helper ships bound to valuz-search / valuz-stock /
+  firecrawl and installs them into the Added group; the connectors list
+  collapses to Added / Available. (#213 @St0neWan9)
+- Discoverable OAuth is optional: a freemium MCP server (e.g. Firecrawl) that
+  advertises OAuth but serves anonymous calls stays auth-free instead of being
+  forced into a login. (#211 @homeant)
+- ADR-011 `LLMProvider` extension point with backend-owned model labels.
+  (#212 @homeant)
+
+### Fixed
+
+- Connectors: a stuck OAuth "connecting" now reads as Not connected; Firecrawl's
+  transient anonymous 401 is tolerated on the probe and the create-time auth
+  check; the onboarding deploy no longer crashes resolving an installed OAuth
+  connector; the tool probe is cached per client session instead of
+  reconnecting on every re-select. (#213 @St0neWan9)
+- Connectors: thread `user_id` through the connectors MCP tools for multi-user.
+  (#209 @St0neWan9)
+- Activity overview: isolate per-session failures so one bad run can't blank the
+  overview, and fix a TodoItem snapshot crash. (#207, #208 @jiaoqsh)
+- DeepAgents: apply the recursion limit to the main graph, not just subagents.
+  (#207, #210 @jiaoqsh)
+- Desktop: keep failed automatic update-checks silent. (#203 @St0neWan9)
 
 ## [0.2.0] - 2026-06-17
 
@@ -48,6 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Connectors: self-heal expired OAuth connectors (silent refresh), re-authorize
   only on hard failure. (#173 @homeant)
 - Backend errors can carry an i18n key, rendered on send. (#145 @homeant)
+- Settings: server-resolved model options with dumb-render model pickers. (#188 @homeant)
 
 ### Changed
 
@@ -89,13 +198,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `claude` runtime: treat `ResultMessage(is_error=True)` as an error, not
   end-turn. (#181 @jiaoqsh)
 - Build: enforce `+x` on the Linux AppImage; pin `executableName` so the Linux
-  deb ships a valid icon; pin the Linux arm64 runner to ubuntu-22.04-arm.
-  (#172, #180, #170 @hanjixin)
+  deb ships a valid icon; pin the Linux arm64 runner to ubuntu-22.04-arm; ship a
+  full hicolor icon set for the Linux deb. (#172, #180, #170, #186 @hanjixin)
+- Desktop: the installed app is named "Valuz" on all platforms (the macOS bundle
+  was "valuz-oss"). (#194 @St0neWan9)
+- Tasks: mark API-errored sessions failed/recoverable instead of completed;
+  anchor the live task card to the lead session's task id. (#183, #184 @Ready22Race)
+- Onboarding: seed the Valuz helper on skip so the workspace is never empty. (#189 @zhourongyu)
+- Model picker: restore display names for subscription / built-in models. (#190 @homeant)
+- Updater toast is draggable and shows download progress instantly. (#191 @St0neWan9)
+- Desktop: align the splash window controls with the TopBar on Linux/Windows. (#187 @hanjixin)
 
 ### Docs & Chore
 
 - Memory subsystem Tier-1 hygiene cleanup. (#137 @jiaoqsh)
 - Purge stale "0-migration / full-wipe" wording from the migration docs. (#152 @Ready22Race)
+- CI: update the macOS runner version in the release workflow (fixes the x86_64
+  build). (#185 @hanjixin)
 
 ## [0.1.7] - 2026-06-15
 

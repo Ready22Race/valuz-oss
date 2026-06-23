@@ -9,10 +9,7 @@ from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import NoAvailableProvider, ProviderNotFound
-from valuz_agent.modules.providers.service import (
-    ProviderService,
-    _resolve_descriptor_model_protocols,
-)
+from valuz_agent.modules.providers.service import ProviderService
 from valuz_agent.modules.settings.model_options import (
     CurrentDefault,
     ModelOptionsResponse,
@@ -346,14 +343,17 @@ async def patch_model_defaults(
                     await ds.clear_default(user_id)
                     await set_default_provider_id(db, None)
                     await set_default_model(db, None)
-                elif ext.llm_registry.get(payload.default_provider_id) is not None:
-                    # System/registry-backed provider (e.g. the commercial
-                    # "Valuz 系统模型" channel). It has no providers-table row to
-                    # carry ``is_default``, so pin it via preferences only — NOT
-                    # through ProviderService.set_default, whose ``_guard_not_system``
-                    # correctly blocks editing system providers but over-blocks
-                    # selecting one as the default. Clear any builtin row's
-                    # ``is_default`` so model_resolver doesn't see two defaults.
+                elif any(
+                    it.id == payload.default_provider_id for it in await ext.llm_provider.list()
+                ):
+                    # Contributed (catalog) channel (e.g. the commercial
+                    # "Valuz 系统模型" channel — ADR-011). It has no providers-table
+                    # row to carry ``is_default``, so pin it via preferences only —
+                    # NOT through ProviderService.set_default, whose
+                    # ``_guard_not_system`` correctly blocks editing system
+                    # providers but over-blocks selecting one as the default. Clear
+                    # any builtin row's ``is_default`` so model_resolver doesn't see
+                    # two defaults.
                     await ProviderDatastore(db).clear_default(user_id)
                     await set_default_provider_id(db, payload.default_provider_id)
                     if payload.default_model is not None:
@@ -430,30 +430,25 @@ async def get_model_options(
             event_bus=event_bus,
         )
         items = await svc.list_providers(user_id)
-        inputs: list[ProviderOptionInput] = []
-        for it in items:
-            # Per-model protocols only exist for overlay system descriptors; user
-            # rows fall back to the provider-level ``compatible_protocols``.
-            model_protocols: dict[str, list[str]] = {}
-            if it.source == "system":
-                descriptor = ext.llm_registry.get(it.id)
-                if descriptor is not None:
-                    model_protocols = await _resolve_descriptor_model_protocols(descriptor)
-            inputs.append(
-                ProviderOptionInput(
-                    id=it.id,
-                    name=it.name,
-                    provider_kind=it.provider_kind,
-                    source=it.source,
-                    auth_type=it.auth_type,
-                    enabled=it.enabled,
-                    unavailable_reason=it.unavailable_reason,
-                    compatible_protocols=it.compatible_protocols,
-                    model_options=it.model_options,
-                    model_labels=it.model_labels,
-                    model_protocols=model_protocols,
-                )
+        # ADR-011: each model carries its declared ``runtimes`` (or None →
+        # derive from compatible_protocols); the builder reads them straight off,
+        # no per-source special-casing.
+        inputs = [
+            ProviderOptionInput(
+                id=it.id,
+                name=it.name,
+                provider_kind=it.provider_kind,
+                source=it.source,
+                auth_type=it.auth_type,
+                enabled=it.enabled,
+                unavailable_reason=it.unavailable_reason,
+                compatible_protocols=it.compatible_protocols,
+                models=it.models,
+                group=it.group,
+                group_rank=it.group_rank,
             )
+            for it in items
+        ]
         current = CurrentDefault(
             runtime=defaults.default_runtime,
             provider_id=defaults.default_provider_id,

@@ -93,6 +93,68 @@ function resolveRgBinary(): string | null {
 }
 
 /**
+ * Locate the bundled Node binary that runs the browser engine.
+ *
+ * A GUI-launched app gets a stripped PATH that hides the user's Node, so the
+ * browser feature ships its own (downloaded + verified at build time by
+ * scripts/download-node.sh, staged at libexec/node). See
+ * docs/design/browser-feature.md §8.
+ *
+ * Returns null when not bundled (dev), so the backend falls back to npx.
+ */
+function resolveNodeBinary(): string | null {
+  const nodeName = process.platform === "win32" ? "node.exe" : "node";
+
+  const bundled = path.join(process.resourcesPath, "libexec", nodeName);
+  if (fs.existsSync(bundled)) return bundled;
+
+  const devNode = path.join(
+    __dirname,
+    "..",
+    "..",
+    "resources",
+    "libexec",
+    nodeName,
+  );
+  if (fs.existsSync(devNode)) return devNode;
+
+  return null;
+}
+
+/**
+ * Locate the bundled chrome-devtools-mcp CLI entry (committed JS tree staged at
+ * libexec/chrome-devtools-mcp/node_modules/...). Run as ``node <entry>``.
+ *
+ * Returns null when not bundled (dev), so the backend falls back to npx.
+ */
+function resolveCdtEntry(): string | null {
+  const rel = path.join(
+    "chrome-devtools-mcp",
+    "node_modules",
+    "chrome-devtools-mcp",
+    "build",
+    "src",
+    "bin",
+    "chrome-devtools.js",
+  );
+
+  const bundled = path.join(process.resourcesPath, "libexec", rel);
+  if (fs.existsSync(bundled)) return bundled;
+
+  const devEntry = path.join(
+    __dirname,
+    "..",
+    "..",
+    "resources",
+    "libexec",
+    rel,
+  );
+  if (fs.existsSync(devEntry)) return devEntry;
+
+  return null;
+}
+
+/**
  * Build spawn arguments for dev-mode fallback (uv run python -m valuz_agent).
  */
 function buildDevSpawnArgs(port: number): {
@@ -166,6 +228,17 @@ export const startSidecar = async (
   const rgBinary = resolveRgBinary();
   if (rgBinary) {
     env.VALUZ_RG_PATH = rgBinary;
+  }
+
+  // Point the backend's browser service at the vendored Node + chrome-devtools-mcp
+  // entry (modules/browser/service.py::_cli_argv). Both must be present; with
+  // them set the backend invokes ``node <entry>`` by absolute path, bypassing
+  // the GUI app's stripped PATH. Absent (dev), it falls back to npx.
+  const nodeBinary = resolveNodeBinary();
+  const cdtEntry = resolveCdtEntry();
+  if (nodeBinary && cdtEntry) {
+    env.VALUZ_NODE_PATH = nodeBinary;
+    env.VALUZ_CDT_ENTRY = cdtEntry;
   }
 
   if (serverBinary) {

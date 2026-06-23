@@ -11,6 +11,7 @@ import {
   Brain,
   Cpu,
   FileText,
+  Globe,
   Info,
   Palette,
   Server,
@@ -26,6 +27,7 @@ import { ConnectorsSection } from "./settings/ConnectorsSection";
 import { GeneralSection } from "./settings/GeneralSection";
 import { SandboxSection } from "./settings/SandboxSection";
 import { MemorySection } from "./settings/MemorySection";
+import { BrowserSection } from "./settings/BrowserSection";
 import { ParsingSection } from "./settings/ParsingSection";
 import { SystemLogsSettingsSection } from "./settings/SystemLogsSection";
 import { AboutSection } from "./settings/AboutSection";
@@ -46,6 +48,8 @@ const TAB_ICON_MAP: Record<string, ReactNode> = {
   info: <Info className="h-4 w-4" />,
   brain: <Brain className="h-4 w-4" />,
   server: <Server className="h-4 w-4" />,
+  globe: <Globe className="h-4 w-4" />,
+  browser: <Globe className="h-4 w-4" />,
 };
 
 const readStoredTab = (): string => {
@@ -70,6 +74,7 @@ const SECTION_MAP: Record<string, React.ComponentType> = {
   general: GeneralSection,
   sandbox: SandboxSection,
   memory: MemorySection,
+  browser: BrowserSection,
   parsing: ParsingSection,
   "system-logs": SystemLogsSettingsSection,
   about: AboutSection,

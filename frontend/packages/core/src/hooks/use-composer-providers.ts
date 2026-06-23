@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { ProviderDetail } from "../api/providers-api";
+import type { LLMChannelDetail } from "../api/providers-api";
 
 /** Runtime identifiers used by the runtime filter. Derived server-side
  *  from provider_kind / protocol — not carried on the API wire anymore. */
@@ -29,7 +29,7 @@ export type RuntimeProvider = "claude_agent" | "codex" | "deepagents";
  * nowhere). REP-107.
  */
 export const providerHasUsableCredentials = (
-  c: Pick<ProviderDetail, "credential_source" | "auth_type">,
+  c: Pick<LLMChannelDetail, "credential_source" | "auth_type">,
 ): boolean => {
   if (c.credential_source === "secret_ref") return true;
   if (c.credential_source === "account_connection") return true;
@@ -65,7 +65,7 @@ const ANTHROPIC_PROVIDER_KINDS = new Set(["anthropic", "claude-subscription"]);
  * openai-* / gemini families (their kinds are too noisy). */
 const canDriveAny = (
   c: Pick<
-    ProviderDetail,
+    LLMChannelDetail,
     "compatible_protocols" | "protocol" | "provider_kind"
   >,
   allowed: readonly string[],
@@ -94,7 +94,7 @@ const canDriveAny = (
 
 const canDriveAnthropic = (
   c: Pick<
-    ProviderDetail,
+    LLMChannelDetail,
     "compatible_protocols" | "protocol" | "provider_kind"
   >,
 ): boolean => canDriveAny(c, ["anthropic"]);
@@ -112,7 +112,7 @@ const DEEPAGENTS_PROTOCOLS = [
 const CODEX_PROTOCOLS = ["openai-response"] as const;
 
 /**
- * Transforms enabled ProviderDetail[] into flat ModelSelectorItem[]
+ * Transforms enabled LLMChannelDetail[] into flat ModelSelectorItem[]
  * for the Composer model selector dropdown.
  *
  * REP-107 + follow-up: ``runtimeFilter`` controls which providers are
@@ -137,7 +137,7 @@ const CODEX_PROTOCOLS = ["openai-response"] as const;
  * in Settings → Providers.
  */
 export const useComposerProviders = (
-  providers: ProviderDetail[],
+  providers: LLMChannelDetail[],
   runtimeFilter?: RuntimeProvider,
 ) =>
   useMemo(
@@ -176,13 +176,14 @@ export const useComposerProviders = (
           return canDriveAny(c, CODEX_PROTOCOLS);
         })
         .flatMap((c) => {
-          const models =
-            c.model_options.length > 0
-              ? c.model_options
+          // ADR-011: models are nested rows now — flatten to their ids.
+          const modelIds =
+            c.models.length > 0
+              ? c.models.map((m) => m.id)
               : c.default_model
                 ? [c.default_model]
                 : [];
-          return models.map((m) => ({
+          return modelIds.map((m) => ({
             providerId: c.id,
             providerName: c.name,
             modelId: m,

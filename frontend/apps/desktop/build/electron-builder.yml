@@ -4,15 +4,17 @@ protocols:
     - valuz-oss
 appId: io.valuz.oss.desktop
 productName: Valuz
-# Without this, electron-builder derives the executable name from
-# package.json's `name: "@valuz/desktop"` → `@valuzdesktop`, which is then
-# used as the .desktop filename, the `Icon=` field, and the hicolor PNG
-# filename. The leading `@` violates the freedesktop icon-name regex
-# ([A-Za-z0-9._-]+), so GNOME/KDE/gtk-icon-cache silently refuse to load
-# it — the app installs with no launcher icon. Pinning `valuz` makes every
-# path land as `/usr/share/applications/valuz.desktop`,
-# `Icon=valuz`, `/usr/share/icons/hicolor/NxN/apps/valuz.png`.
-executableName: valuz-oss
+# Drives the executable basename on every platform: the macOS .app bundle
+# name (so Finder/Dock show `Valuz`, not the bundle filename), the Windows
+# `.exe`, and on Linux the `.desktop` filename, `Icon=` field, and hicolor
+# PNG filename. Pinned to `Valuz` so all three platforms present "Valuz".
+# (Without it, electron-builder would derive the name from package.json's
+# `name: "@valuz/desktop"` → `@valuzdesktop`, whose leading `@` violates the
+# freedesktop icon-name regex [A-Za-z0-9._-]+ and leaves Linux with no
+# launcher icon.) `Valuz` is a valid freedesktop name, so Linux lands as
+# `/usr/share/applications/Valuz.desktop`, `Icon=Valuz`,
+# `/usr/share/icons/hicolor/NxN/apps/Valuz.png`.
+executableName: Valuz
 # Distribution-package artifact name template. Edition comes from
 # VALUZ_EDITION (build-desktop.sh:94); platform+arch from VALUZ_DIST_TAG
 # (build-desktop.sh:137, no edition — keeps the tag arch-only).
@@ -27,6 +29,15 @@ files:
   - dist/**/*
   - dist-electron/**/*
   - package.json
+  # Runtime-loaded icons read via `path.join(app.getAppPath(), "build", …)`
+  # — the macOS menu-bar tray (iconTemplate), the dock setIcon + window icon
+  # (iconRounded), and the Windows tray (icon.ico). Without these in the asar
+  # the paths resolve in dev (project dir) but not in the packaged app, so the
+  # tray showed up blank. nativeImage reads them straight from app.asar.
+  - build/iconTemplate.png
+  - build/iconTemplate@2x.png
+  - build/iconRounded.png
+  - build/icon.ico
 extraResources:
   # User-facing binaries (the valuz Go CLI). On PATH after install.
   - from: resources/bin/
@@ -45,6 +56,16 @@ extraResources:
   - from: resources/THIRD-PARTY-NOTICES.txt
     to: THIRD-PARTY-NOTICES.txt
 asar: true
+# Keep the runtime-loaded icons as real files on disk (app.asar.unpacked/)
+# so nativeImage.createFromPath reads them reliably — the path stays
+# `app.getAppPath()/build/…`, which Electron transparently redirects to the
+# unpacked copy. Belt-and-suspenders for the tray icon (was blank when only
+# inside the asar).
+asarUnpack:
+  - build/iconTemplate.png
+  - build/iconTemplate@2x.png
+  - build/iconRounded.png
+  - build/icon.ico
 mac:
   target:
     - dmg
@@ -90,20 +111,20 @@ win:
   icon: build/icon.ico
 afterSign: build/afterSign.cjs
 # Auto-update channel. electron-builder writes app-update.yml into the
-# packaged app from this block and emits latest-mac.yml / latest.yml next
-# to each artifact. electron-updater (src/main/updater.ts) reads
-# app-update.yml at runtime unless VALUZ_UPDATER_URL overrides it.
+# packaged app from this block and emits latest-mac.yml / latest.yml /
+# latest-linux*.yml next to each artifact. electron-updater
+# (src/main/updater.ts) reads app-update.yml at runtime unless
+# VALUZ_UPDATER_URL overrides it.
 #
-# Per-edition isolation: each edition publishes to its own repo
-# (e.g. owner=valuz-io, repo=valuz-${edition}) so an OSS user never
-# discovers the enterprise build. Drive the values from env so the build
-# script can stamp them per edition without editing this file.
+# Live feed is hosted on Tencent COS + Tencent CDN (files.valuz.cn). The
+# generic provider only stamps app-update.yml with the feed URL — it does
+# NOT perform HTTP uploads (unlike the GitHub provider). CI uploads the
+# artifacts and manifests via scripts/upload-to-cos.sh (wrapping coscli).
+# See docs/superpowers/specs/2026-06-22-tencent-cos-auto-update-design.md.
 #
-# Releasing: `GH_TOKEN=… VALUZ_GH_OWNER=… VALUZ_GH_REPO=… electron-builder
-# --publish always`. Without --publish, the .yml manifest is generated
-# locally but nothing is uploaded.
+# VALUZ_UPDATER_URL defaults to https://files.valuz.cn/${EDITION}/ (set in
+# scripts/build-desktop.sh) — the same ${EDITION}/ prefix upload-to-cos.sh
+# writes to. Override locally for testing.
 publish:
-  provider: github
-  owner: valuz-ai
-  repo: valuz-oss
-  releaseType: release
+  provider: generic
+  url: "${env.VALUZ_UPDATER_URL}"

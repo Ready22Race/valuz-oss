@@ -27,7 +27,17 @@ export function useStableTurns(
       if (oldB.kind === "tool" && nextB.kind === "tool") {
         if (
           oldB.tool.status !== nextB.tool.status ||
-          oldB.tool.output !== nextB.tool.output
+          oldB.tool.output !== nextB.tool.output ||
+          // ``input`` grows while a tool's arguments stream in
+          // (``tool.call.input_delta``) and is then replaced by the canonical
+          // full input on ``tool.call.started``. Both transitions keep
+          // ``status``/``output`` unchanged, so without comparing ``input``
+          // the memoized turn stays frozen on the first partial chunk — the
+          // tool card (e.g. AskUserQuestion) never updates from its streaming
+          // preview to the parseable final input until a reload rebuilds from
+          // scratch.
+          oldB.tool.input !== nextB.tool.input ||
+          oldB.tool.subtitle !== nextB.tool.subtitle
         ) {
           return next;
         }

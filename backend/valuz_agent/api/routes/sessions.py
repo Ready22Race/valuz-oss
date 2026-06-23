@@ -20,10 +20,10 @@ from valuz_agent.modules.sessions.dto import (
     SessionListItem,
     SessionRunResponse,
 )
+from valuz_agent.modules.sessions.errors import BudgetExceeded
 from valuz_agent.modules.sessions.models import SessionAttachmentRow
 from valuz_agent.modules.sessions.schemas import SessionEffortRequest, SessionModelSelection
 from valuz_agent.modules.sessions.service import SessionService
-from valuz_agent.ports.extensions import ext
 
 logger = logging.getLogger(__name__)
 
@@ -291,25 +291,26 @@ async def send_message(
     """Start agent execution in background. Returns immediately with running status."""
     from valuz_agent.infra.auth_context import get_current_user_id
 
-    user_id = get_current_user_id()
-    if user_id is None:
+    if get_current_user_id() is None:
         raise HTTPException(status_code=401, detail="Unauthenticated")
-    budget = await ext.billing.check_budget(user_id, estimated_cost=0.0)
-    if not budget.allowed:
-        # Structured detail: an overlay (e.g. commercial billing) may attach an
-        # i18n ``key`` (+ ``params``) for the client to render; ``message`` is
-        # the no-translation fallback. OSS/Noop only ever sets ``message``.
+    try:
+        return await svc.send_message(
+            session_id, body.prompt, provider_id=body.provider_id, model_id=body.model_id
+        )
+    except BudgetExceeded as exc:
+        # The session service runs a channel-aware wallet pre-check before the
+        # turn. Surface its rejection as a 402 carrying the overlay's i18n
+        # ``key`` (+ ``params``) for the client to render; ``message`` is the
+        # no-translation fallback. (The global ValuzError handler returns 400
+        # and drops ``message_key``, so map it explicitly here.)
         raise HTTPException(
             status_code=402,
             detail={
-                "message_key": budget.message_key,
-                "message_params": budget.message_params,
-                "message": budget.reason or "Budget exceeded",
+                "message_key": exc.message_key,
+                "message_params": exc.message_params,
+                "message": exc.message or "Budget exceeded",
             },
-        )
-    return await svc.send_message(
-        session_id, body.prompt, provider_id=body.provider_id, model_id=body.model_id
-    )
+        ) from exc
 
 
 @router.post("/{session_id}/messages/sync")
@@ -666,34 +667,44 @@ async def upload_attachment(
 
 def _write_parse_result(
     result: Any, dest_dir: Path, base_name: str
-) -> tuple[str | None, str, str | None]:
+) -> tuple[str | None, str, str | None, str | None]:
     """Write a ``ParseResult``'s markdown into ``dest_dir`` as
     ``{base_name}.parsed.md`` and classify the outcome.
 
-    Returns ``(parsed_path, parse_status, engine)``:
-    - ``("…/x.parsed.md", "ready", <plugin/engine>)`` when the parser produced
-      real markdown and reported no error.
-    - ``(None, "failed", <plugin/engine>)`` when there is no markdown OR the
-      result carries ``metadata["error"]`` (unsupported file, parser failure,
-      or a fallback-disabled cloud failure). Callers fall back to the raw
-      ``stored_path`` so the agent at least sees the original file.
+    Returns ``(parsed_path, parse_status, engine, error_message)``:
+    - ``("…/x.parsed.md", "ready", <plugin/engine>, None)`` when the parser
+      produced real markdown and reported no error.
+    - ``(None, "failed", <plugin/engine>, <reason>)`` when there is no markdown
+      OR the result carries ``metadata["error"]`` (unsupported file, parser
+      failure, or a fallback-disabled cloud failure). Callers fall back to the
+      raw ``stored_path`` so the agent at least sees the original file.
 
     ``engine`` records WHICH parser ran (``metadata["plugin_id"]`` — e.g.
     ``mineru`` / ``paddleocr`` / ``light_local`` — falling back to the
     per-format ``engine`` label) for provenance on the attachment row.
+
+    ``error_message`` carries the parser-reported reason on the failure path.
+    Parsers signal failure by RETURNING a ``ParseResult`` with
+    ``metadata["error"]`` (they don't raise — see ``ParserRouter`` /
+    ``LightLocalParser``), so without surfacing it here the real cause — e.g.
+    ``"model not found at …/magika/…"`` from a frozen build missing magika's
+    model data — was discarded with the markdown, leaving the attachment row's
+    ``error_message`` NULL and the failure undiagnosable from the DB.
     """
     meta = dict(getattr(result, "metadata", None) or {})
     engine = meta.get("plugin_id") or meta.get("engine")
     markdown = getattr(result, "markdown", "") or ""
-    if not markdown or meta.get("error"):
-        return None, "failed", engine
+    error = meta.get("error")
+    if not markdown or error:
+        reason = str(error) if error else "parser produced no content"
+        return None, "failed", engine, reason[:2000]
     target = dest_dir / f"{base_name}.parsed.md"
     i = 1
     while target.exists():
         target = dest_dir / f"{base_name}-{i}.parsed.md"
         i += 1
     target.write_text(markdown, encoding="utf-8")
-    return str(target), "ready", engine
+    return str(target), "ready", engine, None
 
 
 async def _build_attachment_parser(db: Any) -> Any:
@@ -786,7 +797,9 @@ def _spawn_attachment_parse(
                 # Bound concurrent CPU-bound local parses (see semaphore note).
                 async with _LOCAL_PARSE_SEMAPHORE:
                     result = await asyncio.to_thread(router.parse_sync, source_path)
-            parsed_path, parse_status, engine = _write_parse_result(result, dest_dir, base_name)
+            parsed_path, parse_status, engine, error_message = _write_parse_result(
+                result, dest_dir, base_name
+            )
         except Exception as exc:  # noqa: BLE001 — contain; never crash the loop
             logger.exception("Background parse failed for attachment %s", attachment_id)
             error_message = str(exc)

@@ -141,6 +141,10 @@ def _translate_kernel_event(
         per-model ``model_usage``)
       - ``todo_update``       → ``session.todos.update``  (V5+messages: lets
         the frontend hydrate a Todos panel from live agent planning)
+      - ``workflow_progress`` → ``session.workflow_progress``  (live-only:
+        Claude ``Workflow`` tool run progress — phases + per-agent state +
+        status, keyed by the launch tool_use_id so the frontend attaches a
+        progress card to the matching tool call)
       - ``session_idle`` / ``session_update`` → surfaced for status display
       - Every translated payload also carries ``message_id`` when the
         kernel event was stamped with one (most events during a turn).
@@ -427,6 +431,26 @@ def _translate_kernel_event(
         return "session.plan_update", _with_message_id(
             {
                 "steps": _stringify(data.get("steps") or data.get("plan") or []),
+            },
+            data,
+        )
+
+    if kernel_type == "workflow_progress":
+        # Claude dynamic-workflow (``Workflow`` tool) live progress. The
+        # kernel streams a snapshot of the run's phases / per-agent progress /
+        # status while the background runtime executes. ``id`` is the
+        # ``Workflow`` tool_use_id (so the frontend can attach the progress
+        # card to the matching tool call); ``state`` is the nested progress
+        # dict (runId / workflowName / status / agentCount / agentsDone /
+        # workflowProgress[] / optional script). JSON-stringified for the
+        # legacy ``Record<string, string>`` SSE contract; the frontend re-
+        # parses. Live-only (non-persisted in the kernel) — it arrives only
+        # over the live subscription, never on history replay.
+        return "session.workflow_progress", _with_message_id(
+            {
+                "id": _stringify(data.get("id") or ""),
+                "run_id": _stringify(data.get("run_id") or ""),
+                "state": _stringify(data.get("state") or {}),
             },
             data,
         )

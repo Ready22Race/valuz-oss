@@ -29,7 +29,6 @@ from app.schemas import (
 
 # Side-effect import — surfaces ``src.core...`` on sys.path.
 import valuz_agent.boot.kernel  # noqa: F401
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.service import build_overrides, merge_params_into_url
 
@@ -49,8 +48,10 @@ def _token_refresh_lock(connector_id: str) -> asyncio.Lock:
     return lock
 
 
-async def _ensure_fresh_oauth_token(row: Any, secrets: FileSecretStore, token_json: str) -> str:
-    """Proactively refresh an OAuth connector's token if the expiry sidecar shows
+async def _ensure_fresh_oauth_token(
+    row: Any, connectors: ConnectorDatastore, token_json: str
+) -> str:
+    """Proactively refresh an OAuth connector's token if its stored expiry shows
     it has lapsed.
 
     The resolver builds the server config ahead of time, so it can't react to a
@@ -63,40 +64,41 @@ async def _ensure_fresh_oauth_token(row: Any, secrets: FileSecretStore, token_js
     from valuz_agent.infra.time_utils import now_ms
     from valuz_agent.integrations.connector_oauth import (
         oauth_token_is_expired,
-        oauth_token_ref,
         try_refresh_connector_token,
     )
 
-    if not oauth_token_is_expired(row.id, secrets, now_ms()):
+    if not oauth_token_is_expired(row, now_ms()):
         return token_json
+    redirect_uri = f"{_settings.backend_base_url}/v1/connectors/oauth/callback"
     async with _token_refresh_lock(row.id):
-        # Re-check under the lock: a sibling build may have refreshed already.
-        if not oauth_token_is_expired(row.id, secrets, now_ms()):
-            return secrets.get(oauth_token_ref(row.id)) or token_json
-        await try_refresh_connector_token(
-            connector_id=row.id,
-            server_url=row.url or "",
-            oauth_metadata_json=row.oauth_metadata_json,
-            oauth_client_info_json=row.oauth_client_info_json,
-            redirect_uri=f"{_settings.backend_base_url}/v1/connectors/oauth/callback",
-            secrets=secrets,
-            now_ms=now_ms(),
+        # Re-read under the lock: a sibling build may have refreshed + committed.
+        fresh = await connectors.get_by_id(row.user_id, row.id)
+        target = fresh if fresh is not None else row
+        if not oauth_token_is_expired(target, now_ms()):
+            return target.oauth_token_json or token_json
+        new_access = await try_refresh_connector_token(
+            target, redirect_uri=redirect_uri, now_ms=now_ms()
         )
-        return secrets.get(oauth_token_ref(row.id)) or token_json
+        if new_access is not None:
+            await connectors.update(target)
+        return target.oauth_token_json or token_json
 
 
 async def resolve_mcp_servers(
     *,
-    secrets: FileSecretStore,
     enabled_slugs: list[str],
     connectors: ConnectorDatastore | None = None,
 ) -> list[McpServerConfig]:
-    """Translate enabled MCP-provider slugs into kernel ``McpServerConfig`` rows."""
+    """Translate enabled MCP-provider slugs into kernel ``McpServerConfig`` rows.
+
+    Connector secrets / OAuth tokens are read off each connector row, so no
+    separate secret store is threaded in.
+    """
     out: list[McpServerConfig] = []
     seen_names: set[str] = set()
 
     for slug in enabled_slugs:
-        cfgs = await _resolve_connector_slug(slug, connectors, secrets)
+        cfgs = await _resolve_connector_slug(slug, connectors)
         if cfgs is None:
             logger.info("mcp resolver: slug %s unknown or has no credentials — skipping", slug)
             continue
@@ -112,7 +114,6 @@ async def resolve_mcp_servers(
 async def _resolve_connector_slug(
     slug: str,
     connectors: ConnectorDatastore | None,
-    secrets: FileSecretStore,
 ) -> list[McpServerConfig] | None:
     if connectors is None:
         return None
@@ -123,24 +124,26 @@ async def _resolve_connector_slug(
         return None
 
     if row.transport == "stdio":
-        return _build_stdio_config(row, secrets)
+        return _build_stdio_config(row)
 
-    return await _build_http_config(row, secrets)
+    return await _build_http_config(row, connectors)
 
 
-async def _build_http_config(row, secrets: FileSecretStore) -> list[McpServerConfig] | None:
+async def _build_http_config(
+    row, connectors: ConnectorDatastore
+) -> list[McpServerConfig] | None:
     # Single injection truth shared with the probe (Acceptance #8 — probe
     # and runtime must produce byte-identical headers/params).
-    headers, params = build_overrides(row, secrets)
+    headers, params = build_overrides(row)
 
     if row.auth_type == "oauth":
         # OAuth layers on AFTER build_overrides — it needs a live token.
-        token_json = secrets.get(f"connector/{row.id}/oauth_token")
+        token_json = row.oauth_token_json
         if not token_json:
             logger.info("mcp resolver: connector %s oauth token not found", row.slug)
             return None
         # Self-heal an expired token before the runtime ever makes a call.
-        token_json = await _ensure_fresh_oauth_token(row, secrets, token_json)
+        token_json = await _ensure_fresh_oauth_token(row, connectors, token_json)
         try:
             token_data = json.loads(token_json)
             access_token = token_data.get("access_token", "")
@@ -213,7 +216,7 @@ def expand_mcp_dir(value: str) -> str:
     return value.replace("{mcp_dir}", _bundled_mcp_servers_dir())
 
 
-def _build_stdio_config(row, secrets: FileSecretStore) -> list[McpServerConfig] | None:
+def _build_stdio_config(row) -> list[McpServerConfig] | None:
     import shlex
 
     if not row.command:
@@ -246,15 +249,8 @@ def _build_stdio_config(row, secrets: FileSecretStore) -> list[McpServerConfig] 
                 env = {str(k): str(v) for k, v in parsed_env.items()}
         except json.JSONDecodeError:
             pass
-    # Inject secret credentials (e.g. WIND_API_KEY) declared in the
-    # connector's cred manifest with ``target == "env"``. Values come from
-    # the secret store, never persisted in the connector row.
-    for m in _parse_manifest(row.cred_manifest_json):
-        if m.get("target") != "env":
-            continue
-        val = secrets.get(m["secret_ref"])
-        if val is not None:
-            env[m["name"]] = val
+    # Paid stdio servers (wind/ifind) read their key from the harness process
+    # env (inherited by the child), not from connector credentials.
     return [
         McpStdioServerConfig(
             name=row.slug,
@@ -263,16 +259,6 @@ def _build_stdio_config(row, secrets: FileSecretStore) -> list[McpServerConfig] 
             env=env,
         )
     ]
-
-
-def _parse_manifest(raw: str | None) -> list[dict[str, Any]]:
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    return [m for m in parsed if isinstance(m, dict)] if isinstance(parsed, list) else []
 
 
 __all__ = ["resolve_mcp_servers"]

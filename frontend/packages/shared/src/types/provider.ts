@@ -43,7 +43,20 @@ export interface ProviderDescriptor {
   default_protocol: string;
 }
 
-export interface ProviderListItem {
+/**
+ * One selectable model under a channel (ADR-011). Self-contained, one row.
+ */
+export interface LLMModel {
+  id: string;
+  /** Display name; ``null`` → fall back to ``modelLabel(id)``. */
+  label: string | null;
+  /** Runtimes this model can drive (``claude_agent`` / ``codex`` /
+   *  ``deepagents``), declared by the producing side. ``null`` → not declared:
+   *  derived from the channel's ``compatible_protocols`` + ``provider_kind``. */
+  runtimes: string[] | null;
+}
+
+export interface LLMChannel {
   id: string;
   name: string;
   provider_kind: string;
@@ -72,16 +85,16 @@ export interface ProviderListItem {
    *  list. Drives the runtime-compatibility filter on the provider
    *  picker. */
   compatible_protocols: ApiProtocol[];
-  /** Available model ids — surfaced on the list response so the
-   *  Default-config picker can flatten (provider × model) entries
-   *  without an N+1 fetch. */
-  model_options: string[];
-  /** Optional ``{model_id: human_label}`` map for the picker UI. The
-   *  wire-level model id (the value in ``model_options``) is always what
-   *  the runtime sends as ``model``; ``model_labels`` only changes what
-   *  the user reads. Missing entries fall back to the id; ``{}`` for
-   *  providers without admin-set display names. */
-  model_labels: Record<string, string>;
+  /** Opaque grouping key (the frontend localizes it into a section
+   *  header) — e.g. ``subscription`` / ``system`` / ``org`` / ``api_key``.
+   *  Set by the producing side; OSS passes it through. */
+  group: string;
+  /** Group sort order, smaller = earlier. */
+  group_rank: number;
+  /** Per-model rows (ADR-011). Replaces the flat ``model_options`` /
+   *  ``model_labels``: each model carries its own ``id`` / ``label`` /
+   *  ``runtimes``. The picker flattens (provider × model) from here. */
+  models: LLMModel[];
   /** Human-readable reason the provider is currently disabled. Only
    *  populated for ``source="system"`` (overlay-contributed) when
    *  ``enabled=false`` — e.g. "未登录 Valuz 账户". Other providers
@@ -89,7 +102,7 @@ export interface ProviderListItem {
   unavailable_reason: string | null;
 }
 
-export interface ProviderDetail extends ProviderListItem {
+export interface LLMChannelDetail extends LLMChannel {
   base_url: string | null;
   supports_custom_base_url: boolean;
   supports_connection_test: boolean;

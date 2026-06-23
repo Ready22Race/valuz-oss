@@ -255,10 +255,7 @@ async def get_automation_service() -> AsyncGenerator[AutomationService, None]:
         )
         # AgentService needs a ConnectorService so library-agent instantiation
         # can resolve MCP servers from the agent's connector_types.
-        connector_svc = ConnectorService(
-            datastore=ConnectorDatastore(db),
-            secrets=_secret_store(),
-        )
+        connector_svc = ConnectorService(datastore=ConnectorDatastore(db))
         agent_svc = AgentService(db=db, connector_service=connector_svc)
         yield AutomationService(
             db=db,

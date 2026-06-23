@@ -19,18 +19,18 @@ Usage
 4. ``McpOauthHelper(...).get_oauth_token(code, code_verifier)``
    → ``OAuthToken``
 
-PKCE state is stored in ``FileSecretStore`` under
-``connector/oauth_state/{state}`` so the callback can look it up without
-requiring sticky sessions or an external cache. The entry is written at (3)
-and consumed at (4).
+PKCE state is held in ``ext.cache`` (a file cache locally, Redis on the shared
+backend), keyed by ``state``, so the callback can look it up without sticky
+sessions. The entry is written at (3) and consumed/cleared at (4).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-from typing import Protocol
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
@@ -46,6 +46,9 @@ from mcp.shared.auth import OAuthMetadata as _OAuthMetadata
 from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_server_url
 from mcp.types import LATEST_PROTOCOL_VERSION
 from pydantic import BaseModel, Field, ValidationError
+
+if TYPE_CHECKING:
+    from valuz_agent.modules.connectors.models import ConnectorRow
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +145,66 @@ class OAuthDiscoverHelper:
                 values["bearer_methods_supported"] = protected_resource.bearer_methods_supported
 
         return OauthMetadata.model_validate(values)
+
+    async def server_allows_anonymous(self, *, attempts: int = 3) -> bool:
+        """Whether the MCP server answers an *unauthenticated* ``initialize`` with success.
+
+        Discoverable OAuth metadata does **not** mean OAuth is mandatory.
+        Freemium MCP servers (e.g. Firecrawl) publish
+        ``/.well-known/oauth-protected-resource`` so signed-in users get
+        per-account attribution, yet still serve fully anonymous calls. A
+        successful unauthenticated ``initialize`` proves anonymous access works,
+        so a connector can stay ``auth_type="none"`` instead of being forced
+        into an OAuth flow it does not need.
+
+        Tolerant of a transient throttle: a free anonymous tier can answer a
+        burst of probes with an intermittent 401, so we try a few times with a
+        short backoff and treat the server as anonymous if **any** attempt
+        succeeds — otherwise one unlucky 401 at create time would wrongly force
+        the connector into an OAuth login. Only a server that rejects *every*
+        attempt (or is unreachable) is treated as auth-required.
+        """
+        for i in range(attempts):
+            if i:
+                await asyncio.sleep(0.8 * i)  # 0.8s, 1.6s, … between attempts
+            if await self._anonymous_probe_once():
+                return True
+        return False
+
+    async def _anonymous_probe_once(self) -> bool:
+        """One unauthenticated ``initialize`` POST → ``True`` iff the server
+        answers 2xx. A 401/other non-2xx or a transport error is ``False``. Uses
+        a streaming send so a long-lived ``text/event-stream`` response never
+        blocks the probe on its body.
+        """
+        init_request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": LATEST_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "valuz-anonymous-probe", "version": "1.0"},
+            },
+        }
+        req = httpx.Request(
+            "POST",
+            self._server_url,
+            json=init_request,
+            headers={
+                "Accept": "application/json, text/event-stream",
+                MCP_PROTOCOL_VERSION: LATEST_PROTOCOL_VERSION,
+            },
+        )
+        try:
+            resp = await self._client.send(req, stream=True)
+        except httpx.HTTPError as exc:
+            logger.debug("anonymous probe failed for %s: %s", self._server_url, exc)
+            return False
+        try:
+            return 200 <= resp.status_code < 300
+        finally:
+            await resp.aclose()
 
     def _get_discovery_urls(self, auth_server_url: str | None = None) -> list[str]:
         target = auth_server_url or self._server_url
@@ -398,103 +461,63 @@ class McpOauthHelper:
 # Token lifecycle helpers (refresh + expiry tracking)
 # ---------------------------------------------------------------------------
 #
-# The access token is persisted as ``OAuthToken`` JSON under
-# ``connector/{id}/oauth_token``. ``OAuthToken`` carries only a *relative*
+# The access token is persisted as ``OAuthToken`` JSON in the connector row's
+# ``oauth_token_json`` column. ``OAuthToken`` carries only a *relative*
 # ``expires_in`` (no issue time), so the absolute expiry is recorded separately
-# in a sidecar key ``connector/{id}/oauth_token_expires_at`` (epoch ms). Readers
-# that want to refresh proactively consult the sidecar; the token blob keeps its
-# original shape so existing readers stay byte-compatible.
+# in ``oauth_token_expires_at`` (epoch ms). These helpers mutate the row in
+# place; the caller commits it (``ConnectorDatastore.update``).
 
 
-class SecretStore(Protocol):
-    """The slice of ``FileSecretStore`` these helpers touch (kept narrow so the
-    helpers stay unit-testable with a plain dict-backed fake)."""
-
-    def get(self, key: str) -> str | None: ...
-    def put(self, key: str, value: str) -> None: ...
-    def delete(self, key: str) -> None: ...
-
-
-def oauth_token_ref(connector_id: str) -> str:
-    return f"connector/{connector_id}/oauth_token"
+def persist_oauth_token(row: ConnectorRow, token: OAuthToken, now_ms: int) -> None:
+    """Write the token blob + absolute expiry onto the connector row (caller commits)."""
+    row.oauth_token_json = token.model_dump_json()
+    row.oauth_token_expires_at = (
+        now_ms + int(token.expires_in) * 1000 if token.expires_in else None
+    )
 
 
-def oauth_token_expiry_ref(connector_id: str) -> str:
-    return f"connector/{connector_id}/oauth_token_expires_at"
+def oauth_token_is_expired(row: ConnectorRow, now_ms: int, *, skew_ms: int = 60_000) -> bool:
+    """True only when ``oauth_token_expires_at`` proves the token is at/near expiry.
 
-
-def persist_oauth_token(
-    connector_id: str, token: OAuthToken, secrets: SecretStore, now_ms: int
-) -> None:
-    """Write the token blob and refresh the absolute-expiry sidecar."""
-    secrets.put(oauth_token_ref(connector_id), token.model_dump_json())
-    if token.expires_in:
-        secrets.put(
-            oauth_token_expiry_ref(connector_id),
-            str(now_ms + int(token.expires_in) * 1000),
-        )
-    else:
-        try:
-            secrets.delete(oauth_token_expiry_ref(connector_id))
-        except Exception:
-            pass
-
-
-def oauth_token_is_expired(
-    connector_id: str, secrets: SecretStore, now_ms: int, *, skew_ms: int = 60_000
-) -> bool:
-    """True only when the sidecar proves the token is at/near expiry.
-
-    Unknown expiry (no sidecar — tokens stored before expiry tracking, or
+    Unknown expiry (column NULL — tokens stored before expiry tracking, or
     servers that omit ``expires_in``) returns False: callers must not refresh on
     a guess, they refresh reactively on a real 401 instead.
     """
-    raw = secrets.get(oauth_token_expiry_ref(connector_id))
-    if not raw:
-        return False
-    try:
-        expires_at = int(raw)
-    except (TypeError, ValueError):
+    expires_at = row.oauth_token_expires_at
+    if not expires_at:
         return False
     return now_ms + skew_ms >= expires_at
 
 
 async def try_refresh_connector_token(
-    *,
-    connector_id: str,
-    server_url: str,
-    oauth_metadata_json: str | None,
-    oauth_client_info_json: str | None,
-    redirect_uri: str,
-    secrets: SecretStore,
-    now_ms: int,
+    row: ConnectorRow, *, redirect_uri: str, now_ms: int
 ) -> str | None:
     """Refresh an OAuth connector's access token using its stored refresh token.
 
-    Returns the new access token (and persists the new token + expiry sidecar)
-    on success, or None when refresh is impossible (no stored token / no refresh
-    token / missing metadata) or the refresh request fails. Never raises — the
-    caller falls back to full re-authorization.
+    Returns the new access token (writing the new token + expiry onto the row —
+    the caller commits) on success, or None when refresh is impossible (no
+    stored token / no refresh token / missing metadata) or the refresh request
+    fails. Never raises — the caller falls back to full re-authorization.
     """
-    token_json = secrets.get(oauth_token_ref(connector_id))
+    token_json = row.oauth_token_json
     if not token_json:
         return None
     try:
         current = OAuthToken.model_validate_json(token_json)
     except ValidationError:
         return None
-    if not current.refresh_token or not oauth_metadata_json:
+    if not current.refresh_token or not row.oauth_metadata_json:
         return None
     try:
-        meta = OauthMetadata.model_validate_json(oauth_metadata_json)
+        meta = OauthMetadata.model_validate_json(row.oauth_metadata_json)
     except ValidationError:
         return None
 
     client_id: str | None = None
     client_secret: str | None = None
-    if oauth_client_info_json:
+    if row.oauth_client_info_json:
         try:
-            info = json.loads(oauth_client_info_json)
+            info = json.loads(row.oauth_client_info_json)
             client_id = info.get("client_id")
             client_secret = info.get("client_secret")
         except (ValueError, AttributeError):
@@ -508,7 +531,7 @@ async def try_refresh_connector_token(
         token_endpoint_auth_method="none",
     )
     helper = McpOauthHelper(
-        server_url=server_url,
+        server_url=row.url or "",
         client_metadata=client_meta,
         token_endpoint=meta.token_endpoint,
         authorization_endpoint=meta.authorization_endpoint,
@@ -519,7 +542,7 @@ async def try_refresh_connector_token(
     try:
         new_token = await helper.refresh_access_token(current.refresh_token)
     except Exception as exc:  # noqa: BLE001 — refresh is best-effort
-        logger.info("connector %s oauth token refresh failed: %s", connector_id, exc)
+        logger.info("connector %s oauth token refresh failed: %s", row.id, exc)
         return None
     finally:
         await helper.close()
@@ -529,8 +552,8 @@ async def try_refresh_connector_token(
     if not new_token.refresh_token:
         new_token.refresh_token = current.refresh_token
 
-    persist_oauth_token(connector_id, new_token, secrets, now_ms)
-    logger.info("connector %s oauth access token refreshed", connector_id)
+    persist_oauth_token(row, new_token, now_ms)
+    logger.info("connector %s oauth access token refreshed", row.id)
     return new_token.access_token
 
 
@@ -538,9 +561,6 @@ __all__ = [
     "OAuthDiscoverHelper",
     "McpOauthHelper",
     "OauthMetadata",
-    "SecretStore",
-    "oauth_token_ref",
-    "oauth_token_expiry_ref",
     "persist_oauth_token",
     "oauth_token_is_expired",
     "try_refresh_connector_token",

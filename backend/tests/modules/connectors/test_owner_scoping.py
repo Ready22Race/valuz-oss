@@ -8,14 +8,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
-from valuz_agent.modules.connectors.models import ConnectorRow
+from valuz_agent.modules.connectors.models import ConnectorAttrRow, ConnectorRow
 
 
 @pytest.fixture
 def sessionmaker_(tmp_path):
     db_file = tmp_path / "conn.db"
     sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(sync_engine, tables=[ConnectorRow.__table__])
+    Base.metadata.create_all(
+        sync_engine, tables=[ConnectorRow.__table__, ConnectorAttrRow.__table__]
+    )
     async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
     return async_sessionmaker(bind=async_engine, expire_on_commit=False)
 

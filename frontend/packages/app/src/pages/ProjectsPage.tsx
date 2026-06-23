@@ -19,6 +19,8 @@ import { projectsApi, type ProjectListItem } from "@valuz/core";
 import { usePlatform } from "@valuz/app/platform";
 import { useTranslation } from "@valuz/core";
 import { useProjectOutlet } from "@valuz/app/layout";
+import { useAgentDeployPicker } from "../components/agent-deploy-picker";
+import { AgentCheckboxList } from "../components/AgentDeployField";
 
 export const ProjectsPage = () => {
   const { t } = useTranslation();
@@ -36,6 +38,8 @@ export const ProjectsPage = () => {
     null,
   );
   const [busy, setBusy] = useState(false);
+  // Initial members for the create dialog (shared with the sidebar entry).
+  const memberPicker = useAgentDeployPicker();
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -105,13 +109,25 @@ export const ProjectsPage = () => {
     setCreateError("");
     setBusy(true);
     try {
-      await projectsApi.create({ name: trimmedName, root_path: trimmedPath });
+      const created = await projectsApi.create({
+        name: trimmedName,
+        root_path: trimmedPath,
+      });
+      const failed = await memberPicker.deploy(created.id);
+      if (failed > 0) {
+        toast.warning(
+          t("project.deployPartialFail" as Parameters<typeof t>[0], {
+            count: failed,
+          }),
+        );
+      }
       toast.success(
         t("project.created" as Parameters<typeof t>[0], { name: trimmedName }),
       );
       setNewName("");
       setNewDesc("");
       setNewRootPath("");
+      memberPicker.reset();
       setCreateOpen(false);
       void fetchProjects();
     } catch (err) {
@@ -200,7 +216,10 @@ export const ProjectsPage = () => {
         open={createOpen}
         onOpenChange={(open) => {
           setCreateOpen(open);
-          if (!open) setCreateError("");
+          if (!open) {
+            setCreateError("");
+            memberPicker.reset();
+          }
         }}
         title={t("common.create" as Parameters<typeof t>[0])}
         description={t("project.instruction" as Parameters<typeof t>[0])}
@@ -230,6 +249,11 @@ export const ProjectsPage = () => {
           <p className="text-xs text-muted-foreground">
             {t("project.fileTree" as Parameters<typeof t>[0])}
           </p>
+        </FormField>
+        <FormField
+          label={t("project.deployAgents" as Parameters<typeof t>[0])}
+        >
+          <AgentCheckboxList picker={memberPicker} />
         </FormField>
         <FormField
           label={t("common.description" as Parameters<typeof t>[0])}

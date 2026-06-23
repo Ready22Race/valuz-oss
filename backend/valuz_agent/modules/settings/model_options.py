@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from valuz_agent.adapters.runtime_registry import RUNTIME_REGISTRY
+from valuz_agent.modules.providers.schemas import LLMModel
 
 # All UI (hyphen-form) wire protocols. An empty per-model protocol list means
 # "no declared restriction" (gateway semantics) → treat as every protocol so
@@ -50,9 +51,6 @@ _SUBSCRIPTION_KINDS: frozenset[str] = frozenset({"claude-subscription", "codex-s
 # (richest reasoning), then codex, then the generic deepagents.
 _RUNTIME_PRIORITY: tuple[str, ...] = ("claude_agent", "codex", "deepagents")
 
-# Display order of the groups in the picker.
-_GROUP_ORDER: tuple[str, ...] = ("subscription", "system", "api_key", "org")
-
 # provider_kind → the CLI tool the client probes / launches for login.
 _CLI_TOOL_BY_KIND: dict[str, str] = {
     "claude-subscription": "claude",
@@ -60,12 +58,21 @@ _CLI_TOOL_BY_KIND: dict[str, str] = {
 }
 
 
-def _runtimes_for_model(protocols: list[str], provider_kind: str) -> list[str]:
-    """Which runtimes can run a model speaking ``protocols``, priority-ordered.
+def runtimes_for(
+    protocols: list[str] | tuple[str, ...],
+    *,
+    provider_kind: str,
+) -> list[str]:
+    """Derive the runtimes a model speaking ``protocols`` can drive (the OSS
+    default rule), priority-ordered.
 
-    Mirrors the frontend ``isProviderRuntimeCompatible`` but at the *model*
-    granularity (a system channel's models can speak different protocols). Empty
-    ``protocols`` = "no declared restriction" → treated as every protocol.
+    Used to fill ``LLMModel.runtimes`` when a producer leaves it ``None``. A
+    producer that knows better declares ``runtimes`` directly — notably the
+    Valuz codex gateway, which is why **codex is only derived here for a
+    ``codex-subscription``**: a bare credential speaking the Responses wire
+    can't drive codex (the codex CLI walks its own keychain); the hosted gateway
+    that can is a contributed row that declares ``("codex",)`` itself. Empty
+    ``protocols`` = "no declared restriction" → every protocol.
     """
     protos = set(protocols) if protocols else set(_ALL_PROTOCOLS)
     out: set[str] = set()
@@ -74,14 +81,9 @@ def _runtimes_for_model(protocols: list[str], provider_kind: str) -> list[str]:
     if "anthropic" in protos & set(RUNTIME_REGISTRY["claude_agent"].supported_protocols):
         out.add("claude_agent")
 
-    # codex: its own ChatGPT subscription, OR a system/gateway channel serving
-    # the Responses API. A bare user OpenAI key can't drive codex (it walks its
-    # own keychain), so only codex-subscription / system qualify.
+    # codex: only its own ChatGPT subscription is derivable here; the hosted
+    # Responses gateway declares codex on its own rows (see docstring).
     if provider_kind == "codex-subscription":
-        out.add("codex")
-    elif provider_kind == "system" and (
-        protos & set(RUNTIME_REGISTRY["codex"].supported_protocols)
-    ):
         out.add("codex")
 
     # deepagents: any non-subscription channel speaking a protocol it accepts.
@@ -91,17 +93,6 @@ def _runtimes_for_model(protocols: list[str], provider_kind: str) -> list[str]:
         out.add("deepagents")
 
     return [r for r in _RUNTIME_PRIORITY if r in out]
-
-
-def _group_key(source: str, auth_type: str) -> str:
-    """Bucket a provider into the picker's display groups."""
-    if source == "org":
-        return "org"
-    if source == "system":
-        return "system"
-    if auth_type == "oauth":
-        return "subscription"
-    return "api_key"
 
 
 # ── Wire schema ──────────────────────────────────────────────────────
@@ -161,9 +152,8 @@ class ModelOptionsResponse(BaseModel):
 
 @dataclass(frozen=True)
 class ProviderOptionInput:
-    """The subset of ``ProviderListItem`` the builder reads, plus per-model
-    protocols. Decoupled from the dataclass so the builder is pure + trivially
-    testable (no DB / registry)."""
+    """The subset of ``LLMChannel`` the builder reads. Decoupled from the
+    dataclass so the builder is pure + trivially testable (no DB / catalog)."""
 
     id: str
     name: str
@@ -172,17 +162,19 @@ class ProviderOptionInput:
     auth_type: str
     enabled: bool
     unavailable_reason: str | None
+    # Channel-level protocols — used to derive runtimes for any model that didn't
+    # declare its own (the OSS default path).
     compatible_protocols: list[str]
-    model_options: list[str]
-    model_labels: dict[str, str]
-    # ``{model_id: [hyphen-form protocols]}`` for providers whose models speak
-    # different protocols (system channels). Empty → every model falls back to
-    # ``compatible_protocols``.
-    model_protocols: dict[str, list[str]]
+    # Per-model rows (ADR-011). Each model's ``runtimes`` win when declared;
+    # ``None`` → derive from ``compatible_protocols`` + ``provider_kind``.
+    models: list[LLMModel]
+    # Opaque grouping key + sort, set by the producing side.
+    group: str
+    group_rank: int
 
 
-def _provider_status(p: ProviderOptionInput, group: str) -> tuple[str, str | None]:
-    if group == "subscription":
+def _provider_status(p: ProviderOptionInput) -> tuple[str, str | None]:
+    if p.group == "subscription":
         # Credential is the local CLI keychain — server can't see it.
         return "client_resolved", None
     if p.enabled:
@@ -196,25 +188,29 @@ def _build_raw_provider(
     """One input provider → a card (models NOT yet disambiguated). ``None`` when
     no model has a runnable runtime (the card would be empty noise)."""
     options: list[ModelOption] = []
-    for mid in p.model_options:
-        protocols = p.model_protocols.get(mid) or p.compatible_protocols
-        runtimes = _runtimes_for_model(protocols, p.provider_kind)
+    for m in p.models:
+        # Declared runtimes win; otherwise derive from the channel (OSS default).
+        runtimes = (
+            list(m.runtimes)
+            if m.runtimes is not None
+            else runtimes_for(p.compatible_protocols, provider_kind=p.provider_kind)
+        )
         if not runtimes:
             # No runtime can run this model → not a selectable default.
             continue
         options.append(
             ModelOption(
-                model_id=mid,
+                model_id=m.id,
                 provider_id=p.id,
-                label=p.model_labels.get(mid) or mid,
+                label=m.label or m.id,
                 runtimes=runtimes,
                 default_runtime=runtimes[0],
-                is_current_default=(p.id == current.provider_id and mid == current.model),
+                is_current_default=(p.id == current.provider_id and m.id == current.model),
             )
         )
     if not options:
         return None
-    status, reason = _provider_status(p, _group_key(p.source, p.auth_type))
+    status, reason = _provider_status(p)
     return ModelOptionProvider(
         provider_id=p.id,
         label=p.name,
@@ -271,10 +267,13 @@ def build_model_options(
     disambiguated last — after the merge.
     """
     by_group: dict[str, list[ModelOptionProvider]] = {}
+    rank: dict[str, int] = {}
     for p in providers:
         card = _build_raw_provider(p, current)
         if card is not None:
-            by_group.setdefault(_group_key(p.source, p.auth_type), []).append(card)
+            by_group.setdefault(p.group, []).append(card)
+            # A group's rank is the smallest group_rank any of its rows declares.
+            rank[p.group] = min(rank.get(p.group, p.group_rank), p.group_rank)
 
     # Merge only the system group: same-named cards there are a deliberate
     # "one logical channel, one descriptor per runtime" signal. Leave user-named
@@ -283,14 +282,15 @@ def build_model_options(
     if "system" in by_group:
         by_group["system"] = _merge_same_name(by_group["system"])
 
+    # Order groups by their declared ``group_rank`` (ADR-011 — picker reads the
+    # row fields, not a hardcoded source order); ties break on the group key.
     # No label disambiguation: each picker view filters by runtime (onboarding
     # prefers claude_agent; Settings has a runtime selector), so two same-named
     # models — a Claude variant + a Codex variant of one logical model — never
     # appear together in one view. Raw labels keep the picker clean.
     groups = [
         ModelOptionGroup(key=key, providers=by_group[key])
-        for key in _GROUP_ORDER
-        if key in by_group
+        for key in sorted(by_group, key=lambda g: (rank.get(g, 999), g))
     ]
     return ModelOptionsResponse(current=current, groups=groups)
 
@@ -303,4 +303,5 @@ __all__ = [
     "ModelOptionsResponse",
     "ProviderOptionInput",
     "build_model_options",
+    "runtimes_for",
 ]

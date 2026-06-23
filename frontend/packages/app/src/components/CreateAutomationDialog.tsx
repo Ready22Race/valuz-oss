@@ -138,6 +138,16 @@ export interface CreateAutomationDialogProps {
   /** Notify the parent the user picked a different target. */
   onSelectTarget?: (id: string) => void;
   /**
+   * Display name of the locked project for flows where the target is fixed
+   * and no selector is shown (the project detail page — the automation is
+   * always bound to the current project). When set and the selector is
+   * hidden, the dialog renders a read-only, lock-badged project field so the
+   * user can confirm *where* the automation is being created without being
+   * able to change it. Omitted on the global automation page (the selector
+   * already shows the choice).
+   */
+  fixedTargetName?: string;
+  /**
    * Pre-fill values for edit mode. When provided, the dialog opens with
    * these values populated and the title defaults to "Edit ...". Omit
    * for create flows.
@@ -160,6 +170,7 @@ export const CreateAutomationDialog = ({
   targets,
   selectedTargetId,
   onSelectTarget,
+  fixedTargetName,
   initial,
   title: titleProp,
   description: descriptionProp,
@@ -187,10 +198,16 @@ export const CreateAutomationDialog = ({
   const showTargetSelector = !isEdit && targetList.length > 0;
   const selectedTarget =
     targetList.find((tg) => tg.id === selectedTargetId) ?? null;
-  // Task mode availability. In create mode it follows the targets (you need
-  // at least one project to host a task); in edit mode the locked project's
-  // ``allowTaskMode`` prop decides.
-  const taskModeAllowed = isEdit ? allowTaskMode : projectTargets.length > 0;
+  // Task mode availability. When the target selector is shown (global
+  // automation page) Task needs at least one project to host it. When the
+  // selector is hidden the project is fixed by the caller — edit mode (the
+  // row's project) or the project detail page (the current project) — so the
+  // caller's ``allowTaskMode`` decides. The old ``!isEdit ⇒ projectTargets``
+  // form wrongly disabled Task on the project page, which passes
+  // ``allowTaskMode`` but no ``targets`` (the project is implicit).
+  const taskModeAllowed = showTargetSelector
+    ? projectTargets.length > 0
+    : allowTaskMode;
 
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -394,11 +411,15 @@ export const CreateAutomationDialog = ({
     };
   };
 
-  // Task mode needs a concrete project target; block submit until one is
-  // picked (the selector only offers projects in Task mode, so this only
-  // bites on the brief window before the auto-jump lands).
+  // Task mode needs a concrete project target only when the selector is
+  // shown; block submit until one is picked (the selector only offers
+  // projects in Task mode, so this only bites on the brief window before the
+  // auto-jump lands). With the selector hidden the project is fixed by the
+  // caller, so there's nothing to wait for.
   const taskNeedsProject =
-    !isEdit && actionKind === "task" && selectedTarget?.kind !== "project";
+    showTargetSelector &&
+    actionKind === "task" &&
+    selectedTarget?.kind !== "project";
 
   const submitDisabled =
     !effectiveAgentSlug ||
@@ -510,15 +531,22 @@ export const CreateAutomationDialog = ({
             </div>
           </FormField>
 
-          {/* Target + agent — linked, directly under the execution mode so
-              the user decides "where it runs / who runs it" before writing
-              the prompt. The target (Chat sentinel or a project) drives both
-              ``project_kind`` at submit and the candidate agents below; in
-              Task mode only projects are offered. Hidden in edit mode, where
-              the target is fixed to the row's project. */}
-          {showTargetSelector && (
+          {/* "所属项目" — where this automation lives, picked before who runs
+              it. Two presentations of the SAME control so the global and
+              in-project dialogs read as one component:
+              - Global automation page: an editable Select over the Chat
+                sentinel (localised "快速对话") + every project. In Task mode
+                only projects are offered. Drives ``project_kind`` at submit
+                and the candidate agents below.
+              - Project detail page: the project is fixed by context, so the
+                same Select is rendered ``disabled`` showing the bound
+                project — visible (no "did I create this in the right place?"
+                doubt) but unchangeable.
+              The label is constant ("所属项目") across both modes — it never
+              swaps mid-interaction. */}
+          {showTargetSelector ? (
             <FormField
-              label={t("automation.targetLabel" as Parameters<typeof t>[0])}
+              label={t("automation.targetLabelTask" as Parameters<typeof t>[0])}
             >
               <Select
                 value={selectedTargetId ?? ""}
@@ -531,14 +559,35 @@ export const CreateAutomationDialog = ({
                   {(actionKind === "task" ? projectTargets : targetList).map(
                     (tg) => (
                       <SelectItem key={tg.id} value={tg.id}>
-                        {tg.name}
+                        {tg.kind === "chat"
+                          ? t(
+                              "automation.targetChat" as Parameters<
+                                typeof t
+                              >[0],
+                            )
+                          : tg.name}
                       </SelectItem>
                     ),
                   )}
                 </SelectContent>
               </Select>
             </FormField>
-          )}
+          ) : fixedTargetName ? (
+            <FormField
+              label={t("automation.targetLabelTask" as Parameters<typeof t>[0])}
+            >
+              {/* Disabled Select = the exact same control, locked. The dimmed
+                  trigger + non-interactive chevron read as "fixed". */}
+              <Select value="__fixed__" disabled>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__fixed__">{fixedTargetName}</SelectItem>
+                </SelectContent>
+              </Select>
+            </FormField>
+          ) : null}
 
           <FormField
             label={t("automation.agentLabel" as Parameters<typeof t>[0])}

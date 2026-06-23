@@ -140,6 +140,7 @@ SRC_CORE_ALLOWLIST = {
     "modules/tasks/tools/handlers.py",
     "modules/tasks/tools/declarations.py",
     "modules/memory/tools.py",
+    "modules/browser/tools.py",
     "integrations/tools_skill_creator.py",
     "integrations/toolkit_mcp_server.py",
 }

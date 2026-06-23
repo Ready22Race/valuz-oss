@@ -32,7 +32,6 @@ from valuz_agent.modules.agent_packs.loader import load_builtin_pack
 from valuz_agent.modules.agent_packs.service import AgentPackService
 from valuz_agent.modules.agents.seed import VALUZ_HELPER_SLUG
 from valuz_agent.modules.agents.service import AgentService, MemberAlreadyExistsError
-from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.service import ConnectorService
 from valuz_agent.modules.projects.datastore import ProjectDatastore
 from valuz_agent.modules.projects.service import ProjectService
@@ -157,6 +156,68 @@ async def _resolve_deploy_target(db) -> tuple[str, str, str]:  # type: ignore[no
 _VALUZ_HELPER_SLUG = VALUZ_HELPER_SLUG
 _VALUZ_HELPER_SKILL = "valuz-handbook"
 _VALUZ_HELPER_AVATAR = "bot"
+# Connectors the default assistant ships bound to (slugs from the connector
+# catalog): the two Valuz research connectors plus Firecrawl for web scraping.
+# A bound slug only resolves to a live MCP server once that connector is
+# installed + enabled, so {@link _ensure_default_connectors} installs these from
+# the catalog alongside the helper — they show up under「已添加」, not just bound
+# on the agent.
+_VALUZ_HELPER_CONNECTORS = ["valuz-search", "valuz-stock", "firecrawl"]
+
+
+async def _ensure_default_connectors(user_id: str, db) -> None:  # type: ignore[no-untyped-def]
+    """Install the default assistant's connectors so they land under「已添加」.
+
+    Idempotent: skips any slug that already has a connector row. Installs via the
+    same path the connectors UI / MCP tool use (``create_connector``), so each
+    one gets a real probe — a no-auth connector like Firecrawl connects right
+    away, and an OAuth connector (Valuz) lands as ``pending_auth`` until the user
+    logs in. One bad connector never sinks onboarding (per-slug try/except).
+    """
+    from valuz_agent.api.routes.connectors import (  # local: avoid route import cycle
+        CONNECTOR_DIRECTORY,
+        CreateConnectorRequest,
+        create_connector,
+    )
+
+    def _text(v: object) -> str:
+        # Catalog display_name / description may be a plain string or an
+        # ``{"zh-CN": ..., "en-US": ...}`` i18n object.
+        if isinstance(v, dict):
+            return str(v.get("zh-CN") or v.get("en-US") or next(iter(v.values()), ""))
+        return str(v or "")
+
+    svc = ConnectorService.with_defaults(db)
+    installed = {v.slug for v in await svc.list_connectors(user_id)}
+    by_slug = {c["slug"]: c for c in CONNECTOR_DIRECTORY}
+
+    for slug in _VALUZ_HELPER_CONNECTORS:
+        if slug in installed:
+            continue
+        cat = by_slug.get(slug)
+        if cat is None:
+            logger.warning("onboarding: default connector %r missing from catalog", slug)
+            continue
+        try:
+            await create_connector(
+                body=CreateConnectorRequest(
+                    slug=slug,
+                    display_name=_text(cat.get("display_name")) or slug,
+                    description=_text(cat.get("description")) or None,
+                    transport=cat.get("transport", "http"),
+                    url=cat.get("url") or None,
+                    auth_type=cat.get("auth_type", "oauth"),
+                    connector_type="recommended",
+                    command=cat.get("command"),
+                    args=cat.get("args", []),
+                    working_dir=cat.get("working_dir"),
+                ),
+                svc=svc,
+                user_id=user_id,
+            )
+            logger.info("onboarding: installed default connector %r", slug)
+        except Exception:  # noqa: BLE001 — one bad connector shouldn't sink onboarding
+            logger.exception("onboarding: failed to install default connector %r", slug)
 
 
 async def _ensure_valuz_helper(user_id: str, db) -> str:  # type: ignore[no-untyped-def]
@@ -167,10 +228,11 @@ async def _ensure_valuz_helper(user_id: str, db) -> str:  # type: ignore[no-unty
     the user's global defaults — the same resolver the team deploy uses, so a
     user with no model configured hits the same 422 guard.
     """
-    connector_svc = ConnectorService(
-        datastore=ConnectorDatastore(db),
-        secrets=None,  # type: ignore[arg-type]
-    )
+    # Install the helper's default connectors first so they exist under「已添加」
+    # and the binding below resolves. Idempotent + best-effort.
+    await _ensure_default_connectors(user_id, db)
+
+    connector_svc = ConnectorService.with_defaults(db)
     agent_svc = AgentService(db=db, connector_service=connector_svc)
 
     for existing in await agent_svc.list_agents(user_id):
@@ -191,6 +253,7 @@ async def _ensure_valuz_helper(user_id: str, db) -> str:  # type: ignore[no-unty
             "provider_id": provider_id,
             "effort": effort,
             "skills": [_VALUZ_HELPER_SKILL],
+            "connector_types": _VALUZ_HELPER_CONNECTORS,
             "avatar": _VALUZ_HELPER_AVATAR,
         }
     )
@@ -247,10 +310,7 @@ async def create_example_project(
             datastore=ProjectDatastore(db),
             event_bus=event_bus,
         )
-        connector_svc = ConnectorService(
-            datastore=ConnectorDatastore(db),
-            secrets=None,  # type: ignore[arg-type]
-        )
+        connector_svc = ConnectorService.with_defaults(db)
         agent_svc = AgentService(db=db, connector_service=connector_svc)  # type: ignore[arg-type]
 
         # Step 1: create or reuse the project.

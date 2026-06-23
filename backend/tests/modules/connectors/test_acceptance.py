@@ -30,7 +30,6 @@ from valuz_agent.api.routes.connectors import (
     HeaderParam,
 )
 from valuz_agent.infra.database import Base
-from valuz_agent.infra.secret_store import InMemorySecretStore
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.service import (
     CatalogFieldSpec,
@@ -41,7 +40,7 @@ from valuz_agent.modules.connectors.service import (
 
 
 @pytest_asyncio.fixture
-async def svc_and_secrets():
+async def svc():
     # Host is fully async now (aiosqlite); a shared in-memory async engine
     # backs the datastore so every session sees the same DB.
     engine = create_async_engine(
@@ -52,9 +51,7 @@ async def svc_and_secrets():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     session = async_sessionmaker(bind=engine, expire_on_commit=False)()
-    secrets = InMemorySecretStore()
-    svc = ConnectorService(datastore=ConnectorDatastore(session), secrets=secrets)
-    yield svc, secrets, session
+    yield ConnectorService(datastore=ConnectorDatastore(session))
     await session.close()
     await engine.dispose()
 
@@ -68,13 +65,13 @@ class _FakeRow:
     auth_type: str = "oauth"
     headers_json: str | None = None
     params_json: str | None = None
-    cred_manifest_json: str | None = None
+    oauth_token_json: str | None = None
+    oauth_token_expires_at: int | None = None
     args_json: str | None = None
 
 
 # ── Acceptance #2 — catalog prefix is UI-only; client sends final value ─
-async def test_should_store_and_inject_the_final_value_verbatim_with_prefix(svc_and_secrets):
-    svc, secrets, _ = svc_and_secrets
+async def test_should_store_and_inject_the_final_value_verbatim_with_prefix(svc):
     # Catalog field declares prefix "Bearer " (UI prefill only). The client
     # sends the WHOLE string; backend stores/injects it verbatim — no
     # double "Bearer Bearer".
@@ -90,46 +87,36 @@ async def test_should_store_and_inject_the_final_value_verbatim_with_prefix(svc_
         catalog_fields=fields,
     )
     row = await ConnectorDatastore(svc._ds._db).get_by_id("local-test-owner", v.id)
-    headers, _ = build_overrides(row, secrets)
+    headers, _ = build_overrides(row)
     assert headers == {"Authorization": "Bearer tok123"}
 
 
-# ── Acceptance #9 — Slice-2-migrated bearer connector still injects ────
-def test_should_keep_migrated_bearer_working_via_backfilled_manifest():
-    # Shape a row exactly as the Slice-2 backfill leaves it: manifest
-    # points at the *legacy* secret path holding the RAW token.
-    secrets = InMemorySecretStore()
-    secrets.put("connector/c1/api_key", "raw-token")
+# ── Acceptance #9 — migrated bearer connector still injects ────────────
+def test_should_keep_migrated_bearer_working_via_raw_token():
+    # A secret Authorization holding a RAW token (as migration 0004 leaves a
+    # legacy bearer connector): the transitional compat re-adds the prefix.
     row = _FakeRow(
         auth_type="bearer",
-        cred_manifest_json=json.dumps(
-            [
-                {
-                    "key": "api_key",
-                    "target": "header",
-                    "name": "Authorization",
-                    "secret_ref": "connector/c1/api_key",
-                }
-            ]
-        ),
+        headers_json=json.dumps({"Authorization": {"value": "raw-token", "secret": True}}),
     )
-    headers, _ = build_overrides(row, secrets)
-    # Transitional Bearer compat normalises the raw legacy token.
+    headers, _ = build_overrides(row)
     assert headers == {"Authorization": "Bearer raw-token"}
 
 
 # ── Acceptance #10 — OAuth layered AFTER build_overrides, unchanged ────
 async def test_should_layer_oauth_authorization_after_build_overrides():
-    secrets = InMemorySecretStore()
-    secrets.put("connector/c1/oauth_token", json.dumps({"access_token": "oauth-abc"}))
-    row = _FakeRow(auth_type="oauth")
+    row = _FakeRow(
+        auth_type="oauth",
+        oauth_token_json=json.dumps({"access_token": "oauth-abc"}),
+    )
 
     # build_overrides itself never touches OAuth.
-    base_headers, _ = build_overrides(row, secrets)
+    base_headers, _ = build_overrides(row)
     assert "Authorization" not in base_headers
 
-    # The resolver overlays it after.
-    cfgs = await _build_http_config(row, secrets=secrets)
+    # The resolver overlays it after. A fresh (no-expiry) token never triggers a
+    # refresh, so ``connectors`` is unused here.
+    cfgs = await _build_http_config(row, None)  # type: ignore[arg-type]
     assert cfgs is not None and len(cfgs) == 1
     assert cfgs[0].headers["Authorization"] == "Bearer oauth-abc"
 
@@ -138,10 +125,6 @@ async def test_should_layer_oauth_authorization_after_build_overrides():
 def test_should_reject_illegal_catalog_field_name():
     with pytest.raises(ValidationError):
         CatalogField(key="k", name="bad name with spaces")
-
-
-# (the old out-of-range-target test is gone: header vs param is now decided
-# by which schema the field sits in, so an invalid target is impossible.)
 
 
 def test_should_reject_duplicate_keys_within_a_header_list():
@@ -157,10 +140,7 @@ def test_should_reject_duplicate_keys_within_a_header_list():
 
 
 # ── Acceptance #12 (backend half) — Phase B capability end-to-end ─────
-async def test_should_support_catalog_nonauth_secret_header_plus_custom_secret(
-    svc_and_secrets,
-):
-    svc, secrets, _ = svc_and_secrets
+async def test_should_support_catalog_nonauth_secret_header_plus_custom_secret(svc):
     # Catalog declares a NON-Authorization secret header; user also adds a
     # custom secret header. Both must round-trip create → injection.
     fields = [CatalogFieldSpec(key="api_key", name="X-API-Key", target="header", secret=True)]
@@ -186,12 +166,12 @@ async def test_should_support_catalog_nonauth_secret_header_plus_custom_secret(
     assert by_key["X-Plain"].secret is False and by_key["X-Plain"].value == "plain"
 
     row = await ConnectorDatastore(svc._ds._db).get_by_id("local-test-owner", v.id)
-    headers, _ = build_overrides(row, secrets)
+    headers, _ = build_overrides(row)
     assert headers == {
         "X-Plain": "plain",
         "X-API-Key": "catalog-secret",
         "X-Custom": "custom-secret",
     }
     # Resolver parity (Acceptance #8) on the same row.
-    cfgs = await _build_http_config(row, secrets=secrets)
+    cfgs = await _build_http_config(row, svc._ds)
     assert cfgs is not None and dict(cfgs[0].headers) == headers

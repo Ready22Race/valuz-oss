@@ -16,6 +16,7 @@ import {
   Flag,
   ListTodo,
   Loader2,
+  MessageCircleQuestion,
   MessageSquare,
   Paperclip,
   Pause,
@@ -43,7 +44,9 @@ import {
   agentsApi,
   tasksApi,
   projectsApi,
+  useDecisionPending,
   useTranslation,
+  type DecisionEntry,
   type IntervenePayload,
   type MemberWithAgent,
   type TaskDetail,
@@ -297,11 +300,23 @@ function eventDetail(evt: TaskEvent, t: Translator): string {
   return "";
 }
 
+/** First question text from a pending decision's AskUserQuestion payload —
+ *  used as the confirm card's one-line summary. */
+const pendingQuestionText = (entry: DecisionEntry): string => {
+  const qs = (entry.question_payload as { questions?: { question?: string }[] })
+    ?.questions;
+  return Array.isArray(qs) && qs[0]?.question ? String(qs[0].question) : "";
+};
+
 export const TaskDetailPage = () => {
   const { taskId = "" } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { setHeader, setHideHeader, setRightPanel } = useProjectOutlet();
+  // Pending confirmations (AskUserQuestion) raised by this task's agents —
+  // surfaced prominently in the timeline so the user isn't left thinking the
+  // task is just "working" when it's actually blocked on their answer.
+  const taskPending = useDecisionPending().filter((e) => e.task_id === taskId);
 
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [members, setMembers] = useState<MemberWithAgent[]>([]);
@@ -708,6 +723,10 @@ export const TaskDetailPage = () => {
   // an API/socket drop — or unresolved subtasks). Surface a retry/继续 entry
   // that re-launches the lead via ``resume_task`` (the :intervene resume path).
   const isBlocked = task.status === "blocked";
+  // A task created straight from a prompt has title === goal; showing both is
+  // pure repetition. Only surface the goal card when it adds something — a goal
+  // distinct from the title, or staged attachments.
+  const goalDiffersFromTitle = task.goal.trim() !== task.title.trim();
 
   // ``leadSessionId`` / ``subtaskRuns`` / ``activeSubtask`` used to live here
   // for the inline right-rail aside. The aside now lives in the AppShell's
@@ -794,13 +813,16 @@ export const TaskDetailPage = () => {
           </div>
         </div>
 
-        {/* Goal card — always pinned right under the title. PRD §3.5 v29:
-          the goal is the spine of the page; status cards (delivery /
-          failure) attach to it instead of replacing it. */}
+        {/* Goal card — shown only when it adds something beyond the title: a
+          goal distinct from the title, or staged attachments. A prompt-launched
+          task (title === goal) would otherwise repeat the heading verbatim. */}
+        {(goalDiffersFromTitle || kickoffAttachments.length > 0) && (
         <section className="mt-4 w-full rounded-lg border border-surface-border bg-[#f7f7f8] px-4 py-3">
-          <p className="whitespace-pre-wrap text-[12px] leading-5 text-[#131313]">
-            {task.goal}
-          </p>
+          {goalDiffersFromTitle && (
+            <p className="whitespace-pre-wrap text-[12px] leading-5 text-[#131313]">
+              {task.goal}
+            </p>
+          )}
           {/* Attachment chips — files staged by the user when launching
             this task. Source: ``kickoff.payload.attachments``. Hides
             entirely when empty so the card stays clean for goal-only
@@ -821,6 +843,7 @@ export const TaskDetailPage = () => {
             </ul>
           )}
         </section>
+        )}
 
         {/* Completed → deliverable card (green). Pulls the lead's final
           summary from the ``task_completed`` event payload. Footer makes
@@ -1054,7 +1077,50 @@ export const TaskDetailPage = () => {
                 of looking frozen at the last event. The waiting
                 spinner inside an open group is enough on its own, so
                 ``showLeadTail`` suppresses this row when one is. */}
-              {showLeadTail && (
+              {/* Blocked-on-you: an agent raised an AskUserQuestion and the
+                task can't proceed until the user answers. Far louder than the
+                top-right inbox dot — a tappable amber card right where the
+                user is reading, jumping straight into the session to answer. */}
+              {taskPending.length > 0 && (
+                <li className="flex gap-2">
+                  <div className="flex w-6 shrink-0 flex-col items-center self-stretch pt-0.5">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-600">
+                      <MessageCircleQuestion className="h-3.5 w-3.5" />
+                    </span>
+                    <span className="mt-1 -mb-3.5 w-px flex-1 bg-[#f7f8fa]" />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigate(
+                        `/conversation/${encodeURIComponent(taskPending[0].session_id)}`,
+                      )
+                    }
+                    className="-mt-1 flex min-w-0 flex-1 flex-col gap-1 rounded-lg border border-amber-300/70 bg-amber-50/70 px-3.5 py-2.5 text-left transition-colors hover:bg-amber-50"
+                  >
+                    <span className="flex items-center gap-1.5">
+                      <span className="text-sm font-semibold text-amber-900">
+                        {t("task.needsConfirm" as Parameters<typeof t>[0])}
+                      </span>
+                      {taskPending.length > 1 && (
+                        <span className="rounded-full bg-amber-200/80 px-1.5 text-[10px] font-medium leading-4 text-amber-800">
+                          {taskPending.length}
+                        </span>
+                      )}
+                    </span>
+                    {pendingQuestionText(taskPending[0]) && (
+                      <span className="line-clamp-2 text-xs leading-5 text-amber-800">
+                        {pendingQuestionText(taskPending[0])}
+                      </span>
+                    )}
+                    <span className="mt-0.5 inline-flex items-center gap-0.5 text-xs font-medium text-amber-700">
+                      {t("task.goConfirm" as Parameters<typeof t>[0])}
+                      <ChevronRight className="h-3 w-3" />
+                    </span>
+                  </button>
+                </li>
+              )}
+              {taskPending.length === 0 && showLeadTail && (
                 // Mirror ``EventAvatar`` (``pt-0.5``) + ``EventBody``
                 // (``-mt-1 px-3 py-2``) so the loader icon and the
                 // "Lead is working…" label line up with the You /

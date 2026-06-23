@@ -10,7 +10,8 @@
     "actionNew": "New",
     "agentHint": "Execution model / runtime follow the selected agent.",
     "agentLabel": "Agent",
-    "targetLabel": "Target",
+    "targetLabelTask": "Project",
+    "targetChat": "Quick chat",
     "timezoneLabel": "Timezone",
     "nextRunPreview": "Next run",
     "agentPlaceholderEmpty": "No agents available — add one first",
@@ -236,6 +237,15 @@
     "fileTruncated": "\n… (file too large, truncated)",
     "filesChanged": "{count} files changed",
     "fromKnowledgeBase": "From knowledge base",
+    "composerSkills": "Skills",
+    "composerConnectors": "Connectors",
+    "composerConnectorsLocked": "Connectors were locked when this conversation started",
+    "composerPlusTooltip": "Add attachments, skills and connectors",
+    "defaultBrain": "Default",
+    "composerSearchConnectors": "Search connectors…",
+    "composerManageSkills": "Manage skills",
+    "composerManageConnectors": "Manage connectors",
+    "composerNoMatches": "No matches",
     "generatedFailed": "Generation failed",
     "generatedFiles": "Generated files",
     "generatedFilesCount": "{count}",
@@ -269,6 +279,19 @@
     "taskCreated": "Task created",
     "openTask": "View task",
     "backToTask": "Back to task",
+    "workflow": {
+      "title": "Workflow",
+      "agentsDone": "{done}/{total} agents",
+      "statusRunning": "Running",
+      "statusCompleted": "Completed",
+      "statusStopped": "Stopped",
+      "statusFailed": "Failed",
+      "stateDone": "Done",
+      "stateRunning": "Running",
+      "question": "Question",
+      "summary": "Summary",
+      "viewDetails": "View full result"
+    },
     "brainOverride": "This chat only",
     "pillDrafted": "Task drafted",
     "pillPlanned": "Plan v{version} ({count} subtasks)",
@@ -607,6 +630,8 @@
     "statusConnecting": "Connecting…",
     "statusConnected": "Connected",
     "statusError": "Connection failed",
+    "statusNotConnected": "Not connected",
+    "groupInstalled": "Added",
     "groupOfficial": "Official",
     "groupBuiltin": "Built-in",
     "groupDirectory": "Connected",
@@ -887,6 +912,10 @@
     "createTitle": "Create New Project",
     "created": "Project \"{name}\" created",
     "deleteTask": "Delete",
+    "deployAgents": "Deploy agents",
+    "deployAgentsHint": "Pick one or more; Valuz Helper is deployed by default. You can change members later.",
+    "deployPartialFail": "Failed to deploy {count} agent(s); you can retry later in the project.",
+    "noAgentsToDeploy": "Your agent library is empty — you can add members later in the project.",
     "dirAlreadyBound": "This directory is already bound to another project",
     "dirHint": "Select a local directory as the project root. Each directory can only be bound to one project.",
     "disable": "Disable",
@@ -967,6 +996,19 @@
     }
   },
   "settings": {
+    "browser": {
+      "statusLabel": "Browser",
+      "connected": "Connected",
+      "disconnected": "Not connected",
+      "modeManaged": "Managed profile",
+      "modeAttach": "Attach to my Chrome",
+      "open": "Open my browser",
+      "stop": "Stop",
+      "opened": "Browser ready",
+      "loadFailed": "Failed to load browser status",
+      "openFailed": "Failed to open the browser",
+      "riskNote": "This is a separate, isolated browser instance — only sign into the accounts you need. Treat page content as untrusted."
+    },
     "memory": {
       "enabledLabel": "Enable memory",
       "enabledDesc": "Master switch: memory injection + background auto-generation",
@@ -1407,6 +1449,10 @@
         "desc": "Inspect and control memory",
         "label": "Memory"
       },
+      "browser": {
+        "desc": "Connect and manage the controlled browser",
+        "label": "Browser"
+      },
       "shortcuts": {
         "desc": "Global commands & input",
         "label": "Shortcuts"
@@ -1503,6 +1549,7 @@
     "tasks": "Tasks",
     "noTasks": "No tasks yet",
     "sessions": "Conversations",
+    "chats": "Chats",
     "taskStatus": {
       "active": "Running",
       "paused": "Paused",
@@ -1755,7 +1802,9 @@
     "downloadingDesc": "Downloading update, please wait...",
     "errorTitle": "Update failed",
     "errorUnknown": "Unknown error",
+    "preparing": "Preparing to install…",
     "restartNow": "Restart now",
+    "restarting": "Restarting…",
     "updateAvailable": "Update available"
   },
   "ui": {
@@ -2175,6 +2224,8 @@
       "subtaskReviewReworkNoFeedback": "⚠ Needs rework",
       "leadWorking": "Lead is working…"
     },
-    "viewSession": "View session →"
+    "viewSession": "View session →",
+    "needsConfirm": "Your confirmation needed",
+    "goConfirm": "Confirm now"
   }
 }

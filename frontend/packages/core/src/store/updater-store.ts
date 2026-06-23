@@ -5,6 +5,11 @@ export type UpdaterStatus =
   | "checking"
   | "available"
   | "downloading"
+  // macOS only: after the real network download, electron-updater hands the zip
+  // to Squirrel.Mac via a loopback server, which "re-downloads" it fast (0→100
+  // again). We surface that second pass as "preparing" (install hand-off) so the
+  // bar doesn't look like it downloads twice.
+  | "preparing"
   | "downloaded"
   | "error";
 
@@ -14,6 +19,11 @@ export interface UpdaterState {
   progress: number;
   bytesPerSecond: number;
   errorMessage: string | null;
+  /** Whether the current error should appear in the floating toast. False for
+   *  the About-page check (it shows its own inline error); true for menu/tray
+   *  checks and downloads, where the toast is the only feedback surface. Only
+   *  meaningful while ``status === "error"``. */
+  errorInToast: boolean;
   /** User hid the in-app update toast. Re-shown when a new lifecycle event
    *  arrives (available / downloaded) or via show(). */
   dismissed: boolean;
@@ -27,7 +37,8 @@ export interface UpdaterState {
   setDownloading: () => void;
   setProgress: (progress: number, bytesPerSecond: number) => void;
   setDownloaded: () => void;
-  setError: (message: string) => void;
+  /** ``toast`` controls whether the error also pops the floating toast. */
+  setError: (message: string, toast?: boolean) => void;
   dismiss: () => void;
   show: () => void;
   reset: () => void;
@@ -39,24 +50,50 @@ const initial = {
   progress: 0,
   bytesPerSecond: 0,
   errorMessage: null as string | null,
+  errorInToast: false,
   dismissed: false,
 };
 
 export const useUpdaterStore = create<UpdaterState>((set) => ({
   ...initial,
 
-  setChecking: () => set({ status: "checking", errorMessage: null }),
+  setChecking: () =>
+    set({ status: "checking", errorMessage: null, errorInToast: false }),
   setAvailable: (version: string) =>
     set({ status: "available", version, errorMessage: null, dismissed: false }),
   setNotAvailable: () => set({ status: "idle" }),
   setDownloading: () =>
     set({ status: "downloading", progress: 0, errorMessage: null }),
   setProgress: (progress: number, bytesPerSecond: number) =>
-    set({ status: "downloading", progress, bytesPerSecond }),
+    set((s) => {
+      // Already in the local install hand-off → hold the bar full, ignore the
+      // fast second 0→100.
+      if (s.status === "preparing") {
+        return { progress: 100, bytesPerSecond: 0 };
+      }
+      // A sharp drop after we'd nearly finished = the network download is done
+      // and Squirrel.Mac is re-reading it from loopback. Show "preparing"
+      // instead of a second download bar. The >=90 / -10 guards keep mid-
+      // download jitter from tripping it; platforms without the hand-off never
+      // reset, so they never enter "preparing".
+      if (s.status === "downloading" && s.progress >= 90 && progress < s.progress - 10) {
+        return { status: "preparing", progress: 100, bytesPerSecond: 0 };
+      }
+      return { status: "downloading", progress, bytesPerSecond };
+    }),
   setDownloaded: () =>
     set({ status: "downloaded", progress: 100, dismissed: false }),
-  setError: (message: string) =>
-    set({ status: "error", errorMessage: message }),
+  setError: (message: string, toast = false) =>
+    set(
+      toast
+        ? {
+            status: "error",
+            errorMessage: message,
+            errorInToast: true,
+            dismissed: false,
+          }
+        : { status: "error", errorMessage: message, errorInToast: false },
+    ),
   dismiss: () => set({ dismissed: true }),
   show: () => set({ dismissed: false }),
   reset: () => set(initial),

@@ -8,9 +8,9 @@ from valuz_agent.modules.providers.discover import ModelDiscoveryError
 from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.service import (
     ConnectionTestResult,
+    LLMChannel,
+    LLMChannelDetail,
     ProviderDescriptor,
-    ProviderDetail,
-    ProviderListItem,
     ProviderService,
     reset_providers,
 )
@@ -269,7 +269,7 @@ def list_provider_descriptors(
 async def list_providers(
     user_id: str = Depends(require_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
-) -> dict[str, list[ProviderListItem]]:
+) -> dict[str, list[LLMChannel]]:
     return {"providers": await svc.list_providers(user_id)}
 
 
@@ -278,7 +278,7 @@ async def get_provider(
     provider_id: str,
     user_id: str = Depends(require_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
-) -> ProviderDetail:
+) -> LLMChannelDetail:
     return await svc.get_provider(user_id, provider_id)
 
 
@@ -287,7 +287,7 @@ async def create_provider(
     body: ProviderCreateRequest,
     user_id: str = Depends(require_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
-) -> ProviderDetail:
+) -> LLMChannelDetail:
     """Create a provider channel.
 
     When ``api_key`` is supplied, the service synchronously probes
@@ -322,7 +322,7 @@ async def update_provider(
     body: ProviderUpdateRequest,
     user_id: str = Depends(require_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
-) -> ProviderDetail:
+) -> LLMChannelDetail:
     await _enforce_provider_policy(user_id, "update")
     try:
         return await svc.update_provider(
@@ -405,7 +405,7 @@ async def enable_provider(
     provider_id: str,
     user_id: str = Depends(require_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
-) -> ProviderDetail:
+) -> LLMChannelDetail:
     """Mark an OAuth/subscription provider channel as enabled.
 
     Called after the user completes an out-of-band CLI login
@@ -453,7 +453,7 @@ class ResetRequest(BaseModel):
 async def reset(
     body: ResetRequest | None = None,
     user_id: str = Depends(require_current_user_id),
-) -> dict[str, list[ProviderListItem]]:
+) -> dict[str, list[LLMChannel]]:
     """Reset the model provider table.
 
     With no body or ``{}`` -- clears all rows and re-runs the boot seeders.

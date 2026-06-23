@@ -18,28 +18,24 @@ describe("modelLabel resolution tiers", () => {
     );
   });
 
-  it("should use the static MODEL_LABELS table for known ids", () => {
-    expect(modelLabel("reportify-pro")).toBe("Reportify Pro");
-  });
-
-  it("should use the known-family rule when MODEL_LABELS misses", () => {
+  it("should use the known-family rule for recognised series", () => {
     expect(modelLabel("claude-opus-4-9")).toBe("Opus 4.9");
+    expect(modelLabel("gpt-5.9")).toBe("GPT 5.9");
   });
 
-  it("should prefer the runtime overlay over every static tier", () => {
+  it("should prefer the runtime overlay (backend label) over the family rule", () => {
     registerDynamicModelLabels({
       "sys-reportify-pro": "Valuz Pro",
-      // Confirm overlay beats even the static MODEL_LABELS table.
-      "reportify-pro": "Valuz Pro Mini",
+      // Backend label beats even a family-rule match.
+      "claude-opus-4-9": "Custom Opus",
     });
     expect(modelLabel("sys-reportify-pro")).toBe("Valuz Pro");
-    expect(modelLabel("reportify-pro")).toBe("Valuz Pro Mini");
+    expect(modelLabel("claude-opus-4-9")).toBe("Custom Opus");
   });
 
-  it("should skip empty / whitespace labels so the static tier still wins", () => {
-    registerDynamicModelLabels({ "reportify-pro": "  " });
-    // Whitespace overlay was rejected — static tier still resolves.
-    expect(modelLabel("reportify-pro")).toBe("Reportify Pro");
+  it("should skip empty / whitespace overlay labels so the rule still wins", () => {
+    registerDynamicModelLabels({ "claude-opus-4-9": "  " });
+    expect(modelLabel("claude-opus-4-9")).toBe("Opus 4.9");
   });
 
   it("should return '' for nullish ids", () => {

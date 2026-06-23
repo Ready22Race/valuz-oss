@@ -46,6 +46,7 @@ export * from "./components/conversation/ApprovalEditModal";
 export * from "./components/conversation/ApprovalResolvedStrip";
 export * from "./components/conversation/AutoApprovedStrip";
 export * from "./components/conversation/UserAnswerSummaryCard";
+export * from "./components/conversation/WorkflowProgressCard";
 export * from "./components/conversation/SkillCallCard";
 export * from "./components/conversation/SkillSearchMenu";
 export * from "./components/conversation/diff-aggregator";
