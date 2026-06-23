@@ -3951,7 +3951,7 @@ export const ConversationPage = () => {
               {isSkillCreatorMode ? (
                 <span className="flex shrink-0 items-center gap-1 rounded-md bg-brand/10 px-2 py-0.5 text-2xs text-brand">
                   <Sparkles className="h-3 w-3" />
-                  Skill Creator {t("cron.model" as Parameters<typeof t>[0])}
+                  Skill Creator
                 </span>
               ) : null}
               {headerTitle ? (
