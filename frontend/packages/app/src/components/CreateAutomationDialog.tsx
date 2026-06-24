@@ -544,88 +544,103 @@ export const CreateAutomationDialog = ({
                 doubt) but unchangeable.
               The label is constant ("所属项目") across both modes — it never
               swaps mid-interaction. */}
-          {showTargetSelector ? (
-            <FormField
-              label={t("automation.targetLabelTask" as Parameters<typeof t>[0])}
-            >
-              <Select
-                value={selectedTargetId ?? ""}
-                onValueChange={(v) => v && onSelectTarget?.(v)}
+          {/* 所属项目 + 智能体 share one row. The project field is dropped when
+              there's neither a selectable target nor a fixed project, so the
+              agent field then spans the full width. */}
+          <div className="flex items-start gap-3">
+            {(showTargetSelector || fixedTargetName) && (
+              <div className="min-w-0 flex-1">
+                {showTargetSelector ? (
+                  <FormField
+                    label={t(
+                      "automation.targetLabelTask" as Parameters<typeof t>[0],
+                    )}
+                  >
+                    <Select
+                      value={selectedTargetId ?? ""}
+                      onValueChange={(v) => v && onSelectTarget?.(v)}
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(actionKind === "task"
+                          ? projectTargets
+                          : targetList
+                        ).map((tg) => (
+                          <SelectItem key={tg.id} value={tg.id}>
+                            {tg.kind === "chat"
+                              ? t(
+                                  "automation.targetChat" as Parameters<
+                                    typeof t
+                                  >[0],
+                                )
+                              : tg.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </FormField>
+                ) : (
+                  <FormField
+                    label={t(
+                      "automation.targetLabelTask" as Parameters<typeof t>[0],
+                    )}
+                  >
+                    {/* Disabled Select = the same control, locked: the dimmed
+                        trigger + non-interactive chevron read as "fixed". */}
+                    <Select value="__fixed__" disabled>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__fixed__">
+                          {fixedTargetName}
+                        </SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </FormField>
+                )}
+              </div>
+            )}
+
+            <div className="min-w-0 flex-1">
+              <FormField
+                label={t("automation.agentLabel" as Parameters<typeof t>[0])}
               >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {(actionKind === "task" ? projectTargets : targetList).map(
-                    (tg) => (
-                      <SelectItem key={tg.id} value={tg.id}>
-                        {tg.kind === "chat"
+                <Select
+                  value={effectiveAgentSlug}
+                  onValueChange={setAgentSlug}
+                  disabled={agents.length === 0}
+                >
+                  <SelectTrigger>
+                    <SelectValue
+                      placeholder={
+                        agents.length === 0
                           ? t(
-                              "automation.targetChat" as Parameters<
+                              "automation.agentPlaceholderEmpty" as Parameters<
                                 typeof t
                               >[0],
                             )
-                          : tg.name}
+                          : t(
+                              "automation.agentPlaceholderPick" as Parameters<
+                                typeof t
+                              >[0],
+                            )
+                      }
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {agents.map((a) => (
+                      <SelectItem key={a.slug} value={a.slug}>
+                        {a.name}
                       </SelectItem>
-                    ),
-                  )}
-                </SelectContent>
-              </Select>
-            </FormField>
-          ) : fixedTargetName ? (
-            <FormField
-              label={t("automation.targetLabelTask" as Parameters<typeof t>[0])}
-            >
-              {/* Disabled Select = the exact same control, locked. The dimmed
-                  trigger + non-interactive chevron read as "fixed". */}
-              <Select value="__fixed__" disabled>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__fixed__">{fixedTargetName}</SelectItem>
-                </SelectContent>
-              </Select>
-            </FormField>
-          ) : null}
-
-          <FormField
-            label={t("automation.agentLabel" as Parameters<typeof t>[0])}
-          >
-            <Select
-              value={effectiveAgentSlug}
-              onValueChange={setAgentSlug}
-              disabled={agents.length === 0}
-            >
-              <SelectTrigger>
-                <SelectValue
-                  placeholder={
-                    agents.length === 0
-                      ? t(
-                          "automation.agentPlaceholderEmpty" as Parameters<
-                            typeof t
-                          >[0],
-                        )
-                      : t(
-                          "automation.agentPlaceholderPick" as Parameters<
-                            typeof t
-                          >[0],
-                        )
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent>
-                {agents.map((a) => (
-                  <SelectItem key={a.slug} value={a.slug}>
-                    {a.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="mt-1 text-xs text-ink-meta">
-              {t("automation.agentHint" as Parameters<typeof t>[0])}
-            </p>
-          </FormField>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FormField>
+            </div>
+          </div>
 
           <FormField label={t("cron.instruction" as Parameters<typeof t>[0])}>
             <Textarea
@@ -635,6 +650,10 @@ export const CreateAutomationDialog = ({
                 "cron.instructionPlaceholder" as Parameters<typeof t>[0],
               )}
               rows={4}
+              // Fixed height with its own scroll — ``field-sizing-fixed``
+              // overrides the Textarea's default content-sizing auto-grow so a
+              // long instruction can't grow the dialog past the viewport.
+              className="field-sizing-fixed h-32 resize-none"
             />
           </FormField>
 
