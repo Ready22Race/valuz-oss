@@ -12,7 +12,7 @@ function Textarea({ className, ...props }: React.ComponentProps<"textarea">) {
       // ``max-h-[40vh]`` caps the visible height so the textarea grows
       // until ~40% of the viewport, then its own scrollbar takes over.
       className={cn(
-        "flex field-sizing-content max-h-[40vh] min-h-16 w-full overflow-y-auto rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-xs transition-[color,box-shadow] outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 md:text-sm dark:bg-input/30 dark:aria-invalid:ring-destructive/40",
+        "flex field-sizing-content max-h-[40vh] min-h-16 w-full overflow-y-auto rounded-lg border border-input bg-surface px-2.5 py-2 text-sm text-foreground shadow-none outline-none transition-[border-color,box-shadow,color,background-color] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-ink-disabled disabled:opacity-100 aria-invalid:border-error aria-invalid:ring-error/20",
         className,
       )}
       {...props}

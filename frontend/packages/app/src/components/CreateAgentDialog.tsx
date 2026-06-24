@@ -12,6 +12,7 @@ import {
   Button,
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogField,
   DialogFooter,
   DialogHeader,
@@ -271,16 +272,16 @@ export const CreateAgentDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="max-h-[85vh] overflow-y-auto border-0 sm:max-w-2xl [&_label]:mb-1.5 [&_label]:font-medium [&_label]:text-[#131313]">
+      <DialogContent className="max-h-[85vh] overflow-y-auto border-0 sm:max-w-2xl">
         {step === "form" ? (
           <>
             <DialogHeader>
               <DialogTitle>
                 {t("agent.createAgent" as Parameters<typeof t>[0])}
               </DialogTitle>
-              <p className="mt-1 text-xs leading-5 text-ink-meta">
+              <DialogDescription>
                 {t("agent.createSubtitle" as Parameters<typeof t>[0])}
-              </p>
+              </DialogDescription>
             </DialogHeader>
 
             {/* ① 基本信息 */}
@@ -338,11 +339,12 @@ export const CreateAgentDialog = ({
                 />
               </DialogField>
 
-              <DialogField
-                label={t("agent.modelChannel" as Parameters<typeof t>[0])}
-              >
+              <div className="mt-2 flex flex-col gap-3">
+                <div className="text-xs font-semibold text-ink-meta">
+                  {t("agent.modelChannel" as Parameters<typeof t>[0])}
+                </div>
                 <AgentModelPicker value={model} onChange={setModel} />
-              </DialogField>
+              </div>
 
               <DialogField label={t("agent.effortLabel")}>
                 <Select

@@ -882,7 +882,7 @@ export const AgentDetailView = ({
           <div className="flex flex-col gap-3">
             <DialogField label={t("agent.selectProject")} required>
               <Select value={targetProject} onValueChange={setTargetProject}>
-                <SelectTrigger className="min-w-24">
+                <SelectTrigger className="w-full">
                   <SelectValue
                     placeholder={t("agent.selectProjectPlaceholder")}
                   />

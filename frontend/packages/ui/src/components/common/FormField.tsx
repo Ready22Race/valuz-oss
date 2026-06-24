@@ -25,14 +25,14 @@ export const FormField = ({
   children,
   className,
 }: FormFieldProps) => (
-  <div className={cn("space-y-1.5", className)}>
+  <div className={cn("flex flex-col", className)}>
     <label
       htmlFor={htmlFor}
-      className="block text-xs font-medium text-ink-label"
+      className="mb-[5px] block text-xs font-medium text-ink-label"
     >
       {label}
     </label>
     {children}
-    {error && <p className="text-xs text-error-text">{error}</p>}
+    {error && <p className="mt-[3px] text-xs text-error-text">{error}</p>}
   </div>
 );

@@ -731,8 +731,8 @@ export function WorkspaceLayoutBase({
             <DialogDescription>{t("project.createDesc")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">
+            <div className="flex flex-col">
+              <label className="mb-[5px] text-xs font-medium text-foreground">
                 {t("project.projectName")}
               </label>
               <Input
@@ -741,15 +741,15 @@ export function WorkspaceLayoutBase({
                 onChange={(event) => setNewName(event.target.value)}
               />
             </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">
+            <div className="flex flex-col">
+              <label className="mb-[5px] text-xs font-medium text-foreground">
                 {t("project.projectDir")}
               </label>
               <div className="flex items-center gap-2">
                 {directoryFieldMode === "picker" && platform.isElectron ? (
                   <button
                     type="button"
-                    className="flex h-9 flex-1 items-center rounded-md border border-input bg-transparent px-3 text-sm shadow-sm transition-colors hover:border-ring"
+                    className="flex h-8 flex-1 items-center rounded-lg border border-input bg-surface px-2.5 text-sm text-foreground transition-[border-color,box-shadow,color,background-color] hover:border-ring focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 focus-visible:outline-none"
                     onClick={() => void handleSelectDirectory()}
                   >
                     <span
@@ -778,7 +778,7 @@ export function WorkspaceLayoutBase({
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="h-9 shrink-0"
+                    className="h-8 shrink-0"
                     onClick={() => void handleSelectDirectory()}
                   >
                     <FolderOpen className="mr-1.5 h-4 w-4" />
@@ -786,11 +786,13 @@ export function WorkspaceLayoutBase({
                   </Button>
                 ) : null}
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="mt-[3px] text-xs text-muted-foreground">
                 {t("project.dirHint")}
               </p>
               {createError ? (
-                <p className="text-xs text-destructive">{createError}</p>
+                <p className="mt-[3px] text-xs text-destructive">
+                  {createError}
+                </p>
               ) : null}
             </div>
             {projectDialogExtraFields}
