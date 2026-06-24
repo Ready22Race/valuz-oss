@@ -9,13 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.db import async_commit_with_retry
-from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.skills.contracts import ProjectRef, RuntimeContext, SkillManifest
 from valuz_agent.modules.skills.models import (
     ProjectSkillConfigRow,
     SkillIndexRow,
-    SkillLibraryStateRow,
 )
 
 
@@ -133,41 +131,30 @@ class SkillDatastore:
         await async_commit_with_retry(self._db, where="SkillDatastore.set_project_skills")
 
     # ------------------------------------------------------------------
-    # Global library on/off switch (valuz_skill_library_state, by slug)
+    # Global library on/off switch (``valuz_skill_index.library_enabled``)
     # ------------------------------------------------------------------
 
-    async def list_library_disabled_slugs(self, user_id: str) -> set[str]:
-        """Slugs the user has turned OFF in the library. Absence = enabled, so
-        only disabled slugs are stored; this is the overlay the catalog reads."""
+    async def list_library_disabled_ids(self, user_id: str) -> set[str]:
+        """Index-row ids the user has turned OFF in the library. Default is on,
+        so this returns only the explicitly-disabled rows — the set the catalog
+        overlay reads to flip ``SkillView.library_enabled`` by id."""
         rows = (
             await self._db.execute(
-                select(SkillLibraryStateRow.slug).where(
-                    SkillLibraryStateRow.user_id == user_id,
-                    SkillLibraryStateRow.enabled.is_(False),
+                select(SkillIndexRow.id).where(
+                    SkillIndexRow.user_id == user_id,
+                    SkillIndexRow.library_enabled.is_(False),
                 )
             )
         ).scalars()
         return set(rows)
 
-    async def set_library_enabled(self, user_id: str, slug: str, enabled: bool) -> None:
-        """Upsert the global library switch for ``slug``. Idempotent."""
-        existing = (
-            await self._db.execute(
-                select(SkillLibraryStateRow).where(
-                    SkillLibraryStateRow.user_id == user_id,
-                    SkillLibraryStateRow.slug == slug,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is None:
-            self._db.add(
-                SkillLibraryStateRow(
-                    user_id=user_id, slug=slug, enabled=enabled, updated_at=now_ms()
-                )
-            )
-        else:
-            existing.enabled = enabled
-            existing.updated_at = now_ms()
+    async def set_library_enabled(self, user_id: str, skill_id: str, enabled: bool) -> None:
+        """Set the global library switch on one index row (the Skills-page
+        representative). No-op if the id is unknown to this owner."""
+        row = await self.get_by_id(user_id, skill_id)
+        if row is None:
+            return
+        row.library_enabled = enabled
         await async_commit_with_retry(self._db, where="SkillDatastore.set_library_enabled")
 
     # ------------------------------------------------------------------

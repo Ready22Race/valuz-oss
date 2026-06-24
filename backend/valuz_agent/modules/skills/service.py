@@ -319,16 +319,15 @@ class SkillLibraryService:
 
         skills.sort(key=_sort_key)
 
-        # Overlay the global library switch (slug-keyed, user-scoped). Absence of
-        # a state row means enabled, so we only flip the ones explicitly turned
-        # off. This is the field the new-conversation ``/`` picker filters on.
-        # Built-in skills (bundled with the client) are always-on and can't be
-        # disabled — guard here too so a stale/forced state row can never hide
-        # one, mirroring the disabled toggle in the UI.
-        disabled = await self._ds.list_library_disabled_slugs(require_current_user_id())
-        if disabled:
+        # Overlay the global library switch (per index row, user-scoped). Default
+        # is on, so we only flip the rows explicitly turned off. This is the field
+        # the new-conversation ``/`` picker filters on. Built-in skills (bundled
+        # with the client) are always-on and can't be disabled — guard here too so
+        # a forced row value can never hide one, mirroring the disabled UI toggle.
+        disabled_ids = await self._ds.list_library_disabled_ids(require_current_user_id())
+        if disabled_ids:
             for s in skills:
-                if s.slug and s.slug in disabled and s.origin_label != "Built-in":
+                if s.id in disabled_ids and s.origin_label != "Built-in":
                     s.library_enabled = False
 
         return SkillsCatalog(project_id=project_id, skills=skills)
@@ -883,9 +882,9 @@ class SkillLibraryService:
 
         # Overlay the global library switch (default on; off only when stored).
         # Built-in skills are always-on (can't be disabled), so never flip them.
-        if skill.slug and skill.origin_label != "Built-in":
-            disabled = await self._ds.list_library_disabled_slugs(require_current_user_id())
-            skill.library_enabled = skill.slug not in disabled
+        if skill.origin_label != "Built-in":
+            disabled_ids = await self._ds.list_library_disabled_ids(require_current_user_id())
+            skill.library_enabled = skill.id not in disabled_ids
 
         return SkillDetail(
             **skill.model_dump(),
@@ -898,20 +897,20 @@ class SkillLibraryService:
         )
 
     async def set_library_enabled(self, skill_id: str, enabled: bool) -> SkillDetail:
-        """Flip a skill's global library switch (slug-keyed) and return it.
+        """Flip a skill's global library switch on its index row and return it.
 
-        Resolves ``skill_id`` to its slug, persists the switch for every index
-        scope sharing that slug at once (one decision per slug), notifies open
-        catalogs, and returns the refreshed detail. Raises ``SkillNotFound``
-        when the id is unknown.
+        ``skill_id`` is the Skills-page row (the dedup-winning representative for
+        the slug). Persists the flag on that row, notifies open catalogs, and
+        returns the refreshed detail. Raises ``SkillNotFound`` when the id is
+        unknown to this owner.
         """
         from valuz_agent.modules.skills.errors import SkillNotFound
 
         user_id = require_current_user_id()
         row = await self._ds.get_by_id(user_id, skill_id)
-        if row is None or not row.slug:
+        if row is None:
             raise SkillNotFound(skill_id)
-        await self._ds.set_library_enabled(user_id, row.slug, enabled)
+        await self._ds.set_library_enabled(user_id, skill_id, enabled)
         self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="library_state")
         return await self.get_skill_detail(skill_id)
 
