@@ -279,6 +279,9 @@ export interface ProjectContextPanelProps {
   todos?: TodoListItem[] | null;
   scheduledTasks?: ScheduledTaskSummary[];
   onAddScheduledTask?: () => void;
+  /** Open the edit dialog for a scheduled task — wired to both a row click and
+   *  the row's "Edit" menu item. */
+  onEditScheduledTask?: (taskId: string) => void;
   onToggleScheduledTask?: (taskId: string, nextStatus: "on" | "off") => void;
   onDeleteScheduledTask?: (taskId: string) => void;
   onManageScheduledTasks?: () => void;
@@ -868,6 +871,7 @@ export const ProjectDetailContextPanel = ({
   todos,
   scheduledTasks,
   onAddScheduledTask,
+  onEditScheduledTask,
   onToggleScheduledTask,
   onDeleteScheduledTask,
   fileTree,
@@ -1589,7 +1593,26 @@ export const ProjectDetailContextPanel = ({
               {(scheduledTasks ?? []).map((task) => (
                 <div
                   key={task.id}
+                  // Row is clickable to edit, but intentionally keeps the
+                  // default cursor (no pointer/hand) per design.
                   className="group relative rounded-lg bg-card"
+                  role={onEditScheduledTask ? "button" : undefined}
+                  tabIndex={onEditScheduledTask ? 0 : undefined}
+                  onClick={
+                    onEditScheduledTask
+                      ? () => onEditScheduledTask(task.id)
+                      : undefined
+                  }
+                  onKeyDown={
+                    onEditScheduledTask
+                      ? (e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            onEditScheduledTask(task.id);
+                          }
+                        }
+                      : undefined
+                  }
                 >
                   <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
                   <div className="relative z-10 py-2.5">
@@ -1609,13 +1632,19 @@ export const ProjectDetailContextPanel = ({
                           ? t("project.taskEnabled")
                           : t("project.taskPaused")}
                       </span>
-                      {(onToggleScheduledTask || onDeleteScheduledTask) && (
+                      {(onEditScheduledTask ||
+                        onToggleScheduledTask ||
+                        onDeleteScheduledTask) && (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <button
                               type="button"
                               className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-label"
                               title={t("project.taskActions")}
+                              // The row itself opens the editor; keep a menu
+                              // click from also triggering that row handler.
+                              onClick={(e) => e.stopPropagation()}
+                              onPointerDown={(e) => e.stopPropagation()}
                             >
                               <MoreHorizontal className="h-3.5 w-3.5" />
                             </button>
@@ -1624,6 +1653,13 @@ export const ProjectDetailContextPanel = ({
                             align="end"
                             className="min-w-[120px]"
                           >
+                            {onEditScheduledTask && (
+                              <DropdownMenuItem
+                                onClick={() => onEditScheduledTask(task.id)}
+                              >
+                                {t("common.edit")}
+                              </DropdownMenuItem>
+                            )}
                             {onToggleScheduledTask && (
                               <DropdownMenuItem
                                 onClick={() =>

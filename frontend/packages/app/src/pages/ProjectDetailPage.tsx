@@ -908,6 +908,12 @@ export const ProjectDetailPage = () => {
   const [previewFileName, setPreviewFileName] = useState("");
   const [previewContent, setPreviewContent] = useState<string | null>(null);
   const [newTaskOpen, setNewTaskOpen] = useState(false);
+  // When set, the automation dialog opens in edit mode (PATCH the row) instead
+  // of create. Holds the fetched detail (prompt_template + trigger) so the
+  // dialog can pre-fill via ``initial``.
+  const [editTask, setEditTask] = useState<
+    Awaited<ReturnType<typeof automationsApi.get>> | null
+  >(null);
   const composerProviders = useComposerProviders(
     providers,
     selectedRuntimeId ?? undefined,
@@ -1072,13 +1078,27 @@ export const ProjectDetailPage = () => {
   // anymore. Re-derive from the composer state only if a future field
   // genuinely needs them at this scope.
 
-  const handleCreateTask = async (data: {
+  const handleSubmitTask = async (data: {
     name: string;
     prompt_template: string;
     agent_slug: string;
     trigger: Trigger;
     action_kind: ActionKind;
   }) => {
+    // Edit mode: PATCH the existing row. The dialog is stateless and calls the
+    // same submit handler for create + edit; ``editTask`` decides which.
+    if (editTask) {
+      await automationsApi.update(editTask.automation_id, {
+        name: data.name,
+        prompt_template: data.prompt_template,
+        agent_slug: data.agent_slug,
+        trigger: data.trigger,
+        action_kind: data.action_kind,
+      });
+      toast.success(t("common.saved" as Parameters<typeof t>[0]));
+      await reloadScheduledTasks();
+      return;
+    }
     // Project detail page is bound to a specific project project by URL —
     // ``project_kind="project"`` + the project's id is the only valid pair
     // here. agent_kind is "project_member" (chat-only library_agent has no
@@ -1102,6 +1122,18 @@ export const ProjectDetailPage = () => {
     const schedRes = await automationsApi.listGroups(id);
     setScheduledTasks(schedRes.groups.flatMap((g) => g.automations));
   }, [id]);
+
+  // Open the automation editor for a row: fetch the full detail (the list rows
+  // carry no prompt_template) and open the dialog in edit mode.
+  const openEditScheduledTask = useCallback(async (automationId: string) => {
+    try {
+      const detail = await automationsApi.get(automationId);
+      setEditTask(detail);
+      setNewTaskOpen(true);
+    } catch {
+      toast.error(t("common.failed" as Parameters<typeof t>[0]));
+    }
+  }, []);
 
   const handleToggleScheduledTask = useCallback(
     async (taskId: string, nextStatus: "on" | "off") => {
@@ -1378,6 +1410,7 @@ export const ProjectDetailPage = () => {
               : "—",
         }))}
         onAddScheduledTask={() => setNewTaskOpen(true)}
+        onEditScheduledTask={openEditScheduledTask}
         onToggleScheduledTask={handleToggleScheduledTask}
         onDeleteScheduledTask={handleDeleteScheduledTask}
         fileTree={fileTree}
@@ -1630,15 +1663,31 @@ export const ProjectDetailPage = () => {
           hint copy ("Tasks created here are linked to this project"). */}
       <CreateAutomationDialog
         open={newTaskOpen}
-        onOpenChange={setNewTaskOpen}
+        onOpenChange={(open) => {
+          // Reset edit context on close so the next "+ New" starts fresh in
+          // create mode.
+          if (!open) setEditTask(null);
+          setNewTaskOpen(open);
+        }}
         description={t("project.instruction" as Parameters<typeof t>[0])}
-        onSubmit={handleCreateTask}
+        onSubmit={handleSubmitTask}
         agents={rawMembers.map((entry) => ({
           slug: entry.member.agent_slug,
           name: entry.agent?.name ?? entry.member.agent_slug,
         }))}
         allowTaskMode
         fixedTargetName={displayName}
+        initial={
+          editTask
+            ? {
+                name: editTask.name,
+                prompt_template: editTask.prompt_template,
+                agent_slug: editTask.agent_slug,
+                trigger: editTask.trigger,
+                action_kind: (editTask.action_kind as ActionKind) ?? "chat",
+              }
+            : undefined
+        }
       />
 
       <DeployAgentsDialog
