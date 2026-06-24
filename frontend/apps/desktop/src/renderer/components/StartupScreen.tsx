@@ -160,7 +160,7 @@ export const StartupScreen = ({
                     <span className="splash-progress-label">
                       BOOT&nbsp;
                       <span className="splash-progress-pct">
-                        {String(progress).padStart(3, "0")}%
+                        {progress}%
                       </span>
                     </span>
                     <span className="splash-progress-meta">
