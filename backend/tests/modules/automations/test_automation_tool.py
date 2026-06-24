@@ -19,6 +19,7 @@ service does with it).
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -121,7 +122,10 @@ class StubService:
         def __init__(self, parent: StubService) -> None:
             self._parent = parent
 
-        async def get_automation(self, automation_id: str):
+        async def get_automation(self, user_id: str, automation_id: str):  # noqa: ARG002
+            # Signature mirrors the real ``AutomationDatastore.get_automation``
+            # (user_id first) so the dispatcher's call shape is exercised — a
+            # one-arg stub would mask a missing-user_id regression.
             return self._parent._rows.get(automation_id) or _row(automation_id)
 
     @property
@@ -541,3 +545,94 @@ class TestDecoratedToolTriggerCoercion:
         )
         payload = stub_service.calls[0][1]["payload"]
         assert payload.trigger.kind == "manual"
+
+
+# ── Session-context resolution ─────────────────────────────────────
+
+
+class _FakeKernelSession:
+    """Mimics the kernel ``SessionData`` shape the resolver reads.
+
+    Crucially it has **no** ``project_id`` attribute — project_id lives under
+    ``metadata["valuz"]``. Reproduces the regression where the resolver did
+    ``str(kernel_session.project_id)`` and blew up with ``AttributeError``.
+    """
+
+    def __init__(self, *, user_id: str, metadata: dict[str, Any]) -> None:
+        self.user_id = user_id
+        self.metadata = metadata
+
+
+class _FakeProjectDatastore:
+    def __init__(self, db: Any) -> None:  # noqa: ARG002
+        pass
+
+    async def get_by_id(self, user_id: str, project_id: str):  # noqa: ARG002
+        return SimpleNamespace(id=project_id, kind="project")
+
+
+@pytest.fixture
+def patched_resolver(monkeypatch: pytest.MonkeyPatch):
+    """Patch the inner imports of ``_resolve_session_context`` so it runs
+    without a kernel or DB. ``session_box["value"]`` controls what
+    ``kernel_client.get_session`` returns."""
+    session_box: dict[str, Any] = {"value": None}
+
+    async def _fake_get_session(user_id: str, session_id: str):  # noqa: ARG001
+        return session_box["value"]
+
+    class _UoW:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+    monkeypatch.setattr(mod, "require_current_user_id", lambda: "user-1")
+    monkeypatch.setattr(
+        "valuz_agent.adapters.kernel_client.get_session", _fake_get_session
+    )
+    monkeypatch.setattr(
+        "valuz_agent.infra.db.async_unit_of_work", lambda commit=True: _UoW()
+    )
+    monkeypatch.setattr(
+        "valuz_agent.modules.projects.datastore.ProjectDatastore",
+        _FakeProjectDatastore,
+    )
+    return session_box
+
+
+class TestResolveSessionContext:
+    async def test_should_read_project_id_from_valuz_metadata(
+        self, patched_resolver: dict[str, Any]
+    ) -> None:
+        patched_resolver["value"] = _FakeKernelSession(
+            user_id="user-1",
+            metadata={"valuz": {"project_id": "ws-42", "agent_slug": "qa"}},
+        )
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context(
+            "sess-1"
+        )
+        assert project_id == "ws-42"
+        assert project_kind == "project"
+        assert bound_agent_slug == "qa"
+
+    async def test_should_treat_missing_project_id_as_chat(
+        self, patched_resolver: dict[str, Any]
+    ) -> None:
+        patched_resolver["value"] = _FakeKernelSession(
+            user_id="user-1",
+            metadata={"valuz": {"agent_slug": "default-assistant"}},
+        )
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context(
+            "sess-1"
+        )
+        assert project_id is None
+        assert project_kind == "chat"
+        assert bound_agent_slug == "default-assistant"
+
+    async def test_should_treat_gc_d_session_as_chat(
+        self, patched_resolver: dict[str, Any]
+    ) -> None:
+        patched_resolver["value"] = None
+        assert await mod._resolve_session_context("sess-1") == (None, "chat", None)
