@@ -156,3 +156,50 @@ def test_extractor_surfaces_usage_in_review_prompt(store):
     asyncio.run(ext.extract(transcript="user: please review this conversation content"))
     assert "/2,500 chars (" in seen["p"]  # global budget surfaced
     assert "/1,500 chars (" in seen["p"]  # user budget surfaced
+
+
+def test_user_directives_block_empty_vs_present():
+    from valuz_agent.modules.memory.prompts import build_user_directives_block
+
+    assert build_user_directives_block(None) == ""
+    assert build_user_directives_block("   ") == ""
+    block = build_user_directives_block("Always remember my key conclusions globally.")
+    assert "<user_directives" in block and "</user_directives>" in block
+    assert "Always remember my key conclusions globally." in block
+    # Spells out the precedence (override soft heuristics) so the reviewer honors it.
+    assert "PRECEDENCE" in block
+
+
+def _capture_prompt(store, **extract_kwargs):  # noqa: ANN001, ANN202
+    seen: dict[str, str] = {}
+
+    async def _capture(prompt):  # noqa: ANN001, ANN202
+        seen["p"] = prompt
+        return json.dumps({"ops": []})
+
+    ext = MemoryExtractor(store=store, complete=_capture)
+    asyncio.run(ext.extract(transcript="user: please review this content", **extract_kwargs))
+    return seen["p"]
+
+
+def test_extractor_injects_custom_instructions(store):
+    prompt = _capture_prompt(store, custom_instructions="Remember every key investment thesis.")
+    assert "<user_directives" in prompt
+    assert "Remember every key investment thesis." in prompt
+
+
+def test_extractor_omits_directives_when_no_custom_instructions(store):
+    assert "<user_directives" not in _capture_prompt(store)
+    assert "<user_directives" not in _capture_prompt(store, custom_instructions="")
+
+
+def test_task_review_prompt_injects_custom_instructions(store):
+    prompt = _capture_prompt(
+        store,
+        task_digest="TASK: do X\nGOAL: y\nOUTCOME: completed",
+        project_id="p1",
+        project_context="Project name: ACME",
+        custom_instructions="Keep multi-agent lessons even if obvious.",
+    )
+    assert "<user_directives" in prompt
+    assert "Keep multi-agent lessons even if obvious." in prompt

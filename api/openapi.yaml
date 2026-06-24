@@ -2414,10 +2414,18 @@ components:
       enum: [user, global, project]
     MemoryView:
       type: object
-      required: [enabled, auto_extract, entries]
+      required: [enabled, auto_extract, custom_instructions, entries]
       properties:
         enabled: {type: boolean}
         auto_extract: {type: boolean}
+        custom_instructions:
+          type: string
+          description: >-
+            User-authored guidance appended to the background reviewer prompt
+            (global). Steers what the auto-extractor saves/skips and takes
+            precedence over the default soft heuristics; empty disables it.
+            Hard rules (secret redaction, knowledge-base dedup, output contract)
+            are not overridable.
         entries:
           type: object
           additionalProperties:
@@ -2426,15 +2434,19 @@ components:
           description: Entries per scope, keyed by target (user / global / project).
     MemorySettings:
       type: object
-      required: [enabled, auto_extract]
+      required: [enabled, auto_extract, custom_instructions]
       properties:
         enabled: {type: boolean}
         auto_extract: {type: boolean}
+        custom_instructions: {type: string}
     MemorySettingsPatch:
       type: object
       properties:
         enabled: {type: boolean}
         auto_extract: {type: boolean}
+        custom_instructions:
+          type: string
+          description: Global reviewer guidance; capped server-side (1500 chars).
     MemoryEntryDelete:
       type: object
       required: [target, old_text]

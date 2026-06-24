@@ -60,8 +60,12 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
     async def _true(_db):  # noqa: ANN001, ANN202
         return True
 
+    async def _no_custom(_db):  # noqa: ANN001, ANN202
+        return ""
+
     monkeypatch.setattr(prefs, "get_memory_enabled", _true)
     monkeypatch.setattr(prefs, "get_memory_auto_extract", _true)
+    monkeypatch.setattr(prefs, "get_memory_custom_instructions", _no_custom)
 
     calls = {"create": 0, "run": 0, "delete": 0}
 
