@@ -352,24 +352,85 @@ const SessionStatusPill = ({ status }: { status?: string }) => {
 const NEW_SESSION_ID = "new";
 
 /**
- * Whether an ``automation`` tool call's input is a ``create`` action — the only
- * action that renders a propose→confirm card (the others render the
- * ``AutomationToolCard``). Reads the still-streaming tool input, so it's safe to
- * call before the tool completes.
+ * Parse an ``automation`` tool call's INPUT into a create spec, or null if it
+ * isn't a ``create`` action. ``create`` is the only action that renders a
+ * propose→confirm card (others render ``AutomationToolCard``).
+ *
+ * We render the card from the input (not the tool output) because the output is
+ * runtime-dependent: the Valuz/DeepAgents (LangChain) runtime wraps it in a
+ * content envelope that isn't bare JSON, so ``parseAutomationToolOutput``
+ * returns null there. The input is always clean — same reason ``AgentProposalCard``
+ * renders from input. Note ``trigger`` may arrive as a JSON *string* (the model
+ * sometimes stringifies it), so we parse it back into the discriminated union.
  */
-function isAutomationCreateInput(input: unknown): boolean {
-  if (!input) return false;
+function parseAutomationCreateInput(input: unknown): {
+  name: string;
+  prompt_template: string;
+  trigger: import("@valuz/core").Trigger | null;
+  agent_slug?: string;
+  action_kind?: "chat" | "task";
+} | null {
+  if (!input) return null;
   let parsed: unknown;
   try {
     parsed = typeof input === "string" ? JSON.parse(input) : input;
   } catch {
-    return false;
+    return null;
   }
-  return (
-    typeof parsed === "object" &&
-    parsed !== null &&
-    (parsed as { action?: unknown }).action === "create"
-  );
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    (parsed as { action?: unknown }).action !== "create"
+  ) {
+    return null;
+  }
+  const p = parsed as Record<string, unknown>;
+  let trigger: unknown = p.trigger ?? null;
+  if (typeof trigger === "string") {
+    try {
+      trigger = JSON.parse(trigger);
+    } catch {
+      trigger = null;
+    }
+  }
+  const actionKind =
+    p.action_kind === "task"
+      ? "task"
+      : p.action_kind === "chat"
+        ? "chat"
+        : undefined;
+  return {
+    name: typeof p.name === "string" ? p.name : "",
+    prompt_template: typeof p.prompt_template === "string" ? p.prompt_template : "",
+    trigger:
+      trigger && typeof trigger === "object"
+        ? (trigger as import("@valuz/core").Trigger)
+        : null,
+    agent_slug: typeof p.agent_slug === "string" ? p.agent_slug : undefined,
+    action_kind: actionKind,
+  };
+}
+
+/** Compact, locale-agnostic schedule summary from a trigger — a fallback for
+ *  when the server's ``trigger_human_readable`` isn't available (the tool output
+ *  wasn't parseable on this runtime). */
+function automationTriggerSummary(
+  trigger: import("@valuz/core").Trigger | null,
+): string | undefined {
+  if (!trigger) return undefined;
+  if (trigger.kind === "cron") {
+    return trigger.timezone
+      ? `${trigger.cron_expr} · ${trigger.timezone}`
+      : trigger.cron_expr;
+  }
+  if (trigger.kind === "interval") {
+    const s = trigger.seconds;
+    if (s % 86400 === 0) return `every ${s / 86400}d`;
+    if (s % 3600 === 0) return `every ${s / 3600}h`;
+    if (s % 60 === 0) return `every ${s / 60}m`;
+    return `every ${s}s`;
+  }
+  return "Manual";
 }
 
 export const ConversationPage = () => {
@@ -1434,7 +1495,7 @@ export const ConversationPage = () => {
         if (block.kind !== "tool") continue;
         const tname = block.tool.title || "";
         if (tname !== "automation" && !tname.endsWith("__automation")) continue;
-        if (isAutomationCreateInput(block.tool.input)) ids.push(block.tool.id);
+        if (parseAutomationCreateInput(block.tool.input)) ids.push(block.tool.id);
       }
     }
     return ids.join(",");
@@ -1632,35 +1693,49 @@ export const ConversationPage = () => {
 
         // ``create`` PROPOSES — render a propose→confirm card (mirrors
         // propose_agent). Every other action keeps the read-only tool card.
-        const isCreate =
-          result?.action === "create" || isAutomationCreateInput(tool.input);
+        // We render primarily from the INPUT (always clean) and enrich from the
+        // OUTPUT proposal when it's parseable — the Valuz/DeepAgents runtime
+        // wraps the output so ``result`` is null there, but the card must still
+        // render and be confirmable.
+        const inputSpec = parseAutomationCreateInput(tool.input);
+        const proposal = result?.proposal ?? null;
+        const isCreate = result?.action === "create" || inputSpec != null;
         if (isCreate) {
-          const proposal = result?.proposal ?? null;
           // The create tool rejected the proposal (bad cron / task-in-chat).
           const validationError = result && !result.ok ? result.message : null;
-          // Still streaming (no resolved proposal, no error) — generic renderer.
-          if (!proposal && !validationError) return null;
+          // Nothing to show yet (no parsed input, no proposal, no error) —
+          // generic renderer until something lands.
+          if (!inputSpec && !proposal && !validationError) return null;
+          const cardName = proposal?.name ?? inputSpec?.name ?? "";
+          const cardPrompt = proposal?.prompt_template ?? inputSpec?.prompt_template;
+          const confirmTrigger = proposal?.trigger ?? inputSpec?.trigger ?? null;
+          const cardTriggerHuman =
+            proposal?.trigger_human_readable ??
+            automationTriggerSummary(confirmTrigger);
+          const cardActionKind =
+            proposal?.action_kind ?? inputSpec?.action_kind ?? "chat";
+          const cardAgentName = proposal?.agent_name ?? inputSpec?.agent_slug ?? null;
           const entry = automationProposalStates[tool.id] || {
             state: "pending" as const,
           };
           return (
             <AutomationProposalCard
-              name={proposal?.name ?? ""}
-              promptTemplate={proposal?.prompt_template}
-              triggerHuman={proposal?.trigger_human_readable}
-              agentName={proposal?.agent_name ?? null}
-              actionKind={proposal?.action_kind ?? "chat"}
+              name={cardName}
+              promptTemplate={cardPrompt}
+              triggerHuman={cardTriggerHuman}
+              agentName={cardAgentName}
+              actionKind={cardActionKind}
               state={entry.state}
               errorMessage={entry.errorMessage}
               validationError={validationError}
               onConfirm={() => {
-                if (!proposal) return;
+                if (!confirmTrigger || !cardName) return;
                 void handleConfirmAutomation(tool.id, {
-                  name: proposal.name,
-                  prompt_template: proposal.prompt_template,
-                  trigger: proposal.trigger,
-                  agent_slug: proposal.agent_slug,
-                  action_kind: proposal.action_kind,
+                  name: cardName,
+                  prompt_template: cardPrompt ?? "",
+                  trigger: confirmTrigger,
+                  agent_slug: proposal?.agent_slug ?? inputSpec?.agent_slug,
+                  action_kind: cardActionKind,
                 });
               }}
               onDismiss={() => handleDismissAutomation(tool.id)}
