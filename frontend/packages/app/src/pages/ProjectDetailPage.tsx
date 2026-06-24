@@ -29,9 +29,16 @@ import {
 import {
   CreateAutomationDialog,
   DeployAgentsDialog,
-  TaskStatusLabel,
+  RowActionsMenu,
+  formatCreatedAt,
 } from "@valuz/app/components";
-import { FilePenLine, Plus, Trash2 } from "lucide-react";
+import {
+  FilePenLine,
+  ListChecks,
+  MessageSquare,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 import {
   projectsApi,
@@ -59,7 +66,6 @@ import {
   type LLMChannel,
   type ConnectorItem,
   type Task,
-  type TaskEvent,
   type Agent,
   type MemberWithAgent,
   skillsApi,
@@ -167,33 +173,48 @@ const ProjectRecents = ({
   }
 
   return (
-    <ul className="flex flex-col gap-0.5">
+    <ul className="flex flex-col">
       {sessions.map((s) => {
         const fallback = t("sidebar.newChat" as Parameters<typeof t>[0]);
         const title = s.name ?? s.last_user_message_text ?? fallback;
         return (
-          <li key={s.id}>
+          <li key={s.id} className="group relative">
             <ContextMenu>
               <ContextMenuTrigger asChild>
-                <button
-                  type="button"
+                <div
+                  role="button"
+                  tabIndex={0}
                   onClick={() => onOpen(s.id)}
-                  className="-mx-3 flex w-[calc(100%+24px)] items-center gap-2 rounded-xl bg-transparent px-3 py-2 text-left transition-colors hover:bg-surface-soft"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onOpen(s.id);
+                    }
+                  }}
+                  className="flex w-full items-center gap-2 rounded-xl bg-transparent px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-base font-medium text-ink-heading">
-                      {title}
-                    </div>
-                  </div>
-                  {SESSION_STATUS_KEY[s.status] && (
-                    <StatusPill
-                      status={s.status}
-                      label={t(
-                        SESSION_STATUS_KEY[s.status] as Parameters<typeof t>[0],
-                      )}
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
+                    {title}
+                  </span>
+                  <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
+                    {formatCreatedAt(s.updated_at, t)}
+                  </span>
+                  <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
+                    {SESSION_STATUS_KEY[s.status] && (
+                      <StatusPill
+                        status={s.status}
+                        label={t(
+                          SESSION_STATUS_KEY[s.status] as Parameters<typeof t>[0],
+                        )}
+                        className="transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
+                      />
+                    )}
+                    <RowActionsMenu
+                      onRename={() => onRename(s.id, s.name ?? "")}
+                      onDelete={() => onDelete(s.id, title)}
                     />
-                  )}
-                </button>
+                  </span>
+                </div>
               </ContextMenuTrigger>
               <ContextMenuContent className="min-w-[140px]">
                 <ContextMenuItem onSelect={() => onRename(s.id, s.name ?? "")}>
@@ -229,92 +250,6 @@ const TASK_STATUS_KEY: Record<string, string> = {
   blocked: "task.statusBlocked",
 };
 
-type TaskTiming = {
-  created_at?: number;
-  updated_at?: number;
-  // Task status captured at fetch time. The event log is fetched lazily and
-  // would otherwise go stale (a pause/resume/completion wouldn't refresh it),
-  // leaving the elapsed clock walking an out-of-date event stream. Comparing
-  // this against the live ``task.status`` lets us refetch on every status
-  // change so ``pausedMillis`` always sees the latest ``paused`` event.
-  status?: string;
-  events?: TaskEvent[];
-};
-
-/** Total milliseconds the task spent paused, so the elapsed clock can
- * subtract it: a paused task's timer freezes, and a resumed one picks up
- * where it left off instead of jumping forward by the pause gap. Walks
- * ``paused`` → ``resumed`` pairs; an unmatched trailing ``paused`` means
- * the task is paused right now, so the open pause is counted up to ``end``
- * (which keeps the displayed elapsed pinned as wall-clock advances). */
-function pausedMillis(events: TaskEvent[], end: number): number {
-  let paused = 0;
-  let pauseStart: number | null = null;
-  for (const event of events) {
-    const ts = new Date(event.created_at).getTime();
-    if (Number.isNaN(ts)) continue;
-    if (event.type === "paused") {
-      pauseStart = ts;
-    } else if (event.type === "resumed" && pauseStart !== null) {
-      paused += Math.max(0, ts - pauseStart);
-      pauseStart = null;
-    }
-  }
-  if (pauseStart !== null) paused += Math.max(0, end - pauseStart);
-  return paused;
-}
-
-function formatTaskElapsed(
-  task: Task,
-  timing: TaskTiming | undefined,
-  now: Date,
-  t: ReturnType<typeof useTranslation>["t"],
-) {
-  const events = timing?.events ?? [];
-  const kickoff = events.find((event) => event.type === "kickoff") ?? events[0];
-  const createdAt =
-    kickoff?.created_at ?? task.created_at ?? timing?.created_at;
-  if (!createdAt) return "";
-  const start = new Date(createdAt).getTime();
-  let end = now.getTime();
-  if (["completed", "failed", "stopped"].includes(task.status)) {
-    const terminal = [...events]
-      .reverse()
-      .find((event) =>
-        ["task_completed", "kickoff_failed", "task_failed", "stopped"].includes(
-          event.type,
-        ),
-      );
-    const updatedAt =
-      terminal?.created_at ?? task.updated_at ?? timing?.updated_at;
-    if (updatedAt) end = new Date(updatedAt).getTime();
-  } else if (task.status === "paused") {
-    // Pin the clock at the pause moment. The event log on this page can lag
-    // or cycle (pause/resume churn), so ``pausedMillis`` alone can miss the
-    // current open pause and let the clock run. ``task.status`` is the live
-    // signal, so freeze on the fresh ``task.updated_at`` (set on the pause)
-    // rather than trusting the event stream to show the open pause.
-    const pausedAt = task.updated_at ?? timing?.updated_at;
-    if (pausedAt) end = new Date(pausedAt).getTime();
-  }
-  if (Number.isNaN(start) || Number.isNaN(end)) return "";
-  const total = Math.max(
-    0,
-    Math.floor((end - start - pausedMillis(events, end)) / 1000),
-  );
-  if (total < 60) return t("task.durationSec", { sec: total });
-  if (total < 3600) {
-    return t("task.durationMinSec", {
-      min: Math.floor(total / 60),
-      sec: total % 60,
-    });
-  }
-  return t("task.durationHourMin", {
-    hour: Math.floor(total / 3600),
-    min: Math.floor((total % 3600) / 60),
-  });
-}
-
 function taskStatusLabel(
   task: Task,
   t: ReturnType<typeof useTranslation>["t"],
@@ -326,75 +261,16 @@ function taskStatusLabel(
 
 interface ProjectTasksProps {
   tasks: Task[];
-  members: ProjectMemberItem[];
   onOpen: (taskId: string) => void;
   onAddTask: () => void;
 }
 
 const ProjectTasks = ({
   tasks,
-  members,
   onOpen,
   onAddTask,
 }: ProjectTasksProps) => {
   const { t } = useTranslation();
-  const [now, setNow] = useState(() => new Date());
-  const [taskTimings, setTaskTimings] = useState<Record<string, TaskTiming>>(
-    {},
-  );
-  const memberNameBySlug = useMemo(
-    () => new Map(members.map((member) => [member.slug, member.name])),
-    [members],
-  );
-
-  useEffect(() => {
-    const id = window.setInterval(() => setNow(new Date()), 1000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    // Refetch when we have no events yet OR the cached snapshot predates the
-    // task's current status (e.g. it was just paused/resumed/completed) — so
-    // the elapsed clock always reflects the latest pause boundaries.
-    const stale = tasks.filter((task) => {
-      const cached = taskTimings[task.id];
-      return !cached?.events || cached.status !== task.status;
-    });
-    if (stale.length === 0) return;
-    let cancelled = false;
-    void Promise.all(
-      stale.map(async (task) => {
-        try {
-          const detail = await tasksApi.getTask(task.id);
-          return {
-            id: task.id,
-            timing: {
-              created_at: detail.task.created_at,
-              updated_at: detail.task.updated_at,
-              // Pin to the prop status we compared against (not
-              // ``detail.task.status``) so a fetch/prop race can't loop.
-              status: task.status,
-              events: detail.events,
-            },
-          };
-        } catch {
-          return null;
-        }
-      }),
-    ).then((rows) => {
-      if (cancelled) return;
-      setTaskTimings((prev) => {
-        const next = { ...prev };
-        for (const row of rows) {
-          if (row) next[row.id] = row.timing;
-        }
-        return next;
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [tasks, taskTimings]);
 
   if (tasks.length === 0) {
     return (
@@ -411,54 +287,143 @@ const ProjectTasks = ({
   }
 
   return (
-    <ul className="flex flex-col gap-0.5">
-      {tasks.map((task) => {
-        const elapsed = formatTaskElapsed(task, taskTimings[task.id], now, t);
+    <ul className="flex flex-col">
+      {tasks.map((task) => (
+        <li key={task.id}>
+          <button
+            type="button"
+            onClick={() => onOpen(task.id)}
+            className="flex w-full items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
+          >
+            <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
+              {task.title}
+            </span>
+            <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
+              {formatCreatedAt(task.created_at, t)}
+            </span>
+            <StatusPill status={task.status} label={taskStatusLabel(task, t)} />
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+};
+
+/* ── Project home "All" — sessions + tasks merged, icon-prefixed ─── */
+
+const ProjectAllList = ({
+  sessions,
+  tasks,
+  onOpenSession,
+  onOpenTask,
+  onRenameSession,
+  onDeleteSession,
+}: {
+  sessions: SessionListItem[];
+  tasks: Task[];
+  onOpenSession: (id: string) => void;
+  onOpenTask: (id: string) => void;
+  onRenameSession: (id: string, currentName: string) => void;
+  onDeleteSession: (id: string, label: string) => void;
+}) => {
+  const { t } = useTranslation();
+  const items = useMemo(() => {
+    const merged = [
+      ...sessions.map((s) => ({
+        kind: "chat" as const,
+        id: s.id,
+        title:
+          s.name ??
+          s.last_user_message_text ??
+          t("sidebar.newChat" as Parameters<typeof t>[0]),
+        // Rename seeds from the raw session name (the title may be a
+        // message-text / fallback, not the editable name).
+        renameSeed: s.name ?? "",
+        status: s.status as string,
+        statusKey: SESSION_STATUS_KEY[s.status],
+        // A session's list ``updated_at`` is its creation time (see
+        // ``formatCreatedAt``) — used for both the displayed time and sorting.
+        created: s.updated_at,
+        sortAt: s.updated_at,
+      })),
+      ...tasks.map((tk) => ({
+        kind: "task" as const,
+        id: tk.id,
+        title: tk.title,
+        status: tk.status,
+        statusKey: TASK_STATUS_KEY[tk.status],
+        created: tk.created_at,
+        sortAt: tk.updated_at,
+      })),
+    ];
+    // Most-recently-active first, matching the per-tab lists.
+    return merged.sort((a, b) => b.sortAt - a.sortAt);
+  }, [sessions, tasks, t]);
+
+  if (items.length === 0) {
+    return (
+      <div className="px-3 py-12 text-center text-sm text-ink-meta">
+        {t("project.noSessions" as Parameters<typeof t>[0])}
+      </div>
+    );
+  }
+
+  return (
+    <ul className="flex flex-col">
+      {items.map((item) => {
+        // Same leading icon as the Activity list: a task vs a conversation.
+        const Icon = item.kind === "task" ? ListChecks : MessageSquare;
         return (
-          <li key={task.id}>
-            <button
-              type="button"
-              onClick={() => onOpen(task.id)}
-              className="-mx-3 flex w-[calc(100%+24px)] items-start gap-2 rounded-xl px-3 py-2 text-left transition-colors hover:bg-surface-soft"
+          <li key={`${item.kind}-${item.id}`} className="group relative">
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() =>
+                item.kind === "task"
+                  ? onOpenTask(item.id)
+                  : onOpenSession(item.id)
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  if (item.kind === "task") onOpenTask(item.id);
+                  else onOpenSession(item.id);
+                }
+              }}
+              className="flex w-full items-center gap-2 rounded-xl px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
             >
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-base font-medium text-ink-heading">
-                    {task.title}
-                  </span>
-                </div>
-                <p className="truncate text-[11px] leading-5 text-ink-meta">
-                  {task.status === "active" && (
-                    <span className="mr-1 inline-block h-[5px] w-[5px] rounded-full bg-[#725cf9] align-middle animate-pulse" />
-                  )}
-                  <span
+              <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
+                <Icon className="h-3 w-3" strokeWidth={2} />
+                {item.kind === "task"
+                  ? t("project.tasksColumn" as Parameters<typeof t>[0])
+                  : t("project.chatTab" as Parameters<typeof t>[0])}
+              </span>
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
+                {item.title}
+              </span>
+              <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
+                {formatCreatedAt(item.created, t)}
+              </span>
+              <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
+                {item.statusKey && (
+                  <StatusPill
+                    status={item.status}
+                    label={t(item.statusKey as Parameters<typeof t>[0])}
                     className={
-                      task.status === "active"
-                        ? "text-[#725cf9]"
-                        : "text-[#898f9c]"
+                      item.kind === "chat"
+                        ? "transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
+                        : undefined
                     }
-                  >
-                    <TaskStatusLabel status={task.status} />
-                  </span>
-                  {elapsed ? (
-                    <>
-                      {" · "}
-                      {t("task.totalDuration" as Parameters<typeof t>[0], {
-                        duration: elapsed,
-                      })}
-                    </>
-                  ) : null}
-                  <span className="mx-2 text-surface-border">|</span>
-                  {memberNameBySlug.get(task.lead_agent_slug) ??
-                    task.lead_agent_slug}
-                </p>
-              </div>
-              <StatusPill
-                status={task.status}
-                label={taskStatusLabel(task, t)}
-                className="mt-1"
-              />
-            </button>
+                  />
+                )}
+                {item.kind === "chat" && (
+                  <RowActionsMenu
+                    onRename={() => onRenameSession(item.id, item.renameSeed)}
+                    onDelete={() => onDeleteSession(item.id, item.title)}
+                  />
+                )}
+              </span>
+            </div>
           </li>
         );
       })}
@@ -600,6 +565,29 @@ export const ProjectDetailPage = () => {
     name: string;
   } | null>(null);
   const [pendingDeleteBusy, setPendingDeleteBusy] = useState(false);
+  // Shared conversation-row actions, used by both the "全部" and "对话" lists'
+  // hover ``⋯`` menu: rename via prompt, delete via the unified confirm dialog.
+  const handleRenameSession = useCallback(
+    async (sid: string, current: string) => {
+      const next = window.prompt(
+        t("sidebar.rename" as Parameters<typeof t>[0]),
+        current,
+      );
+      if (next === null) return;
+      const trimmed = next.trim();
+      if (!trimmed || trimmed === current) return;
+      try {
+        await renameSession(sid, trimmed);
+        toast.success(t("sidebar.renamed" as Parameters<typeof t>[0]));
+      } catch {
+        toast.error(t("sidebar.renameFailed" as Parameters<typeof t>[0]));
+      }
+    },
+    [t, renameSession],
+  );
+  const handleDeleteSession = useCallback((sid: string, label: string) => {
+    setPendingDelete({ kind: "session", id: sid, name: label });
+  }, []);
   // Project conversations bind to one of the project's configured agents
   // (instead of a raw model). The composer remembers the agent PER MODE —
   // Chat keeps the last chat agent, Task keeps the last Lead — because the
@@ -1592,52 +1580,44 @@ export const ProjectDetailPage = () => {
               (lead-dispatch tasks) split into two tabs. The Task tab always
               shows — empty state offers an "add task" affordance. */}
           <div className="mt-4 w-full pb-6">
-            <Tabs defaultValue="tasks">
+            <Tabs defaultValue="all">
               <div className="flex items-center border-b border-surface-border">
                 <TabsList
                   variant="line"
                   className="h-9 justify-start gap-4 border-0 p-0"
                 >
-                  <TabsTrigger value="tasks">
-                    {t("project.tasksColumn" as Parameters<typeof t>[0])}
+                  <TabsTrigger value="all">
+                    {t("activity.filterAll" as Parameters<typeof t>[0])}
                   </TabsTrigger>
                   <TabsTrigger value="chat">
                     {t("project.chatTab" as Parameters<typeof t>[0])}
                   </TabsTrigger>
+                  <TabsTrigger value="tasks">
+                    {t("project.tasksColumn" as Parameters<typeof t>[0])}
+                  </TabsTrigger>
                 </TabsList>
               </div>
+              <TabsContent value="all" className="mt-1">
+                <ProjectAllList
+                  sessions={projectSessions}
+                  tasks={tasks}
+                  onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
+                  onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
+                  onRenameSession={handleRenameSession}
+                  onDeleteSession={handleDeleteSession}
+                />
+              </TabsContent>
               <TabsContent value="chat" className="mt-1">
                 <ProjectRecents
                   sessions={projectSessions}
                   onOpen={(sid) => navigate(`/conversation/${sid}`)}
-                  onRename={async (sid, current) => {
-                    const next = window.prompt(
-                      t("sidebar.rename" as Parameters<typeof t>[0]),
-                      current,
-                    );
-                    if (next === null) return;
-                    const trimmed = next.trim();
-                    if (!trimmed || trimmed === current) return;
-                    try {
-                      await renameSession(sid, trimmed);
-                      toast.success(
-                        t("sidebar.renamed" as Parameters<typeof t>[0]),
-                      );
-                    } catch {
-                      toast.error(
-                        t("sidebar.renameFailed" as Parameters<typeof t>[0]),
-                      );
-                    }
-                  }}
-                  onDelete={(sid, label) => {
-                    setPendingDelete({ kind: "session", id: sid, name: label });
-                  }}
+                  onRename={handleRenameSession}
+                  onDelete={handleDeleteSession}
                 />
               </TabsContent>
               <TabsContent value="tasks" className="mt-1">
                 <ProjectTasks
                   tasks={tasks}
-                  members={members}
                   onOpen={(taskId) => navigate(`/tasks/${taskId}`)}
                   onAddTask={() => {
                     // v2: there is no separate "new task" page anymore — the

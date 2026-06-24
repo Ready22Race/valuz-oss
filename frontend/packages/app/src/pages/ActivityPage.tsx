@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, ListChecks, MessageSquare, Trash2 } from "lucide-react";
+import { ListChecks, MessageSquare } from "lucide-react";
 import {
   DeleteConfirmDialog,
   PageHeader,
@@ -22,6 +22,7 @@ import {
   sessionsApi,
   useRunningRuns,
   useSessionEvents,
+  useSessionStore,
   useTranslation,
   useProjectStore,
   type RunSummary,
@@ -31,6 +32,8 @@ import {
   summarizeSegmentPhrase,
   type SessionEventDTO,
 } from "@valuz/shared";
+import { toast } from "sonner";
+import { RowActionsMenu, formatCreatedAt } from "@valuz/app/components";
 import { useProjectOutlet } from "@valuz/app/layout";
 
 type SourceFilter = "all" | "chat" | "task";
@@ -268,6 +271,7 @@ export const ActivityPage = () => {
     useProjectOutlet();
   const { runs: running } = useRunningRuns();
   const projects = useProjectStore((s) => s.projects);
+  const renameSession = useSessionStore((s) => s.renameSession);
 
   const [filter, setFilter] = useState<SourceFilter>("all");
   const [finished, setFinished] = useState<RunSummary[]>([]);
@@ -408,13 +412,13 @@ export const ActivityPage = () => {
     return <StatusPill status={run.status} label={t(tk(key))} />;
   };
 
-  // History rows: title only (small scope label + status pill on the side).
-  // Always list-shaped — the dashboard above already has the heavy card
-  // visualisation, so the history rail stays a quiet scannable index.
-  // Outer wrapper is a ``div`` (not a ``button``) because we nest a real
-  // trash ``button`` inside for chat rows, and nested buttons are invalid
-  // HTML — the trash click would also trip the row's navigation. Keyboard
-  // accessibility: ``role="button"`` + ``tabIndex`` + Enter / Space.
+  // History rows: title + relative created time + status pill on the side,
+  // matching the project-home conversation rows. Always list-shaped — the
+  // dashboard above already has the heavy card visualisation, so the history
+  // rail stays a quiet scannable index. Outer wrapper is a ``div`` (not a
+  // ``button``) because chat rows nest a ``RowActionsMenu`` trigger
+  // ``button``, and nested buttons are invalid HTML. Keyboard accessibility:
+  // ``role="button"`` + ``tabIndex`` + Enter / Space.
   const historyRow = (run: RunSummary) => {
     const ScopeIcon = run.source_kind === "task" ? ListChecks : MessageSquare;
     const canDelete = run.source_kind !== "task";
@@ -439,31 +443,44 @@ export const ActivityPage = () => {
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
           {run.title}
         </span>
-        {renderStatusChip(run)}
-        {canDelete ? (
-          // Hover swaps the navigation arrow for a trash button — keeps the
-          // row's right-edge slot stable but exposes the destructive action
-          // only when the user is actively pointing at the row. Click stops
-          // propagation so it doesn't also navigate into the conversation.
-          <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
-            <ArrowRight className="absolute h-4 w-4 text-ink-muted transition-opacity group-hover:opacity-0" />
-            <button
-              type="button"
-              aria-label={t(tk("activity.deleteChat"))}
-              onClick={(e) => {
-                e.stopPropagation();
-                setDeletingChat(run);
-              }}
-              className="absolute flex h-4 w-4 items-center justify-center text-ink-muted opacity-0 transition-opacity hover:text-error focus:opacity-100 group-hover:opacity-100"
-            >
-              <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
-            </button>
-          </span>
-        ) : (
-          <ArrowRight className="h-4 w-4 shrink-0 text-ink-muted" />
-        )}
+        <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
+          {run.updated_at ? formatCreatedAt(run.updated_at, t) : ""}
+        </span>
+        <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
+          {STATUS_LABEL_KEY[run.status] && (
+            <StatusPill
+              status={run.status}
+              label={t(tk(STATUS_LABEL_KEY[run.status]))}
+              className={
+                canDelete
+                  ? "transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
+                  : undefined
+              }
+            />
+          )}
+          {canDelete && (
+            <RowActionsMenu
+              onRename={() => handleRenameRun(run)}
+              onDelete={() => setDeletingChat(run)}
+            />
+          )}
+        </span>
       </div>
     );
+  };
+
+  const handleRenameRun = async (run: RunSummary) => {
+    const next = window.prompt(t(tk("sidebar.rename")), run.title);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed || trimmed === run.title) return;
+    try {
+      await renameSession(run.session_id, trimmed);
+      refreshFinished();
+      toast.success(t(tk("sidebar.renamed")));
+    } catch {
+      toast.error(t(tk("sidebar.renameFailed")));
+    }
   };
 
   const handleDeleteChat = async () => {
@@ -538,7 +555,7 @@ export const ActivityPage = () => {
   const hasAny = displayRunning.length > 0 || filteredFinished.length > 0;
 
   return (
-    <div className="mx-auto max-w-3xl px-5 pb-12 pt-4">
+    <div className="mx-auto max-w-[760px] px-5 pb-12 pt-4">
       {/* Toolbar — line-tab filter shared with project home / conversation
           right panel for visual consistency. */}
       <Tabs value={filter} onValueChange={(v) => setFilter(v as SourceFilter)}>
