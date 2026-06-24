@@ -20,6 +20,7 @@ import {
   PageLoader,
   SkillCard,
   SkillDetailPanel,
+  Switch,
 } from "@valuz/ui";
 import { ResourceActionSlot } from "../components/ResourceActionSlot";
 import {
@@ -263,6 +264,30 @@ export const SkillsPage = () => {
       if (mountedRef.current) setRescanning(false);
     }
   }, [rescanning, t]);
+
+  // Global library on/off for a skill (slug-keyed on the backend). Optimistic:
+  // flip local state immediately, revert if the request fails. Off hides the
+  // skill from new (non-project) conversations' ``/`` picker.
+  const handleToggleLibrary = useCallback(
+    async (skill: SkillView, enabled: boolean) => {
+      setSkills((prev) =>
+        prev.map((s) =>
+          s.id === skill.id ? { ...s, library_enabled: enabled } : s,
+        ),
+      );
+      try {
+        await skillsApi.setLibraryState(skill.id, enabled);
+      } catch (err) {
+        console.error("[Skills] library toggle error", err);
+        setSkills((prev) =>
+          prev.map((s) =>
+            s.id === skill.id ? { ...s, library_enabled: !enabled } : s,
+          ),
+        );
+      }
+    },
+    [],
+  );
 
   // Draft-first (no pre-created session): land on the same draft page as
   // 新对话 so the composer's default-agent pick + agent switching work; the
@@ -646,10 +671,45 @@ export const SkillsPage = () => {
                     active={isSelected}
                     onClick={() => setActiveSkillId(skill.id)}
                     actions={
-                      <ResourceActionSlot
-                        resourceType="skill"
-                        resource={skill as unknown as Record<string, unknown>}
-                      />
+                      <div
+                        className="flex items-center gap-2"
+                        // The switch lives inside the card's click target; stop
+                        // propagation so toggling never opens the detail panel.
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {(() => {
+                          // Built-in skills ship with the client: always on and
+                          // not toggleable (the switch is checked + disabled).
+                          const isBuiltin = skill.origin_label === "Built-in";
+                          return (
+                            <Switch
+                              size="sm"
+                              checked={
+                                isBuiltin || skill.library_enabled !== false
+                              }
+                              disabled={isBuiltin}
+                              onCheckedChange={(v) =>
+                                void handleToggleLibrary(skill, v)
+                              }
+                              aria-label={t(
+                                (isBuiltin
+                                  ? "skill.builtinHint"
+                                  : skill.library_enabled !== false
+                                    ? "skill.libraryEnabledTip"
+                                    : "skill.libraryDisabledTip") as Parameters<
+                                  typeof t
+                                >[0],
+                              )}
+                            />
+                          );
+                        })()}
+                        <ResourceActionSlot
+                          resourceType="skill"
+                          resource={
+                            skill as unknown as Record<string, unknown>
+                          }
+                        />
+                      </div>
                     }
                   />
                 );

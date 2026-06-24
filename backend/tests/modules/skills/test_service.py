@@ -109,6 +109,17 @@ class FakeSkillDatastore:
     async def list_skills(self, user_id):
         return list(self._rows.values())
 
+    async def list_library_disabled_ids(self, user_id):
+        return set(getattr(self, "_library_disabled", set()))
+
+    async def set_library_enabled(self, user_id, skill_id, enabled):
+        disabled = getattr(self, "_library_disabled", set())
+        if enabled:
+            disabled.discard(skill_id)
+        else:
+            disabled.add(skill_id)
+        self._library_disabled = disabled
+
     def add_ignore(self, skill_id, content_hash=None):
         pass
 
@@ -285,6 +296,74 @@ class TestListCatalog:
         # zzz-legacy has no birthtime → must be after the real ones
         # regardless of its alphabetical-last name.
         assert slugs[-1] == "zzz-legacy"
+
+
+class TestLibraryState:
+    """Global library on/off switch — the field the new-conversation ``/``
+    picker filters on. Default on; only an explicit off is stored."""
+
+    async def test_catalog_overlays_disabled_row(self, svc, skill_root):
+        service, _ = svc
+        _make_skill_dir(skill_root, "alpha")
+        _make_skill_dir(skill_root, "beta")
+        # Turn alpha off by its catalog row id; beta left at the default (on).
+        cat0 = await service.list_catalog("ws-1")
+        alpha_id = next(s for s in cat0.skills if s.slug == "alpha").id
+        await service._ds.set_library_enabled("u", alpha_id, False)
+
+        catalog = await service.list_catalog("ws-1")
+        by_slug = {s.slug: s for s in catalog.skills}
+
+        assert by_slug["alpha"].library_enabled is False
+        assert by_slug["beta"].library_enabled is True
+
+    async def test_builtin_skill_cannot_be_disabled(self, svc, skill_root):
+        service, _ = svc
+        # A built-in skill (``origin-label: Built-in`` frontmatter). Even with its
+        # row turned off, the catalog must keep it enabled — built-ins ship with
+        # the client and aren't toggleable.
+        d = skill_root / "skill-creator"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            '---\nname: "skill-creator"\ndescription: "x"\norigin-label: "Built-in"\n---\n\nbody\n',
+            encoding="utf-8",
+        )
+        cat0 = await service.list_catalog("ws-1")
+        sc_id = next(s for s in cat0.skills if s.slug == "skill-creator").id
+        await service._ds.set_library_enabled("u", sc_id, False)
+
+        catalog = await service.list_catalog("ws-1")
+        sc = next(s for s in catalog.skills if s.slug == "skill-creator")
+        assert sc.origin_label == "Built-in"
+        assert sc.library_enabled is True
+
+    async def test_toggle_returns_updated_and_persists(self, svc, skill_root):
+        from valuz_agent.modules.skills.models import SkillIndexRow
+
+        service, _ = svc
+        _make_skill_dir(skill_root, "gamma")
+        cat = await service.list_catalog("ws-1")
+        gamma = next(s for s in cat.skills if s.slug == "gamma")
+        assert gamma.library_enabled is True
+        # Seed the index row so the service can resolve id → slug.
+        service._ds._rows[gamma.id] = SkillIndexRow(
+            id=gamma.id,
+            slug="gamma",
+            name="gamma",
+            description="",
+            scope="user",
+            source="filesystem",
+            source_path=gamma.path,
+            user_id="u",
+        )
+
+        updated = await service.set_library_enabled(gamma.id, False)
+        assert updated.library_enabled is False
+
+        cat2 = await service.list_catalog("ws-1")
+        assert (
+            next(s for s in cat2.skills if s.slug == "gamma").library_enabled is False
+        )
 
 
 class TestCreateSkill:

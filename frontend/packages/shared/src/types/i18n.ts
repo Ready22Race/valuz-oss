@@ -1608,6 +1608,8 @@ export type KnownI18nKey =
   | "skill.importedFrom"
   | "skill.importedPartial"
   | "skill.inFinder"
+  | "skill.libraryDisabledTip"
+  | "skill.libraryEnabledTip"
   | "skill.linkImport"
   | "skill.linkImportDesc"
   | "skill.linkImportShort"

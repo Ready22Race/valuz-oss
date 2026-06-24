@@ -62,6 +62,8 @@ import {
   type TaskEvent,
   type Agent,
   type MemberWithAgent,
+  skillsApi,
+  type SkillView,
 } from "@valuz/core";
 import { modelLabel } from "@valuz/shared";
 import { t as _t } from "@valuz/shared/i18n";
@@ -70,6 +72,10 @@ import { useProjectOutlet } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
 import { useProjectKbBindings, useKbDocTree } from "@valuz/app/hooks";
 import { RUNTIME_DISPLAY_NAME, memoryApi, useTranslation } from "@valuz/core";
+import {
+  resolveAgentSkillItems,
+  type AgentSkillItem,
+} from "../lib/agent-skill-items";
 import { toFileTree } from "../lib/file-tree";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 
@@ -561,6 +567,25 @@ export const ProjectDetailPage = () => {
   // without a second fetch. Updated in the same callback as ``members``
   // so the two never drift.
   const [rawMembers, setRawMembers] = useState<MemberWithAgent[]>([]);
+  // Skill catalog for the draft composer's ``/`` picker — used only to map the
+  // selected agent's skill slugs to display names (the picker itself shows the
+  // selected agent's bound skills, see ``selectedAgentSkillItems``).
+  const [skillCatalog, setSkillCatalog] = useState<SkillView[]>([]);
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+    skillsApi
+      .list(id)
+      .then((c) => {
+        if (!cancelled) setSkillCatalog(c.skills);
+      })
+      .catch(() => {
+        if (!cancelled) setSkillCatalog([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
   // Member remove (undeploy) dialog state. Editing is global — handled on the
   // agent detail page, not here (see openMember).
   const [memberDeleteTarget, setMemberDeleteTarget] = useState<string | null>(
@@ -752,6 +777,16 @@ export const ProjectDetailPage = () => {
   // Active agent = the remembered pick for the current mode. Switching mode
   // swaps the agent to that mode's memory (Chat agent ↔ last Lead).
   const selectedAgentSlug = agentByMode[composerMode];
+  // The selected member agent's bound skills — the draft composer's ``/`` list.
+  // Projects can't attach skills ad-hoc, so ``/`` surfaces exactly that agent's
+  // skills (resolved to display names via the project skill catalog).
+  const selectedAgentSkillItems = useMemo<AgentSkillItem[]>(() => {
+    if (!selectedAgentSlug) return [];
+    const agent = rawMembers.find(
+      (m) => m.member.agent_slug === selectedAgentSlug,
+    )?.agent;
+    return resolveAgentSkillItems(agent?.skills, [skillCatalog]);
+  }, [selectedAgentSlug, rawMembers, skillCatalog]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [connectors, setConnectors] = useState<ConnectorItem[]>([]);
@@ -1460,7 +1495,12 @@ export const ProjectDetailPage = () => {
               onSend={() => {
                 void handleSend();
               }}
+              // Projects can't attach skills ad-hoc, so the toolbar "add skill"
+              // button stays hidden — but the ``/`` picker is enabled once an
+              // agent is selected so its bound skills are invocable.
               showSkillButton={false}
+              showSkillSlash={selectedAgentSlug != null}
+              skills={selectedAgentSkillItems}
               uploadOnAttach
               existingAttachmentCount={
                 stagedAttachments.filter((a) => !a.consumed_at).length

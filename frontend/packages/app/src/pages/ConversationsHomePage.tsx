@@ -156,10 +156,13 @@ export const ConversationsHomePage = () => {
     setSelectedModelId(preferred.modelId);
   }, [composerProviders, selectedProviderId, selectedModelId, defaultsLoading]);
 
+  // The quick-chat landing has no agent picker, so the ``/`` list is just the
+  // library-ENABLED skills (the global switch the Skills page toggles). Default
+  // on, so only an explicit off removes a skill here.
   const availableSkills: SkillSearchItem[] = useMemo(
     () =>
       globalSkills
-        .filter((s) => s.enabled)
+        .filter((s) => s.library_enabled !== false)
         .map((s) => ({
           id: s.id,
           name: s.name,

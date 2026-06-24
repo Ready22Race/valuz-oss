@@ -16,6 +16,13 @@ export interface SkillSearchMenuProps {
   onClose: () => void;
   /** Position relative to anchor (CSS top/left) */
   position?: { top: number; left: number };
+  /**
+   * Which way the menu opens relative to the anchor when ``position`` is not
+   * given: ``"up"`` (above the input — the default, for a bottom-anchored
+   * composer) or ``"down"`` (below it, for a top-anchored composer like the
+   * project detail page, where opening up would overflow the page header).
+   */
+  direction?: "up" | "down";
 }
 
 export const SkillSearchMenu = ({
@@ -24,6 +31,7 @@ export const SkillSearchMenu = ({
   onSelect,
   onClose,
   position,
+  direction = "up",
 }: SkillSearchMenuProps) => {
   const { t } = useI18n();
   const [highlightState, setHighlightState] = useState({
@@ -105,7 +113,9 @@ export const SkillSearchMenu = ({
       style={
         position
           ? { top: position.top, left: position.left }
-          : { bottom: "100%", left: 0 }
+          : direction === "down"
+            ? { top: "calc(100% + 4px)", left: 0 }
+            : { bottom: "calc(100% + 4px)", left: 0 }
       }
     >
       <div className="flex items-center gap-2 border-b border-surface-border px-2 py-1.5">

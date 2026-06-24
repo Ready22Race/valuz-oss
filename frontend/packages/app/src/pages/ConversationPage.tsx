@@ -112,6 +112,10 @@ import {
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
+import {
+  resolveAgentSkillItems,
+  type AgentSkillItem,
+} from "../lib/agent-skill-items";
 import { getLastTempAgent, setLastTempAgent } from "../lib/last-temp-agent";
 
 /** True while a workflow snapshot's status denotes an in-flight run (vs a
@@ -985,6 +989,15 @@ export const ConversationPage = () => {
     [selectedSessionId, sessions],
   );
 
+  // The agent actually bound to this composer: an existing session is frozen to
+  // its ``sessionAgentSlug`` (ADR-006), a fresh draft uses the picker's
+  // ``selectedAgentSlug``. The Composer's ``selectedAgentSlug`` prop derives the
+  // same value — skill resolution and the ``/`` gate must use it too, or they'd
+  // read a null draft slug while viewing a live conversation.
+  const effectiveAgentSlug = selectedSession
+    ? sessionAgentSlug
+    : selectedAgentSlug;
+
   // Publish the open conversation's project to the store so the sidebar keeps
   // that project's accordion expanded — authoritative and immediate (straight
   // from the loaded session detail), unlike the lagging runs list. Cleared when
@@ -1676,24 +1689,59 @@ export const ConversationPage = () => {
   ]);
 
   // For project project "/" mention, only show enabled/bound skills
-  const composerMentionSkills = useMemo(() => {
-    if (activeProject?.kind === "project") {
-      return projectSkills
-        .filter((s) => s.enabled)
-        .map((s) => ({
-          id: s.id,
-          name: s.name,
-          slug: s.slug,
-          description: s.description,
-        }));
+  // Resolve an agent's stored skill entries to ``/`` picker items via the loaded
+  // catalogs (shared with ProjectDetailPage to avoid drift).
+  const resolveSkillItems = useCallback(
+    (entries: string[] | null | undefined) =>
+      resolveAgentSkillItems(entries, [availableSkills, projectSkills]),
+    [availableSkills, projectSkills],
+  );
+
+  // The bound skills of the currently selected member agent — the ``/`` picker
+  // list for a PROJECT conversation. Project chats can't attach skills ad-hoc
+  // (skills are the agent's equipment), so ``/`` surfaces exactly that agent's
+  // skills.
+  const selectedAgentSkillItems = useMemo(() => {
+    if (!effectiveAgentSlug) return [];
+    const agent = projectAgents.find(
+      (m) => m.member.agent_slug === effectiveAgentSlug,
+    )?.agent;
+    return resolveSkillItems(agent?.skills);
+  }, [effectiveAgentSlug, projectAgents, resolveSkillItems]);
+
+  // The ``/`` picker list for a NEW (non-project) conversation: the union of
+  // the library-ENABLED skills and the selected agent's bound skills, deduped
+  // by slug. A new conversation may have no agent (library skills only); the
+  // global library switch (``library_enabled``) is what the Skills page toggles.
+  const composerMentionSkills = useMemo<AgentSkillItem[]>(() => {
+    const libraryItems: AgentSkillItem[] = availableSkills
+      .filter((s) => s.library_enabled !== false)
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        slug: s.slug,
+        description: s.description,
+      }));
+    const agentEntries = isTempConversation
+      ? myAgents.find((a) => a.slug === effectiveAgentSlug)?.skills
+      : undefined;
+    const seen = new Set(
+      libraryItems.map((i) => i.slug).filter((s): s is string => !!s),
+    );
+    const merged: AgentSkillItem[] = [...libraryItems];
+    for (const it of resolveSkillItems(agentEntries)) {
+      if (it.slug && seen.has(it.slug)) continue;
+      merged.push(it);
+      if (it.slug) seen.add(it.slug);
     }
-    return availableSkills.map((s) => ({
-      id: s.id,
-      name: s.name,
-      slug: s.slug,
-      description: s.description,
-    }));
-  }, [activeProject?.kind, projectSkills, availableSkills]);
+    return merged;
+  }, [
+    availableSkills,
+    isTempConversation,
+    myAgents,
+    effectiveAgentSlug,
+    resolveSkillItems,
+  ]);
 
   // Slug → display-name map for rendering inline ``/skill-slug`` chips
   // in past user messages. We blend availableSkills (the global picker
@@ -4359,10 +4407,15 @@ export const ConversationPage = () => {
             key={id ?? "new"}
             value={draft}
             onChange={setDraft}
-            // Project conversations configure skills per-agent, so the inline
-            // skill picker is hidden there; the assistant (non-project) chat
-            // keeps it for global ``/`` skills.
+            // Project conversations can't attach skills ad-hoc (skills are the
+            // agent's equipment), so the toolbar "add skill" button stays hidden
+            // there. The ``/`` picker, however, is enabled once a member agent
+            // is selected so the user can invoke that agent's bound skills; the
+            // assistant (non-project) chat keeps both for global ``/`` skills.
             showSkillButton={!isProjectProject}
+            showSkillSlash={
+              isProjectProject ? effectiveAgentSlug != null : undefined
+            }
             autoFocus
             onSend={() => {
               void handleSend();
@@ -4519,7 +4572,9 @@ export const ConversationPage = () => {
               setSelectedModelId(mId);
               setComposerTouched(true);
             }}
-            skills={composerMentionSkills}
+            skills={
+              isProjectProject ? selectedAgentSkillItems : composerMentionSkills
+            }
             onSkillSelect={(s) => {
               const skill =
                 availableSkills.find((sk) => sk.id === s.id) ?? null;

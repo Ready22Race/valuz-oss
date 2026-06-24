@@ -1,7 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Boolean, String, Text
+from sqlalchemy import BigInteger, Boolean, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
@@ -53,6 +53,15 @@ class SkillIndexRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # preserved across ``startup_scan`` rescans. Null for non-imported skills.
     origin_json: Mapped[str | None] = mapped_column(Text, default=None)
     deletable: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Global library on/off switch for THIS skill row (the row the Skills page
+    # shows — i.e. the dedup-winning representative for the slug). Default on;
+    # ``startup_scan`` preserves it across rescans (the upsert never rewrites
+    # it, like ``creation_origin``). Off hides the skill from a new (non-project)
+    # conversation's inline ``/`` picker; never affects runtime loading or an
+    # agent's own ``/`` (which read source paths, not this flag).
+    library_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("1")
+    )
 
 
 class ProjectSkillConfigRow(Base, UserMixin):
@@ -89,6 +98,10 @@ class SkillView(BaseModel):
     source: str
     path: str
     enabled: bool = False
+    # Global library switch (user-scoped, slug-keyed) — distinct from ``enabled``
+    # (per-project). Defaults on; turning it off in the Skills page hides the
+    # skill from a new (non-project) conversation's inline ``/`` picker.
+    library_enabled: bool = True
     tags: list[str] = Field(default_factory=list)
     slug: str = ""
     icon: str | None = None
@@ -138,6 +151,10 @@ class SkillScanResponse(BaseModel):
 
 class SkillStateRequest(BaseModel):
     path: str
+    enabled: bool
+
+
+class SkillLibraryStateRequest(BaseModel):
     enabled: bool
 
 

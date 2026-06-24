@@ -6,8 +6,9 @@ interval, so skills added out-of-band (a team import, a dropped folder) become
 resolvable without a restart. Shares ``SkillLibraryService.startup_scan`` with
 the boot scan and the manual ``POST /v1/skills/scan`` endpoint.
 
-Interval is ``VALUZ_SKILL_SCAN_INTERVAL_SEC`` (default 30 min); ``<= 0`` disables
-the scheduler entirely.
+Interval is ``VALUZ_SKILL_SCAN_INTERVAL_SEC`` (default 5 min, matching the KB
+auto-discovery scheduler's ``RESCAN_INTERVAL_SEC``); ``<= 0`` disables the
+scheduler entirely.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_INTERVAL_SEC = 30 * 60  # 30 minutes
+_DEFAULT_INTERVAL_SEC = 5 * 60  # 5 minutes (matches docs KB RESCAN_INTERVAL_SEC)
 
 
 def _interval_sec() -> int:

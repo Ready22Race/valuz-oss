@@ -163,6 +163,56 @@ async def test_import_pack_materializes_skills(svc: AgentPackService, tmp_path) 
     assert (skills_dir / "xhs-note-writing").is_dir()
 
 
+async def test_import_pack_indexes_embedded_skills(
+    svc: AgentPackService, tmp_path, monkeypatch
+) -> None:
+    # A pack's embedded (user-authored) skills must be installed AND explicitly
+    # indexed at import — otherwise the just-created agent that references them
+    # can't resolve the skill until the next boot / periodic scan (≤30 min).
+    # We spy the user-scope reindex (it writes via the global unit-of-work, out
+    # of this test's reach) and assert the on-disk install, which is the
+    # observable half of the same guarantee.
+    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "user-skills"))
+
+    calls: list[str] = []
+
+    async def _spy_reindex_user() -> int:
+        calls.append("user")
+        return 0
+
+    monkeypatch.setattr(
+        "valuz_agent.modules.skills.service.reindex_user_skills",
+        _spy_reindex_user,
+    )
+
+    from valuz_agent.modules.agent_packs.manifest import (
+        AgentPackManifest,
+        PackAgent,
+        PackCollection,
+        PackSkill,
+    )
+    from valuz_agent.modules.agent_packs.packaging import build_archive, extract_archive
+
+    skill_src = tmp_path / "src" / "my-skill"
+    skill_src.mkdir(parents=True)
+    (skill_src / "SKILL.md").write_text("---\nname: my-skill\n---\n", encoding="utf-8")
+
+    manifest = AgentPackManifest(
+        collection=PackCollection(name="Embedded Pack"),
+        agents=[PackAgent(slug="emb-a1", name="A1", skills=["my-skill"])],
+        skills=[PackSkill(slug="my-skill", source="embedded")],
+    )
+    parsed, root = extract_archive(build_archive(manifest, {"my-skill": skill_src}))
+
+    res = await svc.import_manifest(USER, parsed, embedded_skills_root=root, **DEPLOY)
+
+    assert res["created"] == 1
+    # explicit index trigger fired for the user-scope skill
+    assert calls == ["user"]
+    # and the skill actually landed in the user library
+    assert (tmp_path / "user-skills" / "my-skill" / "SKILL.md").is_file()
+
+
 async def test_import_pack_idempotent(svc: AgentPackService) -> None:
     await svc.import_pack(USER, "investment", **DEPLOY)
     res2 = await svc.import_pack(USER, "investment", **DEPLOY)
