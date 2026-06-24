@@ -6,6 +6,7 @@ the handlers' internal ``async_unit_of_work()`` binds to an in-memory SQLite
 seeded with the skill index + connector tables.
 """
 
+# ruff: noqa: I001 — kernel bootstrap side-effect import must precede src.*
 from __future__ import annotations
 
 import json
@@ -15,7 +16,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-import valuz_agent.boot.kernel  # noqa: F401 — surfaces ``src.*`` on sys.path
+# Side-effect import — surfaces ``src.*`` on sys.path before importing it.
+import valuz_agent.boot.kernel  # noqa: F401
 
 from src.core.tools import ExecContext
 
@@ -23,9 +25,11 @@ from valuz_agent.infra.database import Base
 from valuz_agent.integrations import tools_agent_proposal as tap
 from valuz_agent.integrations.tools_agent_proposal import (
     _list_agents_handler,
+    _list_model_options_handler,
     _list_project_members_handler,
     _list_skills_handler,
     _propose_agent_handler,
+    _validate_runtime_model,
 )
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.connectors.models import (
@@ -105,6 +109,69 @@ async def seeded_db(monkeypatch):
 
 def _ctx() -> ExecContext:
     return ExecContext(session_id="sess-1")
+
+
+def _empty_catalog():
+    from valuz_agent.modules.settings.model_options import (
+        CurrentDefault,
+        ModelOptionsResponse,
+    )
+
+    return ModelOptionsResponse(
+        current=CurrentDefault(runtime=None, provider_id=None, model=None),
+        groups=[],
+    )
+
+
+def _catalog(*models: tuple[str, list[str]]):
+    """Build a one-provider catalog from ``(model_id, [runtimes])`` pairs."""
+    from valuz_agent.modules.settings.model_options import (
+        CurrentDefault,
+        ModelOption,
+        ModelOptionGroup,
+        ModelOptionProvider,
+        ModelOptionsResponse,
+    )
+
+    opts = [
+        ModelOption(
+            model_id=mid,
+            provider_id="p1",
+            label=mid,
+            runtimes=rts,
+            default_runtime=rts[0],
+            is_current_default=False,
+        )
+        for mid, rts in models
+    ]
+    prov = ModelOptionProvider(
+        provider_id="p1",
+        label="Test Channel",
+        kind="anthropic",
+        source="user",
+        cli_tool=None,
+        status="available",
+        unavailable_reason=None,
+        models=opts,
+    )
+    return ModelOptionsResponse(
+        current=CurrentDefault(runtime=None, provider_id=None, model=None),
+        groups=[ModelOptionGroup(key="api_key", providers=[prov])],
+    )
+
+
+def _set_catalog(monkeypatch, catalog) -> None:
+    async def _gather(_db, _user_id):
+        return catalog
+
+    monkeypatch.setattr(tap, "_gather_model_options", _gather)
+
+
+@pytest.fixture(autouse=True)
+def _stub_model_catalog(monkeypatch):
+    """Default the handlers' model catalog to empty so existing tests don't
+    depend on provider tables. Individual tests override via ``_set_catalog``."""
+    _set_catalog(monkeypatch, _empty_catalog())
 
 
 async def test_propose_minimal_ok(seeded_db) -> None:
@@ -238,3 +305,94 @@ async def test_deploy_requires_project(seeded_db, monkeypatch) -> None:
     res = await _deploy_agent_handler({"agent_slug": "research-helper"}, _ctx())
     assert res.is_error
     assert "no project" in res.content
+
+
+# ── runtime / model validation (the codex/claude mix-up bug) ─────────────
+
+
+def test_validate_claude_model_on_codex_rejected() -> None:
+    """A configured Claude model paired with the codex runtime is the bug."""
+    catalog = _catalog(("claude-sonnet-4-6", ["claude_agent", "deepagents"]))
+    error, _ = _validate_runtime_model("codex", "claude-sonnet-4-6", catalog)
+    assert error is not None
+    assert "cannot run on runtime 'codex'" in error
+
+
+def test_validate_codex_model_on_claude_agent_rejected() -> None:
+    catalog = _catalog(("gpt-5-codex", ["codex"]))
+    error, _ = _validate_runtime_model("claude_agent", "gpt-5-codex", catalog)
+    assert error is not None
+    assert "claude_agent" in error
+
+
+def test_validate_compatible_pair_ok() -> None:
+    catalog = _catalog(
+        ("claude-sonnet-4-6", ["claude_agent", "deepagents"]),
+        ("gpt-5-codex", ["codex"]),
+    )
+    assert _validate_runtime_model("codex", "gpt-5-codex", catalog) == (None, [])
+    assert _validate_runtime_model("claude_agent", "claude-sonnet-4-6", catalog) == (None, [])
+
+
+def test_validate_omitted_model_on_codex_rejected() -> None:
+    """Omitting the model on codex would default to claude-sonnet-4-6, which
+    codex can't drive — caught even with an empty catalog."""
+    error, _ = _validate_runtime_model("codex", "", _empty_catalog())
+    assert error is not None
+    assert tap.DEFAULT_MODEL in error
+
+
+def test_validate_omitted_model_on_claude_agent_ok() -> None:
+    assert _validate_runtime_model("claude_agent", "", _empty_catalog()) == (None, [])
+
+
+def test_validate_unknown_explicit_model_warns_only() -> None:
+    catalog = _catalog(("claude-sonnet-4-6", ["claude_agent"]))
+    error, warnings = _validate_runtime_model("claude_agent", "gpt-custom-x", catalog)
+    assert error is None
+    assert warnings and "gpt-custom-x" in warnings[0]
+
+
+async def test_propose_codex_with_claude_model_rejected(seeded_db, monkeypatch) -> None:
+    _set_catalog(monkeypatch, _catalog(("claude-sonnet-4-6", ["claude_agent", "deepagents"])))
+    res = await _propose_agent_handler(
+        {
+            "name": "Coder",
+            "instructions": "Write code.",
+            "runtime": "codex",
+            "model": "claude-sonnet-4-6",
+        },
+        _ctx(),
+    )
+    assert res.is_error
+    assert "codex" in res.content
+
+
+async def test_propose_codex_with_compatible_model_ok(seeded_db, monkeypatch) -> None:
+    _set_catalog(monkeypatch, _catalog(("gpt-5-codex", ["codex"])))
+    res = await _propose_agent_handler(
+        {
+            "name": "Coder",
+            "instructions": "Write code.",
+            "runtime": "codex",
+            "model": "gpt-5-codex",
+        },
+        _ctx(),
+    )
+    assert not res.is_error
+    payload = json.loads(res.content)
+    assert payload["spec"]["model"] == "gpt-5-codex"
+
+
+async def test_list_model_options_returns_runtimes_and_models(seeded_db, monkeypatch) -> None:
+    _set_catalog(monkeypatch, _catalog(("claude-sonnet-4-6", ["claude_agent", "deepagents"])))
+    res = await _list_model_options_handler({}, _ctx())
+    assert not res.is_error
+    payload = json.loads(res.content)
+    runtime_ids = {r["id"] for r in payload["runtimes"]}
+    assert {"claude_agent", "codex", "deepagents"} <= runtime_ids
+    model_ids = {
+        m["model_id"] for p in payload["providers"] for m in p["models"]
+    }
+    assert "claude-sonnet-4-6" in model_ids
+    assert "current_default" in payload
