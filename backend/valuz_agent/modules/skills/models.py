@@ -1,7 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Boolean, String, Text
+from sqlalchemy import BigInteger, Boolean, PrimaryKeyConstraint, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
@@ -63,6 +63,30 @@ class ProjectSkillConfigRow(Base, UserMixin):
     added_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
 
 
+class SkillLibraryStateRow(Base, UserMixin):
+    """Per-user global library on/off for a skill, keyed by SLUG.
+
+    Distinct from ``ProjectSkillConfigRow`` (per-project enablement) and from
+    the ``valuz_skill_index`` rows (one per scope, rebuilt by every scan). A
+    skill can have several index rows for the same slug (user / official /
+    project scopes); the library switch is one decision per slug, so it lives
+    in its own slug-keyed table that survives index rescans untouched.
+
+    Absence of a row means **enabled** (the default), so only an explicit
+    user choice is ever persisted — existing skills need no backfill.
+    """
+
+    __tablename__ = "valuz_skill_library_state"
+    # Composite PK (user_id, slug): one decision per slug per owner. ``user_id``
+    # comes from ``UserMixin`` and is folded into the PK here so a shared backend
+    # never collides two owners' switches for the same slug.
+    __table_args__ = (PrimaryKeyConstraint("user_id", "slug"),)
+
+    slug: Mapped[str] = mapped_column(String(256))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    updated_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
+
+
 # ---------------------------------------------------------------------------
 # Pydantic request / response models
 # ---------------------------------------------------------------------------
@@ -89,6 +113,10 @@ class SkillView(BaseModel):
     source: str
     path: str
     enabled: bool = False
+    # Global library switch (user-scoped, slug-keyed) — distinct from ``enabled``
+    # (per-project). Defaults on; turning it off in the Skills page hides the
+    # skill from a new (non-project) conversation's inline ``/`` picker.
+    library_enabled: bool = True
     tags: list[str] = Field(default_factory=list)
     slug: str = ""
     icon: str | None = None
@@ -138,6 +166,10 @@ class SkillScanResponse(BaseModel):
 
 class SkillStateRequest(BaseModel):
     path: str
+    enabled: bool
+
+
+class SkillLibraryStateRequest(BaseModel):
     enabled: bool
 
 

@@ -1531,6 +1531,8 @@
   },
   "skill": {
     "addBtn": "添加",
+    "libraryEnabledTip": "新对话中可用",
+    "libraryDisabledTip": "新对话中隐藏",
     "rescan": "扫描技能库",
     "rescanDone": "已重新索引 {count} 个技能",
     "rescanFailed": "扫描失败",

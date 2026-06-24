@@ -1531,6 +1531,8 @@
   },
   "skill": {
     "addBtn": "Add",
+    "libraryEnabledTip": "Available in new conversations",
+    "libraryDisabledTip": "Hidden from new conversations",
     "rescan": "Rescan skill library",
     "rescanDone": "Re-indexed {count} skill(s)",
     "rescanFailed": "Rescan failed",

@@ -33,6 +33,10 @@ export interface SkillView {
   source: string;
   path: string;
   enabled: boolean;
+  /** Global library switch (user-scoped, slug-keyed), independent of any
+   *  project. Defaults to true; off hides the skill from a new (non-project)
+   *  conversation's inline `/` picker. */
+  library_enabled?: boolean;
   tags: string[];
   slug?: string;
   icon?: string | null;
@@ -233,6 +237,19 @@ export const skillsApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+  },
+
+  /** Flip a skill's global library on/off switch (slug-keyed, user-scoped).
+   *  Off hides it from a new (non-project) conversation's inline `/` picker. */
+  setLibraryState(skillId: string, enabled: boolean): Promise<SkillView> {
+    return fetchJson(
+      `/v1/skills/${encodeURIComponent(skillId)}/library-state`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      },
+    );
   },
 
   deleteDryRun(

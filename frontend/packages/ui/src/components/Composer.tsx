@@ -438,10 +438,19 @@ export interface ComposerProps {
   /** Called when the user clicks the stop button (only while sending). */
   onStop?: () => void;
   /**
-   * Show the inline skill (``/``) picker button. Hidden in project composers
-   * where skills are configured per-agent, not picked inline. Default true.
+   * Show the toolbar "add skill" affordance (the ``+`` menu's Skills submenu).
+   * Hidden in project composers where skills are configured per-agent, not
+   * attached inline. Default true.
    */
   showSkillButton?: boolean;
+  /**
+   * Enable the inline ``/`` skill picker (read-only query over ``skills``).
+   * Decoupled from ``showSkillButton`` so a project conversation can let the
+   * user invoke the *selected agent's* bound skills with ``/`` without exposing
+   * a separate "add skill" button. Defaults to ``showSkillButton`` when unset,
+   * preserving the prior coupled behavior for existing callers.
+   */
+  showSkillSlash?: boolean;
   /** Optional class override for the outer composer wrapper. */
   wrapperClassName?: string;
 }
@@ -530,8 +539,13 @@ export const Composer = ({
   sending = false,
   onStop,
   showSkillButton = true,
+  showSkillSlash,
   wrapperClassName,
 }: ComposerProps) => {
+  // The ``/`` inline picker defaults to the toolbar button's visibility so
+  // existing callers keep their behavior; a caller can enable it independently
+  // (e.g. project conversations exposing the bound agent's skills via ``/``).
+  const slashEnabled = showSkillSlash ?? showSkillButton;
   // Toolbar dropdowns flip direction based on where the composer sits in the
   // viewport: top half → open downward (room below), bottom half → open
   // upward. Recomputed on resize/scroll via rAF; ``setMenuDir`` bails when the
@@ -691,7 +705,7 @@ export const Composer = ({
   // visibility and the Enter-capture below, using the same predicate the menu
   // renders with so the two can't drift apart.
   const skillMatches =
-    showSkillButton && skillSearch.active
+    slashEnabled && skillSearch.active
       ? filterSkillItems(skills, skillSearch.query)
       : [];
   const skillMenuOpen = skillMatches.length > 0;
@@ -1493,6 +1507,10 @@ export const Composer = ({
                 query={skillSearch.query}
                 onSelect={handleSkillSelect}
                 onClose={() => setSkillSearch({ active: false, query: "" })}
+                // Open the menu away from the nearer viewport edge — downward
+                // for a top-anchored composer (project detail page), upward for
+                // a bottom-anchored one — matching the toolbar dropdowns.
+                direction={menuDir}
               />
             )}
           </div>
