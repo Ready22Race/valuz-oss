@@ -1,7 +1,7 @@
 ---
 name: valuz-handbook
 description: Valuz 产品使用手册——核心概念、常见操作、最佳实践、官方资源（官网 / GitHub）。当用户问 Valuz 怎么用、如何创建任务/项目/Agent、如何配置模型/技能/连接器，或问官网 / GitHub / 源码地址时使用。
-version: 3
+version: 4
 tags: [official, reference]
 ---
 
@@ -56,18 +56,24 @@ Valuz 是一个 Agent（智能体）协作平台。核心心智模型是：
 
 `automation` 工具是多动作工具，`action` 取值：
 
-- `create`：创建一条自动化（必填 `name`、`prompt_template`、`trigger`、`agent_slug`）。
+- `create`：**提议**一条自动化（必填 `name`、`prompt_template`、`trigger`；`agent_slug` 视上下文）。
+  ⚠️ **`create` 不会直接落库**——它会在对话里渲染一张确认卡片，由用户点击「创建」后才真正生成
+  （与 `propose_agent` 同一套「工具提议、用户确认」机制）。所以**只调用一次** `create`，用自然语言
+  复述你拟定的时间安排，然后**停下来等用户确认**，不要重复调用、也不要假定它已经建好了。
 - `list`：列出自动化。
 - `update` / `pause` / `resume` / `run` / `remove`：按 `automation_id` 改 / 暂停 / 恢复 / 立即跑一次 / 删除。
 
 关键参数：
 
-- **`trigger`（触发器，多态）**：
+- **`trigger`（触发器，多态）**——「每隔 N 分钟 / 秒」用 interval，整点 / 固定时刻用 cron：
   - 定时表达式 → `{"kind": "cron", "cron_expr": "0 9 * * *"}`（如每天 9 点）。
-  - 固定间隔 → `{"kind": "interval", "interval_seconds": 3600}`。
+  - 固定间隔 → `{"kind": "interval", "seconds": 3600}`（每 3600 秒，最小 30；注意键名是 `seconds`，不是 cron）。
   - 手动触发 → `{"kind": "manual"}`。
 - **`agent_slug`**：执行身份。项目会话里必须是该项目的成员 Agent；临时对话里用一个库 Agent
   （不指定时会默认用当前对话绑定的 Agent）。
+- **`action_kind`**：执行模式。`chat`（默认）= 每次触发让绑定 Agent 单轮跑一次；`task` = 以绑定
+  Agent 作为 **Lead** 发起一个项目任务。`task` **只能在项目会话里创建**（需要项目的任务上下文）；
+  在临时对话里会被拒绝——那里省略或用 `chat`。
 - **`scope`**：`this` = 仅当前项目；`all` = 整个用户库（仅在临时对话里生效）。一般可省略，
   用默认即可。
 
@@ -75,7 +81,7 @@ Valuz 是一个 Agent（智能体）协作平台。核心心智模型是：
 
 - 用户说「每天早上拉行业数据」「每周五生成报告」这类话，先把它转成
   `create` 调用（拟定 `name` + `prompt_template` + 合适的 `trigger` + `agent_slug`），
-  再向用户复述你建好的自动化。
+  调用后向用户复述这条自动化、并提示在卡片上点「创建」确认。
 - 用户问「我有哪些定时任务 / 自动化」→ 直接 `action: list`。
 - 改时间、暂停、删除 → 先 `list` 拿到 `automation_id`，再对应 `update` / `pause` / `remove`。
 

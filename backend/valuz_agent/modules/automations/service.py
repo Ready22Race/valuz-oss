@@ -62,6 +62,7 @@ from valuz_agent.modules.automations.schemas import (
     AutomationGroupResponse,
     AutomationItemResponse,
     AutomationProjectTarget,
+    AutomationProposalSpec,
     AutomationRunAcceptedResponse,
     AutomationRunItemResponse,
     AutomationUpdatePayload,
@@ -545,6 +546,160 @@ class AutomationService:
             raise AgentNotInProject()
         return payload.project_id, payload.agent_slug
 
+    # ── Proposal (propose → confirm) ────────────────────────────────────
+
+    @staticmethod
+    def build_create_payload(
+        *,
+        name: str | None,
+        prompt_template: str | None,
+        trigger: Trigger,
+        agent_slug: str | None,
+        action_kind: str,
+        project_kind: str,
+        project_id: str | None,
+        session_agent_slug: str | None,
+    ) -> AutomationCreatePayload:
+        """Assemble an :class:`AutomationCreatePayload` from raw create inputs.
+
+        The single source of truth for the create-input rules shared by the
+        ``automation`` MCP tool (which previews) and the confirm route (which
+        persists), so the two never drift:
+
+        - ``agent_slug`` defaults to the session's bound agent in a chat (so the
+          user/LLM need not pick one); it's mandatory otherwise.
+        - ``agent_kind`` is derived from ``project_kind`` — project sessions
+          store ``project_member``, chats store ``library_agent``.
+        - ``task`` mode is rejected outside a project session.
+
+        Raises the same typed errors ``create`` would; callers map them to a
+        tool ``_err`` or an HTTP response. ``trigger`` is required here — the
+        tool checks for a missing trigger first (with a richer message).
+        """
+        name = (name or "").strip()
+        if not name:
+            raise AutomationNameEmpty()
+        if not (prompt_template or "").strip():
+            raise AutomationPromptEmpty()
+        effective_agent_slug = agent_slug
+        if not effective_agent_slug and project_kind == "chat":
+            effective_agent_slug = session_agent_slug
+        if not effective_agent_slug:
+            raise AutomationAgentRequired()
+        action = action_kind or "chat"
+        if action == "task" and project_kind != "project":
+            raise AutomationTaskOnlyOnProject()
+        agent_kind = "project_member" if project_kind == "project" else "library_agent"
+        return AutomationCreatePayload(
+            name=name,
+            project_kind=project_kind,  # type: ignore[arg-type]
+            project_id=project_id,
+            agent_kind=agent_kind,  # type: ignore[arg-type]
+            agent_slug=effective_agent_slug,
+            prompt_template=(prompt_template or "").strip(),
+            trigger=trigger,
+            action_kind=action,  # type: ignore[arg-type]
+        )
+
+    async def _preview_agent_name(
+        self, payload: AutomationCreatePayload, calling_session_project_id: str | None
+    ) -> str | None:
+        """Resolve the bound agent's display name WITHOUT side effects.
+
+        Unlike ``_resolve_project_and_agent`` (which may deploy a library agent
+        or lazy-create a chat project), preview must not write — so it looks the
+        name up directly: library agents from the agent library, project members
+        from the (chat or project) project they belong to.
+        """
+        uid = require_current_user_id()
+        if payload.agent_kind == "library_agent":
+            agent = await self._agents.get_agent(uid, payload.agent_slug)
+            if agent is None:
+                raise AgentNotFound()
+            return agent.name
+        project_id = payload.project_id or calling_session_project_id
+        if not project_id:
+            raise AgentNotInProject()
+        member = await self._members.get(uid, project_id, payload.agent_slug)
+        if member is None:
+            raise AgentNotInProject()
+        probe = AutomationRow(
+            id="preview",
+            name="",
+            agent_kind="project_member",
+            agent_slug=payload.agent_slug,
+            project_id=project_id,
+            prompt_template="",
+            action_kind="chat",
+            trigger_kind="manual",
+            status="enabled",
+        )
+        return await self._resolve_agent_name(probe)
+
+    async def preview(
+        self,
+        payload: AutomationCreatePayload,
+        *,
+        calling_session_project_id: str | None = None,
+    ) -> AutomationProposalSpec:
+        """Validate a create payload and return a resolved-but-unsaved spec.
+
+        Mirrors ``create`` minus the write: validates the trigger, resolves the
+        agent's display name, and computes the human-readable cadence + first
+        fire instant off a transient row. The ``automation create`` tool returns
+        this as a confirmation card; the actual write happens on confirm.
+        """
+        name = payload.name.strip()
+        if not name:
+            raise AutomationNameEmpty()
+        if not payload.prompt_template.strip():
+            raise AutomationPromptEmpty()
+        if not payload.agent_slug:
+            raise AutomationAgentRequired()
+        if payload.action_kind == "task" and payload.project_kind != "project":
+            raise AutomationTaskOnlyOnProject()
+
+        self._validate_trigger(payload.trigger)
+        agent_name = await self._preview_agent_name(payload, calling_session_project_id)
+
+        now = now_ms()
+        row = AutomationRow(
+            id="preview",
+            name=name,
+            agent_kind=payload.agent_kind,
+            agent_slug=payload.agent_slug,
+            project_id=payload.project_id or "preview",
+            prompt_template=payload.prompt_template.strip(),
+            action_kind=payload.action_kind,
+            trigger_kind="cron",  # overwritten by _apply_trigger
+            status="enabled",
+            next_run_at=None,
+            last_run_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._apply_trigger(row, payload.trigger)
+        next_run = self._triggers.initial_next_fire(row, now=now)
+        return AutomationProposalSpec(
+            name=name,
+            prompt_template=payload.prompt_template.strip(),
+            trigger=self._row_to_trigger(row),
+            agent_slug=payload.agent_slug,
+            agent_kind=payload.agent_kind,
+            agent_name=agent_name,
+            action_kind=payload.action_kind,
+            trigger_human_readable=self._trigger_human(row),
+            next_run_at=next_run,
+        )
+
+    async def confirmed_origin_map(self, tool_call_ids: list[str]) -> dict[str, str]:
+        """Map each already-confirmed proposing ``tool_call_id`` → its created
+        automation id (owner-scoped). Backs the proposal re-entry status route."""
+        rows = await self._ds.list_by_origin_tool_call_ids(
+            require_current_user_id(), tool_call_ids
+        )
+        return {r.origin_tool_call_id: r.id for r in rows if r.origin_tool_call_id}
+
     # ── CRUD ──────────────────────────────────────────────────────────
 
     async def create(
@@ -552,6 +707,7 @@ class AutomationService:
         payload: AutomationCreatePayload,
         *,
         calling_session_project_id: str | None = None,
+        origin_tool_call_id: str | None = None,
     ) -> AutomationDetailResponse:
         """Create a new automation row.
 
@@ -596,6 +752,7 @@ class AutomationService:
             status="enabled",
             next_run_at=None,
             last_run_at=None,
+            origin_tool_call_id=origin_tool_call_id,
             created_at=now,
             updated_at=now,
         )

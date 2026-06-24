@@ -29,6 +29,7 @@ import {
   ApiError,
   sessionsApi,
   agentsApi,
+  automationsApi,
   connectorsApi,
   useSessionStore,
   useProjectStore,
@@ -86,6 +87,7 @@ import {
   SkillStagingPanel,
   SkillSubmissionCard,
   AgentProposalCard,
+  AutomationProposalCard,
   parseAskUserQuestionInput,
   parseAutomationToolOutput,
   type ApprovalCardSubject,
@@ -348,6 +350,27 @@ const SessionStatusPill = ({ status }: { status?: string }) => {
  * lock-step with the route definition.
  */
 const NEW_SESSION_ID = "new";
+
+/**
+ * Whether an ``automation`` tool call's input is a ``create`` action — the only
+ * action that renders a propose→confirm card (the others render the
+ * ``AutomationToolCard``). Reads the still-streaming tool input, so it's safe to
+ * call before the tool completes.
+ */
+function isAutomationCreateInput(input: unknown): boolean {
+  if (!input) return false;
+  let parsed: unknown;
+  try {
+    parsed = typeof input === "string" ? JSON.parse(input) : input;
+  } catch {
+    return false;
+  }
+  return (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    (parsed as { action?: unknown }).action === "create"
+  );
+}
 
 export const ConversationPage = () => {
   const { t } = useTranslation();
@@ -735,6 +758,23 @@ export const ConversationPage = () => {
   };
   const [proposalStates, setProposalStates] = useState<
     Record<string, ProposalEntry>
+  >({});
+  // Per-``tool.id`` state for ``automation create`` proposal cards. Same
+  // propose→confirm model as agents; ``automationId`` is filled on confirm /
+  // re-entry so a confirmed card can deep-link into the automation page.
+  type AutomationProposalEntry = {
+    state:
+      | "pending"
+      | "confirming"
+      | "confirmed"
+      | "dismissing"
+      | "dismissed"
+      | "error";
+    errorMessage?: string;
+    automationId?: string | null;
+  };
+  const [automationProposalStates, setAutomationProposalStates] = useState<
+    Record<string, AutomationProposalEntry>
   >({});
   // Local mirror of ``answers`` captured at submit time. Keyed by
   // ``tool_use_id`` (== renderer's ``tool.id``). Lets the renderer
@@ -1245,6 +1285,64 @@ export const ConversationPage = () => {
     }));
   }, []);
 
+  // Create the automation the assistant proposed via ``automation create``.
+  // The confirmable spec is replayed from the parsed tool output; the backend
+  // re-resolves project / bound-agent context from the session and stamps the
+  // proposing ``tool_call_id`` so a reload can detect the row already exists.
+  const handleConfirmAutomation = useCallback(
+    async (
+      toolId: string,
+      spec: {
+        name: string;
+        prompt_template: string;
+        trigger: import("@valuz/core").Trigger;
+        agent_slug?: string | null;
+        action_kind?: "chat" | "task";
+      },
+    ) => {
+      const sid = selectedSessionIdRef.current;
+      if (!sid) return;
+      setAutomationProposalStates((prev) => ({
+        ...prev,
+        [toolId]: { ...(prev[toolId] || { state: "pending" }), state: "confirming" },
+      }));
+      try {
+        const res = await automationsApi.confirmProposal(sid, {
+          tool_call_id: toolId,
+          name: spec.name,
+          prompt_template: spec.prompt_template,
+          trigger: spec.trigger,
+          agent_slug: spec.agent_slug ?? null,
+          action_kind: spec.action_kind,
+        });
+        setAutomationProposalStates((prev) => ({
+          ...prev,
+          [toolId]: { state: "confirmed", automationId: res.automation_id },
+        }));
+        toast.success(t("automation.proposalCreated" as Parameters<typeof t>[0]));
+      } catch (cause) {
+        const msg =
+          cause instanceof Error
+            ? cause.message
+            : t("common.saveFailed" as Parameters<typeof t>[0]);
+        setAutomationProposalStates((prev) => ({
+          ...prev,
+          [toolId]: { state: "error", errorMessage: msg },
+        }));
+        toast.error(msg);
+      }
+    },
+    [t],
+  );
+
+  const handleDismissAutomation = useCallback((toolId: string) => {
+    // Client-side only — nothing was written, so there's nothing to clean up.
+    setAutomationProposalStates((prev) => ({
+      ...prev,
+      [toolId]: { state: "dismissed" },
+    }));
+  }, []);
+
   // Stable signature of the propose_agent tool_use ids in this session, so the
   // re-entry detection below fetches only when the set of proposal cards
   // changes (not on every streamed token).
@@ -1326,6 +1424,59 @@ export const ConversationPage = () => {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSessionId, proposeAgentToolSig]);
+
+  // Stable signature of the ``automation create`` proposal tool_use ids in this
+  // session — only create-action calls render a proposal card.
+  const automationCreateToolSig = useMemo(() => {
+    const ids: string[] = [];
+    for (const turn of turns) {
+      for (const block of turn.blocks) {
+        if (block.kind !== "tool") continue;
+        const tname = block.tool.title || "";
+        if (tname !== "automation" && !tname.endsWith("__automation")) continue;
+        if (isAutomationCreateInput(block.tool.input)) ids.push(block.tool.id);
+      }
+    }
+    return ids.join(",");
+  }, [turns]);
+
+  // Reflect automations already created from a proposal card on session
+  // RE-ENTRY (in-memory state is lost on reload). Unlike agents (matched by
+  // name), automations are matched by ID: the confirm endpoint stamped the
+  // proposing ``tool_call_id`` onto the row, so the status endpoint maps each
+  // tool id → its created automation. Only seeds untracked/pending cards.
+  useEffect(() => {
+    if (!selectedSessionId || !automationCreateToolSig) return;
+    const ids = automationCreateToolSig.split(",").filter(Boolean);
+    if (ids.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await automationsApi.proposalStatus(selectedSessionId, ids);
+        if (cancelled) return;
+        setAutomationProposalStates((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const id of ids) {
+            const cur = next[id];
+            if (cur && cur.state !== "pending") continue;
+            const hit = res.confirmed[id];
+            if (hit) {
+              next[id] = { state: "confirmed", automationId: hit.automation_id };
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      } catch {
+        /* non-fatal — status endpoint can fail transiently */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSessionId, automationCreateToolSig]);
 
   // Scan staging for every ``submit_skill`` tool_use we've seen, so the
   // card renders the actual file tree (not just the agent's
@@ -1472,19 +1623,56 @@ export const ConversationPage = () => {
         name === "automation" || name.endsWith("__automation");
       if (isAutomation) {
         const result = parseAutomationToolOutput(tool.output);
+        const openInAutomation = (automationId: string) => {
+          // The automation page is at ``/automations`` and reads
+          // ``?automation=<id>`` for direct linking. Soft navigation keeps the
+          // conversation mounted in the project sidebar.
+          navigate(`/automations?automation=${encodeURIComponent(automationId)}`);
+        };
+
+        // ``create`` PROPOSES — render a propose→confirm card (mirrors
+        // propose_agent). Every other action keeps the read-only tool card.
+        const isCreate =
+          result?.action === "create" || isAutomationCreateInput(tool.input);
+        if (isCreate) {
+          const proposal = result?.proposal ?? null;
+          // The create tool rejected the proposal (bad cron / task-in-chat).
+          const validationError = result && !result.ok ? result.message : null;
+          // Still streaming (no resolved proposal, no error) — generic renderer.
+          if (!proposal && !validationError) return null;
+          const entry = automationProposalStates[tool.id] || {
+            state: "pending" as const,
+          };
+          return (
+            <AutomationProposalCard
+              name={proposal?.name ?? ""}
+              promptTemplate={proposal?.prompt_template}
+              triggerHuman={proposal?.trigger_human_readable}
+              agentName={proposal?.agent_name ?? null}
+              actionKind={proposal?.action_kind ?? "chat"}
+              state={entry.state}
+              errorMessage={entry.errorMessage}
+              validationError={validationError}
+              onConfirm={() => {
+                if (!proposal) return;
+                void handleConfirmAutomation(tool.id, {
+                  name: proposal.name,
+                  prompt_template: proposal.prompt_template,
+                  trigger: proposal.trigger,
+                  agent_slug: proposal.agent_slug,
+                  action_kind: proposal.action_kind,
+                });
+              }}
+              onDismiss={() => handleDismissAutomation(tool.id)}
+            />
+          );
+        }
+
         if (result) {
           return (
             <AutomationToolCard
               result={result}
-              onOpenInAutomation={(automationId) => {
-                // The automation page is at ``/automations`` and reads
-                // ``?automation=<id>`` for direct linking. We use a soft
-                // navigation so the conversation stays mounted in the
-                // project sidebar.
-                navigate(
-                  `/automations?automation=${encodeURIComponent(automationId)}`,
-                );
-              }}
+              onOpenInAutomation={openInAutomation}
             />
           );
         }
@@ -1721,6 +1909,9 @@ export const ConversationPage = () => {
       proposalStates,
       handleConfirmProposal,
       handleDismissProposal,
+      automationProposalStates,
+      handleConfirmAutomation,
+      handleDismissAutomation,
       askUserQuestionAnswersByToolId,
       askUserQuestionLocalAnswers,
       askUserQuestionSubmitRef,
