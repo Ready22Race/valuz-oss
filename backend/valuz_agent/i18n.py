@@ -47,28 +47,23 @@ _pushed_locale: str | None = None
 _default_locale_provider: Callable[[], str] | None = None
 
 
-def _repo_root() -> Path:
-    p = Path(__file__).resolve().parent
-    while p != p.parent:
-        if (p / "Makefile").is_file() and (p / "frontend").is_dir():
-            return p
-        p = p.parent
-    raise RuntimeError("Cannot locate repo root")
-
-
 def _locales_dir() -> Path:
     """Locate the shared i18n locale catalogs (``i18n/locales/*.json``).
 
-    Under a PyInstaller-frozen ``valuz-server`` there is no source repo to walk
-    up to: the catalogs are bundled under ``_internal/i18n/locales`` (see
-    ``backend/scripts/valuz_agent.spec`` ``datas``), and ``sys._MEIPASS`` points
-    at that ``_internal`` dir. In a dev checkout, resolve relative to the repo
-    root. Without this, any backend ``t()`` in the packaged app raised
-    ``Cannot locate repo root`` and 500'd (e.g. onboarding's example project).
+    ``i18n.py`` lives at ``<root>/backend/valuz_agent/i18n.py`` and the catalogs
+    at ``<root>/i18n/locales`` — a FIXED relative position, three levels up
+    (file → ``valuz_agent`` → ``backend`` → ``<root>``). Resolving straight off
+    ``__file__`` works for a source checkout AND for the backend run as plain
+    Python (e.g. in a container), with no repo-marker or cwd assumptions.
+
+    A PyInstaller-frozen ``valuz-server`` has no such source tree — the catalogs
+    are bundled under ``_internal/i18n/locales`` (see
+    ``backend/scripts/valuz_agent.spec`` ``datas``) and ``sys._MEIPASS`` points
+    at that ``_internal`` dir.
     """
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "i18n" / "locales"  # type: ignore[attr-defined]
-    return _repo_root() / "i18n" / "locales"
+    return Path(__file__).resolve().parents[2] / "i18n" / "locales"
 
 
 def _flatten(obj: object, prefix: str = "") -> dict[str, str]:
