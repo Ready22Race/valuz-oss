@@ -1845,6 +1845,16 @@
     }
   },
   "agent": {
+    "proposalNew": "New agent",
+    "proposalUnnamed": "Unnamed agent",
+    "proposalBrain": "Runtime & model",
+    "proposalSkills": "Skills",
+    "proposalConnectors": "Connectors",
+    "proposalNone": "none",
+    "proposalCreate": "Create agent",
+    "proposalCreated": "Agent created.",
+    "proposalCreatedDeployed": "Created and deployed into {name}.",
+    "proposalDismissed": "Dismissed",
     "title": "Agents",
     "subtitle": "Official agents you can instantiate into a project.",
     "agentCount": "{count} agents",

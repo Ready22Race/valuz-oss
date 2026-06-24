@@ -1845,6 +1845,16 @@
     }
   },
   "agent": {
+    "proposalNew": "新建智能体",
+    "proposalUnnamed": "未命名智能体",
+    "proposalBrain": "运行时和模型",
+    "proposalSkills": "技能",
+    "proposalConnectors": "连接器",
+    "proposalNone": "无",
+    "proposalCreate": "创建智能体",
+    "proposalCreated": "智能体已创建。",
+    "proposalCreatedDeployed": "已创建并部署到「{name}」。",
+    "proposalDismissed": "已取消",
     "title": "智能体",
     "subtitle": "可实例化到项目中的官方智能体。",
     "agentCount": "{count} 个智能体",

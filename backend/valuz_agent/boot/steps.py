@@ -203,6 +203,7 @@ async def init_kernel(app: FastAPI) -> None:
     # submit_skill; ``lead`` (task leads) = dispatch set + memory +
     # submit_skill. The lead gate stays enforced inside each handler.
     from valuz_agent.integrations.toolkit_mcp_server import install_toolkit_toolsets
+    from valuz_agent.integrations.tools_agent_proposal import build_agent_proposal_tool_defs
     from valuz_agent.integrations.tools_skill_creator import build_submit_skill_tool_defs
     from valuz_agent.modules.browser import service as browser_service
     from valuz_agent.modules.browser.tools import build_browser_tool_defs
@@ -224,6 +225,7 @@ async def init_kernel(app: FastAPI) -> None:
         build_memory_tool_defs()
         + build_project_instructions_tool_defs()
         + build_submit_skill_tool_defs()
+        + build_agent_proposal_tool_defs()
         + build_deliver_artifacts_tool_defs()
     )
     # browser_start/browser_stop only work when the engine (Node +
