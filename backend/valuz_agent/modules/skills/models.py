@@ -1,7 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Boolean, PrimaryKeyConstraint, String, Text
+from sqlalchemy import BigInteger, Boolean, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
@@ -53,6 +53,15 @@ class SkillIndexRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # preserved across ``startup_scan`` rescans. Null for non-imported skills.
     origin_json: Mapped[str | None] = mapped_column(Text, default=None)
     deletable: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Global library on/off switch for THIS skill row (the row the Skills page
+    # shows — i.e. the dedup-winning representative for the slug). Default on;
+    # ``startup_scan`` preserves it across rescans (the upsert never rewrites
+    # it, like ``creation_origin``). Off hides the skill from a new (non-project)
+    # conversation's inline ``/`` picker; never affects runtime loading or an
+    # agent's own ``/`` (which read source paths, not this flag).
+    library_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("1")
+    )
 
 
 class ProjectSkillConfigRow(Base, UserMixin):
@@ -61,30 +70,6 @@ class ProjectSkillConfigRow(Base, UserMixin):
     project_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     skill_path: Mapped[str] = mapped_column(Text, primary_key=True)
     added_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
-
-
-class SkillLibraryStateRow(Base, UserMixin):
-    """Per-user global library on/off for a skill, keyed by SLUG.
-
-    Distinct from ``ProjectSkillConfigRow`` (per-project enablement) and from
-    the ``valuz_skill_index`` rows (one per scope, rebuilt by every scan). A
-    skill can have several index rows for the same slug (user / official /
-    project scopes); the library switch is one decision per slug, so it lives
-    in its own slug-keyed table that survives index rescans untouched.
-
-    Absence of a row means **enabled** (the default), so only an explicit
-    user choice is ever persisted — existing skills need no backfill.
-    """
-
-    __tablename__ = "valuz_skill_library_state"
-    # Composite PK (user_id, slug): one decision per slug per owner. ``user_id``
-    # comes from ``UserMixin`` and is folded into the PK here so a shared backend
-    # never collides two owners' switches for the same slug.
-    __table_args__ = (PrimaryKeyConstraint("user_id", "slug"),)
-
-    slug: Mapped[str] = mapped_column(String(256))
-    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
-    updated_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
 
 
 # ---------------------------------------------------------------------------

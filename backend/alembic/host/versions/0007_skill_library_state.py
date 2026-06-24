@@ -1,11 +1,10 @@
-"""skill library state: per-user global on/off switch for a skill (by slug)
+"""skill library switch: global per-skill on/off on the index row
 
-Adds ``valuz_skill_library_state`` — one row per (user, slug) recording the
-global library switch for a skill, independent of any project and of the
-scan-rebuilt ``valuz_skill_index`` rows. Absence of a row means enabled, so
-existing skills need no backfill.
-
-On a fresh / shared backend the table is simply created empty.
+Adds ``library_enabled`` to ``valuz_skill_index`` — the global library on/off
+for a skill, toggled per (dedup-winning) row from the Skills page. Defaults to
+1 so every existing skill stays enabled; ``startup_scan`` preserves the flag
+across rescans. Off hides a skill from a new (non-project) conversation's inline
+``/`` picker; it never affects runtime loading or an agent's own ``/``.
 
 Revision ID: 0007
 Revises: 0006
@@ -27,21 +26,17 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "valuz_skill_library_state",
-        sa.Column("slug", sa.String(length=256), nullable=False),
-        sa.Column("enabled", sa.Boolean(), nullable=False),
-        sa.Column("updated_at", sa.BigInteger(), nullable=False),
-        sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.PrimaryKeyConstraint("user_id", "slug"),
-    )
-    with op.batch_alter_table("valuz_skill_library_state", schema=None) as batch_op:
-        batch_op.create_index(
-            batch_op.f("ix_valuz_skill_library_state_user_id"), ["user_id"], unique=False
+    with op.batch_alter_table("valuz_skill_index", schema=None) as batch_op:
+        batch_op.add_column(
+            sa.Column(
+                "library_enabled",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.text("1"),
+            )
         )
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("valuz_skill_library_state", schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f("ix_valuz_skill_library_state_user_id"))
-    op.drop_table("valuz_skill_library_state")
+    with op.batch_alter_table("valuz_skill_index", schema=None) as batch_op:
+        batch_op.drop_column("library_enabled")

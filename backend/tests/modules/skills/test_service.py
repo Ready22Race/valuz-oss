@@ -109,15 +109,15 @@ class FakeSkillDatastore:
     async def list_skills(self, user_id):
         return list(self._rows.values())
 
-    async def list_library_disabled_slugs(self, user_id):
+    async def list_library_disabled_ids(self, user_id):
         return set(getattr(self, "_library_disabled", set()))
 
-    async def set_library_enabled(self, user_id, slug, enabled):
+    async def set_library_enabled(self, user_id, skill_id, enabled):
         disabled = getattr(self, "_library_disabled", set())
         if enabled:
-            disabled.discard(slug)
+            disabled.discard(skill_id)
         else:
-            disabled.add(slug)
+            disabled.add(skill_id)
         self._library_disabled = disabled
 
     def add_ignore(self, skill_id, content_hash=None):
@@ -302,12 +302,14 @@ class TestLibraryState:
     """Global library on/off switch — the field the new-conversation ``/``
     picker filters on. Default on; only an explicit off is stored."""
 
-    async def test_catalog_overlays_disabled_slug(self, svc, skill_root):
+    async def test_catalog_overlays_disabled_row(self, svc, skill_root):
         service, _ = svc
         _make_skill_dir(skill_root, "alpha")
         _make_skill_dir(skill_root, "beta")
-        # alpha turned off in the library; beta left at the default (on).
-        await service._ds.set_library_enabled("u", "alpha", False)
+        # Turn alpha off by its catalog row id; beta left at the default (on).
+        cat0 = await service.list_catalog("ws-1")
+        alpha_id = next(s for s in cat0.skills if s.slug == "alpha").id
+        await service._ds.set_library_enabled("u", alpha_id, False)
 
         catalog = await service.list_catalog("ws-1")
         by_slug = {s.slug: s for s in catalog.skills}
@@ -317,16 +319,18 @@ class TestLibraryState:
 
     async def test_builtin_skill_cannot_be_disabled(self, svc, skill_root):
         service, _ = svc
-        # A built-in skill (``origin-label: Built-in`` frontmatter). Even with a
-        # stored "disabled" state row, the catalog must keep it enabled — built-ins
-        # ship with the client and aren't toggleable.
+        # A built-in skill (``origin-label: Built-in`` frontmatter). Even with its
+        # row turned off, the catalog must keep it enabled — built-ins ship with
+        # the client and aren't toggleable.
         d = skill_root / "skill-creator"
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(
             '---\nname: "skill-creator"\ndescription: "x"\norigin-label: "Built-in"\n---\n\nbody\n',
             encoding="utf-8",
         )
-        await service._ds.set_library_enabled("u", "skill-creator", False)
+        cat0 = await service.list_catalog("ws-1")
+        sc_id = next(s for s in cat0.skills if s.slug == "skill-creator").id
+        await service._ds.set_library_enabled("u", sc_id, False)
 
         catalog = await service.list_catalog("ws-1")
         sc = next(s for s in catalog.skills if s.slug == "skill-creator")
