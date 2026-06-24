@@ -145,6 +145,35 @@ async def reindex_official_skills() -> int:
                 await _upsert_skill_row(ds, manifest)
                 count += 1
     return count
+
+
+async def reindex_user_skills() -> int:
+    """Index the on-disk user-library skills into ``valuz_skill_index``.
+
+    The user-scope companion to ``reindex_official_skills``: an agent-pack may
+    carry ``embedded`` (user-authored) skills that ``_install_embedded_skills``
+    copies into the user library. Like the official case, those rows would
+    otherwise only land on the next boot or the periodic auto-scan (≤30 min),
+    leaving a pack agent that references them unable to resolve the skill in
+    between. The pack-import path calls this right after installing them so the
+    explicit-index guarantee covers embedded skills too. Upsert only; returns
+    the count.
+    """
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
+    from valuz_agent.modules.skills.contracts import RuntimeContext
+
+    ctx = RuntimeContext()
+    count = 0
+    async with _scan_lock:
+        async with async_unit_of_work(commit=True) as db:
+            ds = SkillDatastore(db)
+            for manifest in FilesystemSkillSource().list_skills(ctx):
+                if manifest.scope != "user":
+                    continue
+                await _upsert_skill_row(ds, manifest)
+                count += 1
+    return count
 # Import provenance staged alongside a preview, keyed by the same ``preview_id``.
 # Populated for URL/GitHub imports; consumed by ``confirm_url_import`` to persist
 # ``valuz_skill_index.origin_json``. Cleaned up with the preview.
@@ -289,6 +318,18 @@ class SkillLibraryService:
             return (0, -view.folder_created_at, view.name.lower())
 
         skills.sort(key=_sort_key)
+
+        # Overlay the global library switch (slug-keyed, user-scoped). Absence of
+        # a state row means enabled, so we only flip the ones explicitly turned
+        # off. This is the field the new-conversation ``/`` picker filters on.
+        # Built-in skills (bundled with the client) are always-on and can't be
+        # disabled — guard here too so a stale/forced state row can never hide
+        # one, mirroring the disabled toggle in the UI.
+        disabled = await self._ds.list_library_disabled_slugs(require_current_user_id())
+        if disabled:
+            for s in skills:
+                if s.slug and s.slug in disabled and s.origin_label != "Built-in":
+                    s.library_enabled = False
 
         return SkillsCatalog(project_id=project_id, skills=skills)
 
@@ -840,6 +881,12 @@ class SkillLibraryService:
             sum(1 for _ in skill_dir.rglob("*") if _.is_file()) if skill_dir.exists() else 0
         )
 
+        # Overlay the global library switch (default on; off only when stored).
+        # Built-in skills are always-on (can't be disabled), so never flip them.
+        if skill.slug and skill.origin_label != "Built-in":
+            disabled = await self._ds.list_library_disabled_slugs(require_current_user_id())
+            skill.library_enabled = skill.slug not in disabled
+
         return SkillDetail(
             **skill.model_dump(),
             instructions_markdown=instructions_md,
@@ -849,6 +896,24 @@ class SkillLibraryService:
             metadata=metadata,
             origin=await self._load_origin(skill.id),
         )
+
+    async def set_library_enabled(self, skill_id: str, enabled: bool) -> SkillDetail:
+        """Flip a skill's global library switch (slug-keyed) and return it.
+
+        Resolves ``skill_id`` to its slug, persists the switch for every index
+        scope sharing that slug at once (one decision per slug), notifies open
+        catalogs, and returns the refreshed detail. Raises ``SkillNotFound``
+        when the id is unknown.
+        """
+        from valuz_agent.modules.skills.errors import SkillNotFound
+
+        user_id = require_current_user_id()
+        row = await self._ds.get_by_id(user_id, skill_id)
+        if row is None or not row.slug:
+            raise SkillNotFound(skill_id)
+        await self._ds.set_library_enabled(user_id, row.slug, enabled)
+        self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="library_state")
+        return await self.get_skill_detail(skill_id)
 
     async def _load_origin(self, skill_id: str) -> SkillOrigin | None:
         """Read import provenance off the ``valuz_skill_index`` row, if any."""

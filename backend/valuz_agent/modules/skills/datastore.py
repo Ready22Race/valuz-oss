@@ -9,11 +9,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.db import async_commit_with_retry
+from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.skills.contracts import ProjectRef, RuntimeContext, SkillManifest
 from valuz_agent.modules.skills.models import (
     ProjectSkillConfigRow,
     SkillIndexRow,
+    SkillLibraryStateRow,
 )
 
 
@@ -129,6 +131,44 @@ class SkillDatastore:
             r.user_id = user_id
         self._db.add_all(rows)
         await async_commit_with_retry(self._db, where="SkillDatastore.set_project_skills")
+
+    # ------------------------------------------------------------------
+    # Global library on/off switch (valuz_skill_library_state, by slug)
+    # ------------------------------------------------------------------
+
+    async def list_library_disabled_slugs(self, user_id: str) -> set[str]:
+        """Slugs the user has turned OFF in the library. Absence = enabled, so
+        only disabled slugs are stored; this is the overlay the catalog reads."""
+        rows = (
+            await self._db.execute(
+                select(SkillLibraryStateRow.slug).where(
+                    SkillLibraryStateRow.user_id == user_id,
+                    SkillLibraryStateRow.enabled.is_(False),
+                )
+            )
+        ).scalars()
+        return set(rows)
+
+    async def set_library_enabled(self, user_id: str, slug: str, enabled: bool) -> None:
+        """Upsert the global library switch for ``slug``. Idempotent."""
+        existing = (
+            await self._db.execute(
+                select(SkillLibraryStateRow).where(
+                    SkillLibraryStateRow.user_id == user_id,
+                    SkillLibraryStateRow.slug == slug,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            self._db.add(
+                SkillLibraryStateRow(
+                    user_id=user_id, slug=slug, enabled=enabled, updated_at=now_ms()
+                )
+            )
+        else:
+            existing.enabled = enabled
+            existing.updated_at = now_ms()
+        await async_commit_with_retry(self._db, where="SkillDatastore.set_library_enabled")
 
     # ------------------------------------------------------------------
     # Filesystem-based project skill config (JSON project-config.json)

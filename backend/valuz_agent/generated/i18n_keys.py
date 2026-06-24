@@ -1614,6 +1614,8 @@ I18nKey = Literal[
     "skill.importedFrom",
     "skill.importedPartial",
     "skill.inFinder",
+    "skill.libraryDisabledTip",
+    "skill.libraryEnabledTip",
     "skill.linkImport",
     "skill.linkImportDesc",
     "skill.linkImportShort",
