@@ -48,6 +48,15 @@ KEY_FONT_SIZE = "ui.font_size"
 # automatic (LLM-spending) review. Both default ON.
 KEY_MEMORY_ENABLED = "memory.enabled"
 KEY_MEMORY_AUTO_EXTRACT = "memory.auto_extract"
+# Global, user-authored guidance appended to the background reviewer prompt
+# (memory-system-design §7.4). It refines "what to save/skip" and OVERRIDES the
+# default soft heuristics (so e.g. "remember key conclusions" can beat the
+# default "skip transcript-derivable facts" rule); the hard rules (secret
+# redaction, KB dedup, JSON contract) are not overridable. Empty = disabled.
+# Stored as a preference like the toggles; only the background extractor reads
+# it (never injected into normal turns). Capped to keep the review prompt bounded.
+KEY_MEMORY_CUSTOM_INSTRUCTIONS = "memory.custom_instructions"
+MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS = 1500
 
 FALLBACK_TIMEZONE = "UTC"
 FALLBACK_LOCALE = "zh-CN"
@@ -314,6 +323,22 @@ async def get_memory_auto_extract(db: AsyncSession) -> bool:
 
 async def set_memory_auto_extract(db: AsyncSession, value: bool) -> None:
     await _write(db, KEY_MEMORY_AUTO_EXTRACT, "true" if value else "false")
+
+
+async def get_memory_custom_instructions(db: AsyncSession) -> str:
+    """Global reviewer guidance (default empty = off). See
+    ``KEY_MEMORY_CUSTOM_INSTRUCTIONS``."""
+    return (await _read(db, KEY_MEMORY_CUSTOM_INSTRUCTIONS)) or ""
+
+
+async def set_memory_custom_instructions(db: AsyncSession, value: str) -> None:
+    """Persist global reviewer guidance, trimmed and hard-capped to
+    ``MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS`` so the review prompt stays bounded."""
+    await _write(
+        db,
+        KEY_MEMORY_CUSTOM_INSTRUCTIONS,
+        value.strip()[:MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS],
+    )
 
 
 def detect_system_timezone() -> str:

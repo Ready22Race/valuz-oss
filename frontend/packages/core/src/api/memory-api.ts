@@ -21,6 +21,12 @@ export type MemoryTarget = "user" | "global" | "project";
 export interface MemoryView {
   enabled: boolean;
   auto_extract: boolean;
+  /**
+   * Global guidance appended to the background reviewer prompt; steers what the
+   * auto-extractor saves/skips (overrides the default soft heuristics). Empty =
+   * off. See memory-system-design §7.4.
+   */
+  custom_instructions: string;
   /** Entries per scope, keyed by target (user / global / project-when-bound). */
   entries: Record<string, string[]>;
 }
@@ -28,11 +34,13 @@ export interface MemoryView {
 export interface MemorySettings {
   enabled: boolean;
   auto_extract: boolean;
+  custom_instructions: string;
 }
 
 export interface MemorySettingsPatch {
   enabled?: boolean;
   auto_extract?: boolean;
+  custom_instructions?: string;
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
