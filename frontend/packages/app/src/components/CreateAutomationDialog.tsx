@@ -359,13 +359,13 @@ export const CreateAutomationDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
+      <DialogContent className="max-w-xl gap-0 p-0">
+        <DialogHeader className="px-[18px] pt-[18px] pb-1">
+          <DialogTitle className="text-sm leading-5">{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
           <FormField label={t("cron.taskName" as Parameters<typeof t>[0])}>
             <Input
               value={name}
@@ -627,7 +627,7 @@ export const CreateAutomationDialog = ({
           </FormField>
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="px-[18px] pt-1 pb-4">
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             {t("common.cancel" as Parameters<typeof t>[0])}
           </Button>

@@ -60,16 +60,16 @@ export const CreateKbDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>
+      <DialogContent className="gap-0 p-0">
+        <DialogHeader className="px-[18px] pt-[18px] pb-1">
+          <DialogTitle className="text-sm leading-5">
             {t("knowledge.newKb" as Parameters<typeof t>[0])}
           </DialogTitle>
           <DialogDescription>
             {t("knowledge.linkLocalDir" as Parameters<typeof t>[0])}
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4 py-2">
+        <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
           <FormField label={t("common.name" as Parameters<typeof t>[0])}>
             <Input
               value={name}
@@ -77,7 +77,6 @@ export const CreateKbDialog = ({
               placeholder={t(
                 "knowledge.kbNamePlaceholder" as Parameters<typeof t>[0],
               )}
-              className="h-10"
             />
           </FormField>
           <FormField
@@ -103,7 +102,7 @@ export const CreateKbDialog = ({
             </span>
           </label>
         </div>
-        <DialogFooter>
+        <DialogFooter className="px-[18px] pt-1 pb-4">
           <Button
             variant="outline"
             onClick={() => onOpenChange(false)}

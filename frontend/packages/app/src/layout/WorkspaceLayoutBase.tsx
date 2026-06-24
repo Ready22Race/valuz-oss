@@ -725,12 +725,14 @@ export function WorkspaceLayoutBase({
           if (!open) setCreateError("");
         }}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("project.createTitle")}</DialogTitle>
+        <DialogContent className="gap-0 p-0">
+          <DialogHeader className="px-[18px] pt-[18px] pb-1">
+            <DialogTitle className="text-sm leading-5">
+              {t("project.createTitle")}
+            </DialogTitle>
             <DialogDescription>{t("project.createDesc")}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
+          <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
             <div className="flex flex-col">
               <label className="mb-[5px] text-xs font-medium text-foreground">
                 {t("project.projectName")}
@@ -797,7 +799,7 @@ export function WorkspaceLayoutBase({
             </div>
             {projectDialogExtraFields}
           </div>
-          <DialogFooter>
+          <DialogFooter className="px-[18px] pt-1 pb-4">
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               {t("common.cancel")}
             </Button>

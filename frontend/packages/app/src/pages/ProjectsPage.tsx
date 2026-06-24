@@ -211,16 +211,16 @@ export const ProjectsPage = () => {
           if (!open) setCreateError("");
         }}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
+        <DialogContent className="gap-0 p-0">
+          <DialogHeader className="px-[18px] pt-[18px] pb-1">
+            <DialogTitle className="text-sm leading-5">
               {t("common.create" as Parameters<typeof t>[0])}
             </DialogTitle>
             <DialogDescription>
               {t("project.instruction" as Parameters<typeof t>[0])}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
+          <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
             <FormField label={t("common.name" as Parameters<typeof t>[0])}>
               <Input
                 placeholder="my-project"
@@ -255,7 +255,7 @@ export const ProjectsPage = () => {
               />
             </FormField>
           </div>
-          <DialogFooter>
+          <DialogFooter className="px-[18px] pt-1 pb-4">
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               {t("common.cancel" as Parameters<typeof t>[0])}
             </Button>
