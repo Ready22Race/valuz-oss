@@ -15,6 +15,7 @@ export * from "./use-runtimes";
 export * from "./use-service-descriptors";
 export * from "./use-services";
 export * from "./use-session";
+export * from "./use-session-artifacts";
 export * from "./use-session-attachments";
 export * from "./use-session-events";
 export * from "./use-skill-events";

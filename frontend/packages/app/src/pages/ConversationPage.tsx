@@ -59,6 +59,7 @@ import {
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
+  useSessionArtifacts,
   useSessionAttachments,
   type RuntimeId,
   type MemberWithAgent,
@@ -932,6 +933,11 @@ export const ConversationPage = () => {
     remove: removeSessionAttachmentRow,
     markPendingConsumed,
   } = useSessionAttachments(selectedSessionId);
+  // Agent-delivered artifacts (the "生成文件" list) — recorded by the
+  // ``deliver_artifacts`` MCP tool. Loads on session change; refreshed on
+  // turn-end (below) so newly delivered files appear without a manual reload.
+  const { artifacts: sessionArtifacts, refresh: refreshArtifacts } =
+    useSessionArtifacts(selectedSessionId);
   const navigate = useNavigate();
 
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
@@ -2182,9 +2188,12 @@ export const ConversationPage = () => {
   useEffect(() => {
     if (prevSendingRef.current && !sending) {
       refreshFileTree();
+      // The agent may have called ``deliver_artifacts`` during the turn —
+      // pull the fresh 生成文件 list alongside the file tree.
+      void refreshArtifacts();
     }
     prevSendingRef.current = sending;
-  }, [sending, refreshFileTree]);
+  }, [sending, refreshFileTree, refreshArtifacts]);
 
   // Loading server-side attachments on session change + polling parse status
   // is owned by ``useSessionAttachments`` above.
@@ -3709,6 +3718,13 @@ export const ConversationPage = () => {
         | "native"
         | undefined,
     }));
+    // Agent-delivered artifacts → the curated "生成文件" panel section.
+    const generatedFiles = sessionArtifacts.map((a) => ({
+      id: a.id,
+      name: a.file_name,
+      size: formatFileSize(a.file_size),
+      path: a.file_path,
+    }));
     // Always render the panel — even when it has nothing in it — so the
     // right-side toggle button stays visible on every conversation page.
     // The layout hides the panel column when the user collapses it; the
@@ -3749,6 +3765,10 @@ export const ConversationPage = () => {
         uploadedFiles={uploadedFiles}
         onUploadFile={handlePanelUpload}
         onRemoveUploadedFile={handleRemoveUploadedFile}
+        // Agent-delivered deliverables (生成文件) — shown in both chat and
+        // project sessions; rows open the file in its OS-associated app.
+        generatedFiles={generatedFiles}
+        onOpenGeneratedFile={(path) => void revealInFinder(path)}
         // KB binding tree — project sessions only, **read-only**: we
         // pass ``kbTree`` + ``bindings`` (so the checkbox state shows
         // which folders/files are bound) and ``onExpandKbFolder`` (so
@@ -3764,7 +3784,10 @@ export const ConversationPage = () => {
         fileTreeTitle={
           isProject
             ? t("project.fileTree" as Parameters<typeof t>[0])
-            : t("conversation.generatedFiles" as Parameters<typeof t>[0])
+            : // Chat sessions: the curated "生成文件" section now owns that
+              // label (agent-delivered artifacts), so the raw cwd file tree
+              // uses the neutral "文件" title to avoid two identical headers.
+              t("conversation.files" as Parameters<typeof t>[0])
         }
         fileTreeInTab={isProject}
         rootPath={
@@ -3816,6 +3839,8 @@ export const ConversationPage = () => {
     stagingSyncing,
     refreshStaging,
     sessionAttachments,
+    sessionArtifacts,
+    revealInFinder,
     handleRemoveSessionAttachment,
     handleSyncStaging,
     todos,

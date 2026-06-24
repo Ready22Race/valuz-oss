@@ -207,6 +207,7 @@ async def init_kernel(app: FastAPI) -> None:
     from valuz_agent.modules.browser import service as browser_service
     from valuz_agent.modules.browser.tools import build_browser_tool_defs
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
+    from valuz_agent.modules.sessions.artifacts_tool import build_deliver_artifacts_tool_defs
     from valuz_agent.modules.tasks.dispatch_mcp import build_task_tool_defs
     from valuz_agent.modules.tasks.orchestrator import task_orchestrator
     from valuz_agent.modules.tasks.tools.declarations import (
@@ -218,7 +219,11 @@ async def init_kernel(app: FastAPI) -> None:
     by_name = {t.name: t for t in task_defs}
     orchestration_names = [d.name for d in ORCHESTRATION_TOOL_DECLARATIONS]
     dispatch_names = [d.name for d in DISPATCH_TOOL_DECLARATIONS]
-    shared = build_memory_tool_defs() + build_submit_skill_tool_defs()
+    shared = (
+        build_memory_tool_defs()
+        + build_submit_skill_tool_defs()
+        + build_deliver_artifacts_tool_defs()
+    )
     # browser_start/browser_stop only work when the engine (Node +
     # chrome-devtools-mcp) is available; don't expose dead tools otherwise
     # (e.g. headless/TUI without Node). See docs/design/browser-feature.md §8.

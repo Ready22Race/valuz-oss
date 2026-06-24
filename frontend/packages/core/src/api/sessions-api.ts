@@ -410,6 +410,22 @@ export interface SessionAttachmentItem {
   consumed_at?: number | null;
 }
 
+/**
+ * A file the **agent** delivered as a finished output via the built-in
+ * ``deliver_artifacts`` MCP tool — the inverse of {@link SessionAttachmentItem}
+ * (user uploads). Durable (no per-turn staging); rendered as the read-only
+ * "生成文件" panel list. ``file_path`` is an absolute path the client opens.
+ */
+export interface SessionArtifactItem {
+  id: string;
+  session_id: string;
+  file_path: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string | null;
+  created_at: number;
+}
+
 const fetchJson = createFetchJson(() => _apiBase);
 
 export type SessionStreamCallback = (event: SessionEventDTO) => void;
@@ -650,6 +666,19 @@ export const sessionsApi = {
   ): Promise<{ items: SessionAttachmentItem[] }> {
     return fetchJson(
       `/v1/sessions/${encodeURIComponent(sessionId)}/attachments`,
+    );
+  },
+
+  /**
+   * List the files the agent delivered for ``sessionId`` (the "生成文件"
+   * panel list), recorded by the built-in ``deliver_artifacts`` MCP tool.
+   * Durable — the full set is returned every call.
+   */
+  listArtifacts(
+    sessionId: string,
+  ): Promise<{ items: SessionArtifactItem[] }> {
+    return fetchJson(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`,
     );
   },
 
