@@ -344,7 +344,19 @@ async def delete_session(
     session_id: str,
     store: StoreDep,
     owner: OwnerDep,
+    orchestrator: OrchestratorDep,
 ) -> dict[str, Any]:
+    # Tear down any cached runtime BEFORE dropping the row, so the session's
+    # live claude/codex subprocess is actually terminated. ``store.delete``
+    # alone only removes the DB row — the warm runtime (and its OS process)
+    # would linger in the orchestrator's cache until host exit. This is also
+    # what makes the memory-curator path leak-free: it creates an ephemeral
+    # session, runs one turn (spawning a CLI subprocess), then deletes it here.
+    # Interrupt first if a turn is in flight so we don't yank the subprocess
+    # out from under a live iterator.
+    if session_id in orchestrator.active_sessions:
+        await orchestrator.interrupt(session_id)
+    await orchestrator.cleanup(session_id)
     deleted = await store.delete_session(owner, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Annotated
 
 from app.config import AppConfig
@@ -34,7 +35,15 @@ async def init_dependencies(config: AppConfig) -> None:
     _engine = create_engine(config.database_url)
     _session_factory = create_session_factory(_engine)
     _store = SQLAlchemyStore(_session_factory)
-    _orchestrator = SessionOrchestrator(_store)
+    _orchestrator = SessionOrchestrator(
+        _store,
+        max_warm_runtimes=_env_int("VALUZ_MAX_WARM_RUNTIMES"),
+        runtime_idle_ttl_s=_env_float("VALUZ_RUNTIME_IDLE_TTL_S"),
+    )
+    # Start the warm-runtime idle sweeper (bounds leaked claude/codex
+    # subprocesses; see SessionOrchestrator). Safe before the orphan scan's
+    # possible early return so it runs regardless of migration state.
+    _orchestrator.start()
     # Best-effort scan — schema may not be migrated yet (typical in unit
     # tests that skip Alembic and run against an empty in-memory DB).
     try:
@@ -52,12 +61,45 @@ async def init_dependencies(config: AppConfig) -> None:
 async def shutdown_dependencies() -> None:
     """Dispose engine and clear singletons. Called during app lifespan shutdown."""
     global _engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
+    if _orchestrator is not None:
+        # Cancel the idle sweeper and close every warm runtime — terminates all
+        # live claude/codex subprocesses deterministically on shutdown.
+        try:
+            await _orchestrator.shutdown()
+        except Exception:  # noqa: BLE001 — shutdown must not raise
+            logger.debug("orchestrator shutdown failed", exc_info=True)
     if _engine:
         await _engine.dispose()
     _engine = None
     _session_factory = None
     _store = None
     _orchestrator = None
+
+
+def _env_int(name: str) -> int | None:
+    """Parse an optional int env override (``<= 0`` disables the policy);
+    ``None`` (use default) when unset or malformed."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Ignoring malformed %s=%r (expected int)", name, raw)
+        return None
+
+
+def _env_float(name: str) -> float | None:
+    """Parse an optional float env override; ``None`` (use default) when unset
+    or malformed."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Ignoring malformed %s=%r (expected number)", name, raw)
+        return None
 
 
 def get_owner_id(x_valuz_owner_id: Annotated[str | None, Header()] = None) -> str:
