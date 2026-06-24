@@ -12,8 +12,10 @@ this orchestrator does not create or own the directory beyond seeding the
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -247,9 +249,49 @@ class SessionOrchestrator:
     file).
     """
 
-    def __init__(self, store: StorePort) -> None:
+    # Warm-runtime eviction defaults. Each cached runtime holds a live CLI
+    # subprocess (claude / codex) for the life of the cache entry, so an
+    # unbounded ``_runtimes`` leaks one OS process per session touched —
+    # they only die when the host exits (the SDKs' atexit reaper). These two
+    # knobs bound that: a hard LRU ceiling on concurrent warm runtimes and an
+    # idle TTL after which an untouched runtime is closed. ``<= 0`` disables
+    # the corresponding policy. Overridable per-instance (composition root
+    # reads env in ``app.dependencies``); see docs/design or the eviction
+    # helpers below.
+    DEFAULT_MAX_WARM_RUNTIMES: int = 6
+    DEFAULT_RUNTIME_IDLE_TTL_S: float = 300.0  # 5 min
+    DEFAULT_SWEEP_INTERVAL_S: float = 60.0  # 1 min
+
+    def __init__(
+        self,
+        store: StorePort,
+        *,
+        max_warm_runtimes: int | None = None,
+        runtime_idle_ttl_s: float | None = None,
+        sweep_interval_s: float | None = None,
+    ) -> None:
         self._store = store
         self._runtimes: dict[str, RuntimePort] = {}
+        # session_id -> monotonic timestamp of the last turn START/END on that
+        # cached runtime. Drives idle-TTL + LRU eviction. Mirrors the lifetime
+        # of ``_runtimes`` exactly (added on create, dropped on evict/cleanup).
+        self._runtime_last_used: dict[str, float] = {}
+        self._max_warm_runtimes = (
+            self.DEFAULT_MAX_WARM_RUNTIMES if max_warm_runtimes is None else max_warm_runtimes
+        )
+        self._runtime_idle_ttl_s = (
+            self.DEFAULT_RUNTIME_IDLE_TTL_S if runtime_idle_ttl_s is None else runtime_idle_ttl_s
+        )
+        self._sweep_interval_s = (
+            self.DEFAULT_SWEEP_INTERVAL_S if sweep_interval_s is None else sweep_interval_s
+        )
+        # Background idle-sweeper task. Started by ``start()`` (composition
+        # root, has a running loop), cancelled by ``shutdown()``. ``None`` when
+        # not running — the lazy sweep in ``_ensure_runtime`` still enforces
+        # both policies on every turn, so eviction is correct even if the timer
+        # was never started (e.g. unit tests driving ``_ensure_runtime``).
+        self._sweeper_task: asyncio.Task[None] | None = None
+        self._closing = False
         self._active: dict[str, RuntimePort] = {}
         self._active_message: dict[str, Message] = {}
         # Per-session outbound bus. Lifecycle is independent of any
@@ -537,6 +579,12 @@ class SessionOrchestrator:
         finally:
             self._active.pop(session_id, None)
             self._active_message.pop(session_id, None)
+            # Mark the runtime freshly-used at turn END too, not just at entry.
+            # A long-running turn (in ``_active``, so never swept) could finish
+            # well past the idle TTL measured from its start; without this bump
+            # the very next sweep would evict a runtime that just went idle.
+            if session_id in self._runtimes:
+                self._runtime_last_used[session_id] = time.monotonic()
             # Defensive: if ``run()`` returned (or raised) without
             # resetting ``session.status``, force it back to ``"idle"``
             # so the DB doesn't carry a phantom ``running`` row from a
@@ -607,6 +655,7 @@ class SessionOrchestrator:
         # ``docs/design/approve-for-session.md`` §8.
         self._session_approval_cache.clear(session_id)
         runtime = self._runtimes.pop(session_id, None)
+        self._runtime_last_used.pop(session_id, None)
         if runtime is not None:
             try:
                 await runtime.close()
@@ -631,9 +680,16 @@ class SessionOrchestrator:
     ) -> RuntimePort:
         from src.runtimes.factory import create_runtime
 
+        # Opportunistic eviction on every turn entry: close runtimes idle past
+        # the TTL (skipping the one we're about to touch / any active turn).
+        # This is the lazy half of the policy — the background sweeper covers
+        # the zero-activity case; together they bound the live subprocess set.
+        await self._sweep_idle_runtimes(exclude=session_id)
+
         cached = self._runtimes.get(session_id)
         if cached is not None:
             cached.update_sink(sink)
+            self._runtime_last_used[session_id] = time.monotonic()
             return cached
 
         runtime = create_runtime(agent, session, sink, workspace_root=workspace_root)
@@ -648,7 +704,114 @@ class SessionOrchestrator:
         if callable(setter):
             setter(self._build_session_rule_finder(session_id, runtime))
         self._runtimes[session_id] = runtime
+        self._runtime_last_used[session_id] = time.monotonic()
+        # Enforce the hard LRU ceiling after admitting the new runtime. This is
+        # the guaranteed bound on concurrent warm subprocesses, independent of
+        # the TTL: no matter how many sessions are touched, at most
+        # ``_max_warm_runtimes`` claude/codex processes stay alive at once.
+        await self._enforce_runtime_cap(exclude=session_id)
         return runtime
+
+    # ── Warm-runtime eviction (idle TTL + LRU cap) ─────────────────────────
+
+    def start(self) -> None:
+        """Start the background idle-sweeper. Idempotent; requires a running
+        event loop (call from the composition root's async init). Eviction is
+        still correct without it — the lazy sweep in ``_ensure_runtime`` runs
+        on every turn — this just covers sessions that go idle with no further
+        activity anywhere. No-op when the idle TTL is disabled (``<= 0``)."""
+        if self._runtime_idle_ttl_s <= 0 or self._sweep_interval_s <= 0:
+            return
+        if self._sweeper_task is not None and not self._sweeper_task.done():
+            return
+        self._closing = False
+        self._sweeper_task = asyncio.create_task(self._run_sweeper())
+
+    async def shutdown(self) -> None:
+        """Cancel the sweeper and close every cached runtime — i.e. terminate
+        all live claude/codex subprocesses deterministically on host shutdown,
+        rather than relying on the SDKs' atexit reaper. Called from
+        ``app.dependencies.shutdown_dependencies``."""
+        self._closing = True
+        task = self._sweeper_task
+        self._sweeper_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        for session_id in list(self._runtimes):
+            await self._evict_runtime(session_id)
+
+    async def _run_sweeper(self) -> None:
+        """Periodic idle sweep loop. Resilient: a failing sweep is logged and
+        the loop continues; cancellation (shutdown) propagates."""
+        try:
+            while not self._closing:
+                await asyncio.sleep(self._sweep_interval_s)
+                if self._closing:
+                    break
+                try:
+                    await self._sweep_idle_runtimes()
+                except Exception:  # noqa: BLE001 — a bad sweep must not kill the loop
+                    logger.debug("runtime idle sweep failed", exc_info=True)
+        except asyncio.CancelledError:
+            raise
+
+    async def _sweep_idle_runtimes(self, *, exclude: str | None = None) -> None:
+        """Close every cached runtime untouched for longer than the idle TTL.
+        Never evicts an active turn (``_active``) — a parked approval keeps the
+        session active because ``runtime.run()`` is still awaiting, so this also
+        protects sessions waiting on a user decision."""
+        if self._runtime_idle_ttl_s <= 0:
+            return
+        now = time.monotonic()
+        stale = [
+            sid
+            for sid, ts in list(self._runtime_last_used.items())
+            if sid != exclude
+            and sid not in self._active
+            and (now - ts) >= self._runtime_idle_ttl_s
+        ]
+        for sid in stale:
+            await self._evict_runtime(sid)
+
+    async def _enforce_runtime_cap(self, *, exclude: str | None = None) -> None:
+        """Evict least-recently-used runtimes until the warm set is within the
+        cap. Skips active turns; if every over-cap entry is active, the cap is
+        briefly exceeded rather than tearing down a running subprocess."""
+        if self._max_warm_runtimes <= 0:
+            return
+        if len(self._runtimes) <= self._max_warm_runtimes:
+            return
+        evictable = sorted(
+            (sid for sid in self._runtimes if sid != exclude and sid not in self._active),
+            key=lambda s: self._runtime_last_used.get(s, 0.0),
+        )
+        for sid in evictable:
+            if len(self._runtimes) <= self._max_warm_runtimes:
+                break
+            await self._evict_runtime(sid)
+
+    async def _evict_runtime(self, session_id: str) -> None:
+        """Drop a runtime from the warm cache and close it (kills its CLI
+        subprocess). Keeps the session's event bus so an attached client keeps
+        streaming and the next turn rebuilds the runtime (resuming via the
+        persisted ``runtime_session_id``) — a cold reload, hence the approval
+        cache is cleared to match ``cleanup`` semantics. Use ``cleanup`` (not
+        this) when the session itself is going away."""
+        runtime = self._runtimes.pop(session_id, None)
+        self._runtime_last_used.pop(session_id, None)
+        self._session_approval_cache.clear(session_id)
+        if runtime is None:
+            return
+        try:
+            await runtime.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("Error evicting runtime for session %s", session_id, exc_info=True)
+        else:
+            logger.info("Evicted warm runtime for idle/over-cap session %s", session_id)
 
     def _build_session_rule_finder(
         self,

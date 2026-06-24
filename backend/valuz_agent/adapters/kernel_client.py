@@ -332,7 +332,7 @@ class InProcessKernelClient:
         from app.routes.sessions import delete_session
 
         try:
-            await delete_session(session_id, _store(), user_id)
+            await delete_session(session_id, _store(), user_id, _orchestrator())
         except HTTPException as exc:
             if exc.status_code == 404:
                 return False
