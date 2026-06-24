@@ -207,6 +207,7 @@ async def init_kernel(app: FastAPI) -> None:
     from valuz_agent.modules.browser import service as browser_service
     from valuz_agent.modules.browser.tools import build_browser_tool_defs
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
+    from valuz_agent.modules.projects.tools import build_project_instructions_tool_defs
     from valuz_agent.modules.sessions.artifacts_tool import build_deliver_artifacts_tool_defs
     from valuz_agent.modules.tasks.dispatch_mcp import build_task_tool_defs
     from valuz_agent.modules.tasks.orchestrator import task_orchestrator
@@ -221,6 +222,7 @@ async def init_kernel(app: FastAPI) -> None:
     dispatch_names = [d.name for d in DISPATCH_TOOL_DECLARATIONS]
     shared = (
         build_memory_tool_defs()
+        + build_project_instructions_tool_defs()
         + build_submit_skill_tool_defs()
         + build_deliver_artifacts_tool_defs()
     )

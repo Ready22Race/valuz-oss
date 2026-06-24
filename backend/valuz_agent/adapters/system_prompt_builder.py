@@ -41,4 +41,23 @@ def build_project_system_prompt(
     return (instructions_md or "").strip()
 
 
-__all__ = ["build_project_system_prompt"]
+def assemble_session_instructions(sections: list[tuple[str, str]]) -> str:
+    """Join the session system-prompt blocks, each wrapped in an XML tag.
+
+    ``sections`` is an ordered list of ``(tag, text)``. Empty / whitespace-only
+    blocks are skipped; the rest are emitted as ``<tag>\\n{text}\\n</tag>`` and
+    joined with blank lines. The tags delineate the distinct kinds of guidance
+    that used to be concatenated into one undelimited blob — the agent's own
+    instructions, the project's instructions, the task playbook, etc. — so both
+    the model and a human reading the session panel can tell them apart. This is
+    the single chokepoint for that assembly (chat/project + task paths both call
+    it), keeping the structure identical everywhere.
+    """
+    out: list[str] = []
+    for tag, text in sections:
+        if text and text.strip():
+            out.append(f"<{tag}>\n{text.strip()}\n</{tag}>")
+    return "\n\n".join(out)
+
+
+__all__ = ["assemble_session_instructions", "build_project_system_prompt"]

@@ -587,9 +587,14 @@ class SessionService:
         # playbooks (DISPATCH_PLAYBOOK / COMMITTED_LEAD_PLAYBOOK) and never
         # flow through this code path.
         from valuz_agent.adapters.agent_resolver import CHAT_TASK_PLAYBOOK
+        from valuz_agent.adapters.system_prompt_builder import assemble_session_instructions
 
-        instructions = "\n\n".join(
-            p for p in (agent.instructions, project_prompt, CHAT_TASK_PLAYBOOK) if p and p.strip()
+        instructions = assemble_session_instructions(
+            [
+                ("agent-instructions", agent.instructions or ""),
+                ("project-instructions", project_prompt),
+                ("task-playbook", CHAT_TASK_PLAYBOOK),
+            ]
         )
 
         effective_permission_mode = _coerce_session_permission_mode(
