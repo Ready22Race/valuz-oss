@@ -114,15 +114,23 @@ async def _resolve_session_context(session_id: str) -> tuple[str | None, str, st
     kernel_session = await kernel_client.get_session(require_current_user_id(), session_id)
     if kernel_session is None:
         return None, "chat", None
-    project_id = str(kernel_session.project_id)
 
+    # ``SessionData`` has no ``project_id`` column — the host records it (and the
+    # bound agent slug) under ``metadata["valuz"]``.
     meta = getattr(kernel_session, "metadata", None) or {}
     valuz_meta = meta.get("valuz") if isinstance(meta, dict) else None
+    project_id: str | None = None
     bound_agent_slug: str | None = None
     if isinstance(valuz_meta, dict):
+        pid = valuz_meta.get("project_id")
+        if isinstance(pid, str) and pid:
+            project_id = pid
         slug = valuz_meta.get("agent_slug")
         if isinstance(slug, str) and slug:
             bound_agent_slug = slug
+
+    if project_id is None:
+        return None, "chat", bound_agent_slug
 
     async with async_unit_of_work(commit=False) as db:
         ws = await ProjectDatastore(db).get_by_id(kernel_session.user_id, project_id)
@@ -301,7 +309,7 @@ async def _handle_create(
         return _err("create", str(exc.message), code=exc.__class__.__name__)
 
     fresh = await svc._row_to_item(  # noqa: SLF001 — sanctioned local projection
-        await svc._ds.get_automation(detail.automation_id)  # noqa: SLF001
+        await svc._ds.get_automation(require_current_user_id(), detail.automation_id)  # noqa: SLF001
     )
     return AutomationToolResult(
         action="create",
@@ -357,7 +365,7 @@ async def _handle_update(
 
     if not payload.automation_id:
         return _err("update", "automation_id is required for update.", code="MISSING_AUTOMATION_ID")
-    row = await svc._ds.get_automation(payload.automation_id)  # noqa: SLF001
+    row = await svc._ds.get_automation(require_current_user_id(), payload.automation_id)  # noqa: SLF001
     if row is None:
         return _err("update", "No such automation.", code="AutomationNotFound")
     if scope == "this" and project_id is not None and row.project_id != project_id:
@@ -387,7 +395,7 @@ async def _handle_update(
     ) as exc:
         return _err("update", str(exc.message), code=exc.__class__.__name__)
     fresh = await svc._row_to_item(  # noqa: SLF001
-        await svc._ds.get_automation(detail.automation_id)  # noqa: SLF001
+        await svc._ds.get_automation(require_current_user_id(), detail.automation_id)  # noqa: SLF001
     )
     return AutomationToolResult(
         action="update",
@@ -419,7 +427,7 @@ async def _handle_status_change(
         return _err(
             action, f"automation_id is required for {action}.", code="MISSING_AUTOMATION_ID"
         )
-    row = await svc._ds.get_automation(payload.automation_id)  # noqa: SLF001
+    row = await svc._ds.get_automation(require_current_user_id(), payload.automation_id)  # noqa: SLF001
     if row is None:
         return _err(action, "No such automation.", code="AutomationNotFound")
     if scope == "this" and project_id is not None and row.project_id != project_id:
@@ -465,7 +473,7 @@ async def _handle_status_change(
     ) as exc:
         return _err(action, str(exc.message), code=exc.__class__.__name__)
     fresh = await svc._row_to_item(  # noqa: SLF001
-        await svc._ds.get_automation(detail.automation_id)  # noqa: SLF001
+        await svc._ds.get_automation(require_current_user_id(), detail.automation_id)  # noqa: SLF001
     )
     return AutomationToolResult(
         action=action,
