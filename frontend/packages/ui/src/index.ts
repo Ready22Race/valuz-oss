@@ -101,6 +101,7 @@ export * from "./components/skills/SkillDetailPanel";
 export * from "./components/skills/SkillLinkImport";
 export * from "./components/skills/SkillStagingPanel";
 export * from "./components/skill/SkillSubmissionCard";
+export * from "./components/agent/AgentProposalCard";
 export * from "./components/automation/AutomationToolCard";
 export * from "./components/system/SystemLogList";
 export * from "./components/system/SystemLogToolbar";

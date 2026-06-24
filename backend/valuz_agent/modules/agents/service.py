@@ -23,7 +23,7 @@ import logging
 from dataclasses import replace
 from typing import Any
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import valuz_agent.boot.kernel  # noqa: F401 — ensures sys.path has kernel root
 
@@ -107,7 +107,7 @@ class AgentNotDeletableError(Exception):
 class AgentService:
     def __init__(
         self,
-        db: Session,
+        db: AsyncSession,
         connector_service: ConnectorService | None = None,
     ) -> None:
         self._db = db

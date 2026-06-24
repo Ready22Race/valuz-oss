@@ -122,6 +122,28 @@ export interface UpdateAgentPayload {
   avatar?: string | null;
 }
 
+/** Spec of an agent the user is confirming after the assistant proposed it
+ *  via the ``propose_agent`` tool. Backend derives a unique slug from name. */
+export interface ProposeAgentConfirmPayload {
+  name: string;
+  instructions: string;
+  description?: string;
+  runtime?: string;
+  model?: string;
+  effort?: EffortLevel | null;
+  skills?: string[];
+  connectors?: string[];
+  avatar?: string | null;
+}
+
+export interface ProposeAgentConfirmResult {
+  agent: AgentSummary;
+  member: ProjectMember | null;
+  /** True when the session was bound to a project and the agent was deployed. */
+  deployed: boolean;
+  project_id: string | null;
+}
+
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const agentsApi = {
@@ -195,6 +217,22 @@ export const agentsApi = {
   ): Promise<MemberWithAgent> {
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/agents`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+  },
+
+  /** Confirm an agent the assistant proposed via ``propose_agent``. Creates
+   *  the library agent and, when the session has a project, deploys it there. */
+  confirmProposal(
+    sessionId: string,
+    payload: ProposeAgentConfirmPayload,
+  ): Promise<ProposeAgentConfirmResult> {
+    return fetchJson(
+      `/v1/agents/proposals/${encodeURIComponent(sessionId)}/confirm`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

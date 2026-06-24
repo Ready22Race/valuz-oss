@@ -283,6 +283,40 @@ paths:
           description: Deleted
         "404":
           description: Agent not found
+  /v1/agents/proposals/{session_id}/confirm:
+    post:
+      summary: Confirm a proposed agent (create in the library + deploy into the session's project)
+      description: >-
+        User confirmation of an agent the assistant proposed via the
+        ``propose_agent`` tool. Creates a library agent and, when the session is
+        bound to a project, deploys it into that project as a member. The frontend
+        replays the agent spec from the originating ``tool_use`` event into the
+        request body.
+      operationId: confirmAgentProposal
+      tags: [agents]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProposeAgentConfirmRequest"
+      responses:
+        "201":
+          description: Agent created (and deployed when the session has a project)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposeAgentConfirmResponse"
+        "404":
+          description: Session not found
+        "409":
+          description: Agent already exists
   /v1/projects/{project_id}/tasks:
     post:
       summary: Kickoff a lead-dispatch task
@@ -2836,6 +2870,38 @@ components:
           oneOf:
             - $ref: "#/components/schemas/AgentSummary"
             - type: "null"
+    ProposeAgentConfirmRequest:
+      type: object
+      description: >-
+        Spec of an agent the user is confirming. Mirrors the ``propose_agent``
+        tool input; the backend derives a unique slug from ``name``.
+      required: [name, instructions]
+      properties:
+        name: {type: string}
+        instructions: {type: string}
+        description: {type: string, default: ""}
+        runtime: {type: string, default: claude_agent}
+        model: {type: string, default: claude-sonnet-4-6}
+        effort: {type: string, nullable: true, enum: [low, medium, high, xhigh, max]}
+        skills:
+          type: array
+          items: {type: string}
+        connectors:
+          type: array
+          items: {type: string}
+        avatar: {type: string, nullable: true}
+    ProposeAgentConfirmResponse:
+      type: object
+      required: [agent, deployed]
+      properties:
+        agent:
+          $ref: "#/components/schemas/AgentSummary"
+        member:
+          oneOf:
+            - $ref: "#/components/schemas/ProjectMember"
+            - type: "null"
+        deployed: {type: boolean}
+        project_id: {type: string, nullable: true}
     KickoffTaskRequest:
       type: object
       required: [goal, lead_agent_slug]
