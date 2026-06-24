@@ -37,7 +37,10 @@ from valuz_agent.adapters.capability_resolver import (
     always_on_skill_paths,
     resolve_skill_slugs_to_paths,
 )
-from valuz_agent.adapters.system_prompt_builder import build_project_system_prompt
+from valuz_agent.adapters.system_prompt_builder import (
+    assemble_session_instructions,
+    build_project_system_prompt,
+)
 from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 
@@ -697,19 +700,19 @@ async def build_member_session(
             "\nIgnore any other skills present in the working directory not listed above."
         )
     skills_block = "\n".join(block_lines)
-    parts = [
-        p
-        for p in [
-            agent.instructions,
-            project_prompt,
-            roster_block,
-            skills_block,
-            playbook_block,
-            brief,
+    # Wrap each block in an XML tag (shared chokepoint with the chat/project
+    # path) so the agent / task guidance / project instructions / roster /
+    # skills / brief are delineated instead of one undelimited blob.
+    instructions = assemble_session_instructions(
+        [
+            ("agent-instructions", agent.instructions or ""),
+            ("project-instructions", project_prompt),
+            ("member-roster", roster_block),
+            ("available-skills", skills_block),
+            ("task-playbook", playbook_block),
+            ("task-brief", brief),
         ]
-        if p.strip()
-    ]
-    instructions = "\n\n".join(parts)
+    )
 
     run_kind = "lead" if is_lead else "subtask"
 
