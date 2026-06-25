@@ -2059,7 +2059,11 @@ export const Composer = ({
                   // falls back to a placeholder). Default/agentless uses the
                   // composer's resolved model.
                   const triggerModelLabel =
-                    selectedAgent?.modelLabel ?? selectedModelLabel;
+                    selectedAgent?.modelLabel ??
+                    // Hide the "Model" placeholder when no model channel is
+                    // configured — ``selectedModelLabel`` falls back to that
+                    // literal only when ``providers`` is empty.
+                    (providers.length > 0 ? selectedModelLabel : null);
                   return (
                     <>
                       <button
