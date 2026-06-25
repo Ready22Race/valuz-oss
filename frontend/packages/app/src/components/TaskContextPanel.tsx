@@ -179,13 +179,16 @@ export const TaskContextPanel = ({
   // the one on the project home / conversation page (same chrome,
   // chevron, count semantics).
   const contextSections = (
-    <div className="flex flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* 👥 Agent Team — lead pinned to the top, dispatched sub-agents follow. */}
       <AccordionSection
         title={t("task.panel.team" as Parameters<typeof t>[0])}
         icon={Users}
         count={team.length || undefined}
         defaultOpen
+        // Natural height (its list is already capped) — never grow/shrink so
+        // the Todo section below gets all the leftover height.
+        className="shrink-0"
         contentClassName="p-0"
       >
         {team.length === 0 ? (
@@ -193,7 +196,10 @@ export const TaskContextPanel = ({
             {t("task.panel.teamEmpty" as Parameters<typeof t>[0])}
           </div>
         ) : (
-          <ul className="py-3">
+          // Cap the team list so a large team doesn't push the sections below
+          // it out of view on a short window — it scrolls internally instead.
+          // ``vh`` keeps it window-relative (tall windows show the whole list).
+          <ul className="max-h-[25vh] overflow-y-auto py-3">
             {team.map(({ slug, isLead }) => {
               const agent = agentBySlug.get(slug);
               const modelText = agent?.model
@@ -249,7 +255,11 @@ export const TaskContextPanel = ({
         icon={ListTodo}
         count={plannedSubtasks.length || undefined}
         defaultOpen
-        contentClassName="p-0"
+        // Grow to fill the rail's remaining height; the list scrolls inside
+        // (instead of a fixed ``vh`` cap) so it reaches the container bottom.
+        className="flex min-h-0 flex-1 flex-col"
+        fill
+        contentClassName="flex h-full min-h-0 flex-col p-0"
         action={
           plannedSubtasks.length > 0 ? (
             <Sheet open={planReviewOpen} onOpenChange={setPlanReviewOpen}>
@@ -298,7 +308,7 @@ export const TaskContextPanel = ({
             {t("task.panel.todoEmpty" as Parameters<typeof t>[0])}
           </p>
         ) : (
-          <ol className="py-3">
+          <ol className="min-h-0 flex-1 overflow-y-auto py-3">
             {plannedSubtasks.map((task, idx) => (
               <li
                 key={task.key ?? task.label}
@@ -362,7 +372,9 @@ export const TaskContextPanel = ({
     // so the rail visual matches across pages.
     return (
       <div className="flex h-full min-h-0 flex-col bg-surface-base">
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 pt-0">
+        {/* Flex column (not a single scroll): the Todo section is ``fill`` and
+            owns the leftover height, scrolling inside itself. */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-2 pt-0">
           {contextSections}
         </div>
       </div>
@@ -398,7 +410,7 @@ export const TaskContextPanel = ({
       </header>
       <TabsContent
         value="context"
-        className="min-h-0 overflow-y-auto px-2 pt-0"
+        className="flex min-h-0 flex-1 flex-col overflow-hidden px-2 pt-0"
       >
         {contextSections}
       </TabsContent>
