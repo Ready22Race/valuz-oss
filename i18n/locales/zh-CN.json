@@ -277,7 +277,7 @@
     "selectAgent": "选择智能体",
     "noAgents": "暂无 Agent，去创建后再开始对话。",
     "addAgent": "添加智能体",
-    "noAgentBanner": "你还没有可用的 Agent，先创建一个或完成引导配置",
+    "noAgentBanner": "你还没有配置模型，先配置模型或完成引导配置",
     "noAgentBannerCta": "去配置",
     "noChannelBanner": "当前没有可用的模型通道，先连接一个",
     "noChannelAndAgentBanner": "你还没有可用的模型通道和 Agent，先完成配置",
