@@ -115,14 +115,14 @@ export const AutomationProposalCard = memo(function AutomationProposalCard({
           </div>
 
           {triggerHuman ? (
-            <p className="mt-1 inline-flex items-center gap-1 text-xs text-ink-body">
+            <p className="mt-1 flex items-center gap-1 text-xs text-ink-body">
               <Sparkles className="h-3 w-3 shrink-0 text-ink-label" />
               {triggerHuman}
             </p>
           ) : null}
 
           {agentName ? (
-            <p className="mt-1 inline-flex items-center gap-1 text-[11px] text-ink-meta">
+            <p className="mt-1 flex items-center gap-1 text-[11px] text-ink-meta">
               <User className="h-3 w-3 shrink-0 text-ink-label" />
               {actionKind === "task"
                 ? `${t("automation.proposalLead")}: ${agentName}`
