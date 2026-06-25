@@ -56,7 +56,7 @@ class UserMixin:
 # (their ``alembic/env.py`` files call ``asyncio.run``).
 #
 # The only synchronous SQLite touch is the pair of boot-time self-heal probes
-# (``boot.schema.drop_stale_host_tables`` / ``boot.kernel.drop_stale_kernel_tables``):
+# (``boot.schema.ensure_host_schema_migratable`` / ``boot.kernel.ensure_kernel_schema_migratable``):
 # both run OFF the event loop in a dedicated thread (no deadlock risk; the
 # ADR-020 hazard is sync-on-loop), own no session, and read no business data.
 # They are data-preserving — a DB on a known alembic revision is migrated
