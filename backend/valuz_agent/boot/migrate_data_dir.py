@@ -88,6 +88,14 @@ def migrate_legacy_data_dir() -> None:
         return
 
     new_root = settings.data_dir
+    # Only the DEFAULT new root participates in the ``~/.valuz/app`` cutover. A
+    # custom ``VALUZ_DATA_DIR`` (tests, bespoke installs) is NOT the rename
+    # target — skip, so we never copy the real ``~/.valuz/app`` into an unrelated
+    # data dir. (The desktop app sets ``VALUZ_DATA_DIR`` to this same default, so
+    # it still migrates.)
+    if new_root != Path.home() / ".valuz-oss":
+        return
+
     old_app = Path.home() / ".valuz" / "app"
     old_kb = Path.home() / ".valuz" / "kb"
     marker = new_root / _MARKER_FILENAME
@@ -108,7 +116,7 @@ def migrate_legacy_data_dir() -> None:
         host_n = _rewrite_all(host_db, pairs)
         kernel_n = _rewrite_all(kernel_db, pairs)
         repaired = _repoint_symlinks(new_root, host_db, old_app_prefix, str(new_root))
-        _verify(host_db, kernel_db, old_app_prefix)
+        _assert_dbs_clean(new_root, old_app_prefix)
         _write_marker(marker, old_app)
         logger.warning(
             "data-dir migration: sweep done — rewrote %s; repaired %d symlink(s)",
@@ -146,7 +154,8 @@ def migrate_legacy_data_dir() -> None:
     repaired = _repoint_symlinks(new_root, host_db, old_app_prefix, str(new_root))
 
     # VERIFY — raise (old tree intact) before the marker is written.
-    _verify(host_db, kernel_db, old_app_prefix)
+    _assert_carried_over(old_app, new_root)
+    _assert_dbs_clean(new_root, old_app_prefix)
 
     logger.warning(
         "data-dir migration: done — rewrote %s; repaired %d symlink(s); old tree %s retained",
@@ -413,16 +422,38 @@ def _repoint_one(entry: Path, old_app_prefix: str, new_prefix: str) -> int:
 # --------------------------------------------------------------------------- #
 
 
-def _verify(host_db: Path, kernel_db: Path, old_app_prefix: str) -> None:
-    """Abort (raise) unless both DBs exist and no text column still carries the
-    old prefix. Leaves the old tree intact on failure."""
-    if not host_db.exists():
-        raise RuntimeError(f"data-dir migration verify failed: {host_db} missing")
-    if not kernel_db.exists():
-        raise RuntimeError(f"data-dir migration verify failed: {kernel_db} missing")
+def _assert_carried_over(old_app: Path, new_root: Path) -> None:
+    """Each CRITICAL file the OLD tree had MUST survive the copy.
 
-    _assert_no_old_prefix(host_db, old_app_prefix)
-    _assert_no_old_prefix(kernel_db, old_app_prefix)
+    - A missing DB is data loss.
+    - A missing ``installation.json`` would let identity re-derive a fresh owner
+      id — **changing ``user_id``** and orphaning owner-scoped state (onboarding,
+      skill index). Preserving it (so identity, resolved right after this step,
+      reads the SAME owner) is the load-bearing guarantee that ``user_id`` is
+      invariant across the migration.
+
+    Absence in the OLD tree is fine: a PRE-SPLIT install has no ``kernel.db``
+    (created later by the kernel-store split), and a never-booted tree may have
+    neither a DB nor an installation file."""
+    critical = (
+        settings.db_filename,
+        settings.kernel_db_filename,
+        settings.installation_file.name,
+    )
+    for name in critical:
+        if (old_app / name).exists() and not (new_root / name).exists():
+            raise RuntimeError(
+                f"data-dir migration verify failed: {new_root / name} missing after copy"
+            )
+
+
+def _assert_dbs_clean(new_root: Path, old_app_prefix: str) -> None:
+    """No surviving DB may still carry the old prefix. Skips DBs that don't
+    exist (nothing to verify). Leaves the old tree intact on failure."""
+    for name in (settings.db_filename, settings.kernel_db_filename):
+        db = new_root / name
+        if db.exists():
+            _assert_no_old_prefix(db, old_app_prefix)
 
 
 def _assert_no_old_prefix(db_path: Path, old_app_prefix: str) -> None:

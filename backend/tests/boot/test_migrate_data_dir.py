@@ -349,6 +349,83 @@ def test_self_heal_sweeps_under_old_marker_version(fake_home):
     assert migrate._marker_version(new_root / migrate._MARKER_FILENAME) >= 2
 
 
+def test_pre_split_old_install_without_kernel_db_does_not_fail_verify(fake_home):
+    """A PRE-SPLIT install has ``valuz.db`` but no ``kernel.db`` (the kernel-store
+    split, run later in boot, creates it). The cutover must NOT treat the missing
+    kernel.db as a verify failure — that crashed boot and left a broken root."""
+    old_app, _old_kb, new_root = fake_home
+    chat_cwd = old_app / "projects" / "p_chat"
+    (chat_cwd / ".claude" / "skills").mkdir(parents=True)
+    _make_host_db(
+        old_app / "valuz.db",
+        chat_cwd=str(chat_cwd),
+        external_cwd=str(new_root.parent / "Downloads" / "ext"),
+        official_skill=str(old_app / "official-skills" / "x"),
+    )
+    assert not (old_app / "kernel.db").exists()  # pre-split
+
+    migrate.migrate_legacy_data_dir()  # must not raise
+
+    assert (new_root / "valuz.db").exists()
+    assert not (new_root / "kernel.db").exists()  # legitimately absent, not a failure
+    assert (new_root / migrate._MARKER_FILENAME).exists()
+    chat_root = _scalar(
+        new_root / "valuz.db", "SELECT root_path FROM valuz_project WHERE id='p_chat'"
+    )
+    assert chat_root is not None and chat_root.startswith(str(new_root))
+
+
+def test_old_tree_without_any_dbs_is_a_noop_success(fake_home):
+    """An empty/reset old tree (no ``valuz.db``) must not crash verify — there is
+    simply nothing to carry; a fresh bootstrap creates the DBs at the new root."""
+    old_app, _old_kb, new_root = fake_home
+    (old_app / "logs").mkdir(parents=True)
+    (old_app / "logs" / "backend.log").write_text("hi\n")
+
+    migrate.migrate_legacy_data_dir()  # must not raise
+
+    assert (new_root / migrate._MARKER_FILENAME).exists()
+    assert (new_root / "logs" / "backend.log").exists()
+    assert not (new_root / "valuz.db").exists()
+
+
+def test_identity_resolves_to_migrated_owner_not_fresh_fingerprint(fake_home):
+    """Boot resolves identity from the MIGRATED ``installation.json``, so the
+    owner id matches the migrated rows regardless of this machine's fingerprint.
+
+    Reproduces the colleague case (stored id != device fingerprint) and asserts
+    the FIXED order (migrate → then identity) yields the OLD owner — the property
+    that keeps owner-scoped state (onboarding, skill index) stable on restart and
+    avoids re-onboarding. Were identity resolved BEFORE the migration, it would
+    derive a fresh fingerprint id instead, orphaning that state."""
+    from valuz_agent.infra import local_identity as li
+
+    old_app, _old_kb, new_root = fake_home
+    old_app.mkdir(parents=True)
+    # Stored owner id deliberately != any device fingerprint (the colleague case).
+    (old_app / "installation.json").write_text(
+        json.dumps({"user_id": "local-OLDOWNER", "fingerprint": "x", "created_at_ms": 1})
+    )
+    _make_host_db(
+        old_app / "valuz.db",
+        chat_cwd=str(old_app / "projects" / "p"),
+        external_cwd=str(new_root.parent / "Downloads" / "ext"),
+        official_skill=str(old_app / "official-skills" / "x"),
+    )
+
+    # FIXED boot order: migrate first, THEN resolve identity.
+    migrate.migrate_legacy_data_dir()
+    li.resolve_local_user_id.cache_clear()
+    try:
+        uid = li.resolve_local_user_id()
+    finally:
+        li.resolve_local_user_id.cache_clear()
+
+    assert uid == "local-OLDOWNER"
+    # The migrated owner file is what was read (not a freshly-written fingerprint).
+    assert json.loads((new_root / "installation.json").read_text())["user_id"] == "local-OLDOWNER"
+
+
 def test_external_db_configured_is_noop(fake_home, monkeypatch):
     """When the store lives in an external DB (e.g. Postgres), the local-SQLite
     copy/rewrite has nothing to do and must not run (or fail) at boot."""
