@@ -63,7 +63,7 @@ from src.runtimes.deepagents.approval_bridge import (
     _classify_subject,
 )
 from src.runtimes.deepagents.middleware import ToolErrorTolerantMiddleware
-from src.runtimes.interruption import is_runtime_interruption
+from src.runtimes.interruption import describe_exception, is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
@@ -449,12 +449,21 @@ class DeepAgentsRuntime:
                     message="runtime process interrupted",
                 )
             else:
+                # See ``describe_exception``: a langgraph / MCP ``ClientSession``
+                # failure can arrive wrapped in an ``ExceptionGroup`` whose
+                # ``str()`` is the opaque "unhandled errors in a TaskGroup" —
+                # unwrap to the leaf so the reason survives, and log the
+                # traceback (this branch previously logged nothing).
+                cause = describe_exception(exc)
+                logger.exception(
+                    "deepagents: turn failed for session %s: %s", session.id, cause
+                )
                 session.stop_reason = Error(
                     category="execution_error",
                     retry_status="exhausted",
-                    message=str(exc),
+                    message=cause,
                 )
-                await self.event_sink.emit(Event(type="session_error", data={"message": str(exc)}))
+                await self.event_sink.emit(Event(type="session_error", data={"message": cause}))
                 if self.config.hooks:
                     await self.config.hooks.fire("on_error", error=exc, session_id=session.id)
         finally:

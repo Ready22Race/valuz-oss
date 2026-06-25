@@ -95,7 +95,7 @@ from src.runtimes.codex.event_mapper import (
     extract_turn_completed,
     map_notification,
 )
-from src.runtimes.interruption import is_runtime_interruption
+from src.runtimes.interruption import describe_exception, is_runtime_interruption
 
 logger = logging.getLogger(__name__)
 
@@ -519,12 +519,20 @@ class CodexRuntime:
                     message="runtime process interrupted",
                 )
             else:
+                # See ``describe_exception``: a wrapped ``ExceptionGroup`` would
+                # otherwise reach the user as the opaque "unhandled errors in a
+                # TaskGroup" — unwrap to the leaf and log the traceback (this
+                # branch previously logged nothing).
+                cause = describe_exception(exc)
+                logger.exception(
+                    "codex: turn failed for session %s: %s", session.id, cause
+                )
                 session.stop_reason = Error(
                     category="execution_error",
                     retry_status="exhausted",
-                    message=str(exc),
+                    message=cause,
                 )
-                await self.event_sink.emit(Event(type="session_error", data={"message": str(exc)}))
+                await self.event_sink.emit(Event(type="session_error", data={"message": cause}))
                 if self.config.hooks:
                     await self.config.hooks.fire("on_error", error=exc, session_id=session.id)
         finally:
