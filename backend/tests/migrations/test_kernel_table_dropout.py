@@ -122,6 +122,24 @@ def test_should_not_touch_host_or_checkpoint_tables(tmp_path) -> None:
     assert {"valuz_agent", "alembic_version_host", "checkpoints"} <= remaining
 
 
+def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> None:
+    """A foreign/unknown kernel stamp WITH real session data = a downgrade.
+    Refuse to start and DO NOT wipe — the kernel store stays intact."""
+    import pytest
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'downgrade.db'}")
+    with engine.begin() as conn:
+        _create_kernel_trio(conn, stamp="9999_from_the_future")
+        conn.execute(text("INSERT INTO sessions VALUES ('s1', 'u1')"))
+
+    with pytest.raises(RuntimeError, match="not a known revision"):
+        drop_stale_kernel_tables(engine)
+
+    assert _TRIO <= _tables(engine)
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT id FROM sessions")).fetchall() == [("s1",)]
+
+
 def test_should_noop_on_fresh_install(tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
     drop_stale_kernel_tables(engine)

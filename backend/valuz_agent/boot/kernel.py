@@ -88,6 +88,24 @@ def _known_kernel_revisions() -> set[str]:
     return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
 
 
+def _any_kernel_rows(engine: Engine, tables: list[str]) -> bool:
+    """True if any of ``tables`` holds at least one row. On a read error, assume
+    data IS present (conservative — never wipe what we can't inspect)."""
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        for table in tables:
+            try:
+                row = conn.execute(
+                    text(f'SELECT 1 FROM "{table}" LIMIT 1')  # noqa: S608
+                ).first()
+            except Exception:
+                return True
+            if row is not None:
+                return True
+    return False
+
+
 def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
     """Self-heal probe for a corrupt/foreign kernel stamp (incremental chain).
 
@@ -126,16 +144,30 @@ def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
         if stamp in _known_kernel_revisions():
             return  # known revision — `alembic upgrade head` migrates it forward
 
-        stale = [t for t in _KERNEL_OWNED_TABLES if t in existing]
-        if not stale:
+        owned = [t for t in _KERNEL_OWNED_TABLES if t in existing]
+        if not owned:
             return  # fresh install / no kernel tables — nothing to reset
+
+        if stamp is not None and _any_kernel_rows(engine, owned):
+            # Downgrade / divergent build: a real revision this build can't
+            # migrate, with actual kernel data present. Fail loud, preserve the
+            # data (mirrors the host probe — never wipe a downgraded store).
+            raise RuntimeError(
+                f"kernel schema stamp={stamp!r} is not a known revision for this "
+                f"build, but {len(owned)} kernel table(s) hold data. Refusing to "
+                f"start so nothing is deleted — the kernel store was written by a "
+                f"newer or divergent version. Run a build whose migrations include "
+                f"{stamp!r} (usually: update to the latest)."
+            )
+
+        # No recoverable data at risk (unstamped half-init, or empty tables):
+        # drop + reinit so the upgrade starts clean.
+        stale = list(owned)
         if KERNEL_VERSION_TABLE in existing:
             stale.append(KERNEL_VERSION_TABLE)
-
         logger.warning(
-            "kernel schema stamp=%s is not a known revision — "
-            "dropping %d kernel table(s) for a clean re-initialization",
-            stamp,
+            "kernel schema is unstamped with %d table(s) present — half-initialized; "
+            "dropping for a clean re-initialization",
             len(stale),
         )
         with engine.begin() as conn:

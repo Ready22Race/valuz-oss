@@ -53,18 +53,44 @@ def _known_host_revisions() -> set[str]:
     return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
 
 
+def _any_rows(engine: Engine, tables: list[str]) -> bool:
+    """True if any of ``tables`` holds at least one row. On a read error, assume
+    data IS present (conservative — never wipe what we can't inspect)."""
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        for table in tables:
+            try:
+                row = conn.execute(
+                    text(f'SELECT 1 FROM "{table}" LIMIT 1')  # noqa: S608
+                ).first()
+            except Exception:
+                return True
+            if row is not None:
+                return True
+    return False
+
+
 def drop_stale_host_tables(engine: Engine | None = None) -> None:
-    """Self-heal probe for a corrupt/foreign host stamp (incremental chain).
+    """Self-heal probe for an unstamped / corrupt host schema (incremental chain).
 
     The host alembic chain is incremental. This keeps any DB stamped at a
     *known* revision and lets ``run_host_migrations`` (``alembic upgrade
-    head``) migrate it forward — data-preserving. Only an unknown/foreign
-    stamp, or ``valuz_*`` tables present with no stamp at all (a boot that
-    died mid-initialization), triggers a drop-and-rebuild so the upgrade can
-    re-initialize cleanly from the baseline.
+    head``) migrate it forward — data-preserving.
 
-    No-op on a fresh file. Runs synchronously off the event loop — it owns no
-    session and reads no business data, like the kernel probe.
+    Behaviour on a non-known stamp:
+
+    - **Unknown revision WITH ``valuz_*`` data** → the data dir was written by a
+      NEWER or divergent build (a downgrade). We **refuse to start** (raise)
+      rather than drop the data — it stays intact so the user can run a build
+      that knows the revision. (This deliberately does NOT wipe; an older drop
+      behaviour silently destroyed downgraded data.)
+    - **No stamp at all, with tables present** (a boot that died mid-init), or an
+      orphan version table with no business data → drop-and-rebuild so the
+      upgrade re-initialises cleanly from baseline. Nothing recoverable is lost.
+
+    No-op on a fresh file / known stamp. Runs synchronously off the event loop —
+    it owns no session and reads no business data, like the kernel probe.
     """
     from sqlalchemy import create_engine, inspect, text
 
@@ -88,15 +114,31 @@ def drop_stale_host_tables(engine: Engine | None = None) -> None:
         if stamp in _known_host_revisions():
             return  # known revision — `alembic upgrade head` migrates it
 
-        stale = sorted(t for t in existing if t.startswith("valuz_"))
+        business = sorted(t for t in existing if t.startswith("valuz_"))
+
+        if stamp is not None and _any_rows(engine, business):
+            # Downgrade / divergent build: a real revision this build can't
+            # migrate, with actual data on the line. Fail loud, preserve the data.
+            raise RuntimeError(
+                f"host schema stamp={stamp!r} is not a known revision for this "
+                f"build, but {len(business)} host table(s) hold data. Refusing to "
+                f"start so nothing is deleted — the data dir was written by a newer "
+                f"or divergent version. Run a build whose migrations include "
+                f"{stamp!r} (usually: update to the latest)."
+            )
+
+        # No recoverable data at risk (unstamped half-init, an orphan version
+        # table, or empty tables): drop the stale stamp/tables so the upgrade
+        # reinitialises clean.
+        stale = list(business)
         if VERSION_TABLE in existing:
             stale.append(VERSION_TABLE)
         if not stale:
             return  # fresh install — nothing to reset
 
         logger.warning(
-            "host schema stamp=%s is not a known revision — "
-            "dropping %d host table(s) for a clean re-initialization",
+            "host schema stamp=%s with no recoverable data — dropping %d table(s) "
+            "for a clean re-initialization",
             stamp,
             len(stale),
         )

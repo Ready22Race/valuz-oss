@@ -122,6 +122,26 @@ def test_should_not_touch_kernel_tables_on_reset(tmp_path) -> None:
     assert {"sessions", "alembic_version"} <= remaining
 
 
+def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> None:
+    """A foreign/unknown stamp WITH real data = a downgrade (DB written by a
+    newer/divergent build). Refuse to start and DO NOT wipe — the data stays."""
+    import pytest
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'downgrade.db'}")
+    with engine.begin() as conn:
+        _create_host_shape(conn, stamp="9999_from_the_future")
+        conn.execute(text("INSERT INTO valuz_agent VALUES ('a1', 'local-u')"))
+
+    with pytest.raises(RuntimeError, match="not a known revision"):
+        drop_stale_host_tables(engine)
+
+    # Nothing dropped — data + stamp intact for a newer build to migrate.
+    assert _host_tables(engine) == {"valuz_agent", "valuz_provider"}
+    assert _stamp(engine) == "9999_from_the_future"
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT id FROM valuz_agent")).fetchall() == [("a1",)]
+
+
 def test_should_noop_on_fresh_install(tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
     drop_stale_host_tables(engine)
