@@ -39,6 +39,12 @@ export const RowActionsMenu = ({
         align="end"
         className="min-w-[140px]"
         onCloseAutoFocus={(e) => e.preventDefault()}
+        // The content is portaled, but React events still bubble through the
+        // component tree — a click on an item would otherwise reach the row's
+        // ``onClick`` (which navigates into the conversation/task) and the
+        // navigation would unmount the rename prompt / delete dialog. Stop it
+        // here so the menu actions actually run.
+        onClick={(e) => e.stopPropagation()}
       >
         <DropdownMenuItem onSelect={onRename}>
           <FilePenLine />

@@ -29,4 +29,5 @@ export { CreateKbDialog } from "./CreateKbDialog";
 export type { CreateKbDialogProps } from "./CreateKbDialog";
 export { TaskStatusLabel } from "./TaskStatusLabel";
 export { RowActionsMenu } from "./RowActionsMenu";
+export { RenameInput } from "./RenameInput";
 export { formatCreatedAt } from "./format-created-at";

@@ -29,6 +29,7 @@ import {
 import {
   CreateAutomationDialog,
   DeployAgentsDialog,
+  RenameInput,
   RowActionsMenu,
   formatCreatedAt,
 } from "@valuz/app/components";
@@ -153,17 +154,18 @@ const SESSION_STATUS_KEY: Record<string, string> = {
 interface ProjectRecentsProps {
   sessions: SessionListItem[];
   onOpen: (sessionId: string) => void;
-  onRename: (sessionId: string, currentLabel: string) => void;
+  onRenameConfirm: (sessionId: string, name: string) => void;
   onDelete: (sessionId: string, label: string) => void;
 }
 
 const ProjectRecents = ({
   sessions,
   onOpen,
-  onRename,
+  onRenameConfirm,
   onDelete,
 }: ProjectRecentsProps) => {
   const { t } = useTranslation();
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   if (sessions.length === 0) {
     return (
       <div className="px-3 py-12 text-center text-sm text-ink-meta">
@@ -177,6 +179,22 @@ const ProjectRecents = ({
       {sessions.map((s) => {
         const fallback = t("sidebar.newChat" as Parameters<typeof t>[0]);
         const title = s.name ?? s.last_user_message_text ?? fallback;
+        if (renamingId === s.id) {
+          return (
+            <li key={s.id}>
+              <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
+                <RenameInput
+                  initial={title}
+                  onConfirm={(v) => {
+                    onRenameConfirm(s.id, v);
+                    setRenamingId(null);
+                  }}
+                  onCancel={() => setRenamingId(null)}
+                />
+              </div>
+            </li>
+          );
+        }
         return (
           <li key={s.id} className="group relative">
             <ContextMenu>
@@ -191,7 +209,7 @@ const ProjectRecents = ({
                       onOpen(s.id);
                     }
                   }}
-                  className="flex w-full items-center gap-2 rounded-xl bg-transparent px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
+                  className="flex w-full cursor-default items-center gap-2 rounded-xl bg-transparent px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
                 >
                   <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
                     {title}
@@ -210,14 +228,14 @@ const ProjectRecents = ({
                       />
                     )}
                     <RowActionsMenu
-                      onRename={() => onRename(s.id, s.name ?? "")}
+                      onRename={() => setRenamingId(s.id)}
                       onDelete={() => onDelete(s.id, title)}
                     />
                   </span>
                 </div>
               </ContextMenuTrigger>
               <ContextMenuContent className="min-w-[140px]">
-                <ContextMenuItem onSelect={() => onRename(s.id, s.name ?? "")}>
+                <ContextMenuItem onSelect={() => setRenamingId(s.id)}>
                   <FilePenLine />
                   {t("sidebar.rename" as Parameters<typeof t>[0])}
                 </ContextMenuItem>
@@ -293,7 +311,7 @@ const ProjectTasks = ({
           <button
             type="button"
             onClick={() => onOpen(task.id)}
-            className="flex w-full items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
+            className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
           >
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
               {task.title}
@@ -316,17 +334,18 @@ const ProjectAllList = ({
   tasks,
   onOpenSession,
   onOpenTask,
-  onRenameSession,
+  onRenameConfirm,
   onDeleteSession,
 }: {
   sessions: SessionListItem[];
   tasks: Task[];
   onOpenSession: (id: string) => void;
   onOpenTask: (id: string) => void;
-  onRenameSession: (id: string, currentName: string) => void;
+  onRenameConfirm: (id: string, name: string) => void;
   onDeleteSession: (id: string, label: string) => void;
 }) => {
   const { t } = useTranslation();
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   const items = useMemo(() => {
     const merged = [
       ...sessions.map((s) => ({
@@ -336,9 +355,6 @@ const ProjectAllList = ({
           s.name ??
           s.last_user_message_text ??
           t("sidebar.newChat" as Parameters<typeof t>[0]),
-        // Rename seeds from the raw session name (the title may be a
-        // message-text / fallback, not the editable name).
-        renameSeed: s.name ?? "",
         status: s.status as string,
         statusKey: SESSION_STATUS_KEY[s.status],
         // A session's list ``updated_at`` is its creation time (see
@@ -373,6 +389,22 @@ const ProjectAllList = ({
       {items.map((item) => {
         // Same leading icon as the Activity list: a task vs a conversation.
         const Icon = item.kind === "task" ? ListChecks : MessageSquare;
+        if (item.kind === "chat" && renamingId === item.id) {
+          return (
+            <li key={`${item.kind}-${item.id}`}>
+              <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
+                <RenameInput
+                  initial={item.title}
+                  onConfirm={(v) => {
+                    onRenameConfirm(item.id, v);
+                    setRenamingId(null);
+                  }}
+                  onCancel={() => setRenamingId(null)}
+                />
+              </div>
+            </li>
+          );
+        }
         return (
           <li key={`${item.kind}-${item.id}`} className="group relative">
             <div
@@ -390,7 +422,7 @@ const ProjectAllList = ({
                   else onOpenSession(item.id);
                 }
               }}
-              className="flex w-full items-center gap-2 rounded-xl px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
+              className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
             >
               <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
                 <Icon className="h-3 w-3" strokeWidth={2} />
@@ -418,7 +450,7 @@ const ProjectAllList = ({
                 )}
                 {item.kind === "chat" && (
                   <RowActionsMenu
-                    onRename={() => onRenameSession(item.id, item.renameSeed)}
+                    onRename={() => setRenamingId(item.id)}
                     onDelete={() => onDeleteSession(item.id, item.title)}
                   />
                 )}
@@ -565,19 +597,13 @@ export const ProjectDetailPage = () => {
     name: string;
   } | null>(null);
   const [pendingDeleteBusy, setPendingDeleteBusy] = useState(false);
-  // Shared conversation-row actions, used by both the "全部" and "对话" lists'
-  // hover ``⋯`` menu: rename via prompt, delete via the unified confirm dialog.
-  const handleRenameSession = useCallback(
-    async (sid: string, current: string) => {
-      const next = window.prompt(
-        t("sidebar.rename" as Parameters<typeof t>[0]),
-        current,
-      );
-      if (next === null) return;
-      const trimmed = next.trim();
-      if (!trimmed || trimmed === current) return;
+  // Shared conversation-row actions, used by both the "全部" and "对话" lists.
+  // Rename happens inline (RenameInput, mirroring the sidebar) — this just
+  // persists the confirmed name; delete goes through the unified confirm dialog.
+  const handleRenameConfirm = useCallback(
+    async (sid: string, name: string) => {
       try {
-        await renameSession(sid, trimmed);
+        await renameSession(sid, name);
         toast.success(t("sidebar.renamed" as Parameters<typeof t>[0]));
       } catch {
         toast.error(t("sidebar.renameFailed" as Parameters<typeof t>[0]));
@@ -1603,7 +1629,7 @@ export const ProjectDetailPage = () => {
                   tasks={tasks}
                   onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
                   onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
-                  onRenameSession={handleRenameSession}
+                  onRenameConfirm={handleRenameConfirm}
                   onDeleteSession={handleDeleteSession}
                 />
               </TabsContent>
@@ -1611,7 +1637,7 @@ export const ProjectDetailPage = () => {
                 <ProjectRecents
                   sessions={projectSessions}
                   onOpen={(sid) => navigate(`/conversation/${sid}`)}
-                  onRename={handleRenameSession}
+                  onRenameConfirm={handleRenameConfirm}
                   onDelete={handleDeleteSession}
                 />
               </TabsContent>

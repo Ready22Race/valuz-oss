@@ -33,7 +33,11 @@ import {
   type SessionEventDTO,
 } from "@valuz/shared";
 import { toast } from "sonner";
-import { RowActionsMenu, formatCreatedAt } from "@valuz/app/components";
+import {
+  RenameInput,
+  RowActionsMenu,
+  formatCreatedAt,
+} from "@valuz/app/components";
 import { useProjectOutlet } from "@valuz/app/layout";
 
 type SourceFilter = "all" | "chat" | "task";
@@ -281,6 +285,9 @@ export const ActivityPage = () => {
   // task rows in the first place.
   const [deletingChat, setDeletingChat] = useState<RunSummary | null>(null);
   const [deleteInFlight, setDeleteInFlight] = useState(false);
+  // Inline rename (RenameInput, mirroring the sidebar): which row's title is
+  // being edited. ``null`` = none.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
 
   useEffect(() => {
     setHeader(
@@ -422,6 +429,23 @@ export const ActivityPage = () => {
   const historyRow = (run: RunSummary) => {
     const ScopeIcon = run.source_kind === "task" ? ListChecks : MessageSquare;
     const canDelete = run.source_kind !== "task";
+    if (canDelete && renamingId === run.session_id) {
+      return (
+        <div
+          key={run.session_id}
+          className="flex w-full items-center gap-2 rounded-xl px-3 py-3"
+        >
+          <RenameInput
+            initial={run.title}
+            onConfirm={(v) => {
+              void handleRenameRunConfirm(run, v);
+              setRenamingId(null);
+            }}
+            onCancel={() => setRenamingId(null)}
+          />
+        </div>
+      );
+    }
     return (
       <div
         key={run.session_id}
@@ -434,7 +458,7 @@ export const ActivityPage = () => {
             openRun(run);
           }
         }}
-        className="group flex w-full cursor-pointer items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
+        className="group flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
       >
         <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
           <ScopeIcon className="h-3 w-3" strokeWidth={2} />
@@ -460,7 +484,7 @@ export const ActivityPage = () => {
           )}
           {canDelete && (
             <RowActionsMenu
-              onRename={() => handleRenameRun(run)}
+              onRename={() => setRenamingId(run.session_id)}
               onDelete={() => setDeletingChat(run)}
             />
           )}
@@ -469,13 +493,9 @@ export const ActivityPage = () => {
     );
   };
 
-  const handleRenameRun = async (run: RunSummary) => {
-    const next = window.prompt(t(tk("sidebar.rename")), run.title);
-    if (next === null) return;
-    const trimmed = next.trim();
-    if (!trimmed || trimmed === run.title) return;
+  const handleRenameRunConfirm = async (run: RunSummary, name: string) => {
     try {
-      await renameSession(run.session_id, trimmed);
+      await renameSession(run.session_id, name);
       refreshFinished();
       toast.success(t(tk("sidebar.renamed")));
     } catch {
