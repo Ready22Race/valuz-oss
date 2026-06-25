@@ -42,7 +42,7 @@ def ensure_local_identity() -> None:
     fallback: a context that was never seeded raises ``LookupError`` on read,
     so an unattributed insert fails loudly instead of being silently owned by
     the install id. OSS derives the id from the device fingerprint and persists
-    it once to ``~/.valuz/app/installation.json``; the commercial overlay
+    it once to ``~/.valuz-oss/installation.json``; the commercial overlay
     overrides per-request identity by swapping ``AuthMiddleware`` (overriding
     ``resolve_user_id``) via ``ext.auth_middleware``.
     """
@@ -104,9 +104,18 @@ async def bootstrap_schema() -> None:
     """
     from valuz_agent.boot.kernel import run_kernel_migrations
     from valuz_agent.boot.kernel_db_split import migrate_kernel_store_out_of_host_db
+    from valuz_agent.boot.migrate_data_dir import migrate_legacy_data_dir
     from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.seeds import seed_all
+
+    # -1. One-time data-dir cutover: carry a pre-rename ``~/.valuz/app`` install
+    #     into the new flat ``~/.valuz-oss`` root (copy → rewrite DB path
+    #     prefixes → repoint skill symlinks → verify). Runs FIRST — before the
+    #     ``data_dir.mkdir`` below, before the kernel-store split, and before any
+    #     engine opens the files — under the single-writer lock acquired earlier
+    #     in boot. No-op once migrated / on a fresh install.
+    migrate_legacy_data_dir()
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
