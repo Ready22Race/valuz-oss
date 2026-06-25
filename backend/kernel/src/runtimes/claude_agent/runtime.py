@@ -100,7 +100,7 @@ from src.runtimes.claude_agent.approval_bridge import (
     _build_pending_payload,
     _classify_subject,
 )
-from src.runtimes.interruption import is_runtime_interruption
+from src.runtimes.interruption import describe_exception, is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
@@ -601,16 +601,29 @@ class ClaudeAgentRuntime:
                         )
                     )
                 else:
+                    # ``describe_exception`` sees through an ``ExceptionGroup``
+                    # (the SDK runs its transport/MCP over an anyio task group,
+                    # so a genuine error can arrive wrapped) — otherwise the
+                    # user sees only the opaque "unhandled errors in a TaskGroup
+                    # (1 sub-exception)" with the real reason lost. Log the full
+                    # traceback too: this branch had no logging, so historic
+                    # failures left nothing to diagnose.
+                    cause = describe_exception(exc)
+                    logger.exception(
+                        "claude_agent: turn failed for session %s: %s",
+                        session.id,
+                        cause,
+                    )
                     session.stop_reason = Error(
                         category="execution_error",
                         retry_status="exhausted",
-                        message=str(exc),
+                        message=cause,
                     )
                     await self.event_sink.emit(
                         Event(
                             type="session_error",
                             data={
-                                "message": str(exc),
+                                "message": cause,
                                 "stderr_tail": stderr_tail,
                             },
                         )
