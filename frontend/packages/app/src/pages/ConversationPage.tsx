@@ -66,12 +66,14 @@ import {
   AutoApprovedStrip,
   AskUserQuestionCard,
   AutomationToolCard,
+  Button,
   DeleteConfirmDialog,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  EmptyState,
   UserAnswerSummaryCard,
   cn,
   Composer,
@@ -3981,24 +3983,23 @@ export const ConversationPage = () => {
 
         {providers.length === 0 && !loading ? (
           <div className="flex flex-1 items-center justify-center p-8">
-            <div className="max-w-sm text-center">
-              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-brand/10">
-                <Settings className="h-6 w-6 text-brand" />
-              </div>
-              <h2 className="mb-2 text-base font-semibold text-ink-heading">
-                {t("conversation.noModel" as Parameters<typeof t>[0])}
-              </h2>
-              <p className="mb-4 text-sm text-ink-body">
-                {t("conversation.noModelHint" as Parameters<typeof t>[0])}
-              </p>
-              <button
-                type="button"
-                onClick={() => navigate("/settings")}
-                className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-hover"
-              >
-                {t("conversation.goToSettings" as Parameters<typeof t>[0])}
-              </button>
-            </div>
+            <EmptyState
+              icon={<Settings />}
+              title={t("conversation.noModel" as Parameters<typeof t>[0])}
+              message={t(
+                "conversation.noModelHint" as Parameters<typeof t>[0],
+              )}
+              action={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="default"
+                  onClick={() => navigate("/settings")}
+                >
+                  {t("conversation.goToSettings" as Parameters<typeof t>[0])}
+                </Button>
+              }
+            />
           </div>
         ) : (
           <>
