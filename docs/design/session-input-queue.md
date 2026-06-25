@@ -4,7 +4,7 @@
 >
 > 取向一句话:**turn 运行中允许用户继续提交消息 → 持久化进 host DB 的 per-session 队列 → 当前 turn 结束后由 host 按 FIFO + budget 预检自动续跑(无损但要等);队列项支持编辑/删除;打断 = 软暂停(保留队列、需显式继续);不做 Codex 式 `turn/steer`(无损即时注入),kernel 零改动。**
 
-> **实现状态(2026-06-24):** 后端(model / `0008` 迁移 / datastore / service / 排空引擎 / boot 恢复 ①+②)+ 共享前端 core(`queue-api` + `chat-store`:`send`→`enqueue` 路由、边界 refetch、队列 actions)已完成并测试通过(后端 10 + 前端 5 个新测试,全量门禁按已知 RED 基线零增量)。前端 UI 本轮接入 **webui**(`ChatComposer` 运行中可入队 + `QueuedInputs` 气泡 编辑/删除 + 暂停后"继续");**desktop `ConversationPage`**(自管 send/interrupt、2980 行 Composer)的 UI 接入为后续(复用同一套 `queue-api`/store 语义)。一处实现补强:`_active_drains` 单飞守卫 + `is_draining_queue` 让 `send_message` 在两个排空项之间的极短 idle 窗口仍 409 防插队(§8.2)。
+> **实现状态(2026-06-24):** 后端(model / `0009` 迁移 / datastore / service / 排空引擎 / boot 恢复 ①+②)+ 共享前端 core(`queue-api` + `chat-store`:`send`→`enqueue` 路由、边界 refetch、队列 actions)已完成并测试通过(后端 10 + 前端 5 个新测试,全量门禁按已知 RED 基线零增量)。前端 UI 本轮接入 **webui**(`ChatComposer` 运行中可入队 + `QueuedInputs` 气泡 编辑/删除 + 暂停后"继续");**desktop `ConversationPage`**(自管 send/interrupt、2980 行 Composer)的 UI 接入为后续(复用同一套 `queue-api`/store 语义)。一处实现补强:`_active_drains` 单飞守卫 + `is_draining_queue` 让 `send_message` 在两个排空项之间的极短 idle 窗口仍 409 防插队(§8.2)。
 
 ---
 
@@ -109,9 +109,9 @@ queue_paused_at: Mapped[int | None] = mapped_column(BigInteger)  # NULL=未暂�
 
 ## 4. Migration
 
-新增 `backend/alembic/host/versions/0008_session_input_queue.py`(拉取 main 后链头已是 `0007`;host 链为**增量、保数据**:`drop_stale_host_tables` 保留任一已知 stamp 并 `alembic upgrade head` 前滚,不清库):
+新增 `backend/alembic/host/versions/0009_session_input_queue.py`(拉取 main 后链头已是 `0008` automation_origin_tool_call_id;host 链为**增量、保数据**:`drop_stale_host_tables` 保留任一已知 stamp 并 `alembic upgrade head` 前滚,不清库):
 
-- `revision = "0008"`,`down_revision = "0007"`。
+- `revision = "0009"`,`down_revision = "0008"`。
 - `upgrade()`:`create_table("valuz_queued_input", ...)` + `batch_alter_table("valuz_project_session")` 加 `queue_paused_at`。
 - `downgrade()`:`drop_table` + `batch_alter_table` 删列(SQLite 限制走 batch)。
 - **无需改 `boot/schema.py`**:known-revisions 由 `_known_host_revisions()` 动态走链得出;`BASELINE_REVISION`(现仍为 `"0004"`,仅作引用常量)不必每次迁移 bump——参照 0005–0007 的落地方式。
@@ -255,7 +255,7 @@ host 启动时(`boot/`)增加一步对账:
 |---|---|
 | 契约 | `api/openapi.yaml`(+5 端点 & schema) |
 | Host model | `modules/sessions/models.py`(`QueuedInputRow` + `ProjectSessionRow.queue_paused_at`) |
-| Host migration | `alembic/host/versions/0008_session_input_queue.py`(down_revision `0007`);无需改 `boot/schema.py` |
+| Host migration | `alembic/host/versions/0009_session_input_queue.py`(down_revision `0008`);无需改 `boot/schema.py` |
 | Host datastore/service | `modules/sessions/datastore.py`(队列 CRUD)、`service.py`(`_drain_queue` / enqueue / resume / 上限 / 预检) |
 | Host boot | `boot/`(重启对账 ①+②) |
 | Host routes | `api/routes/sessions.py`(+5 端点) |
