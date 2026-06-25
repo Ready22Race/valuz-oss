@@ -2133,6 +2133,12 @@
       "failed": "失败",
       "paused": "已暂停"
     },
+    "followUp": {
+      "heading": "基于交付结果继续调整",
+      "placeholder": "跟 Lead 说要怎么调整…",
+      "runTimelineToggle": "执行过程",
+      "runTimelineExpand": "展开查看过程"
+    },
     "continueChat": "继续对话",
     "continueChatHint": "进入主 Agent 会话页继续",
     "deliverableTitle": "交付结果",

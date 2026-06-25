@@ -2133,6 +2133,12 @@
       "failed": "Failed",
       "paused": "Paused"
     },
+    "followUp": {
+      "heading": "Keep refining from the deliverable",
+      "placeholder": "Tell the lead what to adjust…",
+      "runTimelineToggle": "Run timeline",
+      "runTimelineExpand": "Expand to view the process"
+    },
     "continueChat": "Continue chat",
     "continueChatHint": "Open the lead agent conversation",
     "deliverableTitle": "Deliverable",
