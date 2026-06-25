@@ -438,6 +438,12 @@ export interface ComposerProps {
   /** Called when the user clicks the stop button (only while sending). */
   onStop?: () => void;
   /**
+   * When true, a small send button is shown alongside Stop while a turn is in
+   * flight so the user can submit a follow-up that gets queued (the page routes
+   * ``onSend`` to its enqueue path). Enter also works. Off for non-chat uses.
+   */
+  queueWhileSending?: boolean;
+  /**
    * Show the toolbar "add skill" affordance (the ``+`` menu's Skills submenu).
    * Hidden in project composers where skills are configured per-agent, not
    * attached inline. Default true.
@@ -538,6 +544,7 @@ export const Composer = ({
   autoFocus = false,
   sending = false,
   onStop,
+  queueWhileSending = false,
   showSkillButton = true,
   showSkillSlash,
   wrapperClassName,
@@ -2908,18 +2915,37 @@ export const Composer = ({
                 clicking it routes to ``onStop`` (the page maps to its
                 interrupt handler). */}
             {sending ? (
-              <button
-                type="button"
-                className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-white transition-opacity duration-[120ms] hover:opacity-90"
-                onClick={() => onStop?.()}
-                title={t("conversation.stop")}
-                aria-label={t("conversation.stop")}
-              >
-                <Square
-                  className="h-[11px] w-[11px] fill-current"
-                  strokeWidth={0}
-                />
-              </button>
+              <div className="flex items-center gap-1.5">
+                {queueWhileSending && (
+                  <button
+                    type="button"
+                    className={cn(
+                      "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
+                      hasContent && !sendDisabled
+                        ? "bg-brand text-white"
+                        : "bg-brand/40 text-white/60",
+                    )}
+                    onClick={handleSend}
+                    disabled={!hasContent || sendDisabled}
+                    title={t("common.queueSend")}
+                    aria-label={t("common.queueSend")}
+                  >
+                    <ArrowUp className="h-[13px] w-[13px]" strokeWidth={2} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-white transition-opacity duration-[120ms] hover:opacity-90"
+                  onClick={() => onStop?.()}
+                  title={t("conversation.stop")}
+                  aria-label={t("conversation.stop")}
+                >
+                  <Square
+                    className="h-[11px] w-[11px] fill-current"
+                    strokeWidth={0}
+                  />
+                </button>
+              </div>
             ) : mode === "task" ? (
               // Task mode submit. Labelled accent pill ``⚡ Launch task`` when
               // the composer is wide (≥500px); collapses to the compact 28×28

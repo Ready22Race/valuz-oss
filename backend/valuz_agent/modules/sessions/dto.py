@@ -106,3 +106,27 @@ class SessionEventEnvelope:
 class SessionRunResponse:
     session: SessionDetail
     events: list[SessionEventEnvelope]
+
+
+@dataclass
+class QueuedInput:
+    """One queued follow-up input awaiting FIFO drain (or ``blocked``)."""
+
+    id: str
+    status: str  # queued | blocked
+    position: int
+    text: str
+    attachment_count: int
+    provider_id: str | None
+    model_id: str | None
+    error_message: str | None
+    created_at: int
+    updated_at: int | None
+
+
+@dataclass
+class QueuedInputList:
+    session_id: str
+    items: list[QueuedInput]
+    # True when an interrupt soft-paused auto-drain and the queue awaits resume.
+    paused: bool

@@ -64,7 +64,10 @@ from valuz_agent.modules.sessions.capabilities import (
     refresh_docs_capabilities_for_session,
 )
 from valuz_agent.modules.sessions.context_builder import _build_additional_context
+from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
+    QueuedInput,
+    QueuedInputList,
     SessionDetail,
     SessionEventEnvelope,
     SessionListItem,
@@ -72,6 +75,8 @@ from valuz_agent.modules.sessions.dto import (
 )
 from valuz_agent.modules.sessions.errors import (
     BudgetExceeded,
+    QueuedInputNotFound,
+    QueueFull,
     SessionConflict,
     SessionNotRunnable,
 )
@@ -90,13 +95,38 @@ from valuz_agent.modules.sessions.mappers import (
     _session_to_list_item,
     _valuz_meta,
 )
+from valuz_agent.modules.sessions.models import QueuedInputRow
 from valuz_agent.modules.sessions.run_orchestrator import (
     _derive_session_name,
     _run_agent_background,
+    is_draining_queue,
+    schedule_drain,
 )
 from valuz_agent.modules.skills.datastore import SkillDatastore
 
 logger = logging.getLogger(__name__)
+
+# Soft cap on still-``queued`` follow-up inputs per session (input queue). A
+# guard against accidental flooding, not a hard product limit. See
+# docs/design/session-input-queue.md §8.5.
+QUEUE_SOFT_CAP = 20
+
+
+def _queued_input_to_dto(row: QueuedInputRow) -> QueuedInput:
+    payload = row.input or {}
+    attachments = payload.get("attachments") or []
+    return QueuedInput(
+        id=row.id,
+        status=row.status,
+        position=row.position,
+        text=str(payload.get("text") or ""),
+        attachment_count=len(attachments),
+        provider_id=row.provider_id,
+        model_id=row.model_id,
+        error_message=row.error_message,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 async def _enforce_budget(session: object) -> None:
@@ -1085,6 +1115,14 @@ class SessionService:
             session_id=session_id,
         )
 
+        # A fresh user-initiated turn supersedes any interrupt soft-pause, so the
+        # post-turn drain continues the queue. (Explicit resume is for continuing
+        # the queue *without* a new message.) See session-input-queue §9.
+        try:
+            await project_index.set_queue_paused(session_id, False)
+        except Exception:  # noqa: BLE001 — never block a send on queue bookkeeping
+            logger.debug("send_message: clearing queue pause failed for %s", session_id)
+
         asyncio.create_task(
             _run_agent_background(
                 session_id=session_id,
@@ -1356,6 +1394,20 @@ class SessionService:
                         session_id,
                     )
 
+        # Soft-pause auto-drain so queued follow-ups don't auto-run after a stop;
+        # the user resumes explicitly (or a fresh send_message clears it). Only
+        # meaningful when items are actually waiting. See session-input-queue §9.
+        try:
+            async with async_unit_of_work(commit=False) as db:
+                has_queued = (
+                    await SessionDatastore(db).count_queued(require_current_user_id(), session_id)
+                    > 0
+                )
+            if has_queued:
+                await project_index.set_queue_paused(session_id, True)
+        except Exception:  # noqa: BLE001 — never fail the interrupt on queue bookkeeping
+            logger.debug("interrupt: queue pause bookkeeping failed for %s", session_id)
+
         self._bus.publish(
             SESSION_STATUS_CHANGED,
             session_id=session_id,
@@ -1363,6 +1415,110 @@ class SessionService:
             new_status="idle",
         )
         return _session_to_detail(updated)
+
+    # ---- Session input queue (docs/design/session-input-queue.md) ----
+
+    async def list_queue(self, session_id: str) -> QueuedInputList:
+        uid = require_current_user_id()
+        async with async_unit_of_work(commit=False) as db:
+            rows = await SessionDatastore(db).list_queued(uid, session_id)
+        paused = await project_index.get_queue_paused_at(session_id) is not None
+        return QueuedInputList(
+            session_id=session_id,
+            items=[_queued_input_to_dto(r) for r in rows],
+            paused=paused,
+        )
+
+    async def enqueue(
+        self,
+        session_id: str,
+        content: str,
+        *,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+    ) -> QueuedInputList:
+        """Append a follow-up input to the session queue.
+
+        Snapshots + consumes the pending attachment set so the files ride THIS
+        item only (no carry-over, see §8.6). If the session is idle, kicks an
+        immediate drain; otherwise the post-turn drain picks it up.
+        """
+        uid = require_current_user_id()
+        session = await kernel_client.get_session(uid, session_id)
+        if session is None:
+            raise _kernel_session_not_found(session_id)
+        status = _map_kernel_status(session.status)
+        if status in ("cancelled", "archived"):
+            raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
+
+        project_id = str(_valuz_meta(session).get("project_id") or "") or None
+        pending = await _load_pending_attachments(session_id)
+        attachments_json = [
+            {"source_path": source, "parsed_path": parsed}
+            for source, parsed in _attachment_specs(pending)
+        ]
+        consumed_ids = [row.id for row in pending]
+
+        async with async_unit_of_work() as db:
+            ds = SessionDatastore(db)
+            if await ds.count_queued(uid, session_id) >= QUEUE_SOFT_CAP:
+                raise QueueFull()
+            await ds.create_queued(
+                uid,
+                QueuedInputRow(
+                    session_id=session_id,
+                    project_id=project_id,
+                    input={"text": content, "attachments": attachments_json},
+                    status="queued",
+                    provider_id=provider_id,
+                    model_id=model_id,
+                ),
+            )
+        if consumed_ids:
+            await _mark_attachments_consumed(consumed_ids)
+
+        self._bus.publish(SESSION_MESSAGE_SENT, session_id=session_id)
+
+        # Idle-kick: nothing in flight → drain now so the item doesn't wait for a
+        # turn boundary that never comes. If running / already draining, the
+        # in-flight drain picks it up on its next peek.
+        if status != "running" and not is_draining_queue(session_id):
+            schedule_drain(session_id, self._bus)
+
+        return await self.list_queue(session_id)
+
+    async def edit_queued(self, session_id: str, queue_id: str, content: str) -> QueuedInputList:
+        uid = require_current_user_id()
+        async with async_unit_of_work() as db:
+            ds = SessionDatastore(db)
+            existing = await ds.get_queued(uid, session_id, queue_id)
+            if existing is None:
+                raise QueuedInputNotFound()
+            if existing.status != "queued":
+                raise SessionConflict("Queued input is no longer editable")
+            payload = dict(existing.input or {})
+            payload["text"] = content
+            await ds.update_queued_input(uid, session_id, queue_id, payload)
+        return await self.list_queue(session_id)
+
+    async def delete_queued(self, session_id: str, queue_id: str) -> QueuedInputList:
+        uid = require_current_user_id()
+        async with async_unit_of_work() as db:
+            deleted = await SessionDatastore(db).delete_queued(uid, session_id, queue_id)
+        if not deleted:
+            raise QueuedInputNotFound()
+        return await self.list_queue(session_id)
+
+    async def resume_queue(self, session_id: str) -> QueuedInputList:
+        uid = require_current_user_id()
+        session = await kernel_client.get_session(uid, session_id)
+        if session is None:
+            raise _kernel_session_not_found(session_id)
+        await project_index.set_queue_paused(session_id, False)
+        status = _map_kernel_status(session.status)
+        if status != "running" and not is_draining_queue(session_id):
+            schedule_drain(session_id, self._bus)
+        return await self.list_queue(session_id)
 
     async def cancel(self, session_id: str) -> SessionDetail:
         session = await kernel_client.get_session(require_current_user_id(), session_id)
@@ -1414,6 +1570,14 @@ class SessionService:
             raise _kernel_session_not_found(session_id)
         await kernel_client.delete_session(require_current_user_id(), session_id)
         await project_index.remove(session_id)
+        # Drop any pending input-queue rows for the gone session.
+        try:
+            async with async_unit_of_work() as db:
+                await SessionDatastore(db).delete_queue_for_session(
+                    require_current_user_id(), session_id
+                )
+        except Exception:  # noqa: BLE001 — cleanup must not fail the delete
+            logger.debug("delete_session: queue cleanup failed for %s", session_id)
 
     async def get_extra_skills(self, session_id: str) -> list[str]:
         session = await kernel_client.get_session(require_current_user_id(), session_id)

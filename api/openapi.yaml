@@ -2027,6 +2027,143 @@ paths:
               schema:
                 $ref: "#/components/schemas/SessionDetail"
 
+  /v1/sessions/{session_id}/queue:
+    get:
+      summary: List queued follow-up inputs for a session
+      description: |
+        Inputs submitted while a turn was running, awaiting FIFO drain after
+        the active turn completes. Returns ``queued`` + ``blocked`` items and
+        whether auto-drain is currently paused (after an interrupt).
+        See docs/design/session-input-queue.md.
+      operationId: listSessionQueue
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Queued inputs (FIFO) + paused flag
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session not found
+    post:
+      summary: Enqueue a follow-up input (runs after the active turn)
+      description: |
+        Append a user message to the session's input queue. If the session is
+        idle this drains immediately; if a turn is running it waits for FIFO
+        drain. Pending attachments are snapshotted and consumed at enqueue
+        time so they ride this item only. Returns the updated queue.
+      operationId: enqueueSessionInput
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueuedInputCreate"
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session not found
+        "409":
+          description: Queue is full (soft cap reached) or session not runnable
+
+  /v1/sessions/{session_id}/queue/{queue_id}:
+    patch:
+      summary: Edit a queued input (only while still queued)
+      operationId: editSessionQueuedInput
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: queue_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueuedInputPatch"
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session or queued input not found
+        "409":
+          description: Queued input is no longer editable (already dispatched)
+    delete:
+      summary: Delete a queued input
+      operationId: deleteSessionQueuedInput
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: queue_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session or queued input not found
+
+  /v1/sessions/{session_id}/queue/resume:
+    post:
+      summary: Resume draining a paused queue (after an interrupt)
+      operationId: resumeSessionQueue
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session not found
+
   /v1/sessions/{session_id}/cancel:
     post:
       summary: Cancel session
@@ -4364,6 +4501,81 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SessionEventEnvelope"
+
+    # ── Session input queue ────────────────────────────────────────
+
+    QueuedInput:
+      type: object
+      required: [id, status, position, text, attachment_count, created_at]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          description: "queued | blocked (dispatched/cancelled are not listed)"
+        position:
+          type: integer
+          description: FIFO order within the session (ascending).
+        text:
+          type: string
+        attachment_count:
+          type: integer
+          description: Attachments snapshotted from the pending set at enqueue time.
+        provider_id:
+          type: string
+          nullable: true
+        model_id:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+          description: Why a ``blocked`` item could not run (e.g. budget).
+        created_at:
+          type: integer
+          format: int64
+        updated_at:
+          type: integer
+          format: int64
+          nullable: true
+
+    QueuedInputList:
+      type: object
+      required: [session_id, items, paused]
+      properties:
+        session_id:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueuedInput"
+        paused:
+          type: boolean
+          description: >-
+            True when auto-drain is paused (after an interrupt) and awaiting an
+            explicit resume.
+
+    QueuedInputCreate:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+        provider_id:
+          type: string
+          nullable: true
+          description: Optional provider override mirrored from send-message semantics.
+        model_id:
+          type: string
+          nullable: true
+          description: Optional model override mirrored from send-message semantics.
+
+    QueuedInputPatch:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
 
     # ── Skills: File-level schemas ─────────────────────────────────
 

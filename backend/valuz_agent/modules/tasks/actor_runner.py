@@ -113,6 +113,8 @@ async def run_session_to_idle(
     content: str,
     event_bus: EventBus,
     on_message: Any | None = None,
+    *,
+    queued_attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     """Drive one agent turn to completion and return the final session status.
 
@@ -128,10 +130,19 @@ async def run_session_to_idle(
     it to meter billing; the task member/lead path leaves it ``None`` so its
     behaviour is byte-identical.
 
+    ``queued_attachments`` is set only by the session input-queue drain
+    (docs/design/session-input-queue.md): the per-item attachment snapshot
+    (``[{source_path, parsed_path}]``) frozen + consumed at enqueue time. When
+    provided the pending-set load and the post-turn consume are BOTH skipped —
+    the files already left the staging area at enqueue — and the additional
+    context announces these snapshotted files instead. ``None`` (the default)
+    keeps the existing pending-set behaviour byte-identical for task paths.
+
     Used by:
       - dispatch handler via asyncio.create_task (sibling task, not recursive)
       - TaskOrchestrator.kickoff for the lead session background turn
       - sessions/run_orchestrator._run_agent_background (chat path, with meter)
+      - sessions/run_orchestrator._drain_queue_after_turn (queue drain)
     """
     from valuz_agent.modules.sessions.events import SESSION_FINISHED
 
@@ -153,9 +164,31 @@ async def run_session_to_idle(
             )
             from valuz_agent.modules.sessions.context_builder import _build_additional_context
 
-            pending_attachments = await _load_pending_attachments(session_id)
-            consumed_attachment_ids = [row.id for row in pending_attachments]
-            attachment_specs = _attachment_specs(pending_attachments)
+            if queued_attachments is not None:
+                # Queue drain: rebuild minimal (detached) attachment rows from
+                # the per-item snapshot so the additional-context announcement
+                # works; skip the pending load + the post-turn consume (the
+                # rows were consumed at enqueue, see §8.6).
+                from valuz_agent.modules.sessions.models import SessionAttachmentRow
+
+                pending_attachments = [
+                    SessionAttachmentRow(
+                        session_id=session_id,
+                        filename=Path(str(a.get("source_path") or "")).name
+                        or str(a.get("source_path") or ""),
+                        stored_path=str(a.get("source_path") or ""),
+                        parsed_path=a.get("parsed_path"),
+                        parse_status="ready" if a.get("parsed_path") else "uploaded",
+                        source_kind="local",
+                    )
+                    for a in queued_attachments
+                ]
+                consumed_attachment_ids = []
+                attachment_specs = _attachment_specs(pending_attachments)
+            else:
+                pending_attachments = await _load_pending_attachments(session_id)
+                consumed_attachment_ids = [row.id for row in pending_attachments]
+                attachment_specs = _attachment_specs(pending_attachments)
         except Exception:  # noqa: BLE001
             pending_attachments = []
             consumed_attachment_ids = []

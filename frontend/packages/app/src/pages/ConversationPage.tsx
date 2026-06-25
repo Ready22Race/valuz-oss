@@ -28,6 +28,8 @@ import {
 import {
   ApiError,
   sessionsApi,
+  queueApi,
+  type QueuedInput,
   agentsApi,
   automationsApi,
   connectorsApi,
@@ -113,6 +115,7 @@ import {
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
 import { LiveTaskCard } from "../components/LiveTaskCard";
+import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
 import {
@@ -650,6 +653,11 @@ export const ConversationPage = () => {
   } | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  // Session input queue (docs/design/session-input-queue.md): follow-up inputs
+  // submitted while a turn is running, drained FIFO after it. ``queuePaused``
+  // is set after an interrupt — the user resumes explicitly.
+  const [queue, setQueue] = useState<QueuedInput[]>([]);
+  const [queuePaused, setQueuePaused] = useState(false);
   const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
@@ -3401,8 +3409,129 @@ export const ConversationPage = () => {
   // Send entry point. Blocks on attachments that are still parsing — the
   // confirm dialog lets the user wait or submit with only the raw file
   // (no parsed content / doc-search until parsing finishes).
+  // ---- Session input queue (docs/design/session-input-queue.md) ----
+
+  const refreshQueue = useCallback(async () => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.list(selectedSessionId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+    } catch {
+      /* best-effort — a queue fetch failure must not break the conversation */
+    }
+  }, [selectedSessionId]);
+
+  const performEnqueue = async () => {
+    const text = draft.trim();
+    if (!text || !selectedSessionId) return;
+    setDraft("");
+    setSelectedComposerSkill(null);
+    try {
+      const list = await queueApi.enqueue(selectedSessionId, text, {
+        providerId: selectedProviderId,
+        modelId: selectedModelId,
+      });
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+    } catch (cause) {
+      toast.error(
+        cause instanceof Error ? cause.message : "Failed to queue message.",
+      );
+      setDraft(text); // restore so the user can retry
+    }
+  };
+
+  const handleEditQueued = async (queueId: string, text: string) => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.edit(selectedSessionId, queueId, text);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Edit failed.");
+    }
+  };
+
+  const handleDeleteQueued = async (queueId: string) => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.remove(selectedSessionId, queueId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Delete failed.");
+    }
+  };
+
+  const handleResumeQueue = async () => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.resume(selectedSessionId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      // The drain-follower effect picks up from here (status → running →
+      // re-subscribe), the same path as a drain after a normal turn.
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Resume failed.");
+    }
+  };
+
+  // Hydrate the persisted queue when the active session changes.
+  useEffect(() => {
+    void refreshQueue();
+  }, [refreshQueue]);
+
+  // Stream queued items as they drain. Each queued item runs as its OWN kernel
+  // turn after the previous one idles (which tears down that turn's SSE), so
+  // while items remain (not paused) and nothing is currently streaming, poll
+  // for the next drained turn (status → running) and re-subscribe. Re-subscribe
+  // replays any events the DB already has from ``maxSeqRef`` and then streams
+  // live — the same proven path as reopen / mid-turn reconnect — so a drained
+  // turn renders even if it started before we re-attached. When the last item
+  // finishes, the queue is empty and this effect goes quiet.
+  useEffect(() => {
+    if (!selectedSessionId || sending || queuePaused) return;
+    if (!queue.some((i) => i.status === "queued")) return;
+    const sid = selectedSessionId;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+      void sessionsApi
+        .get(sid)
+        .then((detail) => {
+          if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+          if (detail.status === "running") {
+            subscribeToSession(sid, maxSeqRef.current);
+          }
+        })
+        .catch(() => {});
+    };
+    const timer = window.setInterval(tick, 500);
+    tick();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [selectedSessionId, sending, queuePaused, queue, subscribeToSession]);
+
+  // Refetch on a turn boundary (sending → idle): drained items drop and any
+  // blocked / paused state surfaces (session-input-queue §8.4).
+  const prevQueueSendingRef = useRef(false);
+  useEffect(() => {
+    if (prevQueueSendingRef.current && !sending) void refreshQueue();
+    prevQueueSendingRef.current = sending;
+  }, [sending, refreshQueue]);
+
+  // Send entry point. While a turn is running, a follow-up is queued (drains
+  // after the active turn). Otherwise it blocks on attachments still parsing —
+  // the confirm dialog lets the user wait or submit with only the raw file.
   const handleSend = () => {
-    if (!draft.trim() || sending) return;
+    if (!draft.trim()) return;
+    if (sending) {
+      void performEnqueue();
+      return;
+    }
     if (attachmentsParsing) {
       setParsingConfirmOpen(true);
       return;
@@ -4882,6 +5011,15 @@ export const ConversationPage = () => {
               setComposerTouched(true);
             }}
           />
+          {selectedSessionId ? (
+            <QueuedInputsBar
+              queue={queue}
+              paused={queuePaused}
+              onEdit={handleEditQueued}
+              onDelete={handleDeleteQueued}
+              onResume={handleResumeQueue}
+            />
+          ) : null}
           <Composer
             // Remount per route so the textarea's native autoFocus refires when
             // the user navigates to a different conversation (or back to the
@@ -4889,6 +5027,9 @@ export const ConversationPage = () => {
             key={id ?? "new"}
             value={draft}
             onChange={setDraft}
+            // Keep the composer usable while a turn runs — submitting queues a
+            // follow-up (session-input-queue) instead of being blocked.
+            queueWhileSending
             // Project conversations can't attach skills ad-hoc (skills are the
             // agent's equipment), so the toolbar "add skill" button stays hidden
             // there. The ``/`` picker, however, is enabled once a member agent
