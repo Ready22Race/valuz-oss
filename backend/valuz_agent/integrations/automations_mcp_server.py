@@ -223,6 +223,14 @@ async def _handle_create(
     project_id: str | None,
     session_agent_slug: str | None = None,
 ) -> AutomationToolResult:
+    """Validate + PREVIEW the proposed automation — never persist.
+
+    Mirrors ``propose_agent``: the tool returns a resolved-but-unsaved spec the
+    frontend renders as a confirmation card; the user's confirm click hits
+    ``POST /v1/automations/proposals/{session_id}/confirm`` to do the actual
+    create. So the LLM should call ``create`` ONCE, state the resolved schedule
+    in prose, then stop and wait for the user.
+    """
     from valuz_agent.modules.automations.errors import (
         AgentNotFound,
         AgentNotInProject,
@@ -230,38 +238,11 @@ async def _handle_create(
         AutomationNameEmpty,
         AutomationProjectNotFound,
         AutomationPromptEmpty,
+        AutomationTaskOnlyOnProject,
         IntervalTooShort,
         InvalidCronExpression,
     )
-    from valuz_agent.modules.automations.schemas import AutomationCreatePayload
-
-    if not payload.name:
-        return _err("create", "name is required for create.", code="MISSING_NAME")
-    if not payload.prompt_template:
-        return _err(
-            "create",
-            "prompt_template is required for create.",
-            code="MISSING_PROMPT",
-        )
-    # Resolve the effective agent. In a chat / quick conversation the automation
-    # runs as the agent the user is already talking to: default ``agent_slug``
-    # to the session's bound agent (a library agent such as ``default-assistant``)
-    # when omitted. This removes the false dependency on ``list_members`` —
-    # project-member-scoped, hence empty for a project-less chat — that
-    # otherwise made the LLM give up before ever calling create.
-    effective_agent_slug = payload.agent_slug
-    if not effective_agent_slug and project_kind == "chat":
-        effective_agent_slug = session_agent_slug
-    if not effective_agent_slug:
-        return _err(
-            "create",
-            (
-                "agent_slug is required. In a PROJECT session pick a team member "
-                "(call list_members to see them). In a chat it defaults to your "
-                "current agent; pass a library agent slug only to override."
-            ),
-            code="MISSING_AGENT",
-        )
+    from valuz_agent.modules.automations.service import AutomationService
 
     trigger = _trigger_from_payload(payload.trigger)
     if trigger is None:
@@ -275,48 +256,85 @@ async def _handle_create(
             code="MISSING_TRIGGER",
         )
 
-    # Project sessions store project_member; chat sessions store library_agent
-    # (the service then instantiates the library agent into the chat project
-    # and normalises the slug — see ADR-021 §4).
-    agent_kind = "project_member" if project_kind == "project" else "library_agent"
+    action_kind = (payload.action_kind or "chat").strip() or "chat"
+    if action_kind not in ("chat", "task"):
+        return _err(
+            "create",
+            "action_kind must be 'chat' or 'task'.",
+            code="INVALID_ACTION_KIND",
+        )
+    # Task mode kicks off a project task with the bound agent as Lead — it needs
+    # a project context, so it can only be created from inside a project session.
+    if action_kind == "task" and project_kind != "project":
+        return _err(
+            "create",
+            (
+                "task automations can only be created from inside a PROJECT "
+                "session (the agent runs as the task Lead). Open the project and "
+                "ask there, or use action_kind='chat'."
+            ),
+            code="TASK_REQUIRES_PROJECT",
+        )
 
-    create_payload = AutomationCreatePayload(
-        name=payload.name,
-        project_kind=project_kind,  # type: ignore[arg-type]
-        project_id=project_id,
-        agent_kind=agent_kind,  # type: ignore[arg-type]
-        agent_slug=effective_agent_slug,
-        prompt_template=payload.prompt_template,
-        trigger=trigger,
-    )
+    # Shared input-assembly + defaulting (single source of truth with the
+    # confirm route). The effective agent defaults to the session's bound agent
+    # in a chat, so the LLM/user need not pick one (and need not call
+    # list_members, which is empty in a project-less chat).
+    try:
+        create_payload = AutomationService.build_create_payload(
+            name=payload.name,
+            prompt_template=payload.prompt_template,
+            trigger=trigger,
+            agent_slug=payload.agent_slug,
+            action_kind=action_kind,
+            project_kind=project_kind,
+            project_id=project_id,
+            session_agent_slug=session_agent_slug,
+        )
+    except AutomationNameEmpty:
+        return _err("create", "name is required for create.", code="MISSING_NAME")
+    except AutomationPromptEmpty:
+        return _err(
+            "create", "prompt_template is required for create.", code="MISSING_PROMPT"
+        )
+    except AutomationAgentRequired:
+        return _err(
+            "create",
+            (
+                "agent_slug is required. In a PROJECT session pick a team member "
+                "(call list_members to see them). In a chat it defaults to your "
+                "current agent; pass a library agent slug only to override."
+            ),
+            code="MISSING_AGENT",
+        )
+    except AutomationTaskOnlyOnProject as exc:
+        return _err("create", str(exc.message), code=exc.__class__.__name__)
 
-    # MCP-from-chat: forward the calling session's project_id so library
-    # agents land in the user's current chat rather than a fresh ws.
+    # MCP-from-chat: forward the calling session's project_id so the preview
+    # resolves the agent against the user's current chat project.
     calling_ws = project_id if project_kind == "chat" else None
 
     try:
-        detail = await svc.create(create_payload, calling_session_project_id=calling_ws)
+        spec = await svc.preview(create_payload, calling_session_project_id=calling_ws)
     except (
         InvalidCronExpression,
         IntervalTooShort,
-        AutomationNameEmpty,
-        AutomationPromptEmpty,
-        AutomationAgentRequired,
         AutomationProjectNotFound,
         AgentNotInProject,
         AgentNotFound,
+        AutomationTaskOnlyOnProject,
     ) as exc:
         return _err("create", str(exc.message), code=exc.__class__.__name__)
 
-    fresh = await svc._row_to_item(  # noqa: SLF001 — sanctioned local projection
-        await svc._ds.get_automation(require_current_user_id(), detail.automation_id)  # noqa: SLF001
-    )
     return AutomationToolResult(
         action="create",
         ok=True,
-        message=f"Created automation '{detail.name}' — {detail.trigger_human_readable}.",
-        automation=fresh,
-        next_runs=[detail.next_run_at] if detail.next_run_at else [],
+        message=(
+            f"Proposed automation '{spec.name}' — {spec.trigger_human_readable}. "
+            "Awaiting the user's confirmation in the card; do not call create again."
+        ),
+        proposal=spec,
+        next_runs=[spec.next_run_at] if spec.next_run_at else [],
     )
 
 
@@ -541,8 +559,13 @@ or to manage non-recurring follow-ups.
 
 Actions
 =======
-- create: requires name, prompt_template, trigger. agent_slug is
-  CONTEXT-DEPENDENT — do NOT treat it as universally required:
+- create: PROPOSES a new automation — it does NOT save. The user is shown a
+  confirmation card and nothing is written until they approve (same "tool
+  proposes, user disposes" model as propose_agent). So call create ONCE, state
+  the resolved schedule in plain prose, then STOP — do not call create again
+  for the same automation, and do not assume it exists yet.
+  Requires name, prompt_template, trigger. agent_slug is CONTEXT-DEPENDENT —
+  do NOT treat it as universally required:
     • Chat / quick conversation (no project): agent_slug is OPTIONAL. Omit it
       and the automation runs as the agent you are CURRENTLY talking to. Do
       NOT call list_members here — it lists *project members*, so it is empty
@@ -550,9 +573,14 @@ Actions
       available". Pass an explicit LIBRARY agent slug only to override.
     • Project session: agent_slug is REQUIRED and must be a project team
       member — call list_members first to see candidates. Do NOT invent slugs.
-  trigger — discriminated object. Either:
+  action_kind — "chat" (default) runs the bound agent once per fire; "task"
+    kicks off a full project task with the bound agent as the Lead. "task" is
+    ONLY valid in a PROJECT session (it needs the project's task context); in a
+    chat it is rejected — omit it / use "chat" there.
+  trigger — discriminated object. Use interval for "every N minutes/seconds"
+    schedules, cron for clock-time schedules:
     {"kind": "cron", "cron_expr": "0 9 * * *", "timezone": "Asia/Shanghai"}
-    {"kind": "interval", "seconds": 300}
+    {"kind": "interval", "seconds": 300}  — every 300s (min 30); NOT a cron
     {"kind": "manual"}  — never tick-fires; only run via run action
   Cron format: standard 5-field POSIX (minute hour dom month dow). If the
   user gave a natural-language schedule, translate it yourself, confirm
@@ -595,6 +623,7 @@ async def automation(
     prompt_template: str | None = None,
     agent_slug: str | None = None,
     trigger: dict[str, Any] | None = None,
+    action_kind: str | None = None,
     scope: str | None = None,
 ) -> str:
     """Unified entrypoint — see ``_AUTOMATION_DESCRIPTION`` for usage.
@@ -625,6 +654,7 @@ async def automation(
             prompt_template=prompt_template,
             agent_slug=agent_slug,
             trigger=coerced_trigger,
+            action_kind=action_kind,
             scope=scope,
         )
     )

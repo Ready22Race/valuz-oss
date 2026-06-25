@@ -82,6 +82,16 @@ class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # ── Provenance ────────────────────────────────────────────────────
+    # Kernel ``tool_use`` id of the ``automation create`` call that proposed
+    # this row, stamped when the user confirms the proposal card. NULL for
+    # rows created from the UI (no proposing tool call). Indexed so a session
+    # reload can map historical proposing tool-calls → their created rows and
+    # show "already added" instead of a fresh Confirm button.
+    origin_tool_call_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+
     # ── Schedule state ────────────────────────────────────────────────
     status: Mapped[str] = mapped_column(String(32), default="enabled")
     # Cron / interval write a concrete next-fire instant; manual leaves it

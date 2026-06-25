@@ -27,6 +27,7 @@ import pytest
 from valuz_agent.integrations import automations_mcp_server as mod
 from valuz_agent.modules.automations.schemas import (
     AutomationItemResponse,
+    AutomationProposalSpec,
     AutomationToolPayload,
     CronTrigger,
     IntervalTrigger,
@@ -87,6 +88,27 @@ class StubService:
             },
         )()
         return detail
+
+    async def preview(self, payload, *, calling_session_project_id=None):  # type: ignore[no-untyped-def]
+        """``create`` action now PROPOSES (validate + preview, no persist) —
+        the dispatcher calls ``preview`` instead of ``create``. Record the call
+        so routing/defaulting asserts still inspect the resolved payload."""
+        self._record(
+            "preview",
+            payload=payload,
+            calling_session_project_id=calling_session_project_id,
+        )
+        return AutomationProposalSpec(
+            name=payload.name,
+            prompt_template=payload.prompt_template,
+            trigger=payload.trigger,
+            agent_slug=payload.agent_slug,
+            agent_kind=payload.agent_kind,
+            agent_name=payload.agent_slug,
+            action_kind=payload.action_kind,
+            trigger_human_readable="OK",
+            next_run_at=None,
+        )
 
     async def list_all_automations(self):
         self._record("list_all_automations")
@@ -303,7 +325,7 @@ class TestAgentKindByContext:
                 trigger=CronTrigger(cron_expr="0 9 * * *"),
             )
         )
-        assert stub_service.calls[0][0] == "create"
+        assert stub_service.calls[0][0] == "preview"
         payload = stub_service.calls[0][1]["payload"]
         assert payload.agent_kind == "project_member"
         assert payload.project_kind == "project"
@@ -401,6 +423,79 @@ class TestAgentKindByContext:
         decoded = json.loads(result)
         assert decoded["ok"] is False
         assert decoded["error_code"] == "MISSING_AGENT"
+
+
+# ── Propose (create → confirm card) ────────────────────────────────
+
+
+class TestCreateProposes:
+    async def test_create_returns_proposal_and_does_not_persist(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        """``create`` validates + previews; it must NOT call the persisting
+        ``create`` — the user's confirm click does that."""
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="create",
+                name="Daily",
+                prompt_template="x",
+                agent_slug="qa",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        assert decoded["proposal"] is not None
+        assert decoded["proposal"]["name"] == "Daily"
+        assert decoded["automation"] is None
+        methods = [c[0] for c in stub_service.calls]
+        assert "preview" in methods
+        assert "create" not in methods
+
+    async def test_chat_rejects_task_action_kind(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        """Task mode needs a project context — a chat session rejects it."""
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "chat"
+        session_agent_slug["value"] = "default-assistant"
+
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="create",
+                name="Daily",
+                prompt_template="x",
+                action_kind="task",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is False
+        assert decoded["error_code"] == "TASK_REQUIRES_PROJECT"
+        assert not stub_service.calls  # never reached the service
+
+    async def test_project_task_action_kind_flows_to_preview(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "project"
+        project_id["value"] = "ws-proj"
+
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="create",
+                name="Nightly report",
+                prompt_template="x",
+                agent_slug="qa",
+                action_kind="task",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        assert decoded["proposal"]["action_kind"] == "task"
+        payload = stub_service.calls[0][1]["payload"]
+        assert payload.action_kind == "task"
 
 
 # ── Trigger discriminator routing ──────────────────────────────────
