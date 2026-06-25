@@ -555,7 +555,7 @@ export const ActivityPage = () => {
   const hasAny = displayRunning.length > 0 || filteredFinished.length > 0;
 
   return (
-    <div className="mx-auto max-w-[760px] px-5 pb-12 pt-4">
+    <div className="mx-auto max-w-[760px] pb-12 pt-4">
       {/* Toolbar — line-tab filter shared with project home / conversation
           right panel for visual consistency. */}
       <Tabs value={filter} onValueChange={(v) => setFilter(v as SourceFilter)}>
