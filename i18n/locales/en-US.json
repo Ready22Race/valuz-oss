@@ -277,7 +277,7 @@
     "selectAgent": "Select agent",
     "noAgents": "No agents yet — add one to start chatting.",
     "addAgent": "Add agent",
-    "noAgentBanner": "You don't have any agents yet — create one or finish setup",
+    "noAgentBanner": "You haven't configured a model yet — set one up or finish setup",
     "noAgentBannerCta": "Set up",
     "noChannelBanner": "No model channel available yet — connect one",
     "noChannelAndAgentBanner": "No model channel or agent yet — finish setup",

@@ -83,6 +83,25 @@ def acquire_single_writer_lock() -> None:
         _sys.exit(2)
 
 
+def migrate_data_dir() -> None:
+    """One-time data-dir cutover: carry a pre-rename ``~/.valuz/app`` install
+    into the new flat ``~/.valuz-oss`` root (copy → rewrite DB path prefixes →
+    repoint skill symlinks → verify).
+
+    Runs under the single-writer lock and BEFORE ``ensure_local_identity`` and
+    before any engine opens the SQLite files. The ordering vs. identity is
+    load-bearing: the install owner id is read from ``installation.json``, so the
+    migrated copy of that file must be in place first — otherwise the boot
+    context caches a freshly-derived id that mismatches the migrated rows' owner,
+    which breaks the owner-scoped official-skills reindex (a global skill ``id``
+    INSERTed under a new owner collides with the migrated row). No-op once
+    migrated / on a fresh install.
+    """
+    from valuz_agent.boot.migrate_data_dir import migrate_legacy_data_dir
+
+    migrate_legacy_data_dir()
+
+
 async def bootstrap_schema() -> None:
     """Host schema bootstrap — run alembic on both the kernel and host
     chains, then seed.
@@ -104,19 +123,13 @@ async def bootstrap_schema() -> None:
     """
     from valuz_agent.boot.kernel import run_kernel_migrations
     from valuz_agent.boot.kernel_db_split import migrate_kernel_store_out_of_host_db
-    from valuz_agent.boot.migrate_data_dir import migrate_legacy_data_dir
     from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.seeds import seed_all
 
-    # -1. One-time data-dir cutover: carry a pre-rename ``~/.valuz/app`` install
-    #     into the new flat ``~/.valuz-oss`` root (copy → rewrite DB path
-    #     prefixes → repoint skill symlinks → verify). Runs FIRST — before the
-    #     ``data_dir.mkdir`` below, before the kernel-store split, and before any
-    #     engine opens the files — under the single-writer lock acquired earlier
-    #     in boot. No-op once migrated / on a fresh install.
-    migrate_legacy_data_dir()
-
+    # NB: the ``~/.valuz/app`` → ``~/.valuz-oss`` data-dir cutover runs earlier in
+    # the lifespan (``migrate_data_dir``), before identity resolution — see that
+    # step's docstring for why the ordering is load-bearing.
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
     # One-shot courtesy rename from the workspace→project naming cutover:
