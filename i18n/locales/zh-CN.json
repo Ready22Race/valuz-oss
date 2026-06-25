@@ -1299,6 +1299,7 @@
       "notInstalled": "未安装",
       "notLoggedIn": "未登录",
       "installCli": "安装 CLI",
+      "subscriptionLoginRequired": "{name} 渠道尚未登录：请在终端运行 {command}，或在「设置 → 模型」中连接后重试",
       "runtimeSwitchedReSelect": "已切换 Runtime — 请重新选择默认模型",
       "availableModelsList": "可用模型",
       "availableModelsHelp": "（逗号或换行分隔，至少 1 个）",
