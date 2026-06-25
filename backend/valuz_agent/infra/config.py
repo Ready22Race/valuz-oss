@@ -6,7 +6,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     app_name: str = "valuz-agent"
-    data_dir: Path = Path.home() / ".valuz" / "app"
+    data_dir: Path = Path.home() / ".valuz-oss"
     db_filename: str = "valuz.db"
     # The kernel's own SQLite file — sessions / messages / events, its
     # langgraph checkpoint tables, and the kernel ``alembic_version``. Kept

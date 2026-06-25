@@ -30,7 +30,7 @@ def _resources_root() -> Path:
 def _user_official_skills_root() -> Path:
     """Bundled-skill landing root. Delegated to ``fs_registry`` so the
     bootstrap and the discovery source (`OfficialSkillSource`) always
-    agree on the location. Default is ``~/.valuz/app/official-skills/``;
+    agree on the location. Default is ``~/.valuz-oss/official-skills/``;
     ``$VALUZ_OFFICIAL_SKILLS_DIR`` overrides."""
     return fs_registry.official_skill_root()
 

@@ -33,7 +33,7 @@ Apache 2.0 and may be redistributed.
 
 Where they land
 ---------------
-``~/.valuz/app/models/light_local/rapidocr/`` (resolved via
+``~/.valuz-oss/models/light_local/rapidocr/`` (resolved via
 ``fs_registry.parser_model_dir``). When the job succeeds it also writes:
 
 - ``LICENSE`` — Apache 2.0 license text (so the bundle is self-contained

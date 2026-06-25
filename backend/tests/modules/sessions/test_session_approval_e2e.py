@@ -100,7 +100,7 @@ async def _store_and_orchestrator(tmp_path, monkeypatch):
     # it binds ``settings`` at module level (``from ...config import
     # settings``) and ``_set_kernel_env`` writes ``DATABASE_URL`` from
     # that binding. A stale binding points the kernel store at the real
-    # dev DB — the test's fixture rows then leak into ~/.valuz/app/valuz.db.
+    # dev DB — the test's fixture rows then leak into ~/.valuz-oss/valuz.db.
     import sys
 
     for name in list(sys.modules):

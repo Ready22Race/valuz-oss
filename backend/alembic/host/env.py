@@ -65,7 +65,7 @@ target_metadata = Base.metadata
 def get_url() -> str:
     """Resolve the DB URL — env override wins so the runtime bootstrap
     can point alembic at the same SQLite file the rest of the app uses
-    (``~/.valuz/app/valuz.db`` by default, relocatable via
+    (``~/.valuz-oss/valuz.db`` by default, relocatable via
     ``VALUZ_DATA_DIR``).
     """
     return os.environ.get("DATABASE_URL", config.get_main_option("sqlalchemy.url", ""))

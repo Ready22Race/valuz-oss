@@ -25,7 +25,7 @@ def _guess_mime(path: Path) -> str:
 
 def _build_rapidocr(rapidocr_cls: Any) -> Any:
     """Construct ``RapidOCR`` preferring the user-authorized PP-OCRv6
-    bundle in ``~/.valuz/app/models/light_local/rapidocr/`` when the
+    bundle in ``~/.valuz-oss/models/light_local/rapidocr/`` when the
     READY marker is present. Falls back to the library's default
     behaviour (auto-download from ModelScope) when the marker is
     absent — that case only fires when the router's capability gate is
