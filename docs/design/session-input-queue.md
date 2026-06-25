@@ -4,7 +4,7 @@
 >
 > 取向一句话:**turn 运行中允许用户继续提交消息 → 持久化进 host DB 的 per-session 队列 → 当前 turn 结束后由 host 按 FIFO + budget 预检自动续跑(无损但要等);队列项支持编辑/删除;打断 = 软暂停(保留队列、需显式继续);不做 Codex 式 `turn/steer`(无损即时注入),kernel 零改动。**
 
-> **实现状态(2026-06-24):** 后端(model / `0009` 迁移 / datastore / service / 排空引擎 / boot 恢复 ①+②)+ 共享前端 core(`queue-api` + `chat-store`:`send`→`enqueue` 路由、边界 refetch、队列 actions)已完成并测试通过(后端 10 + 前端 5 个新测试,全量门禁按已知 RED 基线零增量)。前端 UI 本轮接入 **webui**(`ChatComposer` 运行中可入队 + `QueuedInputs` 气泡 编辑/删除 + 暂停后"继续");**desktop `ConversationPage`**(自管 send/interrupt、2980 行 Composer)的 UI 接入为后续(复用同一套 `queue-api`/store 语义)。一处实现补强:`_active_drains` 单飞守卫 + `is_draining_queue` 让 `send_message` 在两个排空项之间的极短 idle 窗口仍 409 防插队(§8.2)。
+> **实现状态(2026-06-24):** 后端(model / `0009` 迁移 / datastore / service / 排空引擎 / boot 恢复 ①+②)+ 共享前端 core(`queue-api` + `chat-store`:`send`→`enqueue` 路由、边界 refetch、队列 actions)已完成并测试通过(后端 10 + 前端 5 个新测试,全量门禁按已知 RED 基线零增量)。前端 UI 已接入 **webui**(`ChatComposer` 运行中可入队 + `QueuedInputs` 气泡)**和 desktop `ConversationPage`**(运行中 Composer 旁出现"排队"发送键 + Enter 入队;`QueuedInputsBar` 气泡 编辑/删除 + 暂停后"继续";`Composer` 加 `queueWhileSending` 开关,非聊天场景不受影响)。迁移随 main 合并后顺延为 **`0009`**。一处实现补强:`_active_drains` 单飞守卫 + `is_draining_queue` 让 `send_message` 在两个排空项之间的极短 idle 窗口仍 409 防插队(§8.2)。
 
 ---
 
