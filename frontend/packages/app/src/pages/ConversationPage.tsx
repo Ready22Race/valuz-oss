@@ -5012,13 +5012,18 @@ export const ConversationPage = () => {
             }}
           />
           {selectedSessionId ? (
-            <QueuedInputsBar
-              queue={queue}
-              paused={queuePaused}
-              onEdit={handleEditQueued}
-              onDelete={handleDeleteQueued}
-              onResume={handleResumeQueue}
-            />
+            // Mirror the Composer root's horizontal inset (``px-5``) so the
+            // queue lines up with the input box, which is its own
+            // ``mx-auto max-w-[760px]`` inside that same px-5.
+            <div className="px-5">
+              <QueuedInputsBar
+                queue={queue}
+                paused={queuePaused}
+                onEdit={handleEditQueued}
+                onDelete={handleDeleteQueued}
+                onResume={handleResumeQueue}
+              />
+            </div>
           ) : null}
           <Composer
             // Remount per route so the textarea's native autoFocus refires when
