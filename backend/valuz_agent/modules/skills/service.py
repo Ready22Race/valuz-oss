@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import shutil
 import tarfile
@@ -49,6 +50,8 @@ from valuz_agent.modules.skills.models import (
     SkillUpdateRequest,
     SkillView,
 )
+
+logger = logging.getLogger(__name__)
 
 # Preview entries are heterogeneous by import kind:
 #   archive/directory: (skill_root, managed_temp: bool)  — cleaned via skill_root.parent
@@ -122,6 +125,31 @@ async def _upsert_skill_row(ds: SkillDatastore, manifest) -> None:  # type: igno
         await ds.update(existing)
 
 
+async def _index_manifests(db, ds: SkillDatastore, manifests, *, scope: str, label: str) -> int:  # type: ignore[no-untyped-def]
+    """Upsert each ``scope`` manifest, isolating per-skill failures.
+
+    One bad/conflicting skill (e.g. a stale-owner row already holding the global
+    ``id``, or a malformed manifest) must not abort indexing the rest — that is
+    exactly what would turn a single skill problem into "no official skills
+    indexed this boot". ``SkillDatastore.create``/``update`` each commit, so a
+    failure is rolled back before the next skill to clear the poisoned session.
+    """
+    count = 0
+    for manifest in manifests:
+        if manifest.scope != scope:
+            continue
+        try:
+            await _upsert_skill_row(ds, manifest)
+            count += 1
+        except Exception:
+            logger.exception("%s: skipping skill %s", label, getattr(manifest, "id", "?"))
+            try:
+                await db.rollback()
+            except Exception:
+                logger.exception("%s: rollback after a failed skill upsert failed", label)
+    return count
+
+
 async def reindex_official_skills() -> int:
     """Index the on-disk official skills into ``valuz_skill_index`` (own session).
 
@@ -139,11 +167,13 @@ async def reindex_official_skills() -> int:
     async with _scan_lock:
         async with async_unit_of_work(commit=True) as db:
             ds = SkillDatastore(db)
-            for manifest in OfficialSkillSource().list_skills(ctx):
-                if manifest.scope != "official":
-                    continue
-                await _upsert_skill_row(ds, manifest)
-                count += 1
+            count = await _index_manifests(
+                db,
+                ds,
+                OfficialSkillSource().list_skills(ctx),
+                scope="official",
+                label="reindex_official_skills",
+            )
     return count
 
 
@@ -168,11 +198,13 @@ async def reindex_user_skills() -> int:
     async with _scan_lock:
         async with async_unit_of_work(commit=True) as db:
             ds = SkillDatastore(db)
-            for manifest in FilesystemSkillSource().list_skills(ctx):
-                if manifest.scope != "user":
-                    continue
-                await _upsert_skill_row(ds, manifest)
-                count += 1
+            count = await _index_manifests(
+                db,
+                ds,
+                FilesystemSkillSource().list_skills(ctx),
+                scope="user",
+                label="reindex_user_skills",
+            )
     return count
 # Import provenance staged alongside a preview, keyed by the same ``preview_id``.
 # Populated for URL/GitHub imports; consumed by ``confirm_url_import`` to persist
