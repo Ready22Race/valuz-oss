@@ -67,12 +67,17 @@ def runtimes_for(
     default rule), priority-ordered.
 
     Used to fill ``LLMModel.runtimes`` when a producer leaves it ``None``. A
-    producer that knows better declares ``runtimes`` directly — notably the
-    Valuz codex gateway, which is why **codex is only derived here for a
-    ``codex-subscription``**: a bare credential speaking the Responses wire
-    can't drive codex (the codex CLI walks its own keychain); the hosted gateway
-    that can is a contributed row that declares ``("codex",)`` itself. Empty
-    ``protocols`` = "no declared restriction" → every protocol.
+    producer that knows better declares ``runtimes`` directly. codex is derived
+    here for its own ``codex-subscription`` (CLI keychain login) AND for any
+    non-subscription channel that speaks the Responses wire: the kernel codex
+    runtime accepts a custom ``base_url`` + API key through a synthetic
+    ``[model_providers.harness]`` config block (``wire_api="responses"``,
+    ``env_key=HARNESS_CODEX_PROVIDER_API_KEY`` — see
+    ``kernel/src/runtimes/codex/runtime.py``), so a user-supplied OpenAI-
+    compatible Responses endpoint (e.g. Volcengine Ark) can drive codex too.
+    (``web_search`` is force-disabled for non-subscription keys — the one
+    feature gap, handled kernel-side.) Empty ``protocols`` = "no declared
+    restriction" → every protocol.
     """
     protos = set(protocols) if protocols else set(_ALL_PROTOCOLS)
     out: set[str] = set()
@@ -81,9 +86,13 @@ def runtimes_for(
     if "anthropic" in protos & set(RUNTIME_REGISTRY["claude_agent"].supported_protocols):
         out.add("claude_agent")
 
-    # codex: only its own ChatGPT subscription is derivable here; the hosted
-    # Responses gateway declares codex on its own rows (see docstring).
-    if provider_kind == "codex-subscription":
+    # codex: its own ChatGPT subscription, OR any non-subscription channel
+    # speaking the Responses wire (custom gateway routed through the kernel's
+    # ``model_providers.harness`` block — see docstring).
+    if provider_kind == "codex-subscription" or (
+        provider_kind not in _SUBSCRIPTION_KINDS
+        and (protos & set(RUNTIME_REGISTRY["codex"].supported_protocols))
+    ):
         out.add("codex")
 
     # deepagents: any non-subscription channel speaking a protocol it accepts.
