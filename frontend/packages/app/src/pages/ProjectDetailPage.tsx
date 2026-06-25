@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   Button,
   Composer,
+  EmptyState,
   type ComposerAgentItem,
   ContextMenu,
   ContextMenuContent,
@@ -31,7 +32,7 @@ import {
   DeployAgentsDialog,
   TaskStatusLabel,
 } from "@valuz/app/components";
-import { FilePenLine, Plus, Trash2 } from "lucide-react";
+import { FilePenLine, MessageSquare, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
   workspacesApi,
@@ -152,9 +153,11 @@ const ProjectRecents = ({
   const { t } = useTranslation();
   if (sessions.length === 0) {
     return (
-      <div className="px-3 py-12 text-center text-sm text-ink-meta">
-        {t("project.noSessions" as Parameters<typeof t>[0])}
-      </div>
+      <EmptyState
+        className="py-12"
+        icon={<MessageSquare />}
+        title={t("project.noSessions" as Parameters<typeof t>[0])}
+      />
     );
   }
 
@@ -390,15 +393,18 @@ const ProjectTasks = ({
 
   if (tasks.length === 0) {
     return (
-      <div className="flex flex-col items-center px-3 pt-7 pb-12 text-center">
-        <p className="max-w-[360px] text-sm text-ink-meta">
-          {t("project.noTasksHint" as Parameters<typeof t>[0])}
-        </p>
-        <Button className="mt-4" size="sm" onClick={onAddTask}>
-          <Plus className="h-3.5 w-3.5" />
-          {t("project.addTaskBtn" as Parameters<typeof t>[0])}
-        </Button>
-      </div>
+      <EmptyState
+        className="pt-7 pb-12"
+        icon={<FilePenLine />}
+        title={t("project.noTasks" as Parameters<typeof t>[0])}
+        message={t("project.noTasksHint" as Parameters<typeof t>[0])}
+        action={
+          <Button size="sm" onClick={onAddTask}>
+            <Plus className="h-3.5 w-3.5" />
+            {t("project.addTaskBtn" as Parameters<typeof t>[0])}
+          </Button>
+        }
+      />
     );
   }
 

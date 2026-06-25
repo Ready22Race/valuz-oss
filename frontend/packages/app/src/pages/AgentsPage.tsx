@@ -4,6 +4,7 @@ import { Bot, Copy, MoreHorizontal, Plus, type LucideIcon } from "lucide-react";
 import {
   Button,
   CategorizedList,
+  EmptyState,
   PageLoader,
   Popover,
   PopoverContent,
@@ -267,24 +268,18 @@ export const AgentsPage = () => {
                 );
               }}
               emptyState={
-                <div className="flex flex-col items-center justify-center py-16 text-center">
-                  <Bot className="mb-3 h-10 w-10 text-ink-muted" />
-                  <div className="text-sm text-ink-body">
-                    {t("agent.emptyTitle")}
-                  </div>
-                  <div className="mt-1 max-w-[460px] text-xs leading-5 text-ink-body">
-                    {t("agent.emptyDesc")}
-                  </div>
-                  <Button
-                    className="mt-4"
-                    variant="default"
-                    size="sm"
-                    onClick={openCreate}
-                  >
-                    <Plus className="h-3 w-3" />
-                    {t("agent.createAgent" as Parameters<typeof t>[0])}
-                  </Button>
-                </div>
+                <EmptyState
+                  className="py-16"
+                  icon={<Bot />}
+                  title={t("agent.emptyTitle")}
+                  message={t("agent.emptyDesc")}
+                  action={
+                    <Button variant="default" size="sm" onClick={openCreate}>
+                      <Plus className="h-3 w-3" />
+                      {t("agent.createAgent" as Parameters<typeof t>[0])}
+                    </Button>
+                  }
+                />
               }
             />
           </div>

@@ -12,6 +12,7 @@ import {
   ProjectCard,
   DirectoryPicker,
   DeleteConfirmDialog,
+  EmptyState,
   FormField,
   Button,
   PageLoader,
@@ -157,26 +158,21 @@ export const ProjectsPage = () => {
     if (projects.length === 0) {
       return (
         <div className="flex flex-1 justify-center pt-[160px]">
-          <div className="flex flex-col items-center px-5 text-center">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-surface-soft text-ink-body">
-              <FolderKanban className="h-5 w-5" />
-            </div>
-            <div className="mt-3 text-sm font-medium text-ink-heading">
-              {t("project.createTitle" as Parameters<typeof t>[0])}
-            </div>
-            <div className="mt-1 max-w-[460px] text-xs leading-5 text-ink-body">
-              {t("project.emptyState" as Parameters<typeof t>[0])}
-            </div>
-            <Button
-              className="mt-4"
-              variant="default"
-              size="sm"
-              onClick={() => setCreateOpen(true)}
-            >
-              <Plus className="h-3 w-3" />
-              {t("project.create" as Parameters<typeof t>[0])}
-            </Button>
-          </div>
+          <EmptyState
+            icon={<FolderKanban />}
+            title={t("project.createTitle" as Parameters<typeof t>[0])}
+            message={t("project.emptyState" as Parameters<typeof t>[0])}
+            action={
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setCreateOpen(true)}
+              >
+                <Plus className="h-3 w-3" />
+                {t("project.create" as Parameters<typeof t>[0])}
+              </Button>
+            }
+          />
         </div>
       );
     }

@@ -35,6 +35,7 @@ import {
   DialogHeader,
   DialogTitle,
   DialogField,
+  EmptyState,
   PageLoader,
   Textarea,
   cn,
@@ -959,7 +960,11 @@ export const TaskDetailPage = () => {
             </h2>
           </div>
           {events.length === 0 ? (
-            <p className="text-xs text-ink-meta">{t("task.noEvents")}</p>
+            <EmptyState
+              className="py-8"
+              icon={<ListTodo />}
+              title={t("task.noEvents")}
+            />
           ) : (
             <ol className="flex flex-col gap-4">
               {timelineNodes.map((node) => {

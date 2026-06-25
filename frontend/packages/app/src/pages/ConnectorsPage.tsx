@@ -10,6 +10,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  EmptyState,
   PageLoader,
 } from "@valuz/ui";
 import { ResourceActionSlot } from "../components/ResourceActionSlot";
@@ -710,14 +711,21 @@ export const ConnectorsPage = () => {
                 );
               }}
               emptyState={
-                <div className="flex flex-col items-center justify-center py-16 text-center">
-                  <Link2 className="mb-3 h-10 w-10 text-ink-muted" />
-                  <div className="text-sm text-ink-body">
-                    {connectors.length === 0 && catalog.length === 0
+                <EmptyState
+                  className="py-16"
+                  icon={
+                    connectors.length === 0 && catalog.length === 0 ? (
+                      <Link2 />
+                    ) : (
+                      <Search />
+                    )
+                  }
+                  title={
+                    connectors.length === 0 && catalog.length === 0
                       ? t("connector.empty")
-                      : t("connector.noMatch")}
-                  </div>
-                </div>
+                      : t("connector.noMatch")
+                  }
+                />
               }
             />
           </div>

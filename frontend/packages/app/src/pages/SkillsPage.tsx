@@ -9,6 +9,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  EmptyState,
   PageLoader,
   SkillCard,
   SkillDetailPanel,
@@ -579,14 +580,15 @@ export const SkillsPage = () => {
                 );
               }}
               emptyState={
-                <div className="flex flex-col items-center justify-center py-16 text-center">
-                  <Zap className="mb-3 h-10 w-10 text-ink-muted" />
-                  <div className="text-sm text-ink-body">
-                    {skills.length === 0
+                <EmptyState
+                  className="py-16"
+                  icon={<Zap />}
+                  title={
+                    skills.length === 0
                       ? t("skill.noAvailable" as Parameters<typeof t>[0])
-                      : t("skill.noMatch" as Parameters<typeof t>[0])}
-                  </div>
-                </div>
+                      : t("skill.noMatch" as Parameters<typeof t>[0])
+                  }
+                />
               }
             />
           </div>

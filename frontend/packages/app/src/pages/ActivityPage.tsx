@@ -10,6 +10,7 @@ import { useNavigate } from "react-router-dom";
 import { ArrowRight, ListChecks, MessageSquare, Trash2 } from "lucide-react";
 import {
   DeleteConfirmDialog,
+  EmptyState,
   StatusPill,
   Tabs,
   TabsList,
@@ -96,7 +97,7 @@ interface DashboardLine {
  * ``-webkit-box``) or get overridden by ``unicode-bidi``. JS slicing is
  * uglier but actually works across mixed CJK / Latin / emoji content.
  *
- * Limit picked per script — CJK glyphs are ~2× the width of ASCII at the
+ * Limit picked per script - CJK glyphs are about 2x the width of ASCII at the
  * dashboard's ``text-xs`` size, so a flat char limit either wastes space
  * or overshoots the row. */
 const tailTruncate = (text: string): string => {
@@ -578,9 +579,11 @@ export const ActivityPage = () => {
       <section className={displayRunning.length > 0 ? "" : "mt-5"}>
         {filteredFinished.length === 0 ? (
           hasAny ? null : (
-            <div className="px-3 py-12 text-center text-sm text-ink-meta">
-              {t(tk("activity.noHistory"))}
-            </div>
+            <EmptyState
+              className="py-12"
+              icon={<ListChecks />}
+              title={t(tk("activity.noHistory"))}
+            />
           )
         ) : (
           <div className="flex flex-col gap-5">

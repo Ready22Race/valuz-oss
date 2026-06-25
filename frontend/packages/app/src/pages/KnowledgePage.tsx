@@ -758,26 +758,23 @@ export const KnowledgePage = () => {
             <PageLoader logo className="py-20" />
           ) : isEmpty ? (
             <div className="flex flex-1 justify-center pt-[160px]">
-              <div className="flex flex-col items-center px-5 text-center">
-                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-surface-soft text-ink-body">
-                  <FolderPlus className="h-5 w-5" />
-                </div>
-                <div className="mt-3 text-sm font-medium text-ink-heading">
-                  {t("knowledge.createNew" as Parameters<typeof t>[0])}
-                </div>
-                <div className="mt-1 max-w-[460px] text-xs leading-5 text-ink-body">
-                  {t("knowledge.supportedFormats" as Parameters<typeof t>[0])}
-                </div>
-                <Button
-                  className="mt-4"
-                  size="sm"
-                  onClick={() => setCreateOpen(true)}
-                  variant="default"
-                >
-                  <Plus className="h-3 w-3" />
-                  {t("knowledge.addKb" as Parameters<typeof t>[0])}
-                </Button>
-              </div>
+              <EmptyState
+                icon={<FolderPlus />}
+                title={t("knowledge.createNew" as Parameters<typeof t>[0])}
+                message={t(
+                  "knowledge.supportedFormats" as Parameters<typeof t>[0],
+                )}
+                action={
+                  <Button
+                    size="sm"
+                    onClick={() => setCreateOpen(true)}
+                    variant="default"
+                  >
+                    <Plus className="h-3 w-3" />
+                    {t("knowledge.addKb" as Parameters<typeof t>[0])}
+                  </Button>
+                }
+              />
             </div>
           ) : (
             <>
@@ -884,8 +881,8 @@ export const KnowledgePage = () => {
         ) : filteredRootNodes.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <EmptyState
-              icon={<FolderOpen className="h-10 w-10 text-ink-muted" />}
-              message={
+              icon={<FolderOpen />}
+              title={
                 searchQuery
                   ? t("knowledge.noMatchDocs" as Parameters<typeof t>[0])
                   : t("knowledge.noDocs" as Parameters<typeof t>[0])

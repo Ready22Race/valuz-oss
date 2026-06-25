@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import {
   Button,
   DeleteConfirmDialog,
+  EmptyState,
   ExecutionLog,
   PageLoader,
   ScheduledTaskTable,
@@ -591,26 +592,17 @@ export const AutomationPage = () => {
       <div className="flex min-h-full flex-col px-5 pb-5 pt-3">
         {!hasAutomations ? (
           <div className="flex flex-1 justify-center pt-[160px]">
-            <div className="flex flex-col items-center px-5 text-center">
-              <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-surface-soft text-ink-body">
-                <Clock3 className="h-5 w-5" />
-              </div>
-              <div className="mt-3 text-sm font-medium text-ink-heading">
-                {t(k("automation.emptyTitle"))}
-              </div>
-              <div className="mt-1 max-w-[460px] text-xs leading-5 text-ink-body">
-                {t(k("automation.emptyDesc"))}
-              </div>
-              <Button
-                className="mt-4"
-                variant="default"
-                size="sm"
-                onClick={openCreate}
-              >
-                <Plus className="h-3 w-3" />
-                {t(k("automation.emptyAction"))}
-              </Button>
-            </div>
+            <EmptyState
+              icon={<Clock3 />}
+              title={t(k("automation.emptyTitle"))}
+              message={t(k("automation.emptyDesc"))}
+              action={
+                <Button variant="default" size="sm" onClick={openCreate}>
+                  <Plus className="h-3 w-3" />
+                  {t(k("automation.emptyAction"))}
+                </Button>
+              }
+            />
           </div>
         ) : (
           <>
@@ -671,12 +663,10 @@ export const AutomationPage = () => {
                 />
               ) : (
                 <div className="flex flex-col items-center justify-center px-5 py-8 text-center">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-surface-soft text-ink-body">
-                    <Clock3 className="h-5 w-5" />
-                  </div>
-                  <p className="mt-3 text-sm font-medium text-ink-heading">
-                    {t(k("automation.noExecutions"))}
-                  </p>
+                  <EmptyState
+                    icon={<Clock3 />}
+                    title={t(k("automation.noExecutions"))}
+                  />
                 </div>
               )}
             </section>
