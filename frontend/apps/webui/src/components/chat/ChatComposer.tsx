@@ -17,8 +17,10 @@ const isImeCompositionEvent = (
 /**
  * Lean composer paired with the chat-store turn lifecycle:
  *
- * - When idle:        shows ``Send`` (Enter to submit; Shift+Enter for newline).
- * - During streaming: replaces ``Send`` with ``Stop``; clicking calls interrupt.
+ * - When idle:        ``Send`` (Enter to submit; Shift+Enter for newline).
+ * - During streaming: input stays open — submitting **queues** a follow-up
+ *   (the store routes ``send`` → ``enqueue``; the button reads "Queue"). A
+ *   ``Stop`` button sits alongside to interrupt the active turn.
  * - After Stop click: ``Stop`` enters a ``Stopping...`` state until the turn
  *   actually finalises (chat-store clears ``isInterrupting`` on session.idle).
  */
@@ -34,7 +36,7 @@ export const ChatComposer = ({
 
   const handleSend = async () => {
     const text = draft.trim();
-    if (!text || submitting || isStreaming) return;
+    if (!text || submitting) return;
     setSubmitting(true);
     try {
       await onSend(text);
@@ -64,34 +66,35 @@ export const ChatComposer = ({
         rows={3}
         placeholder={
           isStreaming
-            ? "Agent is responding... press Stop to interrupt."
+            ? "Ask for follow-up changes — queued to run after the current turn."
             : "Send a message — Enter to submit, Shift+Enter for newline."
         }
-        disabled={disabled || isStreaming}
+        disabled={disabled}
         className="min-h-20 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
       />
       <div className="mt-2 flex items-center justify-between">
         <div className="text-[11px] text-muted-foreground">
           {isStreaming ? "Streaming response..." : ""}
         </div>
-        {isStreaming ? (
-          <Button
-            type="button"
-            variant="destructive"
-            size="sm"
-            disabled={isInterrupting}
-            onClick={() => void onInterrupt()}
-            className="gap-1.5"
-            data-testid="stop-button"
-          >
-            {isInterrupting ? (
-              <Spinner className="size-3.5" />
-            ) : (
-              <Square className="size-3.5" />
-            )}
-            {isInterrupting ? "Stopping..." : "Stop"}
-          </Button>
-        ) : (
+        <div className="flex items-center gap-1.5">
+          {isStreaming && (
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              disabled={isInterrupting}
+              onClick={() => void onInterrupt()}
+              className="gap-1.5"
+              data-testid="stop-button"
+            >
+              {isInterrupting ? (
+                <Spinner className="size-3.5" />
+              ) : (
+                <Square className="size-3.5" />
+              )}
+              {isInterrupting ? "Stopping..." : "Stop"}
+            </Button>
+          )}
           <Button
             type="button"
             size="sm"
@@ -101,9 +104,9 @@ export const ChatComposer = ({
             data-testid="send-button"
           >
             <ArrowUp className="size-3.5" />
-            Send
+            {isStreaming ? "Queue" : "Send"}
           </Button>
-        )}
+        </div>
       </div>
     </div>
   );

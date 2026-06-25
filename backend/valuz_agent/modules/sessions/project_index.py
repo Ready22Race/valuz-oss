@@ -12,20 +12,23 @@ Every kernel ``save_session`` **creation** site must be paired with a
 
 from __future__ import annotations
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
+from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.sessions.models import ProjectSessionRow
 
 __all__ = [
     "count_for_project",
+    "get_queue_paused_at",
     "list_recent",
     "list_session_ids",
     "project_of",
     "record",
     "remove",
     "remove_for_project",
+    "set_queue_paused",
 ]
 
 
@@ -96,6 +99,28 @@ async def project_of(session_id: str) -> str | None:
     async with async_unit_of_work(commit=False) as db:
         stmt = select(ProjectSessionRow.project_id).filter_by(session_id=session_id)
         return (await db.execute(stmt)).scalars().first()
+
+
+async def get_queue_paused_at(session_id: str) -> int | None:
+    """Read the input-queue pause marker for a session (SYSTEM, by session_id).
+
+    ``None`` = not paused (drain freely). A timestamp = an interrupt soft-paused
+    auto-drain; it stays paused across restart until an explicit resume. See
+    docs/design/session-input-queue.md §9.
+    """
+    async with async_unit_of_work(commit=False) as db:
+        stmt = select(ProjectSessionRow.queue_paused_at).filter_by(session_id=session_id)
+        return (await db.execute(stmt)).scalars().first()
+
+
+async def set_queue_paused(session_id: str, paused: bool) -> None:
+    """Set/clear the input-queue pause marker (SYSTEM, by session_id)."""
+    async with async_unit_of_work() as db:
+        await db.execute(
+            update(ProjectSessionRow)
+            .where(ProjectSessionRow.session_id == session_id)
+            .values(queue_paused_at=now_ms() if paused else None)
+        )
 
 
 async def count_for_project(project_id: str) -> int:

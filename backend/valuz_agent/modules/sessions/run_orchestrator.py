@@ -11,6 +11,7 @@ surface; the task orchestrator reuses ``_finalize_session`` directly.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -25,22 +26,28 @@ from valuz_agent.modules.tasks.actor_runner import run_session_to_idle
 
 logger = logging.getLogger(__name__)
 
+# Sessions with a queue-drain chain currently in flight. Single-flights the
+# drain (an idle-kick enqueue must not race the post-turn drain) AND doubles as
+# a host-side "busy" signal so ``send_message`` 409s during the brief idle
+# windows *between* drained items (see ``is_draining_queue``). In-memory by
+# design — the queue itself is durable (DB), the drain task is transient.
+_active_drains: set[str] = set()
 
-async def _run_agent_background(
-    session_id: str,
-    content: str,
-    event_bus: EventBus,
-) -> None:
-    """Drive one agent turn in the background.
 
-    Thin wrapper over the shared :func:`run_session_to_idle` runtime primitive
-    (ADR-023): the primitive owns the attach-sink → build UserMessage →
-    run_turn → read-back-status → finalize → consume-attachments →
-    detach/cleanup → publish SESSION_FINISHED shape with the layered failure
-    handling that guarantees a session never gets stranded in
-    ``status="running"``. This wrapper adds only the chat-path billing meter
-    (the task member/lead path leaves ``on_message=None`` so its behaviour is
-    byte-identical).
+def is_draining_queue(session_id: str) -> bool:
+    """True while a queue-drain chain is in flight for this session.
+
+    ``send_message`` treats this like ``status=="running"`` so a new turn can't
+    slip into the sub-second idle gap between two drained queue items.
+    """
+    return session_id in _active_drains
+
+
+def _chat_billing_meter(session_id: str) -> Any:
+    """Build the chat-path billing meter callback for a session.
+
+    Shared by the initial turn and every drained queue item so each metered
+    turn bills identically.
     """
 
     async def _meter(message: Any, after_run: Any) -> None:
@@ -74,7 +81,114 @@ async def _run_agent_background(
             except Exception:  # noqa: BLE001
                 logger.warning("Billing meter failed for session %s", session_id)
 
-    await run_session_to_idle(session_id, content, event_bus, on_message=_meter)
+    return _meter
+
+
+async def _run_agent_background(
+    session_id: str,
+    content: str,
+    event_bus: EventBus,
+) -> None:
+    """Drive one agent turn in the background, then drain any queued follow-ups.
+
+    Thin wrapper over the shared :func:`run_session_to_idle` runtime primitive
+    (ADR-023): the primitive owns the attach-sink → build UserMessage →
+    run_turn → read-back-status → finalize → consume-attachments →
+    detach/cleanup → publish SESSION_FINISHED shape with the layered failure
+    handling that guarantees a session never gets stranded in
+    ``status="running"``. This wrapper adds the chat-path billing meter and the
+    post-turn queue drain (docs/design/session-input-queue.md).
+    """
+    meter = _chat_billing_meter(session_id)
+    await run_session_to_idle(session_id, content, event_bus, on_message=meter)
+    await _drain_queue_after_turn(session_id, event_bus, on_message=meter)
+
+
+async def _drain_queue_after_turn(
+    session_id: str,
+    event_bus: EventBus,
+    on_message: Any | None = None,
+) -> None:
+    """Run queued follow-up inputs FIFO after a turn finishes (host-driven).
+
+    Per item: bail if the app is shutting down or the queue is paused (an
+    interrupt soft-pauses — items stay until an explicit resume); budget
+    pre-check (mark ``blocked`` + stop on failure, preserving the 402 path);
+    else mark ``dispatched`` and drive it through ``run_session_to_idle`` with
+    its frozen attachment snapshot, then loop. Single-flighted via
+    ``_active_drains`` so an idle-kick enqueue can't double-run an item.
+    """
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.infra.lifecycle import is_draining
+    from valuz_agent.modules.sessions import project_index
+    from valuz_agent.modules.sessions.datastore import SessionDatastore
+    from valuz_agent.modules.sessions.errors import BudgetExceeded
+    from valuz_agent.modules.sessions.events import SESSION_FINISHED
+
+    if session_id in _active_drains:
+        return
+    _active_drains.add(session_id)
+    try:
+        while True:
+            if is_draining():
+                return
+            if await project_index.get_queue_paused_at(session_id) is not None:
+                return
+
+            async with async_unit_of_work(commit=False) as db:
+                head = await SessionDatastore(db).peek_next_queued(session_id)
+            if head is None:
+                return
+
+            head_id = head.id
+            payload = head.input or {}
+            text = str(payload.get("text") or "")
+            attachments = list(payload.get("attachments") or [])
+
+            session = await kernel_client.get_session(require_current_user_id(), session_id)
+            if session is None:
+                return
+
+            try:
+                from valuz_agent.modules.sessions.service import _enforce_budget
+
+                await _enforce_budget(session)
+            except BudgetExceeded as exc:
+                async with async_unit_of_work() as db:
+                    await SessionDatastore(db).mark_queued_status(
+                        head_id,
+                        "blocked",
+                        error_message=getattr(exc, "message_key", None) or str(exc),
+                    )
+                # Surface the stall: followers refetch the queue on a finish.
+                event_bus.publish(SESSION_FINISHED, session_id=session_id, status="idle")
+                return
+
+            async with async_unit_of_work() as db:
+                await SessionDatastore(db).mark_queued_status(head_id, "dispatched")
+
+            await run_session_to_idle(
+                session_id,
+                text,
+                event_bus,
+                on_message=on_message,
+                queued_attachments=attachments,
+            )
+    finally:
+        _active_drains.discard(session_id)
+
+
+def schedule_drain(session_id: str, event_bus: EventBus) -> None:
+    """Spawn a background queue drain for an idle session (idle-kick / resume).
+
+    ``asyncio.create_task`` copies the current contextvars, so the ambient
+    request owner (``require_current_user_id``) propagates into the drain.
+    A no-op if a drain is already in flight for the session.
+    """
+    if session_id in _active_drains:
+        return
+    meter = _chat_billing_meter(session_id)
+    asyncio.create_task(_drain_queue_after_turn(session_id, event_bus, on_message=meter))
 
 
 # Strip leading skill-trigger tokens (``/<slug>``) when deriving a

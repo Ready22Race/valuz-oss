@@ -5,6 +5,7 @@ import {
   sessionsApi,
   type SessionEventDTO,
 } from "../api/sessions-api";
+import { queueApi, type QueuedInput } from "../api/queue-api";
 import {
   createSessionStreamController,
   type SessionStreamSnapshot,
@@ -50,6 +51,10 @@ export interface ChatStoreState {
   isStreaming: boolean;
   /** Set true while an interrupt request is in flight; cleared when stream ends. */
   isInterrupting: boolean;
+  /** Follow-up inputs queued while a turn is running (drain FIFO after it). */
+  queue: QueuedInput[];
+  /** True when an interrupt soft-paused the queue; awaits explicit resume. */
+  queuePaused: boolean;
   /** Last seen event seq — used as resume cursor. */
   lastSeq: number;
   /** Connection lifecycle from session-stream controller. */
@@ -63,6 +68,15 @@ export interface ChatStoreState {
     opts?: { providerId?: string | null; modelId?: string | null },
   ) => Promise<void>;
   interrupt: () => Promise<void>;
+  /** Append a follow-up input to the queue (drains after the active turn). */
+  enqueue: (
+    prompt: string,
+    opts?: { providerId?: string | null; modelId?: string | null },
+  ) => Promise<void>;
+  editQueued: (queueId: string, prompt: string) => Promise<void>;
+  deleteQueued: (queueId: string) => Promise<void>;
+  resumeQueue: () => Promise<void>;
+  refreshQueue: () => Promise<void>;
   reconnect: () => void;
   // Test/internal helper — feed an event into the reducer. Exposed so
   // the hook can pipe controller events through and so unit tests can
@@ -116,6 +130,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   streaming: emptyCursor(),
   isStreaming: false,
   isInterrupting: false,
+  queue: [],
+  queuePaused: false,
   lastSeq: 0,
   connection: emptyConnection(),
 
@@ -131,6 +147,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       streaming: emptyCursor(),
       isStreaming: false,
       isInterrupting: false,
+      queue: [],
+      queuePaused: false,
       lastSeq: 0,
       connection: emptyConnection(),
     });
@@ -146,6 +164,9 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       sessionStatus: detail.status,
       todos: detail.todos ?? null,
     });
+
+    // Hydrate any persisted input queue (survives reload / reconnect).
+    void get().refreshQueue();
 
     // 2. Replay history events so the chat list is hydrated before the
     //    live subscription starts.
@@ -183,6 +204,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       streaming: emptyCursor(),
       isStreaming: false,
       isInterrupting: false,
+      queue: [],
+      queuePaused: false,
       lastSeq: 0,
       connection: emptyConnection(),
     });
@@ -191,7 +214,12 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   send: async (prompt, opts = {}) => {
     const { sessionId, isStreaming } = get();
     if (!sessionId) throw new Error("No session attached");
-    if (isStreaming) throw new Error("A turn is already in progress");
+    if (isStreaming) {
+      // A turn is in flight — queue this as a follow-up instead of failing.
+      // It drains FIFO after the active turn (docs/design/session-input-queue).
+      await get().enqueue(prompt, opts);
+      return;
+    }
     // Optimistic user message — the server will eventually echo a
     // ``message.user`` event we'll ignore via id de-dup.
     const optimistic: ChatMessage = {
@@ -241,12 +269,66 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     // (session.idle / session.update with status=cancelled).
   },
 
+  enqueue: async (prompt, opts = {}) => {
+    const { sessionId } = get();
+    if (!sessionId) throw new Error("No session attached");
+    const list = await queueApi.enqueue(sessionId, prompt, {
+      providerId: opts.providerId ?? null,
+      modelId: opts.modelId ?? null,
+    });
+    if (get().sessionId !== sessionId) return;
+    set({ queue: list.items, queuePaused: list.paused });
+  },
+
+  editQueued: async (queueId, prompt) => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    const list = await queueApi.edit(sessionId, queueId, prompt);
+    if (get().sessionId !== sessionId) return;
+    set({ queue: list.items, queuePaused: list.paused });
+  },
+
+  deleteQueued: async (queueId) => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    const list = await queueApi.remove(sessionId, queueId);
+    if (get().sessionId !== sessionId) return;
+    set({ queue: list.items, queuePaused: list.paused });
+  },
+
+  resumeQueue: async () => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    const list = await queueApi.resume(sessionId);
+    if (get().sessionId !== sessionId) return;
+    set({ queue: list.items, queuePaused: list.paused });
+  },
+
+  refreshQueue: async () => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    try {
+      const list = await queueApi.list(sessionId);
+      if (get().sessionId !== sessionId) return;
+      set({ queue: list.items, queuePaused: list.paused });
+    } catch {
+      // Best-effort — a transient queue fetch failure must not break chat.
+    }
+  },
+
   reconnect: () => {
     activeController?.reconnect();
   },
 
   _ingest: (event: SessionEventDTO) => {
+    const before = get().isStreaming;
     set((state) => reduce(state, event));
+    // Turn boundary (streaming true → false): a drained queue item just
+    // dispatched / the queue settled. Resync the queue view so bubbles drop
+    // as they run and ``paused`` / ``blocked`` states surface. See §8.4.
+    if (before && !get().isStreaming) {
+      void get().refreshQueue();
+    }
   },
 }));
 

@@ -15,6 +15,7 @@ from valuz_agent.infra.db import get_async_session
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
+    QueuedInputList,
     SessionDetail,
     SessionEventEnvelope,
     SessionListItem,
@@ -329,6 +330,69 @@ async def interrupt(
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
     return await svc.interrupt(session_id)
+
+
+class QueuedInputCreate(BaseModel):
+    prompt: str
+    provider_id: str | None = None
+    model_id: str | None = None
+
+
+class QueuedInputPatch(BaseModel):
+    prompt: str
+
+
+@router.get("/{session_id}/queue")
+async def list_session_queue(
+    session_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """List a session's queued follow-up inputs (FIFO) + paused flag."""
+    return await svc.list_queue(session_id)
+
+
+@router.post("/{session_id}/queue")
+async def enqueue_session_input(
+    session_id: str,
+    body: QueuedInputCreate,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """Enqueue a follow-up input. Drains immediately if idle, else after the
+    active turn (docs/design/session-input-queue.md)."""
+    return await svc.enqueue(
+        session_id,
+        body.prompt,
+        provider_id=body.provider_id,
+        model_id=body.model_id,
+    )
+
+
+@router.patch("/{session_id}/queue/{queue_id}")
+async def edit_session_queued_input(
+    session_id: str,
+    queue_id: str,
+    body: QueuedInputPatch,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    return await svc.edit_queued(session_id, queue_id, body.prompt)
+
+
+@router.delete("/{session_id}/queue/{queue_id}")
+async def delete_session_queued_input(
+    session_id: str,
+    queue_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    return await svc.delete_queued(session_id, queue_id)
+
+
+@router.post("/{session_id}/queue/resume")
+async def resume_session_queue(
+    session_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """Resume draining a queue paused by an interrupt."""
+    return await svc.resume_queue(session_id)
 
 
 @router.post("/{session_id}/cancel")

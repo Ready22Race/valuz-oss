@@ -110,4 +110,59 @@ async def _finalise_one(session: object) -> None:
     logger.info("Recovered stranded session %s → terminated", sid)
 
 
-__all__ = ["recover_running_sessions"]
+async def resume_queued_drains() -> int:
+    """Resume host-driven queue drains after a restart (durable-queue §9 ②).
+
+    The input queue is persisted, so a restart preserves queued follow-ups.
+    ``recover_running_sessions`` (① above) already terminated any session that
+    was mid-turn at crash time; this step picks up the remaining alive sessions
+    that still have ``queued`` items and re-kicks their drain so a long-running
+    workflow's follow-ups continue without the user re-issuing them.
+
+    Conservative on purpose:
+    - Runs under each session's own owner context (drain reads are owner-scoped).
+    - Skips paused queues (an interrupt soft-pause survives restart — the user
+      resumes explicitly).
+    - Only re-kicks **alive** sessions (``idle`` / ``created``). Items on a
+      session terminated by ① stay ``queued`` and drain on the user's next
+      interaction rather than auto-running onto a dead turn here.
+
+    Best-effort; never raises (boot must not block).
+    """
+    from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.infra.eventbus import event_bus
+    from valuz_agent.modules.sessions import project_index
+    from valuz_agent.modules.sessions.datastore import SessionDatastore
+    from valuz_agent.modules.sessions.mappers import _map_kernel_status
+    from valuz_agent.modules.sessions.run_orchestrator import schedule_drain
+
+    try:
+        async with async_unit_of_work(commit=False) as db:
+            pairs = await SessionDatastore(db).list_queued_session_owners()
+    except Exception:  # noqa: BLE001 — startup must not block on bookkeeping
+        logger.exception("resume_queued_drains: failed to list queued sessions")
+        return 0
+
+    resumed = 0
+    for session_id, owner in pairs:
+        token = set_current_user_id(owner)
+        try:
+            if await project_index.get_queue_paused_at(session_id) is not None:
+                continue
+            session = await kernel_client.get_session(owner, session_id)
+            status = _map_kernel_status(session.status) if session else None
+            if status in ("idle", "created"):
+                schedule_drain(session_id, event_bus)
+                resumed += 1
+        except Exception:  # noqa: BLE001 — one bad session must not stop the rest
+            logger.exception("resume_queued_drains: failed for session %s", session_id)
+        finally:
+            reset_current_user_id(token)
+
+    if resumed:
+        logger.info("resume_queued_drains: re-kicked %d queued session drain(s)", resumed)
+    return resumed
+
+
+__all__ = ["recover_running_sessions", "resume_queued_drains"]

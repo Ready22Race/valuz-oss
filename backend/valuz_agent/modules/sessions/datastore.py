@@ -1,8 +1,14 @@
-from sqlalchemy import select, update
+from typing import Any
+
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.time_utils import now_ms
-from valuz_agent.modules.sessions.models import SessionArtifactRow, SessionAttachmentRow
+from valuz_agent.modules.sessions.models import (
+    QueuedInputRow,
+    SessionArtifactRow,
+    SessionAttachmentRow,
+)
 
 
 class SessionDatastore:
@@ -200,3 +206,139 @@ class SessionDatastore:
         self._db.add(row)
         await self._db.commit()
         return row
+
+    # ---- Queued input operations (session input queue) ----
+
+    _LISTED_QUEUE_STATUSES = ("queued", "blocked")
+
+    async def list_queued(self, user_id: str, session_id: str) -> list[QueuedInputRow]:
+        """List a session's user-visible queue (``queued`` + ``blocked``), FIFO.
+
+        ``dispatched`` / ``cancelled`` rows are history and excluded — the
+        composer only ever shows what is still waiting or stuck.
+        """
+        stmt = (
+            select(QueuedInputRow)
+            .where(
+                QueuedInputRow.session_id == session_id,
+                QueuedInputRow.user_id == user_id,
+                QueuedInputRow.status.in_(self._LISTED_QUEUE_STATUSES),
+            )
+            .order_by(QueuedInputRow.position, QueuedInputRow.created_at)
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
+    async def count_queued(self, user_id: str, session_id: str) -> int:
+        """Number of still-``queued`` items — the soft-cap check input."""
+        stmt = select(func.count(QueuedInputRow.id)).where(
+            QueuedInputRow.session_id == session_id,
+            QueuedInputRow.user_id == user_id,
+            QueuedInputRow.status == "queued",
+        )
+        return int((await self._db.execute(stmt)).scalar_one())
+
+    async def _next_position(self, session_id: str) -> int:
+        stmt = select(func.max(QueuedInputRow.position)).where(
+            QueuedInputRow.session_id == session_id
+        )
+        current = (await self._db.execute(stmt)).scalar_one_or_none()
+        return int(current) + 1 if current is not None else 0
+
+    async def create_queued(self, user_id: str, row: QueuedInputRow) -> QueuedInputRow:
+        row.user_id = user_id
+        row.position = await self._next_position(row.session_id)
+        self._db.add(row)
+        await self._db.commit()
+        return row
+
+    async def get_queued(
+        self, user_id: str, session_id: str, queue_id: str
+    ) -> QueuedInputRow | None:
+        return (
+            (
+                await self._db.execute(
+                    select(QueuedInputRow).where(
+                        QueuedInputRow.id == queue_id,
+                        QueuedInputRow.session_id == session_id,
+                        QueuedInputRow.user_id == user_id,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def update_queued_input(
+        self, user_id: str, session_id: str, queue_id: str, input_payload: dict[str, Any]
+    ) -> QueuedInputRow | None:
+        """Edit a still-``queued`` item's payload. No-op (returns None) if the
+        row is gone or already left the ``queued`` state (dispatched/blocked)."""
+        row = await self.get_queued(user_id, session_id, queue_id)
+        if row is None or row.status != "queued":
+            return None
+        row.input = input_payload
+        row.updated_at = now_ms()
+        await self._db.commit()
+        return row
+
+    async def delete_queued(self, user_id: str, session_id: str, queue_id: str) -> bool:
+        row = await self.get_queued(user_id, session_id, queue_id)
+        if row is None:
+            return False
+        await self._db.delete(row)
+        await self._db.commit()
+        return True
+
+    async def delete_queue_for_session(self, user_id: str, session_id: str) -> None:
+        await self._db.execute(
+            delete(QueuedInputRow).where(
+                QueuedInputRow.session_id == session_id,
+                QueuedInputRow.user_id == user_id,
+            )
+        )
+        await self._db.commit()
+
+    async def peek_next_queued(self, session_id: str) -> QueuedInputRow | None:
+        """Oldest still-``queued`` row for a session (SYSTEM / drain path).
+
+        Cross-owner by id like ``mark_attachments_consumed`` — the drain runs in
+        a background task without an ambient request owner.
+        """
+        return (
+            (
+                await self._db.execute(
+                    select(QueuedInputRow)
+                    .where(
+                        QueuedInputRow.session_id == session_id,
+                        QueuedInputRow.status == "queued",
+                    )
+                    .order_by(QueuedInputRow.position, QueuedInputRow.created_at)
+                    .limit(1)
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def mark_queued_status(
+        self, queue_id: str, status: str, error_message: str | None = None
+    ) -> None:
+        """Transition a queued row (SYSTEM / drain path), keyed on its unique id."""
+        await self._db.execute(
+            update(QueuedInputRow)
+            .where(QueuedInputRow.id == queue_id)
+            .values(status=status, error_message=error_message, updated_at=now_ms())
+        )
+        await self._db.commit()
+
+    async def list_queued_session_owners(self) -> list[tuple[str, str]]:
+        """Distinct ``(session_id, user_id)`` pairs that still have ``queued``
+        items (SYSTEM / boot recovery). Owner-agnostic — boot reconcile runs
+        without a request user and needs each session's owner to re-establish
+        the owner context before resuming its drain."""
+        stmt = (
+            select(QueuedInputRow.session_id, QueuedInputRow.user_id)
+            .where(QueuedInputRow.status == "queued")
+            .distinct()
+        )
+        return [(sid, uid) for sid, uid in (await self._db.execute(stmt)).all()]

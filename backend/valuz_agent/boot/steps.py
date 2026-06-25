@@ -318,6 +318,19 @@ async def recover_stranded_sessions() -> None:
     await recover_running_sessions()
 
 
+async def resume_queued_input_drains() -> None:
+    """Resume persisted session input-queue drains (session-input-queue §9 ②).
+
+    Runs after ``recover_stranded_sessions`` so it sees the post-① state (any
+    mid-turn session already terminated). Valid in both kernel modes — the queue
+    is host-owned and the drain drives turns through the kernel client either
+    way. Best-effort.
+    """
+    from valuz_agent.modules.sessions.recovery import resume_queued_drains
+
+    await resume_queued_drains()
+
+
 async def seal_orphan_pendings() -> None:
     """Seal every ``requires_action`` still open from a previous run.
 

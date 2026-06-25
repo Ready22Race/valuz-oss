@@ -1,4 +1,6 @@
-from sqlalchemy import BigInteger, Integer, String, Text
+from typing import Any
+
+from sqlalchemy import JSON, BigInteger, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
@@ -26,6 +28,10 @@ class ProjectSessionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     kind: Mapped[str] = mapped_column(String(16), default="chat")
     # Mirror of metadata.valuz.origin at creation: user | automation | task…
     origin: Mapped[str] = mapped_column(String(32), default="user")
+    # Auto-drain pause marker for the session input queue. ``NULL`` = not
+    # paused; a timestamp (ms) means an interrupt soft-paused draining and the
+    # queue awaits an explicit resume. See docs/design/session-input-queue.md §9.
+    queue_paused_at: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class SessionAttachmentRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
@@ -95,3 +101,34 @@ class SessionArtifactRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     file_name: Mapped[str] = mapped_column(String(512))
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     mime_type: Mapped[str | None] = mapped_column(String(128))
+
+
+class QueuedInputRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
+    """A user follow-up message queued while a session's turn was running.
+
+    Drained FIFO by the host after the active turn completes (host-driven,
+    budget-checked). Durable so long-running tasks survive client disconnect
+    and backend restart. See docs/design/session-input-queue.md.
+    """
+
+    __tablename__ = "valuz_queued_input"
+
+    # References kernel ``sessions.id`` — business key, NO FK constraint.
+    session_id: Mapped[str] = mapped_column(String(36), index=True)
+    # ``NULL`` for project-less quick chats.
+    project_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    # User-authored part frozen at enqueue, a subset of kernel ``UserMessage``
+    # (core/types.py): ``{"text": str, "attachments": [{"source_path": str,
+    # "parsed_path": str | None}]}``. ``additional_context`` is intentionally
+    # NOT frozen here — it is rebuilt per-turn at dispatch (project memory +
+    # bound KB scope), see the drain path.
+    input: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # queued (待发) | dispatched (执行中/已派发) | blocked (预检失败) | cancelled (删除)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    # FIFO order within a session; ``MAX(position)+1`` at enqueue.
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    # Turn-level overrides mirrored from send_message (NOT part of UserMessage).
+    provider_id: Mapped[str | None] = mapped_column(String(36))
+    model_id: Mapped[str | None] = mapped_column(String(128))
+    # Why a ``blocked`` item could not run (e.g. budget), surfaced to the UI.
+    error_message: Mapped[str | None] = mapped_column(Text)
