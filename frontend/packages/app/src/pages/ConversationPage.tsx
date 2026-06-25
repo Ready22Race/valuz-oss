@@ -658,6 +658,14 @@ export const ConversationPage = () => {
   // is set after an interrupt — the user resumes explicitly.
   const [queue, setQueue] = useState<QueuedInput[]>([]);
   const [queuePaused, setQueuePaused] = useState(false);
+  // Live mirrors for the SSE callback (a stable useCallback that can't close
+  // over the latest queue state) — so the terminal handler can decide whether
+  // the drain continues, and refresh the queue, without re-creating the stream.
+  const queueRef = useRef<{ items: QueuedInput[]; paused: boolean }>({
+    items: [],
+    paused: false,
+  });
+  const refreshQueueRef = useRef<() => Promise<unknown>>(() => Promise.resolve());
   const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
@@ -3131,7 +3139,10 @@ export const ConversationPage = () => {
         // UI stuck in "agent running" state long after the turn
         // finished.
         const evType = event.event.event_type;
-        if (evType === "message.user") {
+        // Latch once armed: subsequent queued-item turns drain on this same
+        // stream and carry their own (different) ``message.user`` text, which
+        // must not reset the guard and strand terminal detection mid-drain.
+        if (evType === "message.user" && !sawTurnStart) {
           sawTurnStart =
             !opts.requireUserBeforeTerminal ||
             opts.expectedUserText === undefined ||
@@ -3148,6 +3159,53 @@ export const ConversationPage = () => {
               status !== "running" &&
               status !== "created"));
         if (terminal) {
+          // Session input queue: each queued item drains as its OWN kernel turn
+          // (emitting its own ``session.idle``) on this same long-lived backend
+          // SSE. On a normal idle while items are still queued (not paused), the
+          // backend is about to run the next one — keep the stream open so the
+          // drained turn renders live instead of only after a reopen. We can't
+          // trust the (lagging) local queue to tell "next turn coming" from
+          // "drain done", so poll the session status: ``running`` ⇒ another turn
+          // started, keep streaming + refresh the bubbles; stays ``idle`` for a
+          // short window ⇒ queue drained, fall through to stop. ``sending`` stays
+          // true throughout so the composer keeps queue mode.
+          if (
+            evType === "session.idle" &&
+            !queueRef.current.paused &&
+            queueRef.current.items.some((i) => i.status === "queued")
+          ) {
+            let tries = 0;
+            const followDrain = (): void => {
+              // Bail if the stream was stopped or interrupted (Stop button
+              // aborts this controller) so the drain-follow can't linger.
+              if (stopped || abort.signal.aborted) return;
+              sessionsApi
+                .get(sessionId)
+                .then((detail) => {
+                  if (stopped || abort.signal.aborted) return;
+                  if (detail.status === "running") {
+                    void refreshQueueRef.current(); // next item is draining
+                  } else if (tries < 5) {
+                    tries += 1;
+                    window.setTimeout(followDrain, 400);
+                  } else {
+                    void refreshQueueRef.current();
+                    stopSubscription(); // drain finished
+                  }
+                })
+                .catch(() => {
+                  if (stopped) return;
+                  if (tries < 5) {
+                    tries += 1;
+                    window.setTimeout(followDrain, 400);
+                  } else {
+                    stopSubscription();
+                  }
+                });
+            };
+            followDrain();
+            return;
+          }
           // Safety net for workflow cards: the turn is over, so any Workflow
           // run is definitively finished (the kernel blocks the turn until the
           // run completes, then force-emits a terminal snapshot). But that
@@ -3470,10 +3528,28 @@ export const ConversationPage = () => {
       const list = await queueApi.resume(selectedSessionId);
       setQueue(list.items);
       setQueuePaused(list.paused);
+      // The backend now drains the queue from idle (no in-flight turn streaming
+      // it). Subscribe so the resumed turns render live, mirroring a fresh send.
+      if (
+        list.items.some((i) => i.status === "queued") &&
+        !abortRef.current &&
+        !isSendInFlightRef.current
+      ) {
+        subscribeToSession(selectedSessionId, maxSeqRef.current);
+      }
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Resume failed.");
     }
   };
+
+  // Keep the SSE-callback mirrors current (the stream callback is a stable
+  // useCallback and can't read the latest queue state directly).
+  useEffect(() => {
+    queueRef.current = { items: queue, paused: queuePaused };
+  }, [queue, queuePaused]);
+  useEffect(() => {
+    refreshQueueRef.current = refreshQueue;
+  }, [refreshQueue]);
 
   // Hydrate the persisted queue when the active session changes.
   useEffect(() => {
