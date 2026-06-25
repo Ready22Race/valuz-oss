@@ -222,7 +222,9 @@ const ProjectRecents = ({
                       <StatusPill
                         status={s.status}
                         label={t(
-                          SESSION_STATUS_KEY[s.status] as Parameters<typeof t>[0],
+                          SESSION_STATUS_KEY[s.status] as Parameters<
+                            typeof t
+                          >[0],
                         )}
                         className="transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
                       />
@@ -283,11 +285,7 @@ interface ProjectTasksProps {
   onAddTask: () => void;
 }
 
-const ProjectTasks = ({
-  tasks,
-  onOpen,
-  onAddTask,
-}: ProjectTasksProps) => {
+const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
   const { t } = useTranslation();
 
   if (tasks.length === 0) {
@@ -552,7 +550,10 @@ export const ProjectDetailPage = () => {
   const handleMemoryClear = useCallback(async () => {
     if (!id) return;
     try {
-      const v = await memoryApi.clearScope({ target: "project", project_id: id });
+      const v = await memoryApi.clearScope({
+        target: "project",
+        project_id: id,
+      });
       setProjectMemory(v.entries.project ?? []);
     } catch {
       // best-effort
@@ -925,9 +926,9 @@ export const ProjectDetailPage = () => {
   // When set, the automation dialog opens in edit mode (PATCH the row) instead
   // of create. Holds the fetched detail (prompt_template + trigger) so the
   // dialog can pre-fill via ``initial``.
-  const [editTask, setEditTask] = useState<
-    Awaited<ReturnType<typeof automationsApi.get>> | null
-  >(null);
+  const [editTask, setEditTask] = useState<Awaited<
+    ReturnType<typeof automationsApi.get>
+  > | null>(null);
   const composerProviders = useComposerProviders(
     providers,
     selectedRuntimeId ?? undefined,
@@ -993,9 +994,7 @@ export const ProjectDetailPage = () => {
         projectsApi
           .listFiles(id, { depth: 3 })
           .catch(() => ({ files: [] as ProjectFileNode[] })),
-        providersApi
-          .list()
-          .catch(() => ({ providers: [] as LLMChannel[] })),
+        providersApi.list().catch(() => ({ providers: [] as LLMChannel[] })),
       ]);
       setFileTree(toFileTree(filesRes.files));
       // Skills are bound on the Agent now (08-agents-module), not the
@@ -1175,6 +1174,19 @@ export const ProjectDetailPage = () => {
     [scheduledTasks],
   );
 
+  const handleRunScheduledTask = useCallback(async (taskId: string) => {
+    try {
+      await automationsApi.runNow(taskId);
+      toast.success(t("automation.runQueued" as Parameters<typeof t>[0]));
+    } catch (error) {
+      toast.error(
+        t("automation.runFailed" as Parameters<typeof t>[0], {
+          error: String(error),
+        }),
+      );
+    }
+  }, []);
+
   const handleOpenInFinder = () => {
     if (project?.root_path) {
       void revealInFinder(project.root_path);
@@ -1238,7 +1250,9 @@ export const ProjectDetailPage = () => {
   // surface a hint instead of silently dropping the file when none is picked.
   const handleAttachFiles = (files: File[]) => {
     if (!selectedAgentSlug) {
-      toast.error(t("conversation.selectAgentFirst" as Parameters<typeof t>[0]));
+      toast.error(
+        t("conversation.selectAgentFirst" as Parameters<typeof t>[0]),
+      );
       return;
     }
     void attachLocalFiles(files, ensureChatSession);
@@ -1427,6 +1441,7 @@ export const ProjectDetailPage = () => {
         onEditScheduledTask={openEditScheduledTask}
         onToggleScheduledTask={handleToggleScheduledTask}
         onDeleteScheduledTask={handleDeleteScheduledTask}
+        onRunScheduledTask={handleRunScheduledTask}
         fileTree={fileTree}
         fileTreeInTab
         rootPath={project?.root_path ?? ""}
@@ -1488,6 +1503,7 @@ export const ProjectDetailPage = () => {
     scheduledTasks,
     handleToggleScheduledTask,
     handleDeleteScheduledTask,
+    handleRunScheduledTask,
     connectors,
     selectedMcpSlugs,
     refreshFileTree,
