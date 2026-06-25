@@ -39,7 +39,7 @@ backend/
     └── cli.py                    # Typer CLI (`serve`, `reset-providers`)
 ```
 
-Two SQLite files under `~/.valuz/app/`: the host's `valuz.db` (the
+Two SQLite files under `~/.valuz-oss/`: the host's `valuz.db` (the
 `valuz_*`-prefixed business tables + `alembic_version_host`) and the kernel's
 own `kernel.db` (the 3 unprefixed kernel tables `sessions` / `messages` /
 `events`, its langgraph checkpoint tables, and `alembic_version`). The split
@@ -201,7 +201,7 @@ code. Add a capability by defining a port, then a default integration.
 
 ## Config, secrets, filesystem
 
-- `infra/config.py` owns all paths (the `~/.valuz` tree) and settings. It is
+- `infra/config.py` owns all paths (the `~/.valuz-oss` tree) and settings. It is
   the only place allowed to compute `Path.home()`-relative locations.
 - `infra/secret_store` keeps API keys / OAuth tokens in the OS keychain — never
   plaintext on disk.

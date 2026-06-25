@@ -49,7 +49,7 @@ def _default_user_skill_root() -> Path:
     """Canonical write-target for promoted user skills.
 
     Delegates to ``FsRegistry.user_skill_root()`` so the destination obeys
-    ADR-004 (host writes go to ``~/.valuz/app/`` by default).
+    ADR-004 (host writes go to ``~/.valuz-oss/`` by default).
     """
     return fs_registry.user_skill_root()
 

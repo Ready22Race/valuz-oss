@@ -20,7 +20,7 @@ def _default_official_skill_root() -> Path:
 
     Always reads through ``fs_registry`` so the location stays
     consistent with the bootstrap sync target — both surfaces resolve
-    to ``~/.valuz/app/official-skills/`` by default.
+    to ``~/.valuz-oss/official-skills/`` by default.
     """
     return fs_registry.official_skill_root()
 

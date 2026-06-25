@@ -528,7 +528,7 @@ class SeatbeltSandboxProvider:
         # upgrade ignores it). Point ``VALUZ_DATABASE_URL`` at the private
         # file; ``kernel_db_url`` falls back to it, so the stale-table drop
         # checks the same DB. Setting the wrong var silently migrates the
-        # default ~/.valuz/app/valuz.db ("no such table: sessions").
+        # default ~/.valuz-oss/valuz.db ("no such table: sessions").
         env = dict(os.environ)
         env["VALUZ_DATABASE_URL"] = f"sqlite:///{kernel_db_path}"
         env.pop("VALUZ_KERNEL_DATABASE_URL", None)

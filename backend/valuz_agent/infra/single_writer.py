@@ -3,7 +3,7 @@
 Why this exists
 ---------------
 SQLite is *not* the reason. Under WAL with ``busy_timeout`` (see
-``infra/database.py``) two processes writing ``~/.valuz/app/valuz.db``
+``infra/database.py``) two processes writing ``~/.valuz-oss/valuz.db``
 serialize on the single write slot and wait-and-retry — concurrent
 access is safe at the storage layer, not corrupting.
 

@@ -54,7 +54,7 @@ class SessionAttachmentRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # ``stored_path`` points at the KB document's ``source_path``
     # (the deterministic on-disk location the KB owns) and
     # ``parsed_path`` reuses the KB's existing preview markdown at
-    # ``~/.valuz/app/docs/preview/{doc_id}.md``. No file copy ever
+    # ``~/.valuz-oss/docs/preview/{doc_id}.md``. No file copy ever
     # happens for ``kb_doc`` rows; re-parses of the KB document
     # propagate to the session attachment automatically because the
     # paths are live references rather than snapshots.

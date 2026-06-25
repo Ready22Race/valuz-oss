@@ -383,6 +383,139 @@ async def deploy_agent(
     return _member_with_agent(result)
 
 
+# ---------------------------------------------------------------------------
+# Natural-language agent proposal (confirm)
+# ---------------------------------------------------------------------------
+
+
+class ProposeAgentConfirmRequest(BaseModel):
+    """Spec of an agent the user is confirming after the assistant proposed it
+    via the ``propose_agent`` tool. Backend derives a unique slug from ``name``."""
+
+    name: str
+    instructions: str
+    description: str = ""
+    runtime: str = "claude_agent"
+    model: str = "claude-sonnet-4-6"
+    effort: EffortLevel | None = None
+    skills: list[str] = []
+    connectors: list[str] = []
+    avatar: str | None = None
+
+
+class ProposeAgentConfirmResponse(BaseModel):
+    agent: AgentSummary
+    member: ProjectMemberResponse | None = None
+    deployed: bool
+    project_id: str | None = None
+
+
+async def _resolve_session_project_id(
+    user_id: str, session_id: str, db: AsyncSession
+) -> str | None:
+    """REAL project id for the calling session, or None.
+
+    A session always carries ``metadata.valuz.project_id`` — but a quick
+    chat / 新对话 binds to an *ephemeral* ``ProjectRow(kind="chat")``, which
+    must NOT be treated as a deployable project. So we resolve the id from
+    metadata and then confirm the project is ``kind == "project"``; a chat /
+    temp project (or a missing one) resolves to None, so confirm creates the
+    library agent only (no派驻)."""
+    from valuz_agent.adapters import kernel_client
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
+
+    sess = await kernel_client.get_session(user_id, session_id)
+    if sess is None:
+        return None
+    project_id = ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or None
+    if not project_id:
+        return None
+    row = await ProjectDatastore(db).get_by_id(user_id, project_id)
+    return project_id if (row is not None and row.kind == "project") else None
+
+
+@router.post(
+    "/v1/agents/proposals/{session_id}/confirm",
+    status_code=201,
+    response_model=ProposeAgentConfirmResponse,
+)
+async def confirm_agent_proposal(
+    session_id: str,
+    payload: ProposeAgentConfirmRequest,
+    user_id: str = Depends(require_current_user_id),
+    svc: AgentService = Depends(_get_agent_service),
+    db: AsyncSession = Depends(get_async_session),
+) -> ProposeAgentConfirmResponse:
+    """Create the proposed agent in the library and, when the session is bound
+    to a project, deploy it into that project as a member.
+
+    Skill slugs that aren't indexed are dropped defensively (they'd bind to
+    nothing at session build anyway); connector slugs map to ``connector_types``.
+    """
+    from valuz_agent.modules.skills.datastore import SkillDatastore
+
+    # Bind only skill slugs that actually resolve in the index — an unindexed
+    # slug would be silently dropped at session build, so storing it is a lie.
+    indexed = {r.slug for r in await SkillDatastore(db).list_skills(user_id)}
+    skills = [s for s in payload.skills if s in indexed]
+    dropped = [s for s in payload.skills if s not in indexed]
+    if dropped:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "confirm_agent_proposal: dropping unindexed skill slugs %s", dropped
+        )
+
+    project_id = await _resolve_session_project_id(user_id, session_id, db)
+    bindings = [{"type": s} for s in payload.connectors]
+
+    try:
+        if project_id:
+            result = await svc.create_blank_agent(
+                user_id,
+                project_id=project_id,
+                agent_slug=None,
+                name=payload.name,
+                instructions=payload.instructions,
+                description=payload.description,
+                runtime=payload.runtime,
+                model=payload.model,
+                connector_bindings=bindings or None,
+                skills=skills,
+                effort=payload.effort,
+            )
+            return ProposeAgentConfirmResponse(
+                agent=_agent_to_summary(result["agent"]),
+                member=ProjectMemberResponse.model_validate(result["member"]),
+                deployed=True,
+                project_id=project_id,
+            )
+        # No project on the session → create the library agent only.
+        row = await svc.create_agent(
+            user_id,
+            {
+                "name": payload.name,
+                "description": payload.description,
+                "instructions": payload.instructions,
+                "runtime": payload.runtime,
+                "model": payload.model,
+                "skills": skills,
+                "connector_types": payload.connectors,
+                "effort": payload.effort,
+                "avatar": payload.avatar,
+            },
+        )
+        agent = await svc.build_agent_config(row)
+        return ProposeAgentConfirmResponse(
+            agent=_agent_to_summary(agent),
+            member=None,
+            deployed=False,
+            project_id=None,
+        )
+    except MemberAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.delete(
     "/v1/projects/{project_id}/agents/{agent_slug}",
     status_code=204,

@@ -36,7 +36,7 @@ def staging_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # ``staging`` was imported earlier in the suite via ``from …config import
     # settings`` so it keeps the OLD object. A bare ``from …config import
     # settings`` here would patch the NEW one and miss the object ``staging``
-    # actually reads — leaking the resolved path back to the real ``~/.valuz``
+    # actually reads — leaking the resolved path back to the real ``~/.valuz-oss``
     # staging dir. Patching ``staging.settings`` is hermetic against that.
     monkeypatch.setattr(staging.settings, "skill_staging_dir_override", staging_dir)
     monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(user_skills))

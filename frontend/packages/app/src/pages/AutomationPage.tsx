@@ -725,6 +725,10 @@ export const AutomationPage = () => {
           // ``targets`` instead, so this value is ignored there.
           editTarget ? editTarget.projectKind === "project" : false
         }
+        // Edit mode: show the row's (locked) project — the target selector is
+        // create-only, so without this the "所属项目" field was blank when
+        // editing a project-bound automation. Create mode leaves it unset.
+        fixedTargetName={editTarget ? editTarget.detail.project_name : undefined}
         initial={
           editTarget
             ? {

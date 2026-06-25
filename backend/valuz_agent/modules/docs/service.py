@@ -1502,11 +1502,12 @@ class DocumentLibraryService:
         )
 
     def _save_preview(self, doc_id: str, source_filename: str, markdown: str) -> str:
+        from valuz_agent.infra.fs_registry import fs_registry
         from valuz_agent.integrations.docs_embedded import sanitize_preview_filename
 
         preview_dir = getattr(self._docs_rt, "preview_dir", None)
         if preview_dir is None:
-            preview_dir = Path.home() / ".valuz" / "app" / "docs" / "preview"
+            preview_dir = fs_registry.data_dir() / "docs" / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
         safe_name = sanitize_preview_filename(source_filename)
         preview_path = preview_dir / safe_name

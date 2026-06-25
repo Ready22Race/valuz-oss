@@ -58,7 +58,7 @@ func defaultLogDir() (string, error) {
 		return "", err
 	}
 	// Matches valuz_agent.infra.config.settings.log_dir default.
-	return filepath.Join(home, ".valuz", "logs"), nil
+	return filepath.Join(home, ".valuz-oss", "logs"), nil
 }
 
 // resolveServerExe locates the absolute path of the valuz-server binary.

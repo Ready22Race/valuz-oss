@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from valuz_agent.adapters.runtime_registry import RUNTIME_REGISTRY
-from valuz_agent.modules.providers.schemas import LLMModel
+from valuz_agent.modules.providers.schemas import LLMChannel, LLMModel
 
 # All UI (hyphen-form) wire protocols. An empty per-model protocol list means
 # "no declared restriction" (gateway semantics) → treat as every protocol so
@@ -173,6 +173,29 @@ class ProviderOptionInput:
     group_rank: int
 
 
+def to_option_input(ch: LLMChannel) -> ProviderOptionInput:
+    """Project a provider-list row (``LLMChannel``) onto the builder's input.
+
+    The single mapping shared by every caller of ``build_model_options`` (the
+    ``GET /v1/settings/model-options`` route and the ``list_model_options`` MCP
+    tool), so both surfaces agree on which (provider, model, runtime)
+    combinations exist. Pure — no DB, trivially testable.
+    """
+    return ProviderOptionInput(
+        id=ch.id,
+        name=ch.name,
+        provider_kind=ch.provider_kind,
+        source=ch.source,
+        auth_type=ch.auth_type,
+        enabled=ch.enabled,
+        unavailable_reason=ch.unavailable_reason,
+        compatible_protocols=ch.compatible_protocols,
+        models=ch.models,
+        group=ch.group,
+        group_rank=ch.group_rank,
+    )
+
+
 def _provider_status(p: ProviderOptionInput) -> tuple[str, str | None]:
     if p.group == "subscription":
         # Credential is the local CLI keychain — server can't see it.
@@ -304,4 +327,5 @@ __all__ = [
     "ProviderOptionInput",
     "build_model_options",
     "runtimes_for",
+    "to_option_input",
 ]

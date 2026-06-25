@@ -52,6 +52,20 @@ class AutomationDatastore:
             .first()
         )
 
+    async def list_by_origin_tool_call_ids(
+        self, user_id: str, tool_call_ids: list[str]
+    ) -> list[AutomationRow]:
+        """Rows whose ``origin_tool_call_id`` is in ``tool_call_ids`` (owner-
+        scoped). Backs the proposal re-entry lookup — empty input short-circuits
+        to avoid an ``IN ()`` query."""
+        if not tool_call_ids:
+            return []
+        stmt = select(AutomationRow).where(
+            AutomationRow.user_id == user_id,
+            AutomationRow.origin_tool_call_id.in_(tool_call_ids),
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
     async def create_automation(self, user_id: str, row: AutomationRow) -> AutomationRow:
         row.user_id = user_id
         self._db.add(row)

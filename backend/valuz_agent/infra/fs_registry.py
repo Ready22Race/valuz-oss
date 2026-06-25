@@ -133,6 +133,18 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def kb_root(self) -> Path:
+        """Return (and create) the knowledge-base root directory.
+
+        ``<data_dir>/kb`` — the single home for KB content, replacing the
+        legacy stray ``~/.valuz/kb`` path. Routed through the registry so KB
+        writes share the same audit / sandbox boundary as every other host
+        write. Created on demand.
+        """
+        path = self.data_dir() / "kb"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     # ---- FS-7 — skill-creator staging (project-cwd-keyed) ----
     #
     # Staging lives **inside the project cwd** under ``.skill-staging/``
@@ -202,7 +214,7 @@ class FsRegistry:
         """Return the canonical home for bundled / official skills.
 
         Defaults to ``<data_dir>/official-skills/`` (i.e.
-        ``~/.valuz/app/official-skills/``) so the host owns the location.
+        ``~/.valuz-oss/official-skills/``) so the host owns the location.
         ``$VALUZ_OFFICIAL_SKILLS_DIR`` overrides for tests / sandboxed
         runs. The directory is created lazily by
         ``sync_bundled_official_skills`` on first boot.
@@ -382,7 +394,7 @@ class FsRegistry:
 
         ``subkind`` namespaces multiple bundles within one plugin (e.g.
         ``parser_model_dir("light_local", "rapidocr")`` →
-        ``~/.valuz/app/models/light_local/rapidocr/``). Created on demand.
+        ``~/.valuz-oss/models/light_local/rapidocr/``). Created on demand.
         """
         if not plugin_id or "/" in plugin_id or ".." in plugin_id:
             raise ValueError(f"invalid plugin_id: {plugin_id!r}")

@@ -391,7 +391,7 @@ export interface SessionAttachmentItem {
   created_at: number;
   /**
    * Origin of the attachment. ``local`` is a multipart upload the host
-   * owns under ``~/.valuz/app/attachments/{session_id}/``; ``kb_doc``
+   * owns under ``~/.valuz-oss/attachments/{session_id}/``; ``kb_doc``
    * is a live reference to a global knowledge-base document — the
    * row's ``stored_path``/``parsed_path`` reuse KB-owned paths
    * directly, no copy. Drives the panel icon + source label + delete

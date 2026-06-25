@@ -19,6 +19,7 @@ service does with it).
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,6 +27,7 @@ import pytest
 from valuz_agent.integrations import automations_mcp_server as mod
 from valuz_agent.modules.automations.schemas import (
     AutomationItemResponse,
+    AutomationProposalSpec,
     AutomationToolPayload,
     CronTrigger,
     IntervalTrigger,
@@ -87,6 +89,27 @@ class StubService:
         )()
         return detail
 
+    async def preview(self, payload, *, calling_session_project_id=None):  # type: ignore[no-untyped-def]
+        """``create`` action now PROPOSES (validate + preview, no persist) —
+        the dispatcher calls ``preview`` instead of ``create``. Record the call
+        so routing/defaulting asserts still inspect the resolved payload."""
+        self._record(
+            "preview",
+            payload=payload,
+            calling_session_project_id=calling_session_project_id,
+        )
+        return AutomationProposalSpec(
+            name=payload.name,
+            prompt_template=payload.prompt_template,
+            trigger=payload.trigger,
+            agent_slug=payload.agent_slug,
+            agent_kind=payload.agent_kind,
+            agent_name=payload.agent_slug,
+            action_kind=payload.action_kind,
+            trigger_human_readable="OK",
+            next_run_at=None,
+        )
+
     async def list_all_automations(self):
         self._record("list_all_automations")
         return list(self._rows.values())
@@ -121,7 +144,10 @@ class StubService:
         def __init__(self, parent: StubService) -> None:
             self._parent = parent
 
-        async def get_automation(self, automation_id: str):
+        async def get_automation(self, user_id: str, automation_id: str):  # noqa: ARG002
+            # Signature mirrors the real ``AutomationDatastore.get_automation``
+            # (user_id first) so the dispatcher's call shape is exercised — a
+            # one-arg stub would mask a missing-user_id regression.
             return self._parent._rows.get(automation_id) or _row(automation_id)
 
     @property
@@ -299,7 +325,7 @@ class TestAgentKindByContext:
                 trigger=CronTrigger(cron_expr="0 9 * * *"),
             )
         )
-        assert stub_service.calls[0][0] == "create"
+        assert stub_service.calls[0][0] == "preview"
         payload = stub_service.calls[0][1]["payload"]
         assert payload.agent_kind == "project_member"
         assert payload.project_kind == "project"
@@ -397,6 +423,79 @@ class TestAgentKindByContext:
         decoded = json.loads(result)
         assert decoded["ok"] is False
         assert decoded["error_code"] == "MISSING_AGENT"
+
+
+# ── Propose (create → confirm card) ────────────────────────────────
+
+
+class TestCreateProposes:
+    async def test_create_returns_proposal_and_does_not_persist(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        """``create`` validates + previews; it must NOT call the persisting
+        ``create`` — the user's confirm click does that."""
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="create",
+                name="Daily",
+                prompt_template="x",
+                agent_slug="qa",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        assert decoded["proposal"] is not None
+        assert decoded["proposal"]["name"] == "Daily"
+        assert decoded["automation"] is None
+        methods = [c[0] for c in stub_service.calls]
+        assert "preview" in methods
+        assert "create" not in methods
+
+    async def test_chat_rejects_task_action_kind(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        """Task mode needs a project context — a chat session rejects it."""
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "chat"
+        session_agent_slug["value"] = "default-assistant"
+
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="create",
+                name="Daily",
+                prompt_template="x",
+                action_kind="task",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is False
+        assert decoded["error_code"] == "TASK_REQUIRES_PROJECT"
+        assert not stub_service.calls  # never reached the service
+
+    async def test_project_task_action_kind_flows_to_preview(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "project"
+        project_id["value"] = "ws-proj"
+
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="create",
+                name="Nightly report",
+                prompt_template="x",
+                agent_slug="qa",
+                action_kind="task",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        assert decoded["proposal"]["action_kind"] == "task"
+        payload = stub_service.calls[0][1]["payload"]
+        assert payload.action_kind == "task"
 
 
 # ── Trigger discriminator routing ──────────────────────────────────
@@ -541,3 +640,94 @@ class TestDecoratedToolTriggerCoercion:
         )
         payload = stub_service.calls[0][1]["payload"]
         assert payload.trigger.kind == "manual"
+
+
+# ── Session-context resolution ─────────────────────────────────────
+
+
+class _FakeKernelSession:
+    """Mimics the kernel ``SessionData`` shape the resolver reads.
+
+    Crucially it has **no** ``project_id`` attribute — project_id lives under
+    ``metadata["valuz"]``. Reproduces the regression where the resolver did
+    ``str(kernel_session.project_id)`` and blew up with ``AttributeError``.
+    """
+
+    def __init__(self, *, user_id: str, metadata: dict[str, Any]) -> None:
+        self.user_id = user_id
+        self.metadata = metadata
+
+
+class _FakeProjectDatastore:
+    def __init__(self, db: Any) -> None:  # noqa: ARG002
+        pass
+
+    async def get_by_id(self, user_id: str, project_id: str):  # noqa: ARG002
+        return SimpleNamespace(id=project_id, kind="project")
+
+
+@pytest.fixture
+def patched_resolver(monkeypatch: pytest.MonkeyPatch):
+    """Patch the inner imports of ``_resolve_session_context`` so it runs
+    without a kernel or DB. ``session_box["value"]`` controls what
+    ``kernel_client.get_session`` returns."""
+    session_box: dict[str, Any] = {"value": None}
+
+    async def _fake_get_session(user_id: str, session_id: str):  # noqa: ARG001
+        return session_box["value"]
+
+    class _UoW:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+    monkeypatch.setattr(mod, "require_current_user_id", lambda: "user-1")
+    monkeypatch.setattr(
+        "valuz_agent.adapters.kernel_client.get_session", _fake_get_session
+    )
+    monkeypatch.setattr(
+        "valuz_agent.infra.db.async_unit_of_work", lambda commit=True: _UoW()
+    )
+    monkeypatch.setattr(
+        "valuz_agent.modules.projects.datastore.ProjectDatastore",
+        _FakeProjectDatastore,
+    )
+    return session_box
+
+
+class TestResolveSessionContext:
+    async def test_should_read_project_id_from_valuz_metadata(
+        self, patched_resolver: dict[str, Any]
+    ) -> None:
+        patched_resolver["value"] = _FakeKernelSession(
+            user_id="user-1",
+            metadata={"valuz": {"project_id": "ws-42", "agent_slug": "qa"}},
+        )
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context(
+            "sess-1"
+        )
+        assert project_id == "ws-42"
+        assert project_kind == "project"
+        assert bound_agent_slug == "qa"
+
+    async def test_should_treat_missing_project_id_as_chat(
+        self, patched_resolver: dict[str, Any]
+    ) -> None:
+        patched_resolver["value"] = _FakeKernelSession(
+            user_id="user-1",
+            metadata={"valuz": {"agent_slug": "default-assistant"}},
+        )
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context(
+            "sess-1"
+        )
+        assert project_id is None
+        assert project_kind == "chat"
+        assert bound_agent_slug == "default-assistant"
+
+    async def test_should_treat_gc_d_session_as_chat(
+        self, patched_resolver: dict[str, Any]
+    ) -> None:
+        patched_resolver["value"] = None
+        assert await mod._resolve_session_context("sess-1") == (None, "chat", None)

@@ -80,7 +80,7 @@ func printAutostartStatus() {
 	}
 }
 
-// printWriterLockStatus surfaces ~/.valuz/app/.single-writer.lock so the
+// printWriterLockStatus surfaces ~/.valuz-oss/.single-writer.lock so the
 // user can see which backend process currently holds the single-writer lock.
 func printWriterLockStatus() {
 	home, err := os.UserHomeDir()
@@ -88,7 +88,7 @@ func printWriterLockStatus() {
 		fmt.Printf("writer lock file: error: %v\n", err)
 		return
 	}
-	lockPath := filepath.Join(home, ".valuz", "app", ".single-writer.lock")
+	lockPath := filepath.Join(home, ".valuz-oss", ".single-writer.lock")
 	info, err := os.Stat(lockPath)
 	if err != nil {
 		fmt.Println("writer lock file: not present (no recent backend)")
