@@ -83,6 +83,8 @@ from valuz_agent.modules.tasks.tools.declarations import (
     SEND_TOOL_NAME,
     STOP_SUBTASK_TOOL_DECLARATION,
     STOP_SUBTASK_TOOL_NAME,
+    UPDATE_DELIVERABLE_TOOL_DECLARATION,
+    UPDATE_DELIVERABLE_TOOL_NAME,
     ensure_orchestration_tools_on_agent,
     strip_dispatch_tools,
 )
@@ -142,6 +144,8 @@ __all__ = [
     "REVIEW_SUBTASK_TOOL_DECLARATION",
     "STOP_SUBTASK_TOOL_NAME",
     "STOP_SUBTASK_TOOL_DECLARATION",
+    "UPDATE_DELIVERABLE_TOOL_NAME",
+    "UPDATE_DELIVERABLE_TOOL_DECLARATION",
     # Gate helpers + adapters re-exported for tests / internal callers that
     # reference them through the ``dispatch_mcp`` module path.
     "kernel_client",

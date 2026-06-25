@@ -1412,6 +1412,68 @@ class TaskOrchestrator:
         return {"ok": True, "status": final_status}
 
     # ------------------------------------------------------------------
+    # update_deliverable — refresh the deliverable card after the task is
+    # completed (post-completion follow-up chat). Append-only: emits a
+    # ``deliverable_updated`` event the detail page reads as the latest
+    # deliverable, without mutating the original ``task_completed`` event.
+    # Does NOT touch task status / plan / runs — the task stays completed.
+    # ------------------------------------------------------------------
+
+    async def update_deliverable(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        lead_session_id: str,
+        summary: str,
+        artifacts: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Refresh the deliverable card on a completed task (follow-up chat).
+
+        Append-only: emits a ``deliverable_updated`` event carrying the latest
+        ``summary`` / ``artifacts`` without mutating the original
+        ``task_completed`` event or the task's status / plan / runs — the task
+        stays ``completed``. The caller is the lead session. Returns a result
+        dict (``status`` ``"updated"`` or ``"rejected"``) rather than raising,
+        mirroring the sibling ``finish_task`` tool-facing method.
+        """
+        async with async_unit_of_work() as db:
+            task_ds = TaskDatastore(db)
+            event_ds = TaskEventDatastore(db)
+
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
+            if task_row is None:
+                return {
+                    "ok": False,
+                    "error": f"update_deliverable: task {task_id!r} not found",
+                    "status": "rejected",
+                }
+            if task_row.status != "completed":
+                return {
+                    "ok": False,
+                    "error": (
+                        "update_deliverable: task is "
+                        f"{task_row.status!r}; only a 'completed' task can "
+                        "refresh its deliverable card."
+                    ),
+                    "status": "rejected",
+                }
+
+            await event_ds.append_event(
+                require_current_user_id(),
+                project_id=project_id,
+                task_id=task_id,
+                type="deliverable_updated",
+                actor=lead_session_id,
+                session_id=lead_session_id,
+                payload={"summary": summary, "artifacts": artifacts or []},
+            )
+
+        return {"ok": True, "status": "updated"}
+
+    # ------------------------------------------------------------------
     # Plan / review — lead orchestration (VALUZ-TASK)
     # ------------------------------------------------------------------
 
