@@ -355,10 +355,11 @@ class ResourceLibrary:
             import os
 
             from valuz_agent.api.deps import get_document_service
+            from valuz_agent.infra.fs_registry import fs_registry
             from valuz_agent.modules.docs.errors import KbRootDuplicated
 
             data = snapshot.data
-            root = os.path.expanduser(f"~/.valuz/kb/{data['name']}")
+            root = str(fs_registry.kb_root() / data["name"])
             os.makedirs(root, exist_ok=True)
             async with _use(get_document_service) as svc:
                 try:

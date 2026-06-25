@@ -17,7 +17,7 @@ class ProjectRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # folded into the main row) is the user-authored prompt source.
     instructions_md: Mapped[str | None] = mapped_column(Text)
     # DEPRECATED / inert: the early single-blob project memory. Superseded by the
-    # file-based project memory at ``~/.valuz/memories/projects/<id>/`` (see
+    # file-based project memory at ``~/.valuz-oss/memories/projects/<id>/`` (see
     # modules/memory). Nothing reads or writes these anymore; they remain only so
     # the live schema is undisturbed. Drop them in a future alembic migration
     # (a SQLite ``batch_alter_table`` column drop) when convenient.

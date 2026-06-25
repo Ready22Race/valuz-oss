@@ -34,7 +34,7 @@ user configures (and, optionally, to the Reportify cloud for research data).
         ▼                    ▼                      ▼
   ┌───────────┐      ┌───────────────┐      ┌──────────────┐
   │ SQLite    │      │ Local FS       │      │ LLM provider  │
-  │ (app db)  │      │ (~/.valuz,     │      │ + optional    │
+  │ (app db)  │      │ (~/.valuz-oss, │      │ + optional    │
   │           │      │  projects)   │      │ Reportify     │
   └───────────┘      └───────────────┘      └──────────────┘
 ```
@@ -128,7 +128,7 @@ The `(runtime, provider, model)` triple is locked once a session is created; `mo
 
 ## 3. Data Layer
 
-Host and kernel keep **separate SQLite files** under `~/.valuz/app/`: the host's
+Host and kernel keep **separate SQLite files** under `~/.valuz-oss/`: the host's
 `valuz.db` (the `valuz_*` business tables) and the kernel's `kernel.db`
 (`sessions` / `messages` / `events`, its langgraph checkpoint tables, and the
 kernel `alembic_version`). The split lets a sandboxed/remote kernel own its file

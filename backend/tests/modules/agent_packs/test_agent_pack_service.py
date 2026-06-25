@@ -69,7 +69,7 @@ async def _build_service(workdir):  # type: ignore[no-untyped-def]
 @pytest.fixture
 async def svc(tmp_path, monkeypatch) -> AsyncIterator[AgentPackService]:
     # import_pack materializes the pack's bundled skills to the official-skills
-    # dir — pin it under tmp so tests never touch the real ~/.valuz tree.
+    # dir — pin it under tmp so tests never touch the real ~/.valuz-oss tree.
     monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(tmp_path / "official-skills"))
     service, session, engine = await _build_service(tmp_path)
     try:

@@ -21,8 +21,8 @@ from fastapi import HTTPException
 # this side-effect import.
 import kernel  # noqa: F401
 
-WINDOWS_SKILL = r"C:\Users\Administrator\.valuz\app\official-skills\valuz-handbook"
-POSIX_SKILL = "/Users/me/.valuz/app/official-skills/valuz-handbook"
+WINDOWS_SKILL = r"C:\Users\Administrator\.valuz-oss\official-skills\valuz-handbook"
+POSIX_SKILL = "/Users/me/.valuz-oss/official-skills/valuz-handbook"
 
 
 @pytest.fixture

@@ -32,7 +32,7 @@ Valuz OSS 是本地优先（local-first）的应用。Agent loop 和全部用户
         ▼                    ▼                      ▼
   ┌───────────┐      ┌───────────────┐      ┌──────────────┐
   │ SQLite    │      │ 本地文件系统    │      │ LLM 服务      │
-  │ (应用库)  │      │ (~/.valuz,     │      │ + 可选         │
+  │ (应用库)  │      │ (~/.valuz-oss, │      │ + 可选         │
   │           │      │  工作空间)      │      │ Reportify     │
   └───────────┘      └───────────────┘      └──────────────┘
 ```
@@ -114,7 +114,7 @@ OAuth 页面，以及对外的 HTTP 接口。宿主自有的表以 `valuz_*` 为
 
 ## 3. 数据层
 
-宿主与内核使用 `~/.valuz/app/` 下的**两个独立 SQLite 文件**：宿主的 `valuz.db`
+宿主与内核使用 `~/.valuz-oss/` 下的**两个独立 SQLite 文件**：宿主的 `valuz.db`
 （`valuz_*` 业务表）与内核自有的 `kernel.db`（`sessions` / `messages` / `events`、
 其 langgraph checkpoint 表，以及内核 `alembic_version`）。这一拆分让沙箱/远程内核独占
 自己的文件，并让进程内（`make dev`）与沙箱（`make dev-sandbox`）内核共享同一份 session

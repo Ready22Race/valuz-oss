@@ -161,7 +161,7 @@ func bundlePaths(resourcesDir string) (*Paths, error) {
 		BackendPort: bundleBackendPort,
 		ServerExe:   exe,
 		LibexecDir:  libexec,
-		LogDir:      filepath.Join(mustHome(), ".valuz", "app", "logs"),
+		LogDir:      filepath.Join(mustHome(), ".valuz-oss", "logs"),
 	}, nil
 }
 

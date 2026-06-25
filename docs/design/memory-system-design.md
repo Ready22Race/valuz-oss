@@ -2,7 +2,7 @@
 
 > 状态:Design / Approved(2026-06-14)。本文是 Valuz 记忆系统的单一设计来源。
 >
-> 取向一句话:**一个统一的 `memory` 工具(`add`/`replace`/`remove`,无 `read`,全量冻结注入)→ 前台(用户要求,补充)与后台(系统自动,主力)共用同一条写入流水线;两层 scope = global + project;全部存 `~/.valuz/memories/`;有界(硬上限 + 溢出合并);"该记什么"靠"四层之外、不可重新发现"的 Valuz 专属规则;kernel 零改动。**
+> 取向一句话:**一个统一的 `memory` 工具(`add`/`replace`/`remove`,无 `read`,全量冻结注入)→ 前台(用户要求,补充)与后台(系统自动,主力)共用同一条写入流水线;两层 scope = global + project;全部存 `~/.valuz-oss/memories/`;有界(硬上限 + 溢出合并);"该记什么"靠"四层之外、不可重新发现"的 Valuz 专属规则;kernel 零改动。**
 
 ---
 
@@ -58,10 +58,10 @@
 
 ---
 
-## 3. 存储布局:全部集中在 ~/.valuz/memories/
+## 3. 存储布局:全部集中在 ~/.valuz-oss/memories/
 
 ```
-~/.valuz/memories/                         # = settings.data_dir/memories/  ← 根本身即 global 命名空间
+~/.valuz-oss/memories/                     # = settings.data_dir/memories/  ← 根本身即 global 命名空间
 ├── USER.md              # target=user   : 用户是谁(画像/偏好/沟通风格)
 ├── MEMORY.md            # target=global : 跨项目的笔记/教训
 ├── projects/<project-id>/
@@ -253,7 +253,7 @@ Valuz 已有**四个其它持久层**,memory 必须靠"不和它们重复"来定
 - **更新/删除**:`replace`/`remove` 即更新与遗忘;同名/同子串覆盖。
 - **老化(P2)**:抽取器按内容判断淘汰陈旧条目;**源驱动遗忘** —— 项目删除时删其 `projects/<id>/` 目录。
 - **手改保护(P2)**:单一 `memories/.manifest.json` 按相对路径记 `file→hash@上次写`;自动写前比对,用户手改过则不盲盖,把 delta 喂给抽取器当权威输入(不引 git)。
-- **可见/可控**:记忆是 `~/.valuz/memories/` 下的本地 markdown,用户可直接开/改/删。GUI 面(P2):设置→记忆(global)、项目 Context Panel→记忆(project,呼应 product-overview 的项目 Memory)。
+- **可见/可控**:记忆是 `~/.valuz-oss/memories/` 下的本地 markdown,用户可直接开/改/删。GUI 面(P2):设置→记忆(global)、项目 Context Panel→记忆(project,呼应 product-overview 的项目 Memory)。
 - **自定义抽取指令(§7.4)**:全局 preference `memory.custom_instructions`,让用户在内置"该记/该跳"之上**调教后台 reviewer**(可覆盖软启发式,不可破硬规则);空串关闭,仅注入后台 reviewer。设置→记忆 提供文本框。
 - **审批门(P2)**:配置开关;开启后自动写暂存 pending 待用户审核。
 - **总开关 / 逐会话开关**:config + 会话级覆盖。
