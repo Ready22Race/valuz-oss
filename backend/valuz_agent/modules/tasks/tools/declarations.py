@@ -58,6 +58,10 @@ RESUME_TASK_TOOL_NAME = "resume_task"
 # misdirected / stuck member without resorting to ``finish_task`` on the
 # whole task.
 STOP_SUBTASK_TOOL_NAME = "stop_subtask"
+# Lead-only: after the task is completed, the lead may refresh the
+# deliverable card (summary + artifacts) during follow-up chat. Appends a
+# ``deliverable_updated`` event; does not change task status.
+UPDATE_DELIVERABLE_TOOL_NAME = "update_deliverable"
 
 DISPATCH_TOOL_NAMES = (
     DISPATCH_TOOL_NAME,
@@ -78,6 +82,7 @@ DISPATCH_TOOL_NAMES = (
     INJECT_INTO_TASK_TOOL_NAME,
     RESUME_TASK_TOOL_NAME,
     STOP_SUBTASK_TOOL_NAME,
+    UPDATE_DELIVERABLE_TOOL_NAME,
 )
 
 # Strict-lead-only dispatch tools — must NOT be on a plain conversation agent
@@ -107,6 +112,7 @@ LEAD_ONLY_TOOL_NAMES = frozenset(
         FINISH_TASK_TOOL_NAME,
         REVIEW_SUBTASK_TOOL_NAME,
         STOP_SUBTASK_TOOL_NAME,
+        UPDATE_DELIVERABLE_TOOL_NAME,
     }
 )
 
@@ -578,6 +584,30 @@ _STOP_SUBTASK_PARAMETERS: dict[str, Any] = {
     },
 }
 
+_UPDATE_DELIVERABLE_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "required": ["summary"],
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": (
+                "The refreshed deliverable summary shown on the task's deliverable "
+                "card. Reflect whatever you just changed."
+            ),
+        },
+        "artifacts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "The COMPLETE list of deliverable file paths (relative to the "
+                "project working dir). This REPLACES the previous list — always "
+                "pass every current deliverable file, not just the ones you "
+                "changed. Omitting it clears the displayed artifacts."
+            ),
+        },
+    },
+}
+
 # ---------------------------------------------------------------------------
 # ToolDef declarations (handler=None) — placed on lead agent AgentConfig.tools
 # so the runtime advertises these tools to the model. The actual handlers
@@ -702,6 +732,19 @@ FINISH_TASK_TOOL_DECLARATION = ToolDef(
     handler=None,
 )
 
+UPDATE_DELIVERABLE_TOOL_DECLARATION = ToolDef(
+    name=UPDATE_DELIVERABLE_TOOL_NAME,
+    description=(
+        "Refresh the task's deliverable card after the task is COMPLETED. "
+        "Call this when, during post-completion follow-up chat, you edited "
+        "a deliverable file and want the card's summary/artifacts to reflect "
+        "the latest state. Only valid on a completed task; it does NOT "
+        "reopen the task, re-plan, or dispatch members."
+    ),
+    parameters=_UPDATE_DELIVERABLE_PARAMETERS,
+    handler=None,
+)
+
 SEND_TOOL_DECLARATION = ToolDef(
     name=SEND_TOOL_NAME,
     description=(
@@ -748,6 +791,7 @@ DISPATCH_TOOL_DECLARATIONS: tuple[ToolDef, ...] = (
     SEND_TOOL_DECLARATION,
     LIST_MEMBERS_TOOL_DECLARATION,
     FINISH_TASK_TOOL_DECLARATION,
+    UPDATE_DELIVERABLE_TOOL_DECLARATION,
     STOP_SUBTASK_TOOL_DECLARATION,
 ) + PLAN_REVIEW_TOOL_DECLARATIONS
 
