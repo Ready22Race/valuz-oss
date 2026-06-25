@@ -1,4 +1,5 @@
-"""``propose_agent`` / ``list_skills`` — natural-language agent creation tools.
+"""``propose_agent`` / ``update_agent`` / ``list_skills`` — natural-language
+agent create + edit tools.
 
 The agent calls ``propose_agent`` once it has gathered everything a new
 Agent needs (name, instructions, brain, and *equipment* — skill slugs +
@@ -8,6 +9,12 @@ that's the user's prerogative, applied via
 "创建并部署" on the proposal card the frontend renders in response to the
 ``tool_use`` event this call produces. Same "agent proposes, user
 disposes" trust model as ``submit_skill``.
+
+``update_agent`` is the edit counterpart for an agent that ALREADY exists.
+It is a **direct write** (not a proposal): it shares propose_agent's spec
+validation but applies the patch immediately through
+``AgentService.update_agent``, which live-references into every project the
+agent is deployed to. Only the fields passed are changed.
 
 Why a validating no-op is enough
 --------------------------------
@@ -53,6 +60,7 @@ from valuz_agent.infra.auth_context import require_current_user_id
 logger = logging.getLogger(__name__)
 
 PROPOSE_AGENT_TOOL_NAME = "propose_agent"
+UPDATE_AGENT_TOOL_NAME = "update_agent"
 LIST_SKILLS_TOOL_NAME = "list_skills"
 LIST_AGENTS_TOOL_NAME = "list_agents"
 LIST_PROJECT_MEMBERS_TOOL_NAME = "list_project_members"
@@ -434,6 +442,268 @@ async def _propose_agent_handler(args: dict[str, Any], context: ExecContext) -> 
     )
 
 
+UPDATE_AGENT_DESCRIPTION = (
+    "Modify an EXISTING agent in the library, in place. Use this when the user "
+    "asks to change an agent they already have — its instructions, name, "
+    "description, brain (runtime/model/effort), or equipment (skills/connectors).\n\n"
+    "## This applies IMMEDIATELY — it is NOT a proposal\n"
+    "Unlike `propose_agent` (which only drafts a NEW agent for the user to "
+    "confirm), `update_agent` writes the change straight to the library the "
+    "moment you call it. It is a **live reference**: the edit propagates to every "
+    "project the agent is deployed to, picked up by every NEW session there. "
+    "Sessions already running keep the config snapshot they started with. Because "
+    "it's a direct write, only call it when the user has actually asked for the "
+    "change — confirm the specifics with them first if anything is ambiguous.\n\n"
+    "## Partial update — only what you pass changes\n"
+    "Pass `agent_slug` (from `list_agents`) plus ONLY the fields you want to "
+    "change; omitted fields are left exactly as they are. For list/clearable "
+    "fields, an explicit value REPLACES the old one wholesale:\n"
+    "- skills / connectors: the list you pass becomes the agent's full set "
+    "(pass the complete intended list, not just additions; `[]` clears it). Same "
+    "existence rules as propose_agent — every skill slug must already be indexed "
+    "(author with skill-creator → submit_skill first), connectors created via "
+    "create_mcp. Use `list_skills` / `list_agents` to check current state.\n"
+    "- effort / avatar: an empty string clears the override.\n"
+    "- name / instructions CANNOT be blanked — omit them to keep the current "
+    "value.\n\n"
+    "## Changing the brain — keep runtime + model compatible\n"
+    "If you change `runtime` OR `model`, the resulting pair must be valid (the "
+    "model's runtimes must include the runtime). When you change only one side, "
+    "this checks it against the agent's CURRENT value for the other side and "
+    "rejects an unrunnable pair — call `list_model_options` first and pass a "
+    "compatible pair (e.g. switching to the codex runtime needs a codex model "
+    "too). Omit both to leave the brain untouched.\n\n"
+    "Returns JSON with ok, the slug, the list of changed fields, and any warnings."
+)
+
+UPDATE_AGENT_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "agent_slug": {
+            "type": "string",
+            "description": "Slug of the library agent to modify (from list_agents). Required.",
+        },
+        "name": {
+            "type": "string",
+            "description": "New display name. Omit to keep current; cannot be blank.",
+        },
+        "instructions": {
+            "type": "string",
+            "description": (
+                "New system prompt / working method. Omit to keep current; "
+                "cannot be blank."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "description": "New one-line description. Empty string clears it.",
+        },
+        "runtime": {
+            "type": "string",
+            "enum": list(VALID_RUNTIMES),
+            "description": "New runtime engine. Must stay compatible with the model.",
+        },
+        "model": {
+            "type": "string",
+            "description": "New model id. Must stay compatible with the runtime.",
+        },
+        "effort": {
+            "type": "string",
+            "description": (
+                "New reasoning-effort budget (one of "
+                + ", ".join(VALID_EFFORTS)
+                + "). Empty string clears the override."
+            ),
+        },
+        "skills": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Replacement skill-slug set (full intended list; [] clears). Each "
+                "slug must already be indexed."
+            ),
+        },
+        "connectors": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Replacement connector-slug set (full intended list; [] clears). "
+                "Created via create_mcp."
+            ),
+        },
+        "avatar": {
+            "type": "string",
+            "description": "New preset avatar key or asset URL. Empty string clears it.",
+        },
+    },
+    "required": ["agent_slug"],
+}
+
+
+async def _update_agent_handler(args: dict[str, Any], context: ExecContext) -> ToolResult:
+    """Apply a partial edit to an existing library agent and write it straight
+    away. Mirrors ``propose_agent``'s validation (skills indexed, connectors
+    exist, runtime/model compatible) but — unlike propose — there is no confirm
+    card: the change lands via ``AgentService.update_agent`` and live-references
+    into every project the agent is deployed to."""
+    slug = str(args.get("agent_slug") or "").strip()
+    if not slug:
+        return _err("update_agent: 'agent_slug' is required")
+
+    # Build the patch from ONLY the keys the caller supplied. An absent key
+    # leaves the field untouched; a present key applies (mirroring
+    # AgentService.update_agent's clear-on-empty semantics for nullable fields).
+    patch: dict[str, Any] = {}
+    if "name" in args:
+        v = str(args.get("name") or "").strip()
+        if not v:
+            return _err(
+                "update_agent: 'name' cannot be blanked — omit it to keep the current name"
+            )
+        patch["name"] = v
+    if "instructions" in args:
+        v = str(args.get("instructions") or "").strip()
+        if not v:
+            return _err(
+                "update_agent: 'instructions' cannot be blanked — omit it to keep current"
+            )
+        patch["instructions"] = v
+    if "description" in args:
+        patch["description"] = str(args.get("description") or "").strip()
+    if "avatar" in args:
+        patch["avatar"] = str(args.get("avatar") or "").strip() or None
+    if "runtime" in args and str(args.get("runtime") or "").strip():
+        runtime = str(args.get("runtime")).strip()
+        if runtime not in VALID_RUNTIMES:
+            return _err(
+                f"update_agent: invalid runtime '{runtime}' — must be one of "
+                f"{', '.join(VALID_RUNTIMES)}"
+            )
+        patch["runtime"] = runtime
+    if "model" in args and str(args.get("model") or "").strip():
+        patch["model"] = str(args.get("model")).strip()
+    if "effort" in args:
+        effort = str(args.get("effort") or "").strip()
+        if effort and effort not in VALID_EFFORTS:
+            return _err(
+                f"update_agent: invalid effort '{effort}' — must be one of "
+                f"{', '.join(VALID_EFFORTS)}"
+            )
+        patch["effort"] = effort or None
+    if "skills" in args:
+        patch["skills"] = _as_str_list(args.get("skills"))
+    if "connectors" in args:
+        patch["connector_types"] = _as_str_list(args.get("connectors"))
+
+    if not patch:
+        return _err(
+            "update_agent: no editable fields provided — pass at least one of "
+            "name, description, instructions, runtime, model, effort, skills, "
+            "connectors, avatar (besides agent_slug)."
+        )
+
+    # Validate equipment + gather the model catalog in one read-only unit of
+    # work, exactly like propose_agent. Capture the current runtime/model inside
+    # the block so the brain check can validate the EFFECTIVE pair even when only
+    # one side is being changed.
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.agents.datastore import AgentDatastore
+    from valuz_agent.modules.connectors.datastore import ConnectorDatastore
+    from valuz_agent.modules.skills.datastore import SkillDatastore
+
+    user_id = require_current_user_id()
+    needs_brain_check = "runtime" in patch or "model" in patch
+    missing_skills: list[str] = []
+    missing_connectors: list[str] = []
+    model_opts: Any = None
+    async with async_unit_of_work(commit=False) as db:
+        existing = await AgentDatastore(db).get_agent(user_id, slug)
+        if existing is None:
+            return _err(
+                f"update_agent: no library agent with slug '{slug}'. Call "
+                "list_agents to see valid slugs."
+            )
+        existing_runtime = existing.runtime
+        existing_model = existing.model
+        if patch.get("skills"):
+            indexed = {r.slug for r in await SkillDatastore(db).list_skills(user_id)}
+            missing_skills = [s for s in patch["skills"] if s not in indexed]
+        if patch.get("connector_types"):
+            cds = ConnectorDatastore(db)
+            for cslug in patch["connector_types"]:
+                if await cds.get_by_slug(user_id, cslug) is None:
+                    missing_connectors.append(cslug)
+        if needs_brain_check:
+            model_opts = await _gather_model_options(db, user_id)
+
+    if missing_skills:
+        return _err(
+            "update_agent: these skill slugs are not in the library yet, so they "
+            "can't be bound: "
+            + ", ".join(missing_skills)
+            + ". Author each one with the skill-creator skill and call "
+            "submit_skill; once the user saves it, retry. Use list_skills to see "
+            "available slugs."
+        )
+
+    warnings: list[str] = []
+    if needs_brain_check:
+        effective_runtime = patch.get("runtime", existing_runtime)
+        effective_model = patch.get("model") or existing_model or DEFAULT_MODEL
+        model_error, model_warnings = _validate_runtime_model(
+            effective_runtime, effective_model, model_opts
+        )
+        if model_error:
+            return _err(model_error.replace("propose_agent:", "update_agent:", 1))
+        warnings.extend(model_warnings)
+        runtime_warning = _runtime_availability_warning(effective_runtime)
+        if runtime_warning:
+            warnings.append(runtime_warning)
+    if missing_connectors:
+        warnings.append(
+            "These connector slugs don't exist yet; create them with create_mcp "
+            "so the binding resolves: " + ", ".join(missing_connectors)
+        )
+
+    from valuz_agent.modules.agents.service import AgentNotFoundError, AgentService
+
+    async with async_unit_of_work() as db:
+        svc = AgentService(db)
+        try:
+            row = await svc.update_agent(user_id, slug, patch)
+        except AgentNotFoundError:
+            return _err(
+                f"update_agent: no library agent with slug '{slug}'. Call "
+                "list_agents to see valid slugs."
+            )
+        agent_name = row.name
+
+    changed = sorted(patch.keys())
+    logger.info(
+        "update_agent: slug=%s changed=%s (missing_conn=%s)",
+        slug,
+        changed,
+        missing_connectors,
+    )
+    return ToolResult(
+        content=json.dumps(
+            {
+                "ok": True,
+                "slug": slug,
+                "name": agent_name,
+                "changed": changed,
+                "warnings": warnings,
+                "next_step": (
+                    "Saved. The change is live across every project this agent is "
+                    "deployed to and applies to new sessions there. Stop here — "
+                    "do not keep editing unless the user asks for more changes."
+                ),
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 LIST_SKILLS_DESCRIPTION = (
     "List the skills already in the user's library (slug, name, description), "
     "so you can bind existing skills by slug when proposing an agent. "
@@ -728,14 +998,22 @@ def _err(message: str) -> ToolResult:
 
 def build_agent_proposal_tool_defs() -> tuple[ToolDef, ...]:
     """Return the agent-creation toolset for the host toolkit MCP:
-    propose_agent (create new, with confirm card) + the discovery/reuse tools
-    list_skills / list_agents / list_project_members / deploy_agent."""
+    propose_agent (create new, with confirm card) + update_agent (edit an
+    existing one in place) + the discovery/reuse tools list_skills /
+    list_agents / list_project_members / deploy_agent."""
     return (
         ToolDef(
             name=PROPOSE_AGENT_TOOL_NAME,
             description=PROPOSE_AGENT_DESCRIPTION,
             parameters=PROPOSE_AGENT_PARAMETERS,
             handler=_propose_agent_handler,
+            read_only=False,
+        ),
+        ToolDef(
+            name=UPDATE_AGENT_TOOL_NAME,
+            description=UPDATE_AGENT_DESCRIPTION,
+            parameters=UPDATE_AGENT_PARAMETERS,
+            handler=_update_agent_handler,
             read_only=False,
         ),
         ToolDef(
@@ -778,6 +1056,7 @@ def build_agent_proposal_tool_defs() -> tuple[ToolDef, ...]:
 
 __all__ = [
     "PROPOSE_AGENT_TOOL_NAME",
+    "UPDATE_AGENT_TOOL_NAME",
     "LIST_SKILLS_TOOL_NAME",
     "LIST_AGENTS_TOOL_NAME",
     "LIST_MODEL_OPTIONS_TOOL_NAME",
