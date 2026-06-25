@@ -1381,6 +1381,7 @@ export type KnownI18nKey =
   | "settings.model.runtimeSwitchedReSelect"
   | "settings.model.selectDefaultModel"
   | "settings.model.selectDefaultProvider"
+  | "settings.model.subscriptionLoginRequired"
   | "settings.model.switchFailed"
   | "settings.model.systemManagedModel"
   | "settings.model.systemProvider"

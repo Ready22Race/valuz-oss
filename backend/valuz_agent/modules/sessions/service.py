@@ -521,6 +521,10 @@ class SessionService:
             resolve_model_provider,
             resolve_runtime_provider,
         )
+        from valuz_agent.modules.providers.service import (
+            materialize_logged_in_subscription,
+            subscription_login_hint,
+        )
 
         if self._secrets is None:
             raise RuntimeError(
@@ -583,6 +587,25 @@ class SessionService:
                 f"enabled provider hosts model '{effective_model}' — add a provider "
                 "for that model or pin one on the agent"
             )
+
+        # Backstop for a stale subscription reference. A logged-in subscription
+        # is normally materialized into a real row the moment its CLI login is
+        # detected (frontend onboarding / Settings). But a value saved before
+        # that — an agent pinned to the virtual ``ch-codex-subscription`` id, or
+        # a composer pick of a not-yet-materialized template — still carries the
+        # catalog id, which owns no row and would resolve to a raw
+        # "provider not found" 400. Materialize it now (CLI-login-gated) and swap
+        # to the real uuid; if the CLI isn't logged in, raise an actionable hint
+        # instead of the cryptic error.
+        uid = require_current_user_id()
+        if await self._providers.get_by_id(uid, provider_id) is None:
+            healed = await materialize_logged_in_subscription(self._providers, uid, provider_id)
+            if healed is not None:
+                provider_id = healed.id
+            else:
+                hint = subscription_login_hint(provider_id)
+                if hint is not None:
+                    raise SessionNotRunnable(hint)
 
         try:
             runtime_provider = await resolve_runtime_provider(
@@ -854,6 +877,10 @@ class SessionService:
             resolve_model_provider,
             resolve_runtime_provider,
         )
+        from valuz_agent.modules.providers.service import (
+            materialize_logged_in_subscription,
+            subscription_login_hint,
+        )
 
         if resolved_provider_id is None:
             raise SessionNotRunnable(
@@ -865,6 +892,23 @@ class SessionService:
                 "SessionService is missing secrets wiring — required "
                 "for provider resolution since kernel V5"
             )
+
+        # Backstop for a composer pick / stale default that still carries a
+        # virtual ``ch-*`` subscription id (no row → raw "provider not found").
+        # Materialize it now if its CLI is logged in (mirrors the frontend's
+        # detect-then-materialize), else raise an actionable login hint. See the
+        # agent-conversation path above for the full rationale.
+        _uid = require_current_user_id()
+        if await self._providers.get_by_id(_uid, resolved_provider_id) is None:
+            _healed = await materialize_logged_in_subscription(
+                self._providers, _uid, resolved_provider_id
+            )
+            if _healed is not None:
+                resolved_provider_id = _healed.id
+            else:
+                _hint = subscription_login_hint(resolved_provider_id)
+                if _hint is not None:
+                    raise SessionNotRunnable(_hint)
 
         # Resolve the runtime BEFORE the model provider: dual-protocol
         # built-ins (DeepSeek / Zhipu / Moonshot / MiniMax) let the

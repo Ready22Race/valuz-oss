@@ -281,6 +281,41 @@ export const ModelSection = () => {
     void refreshCliStatus();
   }, [providersList, refreshCliStatus]);
 
+  // Auto-materialize a logged-in subscription into a real channel. The CLI
+  // keychain is local + invisible to the server, so "available" is detected
+  // client-side; the moment a subscription kind is seen logged in but still
+  // un-materialized (a virtual template: auth_type "oauth" + !deletable — e.g.
+  // an external `codex login` the in-app login flow never enabled), tell the
+  // backend to enable it. This is what makes "可用 = ready to configure an
+  // agent" actually true: without it the row stays a template whose `ch-*` id
+  // 400s ("provider not found") at session creation. Idempotent + guarded so it
+  // fires once per kind — after enable the row turns deletable, so it no longer
+  // matches.
+  const materializingRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const pending = providersList.filter((p) => {
+      if (p.auth_type !== "oauth" || p.deletable) return false;
+      const tool = CLI_TOOL_BY_PROVIDER_KIND[p.provider_kind];
+      if (!tool) return false;
+      return (
+        cliStatus[tool]?.state === "logged_in" &&
+        !materializingRef.current.has(p.id)
+      );
+    });
+    if (pending.length === 0) return;
+    void (async () => {
+      pending.forEach((p) => materializingRef.current.add(p.id));
+      try {
+        await Promise.all(pending.map((p) => providersApi.enable(p.id)));
+        await loadProvidersList();
+      } catch {
+        // best-effort: the session-creation backstop still materializes on use.
+      } finally {
+        pending.forEach((p) => materializingRef.current.delete(p.id));
+      }
+    })();
+  }, [providersList, cliStatus, loadProvidersList]);
+
   // (A) Re-check when the window regains focus / becomes visible — the user
   // typically switches back to the app right after finishing the terminal
   // login, so the badge flips without a manual refresh.
@@ -1031,17 +1066,25 @@ export const ModelSection = () => {
                                 <RefreshCw className="h-3.5 w-3.5" />
                               </Button>
                             )}
-                            {provider.deletable && (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                aria-label={t("common.delete")}
-                                className="h-8 w-8 p-0 text-[#131313] hover:text-[#f54b4b]"
-                                onClick={() => setDeleteTarget(provider)}
-                              >
-                                <Trash2 className="h-3.5 w-3.5" />
-                              </Button>
-                            )}
+                            {/* Subscription channels (auth_type "oauth") are not
+                            user-deletable: their availability mirrors the CLI
+                            login state (auto-materialized on login, gone when the
+                            user logs the CLI out), so a delete button here would
+                            be futile — the channel reappears on the next login
+                            probe. Keeps codex and Claude symmetric. Only
+                            user-added api_key channels get the trash action. */}
+                            {provider.deletable &&
+                              provider.auth_type !== "oauth" && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  aria-label={t("common.delete")}
+                                  className="h-8 w-8 p-0 text-[#131313] hover:text-[#f54b4b]"
+                                  onClick={() => setDeleteTarget(provider)}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
                           </>
                         )}
                       </div>

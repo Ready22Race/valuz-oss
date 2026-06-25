@@ -1299,6 +1299,7 @@
       "notInstalled": "Not installed",
       "notLoggedIn": "Not logged in",
       "installCli": "Install CLI",
+      "subscriptionLoginRequired": "{name} channel isn't logged in yet — run {command} in a terminal, or connect it from Settings → Models, then retry",
       "runtimeSwitchedReSelect": "Runtime switched — please re-select the default model",
       "availableModelsList": "Available models",
       "availableModelsHelp": "(Comma or newline separated, at least 1)",
