@@ -7,7 +7,7 @@ Covers the three moving parts of the cutover:
 2. ``infra.auth_context`` — the request-scoped owner ContextVar. Explicit-only:
    no implicit fallback; an unset context raises ``LookupError``.
 3. ``infra.database.UserMixin`` — auto-stamps the active owner on insert.
-4. ``boot.schema.drop_stale_host_tables`` — fires only on a pre-cutover schema.
+4. ``boot.schema.ensure_host_schema_migratable`` — preflight (never drops).
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import StatementError
 from sqlalchemy.orm import DeclarativeBase, Session
 
-from valuz_agent.boot.schema import drop_stale_host_tables
+from valuz_agent.boot.schema import ensure_host_schema_migratable
 from valuz_agent.infra import auth_context
 from valuz_agent.infra.config import settings
 from valuz_agent.infra.database import PrimaryKeyMixin, UserMixin
@@ -150,27 +150,26 @@ class TestUserMixinStamping:
 
 
 # --------------------------------------------------------------------------- #
-# 4. drop_stale_host_tables
+# 4. ensure_host_schema_migratable
 # --------------------------------------------------------------------------- #
-class TestDropStaleHostTables:
-    """The probe is data-preserving now (trusts any known revision) — full
-    behavioral coverage lives in ``tests/migrations/test_host_baseline_reset``.
-    These cases pin the ownership-relevant ends: an unstamped legacy DB resets;
-    a DB stamped at a known revision is trusted as-is."""
+class TestEnsureHostSchemaMigratable:
+    """The preflight never drops — full behavioral coverage lives in
+    ``tests/migrations/test_host_baseline_reset``. These cases pin the
+    ownership-relevant ends: an unstamped legacy DB raises (kept intact); a DB
+    stamped at a known revision is trusted as-is."""
 
-    def test_drops_legacy_db_without_baseline_stamp(self, tmp_path) -> None:
+    def test_raises_and_keeps_legacy_db_without_baseline_stamp(self, tmp_path) -> None:
         engine = create_engine(f"sqlite:///{tmp_path / 'pre.db'}")
         with engine.begin() as conn:
             conn.execute(text("CREATE TABLE valuz_provider (id TEXT PRIMARY KEY)"))
             conn.execute(text("CREATE TABLE valuz_agent (id TEXT PRIMARY KEY)"))
             conn.execute(text("CREATE TABLE alembic_version_host (version_num TEXT PRIMARY KEY)"))
 
-        drop_stale_host_tables(engine)
+        with pytest.raises(RuntimeError):
+            ensure_host_schema_migratable(engine)
 
         remaining = set(inspect(engine).get_table_names())
-        assert "valuz_provider" not in remaining
-        assert "valuz_agent" not in remaining
-        assert "alembic_version_host" not in remaining
+        assert {"valuz_provider", "valuz_agent", "alembic_version_host"} <= remaining
 
     def test_noop_when_stamped_at_baseline(self, tmp_path) -> None:
         from valuz_agent.boot.schema import BASELINE_REVISION
@@ -182,13 +181,12 @@ class TestDropStaleHostTables:
             conn.execute(text("CREATE TABLE alembic_version_host (version_num TEXT PRIMARY KEY)"))
             conn.execute(text(f"INSERT INTO alembic_version_host VALUES ('{BASELINE_REVISION}')"))
 
-        drop_stale_host_tables(engine)
+        ensure_host_schema_migratable(engine)  # no raise
 
         remaining = set(inspect(engine).get_table_names())
         assert {"valuz_provider", "valuz_agent"} <= remaining
 
     def test_noop_on_fresh_install(self, tmp_path) -> None:
         engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
-        # No host tables at all → nothing to reset.
-        drop_stale_host_tables(engine)
+        ensure_host_schema_migratable(engine)  # no raise
         assert set(inspect(engine).get_table_names()) == set()

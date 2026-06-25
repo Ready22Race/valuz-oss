@@ -1,19 +1,18 @@
-"""Self-heal tests for ``drop_stale_kernel_tables`` (incremental kernel chain).
+"""Preflight tests for ``ensure_kernel_schema_migratable`` (NEVER drops).
 
-Mirrors ``test_host_baseline_reset`` for the kernel. The kernel alembic chain is
-incremental and the probe is data-preserving: a DB stamped at a *known* revision
-is migrated forward by ``alembic upgrade head`` (never dropped). Only an
-unknown/foreign stamp, or kernel tables present with no stamp at all (a boot
-that died mid-initialization, or a half-created trio), triggers a
-drop-and-rebuild of the kernel-owned tables. Host ``valuz_*`` tables and the
-DeepAgents langgraph checkpoint tables in the same file are never touched.
+Mirrors ``test_host_baseline_reset`` for the kernel. A DB stamped at a *known*
+revision (or a fresh file with no kernel tables) passes through to ``alembic
+upgrade head``; any other state raises and leaves every kernel table + row
+intact. The probe never deletes — it replaced one that wiped the trio on a
+non-known stamp.
 """
 
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import create_engine, inspect, text
 
-from valuz_agent.boot.kernel import _known_kernel_revisions, drop_stale_kernel_tables
+from valuz_agent.boot.kernel import _known_kernel_revisions, ensure_kernel_schema_migratable
 
 _TRIO = {"sessions", "messages", "events"}
 
@@ -38,109 +37,85 @@ def _create_kernel_trio(conn, *, stamp: str | None) -> None:
         conn.execute(text(f"INSERT INTO alembic_version VALUES ('{stamp}')"))
 
 
-def test_should_noop_when_stamped_at_known_revision(tmp_path) -> None:
-    """Stamp on a known revision → trust it; trio and data untouched."""
+# ── safe states: return, nothing touched ──────────────────────────────────
+
+
+def test_should_pass_when_stamped_at_known_revision(tmp_path) -> None:
+    """Stamp on a known revision → trust it; trio + data untouched, no raise."""
     engine = create_engine(f"sqlite:///{tmp_path / 'known.db'}")
     with engine.begin() as conn:
         _create_kernel_trio(conn, stamp=_a_known_revision())
         conn.execute(text("INSERT INTO sessions VALUES ('s1', 'u1')"))
 
-    drop_stale_kernel_tables(engine)
+    ensure_kernel_schema_migratable(engine)  # no raise
 
     assert _TRIO <= _tables(engine)
     with engine.connect() as conn:
         assert conn.execute(text("SELECT id FROM sessions")).fetchall() == [("s1",)]
 
 
-def test_should_reset_when_stamped_by_foreign_revision(tmp_path) -> None:
-    """An unknown/foreign stamp (diverged branch, corruption) → reset."""
-    for foreign in ("0099", "deadbeef"):
-        engine = create_engine(f"sqlite:///{tmp_path / f'foreign_{foreign}.db'}")
-        with engine.begin() as conn:
-            _create_kernel_trio(conn, stamp=foreign)
-
-        drop_stale_kernel_tables(engine)
-
-        remaining = _tables(engine)
-        assert not (_TRIO & remaining)
-        assert "alembic_version" not in remaining
+def test_should_pass_on_fresh_install(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
+    ensure_kernel_schema_migratable(engine)  # no raise
+    assert _tables(engine) == set()
 
 
-def test_should_reset_when_stamp_row_is_missing(tmp_path) -> None:
-    """Trio exists but the version table is empty (boot died before the stamp
-    landed) → unknown provenance, reset."""
-    engine = create_engine(f"sqlite:///{tmp_path / 'no_stamp.db'}")
-    with engine.begin() as conn:
-        _create_kernel_trio(conn, stamp=None)
-
-    drop_stale_kernel_tables(engine)
-
-    assert not (_TRIO & _tables(engine))
-
-
-def test_should_reset_torn_half_created_trio(tmp_path) -> None:
-    """An interrupted first boot left a partial trio and no stamp → reset."""
-    engine = create_engine(f"sqlite:///{tmp_path / 'torn.db'}")
-    # Only sessions exists — no messages/events, no alembic_version stamp.
-    with engine.begin() as conn:
-        conn.execute(text("CREATE TABLE sessions (id TEXT PRIMARY KEY)"))
-
-    drop_stale_kernel_tables(engine)
-
-    assert "sessions" not in _tables(engine)
-
-
-def test_should_drop_precutover_fossils(tmp_path) -> None:
-    """Pre-cutover ``projects`` / ``agents`` fossils alongside a foreign-stamped
-    trio are cleared (they are kernel-owned table names)."""
-    engine = create_engine(f"sqlite:///{tmp_path / 'fossil.db'}")
-    with engine.begin() as conn:
-        conn.execute(text("CREATE TABLE projects (id TEXT PRIMARY KEY)"))
-        conn.execute(text("CREATE TABLE agents (id TEXT PRIMARY KEY)"))
-        _create_kernel_trio(conn, stamp="0099")
-
-    drop_stale_kernel_tables(engine)
-
-    remaining = _tables(engine)
-    assert not ({"projects", "agents"} | _TRIO) & remaining
-
-
-def test_should_not_touch_host_or_checkpoint_tables(tmp_path) -> None:
-    """The reset is kernel-scoped: host ``valuz_*`` tables, the host alembic
-    stamp, and langgraph checkpoint tables survive even when the trio drops."""
-    engine = create_engine(f"sqlite:///{tmp_path / 'mixed.db'}")
-    with engine.begin() as conn:
-        _create_kernel_trio(conn, stamp="0099")  # foreign → trio dropped
-        conn.execute(text("CREATE TABLE valuz_agent (id TEXT PRIMARY KEY)"))
-        conn.execute(text("CREATE TABLE alembic_version_host (version_num TEXT PRIMARY KEY)"))
-        conn.execute(text("CREATE TABLE checkpoints (thread_id TEXT PRIMARY KEY)"))
-
-    drop_stale_kernel_tables(engine)
-
-    remaining = _tables(engine)
-    assert not (_TRIO & remaining)
-    assert {"valuz_agent", "alembic_version_host", "checkpoints"} <= remaining
+# ── unsafe states: raise, NOTHING deleted ─────────────────────────────────
 
 
 def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> None:
     """A foreign/unknown kernel stamp WITH real session data = a downgrade.
     Refuse to start and DO NOT wipe — the kernel store stays intact."""
-    import pytest
-
     engine = create_engine(f"sqlite:///{tmp_path / 'downgrade.db'}")
     with engine.begin() as conn:
         _create_kernel_trio(conn, stamp="9999_from_the_future")
         conn.execute(text("INSERT INTO sessions VALUES ('s1', 'u1')"))
 
     with pytest.raises(RuntimeError, match="not a known revision"):
-        drop_stale_kernel_tables(engine)
+        ensure_kernel_schema_migratable(engine)
 
     assert _TRIO <= _tables(engine)
     with engine.connect() as conn:
         assert conn.execute(text("SELECT id FROM sessions")).fetchall() == [("s1",)]
 
 
-def test_should_noop_on_fresh_install(tmp_path) -> None:
-    engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
-    drop_stale_kernel_tables(engine)
-    assert _tables(engine) == set()
+def test_should_raise_and_preserve_on_foreign_stamp_with_empty_trio(tmp_path) -> None:
+    """Foreign stamp, empty trio → unrecognized state; raise, drop nothing."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'foreign_empty.db'}")
+    with engine.begin() as conn:
+        _create_kernel_trio(conn, stamp="0099")
+
+    with pytest.raises(RuntimeError, match="unrecognized state"):
+        ensure_kernel_schema_migratable(engine)
+
+    assert _TRIO <= _tables(engine)
+
+
+def test_should_raise_on_torn_half_created_trio(tmp_path) -> None:
+    """An interrupted first boot left a partial trio and no stamp → raise, keep."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'torn.db'}")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE sessions (id TEXT PRIMARY KEY)"))
+
+    with pytest.raises(RuntimeError, match="unrecognized state"):
+        ensure_kernel_schema_migratable(engine)
+
+    assert "sessions" in _tables(engine)
+
+
+def test_should_not_delete_host_or_checkpoint_tables_when_unmigratable(tmp_path) -> None:
+    """Raises before touching anything: the trio, host ``valuz_*`` tables, the
+    host stamp, and langgraph checkpoint tables all survive."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'mixed.db'}")
+    with engine.begin() as conn:
+        _create_kernel_trio(conn, stamp="0099")  # foreign, empty
+        conn.execute(text("CREATE TABLE valuz_agent (id TEXT PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE alembic_version_host (version_num TEXT PRIMARY KEY)"))
+        conn.execute(text("CREATE TABLE checkpoints (thread_id TEXT PRIMARY KEY)"))
+
+    with pytest.raises(RuntimeError):
+        ensure_kernel_schema_migratable(engine)
+
+    remaining = _tables(engine)
+    assert _TRIO <= remaining
+    assert {"valuz_agent", "alembic_version_host", "checkpoints"} <= remaining

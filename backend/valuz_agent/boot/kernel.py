@@ -47,8 +47,8 @@ KERNEL_ALEMBIC_INI: Path = KERNEL_ALEMBIC_DIR / "alembic.ini"
 # The kernel chain stamps the default ``alembic_version`` table (the host chain
 # uses ``alembic_version_host`` in the same file so the two never collide).
 KERNEL_VERSION_TABLE = "alembic_version"
-# Tables the kernel owns and may drop on a stale-stamp rebuild — the current
-# trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
+# Kernel-owned tables the schema preflight inspects (never drops) — the
+# current trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
 # langgraph checkpoint tables in the same file are off-limits.
 _KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
 
@@ -78,7 +78,7 @@ def _known_kernel_revisions() -> set[str]:
 
     A DB stamped at any of these is on a valid upgrade path and is migrated
     forward by ``alembic upgrade head`` (data-preserving) — see
-    ``drop_stale_kernel_tables``.
+    ``ensure_kernel_schema_migratable``.
     """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
@@ -106,23 +106,24 @@ def _any_kernel_rows(engine: Engine, tables: list[str]) -> bool:
     return False
 
 
-def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
-    """Self-heal probe for a corrupt/foreign kernel stamp (incremental chain).
+def ensure_kernel_schema_migratable(engine: Engine | None = None) -> None:
+    """Preflight the kernel DB before ``alembic upgrade head`` — NEVER drops anything.
 
-    Mirrors the host's ``boot.schema.drop_stale_host_tables``: the kernel
-    alembic chain is incremental, so a DB stamped at a *known* revision is
-    migrated forward by ``run_kernel_migrations`` (``alembic upgrade head``) —
-    data-preserving. Only an unknown/foreign stamp, or kernel tables present
-    with no stamp at all (a boot that died mid-initialization, or a half-created
-    trio), triggers a drop-and-rebuild so the upgrade re-initializes cleanly.
+    Mirrors the host's ``boot.schema.ensure_host_schema_migratable``: the kernel
+    alembic chain is incremental. Returns when the DB is safe to migrate (stamped
+    at a *known* revision, or no kernel tables yet — a fresh file). Otherwise
+    RAISES, deleting nothing:
 
-    Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES`` — the current trio
-    plus pre-cutover fossils) plus the kernel ``alembic_version`` stamp. The
-    host ``valuz_*`` tables and the DeepAgents langgraph checkpoint tables that
-    share the same SQLite file are never touched.
+    - an unknown/foreign stamp WITH kernel data → the store was written by a
+      newer or divergent build (a downgrade); preserve it, run a build that knows
+      the revision.
+    - kernel tables present but unstamped / a foreign stamp with empty tables → a
+      half-initialised / foreign DB; asks the operator to remove the data dir and
+      restart. No committed data to lose, and still nothing is auto-deleted.
 
-    No-op on a fresh file / healthy DB. Runs synchronously off the event loop —
-    it owns no session and reads no business data, like the host probe.
+    Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES``); host ``valuz_*``
+    tables and the langgraph checkpoint tables in the same file are never read or
+    touched. No drops, ever. Runs synchronously off the event loop.
     """
     from sqlalchemy import create_engine, inspect, text
 
@@ -146,33 +147,23 @@ def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
 
         owned = [t for t in _KERNEL_OWNED_TABLES if t in existing]
         if not owned:
-            return  # fresh install / no kernel tables — nothing to reset
+            return  # fresh install / no kernel tables — alembic initialises it
 
-        if stamp is not None and _any_kernel_rows(engine, owned):
-            # Downgrade / divergent build: a real revision this build can't
-            # migrate, with actual kernel data present. Fail loud, preserve the
-            # data (mirrors the host probe — never wipe a downgraded store).
+        if _any_kernel_rows(engine, owned):
             raise RuntimeError(
                 f"kernel schema stamp={stamp!r} is not a known revision for this "
                 f"build, but {len(owned)} kernel table(s) hold data. Refusing to "
-                f"start so nothing is deleted — the kernel store was written by a "
-                f"newer or divergent version. Run a build whose migrations include "
-                f"{stamp!r} (usually: update to the latest)."
+                f"start — nothing is deleted. The kernel store was written by a "
+                f"newer or divergent build (or lost its migration stamp); run a "
+                f"build whose migrations include {stamp!r} (usually: update to the latest)."
             )
 
-        # No recoverable data at risk (unstamped half-init, or empty tables):
-        # drop + reinit so the upgrade starts clean.
-        stale = list(owned)
-        if KERNEL_VERSION_TABLE in existing:
-            stale.append(KERNEL_VERSION_TABLE)
-        logger.warning(
-            "kernel schema is unstamped with %d table(s) present — half-initialized; "
-            "dropping for a clean re-initialization",
-            len(stale),
+        raise RuntimeError(
+            f"kernel schema is in an unrecognized state (stamp={stamp!r}) — kernel "
+            f"table(s) present but no recoverable data (a half-initialised or "
+            f"foreign DB). Nothing was deleted; remove the data dir and restart to "
+            f"reinitialise cleanly."
         )
-        with engine.begin() as conn:
-            for table in stale:
-                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
     finally:
         if owns_engine:
             engine.dispose()
@@ -202,10 +193,10 @@ def run_kernel_migrations() -> None:
 
     Two steps under one entry point:
 
-    1. ``drop_stale_kernel_tables`` — data-preserving self-heal probe. Trusts
+    1. ``ensure_kernel_schema_migratable`` — preflight that NEVER drops. Trusts
        any DB stamped at a known kernel revision (the upgrade migrates it
-       forward); only an unknown/foreign/unstamped kernel schema is dropped so
-       the upgrade can rebuild it. No-op on a healthy DB.
+       forward); an unknown/foreign/unstamped kernel schema makes boot fail loud
+       (data preserved), never wiped. No-op on a healthy / fresh DB.
     2. The kernel's own alembic ``upgrade head``. Writes its revision into the
        default ``alembic_version`` table; the host's chain uses a separate
        ``alembic_version_host`` row in the same file so the two don't collide.
@@ -222,7 +213,7 @@ def run_kernel_migrations() -> None:
     """
     import threading
 
-    drop_stale_kernel_tables()
+    ensure_kernel_schema_migratable()
 
     error: list[BaseException] = []
 

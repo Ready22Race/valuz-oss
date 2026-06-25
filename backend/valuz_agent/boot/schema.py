@@ -6,10 +6,10 @@ collide with the kernel's ``alembic_version`` row in the same SQLite
 file.
 
 The chain is incremental: the 0001 baseline creates the schema and later
-revisions ALTER it. ``drop_stale_host_tables`` keeps any DB stamped at a
+revisions ALTER it. ``ensure_host_schema_migratable`` keeps any DB stamped at a
 *known* revision and lets ``run_host_migrations`` (``alembic upgrade head``)
-migrate it forward — data-preserving. Only an unknown/foreign/corrupt stamp
-(or tables present with no stamp) is dropped wholesale and re-initialized.
+migrate it forward — data-preserving. An unknown/foreign/corrupt stamp is
+NEVER dropped: boot refuses to start (fail loud) so a downgraded store is kept.
 """
 
 from __future__ import annotations
@@ -32,9 +32,9 @@ ALEMBIC_INI = ALEMBIC_DIR / "alembic.ini"
 VERSION_TABLE = "alembic_version_host"
 
 # Head revision of the host alembic chain (kept for reference / exports). The
-# chain is incremental now: ``drop_stale_host_tables`` trusts any DB on a
+# chain is incremental now: ``ensure_host_schema_migratable`` trusts any DB on a
 # *known* revision and lets ``alembic upgrade head`` migrate it forward
-# (data-preserving); only an unknown/foreign/corrupt stamp is dropped + rebuilt.
+# (data-preserving); an unknown/foreign/corrupt stamp makes boot fail loud (never dropped).
 BASELINE_REVISION = "0004"
 
 
@@ -43,7 +43,7 @@ def _known_host_revisions() -> set[str]:
 
     A DB stamped at any of these is on a valid upgrade path and is migrated
     forward by ``alembic upgrade head`` (data-preserving) — see
-    ``drop_stale_host_tables``.
+    ``ensure_host_schema_migratable``.
     """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
@@ -71,26 +71,28 @@ def _any_rows(engine: Engine, tables: list[str]) -> bool:
     return False
 
 
-def drop_stale_host_tables(engine: Engine | None = None) -> None:
-    """Self-heal probe for an unstamped / corrupt host schema (incremental chain).
+def ensure_host_schema_migratable(engine: Engine | None = None) -> None:
+    """Preflight the host DB before ``alembic upgrade head`` — NEVER drops anything.
 
-    The host alembic chain is incremental. This keeps any DB stamped at a
-    *known* revision and lets ``run_host_migrations`` (``alembic upgrade
-    head``) migrate it forward — data-preserving.
+    The host alembic chain is incremental. Returns when the DB is safe to migrate:
 
-    Behaviour on a non-known stamp:
+    - stamped at a *known* revision → ``alembic upgrade head`` migrates it forward
+      (data-preserving), or
+    - a fresh DB (no host tables and no version table) → alembic initialises it.
 
-    - **Unknown revision WITH ``valuz_*`` data** → the data dir was written by a
-      NEWER or divergent build (a downgrade). We **refuse to start** (raise)
-      rather than drop the data — it stays intact so the user can run a build
-      that knows the revision. (This deliberately does NOT wipe; an older drop
-      behaviour silently destroyed downgraded data.)
-    - **No stamp at all, with tables present** (a boot that died mid-init), or an
-      orphan version table with no business data → drop-and-rebuild so the
-      upgrade re-initialises cleanly from baseline. Nothing recoverable is lost.
+    Otherwise RAISES (refusing to start, deleting nothing):
 
-    No-op on a fresh file / known stamp. Runs synchronously off the event loop —
-    it owns no session and reads no business data, like the kernel probe.
+    - a stamp this build's chain doesn't contain, WITH ``valuz_*`` data → the data
+      dir was written by a NEWER or divergent build (a downgrade), or lost its
+      migration stamp. The data stays intact; run a build that knows the revision.
+    - any other unrecognised / half-initialised state (tables present but
+      unstamped, or a foreign stamp with empty tables) → asks the operator to
+      remove the data dir and restart. There is no committed data to lose, and we
+      still refuse to delete anything automatically.
+
+    No drops, ever — an earlier revision wiped tables here and could destroy a
+    downgraded store. Runs synchronously off the event loop; reads no business
+    rows beyond a one-row existence probe.
     """
     from sqlalchemy import create_engine, inspect, text
 
@@ -112,39 +114,27 @@ def drop_stale_host_tables(engine: Engine | None = None) -> None:
                 stamp = row[0] if row else None
 
         if stamp in _known_host_revisions():
-            return  # known revision — `alembic upgrade head` migrates it
+            return  # known revision — `alembic upgrade head` migrates it forward
 
         business = sorted(t for t in existing if t.startswith("valuz_"))
+        if not business and VERSION_TABLE not in existing:
+            return  # fresh install — alembic initialises from baseline
 
-        if stamp is not None and _any_rows(engine, business):
-            # Downgrade / divergent build: a real revision this build can't
-            # migrate, with actual data on the line. Fail loud, preserve the data.
+        if _any_rows(engine, business):
             raise RuntimeError(
                 f"host schema stamp={stamp!r} is not a known revision for this "
                 f"build, but {len(business)} host table(s) hold data. Refusing to "
-                f"start so nothing is deleted — the data dir was written by a newer "
-                f"or divergent version. Run a build whose migrations include "
-                f"{stamp!r} (usually: update to the latest)."
+                f"start — nothing is deleted. The data dir was written by a newer "
+                f"or divergent build (or lost its migration stamp); run a build "
+                f"whose migrations include {stamp!r} (usually: update to the latest)."
             )
 
-        # No recoverable data at risk (unstamped half-init, an orphan version
-        # table, or empty tables): drop the stale stamp/tables so the upgrade
-        # reinitialises clean.
-        stale = list(business)
-        if VERSION_TABLE in existing:
-            stale.append(VERSION_TABLE)
-        if not stale:
-            return  # fresh install — nothing to reset
-
-        logger.warning(
-            "host schema stamp=%s with no recoverable data — dropping %d table(s) "
-            "for a clean re-initialization",
-            stamp,
-            len(stale),
+        raise RuntimeError(
+            f"host schema is in an unrecognized state (stamp={stamp!r}) — host "
+            f"table(s) present but no recoverable data (a half-initialised or "
+            f"foreign DB). Nothing was deleted; remove the data dir and restart to "
+            f"reinitialise cleanly."
         )
-        with engine.begin() as conn:
-            for table in stale:
-                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
     finally:
         if owns_engine:
             engine.dispose()
@@ -172,10 +162,9 @@ def run_host_migrations() -> None:
 
         from alembic import command
 
-        # Reset any DB not stamped at the current baseline before upgrading so
-        # the schema rebuilds clean (runs here, off the event loop, in the
-        # same dedicated thread as the upgrade).
-        drop_stale_host_tables()
+        # Preflight: refuse (never drop) to upgrade a downgraded / unrecognised
+        # DB before alembic runs (off the event loop, same dedicated thread).
+        ensure_host_schema_migratable()
 
         cfg = Config(str(ALEMBIC_INI))
         cfg.set_main_option("script_location", str(ALEMBIC_DIR))
@@ -205,4 +194,9 @@ def run_host_migrations() -> None:
         raise error[0]
 
 
-__all__ = ["run_host_migrations", "drop_stale_host_tables", "VERSION_TABLE", "BASELINE_REVISION"]
+__all__ = [
+    "run_host_migrations",
+    "ensure_host_schema_migratable",
+    "VERSION_TABLE",
+    "BASELINE_REVISION",
+]
