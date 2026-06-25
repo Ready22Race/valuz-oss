@@ -1453,7 +1453,7 @@ class SessionService:
         pending = await _load_pending_attachments(session_id)
         attachments_json = [
             {"source_path": source, "parsed_path": parsed}
-            for source, parsed in _attachment_specs(pending)
+            for source, parsed in _attachment_specs(pending, require_current_user_id())
         ]
         consumed_ids = [row.id for row in pending]
 
