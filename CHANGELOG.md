@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-06-25
+
+### Added
+
+- Natural-language agent creation — describe the agent you want in chat and the
+  assistant scaffolds it. (#269 @Ready22Race)
+- Per-agent skill picker and a global skill-library on/off toggle, plus a faster
+  skill rescan. (#264 @Ready22Race)
+- `project_instructions` tool and an XML-structured project system prompt.
+  (#266 @Ready22Race)
+- Built-in `deliver_artifacts` MCP tool and a generated-files section in the
+  session panel. (#260 @Ready22Race)
+- User-customizable global instructions for the background memory reviewer.
+  (#262 @jiaoqsh)
+
+### Changed
+
+- Project home and Activity lists redesigned: a default "All" tab, creation
+  time, the status pill at the right edge, and a hover overflow menu
+  (rename / delete) on conversation rows. (#274 @St0neWan9)
+- Automations panel rows are now editable inline and the create/edit dialog
+  layout was polished. (#272 @St0neWan9)
+- Agent creation surfaces the available runtimes and configured models and
+  validates the runtime/model (brain) pair. (#271 @Ready22Race)
+- Subscription models are gated on CLI login (composer detail only).
+  (#253 @homeant)
+- The skill-library on/off switch is stored as a `valuz_skill_index` column.
+  (#265 @Ready22Race)
+- Connectors gained dedicated columns for `args` / `oauth_metadata` and a
+  separate OAuth table, dropping the ORM relationships. (#256 @homeant)
+- Sidebar project / conversation list UX. (#258 @St0neWan9)
+- Export the deep component paths consumed by the commercial overlay.
+  (#263 @hanjixin)
+- Kernel skill-materialize gained a self-diagnosing cycle guard. (f7f36e4)
+
+### Fixed
+
+- Kernel warm-runtime subprocesses (claude / codex) leaked; they are now
+  bounded. (#261 @jiaoqsh)
+- The automation MCP tool dispatch was broken. (#270 @Ready22Race)
+- The i18n locale directory is resolved by a fixed relative path instead of a
+  repo-marker walk. (#267 @homeant)
+- The Agents page merges injected resource categories. (#259 @hanjixin)
+- `submit_skill` resolves its staging directory via the session, not
+  `ExecContext.workspace`. (#254 @Ready22Race)
+- The Skill Creator mode badge no longer shows a "model" suffix. (#255 @Ready22Race)
+- The boot-splash percentage drops its leading-zero padding. (#257 @St0neWan9)
+
+### Docs & Chore
+
+- The handbook emphasizes the automation MCP tool for scheduling.
+  (#270 @Ready22Race)
+
 ## [0.2.3] - 2026-06-22
 
 ### Fixed
