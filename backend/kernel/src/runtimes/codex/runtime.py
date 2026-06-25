@@ -1376,6 +1376,14 @@ def _build_codex_env(
     merged: dict[str, str] = dict(os.environ)
     if provider.base_url is not None:
         merged[_HARNESS_PROVIDER_ENV_KEY] = provider.api_key
+        # Present as the CLI's originator (``codex_exec``) rather than the SDK's
+        # default (``codex_python_sdk``). Some third-party OpenAI-compatible
+        # gateways (e.g. Volcengine/Doubao) whitelist codex's proprietary tool
+        # types (``namespace``…) + ``client_metadata`` only for the CLI
+        # originator and 400 ("unknown tool type: namespace") for the SDK one —
+        # even though the request body is byte-identical. Same App Server, so
+        # spoofing the originator makes the SDK path match the working CLI path.
+        merged["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] = "codex_exec"
     else:
         merged["OPENAI_API_KEY"] = provider.api_key
     return merged
