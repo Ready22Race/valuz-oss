@@ -42,7 +42,9 @@ export const QueuedInputsBar = ({
   };
 
   return (
-    <div className="mb-1.5 space-y-1.5">
+    // Match the Composer's outer box (``mx-auto max-w-[760px]``) so the queue
+    // lines up with the input below it instead of spanning the full column.
+    <div className="mx-auto mb-1.5 w-full max-w-[760px] space-y-1.5">
       <div className="flex items-center justify-between px-1">
         <span className="text-[11px] text-ink-meta">
           {t("common.queueRunsAfter")} ({queue.length})
