@@ -753,7 +753,9 @@ export function AccordionSection({
   count,
   action,
   defaultOpen = false,
+  className,
   contentClassName,
+  fill = false,
   children,
 }: {
   title: string;
@@ -765,7 +767,16 @@ export function AccordionSection({
   defaultOpen?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** Extra classes on the section root (e.g. ``shrink-0`` / ``flex-1``). */
+  className?: string;
   contentClassName?: string;
+  /**
+   * Stretch the open section (root → grid → content) to fill its flex parent
+   * so the ``children`` list can own the remaining height and scroll inside it,
+   * instead of the section sizing to content. Opt-in; off leaves the section
+   * exactly as before. The parent must be a flex column with a bounded height.
+   */
+  fill?: boolean;
   children: React.ReactNode;
 }) {
   const [internalOpen, setInternalOpen] = useState(defaultOpen);
@@ -779,7 +790,13 @@ export function AccordionSection({
     // Spec 5.8 Context Section card: bg #F7F8FA, border 1px #F3F4F6,
     // radius 12, mb 8px. Header min-h 40, padding 10px 14px, gap 9px,
     // title 13px / 500 / #131313, count 12px / #6E7481, chevron #94A3B8.
-    <div className="mb-2 overflow-hidden rounded-xl border border-[#F3F4F6] bg-surface-soft dark:border-surface-border">
+    <div
+      className={cn(
+        "mb-2 overflow-hidden rounded-xl border border-[#F3F4F6] bg-surface-soft dark:border-surface-border",
+        fill && "flex min-h-0 flex-1 flex-col",
+        className,
+      )}
+    >
       {/* Hover lives on the row wrapper so background color spans the
           entire header (including the trailing action button), not just
           the toggle hit-area. */}
@@ -816,9 +833,12 @@ export function AccordionSection({
         className={cn(
           "grid transition-[grid-template-rows] duration-200 ease-in-out",
           open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+          // ``fill``: let the open section grow to fill its flex parent so the
+          // content's own scroll container owns the leftover height.
+          fill && open && "min-h-0 flex-1",
         )}
       >
-        <div className="overflow-hidden">
+        <div className={cn("overflow-hidden", fill && "min-h-0")}>
           {/* Nested white content surface (no border, top corners only) —
               layered over the outer surface-soft for depth. Mirrors the
               ContextSection in frontend/docs/design/app.jsx. */}
@@ -1130,7 +1150,7 @@ export const ProjectDetailContextPanel = ({
       count={visibleUploadedFiles.length || undefined}
     >
       {visibleUploadedFiles.length > 0 ? (
-        <div className="space-y-1">
+        <div className="-mr-3 max-h-[25vh] space-y-1 overflow-y-auto overflow-x-hidden pr-3">
           {visibleUploadedFiles.map((f) => {
             // KB-sourced rows render a database glyph so the user can
             // visually tell "this is a live reference to a global KB
@@ -1207,7 +1227,9 @@ export const ProjectDetailContextPanel = ({
               <FileTypeIcon filename={f.name} />
               <span className="flex-1 truncate text-ink-heading">{f.name}</span>
               {f.size ? (
-                <span className="shrink-0 text-2xs text-ink-meta">{f.size}</span>
+                <span className="shrink-0 text-2xs text-ink-meta">
+                  {f.size}
+                </span>
               ) : null}
             </button>
           ))}
@@ -1307,93 +1329,107 @@ export const ProjectDetailContextPanel = ({
           }
         >
           {members.length > 0 ? (
-            <div className="mx-auto w-[301px]">
-              {members.map((member, index) => {
-                const isOrphan = member.orphan === true;
-                return (
-                  <div key={member.id}>
-                    {index > 0 ? (
-                      <div className="h-px w-[301px] bg-[#f7f8fa]" />
-                    ) : null}
-                    <div className="group relative rounded-lg bg-card">
-                      <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
-                      <div className="relative z-10 flex items-center gap-2.5 py-2.5">
-                        {/* Row body opens the shared agent (global edit). */}
-                        <button
-                          type="button"
-                          disabled={isOrphan || !onOpenMember}
-                          onClick={(event) => {
-                            event.currentTarget.blur();
-                            // Only open the overlay when we know the global
-                            // library slug — local member slug isn't valid
-                            // for the agent detail endpoint (would 404).
-                            if (member.sourceAgentSlug) {
-                              onOpenMember?.(member.sourceAgentSlug);
-                            }
-                          }}
-                          className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
-                        >
-                          <div
-                            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
-                              isOrphan
-                                ? "bg-surface-soft text-ink-muted"
-                                : "bg-brand/8 text-brand"
-                            }`}
+            // Cap the member list so a large team doesn't push the sections
+            // below it (Files / Automations) out of view on a short window —
+            // it scrolls internally instead. ``vh`` keeps it window-relative:
+            // tall windows show the whole list, short ones scroll. The inner
+            // ``w-[301px]`` wrapper sits inside so the row's ``-inset-x-1.5``
+            // hover bleed has horizontal room and doesn't trip an x-scrollbar.
+            <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
+              <div className="mx-auto w-[301px]">
+                {members.map((member, index) => {
+                  const isOrphan = member.orphan === true;
+                  return (
+                    <div key={member.id}>
+                      {index > 0 ? (
+                        <div className="h-px w-[301px] bg-[#f7f8fa]" />
+                      ) : null}
+                      <div className="group relative rounded-lg bg-card">
+                        <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
+                        <div className="relative z-10 flex items-center gap-2.5 py-2.5">
+                          {/* Row body opens the shared agent (global edit). */}
+                          <button
+                            type="button"
+                            disabled={isOrphan || !onOpenMember}
+                            onClick={(event) => {
+                              event.currentTarget.blur();
+                              // Only open the overlay when we know the global
+                              // library slug — local member slug isn't valid
+                              // for the agent detail endpoint (would 404).
+                              if (member.sourceAgentSlug) {
+                                onOpenMember?.(member.sourceAgentSlug);
+                              }
+                            }}
+                            className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
                           >
-                            <Bot className="h-3 w-3" />
-                          </div>
-                          <div className="min-w-0 flex-1">
                             <div
-                              className={`truncate text-xs font-medium ${
-                                isOrphan ? "text-ink-meta" : "text-ink-heading"
+                              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
+                                isOrphan
+                                  ? "bg-surface-soft text-ink-muted"
+                                  : "bg-brand/8 text-brand"
                               }`}
                             >
-                              {member.name}
+                              <Bot className="h-3 w-3" />
                             </div>
-                            <div className="truncate text-2xs text-ink-meta">
-                              {isOrphan
-                                ? t(
-                                    "agent.memberOrphaned" as Parameters<
-                                      typeof t
-                                    >[0],
-                                  )
-                                : `${
-                                    member.runtimeLabel
-                                      ? `${member.runtimeLabel} · `
-                                      : ""
-                                  }${
-                                    member.model
-                                      ? modelLabel(member.model)
-                                      : member.slug
-                                  }`}
+                            <div className="min-w-0 flex-1">
+                              <div
+                                className={`truncate text-xs font-medium ${
+                                  isOrphan
+                                    ? "text-ink-meta"
+                                    : "text-ink-heading"
+                                }`}
+                              >
+                                {member.name}
+                              </div>
+                              <div className="truncate text-2xs text-ink-meta">
+                                {isOrphan
+                                  ? t(
+                                      "agent.memberOrphaned" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                                  : `${
+                                      member.runtimeLabel
+                                        ? `${member.runtimeLabel} · `
+                                        : ""
+                                    }${
+                                      member.model
+                                        ? modelLabel(member.model)
+                                        : member.slug
+                                    }`}
+                              </div>
                             </div>
-                          </div>
-                        </button>
-                        {onRemoveMember && (
-                          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.currentTarget.blur();
-                                onRemoveMember(member.slug);
-                              }}
-                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
-                              title={t(
-                                "agent.deleteMember" as Parameters<typeof t>[0],
-                              )}
-                              aria-label={t(
-                                "agent.deleteMember" as Parameters<typeof t>[0],
-                              )}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        )}
+                          </button>
+                          {onRemoveMember && (
+                            <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.currentTarget.blur();
+                                  onRemoveMember(member.slug);
+                                }}
+                                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
+                                title={t(
+                                  "agent.deleteMember" as Parameters<
+                                    typeof t
+                                  >[0],
+                                )}
+                                aria-label={t(
+                                  "agent.deleteMember" as Parameters<
+                                    typeof t
+                                  >[0],
+                                )}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           ) : (
             <p className="text-2xs leading-5 text-ink-meta">
@@ -1557,9 +1593,6 @@ export const ProjectDetailContextPanel = ({
         </AccordionSection>
       )}
 
-      {/* Uploaded files (session attachments) */}
-      {uploadedFilesSection}
-
       {/* Generated files (agent-delivered artifacts — the 生成文件 list) */}
       {generatedFilesSection}
 
@@ -1589,115 +1622,117 @@ export const ProjectDetailContextPanel = ({
           }
         >
           {(scheduledTasks ?? []).length > 0 ? (
-            <div className="mx-auto w-[301px] divide-y divide-[#f3f4f6]">
-              {(scheduledTasks ?? []).map((task) => (
-                <div
-                  key={task.id}
-                  // Row is clickable to edit, but intentionally keeps the
-                  // default cursor (no pointer/hand) per design.
-                  className="group relative rounded-lg bg-card"
-                  role={onEditScheduledTask ? "button" : undefined}
-                  tabIndex={onEditScheduledTask ? 0 : undefined}
-                  onClick={
-                    onEditScheduledTask
-                      ? () => onEditScheduledTask(task.id)
-                      : undefined
-                  }
-                  onKeyDown={
-                    onEditScheduledTask
-                      ? (e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            onEditScheduledTask(task.id);
+            <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
+              <div className="mx-auto w-[301px] divide-y divide-[#f3f4f6]">
+                {(scheduledTasks ?? []).map((task) => (
+                  <div
+                    key={task.id}
+                    // Row is clickable to edit, but intentionally keeps the
+                    // default cursor (no pointer/hand) per design.
+                    className="group relative rounded-lg bg-card"
+                    role={onEditScheduledTask ? "button" : undefined}
+                    tabIndex={onEditScheduledTask ? 0 : undefined}
+                    onClick={
+                      onEditScheduledTask
+                        ? () => onEditScheduledTask(task.id)
+                        : undefined
+                    }
+                    onKeyDown={
+                      onEditScheduledTask
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              onEditScheduledTask(task.id);
+                            }
                           }
-                        }
-                      : undefined
-                  }
-                >
-                  <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
-                  <div className="relative z-10 py-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink-heading">
-                        {task.name}
-                      </span>
-                      <span
-                        className={cn(
-                          "rounded px-1.5 py-px text-2xs",
-                          task.status === "on"
-                            ? "bg-emerald-50 text-emerald-600"
-                            : "bg-surface-soft text-ink-meta",
-                        )}
-                      >
-                        {task.status === "on"
-                          ? t("project.taskEnabled")
-                          : t("project.taskPaused")}
-                      </span>
-                      {(onEditScheduledTask ||
-                        onToggleScheduledTask ||
-                        onDeleteScheduledTask) && (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              type="button"
-                              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-label"
-                              title={t("project.taskActions")}
-                              // The row itself opens the editor; keep a menu
-                              // click from also triggering that row handler.
-                              onClick={(e) => e.stopPropagation()}
-                              onPointerDown={(e) => e.stopPropagation()}
+                        : undefined
+                    }
+                  >
+                    <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
+                    <div className="relative z-10 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink-heading">
+                          {task.name}
+                        </span>
+                        <span
+                          className={cn(
+                            "rounded px-1.5 py-px text-2xs",
+                            task.status === "on"
+                              ? "bg-emerald-50 text-emerald-600"
+                              : "bg-surface-soft text-ink-meta",
+                          )}
+                        >
+                          {task.status === "on"
+                            ? t("project.taskEnabled")
+                            : t("project.taskPaused")}
+                        </span>
+                        {(onEditScheduledTask ||
+                          onToggleScheduledTask ||
+                          onDeleteScheduledTask) && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                type="button"
+                                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-label"
+                                title={t("project.taskActions")}
+                                // The row itself opens the editor; keep a menu
+                                // click from also triggering that row handler.
+                                onClick={(e) => e.stopPropagation()}
+                                onPointerDown={(e) => e.stopPropagation()}
+                              >
+                                <MoreHorizontal className="h-3.5 w-3.5" />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="end"
+                              className="min-w-[120px]"
                             >
-                              <MoreHorizontal className="h-3.5 w-3.5" />
-                            </button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent
-                            align="end"
-                            className="min-w-[120px]"
-                          >
-                            {onEditScheduledTask && (
-                              <DropdownMenuItem
-                                onClick={() => onEditScheduledTask(task.id)}
-                              >
-                                {t("common.edit")}
-                              </DropdownMenuItem>
-                            )}
-                            {onToggleScheduledTask && (
-                              <DropdownMenuItem
-                                onClick={() =>
-                                  onToggleScheduledTask(
-                                    task.id,
-                                    task.status === "on" ? "off" : "on",
-                                  )
-                                }
-                              >
-                                {task.status === "on"
-                                  ? t("project.disable")
-                                  : t("project.enable")}
-                              </DropdownMenuItem>
-                            )}
-                            {onDeleteScheduledTask && (
-                              <DropdownMenuItem
-                                variant="destructive"
-                                onClick={() => onDeleteScheduledTask(task.id)}
-                              >
-                                {t("common.delete")}
-                              </DropdownMenuItem>
-                            )}
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      )}
-                    </div>
-                    <div className="mt-1.5 flex items-center gap-2 text-2xs text-ink-meta">
-                      <span>{task.humanReadable}</span>
-                      <span className="text-surface-border">·</span>
-                      <span>
-                        {t("project.nextRun" as Parameters<typeof t>[0], {
-                          time: task.nextRun,
-                        })}
-                      </span>
+                              {onEditScheduledTask && (
+                                <DropdownMenuItem
+                                  onClick={() => onEditScheduledTask(task.id)}
+                                >
+                                  {t("common.edit")}
+                                </DropdownMenuItem>
+                              )}
+                              {onToggleScheduledTask && (
+                                <DropdownMenuItem
+                                  onClick={() =>
+                                    onToggleScheduledTask(
+                                      task.id,
+                                      task.status === "on" ? "off" : "on",
+                                    )
+                                  }
+                                >
+                                  {task.status === "on"
+                                    ? t("project.disable")
+                                    : t("project.enable")}
+                                </DropdownMenuItem>
+                              )}
+                              {onDeleteScheduledTask && (
+                                <DropdownMenuItem
+                                  variant="destructive"
+                                  onClick={() => onDeleteScheduledTask(task.id)}
+                                >
+                                  {t("common.delete")}
+                                </DropdownMenuItem>
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-2 text-2xs text-ink-meta">
+                        <span>{task.humanReadable}</span>
+                        <span className="text-surface-border">·</span>
+                        <span>
+                          {t("project.nextRun" as Parameters<typeof t>[0], {
+                            time: task.nextRun,
+                          })}
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           ) : (
             <p className="text-2xs text-ink-meta">
@@ -1706,6 +1741,10 @@ export const ProjectDetailContextPanel = ({
           )}
         </AccordionSection>
       )}
+
+      {/* Uploaded files (session attachments) — sits between the automations
+          and knowledge-base sections. */}
+      {uploadedFilesSection}
 
       {/* Docs — KB tree or flat list (project-only) */}
       {showKbDocs && (
@@ -1753,7 +1792,7 @@ export const ProjectDetailContextPanel = ({
                   />
                 </div>
               )}
-              <div className="space-y-0">
+              <div className="-mr-3 max-h-[25vh] space-y-0 overflow-y-auto overflow-x-hidden pr-3">
                 {(() => {
                   // Precompute binding lookups so each KbTreeRow can
                   // resolve its checkbox state without re-walking the
