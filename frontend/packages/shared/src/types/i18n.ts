@@ -710,6 +710,7 @@ export type KnownI18nKey =
   | "cron.paused"
   | "cron.period"
   | "cron.recentExecutions"
+  | "cron.runNow"
   | "cron.runtime"
   | "cron.sat"
   | "cron.selectModel"

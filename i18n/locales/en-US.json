@@ -474,6 +474,7 @@
     "pauseSuccess": "Paused \"{name}\"",
     "paused": "Paused",
     "period": "Period",
+    "runNow": "Run Now",
     "recentExecutions": "Recent executions",
     "sat": "Sat",
     "runtime": "Runtime",

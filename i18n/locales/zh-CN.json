@@ -474,6 +474,7 @@
     "pauseSuccess": "「{name}」已暂停",
     "paused": "已暂停",
     "period": "执行周期",
+    "runNow": "运行测试",
     "recentExecutions": "最近执行",
     "sat": "周六",
     "runtime": "运行时",

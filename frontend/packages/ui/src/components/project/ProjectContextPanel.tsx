@@ -19,6 +19,9 @@ import {
   Plus,
   MoreHorizontal,
   FilePenLine,
+  Pause,
+  Play,
+  Power,
   Zap,
   RefreshCw,
   PanelRightOpen,
@@ -48,6 +51,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
@@ -284,6 +288,7 @@ export interface ProjectContextPanelProps {
   onEditScheduledTask?: (taskId: string) => void;
   onToggleScheduledTask?: (taskId: string, nextStatus: "on" | "off") => void;
   onDeleteScheduledTask?: (taskId: string) => void;
+  onRunScheduledTask?: (taskId: string) => void;
   onManageScheduledTasks?: () => void;
   fileTree?: FileTreeNode[];
   /** Section title for the file-tree accordion. Project projects use
@@ -894,6 +899,7 @@ export const ProjectDetailContextPanel = ({
   onEditScheduledTask,
   onToggleScheduledTask,
   onDeleteScheduledTask,
+  onRunScheduledTask,
   fileTree,
   fileTreeTitle,
   fileTreeInTab = false,
@@ -1685,36 +1691,63 @@ export const ProjectDetailContextPanel = ({
                             </DropdownMenuTrigger>
                             <DropdownMenuContent
                               align="end"
-                              className="min-w-[120px]"
+                              className="min-w-[140px]"
+                              onCloseAutoFocus={(e) => e.preventDefault()}
+                              // Portaled, but clicks still bubble through the
+                              // React tree to the row's onClick (which opens the
+                              // editor). Stop it so toggling pause/enable or
+                              // deleting doesn't also pop the edit dialog.
+                              onClick={(e) => e.stopPropagation()}
                             >
                               {onEditScheduledTask && (
                                 <DropdownMenuItem
-                                  onClick={() => onEditScheduledTask(task.id)}
+                                  onSelect={() => onEditScheduledTask(task.id)}
                                 >
+                                  <FilePenLine />
                                   {t("common.edit")}
                                 </DropdownMenuItem>
                               )}
                               {onToggleScheduledTask && (
                                 <DropdownMenuItem
-                                  onClick={() =>
+                                  onSelect={() =>
                                     onToggleScheduledTask(
                                       task.id,
                                       task.status === "on" ? "off" : "on",
                                     )
                                   }
                                 >
+                                  {task.status === "on" ? <Pause /> : <Power />}
                                   {task.status === "on"
-                                    ? t("project.disable")
+                                    ? t("cron.pause")
                                     : t("project.enable")}
                                 </DropdownMenuItem>
                               )}
-                              {onDeleteScheduledTask && (
+                              {onRunScheduledTask && (
                                 <DropdownMenuItem
-                                  variant="destructive"
-                                  onClick={() => onDeleteScheduledTask(task.id)}
+                                  disabled={task.status !== "on"}
+                                  onSelect={() => {
+                                    if (task.status === "on") {
+                                      onRunScheduledTask(task.id);
+                                    }
+                                  }}
                                 >
-                                  {t("common.delete")}
+                                  <Play />
+                                  {t("cron.runNow")}
                                 </DropdownMenuItem>
+                              )}
+                              {onDeleteScheduledTask && (
+                                <>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    onSelect={() =>
+                                      onDeleteScheduledTask(task.id)
+                                    }
+                                  >
+                                    <Trash2 />
+                                    {t("common.delete")}
+                                  </DropdownMenuItem>
+                                </>
                               )}
                             </DropdownMenuContent>
                           </DropdownMenu>
