@@ -33,29 +33,24 @@ async def test_list_runs_skips_a_session_that_fails_to_build(monkeypatch):
         SimpleNamespace(id="ok", status="running", created_at=2),
     ]
 
-    monkeypatch.setattr(svc_mod, "require_current_user_id", lambda: "u1")
     monkeypatch.setattr(
         svc_mod.project_index,
         "list_recent",
-        _async_return(
-            [SimpleNamespace(session_id=s.id, project_id="") for s in sessions]
-        ),
+        _async_return([SimpleNamespace(session_id=s.id, project_id="") for s in sessions]),
     )
-    monkeypatch.setattr(
-        svc_mod.kernel_client, "list_sessions", _async_return(sessions)
-    )
+    monkeypatch.setattr(svc_mod.kernel_client, "list_sessions", _async_return(sessions))
 
     store = _FakeStore()
     service = RunsService(store, store, store, store)
 
-    async def _fake_build(sess, *_a, **_k):
+    async def _fake_build(user_id, sess, *_a, **_k):
         if sess.id == "bad":
             raise ValueError("boom — malformed session")
         return SimpleNamespace(session_id=sess.id, updated_at=sess.created_at)
 
     service._build = _fake_build  # type: ignore[method-assign]
 
-    out = await service.list_runs(status="running")
+    out = await service.list_runs("u1", status="running")
 
     assert [r.session_id for r in out] == ["ok"]
 

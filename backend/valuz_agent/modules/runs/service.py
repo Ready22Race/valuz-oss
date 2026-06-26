@@ -26,7 +26,6 @@ from app.schemas import TodoItem
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel on sys.path
 from valuz_agent.adapters import kernel_client
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.modules.projects.datastore import ProjectDatastore
 from valuz_agent.modules.projects.models import ProjectRow
 from valuz_agent.modules.sessions import project_index
@@ -147,23 +146,23 @@ class RunsService:
         self._tasks = tasks
         self._task_events = task_events
 
-    async def list_runs(self, status: str = "running") -> list[RunSummary]:
+    async def list_runs(self, user_id: str, status: str = "running") -> list[RunSummary]:
         # Recent sessions come from the host project↔session index; the
         # kernel rows are bulk-fetched by id (the kernel itself is
         # project-agnostic).
         index_rows = await project_index.list_recent(limit=200)
         proj_by_session = {r.session_id: r.project_id for r in index_rows}
         sessions: list[KernelSession] = await kernel_client.list_sessions(
-            require_current_user_id(), ids=[r.session_id for r in index_rows], limit=200
+            user_id, ids=[r.session_id for r in index_rows], limit=200
         )
         ws_map: dict[str, ProjectRow] = {
-            str(r.id): r for r in await self._projects.list_projects(require_current_user_id())
+            str(r.id): r for r in await self._projects.list_projects(user_id)
         }
         ts_map: dict[str, TaskSessionRow] = {
-            r.session_id: r for r in await self._task_sessions.list_all(require_current_user_id())
+            r.session_id: r for r in await self._task_sessions.list_all(user_id)
         }
         task_map: dict[str, TaskRow] = {
-            str(r.id): r for r in await self._tasks.list_all(require_current_user_id(), limit=None)
+            str(r.id): r for r in await self._tasks.list_all(user_id, limit=None)
         }
 
         out: list[RunSummary] = []
@@ -182,6 +181,7 @@ class RunsService:
             # not blank the entire overview. Skip the offender, keep the rest.
             try:
                 summary = await self._build(
+                    user_id,
                     sess,
                     task_session,
                     ws_map,
@@ -216,6 +216,7 @@ class RunsService:
 
     async def _build(
         self,
+        user_id: str,
         sess: KernelSession,
         task_session: TaskSessionRow | None,
         ws_map: dict[str, ProjectRow],
@@ -239,12 +240,12 @@ class RunsService:
                 title = task.title
             # Tasks are described by their latest timeline event — the frontend
             # renders it the same way the task-detail timeline does.
-            last_event = await self._latest_task_event(task_id)
+            last_event = await self._latest_task_event(user_id, task_id)
         else:
             source = (
                 "project_chat" if project is not None and project.kind == "project" else "assistant"
             )
-            last_output = _truncate_output(await self._latest_assistant_text(sess.id))
+            last_output = _truncate_output(await self._latest_assistant_text(user_id, sess.id))
         return RunSummary(
             session_id=sess.id,
             source_kind=source,
@@ -263,21 +264,21 @@ class RunsService:
         )
 
     @staticmethod
-    async def _latest_assistant_text(session_id: str) -> str | None:
+    async def _latest_assistant_text(user_id: str, session_id: str) -> str | None:
         """Assistant output of the session's most recent run that produced any —
         the last round's content. Scans a few recent messages because the
         in-flight turn's message may not have its ``assistant_message`` set yet.
         """
-        messages = await kernel_client.list_messages(require_current_user_id(), session_id, limit=3)
+        messages = await kernel_client.list_messages(user_id, session_id, limit=3)
         for message in messages:  # most-recent first
             if message.assistant_message:
                 return str(message.assistant_message)
         return None
 
-    async def _latest_task_event(self, task_id: str | None) -> dict[str, Any] | None:
+    async def _latest_task_event(self, user_id: str, task_id: str | None) -> dict[str, Any] | None:
         if not task_id:
             return None
-        row = await self._task_events.latest_event(require_current_user_id(), task_id)
+        row = await self._task_events.latest_event(user_id, task_id)
         if row is None:
             return None
         return {"type": row.type, "payload": row.payload or {}}
