@@ -20,8 +20,13 @@ Boundary notes (§S0):
 # ruff: noqa: I001 — kernel_bootstrap side-effect import must precede ``from src.core``
 from __future__ import annotations
 
+import functools
 import logging
 import os
+import sys
+import threading
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import valuz_agent.boot.kernel  # noqa: F401 — ensure kernel sys.path
@@ -48,28 +53,146 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Goal-mode brief length guard
+# Goal-mode brief budget
 # ---------------------------------------------------------------------------
 #
-# The bundled Claude Code CLI inside ``claude_agent_sdk._bundled.claude`` caps
-# ``/goal <text>`` payloads at 4000 characters and rejects anything longer
-# with::
+# A goal-mode session feeds its brief into the bundled Claude Code CLI as a
+# ``/goal <text>`` payload. Two limits apply:
 #
-#     Goal condition is limited to 4000 characters (got NNNN)
+#   1. TOKEN budget (primary) — we keep a goal brief within ``GOAL_BRIEF_MAX_TOKENS``
+#      (~2000 tokens). Past that the goal is too heavy to drive a focused
+#      auto-loop, so the full text is spilled to a doc and only a short pointer
+#      rides ``/goal``.
+#   2. CHARACTER backstop (hard) — the CLI itself rejects ``/goal`` payloads over
+#      4000 chars ("Goal condition is limited to 4000 characters (got NNNN)").
+#      A token-light but char-heavy brief could pass the token budget yet still
+#      blow this cap, so ``GOAL_BRIEF_MAX_CHARS`` (3900, ~100 chars headroom for
+#      the ``/goal `` prefix + padding) is enforced regardless.
 #
-# That error surfaces mid-turn (after the session has been created, after
-# attachments are registered, after agents start spinning up) — by which
-# point the user sees an opaque crash, not a fixable input error.
-#
-# We pre-check inside ``build_member_session`` whenever ``goal_mode=True`` so
-# the failure is loud and immediate, with a friendly hint at the call site
-# that actually has the raw user prompt. The budget is 3900 — leaves ~100
-# chars of headroom for the ``/goal `` prefix and any future runtime padding.
-# Subjective hierarchy: a single number kept in one place, reusable from
-# tests, is preferable to a literal sprinkled across the 6 brief construction
-# sites in ``modules/tasks/orchestrator.py``.
+# ``goal_brief_exceeds_budget`` spills when EITHER limit is exceeded, so we honor
+# the token budget while never crashing the CLI mid-turn. Token counting uses the
+# OSS ``tiktoken`` BPE tokenizer (``o200k_base`` — already in the dependency
+# tree): the exact tokenizer for the codex runtime and a close open-source proxy
+# for Claude (no official Claude tokenizer ships for offline use). If tiktoken
+# can't load its vocab (offline packaged build), counting degrades to a
+# script-aware char heuristic so the fence never fails.
 
+GOAL_BRIEF_MAX_TOKENS: int = 2000
 GOAL_BRIEF_MAX_CHARS: int = 3900
+
+# OSS tokenizer vocabulary. ``o200k_base`` is the GPT-4o / codex BPE vocab — the
+# most modern tiktoken encoding and the best open-source proxy for Claude.
+_TOKEN_ENCODING_NAME = "o200k_base"
+
+
+def _vendored_tiktoken_cache_dir() -> str | None:
+    """Locate the vendored tiktoken vocab dir so the (offline) packaged app can
+    load the encoding without ever reaching the network.
+
+    tiktoken reads a cached vocab from ``$TIKTOKEN_CACHE_DIR/<sha1(blob_url)>``
+    before downloading. We ship that file under ``backend/vendor/tiktoken/`` and
+    point the env there. Priority: ``VALUZ_TIKTOKEN_CACHE_DIR`` override > the
+    frozen bundle (``_MEIPASS/vendor/tiktoken``, staged by the PyInstaller spec)
+    > the dev tree (``backend/vendor/tiktoken``). Returns None if none exist,
+    leaving tiktoken to its default (network) behavior.
+    """
+    env = os.environ.get("VALUZ_TIKTOKEN_CACHE_DIR")
+    if env and os.path.isdir(env):
+        return env
+    if getattr(sys, "frozen", False):
+        bundled = os.path.join(sys._MEIPASS, "vendor", "tiktoken")  # type: ignore[attr-defined]
+        if os.path.isdir(bundled):
+            return bundled
+    # Dev tree: this file is backend/valuz_agent/adapters/agent_resolver.py.
+    dev = Path(__file__).resolve().parents[2] / "vendor" / "tiktoken"
+    return str(dev) if dev.is_dir() else None
+
+
+@functools.lru_cache(maxsize=1)
+def _token_encoding() -> Any | None:
+    """Lazily load the OSS ``tiktoken`` encoding; return None if unavailable.
+
+    Points ``TIKTOKEN_CACHE_DIR`` at the vendored vocab first (so a packaged,
+    offline app loads it without network), unless the operator already set it.
+    Cached so the one-time load is paid once per process. Returns None — never
+    raises — when tiktoken or its vocab can't be loaded (e.g. an unvendored
+    offline build), letting ``estimate_tokens`` fall back to the heuristic.
+    Prefer ``prewarm_token_estimator`` at boot so this load is off the event loop.
+    """
+    try:
+        if not os.environ.get("TIKTOKEN_CACHE_DIR"):
+            cache_dir = _vendored_tiktoken_cache_dir()
+            if cache_dir:
+                os.environ["TIKTOKEN_CACHE_DIR"] = cache_dir
+
+        import tiktoken
+
+        return tiktoken.get_encoding(_TOKEN_ENCODING_NAME)
+    except Exception:  # noqa: BLE001 — any failure → heuristic fallback
+        logger.debug(
+            "tiktoken %s unavailable — goal token budget falls back to the char heuristic",
+            _TOKEN_ENCODING_NAME,
+            exc_info=True,
+        )
+        return None
+
+
+def prewarm_token_estimator() -> None:
+    """Warm the tiktoken encoding in a background daemon thread (best-effort).
+
+    The first ``tiktoken.get_encoding`` may fetch + parse the vocab (seconds);
+    doing it lazily on the first task would stall the event loop. Boot calls this
+    so the cache (or the None fallback) is ready before any task runs. Safe to
+    call repeatedly — the lru_cache makes the actual load run at most once.
+    """
+    threading.Thread(target=_token_encoding, name="tiktoken-prewarm", daemon=True).start()
+
+
+def _heuristic_tokens(text: str) -> int:
+    """Dependency-free token estimate used when tiktoken is unavailable.
+
+    Approximate by script: CJK ideographs / kana / hangul cost ~1 token each
+    (they rarely merge), and the remaining (mostly Latin/punctuation) text costs
+    ~1 token per 4 chars — the widely-used rough ratio. Conservative on purpose.
+    """
+
+    def _is_cjk(ch: str) -> bool:
+        return (
+            "一" <= ch <= "鿿"  # CJK Unified Ideographs
+            or "㐀" <= ch <= "䶿"  # CJK Extension A
+            or "぀" <= ch <= "ヿ"  # Hiragana + Katakana
+            or "가" <= ch <= "힣"  # Hangul syllables
+            or "豈" <= ch <= "﫿"  # CJK Compatibility Ideographs
+        )
+
+    cjk = sum(1 for ch in text if _is_cjk(ch))
+    other = len(text) - cjk
+    return cjk + (other + 3) // 4
+
+
+def estimate_tokens(text: str) -> int:
+    """Token count for the goal-mode budget.
+
+    Uses the OSS ``tiktoken`` ``o200k_base`` BPE tokenizer when available
+    (precise), falling back to a script-aware char heuristic offline. Arbitrary
+    user text is encoded with ``disallowed_special=()`` so literal ``<|...|>``
+    sequences are counted as plain text rather than raising.
+    """
+    if not text:
+        return 0
+    enc = _token_encoding()
+    if enc is not None:
+        try:
+            return len(enc.encode(text, disallowed_special=()))
+        except Exception:  # noqa: BLE001 — never let counting fail the fence
+            logger.debug("tiktoken encode failed — using heuristic", exc_info=True)
+    return _heuristic_tokens(text)
+
+
+def goal_brief_exceeds_budget(brief: str) -> bool:
+    """True when ``brief`` is too long to ride a ``/goal`` payload — over the
+    token budget OR the hard character backstop (see module comment)."""
+    return estimate_tokens(brief) > GOAL_BRIEF_MAX_TOKENS or len(brief) > GOAL_BRIEF_MAX_CHARS
 
 
 class BriefTooLongError(ValueError):
@@ -94,13 +217,85 @@ class BriefTooLongError(ValueError):
 def assert_goal_brief_length(brief: str, *, limit: int = GOAL_BRIEF_MAX_CHARS) -> None:
     """Raise ``BriefTooLongError`` when ``brief`` exceeds the goal-mode cap.
 
-    Pure — no side effects. Callers that need the friendly error at task
-    *creation* time (chat draft/commit), before any session is built, can
-    call this directly with the user's prompt.
+    Pure — no side effects. Retained as a public predicate; the task pipeline
+    no longer raises on a long goal — it *spills* it to a doc instead (see
+    ``spill_goal_brief_if_too_long``). Kept for callers/tests that want the
+    bare length assertion.
     """
     n = len(brief)
     if n > limit:
         raise BriefTooLongError(length=n, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Goal-mode brief spill — the fence that replaces the hard length error.
+# ---------------------------------------------------------------------------
+#
+# Instead of failing an over-long task goal / subtask brief mid-turn, we LAND the
+# full brief in a doc under the session's working dir and hand ``/goal`` only a
+# short pointer that tells the agent to read that doc first. Goal mode then
+# auto-loops against a brief that always fits the budget, while the full goal +
+# refs + acceptance criteria live in a file every agent (lead or member) can
+# read. The spill triggers on ``goal_brief_exceeds_budget`` (token budget OR the
+# hard char backstop).
+#
+# This is a Lead-facing concern (the lead drives the whole task goal AND writes
+# each subtask's goal), so the lead playbooks flag both directions: a goal may
+# arrive as a doc pointer to read, and an over-long subtask goal should be
+# written to a file with only its path dispatched.
+
+
+def _goal_brief_pointer(doc_path: str, *, is_lead: bool) -> str:
+    """Build the short ``/goal`` pointer that stands in for a spilled brief."""
+    noun = "任务" if is_lead else "子任务"
+    return (
+        f"本{noun}的完整目标内容较长(超出 {GOAL_BRIEF_MAX_TOKENS} token 预算),已落地为"
+        f"文档,无法直接作为 goal 条件传入。\n\n"
+        f"请先用文件读取工具完整阅读下面这份文档——它包含本{noun}的完整目标、参考资料"
+        f"与验收标准——然后据此开展工作,直到达成其中描述的目标:\n\n"
+        f"{doc_path}"
+    )
+
+
+def spill_goal_brief_if_too_long(
+    brief: str,
+    *,
+    run_dir: str | Path,
+    task_id: str,
+    label: str,
+    is_lead: bool,
+) -> str:
+    """Return ``brief`` unchanged when it fits the goal-mode budget; otherwise
+    spill the full text to a doc under ``run_dir`` and return a short pointer.
+
+    "Fits the budget" = within ``GOAL_BRIEF_MAX_TOKENS`` AND the hard char
+    backstop (see ``goal_brief_exceeds_budget``). Call this at every site that
+    feeds a brief into a goal-mode session (i.e. the ``/goal`` payload): task
+    kickoff/commit (lead), dispatch (member), and recovery re-injection.
+    Idempotent against an already-spilled (short) brief — one within budget is
+    returned verbatim and no file is written, so it is safe to call both at the
+    caller (to fence the initial prompt) and as defense-in-depth inside
+    ``build_member_session`` (to fence the embedded instructions) without
+    double-writing.
+
+    Only the file write touches disk; the path comes from ``FsRegistry`` (which
+    never writes content), keeping the single-write-registry rule intact.
+    """
+    if not goal_brief_exceeds_budget(brief):
+        return brief
+    from valuz_agent.infra.fs_registry import fs_registry
+
+    doc_path = fs_registry.task_brief_path(run_dir, task_id, label)
+    doc_path.write_text(brief, encoding="utf-8")
+    logger.info(
+        "goal brief spilled to doc (~%d tokens / %d chars > budget): task=%s label=%s -> %s",
+        estimate_tokens(brief),
+        len(brief),
+        task_id,
+        label,
+        doc_path,
+    )
+    return _goal_brief_pointer(str(doc_path), is_lead=is_lead)
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +307,21 @@ DISPATCH_PLAYBOOK = """\
 ## Dispatch Playbook (lead session only)
 
 You are the lead for this Task. Drive the WHOLE task in this one turn —
-dispatch, collect, review, repeat — until you call finish_task. Protocol:
+dispatch, collect, review, repeat — until you call finish_task.
+
+NOTE — the goal-mode length budget (~2000 tokens per goal). Two directions:
+  • RECEIVING: if THIS task's goal was too long to pass inline you'll get a
+    short pointer to a doc file instead of the full goal — read that doc FIRST
+    (file-read tool) for the complete goal / references / criteria before you
+    plan.
+  • DISPATCHING: keep each subtask's `goal` concise. When a subtask needs a lot
+    of context or instructions (over ~2000 tokens), FIRST write that content to
+    a file in the project (e.g. tasks/_briefs/<name>.md) and put the FILE PATH
+    in the subtask `goal` (or in refs) — do NOT inline a huge goal. (Over-long
+    goals are auto-spilled to a doc as a safety net, but writing the file
+    yourself keeps the plan readable and the member focused.)
+
+Protocol:
 
 1. PLAN FIRST. Decompose the goal into a structured subtask plan and record it
    with plan_task(subtasks=[{key, title, goal, agent, review_criteria,
@@ -183,7 +392,19 @@ COMMITTED_LEAD_PLAYBOOK = """\
 You are the lead for this Task. Your plan was ALREADY laid down and approved
 by the user during a chat draft session — DO NOT call plan_task (the handler
 will reject it because the plan is non-empty). Drive execution in this one
-turn until finish_task. Protocol:
+turn until finish_task.
+
+NOTE — the goal-mode length budget (~2000 tokens per goal). Two directions:
+  • RECEIVING: if THIS task's goal was too long to pass inline you'll get a
+    short pointer to a doc file instead of the full goal — read that doc FIRST
+    (file-read tool) for the complete goal / references / criteria.
+  • DISPATCHING / modify_plan: keep each subtask's `goal` concise. When a
+    subtask needs a lot of context (over ~2000 tokens), FIRST write it to a
+    file in the project and put the FILE PATH in the subtask `goal` (or refs)
+    — do NOT inline a huge goal. (Over-long goals are auto-spilled as a safety
+    net, but writing the file yourself keeps the plan readable.)
+
+Protocol:
 
 1. READ THE PLAN. Start by calling get_plan() to see the committed subtask
    DAG: each node carries a stable `key`, target `agent`, dependencies, and
@@ -384,7 +605,6 @@ def summarize_role(instructions: str | None) -> str:
     if len(flat) <= ROLE_SUMMARY_LIMIT:
         return flat
     return flat[:ROLE_SUMMARY_LIMIT].rstrip() + "…"
-
 
 
 async def _member_agent_config(member, members: ProjectMemberDatastore):  # noqa: ANN001, ANN202
@@ -632,12 +852,21 @@ async def build_member_session(
         )
         return None
 
-    # Goal-mode payload guard (see ``assert_goal_brief_length`` docstring).
-    # Only enforced for runtimes whose kernel wrap_for_mode actually prepends
-    # ``/goal `` — claude_agent + codex. deepagents bypasses the slash wrap
-    # so a long brief isn't a CLI-level failure there.
+    # Goal-mode payload fence (see ``spill_goal_brief_if_too_long``). Only the
+    # runtimes whose kernel wrap_for_mode prepends ``/goal `` (claude_agent +
+    # codex) are capped; deepagents bypasses the slash wrap so a long brief is
+    # not a CLI-level failure there. Defense-in-depth: callers spill the brief
+    # they also use as the initial ``/goal`` prompt, so by here ``brief`` is
+    # already short and this is a no-op — but if a path forgets, this fences the
+    # brief embedded into the session instructions.
     if goal_mode and agent.runtime_provider in ("claude_agent", "codex"):
-        assert_goal_brief_length(brief)
+        brief = spill_goal_brief_if_too_long(
+            brief,
+            run_dir=run_dir,
+            task_id=task_id,
+            label=agent_slug,
+            is_lead=is_lead,
+        )
 
     # Build the instructions string (§S3 point ③)
     project_prompt = build_project_system_prompt(
@@ -657,9 +886,7 @@ async def build_member_session(
         else:
             playbook_block = DISPATCH_PLAYBOOK_V2 if dispatch_mode == "async" else DISPATCH_PLAYBOOK
     roster_block = (
-        await build_member_roster(
-            project_id=project_id, members=members, exclude_slug=agent_slug
-        )
+        await build_member_roster(project_id=project_id, members=members, exclude_slug=agent_slug)
         if is_lead
         else ""
     )
@@ -762,9 +989,7 @@ async def build_member_session(
     # servers (docs / schedules / connectors) must be injected here. Generate
     # the session id up front so it can scope those servers' request headers.
     session_id = uuid4().hex
-    builtin_mcp = always_on_http_mcp_servers(
-        session_id, toolkit="lead" if is_lead else "base"
-    )
+    builtin_mcp = always_on_http_mcp_servers(session_id, toolkit="lead" if is_lead else "base")
     # De-dupe by name in case the agent's own mcp_servers already carry a
     # reserved ``valuz_*`` name (shouldn't, but keep injection idempotent).
     existing_names = {getattr(m, "name", None) for m in (agent.mcp_servers or ())}

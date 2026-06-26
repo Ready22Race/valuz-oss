@@ -59,6 +59,7 @@
     "execStatusErr": "执行失败",
     "execStatusPending": "等待中",
     "execStatusSkip": "已跳过",
+    "execTriggerAgent": "智能体",
     "execTriggerCron": "定时",
     "execTriggerInterval": "间隔",
     "execTriggerManual": "手动",

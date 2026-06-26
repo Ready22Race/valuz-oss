@@ -268,6 +268,7 @@ I18nKey = Literal[
     "automation.execStatusOk",
     "automation.execStatusPending",
     "automation.execStatusSkip",
+    "automation.execTriggerAgent",
     "automation.execTriggerCron",
     "automation.execTriggerInterval",
     "automation.execTriggerManual",

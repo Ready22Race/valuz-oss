@@ -129,21 +129,23 @@ async def refresh_always_on_mcp_for_session(session_id: str) -> bool:
 
     Why this exists
     ---------------
-    ``settings.internal_mcp_token`` is generated **per process** and is baked
-    into every always-on ``McpHttpServerConfig`` header at session create-time
-    (``capability_resolver.always_on_http_mcp_servers``). It is not stable
-    across restarts. A session created before a backend restart therefore
-    carries a *stale* ``X-Valuz-Internal``; when the turn resumes, the
-    in-process MCP gate 403s every request and Claude Code parks the server in
-    ``needsAuth`` — hiding the real tools (``automation`` / ``doc_search`` /
-    ``create_mcp``) and exposing only its synthetic OAuth ``authenticate`` /
-    ``complete_authentication`` stubs. The agent then "needs OAuth" for a
-    server that never used OAuth.
+    The always-on ``McpHttpServerConfig`` headers carry ``X-Valuz-Internal``
+    (``settings.internal_mcp_token``) + ``backend_base_url`` + ``session_id``,
+    baked at session create-time (``capability_resolver.always_on_http_mcp_servers``).
+    Historically ``internal_mcp_token`` was a per-process RANDOM secret, so a
+    session created before a backend restart carried a *stale* token; on resume
+    the in-process MCP gate 403'd every request and Claude Code parked the server
+    in ``needsAuth`` — hiding the real tools (``automation`` / ``doc_search`` /
+    ``create_mcp``, and for a lead the whole orchestration set) and exposing only
+    synthetic OAuth stubs. The token is now DERIVED from the stable local owner
+    id (``config.internal_mcp_token``) so it no longer rotates across restarts —
+    but the ``backend_base_url`` / ``session_id`` can still drift (port change,
+    legacy rows), and an ``internal_mcp_token_override`` change still needs
+    convergence, so this re-stamp stays as cheap, idempotent self-healing.
 
-    Re-stamping the always-on trio on every turn keeps the token in-memory
-    while letting this derived state self-heal: the persisted headers are
-    rewritten with the live token + ``backend_base_url`` + ``session_id``,
-    preserving any user-attached external MCP entries untouched.
+    Re-stamping the always-on trio on every turn rewrites the persisted headers
+    with the live values, preserving any user-attached external MCP entries
+    untouched.
 
     Returns ``True`` when the session row actually changed (i.e. something was
     stale), ``False`` when the always-on set already matched (the common case,

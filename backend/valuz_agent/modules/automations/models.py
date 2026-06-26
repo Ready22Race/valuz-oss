@@ -105,8 +105,10 @@ class AutomationRunRow(Base, PrimaryKeyMixin, UserMixin):
 
     automation_id: Mapped[str] = mapped_column(String(36), index=True)
     project_id: Mapped[str] = mapped_column(String(36))
-    # ``cron`` / ``interval`` / ``manual`` / ``recovered_skip`` today;
-    # ``webhook`` enum value reserved for the follow-up ADR.
+    # ``cron`` / ``interval`` (scheduled) · ``manual`` (human "Run now")
+    # · ``agent`` (agent fired it via the ``automation`` MCP tool) ·
+    # ``recovered_skip`` / ``system`` (bookkeeping) today; ``webhook`` enum
+    # value reserved for the follow-up ADR.
     trigger_type: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), default="queued")
     triggered_at: Mapped[int] = mapped_column(BigInteger)

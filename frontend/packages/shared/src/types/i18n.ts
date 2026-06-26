@@ -262,6 +262,7 @@ export type KnownI18nKey =
   | "automation.execStatusOk"
   | "automation.execStatusPending"
   | "automation.execStatusSkip"
+  | "automation.execTriggerAgent"
   | "automation.execTriggerCron"
   | "automation.execTriggerInterval"
   | "automation.execTriggerManual"

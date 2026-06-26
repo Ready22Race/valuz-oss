@@ -48,6 +48,7 @@ from valuz_agent.adapters.agent_resolver import (
     _member_agent_config,
     build_member_session,
     embed_agent_config,
+    spill_goal_brief_if_too_long,
 )
 from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
@@ -140,17 +141,11 @@ class LifecycleService:
 
         Returns the newly created TaskRow.
 
-        Raises ``BriefTooLongError`` (subclass of ValueError) when ``goal``
-        exceeds the goal-mode payload cap — surfaced here BEFORE any DB write
-        so the user gets a clean error in chat instead of a mid-turn crash.
+        An over-long ``goal`` is no longer rejected: the lead brief is *spilled*
+        to a doc and the lead receives a short pointer to read (see
+        ``spill_goal_brief_if_too_long``), so a long goal never crashes the
+        ``/goal`` payload mid-turn.
         """
-        # Goal-mode brief cap. ``build_member_session`` enforces this too as
-        # defense-in-depth, but checking here means failures surface before
-        # we write any rows / spin up sessions.
-        from valuz_agent.adapters.agent_resolver import assert_goal_brief_length
-
-        assert_goal_brief_length(goal)
-
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
@@ -236,6 +231,16 @@ class LifecycleService:
             # context. (deepagents fallback sends the brief unwrapped, where a
             # bare goal + refs is still clear.)
             lead_brief = goal + (f"\n\n## References\n\n{refs_text}" if refs_text else "")
+            # Fence the goal-mode payload: if the lead brief is over the ``/goal``
+            # cap, spill it to a doc and pass the lead a short pointer instead
+            # (used both as the embedded brief and the initial ``/goal`` prompt).
+            lead_brief = spill_goal_brief_if_too_long(
+                lead_brief,
+                run_dir=lead_cwd,
+                task_id=task_id,
+                label=lead_agent_slug,
+                is_lead=True,
+            )
 
             # Fetch project instructions for system prompt
             from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
@@ -389,17 +394,11 @@ class LifecycleService:
         committing.
 
         Raises ``ValueError`` if the project doesn't exist or the agent isn't
-        a member of it (same validations as ``kickoff``). Raises
-        ``BriefTooLongError`` (subclass of ValueError) when ``goal`` exceeds
-        the goal-mode payload cap — fails before any DB write so the chat
-        user sees a clean error before the draft row is created.
+        a member of it (same validations as ``kickoff``). An over-long ``goal``
+        is accepted as-is: the draft only stores the goal text — when
+        ``commit_task`` builds the lead session it spills an over-cap brief to a
+        doc and passes a pointer (see ``spill_goal_brief_if_too_long``).
         """
-        # Same goal-mode brief cap as ``kickoff``. Catching it here means a
-        # draft with an over-long goal never enters the DB at all.
-        from valuz_agent.adapters.agent_resolver import assert_goal_brief_length
-
-        assert_goal_brief_length(goal)
-
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
@@ -561,6 +560,16 @@ class LifecycleService:
                 f"## Plan Summary (already committed; do not re-plan)\n\n"
                 f"{plan_summary_lines}\n"
                 + (f"\n## References\n\n{refs_text}\n" if refs_text else "")
+            )
+            # Fence the goal-mode payload: spill an over-cap committed brief to a
+            # doc and hand the lead a short pointer (used as both the embedded
+            # brief and the initial ``/goal`` prompt below).
+            lead_brief = spill_goal_brief_if_too_long(
+                lead_brief,
+                run_dir=lead_cwd,
+                task_id=task_id,
+                label=lead_slug,
+                is_lead=True,
             )
 
             from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
@@ -1031,8 +1040,7 @@ class LifecycleService:
                                     key,
                                     status="rework",
                                     review_feedback=(
-                                        manifest.get("summary")
-                                        or "上次运行因错误中断,请重试。"
+                                        manifest.get("summary") or "上次运行因错误中断,请重试。"
                                     ),
                                 )
                                 task_row.plan = plan.to_dict()

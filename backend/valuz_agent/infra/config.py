@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 from typing import Literal
 
@@ -77,10 +78,13 @@ class Settings(BaseSettings):
     # edition that ships under a different scheme.
     deep_link_protocol: str = "valuz-oss"
 
-    # Shared secret the docs MCP server checks against the
-    # ``X-Valuz-Internal`` header. Generated per process; effectively
-    # localhost-only since the URL never leaves the box, but it's a cheap
-    # extra defence against accidental cross-origin leakage.
+    # Explicit override for the shared secret guarding the internal MCP
+    # endpoints (the ``X-Valuz-Internal`` header). When unset the token is
+    # DERIVED from the stable local owner id (see ``internal_mcp_token``) so it
+    # survives process restarts. Set this (env
+    # ``VALUZ_INTERNAL_MCP_TOKEN_OVERRIDE``) to pin an explicit value. It's a
+    # localhost-only guard against cross-origin / cross-user access to the
+    # host's internal MCP tools.
     internal_mcp_token_override: str | None = None
 
     # Hard cap on attachments per session — counts local uploads and
@@ -211,20 +215,26 @@ class Settings(BaseSettings):
 
     @property
     def internal_mcp_token(self) -> str:
-        """Per-process token for the in-process docs MCP server.
+        """Shared secret gating the host's internal MCP endpoints
+        (``/internal/mcp/*``), sent in the ``X-Valuz-Internal`` header.
 
-        Lazily generated so tests can monkey-patch
-        ``internal_mcp_token_override`` deterministically. The token is
-        kept in memory only — never persisted, never logged in full.
+        Derived deterministically from the stable local install owner id so it
+        survives process restarts. Sessions bake this token into their stored
+        ``mcp_servers`` headers, and the recovery/resume path replays those
+        stored sessions — a per-boot random token would 403 every pre-restart
+        session's internal-MCP calls (harness / docs / automations /
+        connectors), breaking task recovery. ``internal_mcp_token_override``
+        (env ``VALUZ_INTERNAL_MCP_TOKEN_OVERRIDE``) still takes precedence for
+        tests and explicit configuration.
         """
-        global _RUNTIME_TOKEN
         if self.internal_mcp_token_override:
             return self.internal_mcp_token_override
-        if _RUNTIME_TOKEN is None:
-            import secrets
+        # Lazy import avoids a config <-> local_identity import cycle
+        # (local_identity imports ``settings``).
+        from valuz_agent.infra.local_identity import resolve_local_user_id
 
-            _RUNTIME_TOKEN = secrets.token_urlsafe(24)
-        return _RUNTIME_TOKEN
+        owner = resolve_local_user_id()
+        return hashlib.sha256(b"valuz-internal-mcp\x00" + owner.encode("utf-8")).hexdigest()
 
     # ── User-facing project root ───────────────────────────────────
     # Base directory for user-visible projects (not hidden).
@@ -257,5 +267,4 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "VALUZ_"}
 
 
-_RUNTIME_TOKEN: str | None = None
 settings = Settings()

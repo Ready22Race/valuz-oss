@@ -31,6 +31,12 @@ dependencies = [
     # without the fix.
     "deepagents>=0.5.5",
     "langchain-openai>=1.2.1",
+    # OSS BPE tokenizer for the goal-mode length fence (adapters/agent_resolver
+    # ``estimate_tokens``): counts a task/subtask goal in tokens to decide when to
+    # spill it to a doc. Arrives transitively via langchain-openai too, but the
+    # host imports it directly so we declare it explicitly. Counting degrades to a
+    # char heuristic if the vocab can't load (offline packaged build).
+    "tiktoken>=0.7",
     # Loaded by the kernel's DeepAgentsRuntime when a session pairs
     # ``runtime_provider="deepagents"`` with ``api_protocol="anthropic"``.
     # Valuz today maps anthropic→claude_agent (not deepagents), so this
