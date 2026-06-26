@@ -130,7 +130,7 @@ class StubService:
         self._record("delete", automation_id=automation_id)
         self._rows.pop(automation_id, None)
 
-    async def run_now(self, automation_id, *, trigger_type="manual"):  # type: ignore[no-untyped-def]
+    async def run_now(self, automation_id, *, trigger_type="manual", invoked_by_session_id=None):  # type: ignore[no-untyped-def]
         self._record("run_now", automation_id=automation_id, trigger_type=trigger_type)
         return type("Run", (), {"run_id": f"run-{automation_id}"})()
 
@@ -609,9 +609,7 @@ class TestScopeAndCrossProject:
         assert decoded["ok"] is True
         assert decoded["action"] == "run"
         run_calls = [c for c in stub_service.calls if c[0] == "run_now"]
-        assert run_calls == [
-            ("run_now", {"automation_id": "auto-run", "trigger_type": "agent"})
-        ]
+        assert run_calls == [("run_now", {"automation_id": "auto-run", "trigger_type": "agent"})]
 
 
 # ── Decorated ``automation`` thin wrapper trigger coercion ─────────
@@ -706,12 +704,8 @@ def patched_resolver(monkeypatch: pytest.MonkeyPatch):
             return None
 
     monkeypatch.setattr(mod, "require_current_user_id", lambda: "user-1")
-    monkeypatch.setattr(
-        "valuz_agent.adapters.kernel_client.get_session", _fake_get_session
-    )
-    monkeypatch.setattr(
-        "valuz_agent.infra.db.async_unit_of_work", lambda commit=True: _UoW()
-    )
+    monkeypatch.setattr("valuz_agent.adapters.kernel_client.get_session", _fake_get_session)
+    monkeypatch.setattr("valuz_agent.infra.db.async_unit_of_work", lambda commit=True: _UoW())
     monkeypatch.setattr(
         "valuz_agent.modules.projects.datastore.ProjectDatastore",
         _FakeProjectDatastore,
@@ -727,9 +721,7 @@ class TestResolveSessionContext:
             user_id="user-1",
             metadata={"valuz": {"project_id": "ws-42", "agent_slug": "qa"}},
         )
-        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context(
-            "sess-1"
-        )
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context("sess-1")
         assert project_id == "ws-42"
         assert project_kind == "project"
         assert bound_agent_slug == "qa"
@@ -741,9 +733,7 @@ class TestResolveSessionContext:
             user_id="user-1",
             metadata={"valuz": {"agent_slug": "default-assistant"}},
         )
-        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context(
-            "sess-1"
-        )
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context("sess-1")
         assert project_id is None
         assert project_kind == "chat"
         assert bound_agent_slug == "default-assistant"

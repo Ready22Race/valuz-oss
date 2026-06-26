@@ -29,6 +29,10 @@ export interface ExecutionLogRow {
    *  produced a session yet (queued / running but pre-spawn,
    *  ``recovered_skip``). The link is suppressed when null. */
   sessionId?: string | null;
+  /** Title of the Task this run spawned (task-action automations only).
+   *  Rendered as a "→ 任务《title》" line so the user sees which task the
+   *  automation produced. ``null`` for chat-action / non-task runs. */
+  taskTitle?: string | null;
 }
 
 export interface ExecutionLogProps {
@@ -124,6 +128,18 @@ export const ExecutionLog = ({ rows, onSessionClick }: ExecutionLogProps) => {
                       {labelForTrigger(row.triggerType)}
                     </span>
                   </div>
+
+                  {row.taskTitle ? (
+                    <div
+                      className="mt-1 truncate text-[11px] text-ink-meta"
+                      title={row.taskTitle}
+                    >
+                      {"→ "}
+                      {t("automation.spawnedTask" as Parameters<typeof t>[0], {
+                        title: row.taskTitle,
+                      })}
+                    </div>
+                  ) : null}
 
                   {output && output !== "—" ? (
                     <div

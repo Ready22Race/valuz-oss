@@ -611,6 +611,7 @@ export const AutomationPage = () => {
         : undefined,
     taskName: run.automation_name,
     sessionId: run.session_id,
+    taskTitle: run.task_title,
   }));
 
   // ── Render ──────────────────────────────────────────────────────

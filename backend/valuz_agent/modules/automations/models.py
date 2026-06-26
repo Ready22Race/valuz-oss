@@ -88,9 +88,7 @@ class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # rows created from the UI (no proposing tool call). Indexed so a session
     # reload can map historical proposing tool-calls → their created rows and
     # show "already added" instead of a fresh Confirm button.
-    origin_tool_call_id: Mapped[str | None] = mapped_column(
-        String(128), nullable=True, index=True
-    )
+    origin_tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
     # ── Schedule state ────────────────────────────────────────────────
     status: Mapped[str] = mapped_column(String(32), default="enabled")
@@ -123,3 +121,8 @@ class AutomationRunRow(Base, PrimaryKeyMixin, UserMixin):
     error_message: Mapped[str | None] = mapped_column(Text)
     session_id: Mapped[str | None] = mapped_column(String(36))
     created_files: Mapped[str | None] = mapped_column(Text)
+    # The session that asked for this run, when an AGENT invoked the automation
+    # via the MCP tool (trigger_type="agent"). Lets a task spawned by this run
+    # chain its provenance back to the originating task (transitive
+    # task→automation→task nesting). NULL for cron/interval/manual runs.
+    invoked_by_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

@@ -1,5 +1,6 @@
 {
   "automation": {
+    "spawnedTask": "任务「{title}」",
     "actionCreate": "创建自动化",
     "actionKindChat": "简单任务",
     "actionKindChatHint": "每次触发执行一次智能体对话。",
@@ -2065,6 +2066,10 @@
     }
   },
   "task": {
+    "triggeredByChat": "由对话触发",
+    "triggeredByTask": "由任务「{title}」· {agent} 触发",
+    "triggeredByTaskNoAgent": "由任务「{title}」触发",
+    "triggeredByAutomation": "由自动化「{name}」触发",
     "title": "任务",
     "untitled": "未命名任务",
     "subtitle": "在该项目中运行的 Lead 派发任务。",

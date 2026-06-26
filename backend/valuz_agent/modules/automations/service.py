@@ -276,7 +276,8 @@ class AutomationService:
 
     @staticmethod
     def _run_to_item(
-        row: AutomationRunRow, task_status: str | None = None
+        row: AutomationRunRow,
+        task_link: tuple[str, str, str] | None = None,
     ) -> AutomationRunItemResponse:
         created_files: list[str] = []
         if row.created_files:
@@ -284,6 +285,7 @@ class AutomationService:
                 created_files = json.loads(row.created_files)
             except (json.JSONDecodeError, TypeError):
                 pass
+        task_id, task_title, task_status = task_link or (None, None, None)
         return AutomationRunItemResponse(
             run_id=row.id,
             automation_id=row.automation_id,
@@ -299,6 +301,11 @@ class AutomationService:
             error_message_key=row.error_message_key,
             session_id=row.session_id,
             created_files=created_files,
+            # The spawned task (task-action automations): id + title deep-link to
+            # it; status is its *live* outcome (the run row froze to success at
+            # kickoff, but the lead may run for hours after).
+            task_id=task_id,
+            task_title=task_title,
             task_status=task_status,
         )
 
@@ -696,9 +703,7 @@ class AutomationService:
     async def confirmed_origin_map(self, tool_call_ids: list[str]) -> dict[str, str]:
         """Map each already-confirmed proposing ``tool_call_id`` → its created
         automation id (owner-scoped). Backs the proposal re-entry status route."""
-        rows = await self._ds.list_by_origin_tool_call_ids(
-            require_current_user_id(), tool_call_ids
-        )
+        rows = await self._ds.list_by_origin_tool_call_ids(require_current_user_id(), tool_call_ids)
         return {r.origin_tool_call_id: r.id for r in rows if r.origin_tool_call_id}
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -875,6 +880,7 @@ class AutomationService:
         automation_id: str,
         *,
         trigger_type: Literal["manual", "agent"] = "manual",
+        invoked_by_session_id: str | None = None,
     ) -> AutomationRunAcceptedResponse:
         """Enqueue an immediate, off-schedule run for this automation.
 
@@ -919,6 +925,7 @@ class AutomationService:
             trigger_type=trigger_type,
             status="queued",
             triggered_at=now,
+            invoked_by_session_id=invoked_by_session_id,
         )
         await self._ds.create_run(require_current_user_id(), run)
         self._bus.publish(
@@ -942,20 +949,19 @@ class AutomationService:
             require_current_user_id(), automation_id, limit=limit, cursor=cursor
         )
         # Task automations: the run row freezes to ``success`` at kickoff, so
-        # resolve each lead session's live task status and let the client show
-        # that instead. Batched to avoid an N+1 over the runs page.
-        task_status_by_session = await self._resolve_task_statuses(runs)
+        # resolve each lead session's spawned task (id + title + live status) and
+        # let the client deep-link to it. Batched to avoid an N+1 over the page.
+        task_link_by_session = await self._resolve_task_links(runs)
         return [
-            self._run_to_item(
-                r, task_status_by_session.get(r.session_id) if r.session_id else None
-            )
+            self._run_to_item(r, task_link_by_session.get(r.session_id) if r.session_id else None)
             for r in runs
         ]
 
-    async def _resolve_task_statuses(
+    async def _resolve_task_links(
         self, runs: list[AutomationRunRow]
-    ) -> dict[str, str]:
-        """Map each run's lead ``session_id`` → its task's current status.
+    ) -> dict[str, tuple[str, str, str]]:
+        """Map each run's lead ``session_id`` → ``(task_id, title, status)`` of
+        its spawned task.
 
         Returns ``{}`` when no run carries a session id (e.g. conversation
         automations), avoiding the tasks-datastore round trip entirely.
@@ -965,7 +971,7 @@ class AutomationService:
             return {}
         from valuz_agent.modules.tasks.datastore import TaskSessionDatastore
 
-        return await TaskSessionDatastore(self._db).get_task_status_by_session_ids(
+        return await TaskSessionDatastore(self._db).get_task_links_by_session_ids(
             require_current_user_id(), session_ids
         )
 

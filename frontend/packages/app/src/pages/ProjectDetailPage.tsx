@@ -35,6 +35,7 @@ import {
 } from "@valuz/app/components";
 import {
   FilePenLine,
+  ChevronRight,
   ListChecks,
   MessageSquare,
   Plus,
@@ -279,6 +280,31 @@ function taskStatusLabel(
     : task.status;
 }
 
+/** "由 … 触发" provenance line under a task title; null for direct user actions. */
+function taskTriggerLabel(
+  task: Task,
+  t: ReturnType<typeof useTranslation>["t"],
+): string | null {
+  const trig = task.trigger;
+  if (!trig) return null;
+  const k = (key: string) => key as Parameters<typeof t>[0];
+  switch (trig.type) {
+    case "automation":
+      return t(k("task.triggeredByAutomation"), { name: trig.source_automation_name ?? "…" });
+    case "agent":
+      return trig.source_agent_slug
+        ? t(k("task.triggeredByTask"), {
+            title: trig.source_task_title ?? "…",
+            agent: trig.source_agent_slug,
+          })
+        : t(k("task.triggeredByTaskNoAgent"), { title: trig.source_task_title ?? "…" });
+    case "chat":
+      return t(k("task.triggeredByChat"));
+    default:
+      return null; // "user" → no provenance line
+  }
+}
+
 interface ProjectTasksProps {
   tasks: Task[];
   onOpen: (taskId: string) => void;
@@ -287,6 +313,32 @@ interface ProjectTasksProps {
 
 const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
   const { t } = useTranslation();
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  // Build the agent (task→task) dependency tree from the flat list: a task
+  // triggered by another task that is also in the list nests UNDER that parent.
+  // Everything else — chat / automation / user, or an agent-child whose parent
+  // isn't loaded — stays a root and keeps its flat "由 … 触发" line.
+  const { roots, childrenOf } = useMemo(() => {
+    const present = new Set(tasks.map((tk) => tk.id));
+    const kids = new Map<string, Task[]>();
+    const rootList: Task[] = [];
+    for (const tk of tasks) {
+      // Nest under the originating task whenever one is recorded — directly
+      // (agent create_task) OR transitively (an agent ran an automation that
+      // spawned this task; trigger.type stays "automation" but source_task_id
+      // points at the task whose agent invoked it).
+      const parentId = tk.trigger?.source_task_id ?? null;
+      if (parentId && present.has(parentId)) {
+        const arr = kids.get(parentId) ?? [];
+        arr.push(tk);
+        kids.set(parentId, arr);
+      } else {
+        rootList.push(tk);
+      }
+    }
+    return { roots: rootList, childrenOf: kids };
+  }, [tasks]);
 
   if (tasks.length === 0) {
     return (
@@ -302,27 +354,70 @@ const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
     );
   }
 
-  return (
-    <ul className="flex flex-col">
-      {tasks.map((task) => (
-        <li key={task.id}>
+  const toggle = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const renderNode = (task: Task, depth: number) => {
+    const kids = childrenOf.get(task.id) ?? [];
+    const hasKids = kids.length > 0;
+    const isCollapsed = collapsed.has(task.id);
+    // Flat provenance line: always on roots; and keep the "由自动化…" line even
+    // when nested (it explains HOW the parent task spawned this — via the
+    // automation). Suppress the redundant "由任务…" on nested agent children
+    // (the nesting itself already conveys the parent).
+    const flatLabel =
+      depth === 0 || task.trigger?.type === "automation"
+        ? taskTriggerLabel(task, t)
+        : null;
+    return (
+      <li key={task.id}>
+        <div className="flex items-center">
+          {hasKids ? (
+            <button
+              type="button"
+              onClick={() => toggle(task.id)}
+              aria-label={task.title}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft"
+            >
+              <ChevronRight
+                className={`h-3.5 w-3.5 transition-transform ${isCollapsed ? "" : "rotate-90"}`}
+              />
+            </button>
+          ) : (
+            <span className="w-6 shrink-0" />
+          )}
           <button
             type="button"
             onClick={() => onOpen(task.id)}
-            className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
+            className="flex min-w-0 flex-1 cursor-default items-center gap-2 rounded-xl px-2 py-3 text-left transition-colors hover:bg-surface-soft"
           >
-            <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
-              {task.title}
-            </span>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-medium text-ink-heading">{task.title}</div>
+              {flatLabel ? (
+                <div className="mt-0.5 truncate text-[11px] text-ink-meta">{flatLabel}</div>
+              ) : null}
+            </div>
             <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
               {formatCreatedAt(task.created_at, t)}
             </span>
             <StatusPill status={task.status} label={taskStatusLabel(task, t)} />
           </button>
-        </li>
-      ))}
-    </ul>
-  );
+        </div>
+        {hasKids && !isCollapsed ? (
+          <ul className="ml-[18px] flex flex-col border-l border-surface-border pl-1">
+            {kids.map((kid) => renderNode(kid, depth + 1))}
+          </ul>
+        ) : null}
+      </li>
+    );
+  };
+
+  return <ul className="flex flex-col">{roots.map((task) => renderNode(task, 0))}</ul>;
 };
 
 /* ── Project home "All" — sessions + tasks merged, icon-prefixed ─── */
