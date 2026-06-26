@@ -126,63 +126,30 @@ export const AutomationDetailPage = () => {
   const pageHeader = useMemo(
     () =>
       detail ? (
-        <div className="flex items-center justify-between px-5 py-5">
+        <div className="flex items-center justify-between px-5 py-4">
           <div className="flex min-w-0 items-center gap-2">
             <BackLink
               label={t(k("automation.title"))}
               onClick={() => navigate("/automations")}
             />
             <span className="text-ink-meta">/</span>
-            <span className="truncate text-base font-semibold text-ink-heading">
-              {detail.name}
-            </span>
-            {detail.status === "enabled" ? (
-              <span className="shrink-0 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
-                {t(k("cron.statusOn"))}
-              </span>
-            ) : (
-              <span className="shrink-0 rounded-full bg-surface-soft px-2 py-0.5 text-xs font-medium text-ink-meta">
-                {t(k("cron.paused"))}
-              </span>
-            )}
+            <span className="truncate text-sm text-ink-body">{detail.name}</span>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void handleToggle()}
-            >
-              {detail.status === "enabled" ? (
-                <>
-                  <Pause className="h-3.5 w-3.5" />
-                  {t(k("cron.pause"))}
-                </>
-              ) : (
-                <>
-                  <Power className="h-3.5 w-3.5" />
-                  {t(k("cron.enable"))}
-                </>
-              )}
+          <div className="flex shrink-0 items-center gap-1">
+            <Button variant="ghost" size="icon" onClick={() => setEditOpen(true)}>
+              <FilePenLine className="h-4 w-4" />
             </Button>
             <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void handleRunNow()}
-            >
-              <Play className="h-3.5 w-3.5" />
-              {t(k("cron.runNow"))}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
-              <FilePenLine className="h-3.5 w-3.5" />
-              {t(k("common.edit"))}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
+              variant="ghost"
+              size="icon"
               className="text-destructive hover:text-destructive"
               onClick={() => setDeleteOpen(true)}
             >
-              <Trash2 className="h-3.5 w-3.5" />
+              <Trash2 className="h-4 w-4" />
+            </Button>
+            <Button size="sm" onClick={() => void handleRunNow()}>
+              <Play className="h-3.5 w-3.5" />
+              {t(k("cron.runNow"))}
             </Button>
           </div>
         </div>
@@ -298,48 +265,97 @@ export const AutomationDetailPage = () => {
   if (loading) return <PageLoader />;
   if (!detail) return null;
 
+  const triggerExpr =
+    detail.trigger.kind === "cron"
+      ? detail.trigger.cron_expr
+      : detail.trigger.kind === "interval"
+        ? `${detail.trigger.seconds}s`
+        : "—";
+
   return (
     <div className="relative h-full min-h-0 overflow-y-auto bg-card">
-      <div className="flex min-h-full flex-col px-5 pb-5 pt-3">
-        {/* Trigger + agent info */}
-        <div className="mb-6 rounded-lg border border-surface-border bg-surface-soft px-4 py-3 text-sm text-ink-body">
-          <div className="flex flex-wrap gap-x-6 gap-y-1">
-            <span>
-              <span className="text-ink-meta">{t(k("cron.triggerColumn"))}：</span>
-              <span className="font-mono">{detail.trigger_human_readable}</span>
-            </span>
-            {detail.agent_name && (
-              <span>
-                <span className="text-ink-meta">{t(k("automation.agentLabel"))}：</span>
-                {detail.agent_name}
-              </span>
+      {/* Title + status section */}
+      <div className="px-8 pt-6 pb-5">
+        <h1 className="text-2xl font-semibold text-ink-heading">{detail.name}</h1>
+        {detail.agent_name && (
+          <p className="mt-1 text-sm text-ink-meta">{detail.agent_name}</p>
+        )}
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            onClick={() => void handleToggle()}
+            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 ${
+              detail.status === "enabled"
+                ? "bg-primary"
+                : "bg-input"
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-4 w-4 translate-x-0.5 rounded-full bg-white shadow-sm transition-transform ${
+                detail.status === "enabled" ? "translate-x-4" : ""
+              }`}
+            />
+          </button>
+          <span className="text-sm text-ink-meta flex items-center gap-1">
+            {detail.status === "enabled" ? (
+              t(k("cron.statusOn"))
+            ) : (
+              <>
+                <Pause className="h-3 w-3" />
+                {t(k("cron.paused"))}
+              </>
+            )}
+          </span>
+        </div>
+      </div>
+
+      <div className="mx-8 border-t border-surface-border" />
+
+      {/* Two-column layout */}
+      <div className="grid grid-cols-[1fr_380px] gap-0 px-8 py-6">
+        {/* Left: execution history */}
+        <div className="min-w-0 border-r border-surface-border pr-8">
+          <h2 className="mb-4 text-sm font-medium text-ink-meta">
+            {t(k("cron.executionHistory"))}
+          </h2>
+          {executionRows.length > 0 ? (
+            <ExecutionLog
+              rows={executionRows}
+              onSessionClick={(sessionId) =>
+                navigate(`/conversation/${sessionId}`)
+              }
+            />
+          ) : (
+            <div className="flex justify-center py-8">
+              <EmptyState
+                variant="plain"
+                title={t(k("automation.noExecutions"))}
+                icon={<Clock3 className="h-5 w-5" />}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Right: instructions + trigger */}
+        <div className="pl-8 text-sm">
+          <h2 className="mb-3 text-sm font-medium text-ink-meta">
+            {t(k("cron.instruction"))}
+          </h2>
+          <p className="whitespace-pre-wrap text-ink-body leading-relaxed">
+            {detail.prompt_template}
+          </p>
+
+          <div className="mt-6">
+            <h2 className="mb-2 text-sm font-medium text-ink-meta">
+              {t(k("cron.triggerColumn"))}
+            </h2>
+            <p className="font-medium text-ink-heading">
+              {detail.trigger_human_readable}
+            </p>
+            {triggerExpr !== "—" && (
+              <p className="mt-0.5 font-mono text-xs text-ink-meta">{triggerExpr}</p>
             )}
           </div>
         </div>
-
-        {/* Execution log */}
-        <div className="mb-3 border-b border-[#f7f8fa] pb-3 dark:border-surface-border">
-          <div className="text-base font-semibold text-ink-heading">
-            {t(k("automation.recentExecutions"))}
-          </div>
-        </div>
-
-        {executionRows.length > 0 ? (
-          <ExecutionLog
-            rows={executionRows}
-            onSessionClick={(sessionId) =>
-              navigate(`/conversation/${sessionId}`)
-            }
-          />
-        ) : (
-          <div className="flex flex-1 justify-center py-8">
-            <EmptyState
-              variant="plain"
-              title={t(k("automation.noExecutions"))}
-              icon={<Clock3 className="h-5 w-5" />}
-            />
-          </div>
-        )}
       </div>
 
       <CreateAutomationDialog
