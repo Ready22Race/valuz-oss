@@ -1469,6 +1469,9 @@ class SessionService:
             session_id=session_id,
             items=[_queued_input_to_dto(r) for r in rows],
             paused=paused,
+            # A dispatched item is invisible in ``items`` — surface the in-flight
+            # drain so per-turn re-subscribers keep following (§14.5).
+            draining=is_draining_queue(session_id),
         )
 
     async def enqueue(
@@ -1560,6 +1563,48 @@ class SessionService:
         status = _map_kernel_status(session.status)
         if status != "running" and not is_draining_queue(session_id):
             schedule_drain(session_id, self._bus)
+        return await self.list_queue(session_id)
+
+    async def steer_queued(self, session_id: str, queue_id: str) -> QueuedInputList:
+        """Send a queued item now, interrupting the active turn (steer / send-now).
+
+        Promotes the item to the FIFO head and clears any soft-pause, then — if a
+        turn is in flight — interrupts it *silently* via the low-level kernel
+        interrupt (NOT ``self.interrupt``, which would stamp ``user_interrupt``
+        and re-pause the queue). The in-flight chain finalizes the cut turn as a
+        clean idle and its post-turn drain dispatches the promoted head; we
+        therefore do NOT kick a drain here (that would race the in-flight chain).
+        Only a genuinely idle session needs the explicit kick. Lossy: the running
+        turn's partial progress is discarded. Runtime-agnostic stand-in for Codex
+        ``turn/steer`` (see docs/design/session-input-queue.md §11).
+        """
+        uid = require_current_user_id()
+        session = await kernel_client.get_session(uid, session_id)
+        if session is None:
+            raise _kernel_session_not_found(session_id)
+
+        async with async_unit_of_work() as db:
+            promoted = await SessionDatastore(db).promote_to_front(uid, session_id, queue_id)
+        if promoted is None:
+            raise QueuedInputNotFound()
+
+        # Steer overrides any interrupt soft-pause so the drain proceeds.
+        await project_index.set_queue_paused(session_id, False)
+
+        status = _map_kernel_status(session.status)
+        if status == "running" or is_draining_queue(session_id):
+            # Silent interrupt: cut the in-flight turn so the existing post-turn
+            # drain picks up the promoted head. Low-level kernel interrupt only —
+            # no user_interrupt stamp, no re-pause (that's what makes it "silent";
+            # the cut turn finalizes as a clean idle). Best-effort: if the runtime
+            # is already gone the in-flight chain still drains the promoted head.
+            try:
+                await kernel_client.interrupt(uid, session_id)
+            except Exception:  # noqa: BLE001 — runtime gone / never registered
+                logger.warning("steer: kernel interrupt failed for %s", session_id, exc_info=True)
+        else:
+            schedule_drain(session_id, self._bus)
+
         return await self.list_queue(session_id)
 
     async def cancel(self, session_id: str) -> SessionDetail:

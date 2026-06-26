@@ -168,6 +168,48 @@ async def test_list_queued_session_owners_for_boot_recovery() -> None:
     assert all(uid == OWNER for _, uid in pairs)
 
 
+async def test_promote_to_front_moves_item_to_head() -> None:
+    async with async_unit_of_work() as db:
+        ds = SessionDatastore(db)
+        for t in ("one", "two", "three"):
+            await ds.create_queued(OWNER, _row("p1", t))
+        rows = await ds.list_queued(OWNER, "p1")
+        third = next(r for r in rows if r.input["text"] == "three")
+
+    # Steer "three" → it jumps the FIFO head.
+    async with async_unit_of_work() as db:
+        ds = SessionDatastore(db)
+        promoted = await ds.promote_to_front(OWNER, "p1", third.id)
+        assert promoted is not None
+
+    async with async_unit_of_work(commit=False) as db:
+        ds = SessionDatastore(db)
+        head = await ds.peek_next_queued("p1")
+        assert head is not None and head.input["text"] == "three"
+        # the rest keep their relative order behind the promoted head
+        assert [r.input["text"] for r in await ds.list_queued(OWNER, "p1")] == [
+            "three",
+            "one",
+            "two",
+        ]
+
+
+async def test_promote_to_front_noop_when_not_queued() -> None:
+    async with async_unit_of_work() as db:
+        ds = SessionDatastore(db)
+        await ds.create_queued(OWNER, _row("p2", "a"))
+        row = await ds.peek_next_queued("p2")
+        assert row is not None
+        qid = row.id
+        await ds.mark_queued_status(qid, "dispatched")
+
+    async with async_unit_of_work() as db:
+        ds = SessionDatastore(db)
+        # already dispatched → not promotable; wrong owner → not found
+        assert await ds.promote_to_front(OWNER, "p2", qid) is None
+        assert await ds.promote_to_front("someone-else", "p2", qid) is None
+
+
 async def test_queue_pause_marker_roundtrip() -> None:
     await project_index.record("proj-1", "s9", kind="chat")
     assert await project_index.get_queue_paused_at("s9") is None
@@ -273,3 +315,98 @@ async def test_drain_skips_when_paused(monkeypatch) -> None:
     assert calls == []  # paused → drain returns without running
     async with async_unit_of_work(commit=False) as db:
         assert await SessionDatastore(db).count_queued(OWNER, "d3") == 1
+
+
+async def test_drain_runs_promoted_item_first(monkeypatch) -> None:
+    """A steered (promoted) item drains ahead of earlier-queued ones."""
+    from valuz_agent.modules.sessions import run_orchestrator
+
+    async with async_unit_of_work() as db:
+        ds = SessionDatastore(db)
+        await ds.create_queued(OWNER, _row("d4", "one"))
+        await ds.create_queued(OWNER, _row("d4", "two"))
+        rows = await ds.list_queued(OWNER, "d4")
+        second = next(r for r in rows if r.input["text"] == "two")
+        await ds.promote_to_front(OWNER, "d4", second.id)
+
+    calls = _patch_drain(monkeypatch)
+    await run_orchestrator._drain_queue_after_turn("d4", _FakeBus())
+
+    assert calls == ["two", "one"]  # promoted head ran first
+
+
+async def test_list_queue_surfaces_draining_flag() -> None:
+    """``list_queue`` reflects an in-flight drain so per-turn re-subscribers keep
+    following even when a dispatched item is invisible in ``items`` (§14.5)."""
+    import valuz_agent.modules.sessions.run_orchestrator as run_orchestrator
+    from valuz_agent.modules.sessions.service import SessionService
+
+    await project_index.record("proj-1", "dr1", kind="chat")
+    svc = SessionService.__new__(SessionService)
+
+    not_draining = await svc.list_queue("dr1")
+    assert not_draining.draining is False
+
+    run_orchestrator._active_drains.add("dr1")
+    try:
+        draining = await svc.list_queue("dr1")
+    finally:
+        run_orchestrator._active_drains.discard("dr1")
+    assert draining.draining is True
+
+
+# ---- Steer (service.steer_queued) ----
+
+
+async def test_steer_promotes_and_silently_interrupts(monkeypatch) -> None:
+    """Steer while running: promote to head, clear pause, interrupt via the
+    low-level kernel interrupt (NOT service.interrupt → no user_interrupt
+    stamp), and do NOT kick a competing drain."""
+    import valuz_agent.adapters.kernel_client as kc
+    import valuz_agent.modules.sessions.service as svc_mod
+    from valuz_agent.modules.sessions.service import SessionService
+
+    await project_index.record("proj-1", "st1", kind="chat")
+    async with async_unit_of_work() as db:
+        ds = SessionDatastore(db)
+        await ds.create_queued(OWNER, _row("st1", "one"))
+        await ds.create_queued(OWNER, _row("st1", "two"))
+        rows = await ds.list_queued(OWNER, "st1")
+        second = next(r for r in rows if r.input["text"] == "two")
+    await project_index.set_queue_paused("st1", True)  # an earlier interrupt
+
+    class _Running:
+        status = "running"
+        metadata = {"valuz": {"project_id": "proj-1"}}
+
+    interrupted: list[str] = []
+    drained: list[str] = []
+
+    async def _get_session(uid, sid):
+        return _Running()
+
+    async def _interrupt(uid, sid):
+        interrupted.append(sid)
+
+    def _schedule_drain(sid, bus):
+        drained.append(sid)
+
+    monkeypatch.setattr(kc, "get_session", _get_session)
+    monkeypatch.setattr(kc, "interrupt", _interrupt)
+    # service.py binds these into its own namespace (from ... import ...),
+    # so patch them there, not on run_orchestrator.
+    monkeypatch.setattr(svc_mod, "is_draining_queue", lambda sid: False)
+    monkeypatch.setattr(svc_mod, "schedule_drain", _schedule_drain)
+
+    svc = SessionService.__new__(SessionService)
+    svc._bus = _FakeBus()  # type: ignore[attr-defined]
+
+    result = await svc.steer_queued("st1", second.id)
+
+    assert interrupted == ["st1"]  # silent low-level interrupt fired
+    assert drained == []  # running branch must NOT kick a competing drain
+    assert result.paused is False  # steer overrides the soft-pause
+    # the steered item is now the FIFO head, still queued (drain runs it later)
+    async with async_unit_of_work(commit=False) as db:
+        head = await SessionDatastore(db).peek_next_queued("st1")
+    assert head is not None and head.input["text"] == "two"

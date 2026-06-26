@@ -1,13 +1,22 @@
 import { useState } from "react";
 import { Button, Textarea } from "@valuz/ui";
-import { Check, Paperclip, Pencil, Play, Trash2, X } from "lucide-react";
+import {
+  Check,
+  CornerDownRight,
+  Paperclip,
+  Pencil,
+  Play,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useChatStore } from "@valuz/core";
 
 /**
  * Pending follow-up inputs queued while a turn is running, rendered above the
  * composer (docs/design/session-input-queue.md). Each item drains FIFO after
- * the active turn; queued items can be edited or deleted. After an interrupt
- * the queue is soft-paused and shows a "Continue" affordance.
+ * the active turn; queued items can be edited, deleted, or steered (sent now,
+ * interrupting the active turn). After an interrupt the queue is soft-paused
+ * and shows a "Continue" affordance.
  */
 export const QueuedInputs = () => {
   const queue = useChatStore((s) => s.queue);
@@ -15,6 +24,7 @@ export const QueuedInputs = () => {
   const editQueued = useChatStore((s) => s.editQueued);
   const deleteQueued = useChatStore((s) => s.deleteQueued);
   const resumeQueue = useChatStore((s) => s.resumeQueue);
+  const steerQueued = useChatStore((s) => s.steerQueued);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
@@ -102,6 +112,19 @@ export const QueuedInputs = () => {
                 )}
               </div>
               <div className="flex shrink-0 gap-0.5">
+                {item.status === "queued" && (
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-6 text-brand hover:text-brand"
+                    onClick={() => void steerQueued(item.id)}
+                    title="Send now"
+                    data-testid="queued-steer"
+                  >
+                    <CornerDownRight className="size-3" />
+                  </Button>
+                )}
                 {item.status === "queued" && (
                   <Button
                     type="button"

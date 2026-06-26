@@ -400,6 +400,7 @@ I18nKey = Literal[
     "common.queueContinue",
     "common.queueRunsAfter",
     "common.queueSend",
+    "common.queueSteer",
     "common.refresh",
     "common.reload",
     "common.remove",
