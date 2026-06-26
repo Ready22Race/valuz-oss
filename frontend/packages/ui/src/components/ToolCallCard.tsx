@@ -23,10 +23,10 @@ const STATUS_CLASSES: Record<PrototypeToolCallStatus, string> = {
     "bg-success-light border border-success-border text-success-text",
   // running: 文字 #131313, bg rgba(114,92,249,0.08), border #D9D9DD
   running:
-    "bg-info-light border border-brand-200 text-info-text",
+    "bg-info-light border border-info-border text-info-text",
   // queued: 文字 text-3, bg surface-2
   cached: "bg-surface-2 text-ink-muted",
-  error: "bg-error-light border border-error/30 text-error-text",
+  error: "bg-error-light border border-error-border text-error-text",
 };
 
 export const ToolCallCard = memo(

@@ -1196,7 +1196,7 @@ export const Composer = ({
                     className={cn(
                       "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-2xs",
                       isFailed
-                        ? "border-error/30 bg-error-light text-error-text"
+                        ? "border-error-border bg-error-light text-error-text"
                         : isKb
                           ? "border-brand/25 bg-brand-light text-brand"
                           : "border-surface-border bg-surface-soft text-ink-body",

@@ -48,7 +48,7 @@ const _STYLE: Record<
     icon: CheckCircle2,
   },
   approve_for_session: {
-    tint: "border-brand-200 bg-info-light text-info-text",
+    tint: "border-info-border bg-info-light text-info-text",
     icon: Sparkles,
   },
   reject: {

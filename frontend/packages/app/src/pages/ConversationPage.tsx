@@ -4193,8 +4193,8 @@ export const ConversationPage = () => {
               (isTempConversation &&
                 myAgentsLoaded &&
                 myAgents.length === 0)) && (
-              <div className="mx-auto mb-2 flex w-full max-w-3xl items-center justify-between gap-3 rounded-lg border border-warning-border bg-warning-light px-3 py-2 text-xs">
-                <span className="text-ink-body">
+              <div className="mx-auto mb-2 flex w-full max-w-[760px] items-center justify-between gap-3 rounded-lg border border-info-border bg-info-light px-3 py-2 text-xs text-info-text">
+                <span>
                   {channelLoaded && !hasChannel
                     ? isTempConversation &&
                       myAgentsLoaded &&

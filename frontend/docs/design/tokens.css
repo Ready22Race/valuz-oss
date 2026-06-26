@@ -93,6 +93,7 @@
   /* Info 复用品牌紫（裁决：不引入第五个状态色相） */
   --info:        var(--brand);
   --info-soft:   var(--brand-50); /* 对齐 Info 卡 / callout / note 实际用法（均 brand-50）；v2.6.8 由 brand-100 改 */
+  --info-border: color-mix(in oklab, var(--info) 35%, var(--background));
   --info-text:   var(--brand-700);
 
   /* ===== 阴影 —— 从前景色派生，明暗两端自动协调 =====
@@ -253,14 +254,17 @@
   --color-success-border: var(--success-border);
   --color-warning: var(--warning);
   --color-warning-light: var(--warning-soft);
+  --color-warning-border: var(--warning-border);
   --color-warning-text: var(--warning-text);
   --color-error: var(--error);
   --color-error-light: var(--error-soft);
+  --color-error-border: var(--error-border);
   --color-error-text: var(--error-text);
   --color-error-strong: var(--error-strong);
   --color-error-hover: var(--error-hover);
   --color-info: var(--info);
   --color-info-light: var(--info-soft);
+  --color-info-border: var(--info-border);
   --color-info-text: var(--info-text);
 
   --color-finance-up: var(--finance-up);

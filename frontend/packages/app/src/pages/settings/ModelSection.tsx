@@ -353,7 +353,7 @@ export const ModelSection = () => {
       >
         {/* No provider warning */}
         {providersList.filter((c) => c.enabled).length === 0 && (
-          <div className="mt-5 flex items-center gap-3 rounded-xl border border-error-text/20 bg-error-light px-4 py-3 text-xs text-error-text">
+          <div className="mt-5 flex items-center gap-3 rounded-xl border border-error-border bg-error-light px-4 py-3 text-xs text-error-text">
             <Lock className="h-4 w-4" />
             <span className="flex-1">{t("settings.model.noModelWarning")}</span>
             {configureModelChannel && (
