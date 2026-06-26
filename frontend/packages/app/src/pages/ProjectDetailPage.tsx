@@ -279,6 +279,31 @@ function taskStatusLabel(
     : task.status;
 }
 
+/** "由 … 触发" provenance line under a task title; null for direct user actions. */
+function taskTriggerLabel(
+  task: Task,
+  t: ReturnType<typeof useTranslation>["t"],
+): string | null {
+  const trig = task.trigger;
+  if (!trig) return null;
+  const k = (key: string) => key as Parameters<typeof t>[0];
+  switch (trig.type) {
+    case "automation":
+      return t(k("task.triggeredByAutomation"), { name: trig.source_automation_name ?? "…" });
+    case "agent":
+      return trig.source_agent_slug
+        ? t(k("task.triggeredByTask"), {
+            title: trig.source_task_title ?? "…",
+            agent: trig.source_agent_slug,
+          })
+        : t(k("task.triggeredByTaskNoAgent"), { title: trig.source_task_title ?? "…" });
+    case "chat":
+      return t(k("task.triggeredByChat"));
+    default:
+      return null; // "user" → no provenance line
+  }
+}
+
 interface ProjectTasksProps {
   tasks: Task[];
   onOpen: (taskId: string) => void;
@@ -311,9 +336,14 @@ const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
             onClick={() => onOpen(task.id)}
             className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
           >
-            <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
-              {task.title}
-            </span>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-medium text-ink-heading">{task.title}</div>
+              {taskTriggerLabel(task, t) ? (
+                <div className="mt-0.5 truncate text-[11px] text-ink-meta">
+                  {taskTriggerLabel(task, t)}
+                </div>
+              ) : null}
+            </div>
             <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
               {formatCreatedAt(task.created_at, t)}
             </span>
