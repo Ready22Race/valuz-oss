@@ -394,6 +394,16 @@ async def resume_session_queue(
     return await svc.resume_queue(session_id)
 
 
+@router.post("/{session_id}/queue/{queue_id}/steer")
+async def steer_session_queued_input(
+    session_id: str,
+    queue_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """Steer — send a queued input now, silently interrupting the active turn."""
+    return await svc.steer_queued(session_id, queue_id)
+
+
 @router.post("/{session_id}/cancel")
 async def cancel(
     session_id: str,

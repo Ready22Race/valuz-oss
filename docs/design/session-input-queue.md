@@ -243,9 +243,60 @@ host 启动时(`boot/`)增加一步对账:
 ## 11. 边界 / 未来
 
 - **边界**:同一会话任一时刻只有一条 `_run_agent_background` 链在跑(天然串行);`/messages` running→409 不变;队列项不污染对话历史,直到派发。
-- **后续①:Codex `turn/steer`**——在同一入队入口下,runtime==Codex 时改走 `AsyncTurnHandle.steer()`(无损即时注入),其它 runtime 仍走本设计的排队;需扩 `RuntimePort` + kernel route,Codex-only 增强。
+- **已落地:Steer(立即发送 / send-now)**——见 §14。runtime-agnostic 的有损模拟,**不是** Codex 无损 steer。
+- **后续①:Codex `turn/steer`(无损)**——在 §14 的同一 steer 入口下,runtime==Codex 时改走 `AsyncTurnHandle.steer()`(无损即时注入,不打断、不丢进度),其它 runtime 仍走 §14 的"打断+续跑"模拟;需扩 `RuntimePort` + kernel route,Codex-only 增强。届时前端 §14 的"末条才显 stopped"抑制可对 Codex 路径回退(无打断 = 无 cut turn)。
 - **后续②:多端实时 push**——把 `queue.*` 作为轻量事件并入既有会话事件流,实现跨客户端实时气泡(替代 §8.4 的 refetch)。
 - **后续③:Turn off queueing** 客户端偏好开关。
+
+---
+
+## 14. Steer(立即发送 / send-now)— 有损模拟
+
+> 状态:Implemented(2026-06-25)。在 §1–§10 的排队基础上加一个"立即发送"动作:把某条排队项**马上**跑掉,打断在途 turn。因为三 runtime 里只有 Codex 有无损 `turn/steer`(§11 后续①),本期统一用**有损模拟**:`interrupt(静默)+ 把该条提到队首 + 复用既有排空`。
+
+### 14.1 语义
+
+气泡上每条 `status=queued` 多一个绿色"立即发送"键(截图的 ↪ Steer 位)。点击:
+
+- 该条**提到 FIFO 队首**(`position = min−1`),清掉打断软暂停;
+- 若有 turn 在跑(或正在排空)→ **静默打断**当前 turn(丢在途进度),既有 `_run_agent_background`/排空链收尾后,`_drain_queue_after_turn` 自然 peek 到队首这条并派发;
+- 若会话恰好 idle → 直接 `schedule_drain` 踢一次。
+
+被 steer 的那条**插队**先跑;其余排队项保持相对序,排在它后面续跑(Codex-like)。
+
+### 14.2 "静默"打断(无 kernel 改动)
+
+关键点:**不能**走 host 的 `SessionService.interrupt()`——它会 `finalize_session(stop_reason_type="user_interrupt")` 并对有队列的会话置软暂停。Steer 改调**底层** `kernel_client.interrupt()`:只让 runtime 停止吐 token,host 侧 `run_session_to_idle` 读回 `status=idle`(`_resolve_turn_status` 见 stop_reason 非 error → idle),以**干净 idle** 收尾(无 `session_error`,无 host 软暂停)。
+
+但 **kernel orchestrator 自身**在 `runtime.interrupt()` 后会把被切 message 标 `status="cancelled"` + `stop_reason=UserInterrupt`(`orchestrator._finalize_message`)——这是 kernel 行为,kernel 零改动下抹不掉。因此"前台不显示已中断"放到**前端**解决:
+
+- **前端抑制**:`StopReasonHint`("stopped" 角标)**只在最后一条且非 streaming** 时渲染。Steer 必然续跑 → 被切 turn 不再是最后一条 → 角标自动隐藏;真正的 Stop 停在末条 → 仍显示。副作用:普通 Stop 后又手动发一条,旧角标也隐藏(可接受,属历史噪音)。
+- desktop 侧无 per-message 角标;`SessionStatusPill` 看**会话状态**(steer 是 idle→running,不经 cancelled),"已中断" toast 仅 Stop 键触发,故 desktop 天然静默。
+
+### 14.3 并发 / 不踢竞争排空
+
+running / draining 分支**只**打断,**不**自己 `schedule_drain`——让在途链的 post-turn 排空接手(`_active_drains` 单飞;提队首已先落库,排空 peek 必见)。自己再踢会和在途链抢着起下一条 turn、和切 turn 的 finalize 抢会话状态。仅 idle 分支才 `schedule_drain`。
+
+### 14.4 端点 / 改动
+
+- 契约:`POST /v1/sessions/{id}/queue/{queue_id}/steer` → `QueuedInputList`。
+- datastore:`promote_to_front`(仅 `status=queued`,`position=min−1`)。
+- service:`steer_queued`(提队首 → 清暂停 → running/draining 则静默 `kernel_client.interrupt`,否则 `schedule_drain`)。
+- 前端:`queue-api.steer`、chat-store `steerQueued`、webui `QueuedInputs` + desktop `QueuedInputsBar`/`ConversationPage` 绿色键、webui `MessageList` 角标抑制、i18n `common.queueSteer`。
+
+### 14.5 排空期的直播(desktop drain-follower 修正)
+
+> 背景:desktop **每 turn 拆 SSE**(收到 `session.idle` 即 teardown 释放 loading)。排空里每条都是独立 turn,所以需要一个"跟随器"在每条 drained turn 起来时重新订阅。原实现(a7ed986)用 `轮询直到 status==="running" 再订阅`,有两个洞——steer 把它们都暴露了:
+
+- **洞① 快 turn**(单条 steer 也看不到):被 steer 的 turn 可能在 500ms 轮询间隙内就跑完了,`status` 已回 idle → 跟随器永不订阅 → 该 turn 只在 DB,重开才见。
+- **洞② 队列空窗**(两条 steer 一条、另一条续跑看不到):`list_queue` 只返回 `queued`/`blocked`,**dispatched(在跑)那条不在列表里**。上一条跑完后下一条已 dispatched → 前端 `queue` 空 → 跟随器以为没活了就停 → 下一条无人订阅。
+
+修正:
+
+1. **`QueuedInputList.draining`**(后端 `is_draining_queue(session_id)`):排空链在飞就为真。跟随器据此在"队列看起来空、实则有 dispatched 项在跑"时**继续跟**,直到最后一条结束(填补洞②)。`_active_drains` 整段排空期间恒为真,只有最后一条结束才落,故无中途误判。
+2. **订阅条件改为 `running` 或 `DB 有 maxSeqRef 之后的新事件`**:后者用 `listEvents(maxSeqRef)` 探一下——命中说明有一条 turn 在轮询间隙跑完了,`subscribeToSession` 回放这些事件并在回放到那条的 `session.idle` 时**自终止**(填补洞①)。安静 idle(无新事件、无在跑)**不订阅**——裸订阅会把 SSE 挂住(条间无妨,但最后一条之后会永不释放 `sending`)。
+
+这样单条/多条、快/慢 turn 都直播;最后一条结束后 `draining=false`、队列空 → 跟随器自然安静。
 
 ---
 

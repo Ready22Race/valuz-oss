@@ -76,6 +76,8 @@ export interface ChatStoreState {
   editQueued: (queueId: string, prompt: string) => Promise<void>;
   deleteQueued: (queueId: string) => Promise<void>;
   resumeQueue: () => Promise<void>;
+  /** Steer — send a queued item now, silently interrupting the active turn. */
+  steerQueued: (queueId: string) => Promise<void>;
   refreshQueue: () => Promise<void>;
   reconnect: () => void;
   // Test/internal helper — feed an event into the reducer. Exposed so
@@ -300,6 +302,17 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     const { sessionId } = get();
     if (!sessionId) return;
     const list = await queueApi.resume(sessionId);
+    if (get().sessionId !== sessionId) return;
+    set({ queue: list.items, queuePaused: list.paused });
+  },
+
+  steerQueued: async (queueId) => {
+    const { sessionId } = get();
+    if (!sessionId) return;
+    // Send-now: the backend interrupts the active turn silently and dispatches
+    // this item. The cut turn finalises as a clean idle; the drain-follower /
+    // _ingest turn-boundary resync then refreshes the queue as it runs.
+    const list = await queueApi.steer(sessionId, queueId);
     if (get().sessionId !== sessionId) return;
     set({ queue: list.items, queuePaused: list.paused });
   },

@@ -658,6 +658,11 @@ export const ConversationPage = () => {
   // is set after an interrupt — the user resumes explicitly.
   const [queue, setQueue] = useState<QueuedInput[]>([]);
   const [queuePaused, setQueuePaused] = useState(false);
+  // True while a host drain chain is in flight. A dispatched (in-flight) item
+  // is invisible in ``queue`` (only queued/blocked list), so the drain-follower
+  // keys on this to keep re-subscribing until the LAST drained turn finishes —
+  // not just while ``queue`` is non-empty (session-input-queue §14.5).
+  const [queueDraining, setQueueDraining] = useState(false);
   const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
@@ -3417,6 +3422,7 @@ export const ConversationPage = () => {
       const list = await queueApi.list(selectedSessionId);
       setQueue(list.items);
       setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
     } catch {
       /* best-effort — a queue fetch failure must not break the conversation */
     }
@@ -3434,6 +3440,7 @@ export const ConversationPage = () => {
       });
       setQueue(list.items);
       setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
     } catch (cause) {
       toast.error(
         cause instanceof Error ? cause.message : "Failed to queue message.",
@@ -3448,6 +3455,7 @@ export const ConversationPage = () => {
       const list = await queueApi.edit(selectedSessionId, queueId, text);
       setQueue(list.items);
       setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Edit failed.");
     }
@@ -3459,6 +3467,7 @@ export const ConversationPage = () => {
       const list = await queueApi.remove(selectedSessionId, queueId);
       setQueue(list.items);
       setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Delete failed.");
     }
@@ -3470,10 +3479,26 @@ export const ConversationPage = () => {
       const list = await queueApi.resume(selectedSessionId);
       setQueue(list.items);
       setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
       // The drain-follower effect picks up from here (status → running →
       // re-subscribe), the same path as a drain after a normal turn.
     } catch (cause) {
       toast.error(cause instanceof Error ? cause.message : "Resume failed.");
+    }
+  };
+
+  const handleSteerQueued = async (queueId: string) => {
+    if (!selectedSessionId) return;
+    try {
+      // Send-now: the backend silently interrupts the active turn and drains
+      // this item. The drain-follower effect re-subscribes (status → running)
+      // so the steered turn streams live, same path as a normal drain.
+      const list = await queueApi.steer(selectedSessionId, queueId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Send failed.");
     }
   };
 
@@ -3484,36 +3509,55 @@ export const ConversationPage = () => {
 
   // Stream queued items as they drain. Each queued item runs as its OWN kernel
   // turn after the previous one idles (which tears down that turn's SSE), so
-  // while items remain (not paused) and nothing is currently streaming, poll
-  // for the next drained turn (status → running) and re-subscribe. Re-subscribe
-  // replays any events the DB already has from ``maxSeqRef`` and then streams
-  // live — the same proven path as reopen / mid-turn reconnect — so a drained
-  // turn renders even if it started before we re-attached. When the last item
-  // finishes, the queue is empty and this effect goes quiet.
+  // while a drain is in flight or items remain (and nothing is streaming), poll
+  // for the next drained turn and re-subscribe. ``subscribeToSession`` replays
+  // every event after ``maxSeqRef`` from the DB and then streams live (the same
+  // proven path as reopen / mid-turn reconnect). We subscribe when the session
+  // is ``running`` OR when the DB already has events past ``maxSeqRef`` — the
+  // latter catches a turn that finished *inside* the poll interval (fast turns
+  // / steer-interrupted turns); the replay renders it and self-terminates on
+  // the replayed ``session.idle``. We must NOT subscribe on a quiet idle with
+  // nothing new (a bare subscribe hangs the SSE open — fine between items, but
+  // after the LAST item it would never release ``sending``). ``queueDraining``
+  // (a dispatched item is invisible in ``queue``) keeps this alive until the
+  // last item finishes; then the effect goes quiet (§14.5).
   useEffect(() => {
     if (!selectedSessionId || sending || queuePaused) return;
-    if (!queue.some((i) => i.status === "queued")) return;
+    if (!queueDraining && !queue.some((i) => i.status === "queued")) return;
     const sid = selectedSessionId;
     let cancelled = false;
-    const tick = () => {
+    const tick = async () => {
       if (cancelled || abortRef.current || isSendInFlightRef.current) return;
-      void sessionsApi
-        .get(sid)
-        .then((detail) => {
-          if (cancelled || abortRef.current || isSendInFlightRef.current) return;
-          if (detail.status === "running") {
-            subscribeToSession(sid, maxSeqRef.current);
-          }
-        })
-        .catch(() => {});
+      try {
+        const detail = await sessionsApi.get(sid);
+        if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+        if (detail.status === "running") {
+          subscribeToSession(sid, maxSeqRef.current);
+          return;
+        }
+        const resp = await sessionsApi.listEvents(sid, maxSeqRef.current);
+        if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+        if (resp.items.length > 0) {
+          subscribeToSession(sid, maxSeqRef.current);
+        }
+      } catch {
+        // best-effort — a transient poll failure retries on the next tick.
+      }
     };
-    const timer = window.setInterval(tick, 500);
-    tick();
+    const timer = window.setInterval(() => void tick(), 500);
+    void tick();
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [selectedSessionId, sending, queuePaused, queue, subscribeToSession]);
+  }, [
+    selectedSessionId,
+    sending,
+    queuePaused,
+    queueDraining,
+    queue,
+    subscribeToSession,
+  ]);
 
   // Refetch on a turn boundary (sending → idle): drained items drop and any
   // blocked / paused state surfaces (session-input-queue §8.4).
@@ -5022,6 +5066,7 @@ export const ConversationPage = () => {
                 onEdit={handleEditQueued}
                 onDelete={handleDeleteQueued}
                 onResume={handleResumeQueue}
+                onSteer={handleSteerQueued}
               />
             </div>
           ) : null}

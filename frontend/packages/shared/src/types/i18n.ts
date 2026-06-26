@@ -393,6 +393,7 @@ export type KnownI18nKey =
   | "common.queueContinue"
   | "common.queueRunsAfter"
   | "common.queueSend"
+  | "common.queueSteer"
   | "common.refresh"
   | "common.reload"
   | "common.remove"

@@ -187,6 +187,7 @@
     "queueRunsAfter": "Runs after the current turn",
     "queueContinue": "Continue",
     "queueBlocked": "Could not run",
+    "queueSteer": "Send now",
     "starting": "Starting",
     "stop": "Stop",
     "success": "Success",

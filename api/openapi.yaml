@@ -2164,6 +2164,39 @@ paths:
         "404":
           description: Session not found
 
+  /v1/sessions/{session_id}/queue/{queue_id}/steer:
+    post:
+      summary: Steer — send a queued input now, interrupting the active turn
+      description: >
+        Promote this queued input to the head of the FIFO, clear any
+        interrupt soft-pause, and — if a turn is in flight — interrupt it
+        silently (no user_interrupt stamp) so the host drain dispatches this
+        item immediately. Lossy: the in-flight turn's partial progress is
+        discarded. The runtime-agnostic stand-in for Codex ``turn/steer``.
+        See docs/design/session-input-queue.md §11.
+      operationId: steerSessionQueuedInput
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: queue_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session or queued input not found
+
   /v1/sessions/{session_id}/cancel:
     post:
       summary: Cancel session
@@ -4554,6 +4587,14 @@ components:
           description: >-
             True when auto-drain is paused (after an interrupt) and awaiting an
             explicit resume.
+        draining:
+          type: boolean
+          default: false
+          description: >-
+            True while a host drain chain is in flight. A dispatched (in-flight)
+            item is not present in ``items`` (only queued/blocked are listed), so
+            clients that re-subscribe per drained turn use this to keep following
+            until the last item finishes.
 
     QueuedInputCreate:
       type: object

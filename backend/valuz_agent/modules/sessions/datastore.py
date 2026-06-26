@@ -298,6 +298,28 @@ class SessionDatastore:
         )
         await self._db.commit()
 
+    async def promote_to_front(
+        self, user_id: str, session_id: str, queue_id: str
+    ) -> QueuedInputRow | None:
+        """Move a still-``queued`` item to the FIFO head (steer / send-now).
+
+        Sets ``position`` one below the session's current minimum so the next
+        ``peek_next_queued`` returns it first. No-op (returns None) if the row
+        is gone or already left the ``queued`` state.
+        """
+        row = await self.get_queued(user_id, session_id, queue_id)
+        if row is None or row.status != "queued":
+            return None
+        stmt = select(func.min(QueuedInputRow.position)).where(
+            QueuedInputRow.session_id == session_id,
+            QueuedInputRow.status == "queued",
+        )
+        current_min = (await self._db.execute(stmt)).scalar_one_or_none()
+        row.position = int(current_min) - 1 if current_min is not None else 0
+        row.updated_at = now_ms()
+        await self._db.commit()
+        return row
+
     async def peek_next_queued(self, session_id: str) -> QueuedInputRow | None:
         """Oldest still-``queued`` row for a session (SYSTEM / drain path).
 
