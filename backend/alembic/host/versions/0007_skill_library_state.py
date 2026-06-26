@@ -32,7 +32,12 @@ def upgrade() -> None:
                 "library_enabled",
                 sa.Boolean(),
                 nullable=False,
-                server_default=sa.text("1"),
+                # Portable boolean literal: SQLAlchemy renders ``1`` on SQLite
+                # (no native boolean) and ``true`` on Postgres. A bare
+                # ``text("1")`` renders ``DEFAULT 1`` on Postgres too, which it
+                # rejects ("column is of type boolean but default expression is
+                # of type integer").
+                server_default=sa.true(),
             )
         )
 
