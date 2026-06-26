@@ -71,7 +71,7 @@ export const AutomationDetailPage = () => {
   const { automationId = "" } = useParams<{ automationId: string }>();
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { setHeader, setHeaderClassName, setContentInnerClassName } =
+  const { setHideHeader, setContentInnerClassName } =
     useProjectOutlet();
 
   const [loading, setLoading] = useState(true);
@@ -123,30 +123,14 @@ export const AutomationDetailPage = () => {
 
   // ── Header ─────────────────────────────────────────────────────────
 
-  const pageHeader = useMemo(
-    () =>
-      detail ? (
-        <div className="px-5 py-3">
-          <BackLink
-            label={t(k("automation.title"))}
-            onClick={() => navigate("/automations")}
-          />
-        </div>
-      ) : null,
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [detail, navigate, t],
-  );
-
   useEffect(() => {
-    setHeader(pageHeader);
-    setHeaderClassName("h-auto");
+    setHideHeader(true);
     setContentInnerClassName("p-0");
     return () => {
-      setHeader(null);
-      setHeaderClassName(undefined);
+      setHideHeader(false);
       setContentInnerClassName(undefined);
     };
-  }, [pageHeader, setHeader, setHeaderClassName, setContentInnerClassName]);
+  }, [setHideHeader, setContentInnerClassName]);
 
   // ── Mutations ───────────────────────────────────────────────────────
 
@@ -253,8 +237,11 @@ export const AutomationDetailPage = () => {
 
   return (
     <div className="relative h-full min-h-0 overflow-y-auto bg-card">
+      <div className="px-5 pt-6">
+        <BackLink label={t(k("automation.title"))} onClick={() => navigate("/automations")} />
+      </div>
       {/* Title + actions section */}
-      <div className="flex items-start justify-between px-8 pt-5 pb-5">
+      <div className="flex items-start justify-between px-8 pt-4 pb-5">
         <div>
           <h1 className="text-2xl font-semibold text-ink-heading">{detail.name}</h1>
           <p className="mt-1 flex items-center gap-2 text-sm text-ink-meta">
