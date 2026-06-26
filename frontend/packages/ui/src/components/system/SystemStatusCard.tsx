@@ -94,7 +94,12 @@ export const SystemStatusCard = ({
           <span>{t("system.cannotConnect", { error })}</span>
         </div>
         <div className="mt-3">
-          <Button size="sm" variant="outline" onClick={onRefresh}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="border-error-border bg-error-light text-error-text shadow-none hover:bg-error-border hover:text-error-text"
+            onClick={onRefresh}
+          >
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
             {t("system.retry")}
           </Button>

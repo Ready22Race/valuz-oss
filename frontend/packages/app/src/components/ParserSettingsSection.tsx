@@ -68,6 +68,9 @@ function _withFallback(
   return resolved === key ? fallback : resolved;
 }
 
+const errorDescription = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 // Radix Select treats value="" as "clear selection" and rejects it on
 // SelectItem. Use this sentinel for the "inherit primary engine" option
 // and translate back to "" before sending to the API.
@@ -125,19 +128,17 @@ function PluginCard({ plugin, onConfigure, onTested, t }: PluginCardProps) {
         );
       } else {
         toast.error(
-          t("settings.parsing.testPluginFailed", {
-            name: pluginName,
-            error: result.error ?? t("common.error"),
-          }),
+          t("settings.parsing.testPluginFailed", { name: pluginName }),
+          {
+            description: result.error ?? t("common.error"),
+          },
         );
       }
     } catch (err) {
       onTested(plugin.id, false);
-      toast.error(
-        t("settings.parsing.testRequestFailed", {
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
+      toast.error(t("settings.parsing.testRequestFailed"), {
+        description: errorDescription(err),
+      });
     } finally {
       setTesting(false);
     }
@@ -352,11 +353,9 @@ function InlineKeyEditor({
       onSaved();
       onClose();
     } catch (err) {
-      toast.error(
-        t("settings.parsing.saveFailed", {
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
+      toast.error(t("settings.parsing.saveFailed"), {
+        description: errorDescription(err),
+      });
     } finally {
       setBusy(false);
     }
@@ -534,11 +533,9 @@ export function ParserSettingsSection() {
       setRouting(routingResp);
     } catch (err) {
       console.error("parserApi load failed", err);
-      toast.error(
-        t("settings.parsing.loadFailed", {
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
+      toast.error(t("settings.parsing.loadFailed"), {
+        description: errorDescription(err),
+      });
     } finally {
       setLoading(false);
     }
@@ -563,11 +560,9 @@ export function ParserSettingsSection() {
           t("settings.parsing.primarySwitched", { name: switchedName }),
         );
       } catch (err) {
-        toast.error(
-          t("settings.parsing.switchFailed", {
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
+        toast.error(t("settings.parsing.switchFailed"), {
+          description: errorDescription(err),
+        });
       }
     },
     [plugins, t],
@@ -586,11 +581,9 @@ export function ParserSettingsSection() {
         const updated = await parserApi.patchRouting({ by_kind: next });
         setRouting(updated);
       } catch (err) {
-        toast.error(
-          t("settings.parsing.updateFailed", {
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
+        toast.error(t("settings.parsing.updateFailed"), {
+          description: errorDescription(err),
+        });
       }
     },
     [routing, t],
@@ -604,11 +597,9 @@ export function ParserSettingsSection() {
         });
         setRouting(updated);
       } catch (err) {
-        toast.error(
-          t("settings.parsing.updateFailed", {
-            error: err instanceof Error ? err.message : String(err),
-          }),
-        );
+        toast.error(t("settings.parsing.updateFailed"), {
+          description: errorDescription(err),
+        });
       }
     },
     [t],

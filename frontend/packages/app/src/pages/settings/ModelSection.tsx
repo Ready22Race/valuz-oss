@@ -353,11 +353,20 @@ export const ModelSection = () => {
       >
         {/* No provider warning */}
         {providersList.filter((c) => c.enabled).length === 0 && (
-          <div className="mt-5 flex items-center gap-3 rounded-xl border border-error-border bg-error-light px-4 py-3 text-xs text-error-text">
-            <Lock className="h-4 w-4" />
-            <span className="flex-1">{t("settings.model.noModelWarning")}</span>
+          <div className="mt-5 flex items-center gap-3 rounded-lg border border-error-border bg-error-light px-3 py-2 text-xs text-error-text">
+            <div className="flex h-7 min-w-0 flex-1 items-center gap-2.5">
+              <Lock className="h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0">
+                {t("settings.model.noModelWarning")}
+              </span>
+            </div>
             {configureModelChannel && (
-              <Button size="sm" onClick={() => setAddOpen(true)}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 shrink-0 border-error-border bg-transparent px-3 text-xs text-error-text shadow-none hover:bg-error-light hover:text-error-text"
+                onClick={() => setAddOpen(true)}
+              >
                 {t("settings.model.configureModel")}
               </Button>
             )}
