@@ -50,6 +50,7 @@ from valuz_agent.adapters.agent_resolver import (
     _member_agent_config,
     build_member_session,
     embed_agent_config,
+    spill_goal_brief_if_too_long,
 )
 from valuz_agent.infra.auth_context import (
     require_current_user_id,
@@ -208,9 +209,9 @@ class TaskOrchestrator:
 
         Returns the newly created TaskRow.
 
-        Raises ``BriefTooLongError`` (subclass of ValueError) when ``goal``
-        exceeds the goal-mode payload cap — surfaced here BEFORE any DB write
-        so the user gets a clean error in chat instead of a mid-turn crash.
+        An over-long ``goal`` is spilled to a doc and the lead receives a short
+        pointer to read (see ``spill_goal_brief_if_too_long``) rather than
+        crashing the ``/goal`` payload mid-turn.
 
         Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
         Kept on the orchestrator so its existing callers (REST routes,
@@ -251,17 +252,11 @@ class TaskOrchestrator:
         committing.
 
         Raises ``ValueError`` if the project doesn't exist or the agent isn't
-        a member of it (same validations as ``kickoff``). Raises
-        ``BriefTooLongError`` (subclass of ValueError) when ``goal`` exceeds
-        the goal-mode payload cap — fails before any DB write so the chat
-        user sees a clean error before the draft row is created.
+        a member of it (same validations as ``kickoff``). An over-long ``goal``
+        is accepted as-is: the draft only stores the goal text — when
+        ``commit_task`` builds the lead session it spills an over-cap brief to a
+        doc and passes a pointer (see ``spill_goal_brief_if_too_long``).
         """
-        # Same goal-mode brief cap as ``kickoff``. Catching it here means a
-        # draft with an over-long goal never enters the DB at all.
-        from valuz_agent.adapters.agent_resolver import assert_goal_brief_length
-
-        assert_goal_brief_length(goal)
-
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
@@ -423,6 +418,16 @@ class TaskOrchestrator:
                 f"## Plan Summary (already committed; do not re-plan)\n\n"
                 f"{plan_summary_lines}\n"
                 + (f"\n## References\n\n{refs_text}\n" if refs_text else "")
+            )
+            # Fence the goal-mode payload: spill an over-cap committed brief to a
+            # doc and hand the lead a short pointer (used as both the embedded
+            # brief and the initial ``/goal`` prompt below).
+            lead_brief = spill_goal_brief_if_too_long(
+                lead_brief,
+                run_dir=lead_cwd,
+                task_id=task_id,
+                label=lead_slug,
+                is_lead=True,
             )
 
             from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
@@ -756,7 +761,10 @@ class TaskOrchestrator:
         from valuz_agent.modules.tasks.recovery import reconcile
 
         member_done: list[tuple[str, dict[str, Any]]] = []
-        resume_members: list[tuple[str, str]] = []  # (session_id, brief)
+        # (session_id, brief, run_dir, agent_slug, subtask_key) — run_dir + slug
+        # + key let us spill an over-cap resume brief to a doc before re-injecting
+        # it into the member's goal-mode session.
+        resume_members: list[tuple[str, str, str, str, str]] = []
         summary: list[str] = []
         lead_session_id: str | None = None
 
@@ -813,7 +821,15 @@ class TaskOrchestrator:
                 if rec.deliver_member_done and manifest is not None:
                     member_done.append((run.session_id, manifest))
                 if rec.resume:
-                    resume_members.append((run.session_id, run.goal or ""))
+                    resume_members.append(
+                        (
+                            run.session_id,
+                            run.goal or "",
+                            run.run_dir or "",
+                            run.agent_slug or "",
+                            run.subtask_key or "",
+                        )
+                    )
                 summary.append(f"- {run.subtask_key}({run.agent_slug}): {rec.disposition}")
 
             if plan_dirty:
@@ -854,13 +870,25 @@ class TaskOrchestrator:
                 lead_session_id,
                 InboxMsg(kind="member_done", from_session=member_sid, payload=manifest),
             )
-        for member_sid, brief in resume_members:
+        for member_sid, brief, m_run_dir, m_slug, m_key in resume_members:
             await _evict_runtime(member_sid)
             self._members.add_member(task_id, member_sid)
+            resume_prompt = brief or "继续完成你的子任务,完成后会汇报给 lead。"
+            # Fence the goal-mode re-injection: an over-cap subtask goal would
+            # blow the ``/goal`` payload again on resume — spill it to a doc and
+            # re-inject a short pointer instead (same fence as first dispatch).
+            if brief and m_run_dir:
+                resume_prompt = spill_goal_brief_if_too_long(
+                    brief,
+                    run_dir=m_run_dir,
+                    task_id=task_id,
+                    label=f"{m_slug}-{m_key}",
+                    is_lead=False,
+                )
             asyncio.create_task(
                 self.run_actor_loop(
                     session_id=member_sid,
-                    initial_prompt=brief or "继续完成你的子任务,完成后会汇报给 lead。",
+                    initial_prompt=resume_prompt,
                     role="subtask",
                     task_id=task_id,
                     project_id=project_id,

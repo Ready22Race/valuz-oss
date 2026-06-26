@@ -27,7 +27,10 @@ from typing import Any, Literal, cast
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.modules.sessions import project_index
-from valuz_agent.adapters.agent_resolver import build_member_session
+from valuz_agent.adapters.agent_resolver import (
+    build_member_session,
+    spill_goal_brief_if_too_long,
+)
 from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
@@ -154,6 +157,16 @@ class DispatcherService:
             # Goal mode prepends ``/goal `` (wrap_for_mode); drop the redundant
             # ``## Goal`` header so it doesn't land inside the goal condition.
             member_brief = goal + (f"\n\n## References\n\n{refs_text}" if refs_text else "")
+            # Fence the goal-mode payload: spill an over-cap member brief to a
+            # doc and pass a short pointer (used as both the embedded brief and
+            # the member's initial ``/goal`` prompt).
+            member_brief = spill_goal_brief_if_too_long(
+                member_brief,
+                run_dir=str(run_dir),
+                task_id=task_id,
+                label=f"{agent}-{subtask_key}",
+                is_lead=False,
+            )
 
             # Fetch project context
             ws_ctx = await ws_ds.get_context(task_row.user_id, project_id)
@@ -472,6 +485,16 @@ class DispatcherService:
                     if review_criteria
                     else ""
                 )
+            )
+            # Fence the goal-mode payload: spill an over-cap member brief to a
+            # doc and pass a short pointer (used as both the embedded brief and
+            # the member's initial ``/goal`` prompt).
+            member_brief = spill_goal_brief_if_too_long(
+                member_brief,
+                run_dir=str(run_dir),
+                task_id=task_id,
+                label=f"{agent}-{subtask_key}",
+                is_lead=False,
             )
 
             ws_ctx = await ws_ds.get_context(task_row.user_id, project_id)
