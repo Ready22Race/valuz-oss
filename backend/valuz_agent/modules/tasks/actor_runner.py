@@ -47,15 +47,19 @@ logger = logging.getLogger(__name__)
 async def _restamp_always_on_mcp(session_id: str) -> None:
     """Refresh the always-on in-process MCP token before driving a turn.
 
-    ``settings.internal_mcp_token`` rotates per process, so a session re-driven
-    after a backend restart — task **resume / recovery**, the persistent actor
-    loop, a sync kickoff — carries a *stale* ``X-Valuz-Internal`` in its
-    persisted ``mcp_servers``. The in-process MCP gate then 403s every request
-    and the runtime parks the ``harness`` server in ``needsAuth``, hiding ALL
-    its tools — both the base set (memory / submit_skill) and, for a lead, the
-    orchestration set (dispatch / review_subtask / finish_task / await_members /
-    send / get_plan). The symptom: a re-launched lead reports it "has no
-    orchestration tools" and only the runtime's built-ins remain.
+    A session re-driven after a backend restart — task **resume / recovery**,
+    the persistent actor loop, a sync kickoff — can carry *stale* always-on MCP
+    headers in its persisted ``mcp_servers``. The in-process MCP gate then 403s
+    every request and the runtime parks the ``harness`` server in ``needsAuth``,
+    hiding ALL its tools — both the base set (memory / submit_skill) and, for a
+    lead, the orchestration set (dispatch / review_subtask / finish_task /
+    await_members / send / get_plan). The symptom: a re-launched lead reports it
+    "has no orchestration tools" and only the runtime's built-ins remain.
+
+    ``internal_mcp_token`` is now DERIVED from the stable owner id so it no
+    longer rotates across restarts (the historical root cause); the re-stamp
+    stays to converge the other drift-prone header bits (``backend_base_url`` /
+    ``session_id``, an ``internal_mcp_token_override`` change).
 
     The chat path already self-heals this in ``send_message`` /
     ``send_message_sync``; the task/actor turn path had no equivalent. Re-stamp
