@@ -126,30 +126,63 @@ export const AutomationDetailPage = () => {
   const pageHeader = useMemo(
     () =>
       detail ? (
-        <div className="flex items-center justify-between px-5 py-4">
+        <div className="flex items-center justify-between px-5 py-5">
           <div className="flex min-w-0 items-center gap-2">
             <BackLink
               label={t(k("automation.title"))}
               onClick={() => navigate("/automations")}
             />
             <span className="text-ink-meta">/</span>
-            <span className="truncate text-sm text-ink-body">{detail.name}</span>
+            <span className="truncate text-base font-semibold text-ink-heading">
+              {detail.name}
+            </span>
+            {detail.status === "enabled" ? (
+              <span className="shrink-0 rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400">
+                {t(k("cron.statusOn"))}
+              </span>
+            ) : (
+              <span className="shrink-0 rounded-full bg-surface-soft px-2 py-0.5 text-xs font-medium text-ink-meta">
+                {t(k("cron.paused"))}
+              </span>
+            )}
           </div>
-          <div className="flex shrink-0 items-center gap-1">
-            <Button variant="ghost" size="icon" onClick={() => setEditOpen(true)}>
-              <FilePenLine className="h-4 w-4" />
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void handleToggle()}
+            >
+              {detail.status === "enabled" ? (
+                <>
+                  <Pause className="h-3.5 w-3.5" />
+                  {t(k("cron.pause"))}
+                </>
+              ) : (
+                <>
+                  <Power className="h-3.5 w-3.5" />
+                  {t(k("cron.enable"))}
+                </>
+              )}
             </Button>
             <Button
-              variant="ghost"
-              size="icon"
+              variant="outline"
+              size="sm"
+              onClick={() => void handleRunNow()}
+            >
+              <Play className="h-3.5 w-3.5" />
+              {t(k("cron.runNow"))}
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
+              <FilePenLine className="h-3.5 w-3.5" />
+              {t(k("common.edit"))}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               className="text-destructive hover:text-destructive"
               onClick={() => setDeleteOpen(true)}
             >
-              <Trash2 className="h-4 w-4" />
-            </Button>
-            <Button size="sm" onClick={() => void handleRunNow()}>
-              <Play className="h-3.5 w-3.5" />
-              {t(k("cron.runNow"))}
+              <Trash2 className="h-3.5 w-3.5" />
             </Button>
           </div>
         </div>
