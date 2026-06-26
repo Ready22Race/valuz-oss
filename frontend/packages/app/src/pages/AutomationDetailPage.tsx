@@ -257,8 +257,9 @@ export const AutomationDetailPage = () => {
       <div className="flex items-start justify-between px-8 pt-5 pb-5">
         <div>
           <h1 className="text-2xl font-semibold text-ink-heading">{detail.name}</h1>
+          <p className="mt-1 text-sm text-ink-meta">{detail.trigger_human_readable}</p>
           {detail.agent_name && (
-            <p className="mt-1 text-sm text-ink-meta">{detail.agent_name}</p>
+            <p className="text-sm text-ink-meta">{detail.agent_name}</p>
           )}
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-1">
