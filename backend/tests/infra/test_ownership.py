@@ -17,6 +17,7 @@ import contextvars
 import pytest
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import StatementError
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Session
 
 from valuz_agent.boot.schema import ensure_host_schema_migratable
@@ -152,13 +153,23 @@ class TestUserMixinStamping:
 # --------------------------------------------------------------------------- #
 # 4. ensure_host_schema_migratable
 # --------------------------------------------------------------------------- #
+async def _run_host_preflight(sync_engine) -> None:
+    """Drive the now-async host preflight against the same sqlite file the sync
+    setup engine built (the boot path reflects through an async engine)."""
+    aengine = create_async_engine(sync_engine.url.set(drivername="sqlite+aiosqlite"))
+    try:
+        await ensure_host_schema_migratable(aengine)
+    finally:
+        await aengine.dispose()
+
+
 class TestEnsureHostSchemaMigratable:
     """The preflight never drops — full behavioral coverage lives in
     ``tests/migrations/test_host_baseline_reset``. These cases pin the
     ownership-relevant ends: an unstamped legacy DB raises (kept intact); a DB
     stamped at a known revision is trusted as-is."""
 
-    def test_raises_and_keeps_legacy_db_without_baseline_stamp(self, tmp_path) -> None:
+    async def test_raises_and_keeps_legacy_db_without_baseline_stamp(self, tmp_path) -> None:
         engine = create_engine(f"sqlite:///{tmp_path / 'pre.db'}")
         with engine.begin() as conn:
             conn.execute(text("CREATE TABLE valuz_provider (id TEXT PRIMARY KEY)"))
@@ -166,12 +177,12 @@ class TestEnsureHostSchemaMigratable:
             conn.execute(text("CREATE TABLE alembic_version_host (version_num TEXT PRIMARY KEY)"))
 
         with pytest.raises(RuntimeError):
-            ensure_host_schema_migratable(engine)
+            await _run_host_preflight(engine)
 
         remaining = set(inspect(engine).get_table_names())
         assert {"valuz_provider", "valuz_agent", "alembic_version_host"} <= remaining
 
-    def test_noop_when_stamped_at_baseline(self, tmp_path) -> None:
+    async def test_noop_when_stamped_at_baseline(self, tmp_path) -> None:
         from valuz_agent.boot.schema import BASELINE_REVISION
 
         engine = create_engine(f"sqlite:///{tmp_path / 'modern.db'}")
@@ -181,12 +192,12 @@ class TestEnsureHostSchemaMigratable:
             conn.execute(text("CREATE TABLE alembic_version_host (version_num TEXT PRIMARY KEY)"))
             conn.execute(text(f"INSERT INTO alembic_version_host VALUES ('{BASELINE_REVISION}')"))
 
-        ensure_host_schema_migratable(engine)  # no raise
+        await _run_host_preflight(engine)  # no raise
 
         remaining = set(inspect(engine).get_table_names())
         assert {"valuz_provider", "valuz_agent"} <= remaining
 
-    def test_noop_on_fresh_install(self, tmp_path) -> None:
+    async def test_noop_on_fresh_install(self, tmp_path) -> None:
         engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
-        ensure_host_schema_migratable(engine)  # no raise
+        await _run_host_preflight(engine)  # no raise
         assert set(inspect(engine).get_table_names()) == set()

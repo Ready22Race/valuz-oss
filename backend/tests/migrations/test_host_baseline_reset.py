@@ -11,8 +11,19 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from valuz_agent.boot.schema import BASELINE_REVISION, ensure_host_schema_migratable
+
+
+async def _run_host_preflight(sync_engine) -> None:
+    """Drive the now-async host preflight against the same sqlite file the sync
+    setup engine built (the boot path reflects through an async engine)."""
+    aengine = create_async_engine(sync_engine.url.set(drivername="sqlite+aiosqlite"))
+    try:
+        await ensure_host_schema_migratable(aengine)
+    finally:
+        await aengine.dispose()
 
 
 def _host_tables(engine) -> set[str]:
@@ -38,20 +49,20 @@ def _create_host_shape(conn, *, stamp: str | None) -> None:
 # ── safe states: return, nothing touched ──────────────────────────────────
 
 
-def test_should_pass_when_stamped_at_head(tmp_path) -> None:
+async def test_should_pass_when_stamped_at_head(tmp_path) -> None:
     """Stamp == head revision → trust it; nothing raised, data untouched."""
     engine = create_engine(f"sqlite:///{tmp_path / 'on_head.db'}")
     with engine.begin() as conn:
         _create_host_shape(conn, stamp=BASELINE_REVISION)
         conn.execute(text("INSERT INTO valuz_agent VALUES ('a1', 'local-u')"))
 
-    ensure_host_schema_migratable(engine)  # no raise
+    await _run_host_preflight(engine)  # no raise
 
     assert _stamp(engine) == BASELINE_REVISION
     assert _host_tables(engine) == {"valuz_agent", "valuz_provider"}
 
 
-def test_should_pass_when_stamped_at_older_known_revision(tmp_path) -> None:
+async def test_should_pass_when_stamped_at_older_known_revision(tmp_path) -> None:
     """A DB on an earlier *known* revision passes through for ``alembic upgrade
     head`` to migrate forward — never wiped. (The baseline file's id is 0002.)"""
     engine = create_engine(f"sqlite:///{tmp_path / 'older_known.db'}")
@@ -59,22 +70,22 @@ def test_should_pass_when_stamped_at_older_known_revision(tmp_path) -> None:
         _create_host_shape(conn, stamp="0002")
         conn.execute(text("INSERT INTO valuz_agent VALUES ('a1', 'local-u')"))
 
-    ensure_host_schema_migratable(engine)  # no raise
+    await _run_host_preflight(engine)  # no raise
 
     assert _stamp(engine) == "0002"
     assert _host_tables(engine) == {"valuz_agent", "valuz_provider"}
 
 
-def test_should_pass_on_fresh_install(tmp_path) -> None:
+async def test_should_pass_on_fresh_install(tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
-    ensure_host_schema_migratable(engine)  # no raise
+    await _run_host_preflight(engine)  # no raise
     assert set(inspect(engine).get_table_names()) == set()
 
 
 # ── unsafe states: raise, NOTHING deleted ─────────────────────────────────
 
 
-def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> None:
+async def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> None:
     """Foreign/unknown stamp WITH data = a downgrade. Raise, delete nothing."""
     engine = create_engine(f"sqlite:///{tmp_path / 'downgrade.db'}")
     with engine.begin() as conn:
@@ -82,7 +93,7 @@ def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> No
         conn.execute(text("INSERT INTO valuz_agent VALUES ('a1', 'local-u')"))
 
     with pytest.raises(RuntimeError, match="not a known revision"):
-        ensure_host_schema_migratable(engine)
+        await _run_host_preflight(engine)
 
     assert _host_tables(engine) == {"valuz_agent", "valuz_provider"}
     assert _stamp(engine) == "9999_from_the_future"
@@ -90,45 +101,45 @@ def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> No
         assert conn.execute(text("SELECT id FROM valuz_agent")).fetchall() == [("a1",)]
 
 
-def test_should_raise_and_preserve_on_foreign_stamp_with_empty_tables(tmp_path) -> None:
+async def test_should_raise_and_preserve_on_foreign_stamp_with_empty_tables(tmp_path) -> None:
     """Foreign stamp but empty tables → unrecognized state; raise, drop nothing."""
     engine = create_engine(f"sqlite:///{tmp_path / 'foreign_empty.db'}")
     with engine.begin() as conn:
         _create_host_shape(conn, stamp="0099")
 
     with pytest.raises(RuntimeError, match="unrecognized state"):
-        ensure_host_schema_migratable(engine)
+        await _run_host_preflight(engine)
 
     # Never dropped — operator decides (remove the data dir).
     assert _host_tables(engine) == {"valuz_agent", "valuz_provider"}
     assert "alembic_version_host" in set(inspect(engine).get_table_names())
 
 
-def test_should_raise_when_unstamped_with_tables(tmp_path) -> None:
+async def test_should_raise_when_unstamped_with_tables(tmp_path) -> None:
     """Tables present but version row missing (boot died mid-init) → raise."""
     engine = create_engine(f"sqlite:///{tmp_path / 'no_stamp.db'}")
     with engine.begin() as conn:
         _create_host_shape(conn, stamp=None)
 
     with pytest.raises(RuntimeError, match="unrecognized state"):
-        ensure_host_schema_migratable(engine)
+        await _run_host_preflight(engine)
 
     assert _host_tables(engine) == {"valuz_agent", "valuz_provider"}
 
 
-def test_should_raise_when_version_table_absent_but_tables_present(tmp_path) -> None:
+async def test_should_raise_when_version_table_absent_but_tables_present(tmp_path) -> None:
     """Host tables without any version table (ad-hoc create_all) → raise."""
     engine = create_engine(f"sqlite:///{tmp_path / 'no_vt.db'}")
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE valuz_agent (id TEXT PRIMARY KEY, user_id TEXT)"))
 
     with pytest.raises(RuntimeError, match="unrecognized state"):
-        ensure_host_schema_migratable(engine)
+        await _run_host_preflight(engine)
 
     assert _host_tables(engine) == {"valuz_agent"}
 
 
-def test_should_not_delete_anything_including_kernel_when_unmigratable(tmp_path) -> None:
+async def test_should_not_delete_anything_including_kernel_when_unmigratable(tmp_path) -> None:
     """The preflight raises BEFORE touching anything — host, kernel, version
     tables all survive (it never drops, so the scope question is moot)."""
     engine = create_engine(f"sqlite:///{tmp_path / 'mixed.db'}")
@@ -138,7 +149,7 @@ def test_should_not_delete_anything_including_kernel_when_unmigratable(tmp_path)
         conn.execute(text("CREATE TABLE alembic_version (version_num TEXT PRIMARY KEY)"))
 
     with pytest.raises(RuntimeError):
-        ensure_host_schema_migratable(engine)
+        await _run_host_preflight(engine)
 
     remaining = set(inspect(engine).get_table_names())
     assert {"valuz_agent", "valuz_provider", "sessions", "alembic_version"} <= remaining
