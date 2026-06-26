@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { ListChecks, MessageSquare } from "lucide-react";
+import { Clock3, ListChecks, MessageSquare } from "lucide-react";
 import {
   DeleteConfirmDialog,
   PageHeader,
@@ -191,7 +191,8 @@ const RunningCard = ({
   onOpen,
   t,
 }: RunningCardProps) => {
-  const ScopeIcon = isTask ? ListChecks : MessageSquare;
+  const ScopeIcon =
+    run.origin === "automation" ? Clock3 : isTask ? ListChecks : MessageSquare;
   // No ``max`` override — rely on the hook default. The visible-line cap
   // below handles display trimming; the buffer needs to be large enough that
   // batch counts (``Called harness 10 times``, ``Ran 6 commands``) survive
@@ -375,10 +376,14 @@ export const ActivityPage = () => {
       r.source_kind === "project_chat" ||
       (r.source_kind === "task" &&
         projectKindById.get(r.project_id) === "project");
+    // Automation-triggered runs read as 自动化 regardless of chat/task — in the
+    // 全部 tab the kind chip should mark provenance, not surface type.
     const kind =
-      r.source_kind === "task"
-        ? t(tk("activity.taskTag"))
-        : t(tk("activity.chatTag"));
+      r.origin === "automation"
+        ? t(tk("activity.automationTag"))
+        : r.source_kind === "task"
+          ? t(tk("activity.taskTag"))
+          : t(tk("activity.chatTag"));
     if (!isProject) return kind;
     const scope = r.project_name ?? "Project";
     return `${scope} · ${kind}`;
@@ -427,7 +432,12 @@ export const ActivityPage = () => {
   // ``button``, and nested buttons are invalid HTML. Keyboard accessibility:
   // ``role="button"`` + ``tabIndex`` + Enter / Space.
   const historyRow = (run: RunSummary) => {
-    const ScopeIcon = run.source_kind === "task" ? ListChecks : MessageSquare;
+    const ScopeIcon =
+      run.origin === "automation"
+        ? Clock3
+        : run.source_kind === "task"
+          ? ListChecks
+          : MessageSquare;
     const canDelete = run.source_kind !== "task";
     if (canDelete && renamingId === run.session_id) {
       return (

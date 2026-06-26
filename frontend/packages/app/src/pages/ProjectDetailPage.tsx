@@ -41,6 +41,7 @@ import {
   formatCreatedAt,
 } from "@valuz/app/components";
 import {
+  Clock3,
   FilePenLine,
   ListChecks,
   MessageSquare,
@@ -417,6 +418,7 @@ const ProjectAllList = ({
         // ``formatCreatedAt``) — used for both the displayed time and sorting.
         created: s.updated_at,
         sortAt: s.updated_at,
+        isAuto: s.origin === "automation",
       })),
       ...tasks.map((tk) => ({
         kind: "task" as const,
@@ -426,6 +428,7 @@ const ProjectAllList = ({
         statusKey: TASK_STATUS_KEY[tk.status],
         created: tk.created_at,
         sortAt: tk.updated_at,
+        isAuto: tk.origin === "automation",
       })),
     ];
     // Most-recently-active first, matching the per-tab lists.
@@ -443,8 +446,13 @@ const ProjectAllList = ({
   return (
     <ul className="flex flex-col">
       {items.map((item) => {
-        // Same leading icon as the Activity list: a task vs a conversation.
-        const Icon = item.kind === "task" ? ListChecks : MessageSquare;
+        // Leading icon + scope tag. Automation-triggered runs read as 自动化
+        // (clock) in the 全部 list, marking provenance over surface type.
+        const Icon = item.isAuto
+          ? Clock3
+          : item.kind === "task"
+            ? ListChecks
+            : MessageSquare;
         if (item.kind === "chat" && renamingId === item.id) {
           return (
             <li
@@ -489,9 +497,11 @@ const ProjectAllList = ({
             >
               <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
                 <Icon className="h-3 w-3" strokeWidth={2} />
-                {item.kind === "task"
-                  ? t("project.tasksColumn" as Parameters<typeof t>[0])
-                  : t("project.chatTab" as Parameters<typeof t>[0])}
+                {item.isAuto
+                  ? t("activity.automationTag" as Parameters<typeof t>[0])
+                  : item.kind === "task"
+                    ? t("project.tasksColumn" as Parameters<typeof t>[0])
+                    : t("project.chatTab" as Parameters<typeof t>[0])}
               </span>
               <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
                 {item.title}
@@ -801,7 +811,28 @@ export const ProjectDetailPage = () => {
     };
   }, [id]);
 
-  // ── Steady-state auto-refresh (plan §4A) ───────────────────────────────
+  // Automation-triggered subset for this project. Both signals are
+  // authoritative and complete (no "recent runs" limit): the session carries
+  // origin for chats, and the task list endpoint resolves origin for tasks
+  // (lead session ∈ automation run index). The non-automation lists feed the
+  // 全部/对话/任务 tabs; the automation subset feeds the dedicated 自动化 tab.
+  const userSessions = useMemo(
+    () => projectSessions.filter((s) => s.origin !== "automation"),
+    [projectSessions],
+  );
+  const automationSessions = useMemo(
+    () => projectSessions.filter((s) => s.origin === "automation"),
+    [projectSessions],
+  );
+  const userTasks = useMemo(
+    () => tasks.filter((tk) => tk.origin !== "automation"),
+    [tasks],
+  );
+  const automationTasks = useMemo(
+    () => tasks.filter((tk) => tk.origin === "automation"),
+    [tasks],
+  );
+
   // While the page stays mounted and the tab is visible, re-pull the two
   // already user_id+project_id-filtered list endpoints every 4s (+ on
   // visible/online) and merge the full snapshot back: sessions through the
@@ -1736,6 +1767,9 @@ export const ProjectDetailPage = () => {
                   <TabsTrigger value="tasks">
                     {t("project.tasksColumn" as Parameters<typeof t>[0])}
                   </TabsTrigger>
+                  <TabsTrigger value="automation">
+                    {t("activity.automationTag" as Parameters<typeof t>[0])}
+                  </TabsTrigger>
                 </TabsList>
               </div>
               <TabsContent value="all" className="mt-1">
@@ -1750,7 +1784,7 @@ export const ProjectDetailPage = () => {
               </TabsContent>
               <TabsContent value="chat" className="mt-1">
                 <ProjectRecents
-                  sessions={projectSessions}
+                  sessions={userSessions}
                   onOpen={(sid) => navigate(`/conversation/${sid}`)}
                   onRenameConfirm={handleRenameConfirm}
                   onDelete={handleDeleteSession}
@@ -1758,7 +1792,7 @@ export const ProjectDetailPage = () => {
               </TabsContent>
               <TabsContent value="tasks" className="mt-1">
                 <ProjectTasks
-                  tasks={tasks}
+                  tasks={userTasks}
                   onOpen={(taskId) => navigate(`/tasks/${taskId}`)}
                   onAddTask={() => {
                     // v2: there is no separate "new task" page anymore — the
@@ -1770,6 +1804,16 @@ export const ProjectDetailPage = () => {
                       .getElementById("project-composer")
                       ?.scrollIntoView({ behavior: "smooth", block: "center" });
                   }}
+                />
+              </TabsContent>
+              <TabsContent value="automation" className="mt-1">
+                <ProjectAllList
+                  sessions={automationSessions}
+                  tasks={automationTasks}
+                  onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
+                  onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
+                  onRenameConfirm={handleRenameConfirm}
+                  onDeleteSession={handleDeleteSession}
                 />
               </TabsContent>
             </Tabs>

@@ -425,6 +425,10 @@ export function ProjectLayoutBase({
     const byProject = new Map<string, DesktopSidebarRecentItem[]>();
     const loose: DesktopSidebarRecentItem[] = [];
     for (const r of sorted) {
+      // Automation-triggered runs (chats AND tasks) live in the Activity
+      // 自动化 tab, not the sidebar's conversation/task lists — skip them so
+      // recurring fires don't flood the menu.
+      if (r.origin === "automation") continue;
       const item = toItem(r);
       if (r.project_id && projectIdSet.has(r.project_id)) {
         const arr = byProject.get(r.project_id);

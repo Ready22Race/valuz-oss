@@ -25,6 +25,9 @@ export interface Task {
    * ("active just now" vs "completed yesterday"). */
   created_at: number;
   updated_at: number;
+  /** "user" | "automation" — who triggered the task. Automation-triggered
+   * tasks are grouped into the project's 自动化 tab. */
+  origin: string;
 }
 
 /** One kernel session that belongs to a task (lead or dispatched subtask). */
