@@ -248,7 +248,7 @@ class TestKbListSmoke:
         """list("kb") should return a list without crashing."""
 
         class _FakeDocService:
-            async def list_kbs(self):
+            async def list_kbs(self, user_id):
                 return []
 
         async def _fake_get_document_service():  # type: ignore[return]

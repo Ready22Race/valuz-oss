@@ -115,7 +115,7 @@ class ResourceLibrary:
             from valuz_agent.api.deps import get_document_service
 
             async with _use(get_document_service) as svc:
-                items = await svc.list_kbs()
+                items = await svc.list_kbs(user_id)
             return [ResourceRef(kind="kb", key=item.name, name=item.name) for item in items]
 
         raise NotImplementedError(f"list({kind}) not implemented")
@@ -222,11 +222,11 @@ class ResourceLibrary:
             from valuz_agent.api.deps import get_document_service
 
             async with _use(get_document_service) as svc:
-                items = await svc.list_kbs()
+                items = await svc.list_kbs(user_id)
                 matched_item = next((item for item in items if item.name == key), None)
                 if matched_item is None:
                     return None
-                detail = await svc.get_kb(matched_item.id)
+                detail = await svc.get_kb(user_id, matched_item.id)
             return ResourceSnapshot(
                 kind="kb",
                 key=detail.name,
@@ -364,17 +364,18 @@ class ResourceLibrary:
             async with _use(get_document_service) as svc:
                 try:
                     kb = await svc.create_kb(
+                        user_id,
                         name=data["name"],
                         root_path=root,
                         parser_routing=data.get("parser_routing", "local_only"),
                         auto_discover=bool(data.get("auto_discover", False)),
                     )
                 except KbRootDuplicated:
-                    kbs = await svc.list_kbs()
+                    kbs = await svc.list_kbs(user_id)
                     matched_item = next((item for item in kbs if item.name == data["name"]), None)
                     if matched_item is None:
                         raise
-                    kb = await svc.get_kb(matched_item.id)
+                    kb = await svc.get_kb(user_id, matched_item.id)
             return ResourceRef(kind="kb", key=kb.name, name=kb.name)
 
         raise NotImplementedError(f"save({snapshot.kind}) not implemented")
