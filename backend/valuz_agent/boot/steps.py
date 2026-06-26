@@ -503,6 +503,19 @@ def warm_parse_pool() -> None:
         pass
 
 
+def warm_token_estimator() -> None:
+    """Pre-load the tiktoken vocab used by the goal-mode length fence in a
+    background thread. The first ``get_encoding`` can fetch + parse the vocab
+    (seconds); warming here keeps that off the event loop so the first task's
+    spill check is instant. Best-effort, never fatal."""
+    from valuz_agent.adapters.agent_resolver import prewarm_token_estimator
+
+    try:
+        prewarm_token_estimator()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def shutdown_parse_pool() -> None:
     from valuz_agent.infra import parse_pool
 

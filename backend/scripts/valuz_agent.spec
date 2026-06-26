@@ -79,6 +79,14 @@ _third_party_pkgs = [
     # Agent runtimes
     "deepagents", "claude_agent_sdk",
     "codex_cli_bin", "openai_codex",
+    # Token counting for the goal-mode length fence (agent_resolver). The
+    # ``tiktoken_ext`` namespace package holds the encoding constructors
+    # (o200k_base lives in ``tiktoken_ext.openai_public``); collect_submodules
+    # of the bare ``tiktoken`` package misses it, so it is listed explicitly —
+    # without it ``get_encoding`` raises and counting silently degrades to the
+    # char heuristic. The vocab blob itself is vendored (see the
+    # ``vendor/tiktoken`` data dir below); tiktoken ships no vocab data files.
+    "tiktoken", "tiktoken_ext", "tiktoken_ext.openai_public",
     # LangChain ecosystem
     "langchain", "langchain_core", "langchain_protocol",
     "langchain_openai", "langchain_mcp_adapters",
@@ -205,6 +213,13 @@ a = Analysis(
         # Vendored kernel — same strategy; kernel/__init__.py injects its
         # own path for bare imports (src.*, app.*).
         (str(HERE / "kernel"), "kernel"),
+        # Vendored tiktoken vocab for the goal-mode length fence. tiktoken caches
+        # a vocab blob under ``$TIKTOKEN_CACHE_DIR/<sha1(blob_url)>`` and reads it
+        # before downloading; we ship that file so the offline packaged app counts
+        # tokens with no network. At runtime ``_vendored_tiktoken_cache_dir`` points
+        # ``TIKTOKEN_CACHE_DIR`` at this bundled dir (``_MEIPASS/vendor/tiktoken``).
+        # Refresh with ``scripts/download-tiktoken.sh``.
+        (str(HERE / "vendor" / "tiktoken"), "vendor/tiktoken"),
         # Alembic chains, moved out of the package trees to backend/alembic/
         # {host,kernel}; boot resolves them relative to backend/ (= _internal/).
         (str(HERE / "alembic"), "alembic"),
