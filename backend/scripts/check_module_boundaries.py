@@ -48,6 +48,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("projects", "skills"),
     ("resources", "connectors"),
     ("resources", "skills"),
+    ("runs", "automations"),
     ("runs", "projects"),
     ("runs", "tasks"),
     ("sessions", "agents"),

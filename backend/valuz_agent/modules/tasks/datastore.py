@@ -345,6 +345,27 @@ class TaskSessionDatastore:
         ).all()
         return {session_id: task_id for session_id, task_id in rows if task_id}
 
+    async def get_lead_session_ids_by_task_ids(
+        self, user_id: str, task_ids: list[str]
+    ) -> dict[str, str]:
+        """Map ``task_id`` → its lead ``session_id`` (batch).
+
+        Used to resolve a task's trigger origin: a lead session that appears in
+        the automation run index means the task was automation-triggered.
+        """
+        if not task_ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(TaskSessionRow.task_id, TaskSessionRow.session_id).where(
+                    TaskSessionRow.task_id.in_(task_ids),
+                    TaskSessionRow.user_id == user_id,
+                    TaskSessionRow.kind == "lead",
+                )
+            )
+        ).all()
+        return {task_id: session_id for task_id, session_id in rows if session_id}
+
     async def get_run(self, session_id: str) -> TaskSessionRow | None:
         """SYSTEM lookup by the globally-unique kernel ``session_id`` (runner +
         kernel-event finalization). Not a user query — no owner filter."""

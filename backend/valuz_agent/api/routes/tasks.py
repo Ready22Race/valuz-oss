@@ -31,6 +31,7 @@ from sse_starlette.sse import EventSourceResponse
 from valuz_agent.api.deps import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
 from valuz_agent.infra.sse import shielded
+from valuz_agent.modules.automations.datastore import AutomationDatastore
 from valuz_agent.modules.tasks import messaging, planning
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
@@ -73,6 +74,11 @@ class TaskResponse(BaseModel):
     # ("active just now" vs "completed yesterday").
     created_at: int
     updated_at: int
+    # "user" | "automation" — who triggered the task. A task whose lead session
+    # was produced by a scheduled automation run is "automation"; the task row
+    # itself carries no marker, so the route resolves this from the automation
+    # run index. Lets the project list move automation tasks to its 自动化 tab.
+    origin: str = "user"
 
     model_config = {"from_attributes": True}
 
@@ -201,6 +207,32 @@ async def kickoff_task(project_id: str, payload: KickoffTaskRequest) -> TaskResp
     return TaskResponse.model_validate(row)
 
 
+async def _tasks_with_origin(
+    db: AsyncSession, user_id: str, rows: list[Any]
+) -> list[TaskResponse]:
+    """Build TaskResponses, resolving each task's trigger origin.
+
+    A task is "automation" when its lead session appears in the automation run
+    index (the task row itself carries no marker). Batched: one lead-session
+    lookup + one automation-run-session set, regardless of task count.
+    """
+    if not rows:
+        return []
+    task_ids = [r.id for r in rows]
+    lead_by_task = await TaskSessionDatastore(db).get_lead_session_ids_by_task_ids(
+        user_id, task_ids
+    )
+    automation_sessions = await AutomationDatastore(db).list_run_session_ids(user_id)
+    out: list[TaskResponse] = []
+    for r in rows:
+        resp = TaskResponse.model_validate(r)
+        lead_sid = lead_by_task.get(r.id)
+        if lead_sid and lead_sid in automation_sessions:
+            resp.origin = "automation"
+        out.append(resp)
+    return out
+
+
 @router.get("/v1/projects/{project_id}/tasks", response_model=dict[str, list[TaskResponse]])
 async def list_tasks(
     project_id: str,
@@ -208,7 +240,7 @@ async def list_tasks(
     user_id: str = Depends(require_current_user_id),
 ) -> dict[str, list[TaskResponse]]:
     rows = await TaskDatastore(db).list_tasks(user_id, project_id)
-    return {"tasks": [TaskResponse.model_validate(r) for r in rows]}
+    return {"tasks": await _tasks_with_origin(db, user_id, rows)}
 
 
 @router.get("/v1/tasks", response_model=dict[str, list[TaskResponse]])
@@ -221,7 +253,7 @@ async def list_all_tasks(
     sidebar TASKS section so users see what's running regardless of which
     project page they're on."""
     rows = await TaskDatastore(db).list_all(user_id, limit=limit)
-    return {"tasks": [TaskResponse.model_validate(r) for r in rows]}
+    return {"tasks": await _tasks_with_origin(db, user_id, rows)}
 
 
 @router.get("/v1/tasks/{task_id}", response_model=TaskDetailResponse)
