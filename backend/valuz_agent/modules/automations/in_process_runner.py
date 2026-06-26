@@ -522,6 +522,10 @@ class InProcessAutomationRunner:
                 title=title or row.name,
                 dispatch_mode="async",
                 created_by="automation",
+                # Record the back-link so the spawned task shows "由 自动化 … 触发"
+                # and the reverse "what did this automation spawn?" is queryable.
+                trigger_type="automation",
+                trigger_automation_id=automation_id,
             )
             # ``kickoff`` returns the ``TaskRow``; the lead session id lives
             # on the matching ``TaskSessionRow`` (kind="lead"). Fetch it

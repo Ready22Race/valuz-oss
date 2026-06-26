@@ -3111,6 +3111,22 @@ components:
         file_path: {type: string}
         created_at: {type: integer, format: int64, description: "Unix epoch milliseconds (UTC). Format via new Date(ms)."}
         updated_at: {type: integer, format: int64, description: "Unix epoch milliseconds (UTC). Format via new Date(ms)."}
+        trigger:
+          allOf: [{$ref: "#/components/schemas/TaskTrigger"}]
+          nullable: true
+          description: "Resolved provenance — who/what spawned this task (drives the task-list '由 … 触发' line)."
+    TaskTrigger:
+      type: object
+      required: [type]
+      description: "Who/what spawned a task. The source_* ids deep-link to the parent task / automation / conversation."
+      properties:
+        type: {type: string, enum: [user, chat, agent, automation], description: "user = direct action; chat = a project conversation; agent = another task's lead/member; automation = a scheduled/agent-run automation."}
+        source_task_id: {type: string, nullable: true, description: "Parent task (type=agent)."}
+        source_task_title: {type: string, nullable: true}
+        source_agent_slug: {type: string, nullable: true, description: "Triggering agent (type=agent)."}
+        source_automation_id: {type: string, nullable: true, description: "Automation that fired it (type=automation)."}
+        source_automation_name: {type: string, nullable: true}
+        source_session_id: {type: string, nullable: true, description: "Originating conversation (type=chat)."}
     TaskRun:
       type: object
       required: [id, session_id, agent_slug, sequence, kind, status, project_mode]

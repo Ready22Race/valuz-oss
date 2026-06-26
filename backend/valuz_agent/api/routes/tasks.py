@@ -31,13 +31,14 @@ from sse_starlette.sse import EventSourceResponse
 from valuz_agent.api.deps import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
 from valuz_agent.infra.sse import shielded
+from valuz_agent.modules.automations.datastore import AutomationDatastore
 from valuz_agent.modules.tasks import messaging, planning
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
     TaskSessionDatastore,
 )
-from valuz_agent.modules.tasks.models import TaskEventRow
+from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow
 from valuz_agent.modules.tasks.orchestrator import task_orchestrator
 
 router = APIRouter(tags=["tasks"])
@@ -59,6 +60,21 @@ class KickoffTaskRequest(BaseModel):
     dispatch_mode: Literal["sync", "async"] = "async"
 
 
+class TaskTrigger(BaseModel):
+    """Resolved "who/what spawned this task" — drives the task-list "由 … 触发"
+    line. ``type`` is one of user | chat | agent | automation; the source_* ids
+    let the UI deep-link to the parent task / automation / conversation, and the
+    resolved names spare the frontend a second lookup."""
+
+    type: str
+    source_task_id: str | None = None
+    source_task_title: str | None = None
+    source_agent_slug: str | None = None
+    source_automation_id: str | None = None
+    source_automation_name: str | None = None
+    source_session_id: str | None = None
+
+
 class TaskResponse(BaseModel):
     id: str
     project_id: str
@@ -73,8 +89,54 @@ class TaskResponse(BaseModel):
     # ("active just now" vs "completed yesterday").
     created_at: int
     updated_at: int
+    # Resolved trigger provenance (attached by the route, not from the ORM row).
+    trigger: TaskTrigger | None = None
 
     model_config = {"from_attributes": True}
+
+
+async def _resolve_triggers(
+    db: AsyncSession, user_id: str, rows: list[TaskRow]
+) -> dict[str, TaskTrigger]:
+    """Batch-resolve each task's trigger provenance into a render-ready
+    ``TaskTrigger`` (parent-task titles + automation names fetched once)."""
+    parent_ids = list({r.trigger_task_id for r in rows if r.trigger_task_id})
+    automation_ids = list({r.trigger_automation_id for r in rows if r.trigger_automation_id})
+    titles = await TaskDatastore(db).get_titles_by_ids(user_id, parent_ids) if parent_ids else {}
+    automations = (
+        await AutomationDatastore(db).get_names_by_ids(user_id, automation_ids)
+        if automation_ids
+        else {}
+    )
+    out: dict[str, TaskTrigger] = {}
+    for r in rows:
+        ttype = r.trigger_type or "user"
+        trig = TaskTrigger(type=ttype)
+        if ttype == "agent":
+            trig.source_task_id = r.trigger_task_id
+            trig.source_task_title = titles.get(r.trigger_task_id or "")
+            trig.source_agent_slug = r.trigger_agent_slug
+        elif ttype == "automation":
+            trig.source_automation_id = r.trigger_automation_id
+            trig.source_automation_name = automations.get(r.trigger_automation_id or "")
+        elif ttype == "chat":
+            trig.source_session_id = (r.metadata_ or {}).get("originating_session_id")
+        out[r.id] = trig
+    return out
+
+
+def _to_task_responses(rows: list[TaskRow], triggers: dict[str, TaskTrigger]) -> list[TaskResponse]:
+    out: list[TaskResponse] = []
+    for r in rows:
+        resp = TaskResponse.model_validate(r)
+        resp.trigger = triggers.get(r.id)
+        out.append(resp)
+    return out
+
+
+async def _task_response_with_trigger(db: AsyncSession, user_id: str, row: TaskRow) -> TaskResponse:
+    triggers = await _resolve_triggers(db, user_id, [row])
+    return _to_task_responses([row], triggers)[0]
 
 
 class RunResponse(BaseModel):
@@ -198,7 +260,11 @@ async def kickoff_task(project_id: str, payload: KickoffTaskRequest) -> TaskResp
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return TaskResponse.model_validate(row)
+    # A REST kickoff is a direct user action (no originating session), so the
+    # trigger is always "user" — no source to resolve.
+    resp = TaskResponse.model_validate(row)
+    resp.trigger = TaskTrigger(type=row.trigger_type or "user")
+    return resp
 
 
 @router.get("/v1/projects/{project_id}/tasks", response_model=dict[str, list[TaskResponse]])
@@ -208,7 +274,8 @@ async def list_tasks(
     user_id: str = Depends(require_current_user_id),
 ) -> dict[str, list[TaskResponse]]:
     rows = await TaskDatastore(db).list_tasks(user_id, project_id)
-    return {"tasks": [TaskResponse.model_validate(r) for r in rows]}
+    triggers = await _resolve_triggers(db, user_id, rows)
+    return {"tasks": _to_task_responses(rows, triggers)}
 
 
 @router.get("/v1/tasks", response_model=dict[str, list[TaskResponse]])
@@ -221,7 +288,8 @@ async def list_all_tasks(
     sidebar TASKS section so users see what's running regardless of which
     project page they're on."""
     rows = await TaskDatastore(db).list_all(user_id, limit=limit)
-    return {"tasks": [TaskResponse.model_validate(r) for r in rows]}
+    triggers = await _resolve_triggers(db, user_id, rows)
+    return {"tasks": _to_task_responses(rows, triggers)}
 
 
 @router.get("/v1/tasks/{task_id}", response_model=TaskDetailResponse)
@@ -236,7 +304,7 @@ async def get_task(
     runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
     events = await TaskEventDatastore(db).list_events(user_id, task.project_id, task_id)
     return TaskDetailResponse(
-        task=TaskResponse.model_validate(task),
+        task=await _task_response_with_trigger(db, user_id, task),
         runs=[RunResponse.model_validate(r) for r in runs],
         events=[EventResponse.model_validate(e) for e in events],
     )
@@ -430,7 +498,7 @@ async def intervene(
     db.expire_all()  # drop cached rows so we see the orchestrator's committed write
     refreshed = await task_ds.get_task(user_id, task_id)
     assert refreshed is not None
-    return TaskResponse.model_validate(refreshed)
+    return await _task_response_with_trigger(db, user_id, refreshed)
 
 
 class StopMemberResponse(BaseModel):

@@ -84,6 +84,7 @@ from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.plan import TaskPlan
+from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
 from valuz_agent.modules.tasks.recovery import RecoveryService
 
 
@@ -197,6 +198,8 @@ class TaskOrchestrator:
         title: str | None = None,
         dispatch_mode: Literal["sync", "async"] = "async",
         originating_session_id: str | None = None,
+        trigger_type: str | None = None,
+        trigger_automation_id: str | None = None,
     ) -> TaskRow:
         """Create a task and start its lead session in the background.
 
@@ -227,6 +230,8 @@ class TaskOrchestrator:
             title=title,
             dispatch_mode=dispatch_mode,
             originating_session_id=originating_session_id,
+            trigger_type=trigger_type,
+            trigger_automation_id=trigger_automation_id,
         )
 
     # ------------------------------------------------------------------
@@ -297,6 +302,13 @@ class TaskOrchestrator:
             if refs:
                 metadata["refs"] = list(refs)
 
+            # Classify the trigger source (chat, or agent when drafted from
+            # within another task) so the task list shows "由 … 触发" even for
+            # drafts that haven't been committed yet.
+            prov = await resolve_trigger_provenance(
+                db, originating_session_id=originating_session_id
+            )
+
             task_row = TaskRow(
                 id=task_id,
                 project_id=project_id,
@@ -311,6 +323,10 @@ class TaskOrchestrator:
                 # writer gate uses metadata.originating_session_id +
                 # project match (see dispatch_mcp._check_plan_writer_gate).
                 current_holder=lead_agent_slug,
+                trigger_type=prov.trigger_type,
+                trigger_task_id=prov.trigger_task_id,
+                trigger_agent_slug=prov.trigger_agent_slug,
+                trigger_automation_id=prov.trigger_automation_id,
                 metadata_=metadata,
                 plan_version=0,
                 committed_at=None,
