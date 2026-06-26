@@ -257,10 +257,12 @@ export const AutomationDetailPage = () => {
       <div className="flex items-start justify-between px-8 pt-5 pb-5">
         <div>
           <h1 className="text-2xl font-semibold text-ink-heading">{detail.name}</h1>
-          <p className="mt-1 text-sm text-ink-meta">{detail.trigger_human_readable}</p>
-          {detail.agent_name && (
-            <p className="text-sm text-ink-meta">{detail.agent_name}</p>
-          )}
+          <p className="mt-1 flex items-center gap-2 text-sm text-ink-meta">
+            <span>{detail.trigger_human_readable}</span>
+            {detail.agent_name && (
+              <><span>·</span><span>{detail.agent_name}</span></>
+            )}
+          </p>
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-1">
           <Button variant="outline" size="sm" onClick={() => void handleToggle()}>
