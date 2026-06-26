@@ -164,7 +164,9 @@ class FakeProjectService:
     async def list_projects(self, user_id: str) -> list[FakeProject]:
         return list(self._projects.values())
 
-    async def create_chat_project_for_session(self, name: str = "Chat") -> FakeProject:
+    async def create_chat_project_for_session(
+        self, user_id: str, name: str = "Chat"
+    ) -> FakeProject:
         self._counter += 1
         ws_id = f"chat-ws-{self._counter}"
         ws = FakeProject(ws_id, name, "chat")

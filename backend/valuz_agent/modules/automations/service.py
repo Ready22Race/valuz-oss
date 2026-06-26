@@ -481,13 +481,15 @@ class AutomationService:
                     # The calling session was a project session that asked
                     # for kind=chat — treat as "lazy create".
                     fresh = await self._ws.create_chat_project_for_session(
-                        name=payload.name.strip()
+                        require_current_user_id(), name=payload.name.strip()
                     )
                     project_id = fresh.id
             else:
                 # Automation page "Chat" picker: no calling session, no
                 # explicit ws — lazy-create one named after the automation.
-                fresh = await self._ws.create_chat_project_for_session(name=payload.name.strip())
+                fresh = await self._ws.create_chat_project_for_session(
+                    require_current_user_id(), name=payload.name.strip()
+                )
                 project_id = fresh.id
 
             # 2. Resolve the agent for that project
@@ -695,9 +697,7 @@ class AutomationService:
     async def confirmed_origin_map(self, tool_call_ids: list[str]) -> dict[str, str]:
         """Map each already-confirmed proposing ``tool_call_id`` → its created
         automation id (owner-scoped). Backs the proposal re-entry status route."""
-        rows = await self._ds.list_by_origin_tool_call_ids(
-            require_current_user_id(), tool_call_ids
-        )
+        rows = await self._ds.list_by_origin_tool_call_ids(require_current_user_id(), tool_call_ids)
         return {r.origin_tool_call_id: r.id for r in rows if r.origin_tool_call_id}
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -929,15 +929,11 @@ class AutomationService:
         # that instead. Batched to avoid an N+1 over the runs page.
         task_status_by_session = await self._resolve_task_statuses(runs)
         return [
-            self._run_to_item(
-                r, task_status_by_session.get(r.session_id) if r.session_id else None
-            )
+            self._run_to_item(r, task_status_by_session.get(r.session_id) if r.session_id else None)
             for r in runs
         ]
 
-    async def _resolve_task_statuses(
-        self, runs: list[AutomationRunRow]
-    ) -> dict[str, str]:
+    async def _resolve_task_statuses(self, runs: list[AutomationRunRow]) -> dict[str, str]:
         """Map each run's lead ``session_id`` → its task's current status.
 
         Returns ``{}`` when no run carries a session id (e.g. conversation
