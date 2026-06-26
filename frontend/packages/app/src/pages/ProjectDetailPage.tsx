@@ -324,8 +324,11 @@ const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
     const kids = new Map<string, Task[]>();
     const rootList: Task[] = [];
     for (const tk of tasks) {
-      const parentId =
-        tk.trigger?.type === "agent" ? (tk.trigger.source_task_id ?? null) : null;
+      // Nest under the originating task whenever one is recorded — directly
+      // (agent create_task) OR transitively (an agent ran an automation that
+      // spawned this task; trigger.type stays "automation" but source_task_id
+      // points at the task whose agent invoked it).
+      const parentId = tk.trigger?.source_task_id ?? null;
       if (parentId && present.has(parentId)) {
         const arr = kids.get(parentId) ?? [];
         arr.push(tk);
@@ -363,9 +366,14 @@ const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
     const kids = childrenOf.get(task.id) ?? [];
     const hasKids = kids.length > 0;
     const isCollapsed = collapsed.has(task.id);
-    // Flat provenance line only on roots: a nested child is always
-    // agent-triggered, and the nesting itself conveys "由父任务触发".
-    const flatLabel = depth === 0 ? taskTriggerLabel(task, t) : null;
+    // Flat provenance line: always on roots; and keep the "由自动化…" line even
+    // when nested (it explains HOW the parent task spawned this — via the
+    // automation). Suppress the redundant "由任务…" on nested agent children
+    // (the nesting itself already conveys the parent).
+    const flatLabel =
+      depth === 0 || task.trigger?.type === "automation"
+        ? taskTriggerLabel(task, t)
+        : null;
     return (
       <li key={task.id}>
         <div className="flex items-center">

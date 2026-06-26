@@ -880,6 +880,7 @@ class AutomationService:
         automation_id: str,
         *,
         trigger_type: Literal["manual", "agent"] = "manual",
+        invoked_by_session_id: str | None = None,
     ) -> AutomationRunAcceptedResponse:
         """Enqueue an immediate, off-schedule run for this automation.
 
@@ -924,6 +925,7 @@ class AutomationService:
             trigger_type=trigger_type,
             status="queued",
             triggered_at=now,
+            invoked_by_session_id=invoked_by_session_id,
         )
         await self._ds.create_run(require_current_user_id(), run)
         self._bus.publish(

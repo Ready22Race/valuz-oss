@@ -112,11 +112,14 @@ async def _resolve_triggers(
     for r in rows:
         ttype = r.trigger_type or "user"
         trig = TaskTrigger(type=ttype)
-        if ttype == "agent":
+        # The originating task (for tree nesting) can ride on ANY type: directly
+        # for ``agent``, or transitively for ``automation`` (an agent in a task
+        # ran the automation that spawned this one). Surface it whenever present.
+        if r.trigger_task_id:
             trig.source_task_id = r.trigger_task_id
-            trig.source_task_title = titles.get(r.trigger_task_id or "")
+            trig.source_task_title = titles.get(r.trigger_task_id)
             trig.source_agent_slug = r.trigger_agent_slug
-        elif ttype == "automation":
+        if ttype == "automation":
             trig.source_automation_id = r.trigger_automation_id
             trig.source_automation_name = automations.get(r.trigger_automation_id or "")
         elif ttype == "chat":

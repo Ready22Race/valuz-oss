@@ -58,6 +58,37 @@ async def test_automation_taken_as_is(bind_db):
 
 
 @pytest.mark.asyncio
+async def test_automation_invoked_by_agent_also_links_origin_task(bind_db):
+    """An agent (in a task) that runs an automation → the spawned task keeps
+    type=automation but ALSO records the originating task so it nests under it."""
+    uid = require_current_user_id()
+    async with async_unit_of_work() as db:
+        db.add(
+            TaskSessionRow(
+                user_id=uid,
+                project_id="w1",
+                task_id="origin-task",
+                session_id="origin-lead",
+                agent_slug="行业分析师",
+                sequence=0,
+                kind="lead",
+                status="active",
+            )
+        )
+    async with async_unit_of_work() as db:
+        prov = await resolve_trigger_provenance(
+            db,
+            originating_session_id="origin-lead",
+            trigger_type="automation",
+            trigger_automation_id="auto-9",
+        )
+    assert prov.trigger_type == "automation"
+    assert prov.trigger_automation_id == "auto-9"
+    assert prov.trigger_task_id == "origin-task"  # nests under the originating task
+    assert prov.trigger_agent_slug == "行业分析师"
+
+
+@pytest.mark.asyncio
 async def test_conversation_session_is_chat(bind_db):
     # A session with no task-session row is a plain project conversation.
     async with async_unit_of_work() as db:
