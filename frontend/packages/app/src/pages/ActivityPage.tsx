@@ -40,7 +40,7 @@ import {
 } from "@valuz/app/components";
 import { useProjectOutlet } from "@valuz/app/layout";
 
-type SourceFilter = "all" | "chat" | "task";
+type SourceFilter = "all" | "chat" | "task" | "automation";
 type TimeBucket = "today" | "yesterday" | "thisWeek" | "earlier";
 
 const tk = (key: string) =>
@@ -290,9 +290,7 @@ export const ActivityPage = () => {
   const [renamingId, setRenamingId] = useState<string | null>(null);
 
   useEffect(() => {
-    setHeader(
-      <PageHeader title={t(tk("nav.activity"))} />,
-    );
+    setHeader(<PageHeader title={t(tk("nav.activity"))} />);
     setHeaderClassName("h-auto px-5 py-5");
     // Drop the AppShell's default vertical padding for this page —
     // the page already self-manages top/bottom space (``pt-4`` on the
@@ -387,9 +385,11 @@ export const ActivityPage = () => {
   };
 
   const matchesFilter = (r: RunSummary): boolean => {
+    const isAuto = r.origin === "automation";
+    if (filter === "automation") return isAuto;
     if (filter === "all") return true;
-    if (filter === "task") return r.source_kind === "task";
-    return r.source_kind !== "task"; // chat
+    if (filter === "task") return r.source_kind === "task" && !isAuto;
+    return r.source_kind !== "task" && !isAuto; // chat
   };
 
   const filteredRunning = useMemo(
@@ -566,6 +566,7 @@ export const ActivityPage = () => {
     { value: "all", labelKey: "activity.filterAll" },
     { value: "chat", labelKey: "activity.chatTag" },
     { value: "task", labelKey: "activity.taskTag" },
+    { value: "automation", labelKey: "activity.automationTag" },
   ];
 
   // ──────────────────────────────────────────────────────────────

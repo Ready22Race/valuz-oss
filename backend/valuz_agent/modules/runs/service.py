@@ -96,6 +96,7 @@ class RunSummary:
     updated_at: int  # Unix epoch milliseconds (UTC)
     project_name: str | None = None
     task_id: str | None = None
+    origin: str = "user"
     current_todo: TodoSnapshot | None = None
     last_message: str | None = None
     # Chats: last round's assistant output (truncated). Tasks use ``last_event``.
@@ -153,6 +154,7 @@ class RunsService:
         # project-agnostic).
         index_rows = await project_index.list_recent(limit=200)
         proj_by_session = {r.session_id: r.project_id for r in index_rows}
+        origin_by_session = {r.session_id: r.origin for r in index_rows}
         sessions: list[KernelSession] = await kernel_client.list_sessions(
             require_current_user_id(), ids=[r.session_id for r in index_rows], limit=200
         )
@@ -188,6 +190,7 @@ class RunsService:
                     task_map,
                     effective,
                     project_id=proj_by_session.get(sess.id, ""),
+                    origin=origin_by_session.get(sess.id, "user"),
                 )
             except Exception:
                 logger.exception(
@@ -223,6 +226,7 @@ class RunsService:
         effective_status: str,
         *,
         project_id: str,
+        origin: str = "user",
     ) -> RunSummary:
         meta: dict[str, Any] = (sess.metadata or {}).get("valuz") or {}
         project = ws_map.get(project_id)
@@ -251,6 +255,7 @@ class RunsService:
             project_id=project_id,
             project_name=project.name if project is not None else None,
             task_id=task_id,
+            origin=origin,
             title=str(title),
             status=effective_status,
             updated_at=sess.created_at,
