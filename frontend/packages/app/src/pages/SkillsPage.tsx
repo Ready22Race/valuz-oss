@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { FileText, Plus, Search, Sparkles, Upload, Zap } from "lucide-react";
 import {
   CategorizedList,
+  Button,
   DeleteConfirmDialog,
   DropdownMenu,
   DropdownMenuContent,
@@ -585,8 +586,52 @@ export const SkillsPage = () => {
                   icon={<Zap />}
                   title={
                     skills.length === 0
-                      ? t("skill.noAvailable" as Parameters<typeof t>[0])
+                      ? t("skill.emptyTitle" as Parameters<typeof t>[0])
                       : t("skill.noMatch" as Parameters<typeof t>[0])
+                  }
+                  message={
+                    skills.length === 0
+                      ? t("skill.emptyDesc" as Parameters<typeof t>[0])
+                      : undefined
+                  }
+                  action={
+                    skills.length === 0 ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="default" size="sm">
+                            <Plus className="h-3 w-3" />
+                            {t("skill.emptyAction" as Parameters<typeof t>[0])}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="center"
+                          className="min-w-[160px]"
+                        >
+                          <DropdownMenuItem
+                            onSelect={() => void handleStartAiCreate()}
+                          >
+                            <Sparkles className="h-4 w-4" />
+                            {t("skill.aiCreate" as Parameters<typeof t>[0])}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => openAddDialog("link")}
+                          >
+                            <FileText className="h-4 w-4" />
+                            {t(
+                              "skill.linkImportShort" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => openAddDialog("upload")}
+                          >
+                            <Upload className="h-4 w-4" />
+                            {t("skill.upload" as Parameters<typeof t>[0])}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : undefined
                   }
                 />
               }

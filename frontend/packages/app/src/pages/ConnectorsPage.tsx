@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { Link2, Plus, Search, Trash2 } from "lucide-react";
 import {
   CategorizedList,
+  Button,
   ConnectorDetailPanel,
   ConnectorListItem,
   DeleteConfirmDialog,
@@ -722,8 +723,40 @@ export const ConnectorsPage = () => {
                   }
                   title={
                     connectors.length === 0 && catalog.length === 0
-                      ? t("connector.empty")
+                      ? t("connector.emptyTitle")
                       : t("connector.noMatch")
+                  }
+                  message={
+                    connectors.length === 0 && catalog.length === 0
+                      ? t("connector.emptyDesc")
+                      : undefined
+                  }
+                  action={
+                    connectors.length === 0 && catalog.length === 0 ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="default" size="sm">
+                            <Plus className="h-3 w-3" />
+                            {t("connector.emptyAction")}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="center"
+                          className="min-w-[180px]"
+                        >
+                          <DropdownMenuItem onSelect={() => setAddMode("http")}>
+                            <Link2 className="h-4 w-4" />
+                            {t("connector.addHttp")}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => setAddMode("stdio")}
+                          >
+                            <Plus className="h-4 w-4" />
+                            {t("connector.addStdio")}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : undefined
                   }
                 />
               }
