@@ -5,6 +5,7 @@ export type ExecutionLogTriggerType =
   | "cron"
   | "interval"
   | "manual"
+  | "agent"
   | "recovered_skip";
 
 export interface ExecutionLogRow {
@@ -68,6 +69,8 @@ export const ExecutionLog = ({ rows, onSessionClick }: ExecutionLogProps) => {
   const labelForTrigger = (type?: ExecutionLogTriggerType): string => {
     if (type === "manual")
       return t("automation.execTriggerManual" as Parameters<typeof t>[0]);
+    if (type === "agent")
+      return t("automation.execTriggerAgent" as Parameters<typeof t>[0]);
     if (type === "interval")
       return t("automation.execTriggerInterval" as Parameters<typeof t>[0]);
     if (type === "recovered_skip")

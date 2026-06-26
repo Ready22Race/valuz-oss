@@ -110,7 +110,7 @@ export interface AutomationRunItem {
   run_id: string;
   automation_id: string;
   project_id: string;
-  trigger_type: "cron" | "interval" | "manual" | "recovered_skip";
+  trigger_type: "cron" | "interval" | "manual" | "agent" | "recovered_skip";
   status:
     | "queued"
     | "running"

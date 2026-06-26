@@ -597,13 +597,15 @@ export const AutomationPage = () => {
       run.error_message ??
       (run.error_code ? `${run.error_code}` : ""),
     triggerType:
-      // ExecutionLog now recognises all four trigger kinds the runner
-      // emits (cron / interval / manual / recovered_skip). System-emitted
-      // ``auto_paused_notice`` rows (ADR-012) and any unknown future
-      // values fall through to undefined → no badge.
+      // ExecutionLog recognises the trigger kinds the runner emits
+      // (cron / interval / manual / agent / recovered_skip). ``manual`` is a
+      // human "Run now"; ``agent`` is an agent firing it via the automation
+      // MCP tool. System-emitted ``auto_paused_notice`` rows (ADR-012) and any
+      // unknown future values fall through to undefined → no badge.
       run.trigger_type === "cron" ||
       run.trigger_type === "interval" ||
       run.trigger_type === "manual" ||
+      run.trigger_type === "agent" ||
       run.trigger_type === "recovered_skip"
         ? run.trigger_type
         : undefined,

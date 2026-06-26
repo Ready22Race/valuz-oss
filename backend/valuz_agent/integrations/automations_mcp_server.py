@@ -471,7 +471,10 @@ async def _handle_status_change(
                 message=f"Removed '{name}'.",
             )
         elif action == "run":
-            run = await svc.run_now(payload.automation_id)
+            # Agent-initiated off-schedule fire — tag it ``agent`` so the
+            # execution log distinguishes it from a human's "Run now" click
+            # (``manual``) and the scheduled cron/interval runs.
+            run = await svc.run_now(payload.automation_id, trigger_type="agent")
             return AutomationToolResult(
                 action="run",
                 ok=True,

@@ -22,6 +22,7 @@ from the legacy schedule:
 from __future__ import annotations
 
 import json
+from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -869,8 +870,24 @@ class AutomationService:
             automation_id=automation_id,
         )
 
-    async def run_now(self, automation_id: str) -> AutomationRunAcceptedResponse:
-        """Enqueue a manual run for this automation.
+    async def run_now(
+        self,
+        automation_id: str,
+        *,
+        trigger_type: Literal["manual", "agent"] = "manual",
+    ) -> AutomationRunAcceptedResponse:
+        """Enqueue an immediate, off-schedule run for this automation.
+
+        ``trigger_type`` records *who* asked for this off-schedule fire so the
+        execution log can tell them apart from the scheduled (``cron`` /
+        ``interval``) runs:
+
+        - ``"manual"`` (default) — a human clicked "Run now" in the UI
+          (``POST /v1/automations/{id}/run-now``).
+        - ``"agent"`` — an agent invoked the ``automation`` MCP tool with
+          ``action="run"``.
+
+        Both share the same enqueue path; only the recorded provenance differs.
 
         Single-flight: refuses to enqueue while the most recent run is
         still queued or running. The runner's in-memory ``_active_ids``
@@ -899,7 +916,7 @@ class AutomationService:
             id=uuid4().hex,
             automation_id=automation_id,
             project_id=row.project_id,
-            trigger_type="manual",
+            trigger_type=trigger_type,
             status="queued",
             triggered_at=now,
         )
