@@ -254,7 +254,9 @@ export const AutomationPage = () => {
         .slice(0, 30);
       setRecentRuns(merged);
     } catch (error) {
-      toast.error(t(k("automation.loadFailed"), { error: String(error) }));
+      toast.error(t(k("automation.loadFailed")), {
+        description: String(error),
+      });
     } finally {
       setLoading(false);
     }
@@ -363,7 +365,9 @@ export const AutomationPage = () => {
       }
       await loadAll();
     } catch (error) {
-      toast.error(t(k("automation.toggleFailed"), { error: String(error) }));
+      toast.error(t(k("automation.toggleFailed")), {
+        description: String(error),
+      });
     }
   };
 
@@ -373,7 +377,9 @@ export const AutomationPage = () => {
       toast.success(t(k("automation.runQueued")));
       void loadAll();
     } catch (error) {
-      toast.error(t(k("automation.runFailed"), { error: String(error) }));
+      toast.error(t(k("automation.runFailed")), {
+        description: String(error),
+      });
     }
   };
 
@@ -387,7 +393,9 @@ export const AutomationPage = () => {
       setDeleteTarget(null);
       await loadAll();
     } catch (error) {
-      toast.error(t(k("automation.deleteFailed"), { error: String(error) }));
+      toast.error(t(k("automation.deleteFailed")), {
+        description: String(error),
+      });
     }
   };
 
@@ -493,7 +501,9 @@ export const AutomationPage = () => {
       });
       setCreateOpen(true);
     } catch (error) {
-      toast.error(t(k("automation.loadFailed"), { error: String(error) }));
+      toast.error(t(k("automation.loadFailed")), {
+        description: String(error),
+      });
     }
   };
 
@@ -518,7 +528,9 @@ export const AutomationPage = () => {
         toast.success(t(k("automation.updateSuccess"), { name: data.name }));
         await loadAll();
       } catch (error) {
-        toast.error(t(k("automation.updateFailed"), { error: String(error) }));
+        toast.error(t(k("automation.updateFailed")), {
+          description: String(error),
+        });
         throw error;
       }
       return;
@@ -542,7 +554,9 @@ export const AutomationPage = () => {
       toast.success(t(k("automation.createSuccess"), { name: data.name }));
       await loadAll();
     } catch (error) {
-      toast.error(t(k("automation.createFailed"), { error: String(error) }));
+      toast.error(t(k("automation.createFailed")), {
+        description: String(error),
+      });
       throw error;
     }
   };
