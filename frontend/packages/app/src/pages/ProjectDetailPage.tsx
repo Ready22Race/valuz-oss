@@ -35,6 +35,7 @@ import {
 } from "@valuz/app/components";
 import {
   FilePenLine,
+  ChevronRight,
   ListChecks,
   MessageSquare,
   Plus,
@@ -312,6 +313,29 @@ interface ProjectTasksProps {
 
 const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
   const { t } = useTranslation();
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  // Build the agent (task→task) dependency tree from the flat list: a task
+  // triggered by another task that is also in the list nests UNDER that parent.
+  // Everything else — chat / automation / user, or an agent-child whose parent
+  // isn't loaded — stays a root and keeps its flat "由 … 触发" line.
+  const { roots, childrenOf } = useMemo(() => {
+    const present = new Set(tasks.map((tk) => tk.id));
+    const kids = new Map<string, Task[]>();
+    const rootList: Task[] = [];
+    for (const tk of tasks) {
+      const parentId =
+        tk.trigger?.type === "agent" ? (tk.trigger.source_task_id ?? null) : null;
+      if (parentId && present.has(parentId)) {
+        const arr = kids.get(parentId) ?? [];
+        arr.push(tk);
+        kids.set(parentId, arr);
+      } else {
+        rootList.push(tk);
+      }
+    }
+    return { roots: rootList, childrenOf: kids };
+  }, [tasks]);
 
   if (tasks.length === 0) {
     return (
@@ -327,21 +351,47 @@ const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
     );
   }
 
-  return (
-    <ul className="flex flex-col">
-      {tasks.map((task) => (
-        <li key={task.id}>
+  const toggle = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const renderNode = (task: Task, depth: number) => {
+    const kids = childrenOf.get(task.id) ?? [];
+    const hasKids = kids.length > 0;
+    const isCollapsed = collapsed.has(task.id);
+    // Flat provenance line only on roots: a nested child is always
+    // agent-triggered, and the nesting itself conveys "由父任务触发".
+    const flatLabel = depth === 0 ? taskTriggerLabel(task, t) : null;
+    return (
+      <li key={task.id}>
+        <div className="flex items-center">
+          {hasKids ? (
+            <button
+              type="button"
+              onClick={() => toggle(task.id)}
+              aria-label={task.title}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft"
+            >
+              <ChevronRight
+                className={`h-3.5 w-3.5 transition-transform ${isCollapsed ? "" : "rotate-90"}`}
+              />
+            </button>
+          ) : (
+            <span className="w-6 shrink-0" />
+          )}
           <button
             type="button"
             onClick={() => onOpen(task.id)}
-            className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
+            className="flex min-w-0 flex-1 cursor-default items-center gap-2 rounded-xl px-2 py-3 text-left transition-colors hover:bg-surface-soft"
           >
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium text-ink-heading">{task.title}</div>
-              {taskTriggerLabel(task, t) ? (
-                <div className="mt-0.5 truncate text-[11px] text-ink-meta">
-                  {taskTriggerLabel(task, t)}
-                </div>
+              {flatLabel ? (
+                <div className="mt-0.5 truncate text-[11px] text-ink-meta">{flatLabel}</div>
               ) : null}
             </div>
             <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
@@ -349,10 +399,17 @@ const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
             </span>
             <StatusPill status={task.status} label={taskStatusLabel(task, t)} />
           </button>
-        </li>
-      ))}
-    </ul>
-  );
+        </div>
+        {hasKids && !isCollapsed ? (
+          <ul className="ml-[18px] flex flex-col border-l border-surface-border pl-1">
+            {kids.map((kid) => renderNode(kid, depth + 1))}
+          </ul>
+        ) : null}
+      </li>
+    );
+  };
+
+  return <ul className="flex flex-col">{roots.map((task) => renderNode(task, 0))}</ul>;
 };
 
 /* ── Project home "All" — sessions + tasks merged, icon-prefixed ─── */
