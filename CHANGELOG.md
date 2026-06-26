@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ensure_host_schema_migratable`) now reflect through an **async** engine and
   run off the event loop in the migration worker thread, so a Postgres DSN
   resolves to asyncpg cleanly. (#303 @homeant)
+- Host migration `0007` (skill-library on/off toggle) crashed on Postgres with
+  `column "library_enabled" is of type boolean but default expression is of
+  type integer`: the `server_default` was a bare `text("1")`, which renders
+  `DEFAULT 1` (an integer literal) and is rejected by Postgres' strict boolean
+  typing. Switched both the migration and the `SkillIndexRow` model to
+  `sa.true()`, which SQLAlchemy renders portably as `1` on SQLite and `true`
+  on Postgres. (#304 @homeant)
 
 ## [0.2.4] - 2026-06-25
 
