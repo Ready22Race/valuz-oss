@@ -128,14 +128,14 @@ export interface AutomationRunItem {
   error_message: string | null;
   session_id: string | null;
   created_files: string[];
-  // Live status of the task this run kicked off (task automations only).
-  // `status` freezes to `success` at kickoff; prefer this for the badge when
-  // present. Resolved from the lead session's task at read time. `null` for
-  // non-task runs.
-  task_status: "active" | "completed" | "failed" | "paused" | null;
-  // When the run kicked off a task, its owning task_id — lets the client
-  // deep-link to the task detail page. `null` for non-task (chat) runs.
+  // The task this run kicked off (task automations only) — id + title deep-link
+  // to it ("→ 任务《title》"). `null` for non-task runs.
   task_id: string | null;
+  task_title: string | null;
+  // Live status of that task. `status` freezes to `success` at kickoff; prefer
+  // this for the badge when present. Resolved from the lead session's task at
+  // read time. `null` for non-task runs.
+  task_status: "active" | "completed" | "failed" | "paused" | null;
 }
 
 // ── Trigger validation helpers ─────────────────────────────────────

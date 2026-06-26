@@ -25,6 +25,9 @@ class _FakeStore:
     async def list_all(self, *_a, **_k):
         return []
 
+    async def list_run_session_ids(self, *_a, **_k):
+        return set()
+
 
 @pytest.mark.asyncio
 async def test_list_runs_skips_a_session_that_fails_to_build(monkeypatch):
@@ -46,7 +49,7 @@ async def test_list_runs_skips_a_session_that_fails_to_build(monkeypatch):
     )
 
     store = _FakeStore()
-    service = RunsService(store, store, store, store)
+    service = RunsService(store, store, store, store, store)
 
     async def _fake_build(sess, *_a, **_k):
         if sess.id == "bad":

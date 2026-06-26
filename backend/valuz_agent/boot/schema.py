@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = logging.getLogger(__name__)
 
@@ -53,17 +53,18 @@ def _known_host_revisions() -> set[str]:
     return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
 
 
-def _any_rows(engine: Engine, tables: list[str]) -> bool:
+async def _any_rows(engine: AsyncEngine, tables: list[str]) -> bool:
     """True if any of ``tables`` holds at least one row. On a read error, assume
     data IS present (conservative — never wipe what we can't inspect)."""
     from sqlalchemy import text
 
-    with engine.connect() as conn:
+    async with engine.connect() as conn:
         for table in tables:
             try:
-                row = conn.execute(
+                result = await conn.execute(
                     text(f'SELECT 1 FROM "{table}" LIMIT 1')  # noqa: S608
-                ).first()
+                )
+                row = result.first()
             except Exception:
                 return True
             if row is not None:
@@ -71,7 +72,7 @@ def _any_rows(engine: Engine, tables: list[str]) -> bool:
     return False
 
 
-def ensure_host_schema_migratable(engine: Engine | None = None) -> None:
+async def ensure_host_schema_migratable(engine: AsyncEngine | None = None) -> None:
     """Preflight the host DB before ``alembic upgrade head`` — NEVER drops anything.
 
     The host alembic chain is incremental. Returns when the DB is safe to migrate:
@@ -91,26 +92,29 @@ def ensure_host_schema_migratable(engine: Engine | None = None) -> None:
       still refuse to delete anything automatically.
 
     No drops, ever — an earlier revision wiped tables here and could destroy a
-    downgraded store. Runs synchronously off the event loop; reads no business
-    rows beyond a one-row existence probe.
+    downgraded store. Reflects through an ASYNC engine (so a Postgres
+    ``database_url`` resolves to asyncpg rather than choking a sync engine on an
+    async driver); the caller runs it off the event loop in a worker thread.
+    Reads no business rows beyond a one-row existence probe.
     """
-    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy import inspect, text
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     from valuz_agent.infra.config import settings
 
     owns_engine = engine is None
     if engine is None:
-        engine = create_engine(settings.db_url)
+        engine = create_async_engine(settings.db_url_async)
     try:
-        inspector = inspect(engine)
-        existing = set(inspector.get_table_names())
+        async with engine.connect() as conn:
+            existing = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
 
-        stamp: str | None = None
-        if VERSION_TABLE in existing:
-            with engine.connect() as conn:
-                row = conn.execute(
+            stamp: str | None = None
+            if VERSION_TABLE in existing:
+                result = await conn.execute(
                     text(f"SELECT version_num FROM {VERSION_TABLE}")  # noqa: S608
-                ).fetchone()
+                )
+                row = result.fetchone()
                 stamp = row[0] if row else None
 
         if stamp in _known_host_revisions():
@@ -120,7 +124,7 @@ def ensure_host_schema_migratable(engine: Engine | None = None) -> None:
         if not business and VERSION_TABLE not in existing:
             return  # fresh install — alembic initialises from baseline
 
-        if _any_rows(engine, business):
+        if await _any_rows(engine, business):
             raise RuntimeError(
                 f"host schema stamp={stamp!r} is not a known revision for this "
                 f"build, but {len(business)} host table(s) hold data. Refusing to "
@@ -137,7 +141,7 @@ def ensure_host_schema_migratable(engine: Engine | None = None) -> None:
         )
     finally:
         if owns_engine:
-            engine.dispose()
+            await engine.dispose()
 
 
 def run_host_migrations() -> None:
@@ -158,13 +162,16 @@ def run_host_migrations() -> None:
     db_url = settings.db_url_async
 
     def _do() -> None:
+        import asyncio
+
         from alembic.config import Config
 
         from alembic import command
 
         # Preflight: refuse (never drop) to upgrade a downgraded / unrecognised
-        # DB before alembic runs (off the event loop, same dedicated thread).
-        ensure_host_schema_migratable()
+        # DB before alembic runs. Reflects through an async engine; ``asyncio.run``
+        # is safe here — this is the dedicated thread, off the startup event loop.
+        asyncio.run(ensure_host_schema_migratable())
 
         cfg = Config(str(ALEMBIC_INI))
         cfg.set_main_option("script_location", str(ALEMBIC_DIR))

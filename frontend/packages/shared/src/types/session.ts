@@ -30,7 +30,7 @@ export interface SessionListItem {
   project_id: string;
   name: string | null;
   status: "created" | "running" | "idle" | "failed" | "cancelled" | "archived";
-  origin: "user" | "schedule";
+  origin: "user" | "schedule" | "automation";
   last_user_message_text: string | null;
   locked_model_id: string | null;
   /**

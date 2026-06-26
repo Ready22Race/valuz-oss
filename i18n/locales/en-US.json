@@ -1,5 +1,6 @@
 {
   "automation": {
+    "spawnedTask": "Task \"{title}\"",
     "actionCreate": "Create automation",
     "actionKindChat": "Simple",
     "actionKindChatHint": "One agent run per fire.",
@@ -195,6 +196,7 @@
     "queueRunsAfter": "Runs after the current turn",
     "queueContinue": "Continue",
     "queueBlocked": "Could not run",
+    "queueSteer": "Send now",
     "starting": "Starting",
     "stop": "Stop",
     "success": "Success",
@@ -2073,6 +2075,10 @@
     }
   },
   "task": {
+    "triggeredByChat": "Triggered by a conversation",
+    "triggeredByTask": "Triggered by task \"{title}\" · {agent}",
+    "triggeredByTaskNoAgent": "Triggered by task \"{title}\"",
+    "triggeredByAutomation": "Triggered by automation \"{name}\"",
     "title": "Tasks",
     "untitled": "Untitled task",
     "subtitle": "Lead-dispatch tasks running in this project.",

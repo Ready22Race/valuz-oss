@@ -52,6 +52,20 @@ class AutomationDatastore:
             .first()
         )
 
+    async def get_names_by_ids(self, user_id: str, automation_ids: list[str]) -> dict[str, str]:
+        """Map automation id → name for the given ids (used to label a task's
+        "由 自动化《name》触发" provenance without N+1 lookups). Missing ids omitted."""
+        if not automation_ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(AutomationRow.id, AutomationRow.name).where(
+                    AutomationRow.id.in_(automation_ids), AutomationRow.user_id == user_id
+                )
+            )
+        ).all()
+        return {aid: name for aid, name in rows}
+
     async def list_by_origin_tool_call_ids(
         self, user_id: str, tool_call_ids: list[str]
     ) -> list[AutomationRow]:

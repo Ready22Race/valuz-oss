@@ -11,10 +11,21 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from valuz_agent.boot.kernel import _known_kernel_revisions, ensure_kernel_schema_migratable
 
 _TRIO = {"sessions", "messages", "events"}
+
+
+async def _run_preflight(sync_engine) -> None:
+    """Drive the now-async kernel preflight against the same sqlite file the sync
+    setup engine built (the boot path reflects through an async engine)."""
+    engine = create_async_engine(sync_engine.url.set(drivername="sqlite+aiosqlite"))
+    try:
+        await ensure_kernel_schema_migratable(engine)
+    finally:
+        await engine.dispose()
 
 
 def _tables(engine) -> set[str]:
@@ -40,30 +51,30 @@ def _create_kernel_trio(conn, *, stamp: str | None) -> None:
 # ── safe states: return, nothing touched ──────────────────────────────────
 
 
-def test_should_pass_when_stamped_at_known_revision(tmp_path) -> None:
+async def test_should_pass_when_stamped_at_known_revision(tmp_path) -> None:
     """Stamp on a known revision → trust it; trio + data untouched, no raise."""
     engine = create_engine(f"sqlite:///{tmp_path / 'known.db'}")
     with engine.begin() as conn:
         _create_kernel_trio(conn, stamp=_a_known_revision())
         conn.execute(text("INSERT INTO sessions VALUES ('s1', 'u1')"))
 
-    ensure_kernel_schema_migratable(engine)  # no raise
+    await _run_preflight(engine)  # no raise
 
     assert _TRIO <= _tables(engine)
     with engine.connect() as conn:
         assert conn.execute(text("SELECT id FROM sessions")).fetchall() == [("s1",)]
 
 
-def test_should_pass_on_fresh_install(tmp_path) -> None:
+async def test_should_pass_on_fresh_install(tmp_path) -> None:
     engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
-    ensure_kernel_schema_migratable(engine)  # no raise
+    await _run_preflight(engine)  # no raise
     assert _tables(engine) == set()
 
 
 # ── unsafe states: raise, NOTHING deleted ─────────────────────────────────
 
 
-def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> None:
+async def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> None:
     """A foreign/unknown kernel stamp WITH real session data = a downgrade.
     Refuse to start and DO NOT wipe — the kernel store stays intact."""
     engine = create_engine(f"sqlite:///{tmp_path / 'downgrade.db'}")
@@ -72,38 +83,38 @@ def test_should_raise_and_preserve_when_foreign_stamp_holds_data(tmp_path) -> No
         conn.execute(text("INSERT INTO sessions VALUES ('s1', 'u1')"))
 
     with pytest.raises(RuntimeError, match="not a known revision"):
-        ensure_kernel_schema_migratable(engine)
+        await _run_preflight(engine)
 
     assert _TRIO <= _tables(engine)
     with engine.connect() as conn:
         assert conn.execute(text("SELECT id FROM sessions")).fetchall() == [("s1",)]
 
 
-def test_should_raise_and_preserve_on_foreign_stamp_with_empty_trio(tmp_path) -> None:
+async def test_should_raise_and_preserve_on_foreign_stamp_with_empty_trio(tmp_path) -> None:
     """Foreign stamp, empty trio → unrecognized state; raise, drop nothing."""
     engine = create_engine(f"sqlite:///{tmp_path / 'foreign_empty.db'}")
     with engine.begin() as conn:
         _create_kernel_trio(conn, stamp="0099")
 
     with pytest.raises(RuntimeError, match="unrecognized state"):
-        ensure_kernel_schema_migratable(engine)
+        await _run_preflight(engine)
 
     assert _TRIO <= _tables(engine)
 
 
-def test_should_raise_on_torn_half_created_trio(tmp_path) -> None:
+async def test_should_raise_on_torn_half_created_trio(tmp_path) -> None:
     """An interrupted first boot left a partial trio and no stamp → raise, keep."""
     engine = create_engine(f"sqlite:///{tmp_path / 'torn.db'}")
     with engine.begin() as conn:
         conn.execute(text("CREATE TABLE sessions (id TEXT PRIMARY KEY)"))
 
     with pytest.raises(RuntimeError, match="unrecognized state"):
-        ensure_kernel_schema_migratable(engine)
+        await _run_preflight(engine)
 
     assert "sessions" in _tables(engine)
 
 
-def test_should_not_delete_host_or_checkpoint_tables_when_unmigratable(tmp_path) -> None:
+async def test_should_not_delete_host_or_checkpoint_tables_when_unmigratable(tmp_path) -> None:
     """Raises before touching anything: the trio, host ``valuz_*`` tables, the
     host stamp, and langgraph checkpoint tables all survive."""
     engine = create_engine(f"sqlite:///{tmp_path / 'mixed.db'}")
@@ -114,7 +125,7 @@ def test_should_not_delete_host_or_checkpoint_tables_when_unmigratable(tmp_path)
         conn.execute(text("CREATE TABLE checkpoints (thread_id TEXT PRIMARY KEY)"))
 
     with pytest.raises(RuntimeError):
-        ensure_kernel_schema_migratable(engine)
+        await _run_preflight(engine)
 
     remaining = _tables(engine)
     assert _TRIO <= remaining

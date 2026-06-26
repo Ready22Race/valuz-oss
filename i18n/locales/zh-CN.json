@@ -1,5 +1,6 @@
 {
   "automation": {
+    "spawnedTask": "任务「{title}」",
     "actionCreate": "创建自动化",
     "actionKindChat": "简单任务",
     "actionKindChatHint": "每次触发执行一次智能体对话。",
@@ -195,6 +196,7 @@
     "queueRunsAfter": "将在当前回合结束后运行",
     "queueContinue": "继续",
     "queueBlocked": "无法运行",
+    "queueSteer": "立即发送",
     "starting": "启动中",
     "stop": "停止",
     "success": "成功",
@@ -2073,6 +2075,10 @@
     }
   },
   "task": {
+    "triggeredByChat": "由对话触发",
+    "triggeredByTask": "由任务「{title}」· {agent} 触发",
+    "triggeredByTaskNoAgent": "由任务「{title}」触发",
+    "triggeredByAutomation": "由自动化「{name}」触发",
     "title": "任务",
     "untitled": "未命名任务",
     "subtitle": "在该项目中运行的 Lead 派发任务。",

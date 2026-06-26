@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 from valuz_agent.infra.config import settings
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = logging.getLogger(__name__)
 
@@ -88,17 +88,18 @@ def _known_kernel_revisions() -> set[str]:
     return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
 
 
-def _any_kernel_rows(engine: Engine, tables: list[str]) -> bool:
+async def _any_kernel_rows(engine: AsyncEngine, tables: list[str]) -> bool:
     """True if any of ``tables`` holds at least one row. On a read error, assume
     data IS present (conservative — never wipe what we can't inspect)."""
     from sqlalchemy import text
 
-    with engine.connect() as conn:
+    async with engine.connect() as conn:
         for table in tables:
             try:
-                row = conn.execute(
+                result = await conn.execute(
                     text(f'SELECT 1 FROM "{table}" LIMIT 1')  # noqa: S608
-                ).first()
+                )
+                row = result.first()
             except Exception:
                 return True
             if row is not None:
@@ -106,7 +107,7 @@ def _any_kernel_rows(engine: Engine, tables: list[str]) -> bool:
     return False
 
 
-def ensure_kernel_schema_migratable(engine: Engine | None = None) -> None:
+async def ensure_kernel_schema_migratable(engine: AsyncEngine | None = None) -> None:
     """Preflight the kernel DB before ``alembic upgrade head`` — NEVER drops anything.
 
     Mirrors the host's ``boot.schema.ensure_host_schema_migratable``: the kernel
@@ -123,23 +124,26 @@ def ensure_kernel_schema_migratable(engine: Engine | None = None) -> None:
 
     Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES``); host ``valuz_*``
     tables and the langgraph checkpoint tables in the same file are never read or
-    touched. No drops, ever. Runs synchronously off the event loop.
+    touched. No drops, ever. Reflects through an ASYNC engine (so a Postgres
+    ``database_url`` resolves to asyncpg rather than choking a sync engine on an
+    async driver); the caller runs it off the event loop in a worker thread.
     """
-    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy import inspect, text
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     owns_engine = engine is None
     if engine is None:
-        engine = create_engine(settings.kernel_db_url)
+        engine = create_async_engine(settings.kernel_db_url_async)
     try:
-        inspector = inspect(engine)
-        existing = set(inspector.get_table_names())
+        async with engine.connect() as conn:
+            existing = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
 
-        stamp: str | None = None
-        if KERNEL_VERSION_TABLE in existing:
-            with engine.connect() as conn:
-                row = conn.execute(
+            stamp: str | None = None
+            if KERNEL_VERSION_TABLE in existing:
+                result = await conn.execute(
                     text(f"SELECT version_num FROM {KERNEL_VERSION_TABLE}")  # noqa: S608
-                ).fetchone()
+                )
+                row = result.fetchone()
                 stamp = row[0] if row else None
 
         if stamp in _known_kernel_revisions():
@@ -149,7 +153,7 @@ def ensure_kernel_schema_migratable(engine: Engine | None = None) -> None:
         if not owned:
             return  # fresh install / no kernel tables — alembic initialises it
 
-        if _any_kernel_rows(engine, owned):
+        if await _any_kernel_rows(engine, owned):
             raise RuntimeError(
                 f"kernel schema stamp={stamp!r} is not a known revision for this "
                 f"build, but {len(owned)} kernel table(s) hold data. Refusing to "
@@ -166,7 +170,7 @@ def ensure_kernel_schema_migratable(engine: Engine | None = None) -> None:
         )
     finally:
         if owns_engine:
-            engine.dispose()
+            await engine.dispose()
 
 
 def _do_alembic_upgrade() -> None:
@@ -203,22 +207,23 @@ def run_kernel_migrations() -> None:
        Schema changes ship as new, reversible revisions chained onto the head —
        existing ``sessions`` / ``messages`` / ``events`` data migrates in place.
 
-    Always runs in a dedicated thread because the kernel's
-    ``alembic/env.py`` calls ``asyncio.run()`` to drive its async
-    migrations, and that fails if the calling thread already has a
-    running event loop — which is the case for FastAPI/Starlette
-    ``on_event("startup")`` and any test using ``TestClient``.
-    Spawning a thread keeps the kernel migration code unchanged and
-    the host code obvious at the call site.
+    Both steps run in a dedicated thread: the preflight reflects through an
+    async engine (``asyncio.run``) and the kernel's ``alembic/env.py`` also
+    calls ``asyncio.run()`` to drive its async migrations — either nested in the
+    already-running FastAPI/Starlette startup loop would raise. Running them off
+    the loop in a worker thread keeps the kernel migration code unchanged and the
+    host code obvious at the call site.
     """
+    import asyncio
     import threading
-
-    ensure_kernel_schema_migratable()
 
     error: list[BaseException] = []
 
     def _runner() -> None:
         try:
+            # Preflight (async reflection) then the kernel alembic upgrade, both
+            # off the event loop in this worker thread (see the docstring).
+            asyncio.run(ensure_kernel_schema_migratable())
             _do_alembic_upgrade()
         except BaseException as exc:  # noqa: BLE001 — re-raised on the main thread
             error.append(exc)

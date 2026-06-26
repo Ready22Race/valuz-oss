@@ -34,6 +34,12 @@ export interface QueuedInputList {
   items: QueuedInput[];
   /** True when an interrupt soft-paused auto-drain; awaiting explicit resume. */
   paused: boolean;
+  /**
+   * True while a host drain chain is in flight. A dispatched (in-flight) item
+   * is invisible in ``items`` (only queued/blocked listed), so per-turn
+   * re-subscribers keep following until the last item finishes.
+   */
+  draining?: boolean;
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
@@ -87,6 +93,14 @@ export const queueApi = {
   resume(sessionId: string): Promise<QueuedInputList> {
     return fetchJson<QueuedInputList>(
       `/v1/sessions/${enc(sessionId)}/queue/resume`,
+      jsonInit("POST"),
+    );
+  },
+
+  /** Steer — send this queued item now, silently interrupting the active turn. */
+  steer(sessionId: string, queueId: string): Promise<QueuedInputList> {
+    return fetchJson<QueuedInputList>(
+      `/v1/sessions/${enc(sessionId)}/queue/${enc(queueId)}/steer`,
       jsonInit("POST"),
     );
   },

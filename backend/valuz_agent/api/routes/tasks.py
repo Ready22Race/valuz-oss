@@ -38,7 +38,7 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
-from valuz_agent.modules.tasks.models import TaskEventRow
+from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow
 from valuz_agent.modules.tasks.orchestrator import task_orchestrator
 
 router = APIRouter(tags=["tasks"])
@@ -60,6 +60,21 @@ class KickoffTaskRequest(BaseModel):
     dispatch_mode: Literal["sync", "async"] = "async"
 
 
+class TaskTrigger(BaseModel):
+    """Resolved "who/what spawned this task" — drives the task-list "由 … 触发"
+    line. ``type`` is one of user | chat | agent | automation; the source_* ids
+    let the UI deep-link to the parent task / automation / conversation, and the
+    resolved names spare the frontend a second lookup."""
+
+    type: str
+    source_task_id: str | None = None
+    source_task_title: str | None = None
+    source_agent_slug: str | None = None
+    source_automation_id: str | None = None
+    source_automation_name: str | None = None
+    source_session_id: str | None = None
+
+
 class TaskResponse(BaseModel):
     id: str
     project_id: str
@@ -74,13 +89,57 @@ class TaskResponse(BaseModel):
     # ("active just now" vs "completed yesterday").
     created_at: int
     updated_at: int
-    # "user" | "automation" — who triggered the task. A task whose lead session
-    # was produced by a scheduled automation run is "automation"; the task row
-    # itself carries no marker, so the route resolves this from the automation
-    # run index. Lets the project list move automation tasks to its 自动化 tab.
-    origin: str = "user"
+    # Resolved trigger provenance (attached by the route, not from the ORM row).
+    trigger: TaskTrigger | None = None
 
     model_config = {"from_attributes": True}
+
+
+async def _resolve_triggers(
+    db: AsyncSession, user_id: str, rows: list[TaskRow]
+) -> dict[str, TaskTrigger]:
+    """Batch-resolve each task's trigger provenance into a render-ready
+    ``TaskTrigger`` (parent-task titles + automation names fetched once)."""
+    parent_ids = list({r.trigger_task_id for r in rows if r.trigger_task_id})
+    automation_ids = list({r.trigger_automation_id for r in rows if r.trigger_automation_id})
+    titles = await TaskDatastore(db).get_titles_by_ids(user_id, parent_ids) if parent_ids else {}
+    automations = (
+        await AutomationDatastore(db).get_names_by_ids(user_id, automation_ids)
+        if automation_ids
+        else {}
+    )
+    out: dict[str, TaskTrigger] = {}
+    for r in rows:
+        ttype = r.trigger_type or "user"
+        trig = TaskTrigger(type=ttype)
+        # The originating task (for tree nesting) can ride on ANY type: directly
+        # for ``agent``, or transitively for ``automation`` (an agent in a task
+        # ran the automation that spawned this one). Surface it whenever present.
+        if r.trigger_task_id:
+            trig.source_task_id = r.trigger_task_id
+            trig.source_task_title = titles.get(r.trigger_task_id)
+            trig.source_agent_slug = r.trigger_agent_slug
+        if ttype == "automation":
+            trig.source_automation_id = r.trigger_automation_id
+            trig.source_automation_name = automations.get(r.trigger_automation_id or "")
+        elif ttype == "chat":
+            trig.source_session_id = (r.metadata_ or {}).get("originating_session_id")
+        out[r.id] = trig
+    return out
+
+
+def _to_task_responses(rows: list[TaskRow], triggers: dict[str, TaskTrigger]) -> list[TaskResponse]:
+    out: list[TaskResponse] = []
+    for r in rows:
+        resp = TaskResponse.model_validate(r)
+        resp.trigger = triggers.get(r.id)
+        out.append(resp)
+    return out
+
+
+async def _task_response_with_trigger(db: AsyncSession, user_id: str, row: TaskRow) -> TaskResponse:
+    triggers = await _resolve_triggers(db, user_id, [row])
+    return _to_task_responses([row], triggers)[0]
 
 
 class RunResponse(BaseModel):
@@ -204,33 +263,11 @@ async def kickoff_task(project_id: str, payload: KickoffTaskRequest) -> TaskResp
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return TaskResponse.model_validate(row)
-
-
-async def _tasks_with_origin(
-    db: AsyncSession, user_id: str, rows: list[Any]
-) -> list[TaskResponse]:
-    """Build TaskResponses, resolving each task's trigger origin.
-
-    A task is "automation" when its lead session appears in the automation run
-    index (the task row itself carries no marker). Batched: one lead-session
-    lookup + one automation-run-session set, regardless of task count.
-    """
-    if not rows:
-        return []
-    task_ids = [r.id for r in rows]
-    lead_by_task = await TaskSessionDatastore(db).get_lead_session_ids_by_task_ids(
-        user_id, task_ids
-    )
-    automation_sessions = await AutomationDatastore(db).list_run_session_ids(user_id)
-    out: list[TaskResponse] = []
-    for r in rows:
-        resp = TaskResponse.model_validate(r)
-        lead_sid = lead_by_task.get(r.id)
-        if lead_sid and lead_sid in automation_sessions:
-            resp.origin = "automation"
-        out.append(resp)
-    return out
+    # A REST kickoff is a direct user action (no originating session), so the
+    # trigger is always "user" — no source to resolve.
+    resp = TaskResponse.model_validate(row)
+    resp.trigger = TaskTrigger(type=row.trigger_type or "user")
+    return resp
 
 
 @router.get("/v1/projects/{project_id}/tasks", response_model=dict[str, list[TaskResponse]])
@@ -240,7 +277,8 @@ async def list_tasks(
     user_id: str = Depends(require_current_user_id),
 ) -> dict[str, list[TaskResponse]]:
     rows = await TaskDatastore(db).list_tasks(user_id, project_id)
-    return {"tasks": await _tasks_with_origin(db, user_id, rows)}
+    triggers = await _resolve_triggers(db, user_id, rows)
+    return {"tasks": _to_task_responses(rows, triggers)}
 
 
 @router.get("/v1/tasks", response_model=dict[str, list[TaskResponse]])
@@ -253,7 +291,8 @@ async def list_all_tasks(
     sidebar TASKS section so users see what's running regardless of which
     project page they're on."""
     rows = await TaskDatastore(db).list_all(user_id, limit=limit)
-    return {"tasks": await _tasks_with_origin(db, user_id, rows)}
+    triggers = await _resolve_triggers(db, user_id, rows)
+    return {"tasks": _to_task_responses(rows, triggers)}
 
 
 @router.get("/v1/tasks/{task_id}", response_model=TaskDetailResponse)
@@ -268,7 +307,7 @@ async def get_task(
     runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
     events = await TaskEventDatastore(db).list_events(user_id, task.project_id, task_id)
     return TaskDetailResponse(
-        task=TaskResponse.model_validate(task),
+        task=await _task_response_with_trigger(db, user_id, task),
         runs=[RunResponse.model_validate(r) for r in runs],
         events=[EventResponse.model_validate(e) for e in events],
     )
@@ -462,7 +501,7 @@ async def intervene(
     db.expire_all()  # drop cached rows so we see the orchestrator's committed write
     refreshed = await task_ds.get_task(user_id, task_id)
     assert refreshed is not None
-    return TaskResponse.model_validate(refreshed)
+    return await _task_response_with_trigger(db, user_id, refreshed)
 
 
 class StopMemberResponse(BaseModel):
