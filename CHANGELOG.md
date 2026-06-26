@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Boot crashed with `MissingGreenlet` when `database_url` pointed at Postgres
+  via the async driver (`postgresql+asyncpg://`): the kernel/host schema
+  preflights built a **sync** engine and called `inspect()` on it, which can't
+  drive an async DBAPI. The preflights (`ensure_kernel_schema_migratable` /
+  `ensure_host_schema_migratable`) now reflect through an **async** engine and
+  run off the event loop in the migration worker thread, so a Postgres DSN
+  resolves to asyncpg cleanly. (#303 @homeant)
+
 ## [0.2.4] - 2026-06-25
 
 ### Added
