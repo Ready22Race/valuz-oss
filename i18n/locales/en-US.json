@@ -59,6 +59,7 @@
     "execStatusErr": "Failed",
     "execStatusPending": "Pending",
     "execStatusSkip": "Skipped",
+    "execTriggerAgent": "Agent",
     "execTriggerCron": "Cron",
     "execTriggerInterval": "Interval",
     "execTriggerManual": "Manual",

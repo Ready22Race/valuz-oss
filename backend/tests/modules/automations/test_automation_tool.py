@@ -130,8 +130,8 @@ class StubService:
         self._record("delete", automation_id=automation_id)
         self._rows.pop(automation_id, None)
 
-    async def run_now(self, automation_id):  # type: ignore[no-untyped-def]
-        self._record("run_now", automation_id=automation_id)
+    async def run_now(self, automation_id, *, trigger_type="manual"):  # type: ignore[no-untyped-def]
+        self._record("run_now", automation_id=automation_id, trigger_type=trigger_type)
         return type("Run", (), {"run_id": f"run-{automation_id}"})()
 
     async def update(self, automation_id, payload):  # type: ignore[no-untyped-def]
@@ -590,6 +590,28 @@ class TestScopeAndCrossProject:
         decoded = json.loads(result)
         assert decoded["ok"] is False
         assert decoded["error_code"] == "CROSS_PROJECT_DENIED"
+
+    async def test_run_action_should_tag_trigger_type_agent(
+        self,
+        patched_dispatch: Any,
+        stub_service: StubService,
+    ) -> None:
+        # An agent firing an automation via the MCP ``run`` action records the
+        # run as ``trigger_type="agent"`` — distinct from a human "Run now"
+        # (``manual``) and the scheduled cron / interval fires.
+        stub_service._rows["auto-run"] = _row(  # noqa: SLF001
+            automation_id="auto-run", project_id="ws-proj"
+        )
+        result = await mod.automation_invoke(
+            AutomationToolPayload(action="run", automation_id="auto-run")
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        assert decoded["action"] == "run"
+        run_calls = [c for c in stub_service.calls if c[0] == "run_now"]
+        assert run_calls == [
+            ("run_now", {"automation_id": "auto-run", "trigger_type": "agent"})
+        ]
 
 
 # ── Decorated ``automation`` thin wrapper trigger coercion ─────────
