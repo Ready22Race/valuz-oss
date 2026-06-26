@@ -88,26 +88,32 @@ def _normalise_tz(value: str | None) -> str | None:
     return trimmed or None
 
 
-def _format_interval_human(seconds: int) -> str:
-    """Render an interval as a human-readable cadence.
+def _format_interval_human(seconds: int, locale: str | None = None) -> str:
+    """Render an interval as a localized human-readable cadence.
 
-    Examples: ``30 -> "every 30 seconds"``, ``300 -> "every 5 minutes"``,
-    ``3900 -> "every 1 hour 5 minutes"``. The frontend can override this
-    with locale-specific formatting; the server-side string is the
-    fallback for the LLM tool result and the i18n-less tests.
+    Examples (en): ``30 -> "Every 30 seconds"``, ``300 -> "Every 5 minutes"``,
+    ``3900 -> "Every 1 hours 5 minutes"``. Chinese renders ``每 …``. The
+    server-side string is also the fallback for the LLM tool result.
     """
     if seconds < 60:
-        return f"every {seconds} seconds"
+        return t("automation.intervalEverySeconds", params={"count": seconds}, locale=locale)
     minutes, secs = divmod(seconds, 60)
     if minutes < 60:
         if secs == 0:
-            return f"every {minutes} minute{'s' if minutes != 1 else ''}"
-        return f"every {minutes}m {secs}s"
+            return t("automation.intervalEveryMinutes", params={"count": minutes}, locale=locale)
+        return t(
+            "automation.intervalEveryMinutesSeconds",
+            params={"minutes": minutes, "seconds": secs},
+            locale=locale,
+        )
     hours, mins = divmod(minutes, 60)
-    parts = [f"{hours} hour{'s' if hours != 1 else ''}"]
     if mins:
-        parts.append(f"{mins} minute{'s' if mins != 1 else ''}")
-    return "every " + " ".join(parts)
+        return t(
+            "automation.intervalEveryHoursMinutes",
+            params={"hours": hours, "minutes": mins},
+            locale=locale,
+        )
+    return t("automation.intervalEveryHours", params={"count": hours}, locale=locale)
 
 
 class AutomationService:
@@ -174,8 +180,8 @@ class AutomationService:
         if row.trigger_kind == "cron" and row.cron_expr:
             return self._cron.describe(row.cron_expr, locale=self._locale)
         if row.trigger_kind == "interval" and row.interval_seconds:
-            return _format_interval_human(row.interval_seconds)
-        return "Manual"
+            return _format_interval_human(row.interval_seconds, locale=self._locale)
+        return t("automation.triggerManual", locale=self._locale)
 
     def _apply_trigger(self, row: AutomationRow, trigger: Trigger) -> None:
         """Project a Trigger union back onto the row's flat columns.
@@ -276,7 +282,9 @@ class AutomationService:
 
     @staticmethod
     def _run_to_item(
-        row: AutomationRunRow, task_status: str | None = None
+        row: AutomationRunRow,
+        task_status: str | None = None,
+        task_id: str | None = None,
     ) -> AutomationRunItemResponse:
         created_files: list[str] = []
         if row.created_files:
@@ -300,6 +308,7 @@ class AutomationService:
             session_id=row.session_id,
             created_files=created_files,
             task_status=task_status,
+            task_id=task_id,
         )
 
     # ── Project target picker ───────────────────────────────────────
@@ -943,11 +952,15 @@ class AutomationService:
         )
         # Task automations: the run row freezes to ``success`` at kickoff, so
         # resolve each lead session's live task status and let the client show
-        # that instead. Batched to avoid an N+1 over the runs page.
+        # that instead. Batched to avoid an N+1 over the runs page. The owning
+        # task_id rides along so the client can deep-link to the task page.
         task_status_by_session = await self._resolve_task_statuses(runs)
+        task_id_by_session = await self._resolve_task_ids(runs)
         return [
             self._run_to_item(
-                r, task_status_by_session.get(r.session_id) if r.session_id else None
+                r,
+                task_status_by_session.get(r.session_id) if r.session_id else None,
+                task_id_by_session.get(r.session_id) if r.session_id else None,
             )
             for r in runs
         ]
@@ -966,6 +979,21 @@ class AutomationService:
         from valuz_agent.modules.tasks.datastore import TaskSessionDatastore
 
         return await TaskSessionDatastore(self._db).get_task_status_by_session_ids(
+            require_current_user_id(), session_ids
+        )
+
+    async def _resolve_task_ids(self, runs: list[AutomationRunRow]) -> dict[str, str]:
+        """Map each run's lead ``session_id`` → its owning ``task_id``.
+
+        Returns ``{}`` when no run carries a session id (conversation
+        automations), avoiding the tasks-datastore round trip entirely.
+        """
+        session_ids = [r.session_id for r in runs if r.session_id]
+        if not session_ids:
+            return {}
+        from valuz_agent.modules.tasks.datastore import TaskSessionDatastore
+
+        return await TaskSessionDatastore(self._db).get_task_ids_by_session_ids(
             require_current_user_id(), session_ids
         )
 
@@ -991,7 +1019,7 @@ class AutomationService:
             )
         return IntervalValidationResultResponse(
             valid=True,
-            human_readable=_format_interval_human(seconds),
+            human_readable=_format_interval_human(seconds, locale=self._locale),
         )
 
     # ── Recovered-skip during offline windows ─────────────────────────
