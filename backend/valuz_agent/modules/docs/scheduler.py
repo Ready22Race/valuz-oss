@@ -80,26 +80,19 @@ def run_auto_discovery_scan() -> None:
 
 
 async def _arun_auto_discovery_scan() -> None:
-    # Seed the owner ContextVar. This runs in the scheduler's daemon
-    # THREAD (its own ``asyncio.run`` loop), which does NOT inherit the
-    # main thread's ``valuz_current_user_id`` seeded at boot. Per the
-    # ``infra.auth_context`` contract a background runner must set it
-    # itself — otherwise the OwnedMixin ``user_id`` default raises
-    # ``LookupError`` and every rescan task insert (valuz_document_import_task)
-    # fails. ``resolve_local_user_id`` is process-cached, so this returns
-    # the same owner id as the main thread.
-    from valuz_agent.infra.auth_context import set_current_user_id
-    from valuz_agent.infra.local_identity import resolve_local_user_id
-
-    set_current_user_id(resolve_local_user_id())
-
-    # Build the SAME configured ParserRouter the request path uses
-    # (deps.get_document_service) — routing config + secret resolver +
-    # capability gate — so auto-discovered files honour the user's chosen
-    # engine (PaddleOCR / MinerU) instead of always falling back to
-    # light_local. Reuses the process-wide singletons (registry shares the
-    # main-loop PollingScheduler; async-poll parses dispatch there via
-    # ParserRouter._drive_async_parse_sync).
+    # Background scan across ALL owners. ``list_auto_discover_kbs`` enumerates
+    # every owner's auto-discover KBs (owner-agnostic system read); each is then
+    # rescanned via ``service.rescan_kb(kb_id)``, which derives the owner from the
+    # KB row itself and publishes it for the rescan. The scheduler does NOT touch
+    # the owner ContextVar — it only needs ``kb.user_id`` to build that KB's
+    # parser secret resolver (BYOK parser keys are per-user). The old
+    # ``resolve_local_user_id()`` seed only ever scanned the single device id.
+    #
+    # The parser is the SAME configured ParserRouter the request path uses
+    # (deps.get_document_service) — routing config + secret resolver + capability
+    # gate — so auto-discovered files honour the user's chosen engine
+    # (PaddleOCR / MinerU). Reuses process-wide singletons (registry shares the
+    # main-loop PollingScheduler; async-poll parses dispatch there).
     from valuz_agent.api.deps import (
         _parser_registry,
         _secret_store,
@@ -119,15 +112,15 @@ async def _arun_auto_discovery_scan() -> None:
     from valuz_agent.modules.parser import ParserRouter
     from valuz_agent.modules.settings.parser_routing import load_routing_config
 
-    # Snapshot the auto-discover KB (id, name) pairs in one short-lived
-    # session, then run each rescan in its own session below. Keeping the
-    # listing read separate means a per-KB rescan failure can't taint the
-    # listing transaction.
+    # Snapshot the auto-discover KBs (id, name, owner) across ALL owners in one
+    # short-lived session, then run each rescan in its own session below.
+    # Keeping the listing read separate means a per-KB rescan failure can't
+    # taint the listing transaction.
     async with async_unit_of_work(commit=False) as db:
-        from valuz_agent.infra.auth_context import require_current_user_id
-
-        kbs = await DocumentDatastore(db).list_kbs(require_current_user_id())
-        kb_refs = [(kb.id, kb.name) for kb in kbs if kb.auto_discover]
+        kb_refs = [
+            (kb.id, kb.name, kb.user_id)
+            for kb in await DocumentDatastore(db).list_auto_discover_kbs()
+        ]
 
     if not kb_refs:
         return
@@ -138,15 +131,13 @@ async def _arun_auto_discovery_scan() -> None:
         "KB auto-discovery scanning %d KB(s) with auto_discover=True",
         len(kb_refs),
     )
-    for kb_id, kb_name in kb_refs:
+    for kb_id, kb_name, owner in kb_refs:
         try:
             async with async_unit_of_work(commit=False) as db:
                 routing_config = await load_routing_config(db)
                 parser = ParserRouter(
                     registry=_parser_registry(),
-                    secret_resolver=_SecretStoreResolver(
-                        _secret_store(), require_current_user_id()
-                    ),
+                    secret_resolver=_SecretStoreResolver(_secret_store(), owner),
                     routing_config=routing_config,
                     setup_complete_probe=_setup_controller().is_complete,
                 )
@@ -157,6 +148,7 @@ async def _arun_auto_discovery_scan() -> None:
                     event_bus=event_bus,
                     scan_state_dir=settings.docs_dir / "scan_state",
                 )
+                # rescan_kb derives the owner from the KB row and publishes it.
                 result = await svc.rescan_kb(kb_id)
             logger.info(
                 "Auto-rescan completed: %s (%s) — %d new/changed files",

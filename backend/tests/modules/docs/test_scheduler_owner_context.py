@@ -1,21 +1,21 @@
-"""Regression: the KB auto-discovery scheduler seeds the owner ContextVar.
+"""KB auto-discovery — owner is derived from the KB row, not an ambient/device id.
 
-The scheduler runs in a daemon THREAD with its own ``asyncio.run`` loop,
-which does NOT inherit the main thread's ``valuz_current_user_id`` seeded
-at boot. Without seeding it itself, the OwnedMixin ``user_id`` default
-raises ``LookupError`` and every rescan-task insert
-(``valuz_document_import_task``) fails (~6 times per boot).
+The scheduler runs in a daemon THREAD with no inherited request context. It must
+NOT scan as a single ambient/device owner (that only rescans one user's KBs on a
+shared multi-user backend). Instead:
 
-``_arun_auto_discovery_scan`` now seeds it at the top. This pins that:
-run the scan in a fresh thread (no inherited context) and assert that by
-the time it opens its first DB unit of work, the owner id is resolved
-rather than unset.
+  * the scheduler enumerates auto-discover KBs owner-agnostically and calls
+    ``service.rescan_kb(kb_id)`` per KB — it never touches the owner ContextVar;
+  * ``rescan_kb`` derives the owner from the KB row itself (``get_kb_by_id`` →
+    ``kb.user_id``) and threads it EXPLICITLY into the rescan task + the rescan
+    work — it never reads or publishes the ambient owner ContextVar.
+
+These tests pin both.
 """
 
 from __future__ import annotations
 
-import asyncio
-import threading
+import types
 from contextlib import asynccontextmanager
 
 import pytest
@@ -23,72 +23,140 @@ import pytest
 import valuz_agent.infra.db as db_mod
 from valuz_agent.infra.auth_context import get_current_user_id
 from valuz_agent.modules.docs import scheduler as sched
+from valuz_agent.modules.docs.datastore import DocumentDatastore
+from valuz_agent.modules.docs.service import DocumentLibraryService
 
 
-def test_scan_seeds_owner_context_in_a_fresh_thread(monkeypatch) -> None:
-    captured: dict[str, object] = {}
+class _KB:
+    """Minimal stand-in — callers read only id / name / user_id."""
+
+    def __init__(self, kb_id: str, name: str, user_id: str) -> None:
+        self.id = kb_id
+        self.name = name
+        self.user_id = user_id
+
+
+# ── scheduler: enumerate owner-agnostically, call rescan_kb(kb_id) per KB ──────
+
+
+def _stub_heavy_scan(monkeypatch, tmp_path, kbs: list[_KB], called: list[str]) -> None:
+    """Patch the heavy parser/service construction so the test isolates the
+    scheduler loop. ``rescan_kb`` records the kb_id it was handed."""
+    from valuz_agent.infra.config import settings as cfg
+
+    async def _fake_list(self):  # type: ignore[no-untyped-def]
+        return kbs
+
+    monkeypatch.setattr(DocumentDatastore, "list_auto_discover_kbs", _fake_list)
 
     @asynccontextmanager
-    async def _capturing_uow(*args, **kwargs):
-        # First DB access after the seed — record what the owner ctx holds,
-        # then short-circuit the rest of the heavy scan.
-        captured["uid_at_db_access"] = get_current_user_id()
-        raise _StopScan
-        yield  # unreachable — makes this an async generator (asynccontextmanager)
+    async def _uow(*a, **k):  # type: ignore[no-untyped-def]
+        yield None
 
-    monkeypatch.setattr(db_mod, "async_unit_of_work", _capturing_uow)
+    monkeypatch.setattr(db_mod, "async_unit_of_work", _uow)
+    # ``docs_dir`` is a computed property (data_dir/"docs") — patch the field.
+    monkeypatch.setattr(cfg, "data_dir", tmp_path)
 
-    error: list[BaseException] = []
+    async def _async_none(*a, **k):  # type: ignore[no-untyped-def]
+        return None
 
-    def _run_in_thread() -> None:
-        # A brand-new thread: the boot-seeded main-thread context does NOT
-        # carry over — exactly the scheduler's daemon-thread situation.
-        try:
-            get_current_user_id()
-            captured["ctx_inherited"] = True  # pragma: no cover
-        except LookupError:
-            captured["ctx_inherited"] = False
-        try:
-            asyncio.run(sched._arun_auto_discovery_scan())
-        except _StopScan:
-            pass
-        except BaseException as exc:  # noqa: BLE001
-            error.append(exc)
+    monkeypatch.setattr("valuz_agent.api.deps._parser_registry", lambda: None)
+    monkeypatch.setattr("valuz_agent.api.deps._secret_store", lambda: None)
+    monkeypatch.setattr("valuz_agent.api.deps._SecretStoreResolver", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "valuz_agent.api.deps._setup_controller",
+        lambda: types.SimpleNamespace(is_complete=lambda: True),
+    )
+    monkeypatch.setattr("valuz_agent.modules.parser.ParserRouter", lambda **k: None)
+    monkeypatch.setattr(
+        "valuz_agent.modules.settings.parser_routing.load_routing_config", _async_none
+    )
+    monkeypatch.setattr(
+        "valuz_agent.integrations.docs_embedded.EmbeddedDocsRuntime", lambda **k: None
+    )
 
-    t = threading.Thread(target=_run_in_thread)
-    t.start()
-    t.join(timeout=20)
+    async def _rescan(self, kb_id: str):  # type: ignore[no-untyped-def]
+        called.append(kb_id)
+        return types.SimpleNamespace(total_items=0)
 
-    assert not error, error
-    # The thread genuinely had no inherited context (the bug's precondition)…
-    assert captured["ctx_inherited"] is False
-    # …and the scan seeded it before any DB work (the fix).
-    assert isinstance(captured["uid_at_db_access"], str)
-    assert captured["uid_at_db_access"]
-
-
-class _StopScan(BaseException):
-    """Sentinel to short-circuit the scan after the owner-ctx checkpoint."""
+    monkeypatch.setattr(DocumentLibraryService, "rescan_kb", _rescan)
 
 
 @pytest.mark.asyncio
-async def test_scan_seed_uses_the_resolved_local_owner(monkeypatch) -> None:
-    """The seeded id is the process owner id, not an arbitrary value."""
-    from valuz_agent.infra import local_identity
+async def test_scheduler_rescans_each_auto_discover_kb(monkeypatch, tmp_path) -> None:
+    called: list[str] = []
+    kbs = [_KB("kb-a", "A", "owner-A"), _KB("kb-b", "B", "owner-B")]
+    _stub_heavy_scan(monkeypatch, tmp_path, kbs, called)
+
+    await sched._arun_auto_discovery_scan()
+
+    # Every owner's auto-discover KB is rescanned (by id) — not just one device id.
+    assert called == ["kb-a", "kb-b"]
+
+
+@pytest.mark.asyncio
+async def test_no_kbs_is_a_noop(monkeypatch, tmp_path) -> None:
+    called: list[str] = []
+    _stub_heavy_scan(monkeypatch, tmp_path, [], called)
+    await sched._arun_auto_discovery_scan()
+    assert called == []
+
+
+# ── rescan_kb: owner derived from the KB row ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rescan_kb_derives_owner_from_row(monkeypatch) -> None:
+    """The owner is resolved from the KB row (``get_kb_by_id`` → ``kb.user_id``)
+    and threaded EXPLICITLY into the rescan task + ``_run_rescan`` — the ambient
+    owner ContextVar is never read or published."""
+    svc = DocumentLibraryService.__new__(DocumentLibraryService)
+
+    class _DS:
+        async def get_kb_by_id(self, kb_id: str):  # type: ignore[no-untyped-def]
+            return _KB(kb_id, "X", "owner-X")
+
+    svc._ds = _DS()  # type: ignore[attr-defined]
 
     seen: dict[str, object] = {}
 
-    @asynccontextmanager
-    async def _capturing_uow(*args, **kwargs):
-        seen["uid"] = get_current_user_id()
-        raise _StopScan
-        yield  # unreachable — makes this an async generator (asynccontextmanager)
+    async def _create_task(user_id: str, kb_id: str):  # type: ignore[no-untyped-def]
+        seen["task_owner"] = user_id
+        return types.SimpleNamespace(id="task-1", kb_id=kb_id, user_id=user_id)
 
-    monkeypatch.setattr(db_mod, "async_unit_of_work", _capturing_uow)
+    async def _run(kb, task):  # type: ignore[no-untyped-def]
+        seen["rescan_owner"] = kb.user_id
+        seen["ambient_during_run"] = get_current_user_id()
 
-    try:
-        await sched._arun_auto_discovery_scan()
-    except _StopScan:
-        pass
+    monkeypatch.setattr(svc, "_create_rescan_task", _create_task)
+    monkeypatch.setattr(svc, "_run_rescan", _run)
+    monkeypatch.setattr("valuz_agent.modules.docs.service._task_to_result", lambda t: "ok")
 
-    assert seen["uid"] == local_identity.resolve_local_user_id()
+    before = get_current_user_id()
+    result = await svc.rescan_kb("kb-1")
+
+    assert result == "ok"
+    # Owner came from the KB row and was threaded explicitly into both the
+    # rescan task and the rescan work.
+    assert seen["task_owner"] == "owner-X"
+    assert seen["rescan_owner"] == "owner-X"
+    # The ambient ContextVar was never published — owner derivation is purely
+    # entity-based (no set_current_user_id anywhere in the rescan path).
+    assert seen["ambient_during_run"] == before
+    assert get_current_user_id() == before
+
+
+@pytest.mark.asyncio
+async def test_rescan_kb_missing_kb_raises(monkeypatch) -> None:
+    from valuz_agent.modules.docs.errors import KbNotFound
+
+    svc = DocumentLibraryService.__new__(DocumentLibraryService)
+
+    class _DS:
+        async def get_kb_by_id(self, kb_id: str):  # type: ignore[no-untyped-def]
+            return None
+
+    svc._ds = _DS()  # type: ignore[attr-defined]
+
+    with pytest.raises(KbNotFound):
+        await svc.rescan_kb("nope")

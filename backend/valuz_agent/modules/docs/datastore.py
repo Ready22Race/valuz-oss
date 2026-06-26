@@ -45,6 +45,18 @@ class DocumentDatastore:
             .first()
         )
 
+    async def get_kb_by_id(self, kb_id: str) -> KnowledgeBaseRow | None:
+        """Fetch a KB by id WITHOUT an owner filter — a deliberate cross-owner
+        SYSTEM read for background work (the auto-discovery scheduler), which then
+        runs the rescan AS the KB's own ``user_id``. Owner-scoped callers use
+        ``get_kb(user_id, …)``; HTTP entry points authorize before reaching here.
+        """
+        return (
+            (await self._db.execute(select(KnowledgeBaseRow).where(KnowledgeBaseRow.id == kb_id)))
+            .scalars()
+            .first()
+        )
+
     async def list_kbs(self, user_id: str) -> list[KnowledgeBaseRow]:
         return list(
             (
@@ -52,6 +64,25 @@ class DocumentDatastore:
                     select(KnowledgeBaseRow)
                     .where(KnowledgeBaseRow.user_id == user_id)
                     .order_by(KnowledgeBaseRow.created_at.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    async def list_auto_discover_kbs(self) -> list[KnowledgeBaseRow]:
+        """Every ``auto_discover=True`` KB across ALL owners — a deliberate
+        cross-owner SYSTEM scan for the background rescan loop.
+
+        This is the ONE owner-agnostic KB read (no ``user_id`` filter): the
+        scheduler runs each rescan AS that KB's owner (``row.user_id``), so a
+        shared multi-user backend rescans every owner's KBs, not just one. Every
+        other KB read stays owner-scoped.
+        """
+        return list(
+            (
+                await self._db.execute(
+                    select(KnowledgeBaseRow).where(KnowledgeBaseRow.auto_discover.is_(True))
                 )
             )
             .scalars()
@@ -394,6 +425,20 @@ class DocumentDatastore:
                         DocumentImportTaskRow.id == task_id,
                         DocumentImportTaskRow.user_id == user_id,
                     )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def get_import_task_by_id(self, task_id: str) -> DocumentImportTaskRow | None:
+        """Fetch an import task by id WITHOUT an owner filter — a deliberate
+        owner-agnostic SYSTEM read for background daemons, which then run as the
+        loaded row's ``user_id``."""
+        return (
+            (
+                await self._db.execute(
+                    select(DocumentImportTaskRow).where(DocumentImportTaskRow.id == task_id)
                 )
             )
             .scalars()
