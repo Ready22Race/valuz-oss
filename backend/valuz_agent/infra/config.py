@@ -1,8 +1,9 @@
 import hashlib
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic_settings import BaseSettings
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode
 
 
 class Settings(BaseSettings):
@@ -68,6 +69,37 @@ class Settings(BaseSettings):
     # ``VALUZ_BACKEND_BASE_URL`` (e.g. ``http://127.0.0.1:18080``) when
     # the launcher pins a custom port.
     backend_base_url: str = "http://127.0.0.1:8000"
+
+    # ── Global API prefix ────────────────────────────────────────────
+    # Optional base path(s) prepended to the whole public HTTP surface — the
+    # host's own routers, the overlay's ``module_registry`` routes, and the
+    # in-process kernel routers. Lets the backend sit behind a shared-host
+    # ingress that namespaces it by path (e.g. istio routing ``/valuz-backend``
+    # to this service without a rewrite). Empty (default) → routes served at
+    # their native paths; behaviour unchanged. ``["/valuz-backend"]`` → the
+    # entire surface moves under that base; ``["", "/valuz-backend"]`` (env
+    # ``,/valuz-backend``) → served at BOTH so native/internal callers keep
+    # working while the ingress sees the prefixed surface. The internal
+    # ``/internal/mcp/*`` mounts are reached server-side via ``backend_base_url``
+    # and stay at fixed native paths — never prefixed. Override with
+    # ``VALUZ_API_PREFIX``; accepts a JSON list or a comma-separated string,
+    # each entry normalised to ``""`` or ``"/segment"``.
+    api_prefix: Annotated[list[str], NoDecode] = []
+
+    @field_validator("api_prefix", mode="before")
+    @classmethod
+    def _normalize_api_prefix(cls, v: object) -> list[str]:
+        if v is None or v == "":
+            return []
+        items = v.split(",") if isinstance(v, str) else list(v)  # type: ignore[arg-type]
+        out: list[str] = []
+        for item in items:
+            seg = str(item).strip().rstrip("/")
+            if seg and not seg.startswith("/"):
+                seg = "/" + seg
+            if seg not in out:  # dedup, preserve order; keep "" (native) entries
+                out.append(seg)
+        return out
 
     # Custom URL scheme the desktop shell registers (Electron
     # ``setAsDefaultProtocolClient`` — see
