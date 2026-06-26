@@ -1,4 +1,11 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   Button,
@@ -57,6 +64,8 @@ import {
   useRuntimes,
   useSessionAttachments,
   useSessionStore,
+  useProjectListAutoRefresh,
+  useListScrollAnchor,
   type ActionKind,
   type AutomationItem,
   type RuntimeId,
@@ -138,6 +147,51 @@ function isTextFile(name: string): boolean {
   return TEXT_EXTENSIONS.has(ext);
 }
 
+// Volatile fields that decide whether a polled task row differs from the one
+// already on screen — if equal we reuse the old object reference so unaffected
+// rows update in place (stable DOM nodes for the scroll anchor).
+function taskEqual(a: Task, b: Task): boolean {
+  return (
+    a.id === b.id &&
+    a.title === b.title &&
+    a.status === b.status &&
+    a.created_at === b.created_at &&
+    a.updated_at === b.updated_at
+  );
+}
+
+/**
+ * Id-keyed in-place merge of a fresh full task list into the previous one
+ * (plan §5 — replaces ``setTasks(res.tasks)`` whole-table overwrite). The
+ * incoming list is the authoritative ``created_at``-DESC snapshot, so following
+ * its order keeps existing rows in place (``created_at`` is immutable),
+ * positions new rows by ``created_at``, drops rows that disappeared, and never
+ * duplicates an id. Unchanged rows keep their previous reference.
+ */
+function mergeTasks(prev: Task[], incoming: Task[]): Task[] {
+  const prevById = new Map(prev.map((t) => [t.id, t]));
+  return incoming.map((t) => {
+    const old = prevById.get(t.id);
+    return old && taskEqual(old, t) ? old : t;
+  });
+}
+
+/**
+ * Walk up from ``el`` to the nearest ancestor that actually scrolls. The
+ * project-detail page has no list-level scroller; the real one is the layout's
+ * ``overflow-y-auto`` content container (plan review P2). An explicit
+ * auto/scroll container is the intended scroller even before it overflows.
+ */
+function findScrollParent(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    const overflowY = getComputedStyle(node).overflowY;
+    if (overflowY === "auto" || overflowY === "scroll") return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
 /* ── Project Recents (PRD §03 2) ────────────────────────────── */
 
 // Session status -> i18n key for the right-edge ``StatusPill`` on
@@ -181,7 +235,7 @@ const ProjectRecents = ({
         const title = s.name ?? s.last_user_message_text ?? fallback;
         if (renamingId === s.id) {
           return (
-            <li key={s.id}>
+            <li key={s.id} data-anchor-key={`chat-${s.id}`}>
               <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
                 <RenameInput
                   initial={title}
@@ -196,7 +250,11 @@ const ProjectRecents = ({
           );
         }
         return (
-          <li key={s.id} className="group relative">
+          <li
+            key={s.id}
+            data-anchor-key={`chat-${s.id}`}
+            className="group relative"
+          >
             <ContextMenu>
               <ContextMenuTrigger asChild>
                 <div
@@ -305,7 +363,7 @@ const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
   return (
     <ul className="flex flex-col">
       {tasks.map((task) => (
-        <li key={task.id}>
+        <li key={task.id} data-anchor-key={`task-${task.id}`}>
           <button
             type="button"
             onClick={() => onOpen(task.id)}
@@ -389,7 +447,10 @@ const ProjectAllList = ({
         const Icon = item.kind === "task" ? ListChecks : MessageSquare;
         if (item.kind === "chat" && renamingId === item.id) {
           return (
-            <li key={`${item.kind}-${item.id}`}>
+            <li
+              key={`${item.kind}-${item.id}`}
+              data-anchor-key={`${item.kind}-${item.id}`}
+            >
               <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
                 <RenameInput
                   initial={item.title}
@@ -404,7 +465,11 @@ const ProjectAllList = ({
           );
         }
         return (
-          <li key={`${item.kind}-${item.id}`} className="group relative">
+          <li
+            key={`${item.kind}-${item.id}`}
+            data-anchor-key={`${item.kind}-${item.id}`}
+            className="group relative"
+          >
             <div
               role="button"
               tabIndex={0}
@@ -718,13 +783,15 @@ export const ProjectDetailPage = () => {
   }, [id, memberDeleteTarget, loadMembers, t]);
 
   // Load this project's tasks. Failures are swallowed — non-critical here.
+  // First load uses the same id-keyed in-place merge as the auto-refresh
+  // poller (plan §4A.7) so the two paths are idempotent.
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
     tasksApi
       .listTasks(id)
       .then((res) => {
-        if (!cancelled) setTasks(res.tasks);
+        if (!cancelled) setTasks((prev) => mergeTasks(prev, res.tasks));
       })
       .catch(() => {
         if (!cancelled) setTasks([]);
@@ -733,6 +800,36 @@ export const ProjectDetailPage = () => {
       cancelled = true;
     };
   }, [id]);
+
+  // ── Steady-state auto-refresh (plan §4A) ───────────────────────────────
+  // While the page stays mounted and the tab is visible, re-pull the two
+  // already user_id+project_id-filtered list endpoints every 4s (+ on
+  // visible/online) and merge the full snapshot back: sessions through the
+  // store's ``mergeProjectSessions`` (subset merge, other projects untouched),
+  // tasks through the id-keyed ``mergeTasks`` below.
+  const mergeTasksInPlace = useCallback((incoming: Task[]) => {
+    setTasks((prev) => mergeTasks(prev, incoming));
+  }, []);
+  useProjectListAutoRefresh(id, { onTasks: mergeTasksInPlace });
+
+  // Scroll-position anchoring (plan §4B / §7.4). The real scroller is the
+  // layout content container, found by walking up from this sentinel. A
+  // fingerprint of the two lists (ids + the volatile updated_at/status) keys
+  // the correction layout effect so a poll-driven reorder doesn't jump the
+  // first visible row.
+  const listRootRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    scrollContainerRef.current = findScrollParent(listRootRef.current);
+  }, []);
+  const anchorDataKey = useMemo(() => {
+    const s = projectSessions
+      .map((x) => `${x.id}:${x.updated_at}:${x.status}`)
+      .join(",");
+    const tk = tasks.map((x) => `${x.id}:${x.updated_at}:${x.status}`).join(",");
+    return `${s}|${tk}`;
+  }, [projectSessions, tasks]);
+  useListScrollAnchor(scrollContainerRef, anchorDataKey);
 
   // Load this project's member agents + the Library agents the add-agent
   // dialog offers. Non-critical for the project home, so failures are quiet.
@@ -1620,8 +1717,10 @@ export const ProjectDetailPage = () => {
 
           {/* Centre history area (PRD-NEXT §3.4): Chat (sessions) and Task
               (lead-dispatch tasks) split into two tabs. The Task tab always
-              shows — empty state offers an "add task" affordance. */}
-          <div className="mt-4 w-full pb-6">
+              shows — empty state offers an "add task" affordance. The ref is
+              the sentinel ``useListScrollAnchor`` walks up from to find the
+              real scroll container (plan §4B). */}
+          <div ref={listRootRef} className="mt-4 w-full pb-6">
             <Tabs defaultValue="all">
               <div className="flex items-center border-b border-surface-border">
                 <TabsList
