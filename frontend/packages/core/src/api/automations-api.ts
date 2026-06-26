@@ -133,6 +133,9 @@ export interface AutomationRunItem {
   // present. Resolved from the lead session's task at read time. `null` for
   // non-task runs.
   task_status: "active" | "completed" | "failed" | "paused" | null;
+  // When the run kicked off a task, its owning task_id — lets the client
+  // deep-link to the task detail page. `null` for non-task (chat) runs.
+  task_id: string | null;
 }
 
 // ── Trigger validation helpers ─────────────────────────────────────

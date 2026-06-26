@@ -1,16 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Clock3, FilePenLine, Pause, Play, Power, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronRight, Clock3, FilePenLine, ListChecks, MessageSquare, Pause, Play, Power, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
-  BackLink,
   Button,
   DeleteConfirmDialog,
   EmptyState,
-  ExecutionLog,
   PageLoader,
+  StatusPill,
 } from "@valuz/ui";
-import type { ExecutionLogRow } from "@valuz/ui";
 import {
   agentsApi,
   automationsApi,
@@ -24,37 +22,14 @@ import {
 import { useProjectOutlet } from "@valuz/app/layout";
 import {
   CreateAutomationDialog,
+  formatCreatedAt,
   type AutomationAgentChoice,
 } from "@valuz/app/components";
 
 type I18nKey = Parameters<ReturnType<typeof useTranslation>["t"]>[0];
 const k = (key: string) => key as I18nKey;
 
-// ── Helpers (mirrors AutomationPage) ────────────────────────────────
-
-function runStatusToLogStatus(
-  status: AutomationRunItem["status"],
-): ExecutionLogRow["status"] {
-  if (status === "success") return "ok";
-  if (status === "failed") return "err";
-  if (status === "queued" || status === "running") return "pending";
-  return "skip";
-}
-
-function runToLogStatus(run: AutomationRunItem): ExecutionLogRow["status"] {
-  if (run.task_status) {
-    if (run.task_status === "completed") return "ok";
-    if (run.task_status === "failed") return "err";
-    return "pending";
-  }
-  return runStatusToLogStatus(run.status);
-}
-
-function formatRunTime(ms: number): string {
-  const d = new Date(ms);
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
+// ── Helpers ─────────────────────────────────────────────────────────
 
 function formatDuration(ms: number | null): string {
   if (ms == null) return "—";
@@ -64,6 +39,31 @@ function formatDuration(ms: number | null): string {
   const m = Math.floor(s / 60);
   return `${m}m${s % 60 > 0 ? `${s % 60}s` : ""}`;
 }
+
+// Time-bucket grouping — mirrors the activity (动态) history list so the two
+// surfaces read identically.
+type TimeBucket = "today" | "yesterday" | "thisWeek" | "earlier";
+
+const bucketOf = (ms: number, now: Date): TimeBucket => {
+  const d = new Date(ms);
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startYesterday = new Date(startToday);
+  startYesterday.setDate(startYesterday.getDate() - 1);
+  const startWeek = new Date(startToday);
+  startWeek.setDate(startWeek.getDate() - 7);
+  if (d >= startToday) return "today";
+  if (d >= startYesterday) return "yesterday";
+  if (d >= startWeek) return "thisWeek";
+  return "earlier";
+};
+
+const BUCKET_ORDER: TimeBucket[] = ["today", "yesterday", "thisWeek", "earlier"];
+const BUCKET_KEY: Record<TimeBucket, string> = {
+  today: "activity.today",
+  yesterday: "activity.yesterday",
+  thisWeek: "activity.thisWeek",
+  earlier: "activity.earlier",
+};
 
 // ── Page ────────────────────────────────────────────────────────────
 
@@ -197,51 +197,87 @@ export const AutomationDetailPage = () => {
     [editMembers],
   );
 
-  // ── Execution log rows ──────────────────────────────────────────────
-
-  const executionRows: ExecutionLogRow[] = runs.map((run) => ({
-    id: run.run_id,
-    time: formatRunTime(run.triggered_at),
-    status: runToLogStatus(run),
-    duration: formatDuration(run.duration_ms),
-    output:
-      (run.error_message_key
-        ? t(run.error_message_key as I18nKey)
-        : null) ??
-      run.result_summary ??
-      run.error_message ??
-      (run.error_code ? `${run.error_code}` : ""),
-    triggerType:
-      run.trigger_type === "cron" ||
-      run.trigger_type === "interval" ||
-      run.trigger_type === "manual" ||
-      run.trigger_type === "agent" ||
-      run.trigger_type === "recovered_skip"
-        ? run.trigger_type
-        : undefined,
-    taskName: detail?.name ?? "",
-    sessionId: run.session_id,
-  }));
-
   // ── Render ─────────────────────────────────────────────────────────
 
   if (loading) return <PageLoader />;
   if (!detail) return null;
 
-  const triggerExpr =
-    detail.trigger.kind === "cron"
-      ? detail.trigger.cron_expr
-      : detail.trigger.kind === "interval"
-        ? `${detail.trigger.seconds}s`
-        : "—";
+  // Drop runs that never produced a session — interrupted-on-shutdown
+  // or recovered-skip ticks that fired but never kicked off a task/chat.
+  // They carry no title or destination, so they'd read as empty rows.
+  const visibleRuns = runs.filter((r) => r.session_id);
+
+  const groupedRuns = (() => {
+    const now = new Date();
+    const groups = new Map<TimeBucket, typeof visibleRuns>();
+    for (const r of visibleRuns) {
+      const b = bucketOf(r.triggered_at, now);
+      const list = groups.get(b) ?? [];
+      list.push(r);
+      groups.set(b, list);
+    }
+    return groups;
+  })();
+
+  const renderRunRow = (run: (typeof visibleRuns)[number]) => {
+    const isTask = run.task_status !== null;
+    const Icon = isTask ? ListChecks : MessageSquare;
+    const eff = run.task_status ?? run.status;
+    const pillStatus =
+      eff === "completed" || eff === "success" ? "completed"
+      : eff === "failed" ? "failed"
+      : eff === "active" || eff === "running" || eff === "queued" ? "running"
+      : eff === "paused" ? "paused"
+      : "skipped";
+    const pillLabel =
+      pillStatus === "completed" ? t(k("automation.execStatusOk"))
+      : pillStatus === "failed" ? t(k("automation.execStatusErr"))
+      : pillStatus === "running" ? t(k("automation.execStatusPending"))
+      : pillStatus === "paused" ? t(k("cron.paused"))
+      : t(k("automation.execStatusSkip"));
+    return (
+      <button
+        key={run.run_id}
+        onClick={() => {
+          if (run.task_id) navigate(`/tasks/${run.task_id}`);
+          else if (run.session_id) navigate(`/conversation/${run.session_id}`);
+        }}
+        className="group flex w-full items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
+      >
+        <Icon className="h-3 w-3 shrink-0 text-ink-meta" strokeWidth={2} />
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
+          {run.result_summary?.trim() || detail.name}
+        </span>
+        <span className="shrink-0 text-[11px] text-ink-meta">
+          {formatCreatedAt(run.triggered_at, t)}
+          {run.duration_ms ? ` · ${formatDuration(run.duration_ms)}` : ""}
+        </span>
+        <StatusPill status={pillStatus} label={pillLabel} />
+      </button>
+    );
+  };
 
   return (
-    <div className="relative h-full min-h-0 overflow-y-auto bg-card">
-      <div className="px-5 pt-6">
-        <BackLink label={t(k("automation.title"))} onClick={() => navigate("/automations")} />
+    <div className="flex h-full flex-col overflow-hidden bg-card">
+      {/* Breadcrumb nav — top-left, full width, mirrors task detail. */}
+      <div className="flex min-w-0 shrink-0 items-center gap-2 px-5 pt-5 text-sm leading-5">
+        <button
+          type="button"
+          onClick={() => navigate("/automations")}
+          className="inline-flex shrink-0 items-center gap-1 text-ink-meta transition-colors hover:text-ink-heading"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+          <span>{t(k("automation.title"))}</span>
+        </button>
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
+        <span className="min-w-0 truncate font-medium text-ink-heading">
+          {t(k("automation.detailTitle"))}
+        </span>
       </div>
+
+      <div className="mx-auto flex min-h-0 w-full max-w-[1000px] flex-1 flex-col overflow-hidden">
       {/* Title + actions section */}
-      <div className="flex items-start justify-between px-8 pt-4 pb-5">
+      <div className="flex items-start justify-between pt-4 pb-5 shrink-0">
         <div>
           <h1 className="text-2xl font-semibold text-ink-heading">{detail.name}</h1>
           <p className="mt-1 flex items-center gap-2 text-sm text-ink-meta">
@@ -262,12 +298,7 @@ export const AutomationDetailPage = () => {
           <Button variant="outline" size="icon" onClick={() => setEditOpen(true)}>
             <FilePenLine className="h-4 w-4" />
           </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="text-destructive hover:text-destructive"
-            onClick={() => setDeleteOpen(true)}
-          >
+          <Button variant="outline" size="icon" className="text-destructive hover:text-destructive" onClick={() => setDeleteOpen(true)}>
             <Trash2 className="h-4 w-4" />
           </Button>
           <Button size="sm" onClick={() => void handleRunNow()}>
@@ -277,54 +308,41 @@ export const AutomationDetailPage = () => {
         </div>
       </div>
 
-      <div className="mx-8 border-t border-surface-border" />
-
-      {/* Two-column layout */}
-      <div className="grid grid-cols-[1fr_380px] gap-0 px-8 py-6">
+      {/* Two-column layout — each column scrolls independently */}
+      <div className="grid grid-cols-2 flex-1 min-h-0 overflow-hidden">
         {/* Left: execution history */}
-        <div className="min-w-0 border-r border-surface-border pr-8">
-          <h2 className="mb-4 text-sm font-medium text-ink-meta">
+        <div className="flex min-w-0 flex-col overflow-hidden pt-6">
+          <h2 className="mb-3 shrink-0 pr-8 text-sm font-medium text-ink-meta">
             {t(k("cron.executionHistory"))}
           </h2>
-          {executionRows.length > 0 ? (
-            <ExecutionLog
-              rows={executionRows}
-              onSessionClick={(sessionId) =>
-                navigate(`/conversation/${sessionId}`)
-              }
-            />
+          {visibleRuns.length > 0 ? (
+            <div className="min-h-0 flex-1 overflow-y-auto pr-8 pb-6">
+              {BUCKET_ORDER.filter((b) => groupedRuns.has(b)).map((b) => (
+                <div key={b} className="mb-4">
+                  <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+                    {t(k(BUCKET_KEY[b]))}
+                  </div>
+                  {(groupedRuns.get(b) ?? []).map((run) => renderRunRow(run))}
+                </div>
+              ))}
+            </div>
           ) : (
-            <div className="flex justify-center py-8">
-              <EmptyState
-                variant="plain"
-                title={t(k("automation.noExecutions"))}
-                icon={<Clock3 className="h-5 w-5" />}
-              />
+            <div className="flex flex-1 justify-center py-8">
+              <EmptyState variant="plain" title={t(k("automation.noExecutions"))} icon={<Clock3 className="h-5 w-5" />} />
             </div>
           )}
         </div>
 
-        {/* Right: instructions + trigger */}
-        <div className="pl-8 text-sm">
-          <h2 className="mb-3 text-sm font-medium text-ink-meta">
+        {/* Right: instructions */}
+        <div className="flex flex-col overflow-hidden pl-8 pt-6 pb-6 text-sm">
+          <h2 className="mb-3 shrink-0 text-sm font-medium text-ink-meta">
             {t(k("cron.instruction"))}
           </h2>
-          <p className="whitespace-pre-wrap text-ink-body leading-relaxed">
+          <p className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap pb-6 text-ink-body leading-relaxed">
             {detail.prompt_template}
           </p>
-
-          <div className="mt-6">
-            <h2 className="mb-2 text-sm font-medium text-ink-meta">
-              {t(k("cron.triggerColumn"))}
-            </h2>
-            <p className="font-medium text-ink-heading">
-              {detail.trigger_human_readable}
-            </p>
-            {triggerExpr !== "—" && (
-              <p className="mt-0.5 font-mono text-xs text-ink-meta">{triggerExpr}</p>
-            )}
-          </div>
         </div>
+      </div>
       </div>
 
       <CreateAutomationDialog

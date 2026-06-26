@@ -57,15 +57,13 @@ function relativeTime(ms: number | null): string {
 }
 
 // Trigger column — original ScheduledTaskTable shows the cron expression
-// in monospace next to the human-readable subtitle. The column is
-// ``font-mono`` so we keep it locale-neutral: raw cron expression for
-// cron, ``Ns`` for interval, and an em-dash for manual rows (which
-// never fire on the tick; the human-readable subtitle below already
-// says "Manual" for context).
+// Trigger column — cron rows show the raw cron expression (locale-neutral
+// standard, reads fine in monospace); interval / manual rows show the
+// backend's localized human-readable cadence (``每 30 分钟`` / ``Every 30
+// minutes`` / ``手动``) rather than a raw ``1800s``.
 function triggerColumn(item: AutomationItem): string {
   if (item.trigger.kind === "cron") return item.trigger.cron_expr;
-  if (item.trigger.kind === "interval") return `${item.trigger.seconds}s`;
-  return "—";
+  return item.trigger_human_readable;
 }
 
 // Map AutomationItem → the generic shape `ScheduledTaskTable` expects.
@@ -81,7 +79,9 @@ function automationToTableRow(item: AutomationItem) {
   return {
     id: item.automation_id,
     name: item.name,
-    prompt: item.trigger_human_readable,
+    // Subtitle = the bound agent (the schedule now lives in the 触发规则
+    // column, so repeating ``trigger_human_readable`` here would duplicate it).
+    prompt: item.agent_name ?? "",
     trigger: triggerColumn(item),
     triggerTimezone:
       item.trigger.kind === "cron"
@@ -364,7 +364,7 @@ export const AutomationPage = () => {
 
   return (
     <div className="relative h-full min-h-0 overflow-y-auto bg-card">
-      <div className="flex min-h-full flex-col px-5 pb-5 pt-3">
+      <div className="mx-auto flex min-h-full w-full max-w-[1000px] flex-col pb-5 pt-3">
         {!hasAutomations ? (
           <div className="flex flex-1 justify-center pt-[160px]">
             <EmptyState
