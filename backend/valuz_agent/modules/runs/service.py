@@ -154,6 +154,10 @@ class RunsService:
         # project-agnostic).
         index_rows = await project_index.list_recent(limit=200)
         proj_by_session = {r.session_id: r.project_id for r in index_rows}
+        # Session creation origin (user | automation | task). A task lead's own
+        # index origin is "task", but who *triggered* the task lives on the
+        # session that spawned it — so we also resolve a lead's trigger origin
+        # from its originating session below.
         origin_by_session = {r.session_id: r.origin for r in index_rows}
         sessions: list[KernelSession] = await kernel_client.list_sessions(
             require_current_user_id(), ids=[r.session_id for r in index_rows], limit=200
@@ -190,7 +194,7 @@ class RunsService:
                     task_map,
                     effective,
                     project_id=proj_by_session.get(sess.id, ""),
-                    origin=origin_by_session.get(sess.id, "user"),
+                    origin_by_session=origin_by_session,
                 )
             except Exception:
                 logger.exception(
@@ -226,7 +230,7 @@ class RunsService:
         effective_status: str,
         *,
         project_id: str,
-        origin: str = "user",
+        origin_by_session: dict[str, str],
     ) -> RunSummary:
         meta: dict[str, Any] = (sess.metadata or {}).get("valuz") or {}
         project = ws_map.get(project_id)
@@ -249,13 +253,29 @@ class RunsService:
                 "project_chat" if project is not None and project.kind == "project" else "assistant"
             )
             last_output = _truncate_output(await self._latest_assistant_text(sess.id))
+
+        # ``origin`` = who triggered this run.
+        # - For chat sessions: read the session's own metadata origin (set at
+        #   creation by the automation runner; never rewritten).
+        # - For task leads: the lead session's own origin stays "user" (set by
+        #   the task orchestrator which doesn't propagate the trigger). Instead,
+        #   look up the originating_session_id stored in the task's metadata and
+        #   resolve that session's origin from the index.
+        own_origin = str(meta.get("origin") or "user")
+        if source == "task" and own_origin == "user" and task_id:
+            task_row = task_map.get(task_id)
+            if task_row is not None:
+                orig_sid = (task_row.metadata_ or {}).get("originating_session_id")
+                if orig_sid:
+                    own_origin = origin_by_session.get(str(orig_sid), own_origin)
+
         return RunSummary(
             session_id=sess.id,
             source_kind=source,
             project_id=project_id,
             project_name=project.name if project is not None else None,
             task_id=task_id,
-            origin=origin,
+            origin=own_origin,
             title=str(title),
             status=effective_status,
             updated_at=sess.created_at,
