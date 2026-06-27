@@ -43,8 +43,9 @@ frontend/apps/desktop/release/
 .DS_Store
 Thumbs.db
 
-# Claude Code local settings
-.claude/settings.local.json
+# Claude Code / agent-harness local dirs (skills cache, local settings)
+.claude/
+.agents/
 
 # Docker data
 docker-data/
