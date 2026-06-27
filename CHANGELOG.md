@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-06-27
+
+### Added
+
+- Automation runs are now a first-class concept across the app. A dedicated
+  automation detail page (`/automations/:id`) shows execution history and the
+  rendered instruction side by side; the automation list opens it on row click
+  (the inline recent-runs section is gone). The activity overview and project
+  detail both gain a 自动化 tab, and the 全部 tabs mark each automation row with
+  a 自动化 chip instead of 对话/任务. Trigger cadence is localized (`每 30 分钟`
+  / `Every 30 minutes` / `手动` / `Manual`) instead of a raw `1800s`. Project
+  detail tabs also group rows by time bucket (今天/昨天/本周/更早), matching the
+  activity list. (#307 @St0neWan9)
+
 ### Fixed
 
+- KB auto-discovery rescans failed on every tick with `OwnerContextUnsetError`:
+  the scheduler called `load_routing_config` (owner-scoped settings reads)
+  before any owner context was published. Each per-KB iteration now publishes
+  the KB's owner on the `current_user_id` ContextVar (try/finally, mirroring the
+  automation in-process runner) so the routing-config read and the rescan both
+  resolve against the right user. (#308 @St0neWan9)
 - Boot crashed with `MissingGreenlet` when `database_url` pointed at Postgres
   via the async driver (`postgresql+asyncpg://`): the kernel/host schema
   preflights built a **sync** engine and called `inspect()` on it, which can't
@@ -23,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   typing. Switched both the migration and the `SkillIndexRow` model to
   `sa.true()`, which SQLAlchemy renders portably as `1` on SQLite and `true`
   on Postgres. (#304 @homeant)
+
+### Docs & Chore
+
+- gitignore the local `.claude/` and `.agents/` agent-harness dirs and remove
+  stray design-draft markdown that had been committed by accident. (#309
+  @St0neWan9)
 
 ## [0.2.4] - 2026-06-25
 
