@@ -83,10 +83,11 @@ async def _arun_auto_discovery_scan() -> None:
     # Background scan across ALL owners. ``list_auto_discover_kbs`` enumerates
     # every owner's auto-discover KBs (owner-agnostic system read); each is then
     # rescanned via ``service.rescan_kb(kb_id)``, which derives the owner from the
-    # KB row itself and publishes it for the rescan. The scheduler does NOT touch
-    # the owner ContextVar — it only needs ``kb.user_id`` to build that KB's
-    # parser secret resolver (BYOK parser keys are per-user). The old
-    # ``resolve_local_user_id()`` seed only ever scanned the single device id.
+    # KB row itself and publishes it for the rescan. The per-KB loop below also
+    # publishes that owner on the ContextVar so owner-scoped reads done BEFORE
+    # rescan_kb (e.g. ``load_routing_config``'s settings lookups) resolve too.
+    # The old ``resolve_local_user_id()`` seed only ever scanned the single
+    # device id.
     #
     # The parser is the SAME configured ParserRouter the request path uses
     # (deps.get_document_service) — routing config + secret resolver + capability
@@ -98,6 +99,10 @@ async def _arun_auto_discovery_scan() -> None:
         _secret_store,
         _SecretStoreResolver,
         _setup_controller,
+    )
+    from valuz_agent.infra.auth_context import (
+        reset_current_user_id,
+        set_current_user_id,
     )
     from valuz_agent.infra.config import settings
     from valuz_agent.infra.db import async_unit_of_work
@@ -132,6 +137,12 @@ async def _arun_auto_discovery_scan() -> None:
         len(kb_refs),
     )
     for kb_id, kb_name, owner in kb_refs:
+        # Background path: no request context. Publish the KB's owner so the
+        # owner-scoped reads in this iteration (load_routing_config's settings
+        # lookups, rescan_kb) resolve against the right user. ``owner`` may be
+        # None for legacy single-user rows — skip publishing then (the global
+        # default-user fallback applies downstream).
+        owner_token = set_current_user_id(owner) if owner else None
         try:
             async with async_unit_of_work(commit=False) as db:
                 routing_config = await load_routing_config(db)
@@ -160,6 +171,9 @@ async def _arun_auto_discovery_scan() -> None:
             # The failed unit-of-work already rolled back + closed; the next
             # KB starts from a fresh session.
             logger.exception("Auto-rescan failed: %s (%s)", kb_name, kb_id)
+        finally:
+            if owner_token is not None:
+                reset_current_user_id(owner_token)
 
 
 _scheduler: KbAutoDiscoveryScheduler | None = None
