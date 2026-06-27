@@ -9,6 +9,7 @@ from typing import Literal
 
 # fmt: off
 I18nKey = Literal[
+    "activity.automationTag",
     "activity.cardView",
     "activity.chatTag",
     "activity.deleteChat",
@@ -254,6 +255,7 @@ I18nKey = Literal[
     "automation.deleteFailed",
     "automation.deleteSuccess",
     "automation.deleteTitle",
+    "automation.detailTitle",
     "automation.dialogTitleChat",
     "automation.dialogTitleEdit",
     "automation.dialogTitleEditNamed",
@@ -279,6 +281,11 @@ I18nKey = Literal[
     "automation.headerEnabled",
     "automation.intervalBelowFloor",
     "automation.intervalEvery",
+    "automation.intervalEveryHours",
+    "automation.intervalEveryHoursMinutes",
+    "automation.intervalEveryMinutes",
+    "automation.intervalEveryMinutesSeconds",
+    "automation.intervalEverySeconds",
     "automation.intervalUnitDays",
     "automation.intervalUnitHours",
     "automation.intervalUnitMinutes",
@@ -308,6 +315,7 @@ I18nKey = Literal[
     "automation.toggleFailed",
     "automation.triggerCron",
     "automation.triggerInterval",
+    "automation.triggerManual",
     "automation.updateFailed",
     "automation.updateSuccess",
     "backend.automation.appNotRunning",
@@ -729,6 +737,7 @@ I18nKey = Literal[
     "cron.setModel",
     "cron.simple",
     "cron.statusColumn",
+    "cron.statusOn",
     "cron.sun",
     "cron.taskColumn",
     "cron.taskCount",

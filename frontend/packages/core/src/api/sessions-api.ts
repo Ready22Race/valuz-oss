@@ -431,11 +431,17 @@ const fetchJson = createFetchJson(() => _apiBase);
 export type SessionStreamCallback = (event: SessionEventDTO) => void;
 
 export const sessionsApi = {
-  list(projectId?: string): Promise<{ sessions: SessionListItem[] }> {
+  list(
+    projectId?: string,
+    init?: { signal?: AbortSignal },
+  ): Promise<{ sessions: SessionListItem[] }> {
     const qs = new URLSearchParams();
     if (projectId) qs.set("project_id", projectId);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/sessions${suffix}`);
+    // ``init`` (e.g. an ``AbortSignal`` for the project-detail auto-refresh
+    // poller) is forwarded to ``fetchJson`` → ``fetch``. Existing callers pass
+    // nothing, so their behaviour is unchanged.
+    return fetchJson(`/v1/sessions${suffix}`, init);
   },
 
   get(sessionId: string): Promise<SessionDetail> {

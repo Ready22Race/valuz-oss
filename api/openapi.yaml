@@ -2707,6 +2707,9 @@ components:
         project_id: {type: string}
         project_name: {type: string, nullable: true}
         task_id: {type: string, nullable: true}
+        origin:
+          type: string
+          description: "user | automation | task — who created the session."
         title: {type: string}
         status: {type: string}
         current_todo:

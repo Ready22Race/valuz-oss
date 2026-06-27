@@ -1,4 +1,11 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import {
+  useState,
+  useEffect,
+  useLayoutEffect,
+  useCallback,
+  useMemo,
+  useRef,
+} from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   Button,
@@ -34,6 +41,7 @@ import {
   formatCreatedAt,
 } from "@valuz/app/components";
 import {
+  Clock3,
   FilePenLine,
   ChevronRight,
   ListChecks,
@@ -58,6 +66,8 @@ import {
   useRuntimes,
   useSessionAttachments,
   useSessionStore,
+  useProjectListAutoRefresh,
+  useListScrollAnchor,
   type ActionKind,
   type AutomationItem,
   type RuntimeId,
@@ -85,6 +95,7 @@ import {
   type AgentSkillItem,
 } from "../lib/agent-skill-items";
 import { toFileTree } from "../lib/file-tree";
+import { BUCKET_KEY, groupByTimeBucket } from "../lib/time-buckets";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 
 const TEXT_EXTENSIONS = new Set([
@@ -139,6 +150,51 @@ function isTextFile(name: string): boolean {
   return TEXT_EXTENSIONS.has(ext);
 }
 
+// Volatile fields that decide whether a polled task row differs from the one
+// already on screen — if equal we reuse the old object reference so unaffected
+// rows update in place (stable DOM nodes for the scroll anchor).
+function taskEqual(a: Task, b: Task): boolean {
+  return (
+    a.id === b.id &&
+    a.title === b.title &&
+    a.status === b.status &&
+    a.created_at === b.created_at &&
+    a.updated_at === b.updated_at
+  );
+}
+
+/**
+ * Id-keyed in-place merge of a fresh full task list into the previous one
+ * (plan §5 — replaces ``setTasks(res.tasks)`` whole-table overwrite). The
+ * incoming list is the authoritative ``created_at``-DESC snapshot, so following
+ * its order keeps existing rows in place (``created_at`` is immutable),
+ * positions new rows by ``created_at``, drops rows that disappeared, and never
+ * duplicates an id. Unchanged rows keep their previous reference.
+ */
+function mergeTasks(prev: Task[], incoming: Task[]): Task[] {
+  const prevById = new Map(prev.map((t) => [t.id, t]));
+  return incoming.map((t) => {
+    const old = prevById.get(t.id);
+    return old && taskEqual(old, t) ? old : t;
+  });
+}
+
+/**
+ * Walk up from ``el`` to the nearest ancestor that actually scrolls. The
+ * project-detail page has no list-level scroller; the real one is the layout's
+ * ``overflow-y-auto`` content container (plan review P2). An explicit
+ * auto/scroll container is the intended scroller even before it overflows.
+ */
+function findScrollParent(el: HTMLElement | null): HTMLElement | null {
+  let node = el?.parentElement ?? null;
+  while (node) {
+    const overflowY = getComputedStyle(node).overflowY;
+    if (overflowY === "auto" || overflowY === "scroll") return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
 /* ── Project Recents (PRD §03 2) ────────────────────────────── */
 
 // Session status -> i18n key for the right-edge ``StatusPill`` on
@@ -175,87 +231,96 @@ const ProjectRecents = ({
     );
   }
 
-  return (
-    <ul className="flex flex-col">
-      {sessions.map((s) => {
-        const fallback = t("sidebar.newChat" as Parameters<typeof t>[0]);
-        const title = s.name ?? s.last_user_message_text ?? fallback;
-        if (renamingId === s.id) {
-          return (
-            <li key={s.id}>
-              <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
-                <RenameInput
-                  initial={title}
-                  onConfirm={(v) => {
-                    onRenameConfirm(s.id, v);
-                    setRenamingId(null);
-                  }}
-                  onCancel={() => setRenamingId(null)}
-                />
-              </div>
-            </li>
-          );
-        }
-        return (
-          <li key={s.id} className="group relative">
-            <ContextMenu>
-              <ContextMenuTrigger asChild>
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => onOpen(s.id)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      onOpen(s.id);
-                    }
-                  }}
-                  className="flex w-full cursor-default items-center gap-2 rounded-xl bg-transparent px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
-                >
-                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
-                    {title}
-                  </span>
-                  <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
-                    {formatCreatedAt(s.updated_at, t)}
-                  </span>
-                  <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
-                    {SESSION_STATUS_KEY[s.status] && (
-                      <StatusPill
-                        status={s.status}
-                        label={t(
-                          SESSION_STATUS_KEY[s.status] as Parameters<
-                            typeof t
-                          >[0],
-                        )}
-                        className="transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
-                      />
+  const grouped = groupByTimeBucket(sessions, (s) => s.updated_at);
+
+  const renderRow = (s: SessionListItem) => {
+    const fallback = t("sidebar.newChat" as Parameters<typeof t>[0]);
+    const title = s.name ?? s.last_user_message_text ?? fallback;
+    if (renamingId === s.id) {
+      return (
+        <li key={s.id} data-anchor-key={`chat-${s.id}`}>
+          <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
+            <RenameInput
+              initial={title}
+              onConfirm={(v) => {
+                onRenameConfirm(s.id, v);
+                setRenamingId(null);
+              }}
+              onCancel={() => setRenamingId(null)}
+            />
+          </div>
+        </li>
+      );
+    }
+    return (
+      <li key={s.id} data-anchor-key={`chat-${s.id}`} className="group relative">
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => onOpen(s.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onOpen(s.id);
+                }
+              }}
+              className="flex w-full cursor-default items-center gap-2 rounded-xl bg-transparent px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
+            >
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
+                {title}
+              </span>
+              <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
+                {formatCreatedAt(s.updated_at, t)}
+              </span>
+              <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
+                {SESSION_STATUS_KEY[s.status] && (
+                  <StatusPill
+                    status={s.status}
+                    label={t(
+                      SESSION_STATUS_KEY[s.status] as Parameters<typeof t>[0],
                     )}
-                    <RowActionsMenu
-                      onRename={() => setRenamingId(s.id)}
-                      onDelete={() => onDelete(s.id, title)}
-                    />
-                  </span>
-                </div>
-              </ContextMenuTrigger>
-              <ContextMenuContent className="min-w-[140px]">
-                <ContextMenuItem onSelect={() => setRenamingId(s.id)}>
-                  <FilePenLine />
-                  {t("sidebar.rename" as Parameters<typeof t>[0])}
-                </ContextMenuItem>
-                <ContextMenuSeparator />
-                <ContextMenuItem
-                  variant="destructive"
-                  onSelect={() => onDelete(s.id, title)}
-                >
-                  <Trash2 />
-                  {t("common.delete" as Parameters<typeof t>[0])}
-                </ContextMenuItem>
-              </ContextMenuContent>
-            </ContextMenu>
-          </li>
-        );
-      })}
-    </ul>
+                    className="transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
+                  />
+                )}
+                <RowActionsMenu
+                  onRename={() => setRenamingId(s.id)}
+                  onDelete={() => onDelete(s.id, title)}
+                />
+              </span>
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="min-w-[140px]">
+            <ContextMenuItem onSelect={() => setRenamingId(s.id)}>
+              <FilePenLine />
+              {t("sidebar.rename" as Parameters<typeof t>[0])}
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              variant="destructive"
+              onSelect={() => onDelete(s.id, title)}
+            >
+              <Trash2 />
+              {t("common.delete" as Parameters<typeof t>[0])}
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      </li>
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      {grouped.map(([bucket, bucketSessions]) => (
+        <div key={bucket}>
+          <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+            {t(BUCKET_KEY[bucket] as Parameters<typeof t>[0])}
+          </div>
+          <ul className="flex flex-col">{bucketSessions.map(renderRow)}</ul>
+        </div>
+      ))}
+    </div>
   );
 };
 
@@ -388,9 +453,7 @@ const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
                 className={`h-3.5 w-3.5 transition-transform ${isCollapsed ? "" : "rotate-90"}`}
               />
             </button>
-          ) : (
-            <span className="w-6 shrink-0" />
-          )}
+          ) : null}
           <button
             type="button"
             onClick={() => onOpen(task.id)}
@@ -417,7 +480,22 @@ const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
     );
   };
 
-  return <ul className="flex flex-col">{roots.map((task) => renderNode(task, 0))}</ul>;
+  const grouped = groupByTimeBucket(roots, (task) => task.updated_at);
+
+  return (
+    <div className="flex flex-col gap-5">
+      {grouped.map(([bucket, bucketRoots]) => (
+        <div key={bucket}>
+          <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+            {t(BUCKET_KEY[bucket] as Parameters<typeof t>[0])}
+          </div>
+          <ul className="flex flex-col">
+            {bucketRoots.map((task) => renderNode(task, 0))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
 };
 
 /* ── Project home "All" — sessions + tasks merged, icon-prefixed ─── */
@@ -429,6 +507,7 @@ const ProjectAllList = ({
   onOpenTask,
   onRenameConfirm,
   onDeleteSession,
+  hideScopeTag = false,
 }: {
   sessions: SessionListItem[];
   tasks: Task[];
@@ -436,6 +515,9 @@ const ProjectAllList = ({
   onOpenTask: (id: string) => void;
   onRenameConfirm: (id: string, name: string) => void;
   onDeleteSession: (id: string, label: string) => void;
+  /** Hide the leading icon + 对话/任务/自动化 chip — used by the 自动化 tab
+   * where every row is automation, so the chip would be pure noise. */
+  hideScopeTag?: boolean;
 }) => {
   const { t } = useTranslation();
   const [renamingId, setRenamingId] = useState<string | null>(null);
@@ -454,6 +536,7 @@ const ProjectAllList = ({
         // ``formatCreatedAt``) — used for both the displayed time and sorting.
         created: s.updated_at,
         sortAt: s.updated_at,
+        isAuto: s.origin === "automation",
       })),
       ...tasks.map((tk) => ({
         kind: "task" as const,
@@ -463,6 +546,7 @@ const ProjectAllList = ({
         statusKey: TASK_STATUS_KEY[tk.status],
         created: tk.created_at,
         sortAt: tk.updated_at,
+        isAuto: tk.trigger?.type === "automation",
       })),
     ];
     // Most-recently-active first, matching the per-tab lists.
@@ -477,82 +561,107 @@ const ProjectAllList = ({
     );
   }
 
-  return (
-    <ul className="flex flex-col">
-      {items.map((item) => {
-        // Same leading icon as the Activity list: a task vs a conversation.
-        const Icon = item.kind === "task" ? ListChecks : MessageSquare;
-        if (item.kind === "chat" && renamingId === item.id) {
-          return (
-            <li key={`${item.kind}-${item.id}`}>
-              <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
-                <RenameInput
-                  initial={item.title}
-                  onConfirm={(v) => {
-                    onRenameConfirm(item.id, v);
-                    setRenamingId(null);
-                  }}
-                  onCancel={() => setRenamingId(null)}
-                />
-              </div>
-            </li>
-          );
-        }
-        return (
-          <li key={`${item.kind}-${item.id}`} className="group relative">
-            <div
-              role="button"
-              tabIndex={0}
-              onClick={() =>
-                item.kind === "task"
-                  ? onOpenTask(item.id)
-                  : onOpenSession(item.id)
-              }
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  if (item.kind === "task") onOpenTask(item.id);
-                  else onOpenSession(item.id);
-                }
+  const grouped = groupByTimeBucket(items, (item) => item.sortAt);
+
+  const renderItem = (item: (typeof items)[number]) => {
+    // Leading icon + scope tag. Automation-triggered runs read as 自动化
+    // (clock) in the 全部 list, marking provenance over surface type.
+    const Icon = item.isAuto
+      ? Clock3
+      : item.kind === "task"
+        ? ListChecks
+        : MessageSquare;
+    if (item.kind === "chat" && renamingId === item.id) {
+      return (
+        <li
+          key={`${item.kind}-${item.id}`}
+          data-anchor-key={`${item.kind}-${item.id}`}
+        >
+          <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
+            <RenameInput
+              initial={item.title}
+              onConfirm={(v) => {
+                onRenameConfirm(item.id, v);
+                setRenamingId(null);
               }}
-              className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
-            >
-              <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
-                <Icon className="h-3 w-3" strokeWidth={2} />
-                {item.kind === "task"
+              onCancel={() => setRenamingId(null)}
+            />
+          </div>
+        </li>
+      );
+    }
+    return (
+      <li
+        key={`${item.kind}-${item.id}`}
+        data-anchor-key={`${item.kind}-${item.id}`}
+        className="group relative"
+      >
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() =>
+            item.kind === "task" ? onOpenTask(item.id) : onOpenSession(item.id)
+          }
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              if (item.kind === "task") onOpenTask(item.id);
+              else onOpenSession(item.id);
+            }
+          }}
+          className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
+        >
+          {!hideScopeTag && (
+            <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
+              <Icon className="h-3 w-3" strokeWidth={2} />
+              {item.isAuto
+                ? t("activity.automationTag" as Parameters<typeof t>[0])
+                : item.kind === "task"
                   ? t("project.tasksColumn" as Parameters<typeof t>[0])
                   : t("project.chatTab" as Parameters<typeof t>[0])}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
-                {item.title}
-              </span>
-              <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
-                {formatCreatedAt(item.created, t)}
-              </span>
-              <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
-                {item.statusKey && (
-                  <StatusPill
-                    status={item.status}
-                    label={t(item.statusKey as Parameters<typeof t>[0])}
-                    className={
-                      item.kind === "chat"
-                        ? "transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
-                        : undefined
-                    }
-                  />
-                )}
-                {item.kind === "chat" && (
-                  <RowActionsMenu
-                    onRename={() => setRenamingId(item.id)}
-                    onDelete={() => onDeleteSession(item.id, item.title)}
-                  />
-                )}
-              </span>
-            </div>
-          </li>
-        );
-      })}
-    </ul>
+            </span>
+          )}
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
+            {item.title}
+          </span>
+          <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
+            {formatCreatedAt(item.created, t)}
+          </span>
+          <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
+            {item.statusKey && (
+              <StatusPill
+                status={item.status}
+                label={t(item.statusKey as Parameters<typeof t>[0])}
+                className={
+                  item.kind === "chat"
+                    ? "transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
+                    : undefined
+                }
+              />
+            )}
+            {item.kind === "chat" && (
+              <RowActionsMenu
+                onRename={() => setRenamingId(item.id)}
+                onDelete={() => onDeleteSession(item.id, item.title)}
+              />
+            )}
+          </span>
+        </div>
+      </li>
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      {grouped.map(([bucket, bucketItems]) => (
+        <div key={bucket}>
+          <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+            {t(BUCKET_KEY[bucket] as Parameters<typeof t>[0])}
+          </div>
+          <ul className="flex flex-col">{bucketItems.map(renderItem)}</ul>
+        </div>
+      ))}
+    </div>
   );
 };
 
@@ -813,13 +922,15 @@ export const ProjectDetailPage = () => {
   }, [id, memberDeleteTarget, loadMembers, t]);
 
   // Load this project's tasks. Failures are swallowed — non-critical here.
+  // First load uses the same id-keyed in-place merge as the auto-refresh
+  // poller (plan §4A.7) so the two paths are idempotent.
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
     tasksApi
       .listTasks(id)
       .then((res) => {
-        if (!cancelled) setTasks(res.tasks);
+        if (!cancelled) setTasks((prev) => mergeTasks(prev, res.tasks));
       })
       .catch(() => {
         if (!cancelled) setTasks([]);
@@ -828,6 +939,57 @@ export const ProjectDetailPage = () => {
       cancelled = true;
     };
   }, [id]);
+
+  // Automation-triggered subset for this project. Both signals are
+  // authoritative and complete (no "recent runs" limit): the session carries
+  // origin for chats, and the task list endpoint resolves origin for tasks
+  // (lead session ∈ automation run index). The non-automation lists feed the
+  // 全部/对话/任务 tabs; the automation subset feeds the dedicated 自动化 tab.
+  const userSessions = useMemo(
+    () => projectSessions.filter((s) => s.origin !== "automation"),
+    [projectSessions],
+  );
+  const automationSessions = useMemo(
+    () => projectSessions.filter((s) => s.origin === "automation"),
+    [projectSessions],
+  );
+  const userTasks = useMemo(
+    () => tasks.filter((tk) => tk.trigger?.type !== "automation"),
+    [tasks],
+  );
+  const automationTasks = useMemo(
+    () => tasks.filter((tk) => tk.trigger?.type === "automation"),
+    [tasks],
+  );
+
+  // While the page stays mounted and the tab is visible, re-pull the two
+  // already user_id+project_id-filtered list endpoints every 4s (+ on
+  // visible/online) and merge the full snapshot back: sessions through the
+  // store's ``mergeProjectSessions`` (subset merge, other projects untouched),
+  // tasks through the id-keyed ``mergeTasks`` below.
+  const mergeTasksInPlace = useCallback((incoming: Task[]) => {
+    setTasks((prev) => mergeTasks(prev, incoming));
+  }, []);
+  useProjectListAutoRefresh(id, { onTasks: mergeTasksInPlace });
+
+  // Scroll-position anchoring (plan §4B / §7.4). The real scroller is the
+  // layout content container, found by walking up from this sentinel. A
+  // fingerprint of the two lists (ids + the volatile updated_at/status) keys
+  // the correction layout effect so a poll-driven reorder doesn't jump the
+  // first visible row.
+  const listRootRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    scrollContainerRef.current = findScrollParent(listRootRef.current);
+  }, []);
+  const anchorDataKey = useMemo(() => {
+    const s = projectSessions
+      .map((x) => `${x.id}:${x.updated_at}:${x.status}`)
+      .join(",");
+    const tk = tasks.map((x) => `${x.id}:${x.updated_at}:${x.status}`).join(",");
+    return `${s}|${tk}`;
+  }, [projectSessions, tasks]);
+  useListScrollAnchor(scrollContainerRef, anchorDataKey);
 
   // Load this project's member agents + the Library agents the add-agent
   // dialog offers. Non-critical for the project home, so failures are quiet.
@@ -1715,8 +1877,10 @@ export const ProjectDetailPage = () => {
 
           {/* Centre history area (PRD-NEXT §3.4): Chat (sessions) and Task
               (lead-dispatch tasks) split into two tabs. The Task tab always
-              shows — empty state offers an "add task" affordance. */}
-          <div className="mt-4 w-full pb-6">
+              shows — empty state offers an "add task" affordance. The ref is
+              the sentinel ``useListScrollAnchor`` walks up from to find the
+              real scroll container (plan §4B). */}
+          <div ref={listRootRef} className="mt-4 w-full pb-6">
             <Tabs defaultValue="all">
               <div className="flex items-center border-b border-surface-border">
                 <TabsList
@@ -1732,9 +1896,12 @@ export const ProjectDetailPage = () => {
                   <TabsTrigger value="tasks">
                     {t("project.tasksColumn" as Parameters<typeof t>[0])}
                   </TabsTrigger>
+                  <TabsTrigger value="automation">
+                    {t("activity.automationTag" as Parameters<typeof t>[0])}
+                  </TabsTrigger>
                 </TabsList>
               </div>
-              <TabsContent value="all" className="mt-1">
+              <TabsContent value="all" className="mt-5">
                 <ProjectAllList
                   sessions={projectSessions}
                   tasks={tasks}
@@ -1744,17 +1911,17 @@ export const ProjectDetailPage = () => {
                   onDeleteSession={handleDeleteSession}
                 />
               </TabsContent>
-              <TabsContent value="chat" className="mt-1">
+              <TabsContent value="chat" className="mt-5">
                 <ProjectRecents
-                  sessions={projectSessions}
+                  sessions={userSessions}
                   onOpen={(sid) => navigate(`/conversation/${sid}`)}
                   onRenameConfirm={handleRenameConfirm}
                   onDelete={handleDeleteSession}
                 />
               </TabsContent>
-              <TabsContent value="tasks" className="mt-1">
+              <TabsContent value="tasks" className="mt-5">
                 <ProjectTasks
-                  tasks={tasks}
+                  tasks={userTasks}
                   onOpen={(taskId) => navigate(`/tasks/${taskId}`)}
                   onAddTask={() => {
                     // v2: there is no separate "new task" page anymore — the
@@ -1766,6 +1933,17 @@ export const ProjectDetailPage = () => {
                       .getElementById("project-composer")
                       ?.scrollIntoView({ behavior: "smooth", block: "center" });
                   }}
+                />
+              </TabsContent>
+              <TabsContent value="automation" className="mt-5">
+                <ProjectAllList
+                  sessions={automationSessions}
+                  tasks={automationTasks}
+                  onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
+                  onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
+                  onRenameConfirm={handleRenameConfirm}
+                  onDeleteSession={handleDeleteSession}
+                  hideScopeTag
                 />
               </TabsContent>
             </Tabs>

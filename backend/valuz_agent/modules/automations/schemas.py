@@ -212,6 +212,10 @@ class AutomationRunItemResponse(BaseModel):
     # session's task at read time (``active`` / ``completed`` / ``failed`` /
     # ``paused``). ``None`` for non-task runs or when the task is gone.
     task_status: str | None = None
+    # When the run kicked off a task, the owning ``task_id`` so the client can
+    # deep-link to the task detail page instead of the raw lead conversation.
+    # ``None`` for non-task (chat) runs.
+    task_id: str | None = None
 
 
 class CronValidateRequest(BaseModel):

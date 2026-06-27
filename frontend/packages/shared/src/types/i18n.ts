@@ -3,6 +3,7 @@
 
 /** Dot-path translation keys from i18n/locales/en-US.json. */
 export type KnownI18nKey =
+  | "activity.automationTag"
   | "activity.cardView"
   | "activity.chatTag"
   | "activity.deleteChat"
@@ -248,6 +249,7 @@ export type KnownI18nKey =
   | "automation.deleteFailed"
   | "automation.deleteSuccess"
   | "automation.deleteTitle"
+  | "automation.detailTitle"
   | "automation.dialogTitleChat"
   | "automation.dialogTitleEdit"
   | "automation.dialogTitleEditNamed"
@@ -273,6 +275,11 @@ export type KnownI18nKey =
   | "automation.headerEnabled"
   | "automation.intervalBelowFloor"
   | "automation.intervalEvery"
+  | "automation.intervalEveryHours"
+  | "automation.intervalEveryHoursMinutes"
+  | "automation.intervalEveryMinutes"
+  | "automation.intervalEveryMinutesSeconds"
+  | "automation.intervalEverySeconds"
   | "automation.intervalUnitDays"
   | "automation.intervalUnitHours"
   | "automation.intervalUnitMinutes"
@@ -302,6 +309,7 @@ export type KnownI18nKey =
   | "automation.toggleFailed"
   | "automation.triggerCron"
   | "automation.triggerInterval"
+  | "automation.triggerManual"
   | "automation.updateFailed"
   | "automation.updateSuccess"
   | "backend.automation.appNotRunning"
@@ -723,6 +731,7 @@ export type KnownI18nKey =
   | "cron.setModel"
   | "cron.simple"
   | "cron.statusColumn"
+  | "cron.statusOn"
   | "cron.sun"
   | "cron.taskColumn"
   | "cron.taskCount"

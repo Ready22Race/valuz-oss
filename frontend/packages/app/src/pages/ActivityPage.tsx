@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { ListChecks, MessageSquare } from "lucide-react";
+import { Clock3, ListChecks, MessageSquare } from "lucide-react";
 import {
   DeleteConfirmDialog,
   PageHeader,
@@ -40,7 +40,7 @@ import {
 } from "@valuz/app/components";
 import { useProjectOutlet } from "@valuz/app/layout";
 
-type SourceFilter = "all" | "chat" | "task";
+type SourceFilter = "all" | "chat" | "task" | "automation";
 type TimeBucket = "today" | "yesterday" | "thisWeek" | "earlier";
 
 const tk = (key: string) =>
@@ -191,7 +191,8 @@ const RunningCard = ({
   onOpen,
   t,
 }: RunningCardProps) => {
-  const ScopeIcon = isTask ? ListChecks : MessageSquare;
+  const ScopeIcon =
+    run.origin === "automation" ? Clock3 : isTask ? ListChecks : MessageSquare;
   // No ``max`` override — rely on the hook default. The visible-line cap
   // below handles display trimming; the buffer needs to be large enough that
   // batch counts (``Called harness 10 times``, ``Ran 6 commands``) survive
@@ -290,9 +291,7 @@ export const ActivityPage = () => {
   const [renamingId, setRenamingId] = useState<string | null>(null);
 
   useEffect(() => {
-    setHeader(
-      <PageHeader title={t(tk("nav.activity"))} />,
-    );
+    setHeader(<PageHeader title={t(tk("nav.activity"))} />);
     setHeaderClassName("h-auto px-5 py-5");
     // Drop the AppShell's default vertical padding for this page —
     // the page already self-manages top/bottom space (``pt-4`` on the
@@ -377,19 +376,25 @@ export const ActivityPage = () => {
       r.source_kind === "project_chat" ||
       (r.source_kind === "task" &&
         projectKindById.get(r.project_id) === "project");
+    // Automation-triggered runs read as 自动化 regardless of chat/task — in the
+    // 全部 tab the kind chip should mark provenance, not surface type.
     const kind =
-      r.source_kind === "task"
-        ? t(tk("activity.taskTag"))
-        : t(tk("activity.chatTag"));
+      r.origin === "automation"
+        ? t(tk("activity.automationTag"))
+        : r.source_kind === "task"
+          ? t(tk("activity.taskTag"))
+          : t(tk("activity.chatTag"));
     if (!isProject) return kind;
     const scope = r.project_name ?? "Project";
     return `${scope} · ${kind}`;
   };
 
   const matchesFilter = (r: RunSummary): boolean => {
+    const isAuto = r.origin === "automation";
+    if (filter === "automation") return isAuto;
     if (filter === "all") return true;
-    if (filter === "task") return r.source_kind === "task";
-    return r.source_kind !== "task"; // chat
+    if (filter === "task") return r.source_kind === "task" && !isAuto;
+    return r.source_kind !== "task" && !isAuto; // chat
   };
 
   const filteredRunning = useMemo(
@@ -427,7 +432,12 @@ export const ActivityPage = () => {
   // ``button``, and nested buttons are invalid HTML. Keyboard accessibility:
   // ``role="button"`` + ``tabIndex`` + Enter / Space.
   const historyRow = (run: RunSummary) => {
-    const ScopeIcon = run.source_kind === "task" ? ListChecks : MessageSquare;
+    const ScopeIcon =
+      run.origin === "automation"
+        ? Clock3
+        : run.source_kind === "task"
+          ? ListChecks
+          : MessageSquare;
     const canDelete = run.source_kind !== "task";
     if (canDelete && renamingId === run.session_id) {
       return (
@@ -566,6 +576,7 @@ export const ActivityPage = () => {
     { value: "all", labelKey: "activity.filterAll" },
     { value: "chat", labelKey: "activity.chatTag" },
     { value: "task", labelKey: "activity.taskTag" },
+    { value: "automation", labelKey: "activity.automationTag" },
   ];
 
   // ──────────────────────────────────────────────────────────────

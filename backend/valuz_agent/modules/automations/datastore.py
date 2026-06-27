@@ -243,6 +243,23 @@ class AutomationDatastore:
             .all()
         )
 
+    async def list_run_session_ids(self, user_id: str) -> set[str]:
+        """All kernel ``session_id``s that an automation run produced.
+
+        The runs overview uses this to flag a task/chat as automation-triggered:
+        a task lead session whose id appears here was spawned by a scheduled
+        run, even though the task row itself carries no automation marker.
+        """
+        rows = (
+            await self._db.execute(
+                select(AutomationRunRow.session_id).where(
+                    AutomationRunRow.user_id == user_id,
+                    AutomationRunRow.session_id.is_not(None),
+                )
+            )
+        ).all()
+        return {sid for (sid,) in rows if sid}
+
     async def count_runs(self, user_id: str, automation_id: str) -> int:
         return (
             await self._db.execute(

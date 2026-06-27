@@ -88,26 +88,32 @@ def _normalise_tz(value: str | None) -> str | None:
     return trimmed or None
 
 
-def _format_interval_human(seconds: int) -> str:
-    """Render an interval as a human-readable cadence.
+def _format_interval_human(seconds: int, locale: str | None = None) -> str:
+    """Render an interval as a localized human-readable cadence.
 
-    Examples: ``30 -> "every 30 seconds"``, ``300 -> "every 5 minutes"``,
-    ``3900 -> "every 1 hour 5 minutes"``. The frontend can override this
-    with locale-specific formatting; the server-side string is the
-    fallback for the LLM tool result and the i18n-less tests.
+    Examples (en): ``30 -> "Every 30 seconds"``, ``300 -> "Every 5 minutes"``,
+    ``3900 -> "Every 1 hours 5 minutes"``. Chinese renders ``每 …``. The
+    server-side string is also the fallback for the LLM tool result.
     """
     if seconds < 60:
-        return f"every {seconds} seconds"
+        return t("automation.intervalEverySeconds", params={"count": seconds}, locale=locale)
     minutes, secs = divmod(seconds, 60)
     if minutes < 60:
         if secs == 0:
-            return f"every {minutes} minute{'s' if minutes != 1 else ''}"
-        return f"every {minutes}m {secs}s"
+            return t("automation.intervalEveryMinutes", params={"count": minutes}, locale=locale)
+        return t(
+            "automation.intervalEveryMinutesSeconds",
+            params={"minutes": minutes, "seconds": secs},
+            locale=locale,
+        )
     hours, mins = divmod(minutes, 60)
-    parts = [f"{hours} hour{'s' if hours != 1 else ''}"]
     if mins:
-        parts.append(f"{mins} minute{'s' if mins != 1 else ''}")
-    return "every " + " ".join(parts)
+        return t(
+            "automation.intervalEveryHoursMinutes",
+            params={"hours": hours, "minutes": mins},
+            locale=locale,
+        )
+    return t("automation.intervalEveryHours", params={"count": hours}, locale=locale)
 
 
 class AutomationService:
@@ -174,8 +180,8 @@ class AutomationService:
         if row.trigger_kind == "cron" and row.cron_expr:
             return self._cron.describe(row.cron_expr, locale=self._locale)
         if row.trigger_kind == "interval" and row.interval_seconds:
-            return _format_interval_human(row.interval_seconds)
-        return "Manual"
+            return _format_interval_human(row.interval_seconds, locale=self._locale)
+        return t("automation.triggerManual", locale=self._locale)
 
     def _apply_trigger(self, row: AutomationRow, trigger: Trigger) -> None:
         """Project a Trigger union back onto the row's flat columns.
@@ -997,7 +1003,7 @@ class AutomationService:
             )
         return IntervalValidationResultResponse(
             valid=True,
-            human_readable=_format_interval_human(seconds),
+            human_readable=_format_interval_human(seconds, locale=self._locale),
         )
 
     # ── Recovered-skip during offline windows ─────────────────────────

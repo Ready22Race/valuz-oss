@@ -191,8 +191,17 @@ export const tasksApi = {
     });
   },
 
-  listTasks(projectId: string): Promise<{ tasks: Task[] }> {
-    return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks`);
+  listTasks(
+    projectId: string,
+    init?: { signal?: AbortSignal },
+  ): Promise<{ tasks: Task[] }> {
+    // ``init`` (e.g. an ``AbortSignal`` for the project-detail auto-refresh
+    // poller) is forwarded to ``fetchJson`` → ``fetch``. Existing callers pass
+    // nothing, so their behaviour is unchanged.
+    return fetchJson(
+      `/v1/projects/${encodeURIComponent(projectId)}/tasks`,
+      init,
+    );
   },
 
   /** Global cross-project task list, newest activity first. Backs the

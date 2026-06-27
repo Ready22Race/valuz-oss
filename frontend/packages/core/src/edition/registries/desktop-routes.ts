@@ -173,6 +173,15 @@ export const personalDesktopRoutes: DesktopRouteModule[] = [
     edition: "personal",
   },
   {
+    id: "automation-detail",
+    path: "/automations/:automationId",
+    label: "Automation Detail",
+    description: "Automation detail view with execution log.",
+    layout: "project",
+    showInNav: false,
+    edition: "personal",
+  },
+  {
     id: "activity",
     path: "/activity",
     label: "Activity",
