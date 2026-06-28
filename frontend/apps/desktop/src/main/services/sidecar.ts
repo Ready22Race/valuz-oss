@@ -213,7 +213,7 @@ export const startSidecar = async (
   // _pyinstaller_entry" before the sidecar can even log a line.
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
-    VALUZ_DATA_DIR: path.join(homedir(), ".valuz", "app"),
+    VALUZ_DATA_DIR: path.join(homedir(), ".valuz-oss"),
   };
 
   // The backend builds its public callback URLs (notably the connector OAuth

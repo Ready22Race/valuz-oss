@@ -618,10 +618,10 @@ export const DesktopSidebar = ({
   );
   const [projectsSectionOpen, setProjectsSectionOpen] = useState(true);
   const [chatsSectionOpen, setChatsSectionOpen] = useState(true);
-  // Multi-open accordion: every expanded project id is held independently, so
-  // opening one — or navigating anywhere — never collapses another (a project
-  // with running chats/tasks stays open until you collapse it yourself). Purely
-  // user-controlled via the row chevron; nothing auto-expands or auto-collapses.
+  // Navigation-following accordion: navigating to any menu item outside an open
+  // project collapses it (the effect below keeps only the active project open).
+  // Between navigations the row chevron can expand additional projects — a
+  // chevron toggle never collapses another project, only a navigation does.
   const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -642,19 +642,22 @@ export const DesktopSidebar = ({
   const RUNS_COLLAPSED = 5;
   const CHATS_COLLAPSED = 10;
 
-  // Auto-expand on *entry*: when the route moves into a different project's
-  // conversation, open that project once. Keyed on activeProjectId so it fires
-  // only on that transition — a later manual collapse (chevron) then sticks
-  // while you stay in the project, and re-entering it (navigate away and back)
-  // opens it again. This is a genuine route→state sync, not derivable: deriving
-  // "expanded == active" would make the active project impossible to collapse.
+  // Collapse-on-navigate: selecting any menu item outside an open project
+  // collapses it. On every navigation keep only the active project's accordion
+  // open; a chevron toggle doesn't change activePath, so peeking another project
+  // (or toggling the active one) never collapses anything — only navigating
+  // does. The active project's own collapse chevron is hidden, so it stays open.
   useEffect(() => {
-    if (!activeProjectId) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setExpandedProjectIds((prev) =>
-      prev.has(activeProjectId) ? prev : new Set(prev).add(activeProjectId),
-    );
-  }, [activeProjectId]);
+    setExpandedProjectIds((prev) => {
+      const next = activeProjectId
+        ? new Set<string>([activeProjectId])
+        : new Set<string>();
+      const unchanged =
+        prev.size === next.size && [...prev].every((id) => next.has(id));
+      return unchanged ? prev : next;
+    });
+  }, [activePath, activeProjectId]);
 
   const toggleGroup = (key: string) =>
     setGroupExpanded((m) => ({ ...m, [key]: !m[key] }));
@@ -701,11 +704,16 @@ export const DesktopSidebar = ({
         key={`run-${item.id}`}
         to={item.href}
         className={cn(
-          "group/recent-row relative mx-1 flex cursor-default items-center gap-2 rounded-[7px] py-[5px] pr-[10px] text-[12.5px] outline-none transition-colors duration-[120ms] hover:bg-surface-soft hover:text-ink-heading focus-visible:outline-none focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
+          "group/recent-row relative mx-1 flex cursor-default items-center gap-2 rounded-[7px] py-[5px] pr-[10px] text-[12.5px] outline-none transition-colors duration-[120ms] focus-visible:outline-none focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
           padClass,
+          // The selected row carries the bg-card highlight + drop shadow. Don't
+          // layer a hover background on top of it (the hover affordance is for
+          // non-selected rows only), and lift it with z-10 so its shadow paints
+          // above the adjacent rows — otherwise hovering the row right below it
+          // covers that shadow with the hover background.
           active
-            ? "bg-card text-ink-heading shadow-[0_6px_16px_rgba(17,24,39,0.12)] dark:bg-surface-muted dark:shadow-none"
-            : "text-ink-meta",
+            ? "z-10 bg-card text-ink-heading shadow-[0_6px_16px_rgba(17,24,39,0.12)] dark:bg-surface-muted dark:shadow-none"
+            : "text-ink-meta hover:bg-surface-soft hover:text-ink-heading",
         )}
       >
         <span className="min-w-0 flex-1 truncate">{item.title}</span>

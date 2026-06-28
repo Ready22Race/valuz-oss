@@ -100,7 +100,7 @@ export VALUZ_EDITION="$EDITION"
 # Local dev builds don't publish, so the value only matters for packaged
 # builds — but electron-builder reads it unconditionally when stamping
 # app-update.yml (publish: provider=generic in build/electron-builder.yml).
-: "${VALUZ_UPDATER_URL:=https://files.valuz.cn/valuz-${EDITION}/}"
+: "${VALUZ_UPDATER_URL:=https://files.valuz.cn/${EDITION}/}"
 export VALUZ_UPDATER_URL
 
 log()  { echo "[build] $*"; }

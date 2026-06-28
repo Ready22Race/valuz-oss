@@ -79,9 +79,7 @@ class FsRegistry:
 
     # ---- FS-3 — project cwd (project.cwd in V5 kernel terms) ----
 
-    def project_cwd(
-        self, project_id: str, kind: ProjectKind, root_path: str | None = None
-    ) -> Path:
+    def project_cwd(self, project_id: str, kind: ProjectKind, root_path: str | None = None) -> Path:
         """Return the absolute cwd for a project.
 
         - ``kind="project"``: caller-supplied ``root_path`` is used as-is. The
@@ -130,6 +128,18 @@ class FsRegistry:
 
     def attachment_dir(self, session_id: str) -> Path:
         path = self.data_dir() / "attachments" / session_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def kb_root(self) -> Path:
+        """Return (and create) the knowledge-base root directory.
+
+        ``<data_dir>/kb`` — the single home for KB content, replacing the
+        legacy stray ``~/.valuz/kb`` path. Routed through the registry so KB
+        writes share the same audit / sandbox boundary as every other host
+        write. Created on demand.
+        """
+        path = self.data_dir() / "kb"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -202,7 +212,7 @@ class FsRegistry:
         """Return the canonical home for bundled / official skills.
 
         Defaults to ``<data_dir>/official-skills/`` (i.e.
-        ``~/.valuz/app/official-skills/``) so the host owns the location.
+        ``~/.valuz-oss/official-skills/``) so the host owns the location.
         ``$VALUZ_OFFICIAL_SKILLS_DIR`` overrides for tests / sandboxed
         runs. The directory is created lazily by
         ``sync_bundled_official_skills`` on first boot.
@@ -266,6 +276,29 @@ class FsRegistry:
         parent = Path(project_cwd) / "tasks"
         parent.mkdir(parents=True, exist_ok=True)
         return parent / f"{task_id}-{ascii_slug}.md"
+
+    def task_brief_path(self, base_cwd: str | Path, task_id: str, label: str = "goal") -> Path:
+        """Return the path for a spilled (over-long) goal/brief doc.
+
+        ``<base_cwd>/tasks/_briefs/<task_id>-<ascii_label>.md``
+
+        Goal mode caps the ``/goal`` payload (bundled Claude CLI: 4000 chars); a
+        task goal / subtask brief over the cap is written here and referenced by
+        path instead (see ``agent_resolver.spill_goal_brief_if_too_long``).
+        ``base_cwd`` is the session's working dir — the project cwd for a lead /
+        shared member, or an isolated subrun dir for a repo-worktree member — so
+        the doc always sits inside the agent's readable tree, next to the task
+        narrative + run dirs. The parent dir is created; the file content is
+        written by the caller (the registry never writes content). ``label`` is
+        sanitized to ASCII like ``task_path`` so a CJK agent slug never leaks
+        into an on-disk path.
+        """
+        import re
+
+        ascii_label = re.sub(r"[^A-Za-z0-9-]+", "-", label).strip("-") or "goal"
+        parent = Path(base_cwd) / "tasks" / "_briefs"
+        parent.mkdir(parents=True, exist_ok=True)
+        return parent / f"{task_id}-{ascii_label}.md"
 
     def subrun_dir(
         self,
@@ -382,7 +415,7 @@ class FsRegistry:
 
         ``subkind`` namespaces multiple bundles within one plugin (e.g.
         ``parser_model_dir("light_local", "rapidocr")`` →
-        ``~/.valuz/app/models/light_local/rapidocr/``). Created on demand.
+        ``~/.valuz-oss/models/light_local/rapidocr/``). Created on demand.
         """
         if not plugin_id or "/" in plugin_id or ".." in plugin_id:
             raise ValueError(f"invalid plugin_id: {plugin_id!r}")

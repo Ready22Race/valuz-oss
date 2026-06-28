@@ -271,7 +271,7 @@ class ConnectorService:
                 transport="stdio",
                 auth_type="none",
                 command=command,
-                args_json=json.dumps(args or []),
+                args=json.dumps(args or []),
                 working_dir=working_dir,
                 env_json=json.dumps(env) if env else None,
                 enabled=True,
@@ -335,7 +335,7 @@ class ConnectorService:
         if command is not None:
             row.command = command
         if args is not None:
-            row.args_json = json.dumps(args)
+            row.args = json.dumps(args)
         if working_dir is not None:
             row.working_dir = working_dir
         if env is not None:
@@ -425,9 +425,9 @@ def _effective_status(row: ConnectorRow) -> str:
 
 def _row_to_view(row: ConnectorRow) -> ConnectorView:
     args: list[str] = []
-    if row.args_json:
+    if row.args:
         try:
-            parsed = json.loads(row.args_json)
+            parsed = json.loads(row.args)
             if isinstance(parsed, list):
                 args = [str(a) for a in parsed]
         except json.JSONDecodeError:

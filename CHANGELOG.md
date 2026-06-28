@@ -7,6 +7,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-06-27
+
+### Added
+
+- Automation runs are now a first-class concept across the app. A dedicated
+  automation detail page (`/automations/:id`) shows execution history and the
+  rendered instruction side by side; the automation list opens it on row click
+  (the inline recent-runs section is gone). The activity overview and project
+  detail both gain a 自动化 tab, and the 全部 tabs mark each automation row with
+  a 自动化 chip instead of 对话/任务. Trigger cadence is localized (`每 30 分钟`
+  / `Every 30 minutes` / `手动` / `Manual`) instead of a raw `1800s`. Project
+  detail tabs also group rows by time bucket (今天/昨天/本周/更早), matching the
+  activity list. (#307 @St0neWan9)
+- Task trigger provenance — each task records and surfaces what spawned it
+  (chat / agent / automation), shown both ways with the automation→task link.
+  (#300, #297 @Ready22Race)
+- Durable session input queue: enqueue follow-ups while a turn is running, and
+  "Send now" to interrupt the current turn and dispatch immediately.
+  (#284 @jiaoqsh, #299 @jiaoqsh)
+- Post-completion follow-up chat with the task lead on the task-detail page.
+  (#289 @zhourongyu)
+- Automation propose→confirm card for creating automations from chat.
+  (#273 @Ready22Race)
+- Unified project + global automation action menus. (#295 @St0neWan9)
+- Group the agent list by project deployments. (#306 @zhourongyu)
+- `update_agent` host-toolkit tool to edit existing agents. (#286 @Ready22Race)
+- Host-domain files moved onto an owner-scoped `AssetStore`. (#285 @homeant)
+- Custom Responses-API channels can now drive the Codex runtime.
+  (#290 @zhourongyu)
+- `create_app(api_prefix=)` seam for shared-host path routing. (#301 @homeant)
+
+### Changed
+
+- Flatten the data dir to `~/.valuz-oss` with a safe one-time migration.
+  (#276 @Ready22Race)
+- Context-panel section heights + list-row menu actions; model-setup composer
+  banner and Activity list column width. (#292, #278 @St0neWan9)
+- Align the queued-inputs bar width with the composer. (#294 @St0neWan9)
+
+### Fixed
+
+- KB auto-discovery rescans failed on every tick with `OwnerContextUnsetError`:
+  the scheduler called `load_routing_config` (owner-scoped settings reads)
+  before any owner context was published. Each per-KB iteration now publishes
+  the KB's owner on the `current_user_id` ContextVar (try/finally, mirroring the
+  automation in-process runner) so the routing-config read and the rescan both
+  resolve against the right user. (#308 @St0neWan9)
+- Boot crashed with `MissingGreenlet` when `database_url` pointed at Postgres
+  via the async driver (`postgresql+asyncpg://`): the kernel/host schema
+  preflights built a **sync** engine and called `inspect()` on it, which can't
+  drive an async DBAPI. The preflights (`ensure_kernel_schema_migratable` /
+  `ensure_host_schema_migratable`) now reflect through an **async** engine and
+  run off the event loop in the migration worker thread, so a Postgres DSN
+  resolves to asyncpg cleanly. (#303 @homeant)
+- Host migration `0007` (skill-library on/off toggle) crashed on Postgres with
+  `column "library_enabled" is of type boolean but default expression is of
+  type integer`: the `server_default` was a bare `text("1")`, which renders
+  `DEFAULT 1` (an integer literal) and is rejected by Postgres' strict boolean
+  typing. Switched both the migration and the `SkillIndexRow` model to
+  `sa.true()`, which SQLAlchemy renders portably as `1` on SQLite and `true`
+  on Postgres. (#304 @homeant)
+- Resolve owner per work-item in background scanners instead of an
+  ambient/device id. (#302 @homeant)
+- Schema preflight never drops — preserve data, fail loud on any non-migratable
+  DB; harden the `~/.valuz-oss` data-dir migration (preserve `user_id`, version
+  compatibility, skill-reindex resilience). (#282, #280 @Ready22Race)
+- Unwrap `ExceptionGroup` so a wrapped transport death stays resumable.
+  (#288 @Ready22Race)
+- Auto-materialize logged-in subscription channels. (#291 @Ready22Race)
+- Present the CLI originator (`codex_exec`) to third-party gateways.
+  (#293 @jiaoqsh)
+- Spill over-long goal-mode task briefs to a doc; stabilize the internal MCP
+  token across restarts. (#298 @Ready22Race)
+
+### Docs & Chore
+
+- Nudge agents to deliver finished files via `deliver_artifacts`.
+  (#287 @Ready22Race)
+- gitignore the local `.claude/` and `.agents/` agent-harness dirs and remove
+  stray design-draft markdown that had been committed by accident. (#309
+  @St0neWan9)
+
+## [0.2.4] - 2026-06-25
+
+### Added
+
+- Natural-language agent creation — describe the agent you want in chat and the
+  assistant scaffolds it. (#269 @Ready22Race)
+- Per-agent skill picker and a global skill-library on/off toggle, plus a faster
+  skill rescan. (#264 @Ready22Race)
+- `project_instructions` tool and an XML-structured project system prompt.
+  (#266 @Ready22Race)
+- Built-in `deliver_artifacts` MCP tool and a generated-files section in the
+  session panel. (#260 @Ready22Race)
+- User-customizable global instructions for the background memory reviewer.
+  (#262 @jiaoqsh)
+
+### Changed
+
+- Project home and Activity lists redesigned: a default "All" tab, creation
+  time, the status pill at the right edge, and a hover overflow menu
+  (rename / delete) on conversation rows. (#274 @St0neWan9)
+- Automations panel rows are now editable inline and the create/edit dialog
+  layout was polished. (#272 @St0neWan9)
+- Agent creation surfaces the available runtimes and configured models and
+  validates the runtime/model (brain) pair. (#271 @Ready22Race)
+- Subscription models are gated on CLI login (composer detail only).
+  (#253 @homeant)
+- The skill-library on/off switch is stored as a `valuz_skill_index` column.
+  (#265 @Ready22Race)
+- Connectors gained dedicated columns for `args` / `oauth_metadata` and a
+  separate OAuth table, dropping the ORM relationships. (#256 @homeant)
+- Sidebar project / conversation list UX. (#258 @St0neWan9)
+- Export the deep component paths consumed by the commercial overlay.
+  (#263 @hanjixin)
+- Kernel skill-materialize gained a self-diagnosing cycle guard. (f7f36e4)
+
+### Fixed
+
+- Kernel warm-runtime subprocesses (claude / codex) leaked; they are now
+  bounded. (#261 @jiaoqsh)
+- The automation MCP tool dispatch was broken. (#270 @Ready22Race)
+- The i18n locale directory is resolved by a fixed relative path instead of a
+  repo-marker walk. (#267 @homeant)
+- The Agents page merges injected resource categories. (#259 @hanjixin)
+- `submit_skill` resolves its staging directory via the session, not
+  `ExecContext.workspace`. (#254 @Ready22Race)
+- The Skill Creator mode badge no longer shows a "model" suffix. (#255 @Ready22Race)
+- The boot-splash percentage drops its leading-zero padding. (#257 @St0neWan9)
+
+### Docs & Chore
+
+- The handbook emphasizes the automation MCP tool for scheduling.
+  (#270 @Ready22Race)
+
 ## [0.2.3] - 2026-06-22
 
 ### Fixed
@@ -21,6 +156,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mac auto-updates to its native build; Apple Silicon users on the Intel 0.2.2
   update straight to the arm64 build here. (#240 @St0neWan9)
 
+- The packaged desktop client looked for updates at the wrong COS feed prefix:
+  `build-desktop.sh` stamped `app-update.yml` with
+  `files.valuz.cn/valuz-<edition>/` while CI publishes manifests and artifacts
+  under `files.valuz.cn/<edition>/`. Drop the `valuz-` prefix so the baked feed
+  URL matches where artifacts land. (#252 @St0neWan9)
+
 ### Docs & Chore
 
 - Route the auto-updater's logs to a file via electron-log
@@ -28,6 +169,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Windows). They previously went to the console, which a packaged app discards,
   so whether an update ran as a delta (vs a full download) and why was
   untraceable. (#241 @St0neWan9)
+
+- Fix the Tencent COS publish pipeline for coscli v1.0.8: write the config to
+  `~/.cos.yaml` in its schema, drop the unsupported `--force` flag, upload each
+  artifact individually (its `--include` filter matched nothing at the release
+  root), and check the repo out in the manifest-merge job. (#246 #249 #251
+  @St0neWan9)
 
 ## [0.2.2] - 2026-06-22
 

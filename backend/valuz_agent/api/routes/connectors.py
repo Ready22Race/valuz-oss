@@ -517,7 +517,7 @@ async def create_connector(
                 transport=body.transport if body.transport in ("http", "sse") else "http",
                 url=server_url,
                 auth_type="oauth",
-                oauth_metadata_json=oauth_meta.model_dump_json(),
+                oauth_metadata=oauth_meta.model_dump_json(),
                 oauth_client_info_json=client_info_json,
                 enabled=False,
                 status="pending_auth",
@@ -525,7 +525,7 @@ async def create_connector(
             saved_row = await svc._ds.create(user_id, row)
         else:
             existing.status = "pending_auth"
-            existing.oauth_metadata_json = oauth_meta.model_dump_json()
+            existing.oauth_metadata = oauth_meta.model_dump_json()
             if client_info_json is not None:
                 existing.oauth_client_info_json = client_info_json
             existing.updated_at = now_ms()
@@ -856,7 +856,7 @@ async def oauth_callback(
         if row is None:
             return _oauth_html_result(ok=False, error="Connector not found")
 
-        oauth_meta_json = row.oauth_metadata_json
+        oauth_meta_json = row.oauth_metadata
         if not oauth_meta_json:
             return _oauth_html_result(ok=False, error="OAuth metadata missing on connector row")
 

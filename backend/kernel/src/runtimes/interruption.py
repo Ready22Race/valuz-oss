@@ -23,13 +23,61 @@ subprocess that dies on every attempt.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
+
+def iter_leaf_exceptions(exc: BaseException) -> Iterator[BaseException]:
+    """Yield the non-group leaf exceptions behind a (possibly nested) group.
+
+    ``BaseExceptionGroup`` (raised by ``asyncio.TaskGroup`` /
+    ``anyio.create_task_group``) nests: its ``.exceptions`` can themselves be
+    groups. Recurse so callers always see the real leaves. A plain exception
+    yields itself.
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        for sub in exc.exceptions:
+            yield from iter_leaf_exceptions(sub)
+    else:
+        yield exc
+
+
+def describe_exception(exc: BaseException) -> str:
+    """Readable cause string that sees *through* an ``ExceptionGroup`` wrapper.
+
+    ``str(ExceptionGroup)`` is the useless ``"unhandled errors in a TaskGroup
+    (N sub-exception(s))"`` — the actual reason lives in the leaves. The SDKs
+    raise these whenever a transport/MCP task group tears down mid-turn (the
+    claude CLI subprocess dies, an MCP ``ClientSession`` loses its server,
+    etc.), so the leaf is what a user / operator needs. For a plain exception
+    this is just ``str(exc)``.
+    """
+    if not isinstance(exc, BaseExceptionGroup):
+        return str(exc) or type(exc).__name__
+    parts: list[str] = []
+    for leaf in iter_leaf_exceptions(exc):
+        part = f"{type(leaf).__name__}: {leaf}" if str(leaf) else type(leaf).__name__
+        if part not in parts:  # collapse duplicate fan-out (same error N tasks)
+            parts.append(part)
+    return "; ".join(parts) or str(exc)
+
 
 def is_runtime_interruption(exc: BaseException) -> bool:
     """True when ``exc`` is the agent subprocess going away mid-turn.
 
     Detects the transport/process-death exceptions raised when a runtime's
     child process is torn down under it — not genuine task failures.
+
+    Recurses into ``BaseExceptionGroup``: the SDKs run their transport / MCP
+    client over an anyio task group, so a mid-turn transport death surfaces
+    **wrapped** as ``ExceptionGroup("unhandled errors in a TaskGroup …")``
+    whose leaf is the real ``BrokenPipeError`` / ``ConnectionResetError`` /
+    ``TransportClosedError``. Without this recursion the ``isinstance`` checks
+    below miss the wrapped case — the turn is mis-stamped ``execution_error``
+    (a hard, non-resumable failure) instead of the resumable ``interrupted``,
+    so an intermittent transport blip fails the subtask outright.
     """
+    if isinstance(exc, BaseExceptionGroup):
+        return any(is_runtime_interruption(leaf) for leaf in iter_leaf_exceptions(exc))
     if isinstance(exc, (BrokenPipeError, ConnectionError, EOFError)):
         return True
     try:

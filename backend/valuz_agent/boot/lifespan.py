@@ -17,14 +17,20 @@ from valuz_agent.boot import steps
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ── startup（顺序 load-bearing，注释分组）──
     steps.configure_structured_logging()  # FIRST
-    steps.ensure_local_identity()  # seed owner ctx before any insert
     steps.acquire_single_writer_lock()
+    # Data-dir cutover runs BEFORE identity: the owner id is read from the
+    # migrated ``installation.json``, so it must be in place before
+    # ``ensure_local_identity`` caches the id (else the cached id mismatches the
+    # migrated rows' owner and breaks the official-skills reindex).
+    steps.migrate_data_dir()
+    steps.ensure_local_identity()  # seed owner ctx before any insert
     await steps.bootstrap_schema()
     await steps.configure_i18n()
     await steps.init_kernel(app)
     steps.install_binding_change_listener()
     # ── recovery（依赖 kernel store 已就绪）──
     await steps.recover_stranded_sessions()
+    await steps.resume_queued_input_drains()
     await steps.seal_orphan_pendings()
     await steps.recover_active_tasks()
     # ── long-lived runners ──
@@ -32,6 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await steps.start_automation_runner(app)
     await steps.start_polling_scheduler()
     steps.warm_parse_pool()
+    steps.warm_token_estimator()
     await steps.start_skills(app)
     await steps.start_decision_aggregator(app)
     steps.mark_boot_complete()  # LAST

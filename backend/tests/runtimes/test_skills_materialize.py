@@ -105,6 +105,48 @@ def test_skips_source_reaching_skills_root_through_symlink(tmp_path: Path) -> No
     assert manifest == {"managed": []}
 
 
+def test_in_place_skill_skipped_at_debug_not_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A skill already sitting at its skills-root location is benign — discovered
+    in place. It must be skipped quietly (debug), not warned, so the log stays
+    clean on the common case."""
+    cwd = tmp_path / "cwd"
+    in_place = cwd / ".agents" / "skills" / "autoplan"
+    in_place.mkdir(parents=True)
+    (in_place / "SKILL.md").write_text("# autoplan\n", encoding="utf-8")
+
+    with caplog.at_level("DEBUG", logger=sm.__name__):
+        sm.prepare_deepagents_skills(str(cwd), [str(in_place)])
+
+    records = [r for r in caplog.records if "autoplan" in r.getMessage()]
+    assert records, "expected the skip to be logged"
+    assert all(r.levelname == "DEBUG" for r in records)
+    assert all("in place" in r.getMessage() for r in records)
+
+
+def test_source_containing_skills_root_warns_with_cause(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A skill source that is an *ancestor* of the skills root (e.g. resolved to
+    the project cwd) is a real misconfiguration: it's skipped with a WARNING that
+    names the cause, so the loop is self-diagnosing."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir(parents=True)
+    (cwd / "SKILL.md").write_text("# bogus\n", encoding="utf-8")
+
+    # Source == cwd, which is an ancestor of <cwd>/.agents/skills.
+    with caplog.at_level("DEBUG", logger=sm.__name__):
+        root = Path(sm.prepare_deepagents_skills(str(cwd), [str(cwd)]))
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings, "expected a warning for the ancestor source"
+    assert any("ancestor of the skills root" in r.getMessage() for r in warnings)
+    # nothing materialized
+    assert _manifest(cwd, sm.AGENTS_MANIFEST) == {"managed": []}
+    assert not (root / "cwd").exists()
+
+
 # -- Windows fallback: copy when the link primitive is unavailable ----------
 
 

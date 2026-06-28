@@ -203,12 +203,19 @@ class AutomationRunItemResponse(BaseModel):
     error_message_key: str | None
     session_id: str | None
     created_files: list[str]
-    # Live status of the task this run kicked off (task automations only).
-    # ``run.status`` freezes to ``success`` the moment kickoff returns, so the
-    # client prefers this — resolved from the lead session's task at read time
-    # (``active`` / ``completed`` / ``failed`` / ``paused``). ``None`` for
-    # non-task runs or when the task is gone.
+    # The task this run kicked off (task automations only) — id + title let the
+    # execution log deep-link to it ("→ 任务《title》"). ``None`` for non-task runs.
+    task_id: str | None = None
+    task_title: str | None = None
+    # Live status of that task. ``run.status`` freezes to ``success`` the moment
+    # kickoff returns, so the client prefers this — resolved from the lead
+    # session's task at read time (``active`` / ``completed`` / ``failed`` /
+    # ``paused``). ``None`` for non-task runs or when the task is gone.
     task_status: str | None = None
+    # When the run kicked off a task, the owning ``task_id`` so the client can
+    # deep-link to the task detail page instead of the raw lead conversation.
+    # ``None`` for non-task (chat) runs.
+    task_id: str | None = None
 
 
 class CronValidateRequest(BaseModel):
@@ -283,6 +290,10 @@ class AutomationToolPayload(BaseModel):
     prompt_template: str | None = None
     trigger: Trigger | None = None
     agent_slug: str | None = None
+    # Execution mode on create. ``chat`` (default) runs the bound agent once;
+    # ``task`` kicks off a project task with the bound agent as Lead — only
+    # valid from a PROJECT session (the tool rejects ``task`` in a chat).
+    action_kind: str | None = None
     scope: str | None = Field(
         default=None,
         description=(
@@ -292,6 +303,30 @@ class AutomationToolPayload(BaseModel):
             "see only the current project regardless of value."
         ),
     )
+
+
+class AutomationProposalSpec(BaseModel):
+    """Resolved (but NOT persisted) automation proposed by the ``create``
+    action. Echoed in ``AutomationToolResult.proposal`` so the frontend can
+    render a confirmation card and replay the exact spec to the confirm
+    endpoint; the LLM reads the same JSON. ``create`` validates + previews
+    and writes nothing — the user's confirm click does the actual create
+    (mirrors ``propose_agent`` → ``confirm``)."""
+
+    name: str
+    prompt_template: str
+    trigger: Trigger
+    # Resolved executing agent. In a chat the slug defaults to the session's
+    # bound agent; in a project session it's the chosen project member (the
+    # Lead in ``task`` mode).
+    agent_slug: str
+    agent_kind: str
+    agent_name: str | None = None
+    action_kind: str
+    # Localised "每天 9 点" / "every 5 minutes" — the card's primary schedule line.
+    trigger_human_readable: str
+    # First fire instant (epoch ms) the schedule would produce — preview only.
+    next_run_at: int | None = None
 
 
 class AutomationToolResult(BaseModel):
@@ -305,4 +340,43 @@ class AutomationToolResult(BaseModel):
     automation: AutomationItemResponse | None = None
     automations: list[AutomationItemResponse] = []
     next_runs: list[int] = []
+    # Set only by the ``create`` action — the proposed-but-unsaved spec the
+    # confirmation card renders. ``automation`` stays ``None`` on create
+    # (nothing is persisted until the user confirms).
+    proposal: AutomationProposalSpec | None = None
     error_code: str | None = None
+
+
+# ── Proposal confirm + status (mirrors propose_agent → confirm) ──────
+
+
+class AutomationProposalConfirmRequest(BaseModel):
+    """Body for ``POST /v1/automations/proposals/{session_id}/confirm`` — the
+    user accepting an automation the ``create`` action proposed. ``tool_call_id``
+    is the kernel ``tool_use`` id of the proposing call; it's persisted on the
+    created row (``origin_tool_call_id``) so a session reload can detect the
+    automation already exists. Project / agent_kind are re-resolved from the
+    session, mirroring how the tool resolved them when proposing."""
+
+    tool_call_id: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=50)
+    prompt_template: str = Field(min_length=1)
+    trigger: Trigger
+    agent_slug: str | None = None
+    action_kind: ActionKind = "chat"
+
+
+class AutomationProposalStatusRequest(BaseModel):
+    tool_call_ids: list[str]
+
+
+class AutomationProposalStatusEntry(BaseModel):
+    automation_id: str
+
+
+class AutomationProposalStatusResponse(BaseModel):
+    """Maps each already-confirmed proposing ``tool_call_id`` to its created
+    automation, so the frontend can seed those cards to a confirmed state on
+    re-entry instead of showing a fresh Confirm button."""
+
+    confirmed: dict[str, AutomationProposalStatusEntry]

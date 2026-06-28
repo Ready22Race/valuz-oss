@@ -67,7 +67,7 @@ class _FakeRow:
     params_json: str | None = None
     oauth_token_json: str | None = None
     oauth_token_expires_at: int | None = None
-    args_json: str | None = None
+    args: str | None = None
 
 
 # ── Acceptance #2 — catalog prefix is UI-only; client sends final value ─

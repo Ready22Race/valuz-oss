@@ -10,6 +10,7 @@ import {
   SettingsRow,
   SettingsSection,
   Switch,
+  Textarea,
 } from "@valuz/ui";
 import {
   memoryApi,
@@ -23,10 +24,14 @@ export const MemorySection = () => {
   const [view, setView] = useState<MemoryView | null>(null);
   const [loading, setLoading] = useState(true);
   const [clearTarget, setClearTarget] = useState<MemoryTarget | null>(null);
+  // Locally-edited custom instructions; persisted on blur (see saveCustom).
+  const [customInstructions, setCustomInstructions] = useState("");
 
   const load = useCallback(async () => {
     try {
-      setView(await memoryApi.getMemory());
+      const v = await memoryApi.getMemory();
+      setView(v);
+      setCustomInstructions(v.custom_instructions);
     } catch {
       toast.error(t("settings.memory.loadFailed"));
     } finally {
@@ -43,6 +48,20 @@ export const MemorySection = () => {
       const next = await memoryApi.patchSettings({ [key]: value });
       setView((v) =>
         v ? { ...v, enabled: next.enabled, auto_extract: next.auto_extract } : v,
+      );
+    } catch {
+      toast.error(t("settings.memory.saveFailed"));
+    }
+  };
+
+  const saveCustom = async () => {
+    const next = customInstructions.trim();
+    if (next === (view?.custom_instructions ?? "")) return; // no change
+    try {
+      const res = await memoryApi.patchSettings({ custom_instructions: next });
+      setCustomInstructions(res.custom_instructions);
+      setView((v) =>
+        v ? { ...v, custom_instructions: res.custom_instructions } : v,
       );
     } catch {
       toast.error(t("settings.memory.saveFailed"));
@@ -105,6 +124,26 @@ export const MemorySection = () => {
               onCheckedChange={(v) => void toggle("auto_extract", v)}
             />
           </SettingsRow>
+          <div className="my-5 h-px bg-[#f7f8fa] dark:bg-surface-border" />
+          <div className="flex flex-col gap-2">
+            <div>
+              <div className="text-sm font-medium text-ink-heading">
+                {t("settings.memory.customInstructionsLabel")}
+              </div>
+              <div className="mt-0.5 text-xs text-ink-meta">
+                {t("settings.memory.customInstructionsDesc")}
+              </div>
+            </div>
+            <Textarea
+              value={customInstructions}
+              maxLength={1500}
+              rows={3}
+              disabled={!masterOn}
+              placeholder={t("settings.memory.customInstructionsPlaceholder")}
+              onChange={(e) => setCustomInstructions(e.target.value)}
+              onBlur={() => void saveCustom()}
+            />
+          </div>
         </CardContent>
       </Card>
 

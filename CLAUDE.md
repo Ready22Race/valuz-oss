@@ -68,7 +68,19 @@ Cutting `vX.Y.Z`:
    feature batch → minor (`0.2.0`).
 2. **Update `CHANGELOG.md`** (Keep a Changelog: Added / Changed / Fixed / Docs & Chore).
    Credit every entry `(#PR @author)`; use the short SHA for commits pushed straight to
-   main. Land it via PR.
+   main. **Write all CHANGELOG entries and release notes in English only** — no Chinese
+   prose (UI strings quoted as examples may keep their native text). Land it via PR.
+
+   **Derive the entry list from git, not from `[Unreleased]`.** The `[Unreleased]`
+   section is frequently incomplete (contributors forget to append), so never trust it
+   as the source of truth. List the real merged set and diff it against what you wrote:
+   ```bash
+   # every PR merged since the last tag — the authoritative set to cover
+   git log <prev-tag>..origin/main --grep "Merge pull request" | grep -oE "#[0-9]+" | sort -u
+   # what your drafted section already lists
+   awk '/^## \[X.Y.Z\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md | grep -oE "#[0-9]+" | sort -u
+   ```
+   The two sets must match before you tag — a non-empty diff means a missing entry.
 3. **Create the release = create the tag** (one step; also triggers the build):
    ```bash
    gh release create vX.Y.Z --target main --title "Valuz X.Y.Z" --notes-file <notes>

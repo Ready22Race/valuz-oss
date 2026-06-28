@@ -120,7 +120,7 @@ class InProcessAutomationRunner:
     def __init__(self) -> None:
         self._running = False
         self._queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue()
-        self._active_ids: set[str] = set()
+        self._active_ids: dict[str, str] = {}  # automation_id -> owner user_id
         self._tick_task: asyncio.Task[None] | None = None
         self._worker_task: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -210,8 +210,10 @@ class InProcessAutomationRunner:
 
         async with async_unit_of_work() as db:
             ds = AutomationDatastore(db)
-            for automation_id in list(self._active_ids):
-                last_run = await ds.last_run(require_current_user_id(), automation_id)
+            # Active automations span owners (shutdown path has no request
+            # context) — use each automation's own owner, never ambient.
+            for automation_id, owner in list(self._active_ids.items()):
+                last_run = await ds.last_run(owner, automation_id)
                 if last_run and last_run.status == "running":
                     last_run.status = "interrupted_by_shutdown"
                     last_run.error_code = "AUTOMATION_INTERRUPTED_BY_SHUTDOWN"
@@ -348,7 +350,7 @@ class InProcessAutomationRunner:
             # the user who owns the automation (mirrors AuthMiddleware on the
             # request path).
             owner_token = set_current_user_id(row.user_id) if row.user_id else None
-            self._active_ids.add(automation_id)
+            self._active_ids[automation_id] = user_id
             try:
                 project_name = await self._resolve_project_name(db, row.project_id)
                 effective_tz = self._effective_tz_for(row)
@@ -477,7 +479,7 @@ class InProcessAutomationRunner:
 
                 logger.info("Run %s completed: %s", run_id, run.status)
             finally:
-                self._active_ids.discard(automation_id)
+                self._active_ids.pop(automation_id, None)
                 if owner_token is not None:
                     reset_current_user_id(owner_token)
 
@@ -522,6 +524,14 @@ class InProcessAutomationRunner:
                 title=title or row.name,
                 dispatch_mode="async",
                 created_by="automation",
+                # Record the back-link so the spawned task shows "由 自动化 … 触发"
+                # and the reverse "what did this automation spawn?" is queryable.
+                trigger_type="automation",
+                trigger_automation_id=automation_id,
+                # When an AGENT invoked this run, carry its session so the spawned
+                # task also chains back to the originating task (transitive
+                # task→automation→task nesting in the task tree).
+                originating_session_id=run.invoked_by_session_id,
             )
             # ``kickoff`` returns the ``TaskRow``; the lead session id lives
             # on the matching ``TaskSessionRow`` (kind="lead"). Fetch it

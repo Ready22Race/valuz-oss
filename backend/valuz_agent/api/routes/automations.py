@@ -23,7 +23,12 @@ from valuz_agent.modules.automations.schemas import (
     AutomationCreatePayload,
     AutomationDetailResponse,
     AutomationGroupResponse,
+    AutomationItemResponse,
     AutomationProjectTargetsResponse,
+    AutomationProposalConfirmRequest,
+    AutomationProposalStatusEntry,
+    AutomationProposalStatusRequest,
+    AutomationProposalStatusResponse,
     AutomationRunAcceptedResponse,
     AutomationRunItemResponse,
     AutomationUpdatePayload,
@@ -65,6 +70,68 @@ async def create_automation(
     tool, which knows the caller's chat project.
     """
     return await svc.create(payload)
+
+
+@router.post("/proposals/{session_id}/confirm", status_code=201)
+async def confirm_automation_proposal(
+    session_id: str,
+    payload: AutomationProposalConfirmRequest,
+    svc: AutomationService = Depends(get_automation_service),
+) -> AutomationItemResponse:
+    """Create the automation a ``create`` tool call proposed.
+
+    The user confirms the proposal card; we re-resolve the session's project /
+    bound-agent context (so a chat defaults the agent and a project session
+    binds to its project + member Lead — exactly as the proposing tool did),
+    then persist. ``tool_call_id`` is stamped on the row so a later session
+    reload can detect the automation already exists. Typed module errors
+    (invalid cron, agent-not-in-project, task-only-on-project, …) propagate to
+    the global handler.
+    """
+    from valuz_agent.integrations.automations_mcp_server import _resolve_session_context
+
+    project_id, project_kind, bound_agent_slug = await _resolve_session_context(session_id)
+    create_payload = AutomationService.build_create_payload(
+        name=payload.name,
+        prompt_template=payload.prompt_template,
+        trigger=payload.trigger,
+        agent_slug=payload.agent_slug,
+        action_kind=payload.action_kind,
+        project_kind=project_kind,
+        project_id=project_id,
+        session_agent_slug=bound_agent_slug,
+    )
+    # MCP-from-chat: forward the calling session's project so library agents land
+    # in the user's current chat project rather than a freshly created one.
+    calling_ws = project_id if project_kind == "chat" else None
+    return await svc.create(
+        create_payload,
+        calling_session_project_id=calling_ws,
+        origin_tool_call_id=payload.tool_call_id,
+    )
+
+
+@router.post("/proposals/{session_id}/status")
+async def automation_proposal_status(
+    session_id: str,
+    payload: AutomationProposalStatusRequest,
+    svc: AutomationService = Depends(get_automation_service),
+) -> AutomationProposalStatusResponse:
+    """Map proposing ``tool_call_id``s → already-created automations.
+
+    The frontend calls this on session re-entry (in-memory card state is lost on
+    reload) to seed confirmed cards instead of showing a fresh Confirm button.
+    ``session_id`` scopes the request semantically; the lookup is owner-scoped by
+    the persisted ``origin_tool_call_id`` (globally unique per user).
+    """
+    _ = session_id
+    mapping = await svc.confirmed_origin_map(payload.tool_call_ids)
+    return AutomationProposalStatusResponse(
+        confirmed={
+            tid: AutomationProposalStatusEntry(automation_id=aid)
+            for tid, aid in mapping.items()
+        }
+    )
 
 
 @router.post("/validate-cron")

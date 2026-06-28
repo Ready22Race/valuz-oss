@@ -106,3 +106,33 @@ class SessionEventEnvelope:
 class SessionRunResponse:
     session: SessionDetail
     events: list[SessionEventEnvelope]
+
+
+@dataclass
+class QueuedInput:
+    """One queued follow-up input awaiting FIFO drain (or ``blocked``)."""
+
+    id: str
+    status: str  # queued | blocked
+    position: int
+    text: str
+    attachment_count: int
+    provider_id: str | None
+    model_id: str | None
+    error_message: str | None
+    created_at: int
+    updated_at: int | None
+
+
+@dataclass
+class QueuedInputList:
+    session_id: str
+    items: list[QueuedInput]
+    # True when an interrupt soft-paused auto-drain and the queue awaits resume.
+    paused: bool
+    # True while a host drain chain is in flight for this session. A dispatched
+    # (in-flight) item drops out of ``items`` (only queued/blocked are listed),
+    # so clients that re-subscribe per drained turn (desktop) need this to keep
+    # following until the LAST item finishes — not just while ``items`` is
+    # non-empty. See docs/design/session-input-queue.md §14.5.
+    draining: bool = False

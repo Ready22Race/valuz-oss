@@ -110,7 +110,7 @@ export interface AutomationRunItem {
   run_id: string;
   automation_id: string;
   project_id: string;
-  trigger_type: "cron" | "interval" | "manual" | "recovered_skip";
+  trigger_type: "cron" | "interval" | "manual" | "agent" | "recovered_skip";
   status:
     | "queued"
     | "running"
@@ -128,10 +128,13 @@ export interface AutomationRunItem {
   error_message: string | null;
   session_id: string | null;
   created_files: string[];
-  // Live status of the task this run kicked off (task automations only).
-  // `status` freezes to `success` at kickoff; prefer this for the badge when
-  // present. Resolved from the lead session's task at read time. `null` for
-  // non-task runs.
+  // The task this run kicked off (task automations only) — id + title deep-link
+  // to it ("→ 任务《title》"). `null` for non-task runs.
+  task_id: string | null;
+  task_title: string | null;
+  // Live status of that task. `status` freezes to `success` at kickoff; prefer
+  // this for the badge when present. Resolved from the lead session's task at
+  // read time. `null` for non-task runs.
   task_status: "active" | "completed" | "failed" | "paused" | null;
 }
 
@@ -218,6 +221,40 @@ export interface AutomationProjectTarget {
   name: string;
   kind: "chat" | "project";
   project_id: string | null;
+}
+
+// ── Proposal (create → confirm card) ───────────────────────────────
+
+/**
+ * Resolved-but-unsaved automation echoed by the ``automation create`` tool
+ * (``AutomationToolResult.proposal``). The confirmation card renders this and
+ * replays the confirmable fields to ``confirmProposal``.
+ */
+export interface AutomationProposalSpec {
+  name: string;
+  prompt_template: string;
+  trigger: Trigger;
+  agent_slug: string;
+  agent_kind: AgentKind;
+  agent_name: string | null;
+  action_kind: ActionKind;
+  trigger_human_readable: string;
+  next_run_at: number | null;
+}
+
+/** Body for confirming an automation proposal. ``tool_call_id`` is the kernel
+ *  ``tool_use`` id of the proposing call (persisted for re-entry detection). */
+export interface AutomationProposalConfirmPayload {
+  tool_call_id: string;
+  name: string;
+  prompt_template: string;
+  trigger: Trigger;
+  agent_slug?: string | null;
+  action_kind?: ActionKind;
+}
+
+export interface AutomationProposalStatusResult {
+  confirmed: Record<string, { automation_id: string }>;
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
@@ -315,5 +352,37 @@ export const automationsApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ seconds }),
     });
+  },
+
+  /** Confirm an automation the ``create`` tool proposed (the user clicked
+   *  "Create" on the proposal card). Persists + returns the created row. */
+  confirmProposal(
+    sessionId: string,
+    payload: AutomationProposalConfirmPayload,
+  ): Promise<AutomationItem> {
+    return fetchJson(
+      `/v1/automations/proposals/${encodeURIComponent(sessionId)}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+  },
+
+  /** Map proposing ``tool_call_id``s → already-created automations, so the page
+   *  can seed confirmed proposal cards on session re-entry. */
+  proposalStatus(
+    sessionId: string,
+    toolCallIds: string[],
+  ): Promise<AutomationProposalStatusResult> {
+    return fetchJson(
+      `/v1/automations/proposals/${encodeURIComponent(sessionId)}/status`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool_call_ids: toolCallIds }),
+      },
+    );
   },
 };

@@ -46,7 +46,7 @@ from valuz_agent.adapters.system_prompt_builder import build_project_system_prom
 from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.infra.secret_store import FileSecretStore
+from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
@@ -64,7 +64,10 @@ from valuz_agent.modules.sessions.capabilities import (
     refresh_docs_capabilities_for_session,
 )
 from valuz_agent.modules.sessions.context_builder import _build_additional_context
+from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
+    QueuedInput,
+    QueuedInputList,
     SessionDetail,
     SessionEventEnvelope,
     SessionListItem,
@@ -72,6 +75,8 @@ from valuz_agent.modules.sessions.dto import (
 )
 from valuz_agent.modules.sessions.errors import (
     BudgetExceeded,
+    QueuedInputNotFound,
+    QueueFull,
     SessionConflict,
     SessionNotRunnable,
 )
@@ -90,13 +95,38 @@ from valuz_agent.modules.sessions.mappers import (
     _session_to_list_item,
     _valuz_meta,
 )
+from valuz_agent.modules.sessions.models import QueuedInputRow
 from valuz_agent.modules.sessions.run_orchestrator import (
     _derive_session_name,
     _run_agent_background,
+    is_draining_queue,
+    schedule_drain,
 )
 from valuz_agent.modules.skills.datastore import SkillDatastore
 
 logger = logging.getLogger(__name__)
+
+# Soft cap on still-``queued`` follow-up inputs per session (input queue). A
+# guard against accidental flooding, not a hard product limit. See
+# docs/design/session-input-queue.md §8.5.
+QUEUE_SOFT_CAP = 20
+
+
+def _queued_input_to_dto(row: QueuedInputRow) -> QueuedInput:
+    payload = row.input or {}
+    attachments = payload.get("attachments") or []
+    return QueuedInput(
+        id=row.id,
+        status=row.status,
+        position=row.position,
+        text=str(payload.get("text") or ""),
+        attachment_count=len(attachments),
+        provider_id=row.provider_id,
+        model_id=row.model_id,
+        error_message=row.error_message,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 async def _enforce_budget(session: object) -> None:
@@ -157,7 +187,7 @@ class SessionService:
         # need data sources) can omit them. When provided the capability
         # resolver injects ``McpServerConfig`` rows into the kernel session
         # at creation time.
-        secrets: FileSecretStore | None = None,
+        secrets: SecretStorePort | None = None,
         connectors: ConnectorDatastore | None = None,
         # User-library skill source — when supplied, chat (non-project)
         # projects auto-include every discovered user-scoped skill in
@@ -491,6 +521,10 @@ class SessionService:
             resolve_model_provider,
             resolve_runtime_provider,
         )
+        from valuz_agent.modules.providers.service import (
+            materialize_logged_in_subscription,
+            subscription_login_hint,
+        )
 
         if self._secrets is None:
             raise RuntimeError(
@@ -533,14 +567,13 @@ class SessionService:
         if not provider_id and not model_overridden:
             provider_id = (agent.metadata or {}).get("provider_id")
         if not provider_id:
-            from valuz_agent.infra.config import settings
             from valuz_agent.infra.eventbus import event_bus
-            from valuz_agent.infra.secret_store import FileSecretStore
             from valuz_agent.modules.providers.service import ProviderService
+            from valuz_agent.ports.extensions import ext
 
             prov_svc = ProviderService(
                 datastore=self._providers,
-                secret_store=FileSecretStore(settings.secrets_dir),
+                secret_store=ext.secret_store,
                 event_bus=event_bus,
             )
             match = await prov_svc.resolve_provider_for_model(
@@ -554,6 +587,25 @@ class SessionService:
                 f"enabled provider hosts model '{effective_model}' — add a provider "
                 "for that model or pin one on the agent"
             )
+
+        # Backstop for a stale subscription reference. A logged-in subscription
+        # is normally materialized into a real row the moment its CLI login is
+        # detected (frontend onboarding / Settings). But a value saved before
+        # that — an agent pinned to the virtual ``ch-codex-subscription`` id, or
+        # a composer pick of a not-yet-materialized template — still carries the
+        # catalog id, which owns no row and would resolve to a raw
+        # "provider not found" 400. Materialize it now (CLI-login-gated) and swap
+        # to the real uuid; if the CLI isn't logged in, raise an actionable hint
+        # instead of the cryptic error.
+        uid = require_current_user_id()
+        if await self._providers.get_by_id(uid, provider_id) is None:
+            healed = await materialize_logged_in_subscription(self._providers, uid, provider_id)
+            if healed is not None:
+                provider_id = healed.id
+            else:
+                hint = subscription_login_hint(provider_id)
+                if hint is not None:
+                    raise SessionNotRunnable(hint)
 
         try:
             runtime_provider = await resolve_runtime_provider(
@@ -587,9 +639,14 @@ class SessionService:
         # playbooks (DISPATCH_PLAYBOOK / COMMITTED_LEAD_PLAYBOOK) and never
         # flow through this code path.
         from valuz_agent.adapters.agent_resolver import CHAT_TASK_PLAYBOOK
+        from valuz_agent.adapters.system_prompt_builder import assemble_session_instructions
 
-        instructions = "\n\n".join(
-            p for p in (agent.instructions, project_prompt, CHAT_TASK_PLAYBOOK) if p and p.strip()
+        instructions = assemble_session_instructions(
+            [
+                ("agent-instructions", agent.instructions or ""),
+                ("project-instructions", project_prompt),
+                ("task-playbook", CHAT_TASK_PLAYBOOK),
+            ]
         )
 
         effective_permission_mode = _coerce_session_permission_mode(
@@ -793,14 +850,13 @@ class SessionService:
         # which configured provider hosts the resolved model.
         resolved_provider_id: str | None = provider_id
         if not resolved_provider_id and resolution.model:
-            from valuz_agent.infra.config import settings
             from valuz_agent.infra.eventbus import event_bus
-            from valuz_agent.infra.secret_store import FileSecretStore
             from valuz_agent.modules.providers.service import ProviderService
+            from valuz_agent.ports.extensions import ext
 
             prov_svc = ProviderService(
                 datastore=self._providers,
-                secret_store=FileSecretStore(settings.secrets_dir),
+                secret_store=ext.secret_store,
                 event_bus=event_bus,
             )
             match = await prov_svc.resolve_provider_for_model(
@@ -821,6 +877,10 @@ class SessionService:
             resolve_model_provider,
             resolve_runtime_provider,
         )
+        from valuz_agent.modules.providers.service import (
+            materialize_logged_in_subscription,
+            subscription_login_hint,
+        )
 
         if resolved_provider_id is None:
             raise SessionNotRunnable(
@@ -832,6 +892,23 @@ class SessionService:
                 "SessionService is missing secrets wiring — required "
                 "for provider resolution since kernel V5"
             )
+
+        # Backstop for a composer pick / stale default that still carries a
+        # virtual ``ch-*`` subscription id (no row → raw "provider not found").
+        # Materialize it now if its CLI is logged in (mirrors the frontend's
+        # detect-then-materialize), else raise an actionable login hint. See the
+        # agent-conversation path above for the full rationale.
+        _uid = require_current_user_id()
+        if await self._providers.get_by_id(_uid, resolved_provider_id) is None:
+            _healed = await materialize_logged_in_subscription(
+                self._providers, _uid, resolved_provider_id
+            )
+            if _healed is not None:
+                resolved_provider_id = _healed.id
+            else:
+                _hint = subscription_login_hint(resolved_provider_id)
+                if _hint is not None:
+                    raise SessionNotRunnable(_hint)
 
         # Resolve the runtime BEFORE the model provider: dual-protocol
         # built-ins (DeepSeek / Zhipu / Moonshot / MiniMax) let the
@@ -1080,6 +1157,14 @@ class SessionService:
             session_id=session_id,
         )
 
+        # A fresh user-initiated turn supersedes any interrupt soft-pause, so the
+        # post-turn drain continues the queue. (Explicit resume is for continuing
+        # the queue *without* a new message.) See session-input-queue §9.
+        try:
+            await project_index.set_queue_paused(session_id, False)
+        except Exception:  # noqa: BLE001 — never block a send on queue bookkeeping
+            logger.debug("send_message: clearing queue pause failed for %s", session_id)
+
         asyncio.create_task(
             _run_agent_background(
                 session_id=session_id,
@@ -1165,7 +1250,7 @@ class SessionService:
             # the full rationale).
             pending_attachments = await _load_pending_attachments(session_id)
             consumed_attachment_ids = [row.id for row in pending_attachments]
-            attachment_specs = _attachment_specs(pending_attachments)
+            attachment_specs = _attachment_specs(pending_attachments, require_current_user_id())
             project_id = str(
                 ((session.metadata or {}).get("valuz", {}) or {}).get("project_id") or ""
             )
@@ -1351,6 +1436,20 @@ class SessionService:
                         session_id,
                     )
 
+        # Soft-pause auto-drain so queued follow-ups don't auto-run after a stop;
+        # the user resumes explicitly (or a fresh send_message clears it). Only
+        # meaningful when items are actually waiting. See session-input-queue §9.
+        try:
+            async with async_unit_of_work(commit=False) as db:
+                has_queued = (
+                    await SessionDatastore(db).count_queued(require_current_user_id(), session_id)
+                    > 0
+                )
+            if has_queued:
+                await project_index.set_queue_paused(session_id, True)
+        except Exception:  # noqa: BLE001 — never fail the interrupt on queue bookkeeping
+            logger.debug("interrupt: queue pause bookkeeping failed for %s", session_id)
+
         self._bus.publish(
             SESSION_STATUS_CHANGED,
             session_id=session_id,
@@ -1358,6 +1457,155 @@ class SessionService:
             new_status="idle",
         )
         return _session_to_detail(updated)
+
+    # ---- Session input queue (docs/design/session-input-queue.md) ----
+
+    async def list_queue(self, session_id: str) -> QueuedInputList:
+        uid = require_current_user_id()
+        async with async_unit_of_work(commit=False) as db:
+            rows = await SessionDatastore(db).list_queued(uid, session_id)
+        paused = await project_index.get_queue_paused_at(session_id) is not None
+        return QueuedInputList(
+            session_id=session_id,
+            items=[_queued_input_to_dto(r) for r in rows],
+            paused=paused,
+            # A dispatched item is invisible in ``items`` — surface the in-flight
+            # drain so per-turn re-subscribers keep following (§14.5).
+            draining=is_draining_queue(session_id),
+        )
+
+    async def enqueue(
+        self,
+        session_id: str,
+        content: str,
+        *,
+        provider_id: str | None = None,
+        model_id: str | None = None,
+    ) -> QueuedInputList:
+        """Append a follow-up input to the session queue.
+
+        Snapshots + consumes the pending attachment set so the files ride THIS
+        item only (no carry-over, see §8.6). If the session is idle, kicks an
+        immediate drain; otherwise the post-turn drain picks it up.
+        """
+        uid = require_current_user_id()
+        session = await kernel_client.get_session(uid, session_id)
+        if session is None:
+            raise _kernel_session_not_found(session_id)
+        status = _map_kernel_status(session.status)
+        if status in ("cancelled", "archived"):
+            raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
+
+        project_id = str(_valuz_meta(session).get("project_id") or "") or None
+        pending = await _load_pending_attachments(session_id)
+        attachments_json = [
+            {"source_path": source, "parsed_path": parsed}
+            for source, parsed in _attachment_specs(pending, require_current_user_id())
+        ]
+        consumed_ids = [row.id for row in pending]
+
+        async with async_unit_of_work() as db:
+            ds = SessionDatastore(db)
+            if await ds.count_queued(uid, session_id) >= QUEUE_SOFT_CAP:
+                raise QueueFull()
+            await ds.create_queued(
+                uid,
+                QueuedInputRow(
+                    session_id=session_id,
+                    project_id=project_id,
+                    input={"text": content, "attachments": attachments_json},
+                    status="queued",
+                    provider_id=provider_id,
+                    model_id=model_id,
+                ),
+            )
+        if consumed_ids:
+            await _mark_attachments_consumed(consumed_ids)
+
+        self._bus.publish(SESSION_MESSAGE_SENT, session_id=session_id)
+
+        # Idle-kick: nothing in flight → drain now so the item doesn't wait for a
+        # turn boundary that never comes. If running / already draining, the
+        # in-flight drain picks it up on its next peek.
+        if status != "running" and not is_draining_queue(session_id):
+            schedule_drain(session_id, self._bus)
+
+        return await self.list_queue(session_id)
+
+    async def edit_queued(self, session_id: str, queue_id: str, content: str) -> QueuedInputList:
+        uid = require_current_user_id()
+        async with async_unit_of_work() as db:
+            ds = SessionDatastore(db)
+            existing = await ds.get_queued(uid, session_id, queue_id)
+            if existing is None:
+                raise QueuedInputNotFound()
+            if existing.status != "queued":
+                raise SessionConflict("Queued input is no longer editable")
+            payload = dict(existing.input or {})
+            payload["text"] = content
+            await ds.update_queued_input(uid, session_id, queue_id, payload)
+        return await self.list_queue(session_id)
+
+    async def delete_queued(self, session_id: str, queue_id: str) -> QueuedInputList:
+        uid = require_current_user_id()
+        async with async_unit_of_work() as db:
+            deleted = await SessionDatastore(db).delete_queued(uid, session_id, queue_id)
+        if not deleted:
+            raise QueuedInputNotFound()
+        return await self.list_queue(session_id)
+
+    async def resume_queue(self, session_id: str) -> QueuedInputList:
+        uid = require_current_user_id()
+        session = await kernel_client.get_session(uid, session_id)
+        if session is None:
+            raise _kernel_session_not_found(session_id)
+        await project_index.set_queue_paused(session_id, False)
+        status = _map_kernel_status(session.status)
+        if status != "running" and not is_draining_queue(session_id):
+            schedule_drain(session_id, self._bus)
+        return await self.list_queue(session_id)
+
+    async def steer_queued(self, session_id: str, queue_id: str) -> QueuedInputList:
+        """Send a queued item now, interrupting the active turn (steer / send-now).
+
+        Promotes the item to the FIFO head and clears any soft-pause, then — if a
+        turn is in flight — interrupts it *silently* via the low-level kernel
+        interrupt (NOT ``self.interrupt``, which would stamp ``user_interrupt``
+        and re-pause the queue). The in-flight chain finalizes the cut turn as a
+        clean idle and its post-turn drain dispatches the promoted head; we
+        therefore do NOT kick a drain here (that would race the in-flight chain).
+        Only a genuinely idle session needs the explicit kick. Lossy: the running
+        turn's partial progress is discarded. Runtime-agnostic stand-in for Codex
+        ``turn/steer`` (see docs/design/session-input-queue.md §11).
+        """
+        uid = require_current_user_id()
+        session = await kernel_client.get_session(uid, session_id)
+        if session is None:
+            raise _kernel_session_not_found(session_id)
+
+        async with async_unit_of_work() as db:
+            promoted = await SessionDatastore(db).promote_to_front(uid, session_id, queue_id)
+        if promoted is None:
+            raise QueuedInputNotFound()
+
+        # Steer overrides any interrupt soft-pause so the drain proceeds.
+        await project_index.set_queue_paused(session_id, False)
+
+        status = _map_kernel_status(session.status)
+        if status == "running" or is_draining_queue(session_id):
+            # Silent interrupt: cut the in-flight turn so the existing post-turn
+            # drain picks up the promoted head. Low-level kernel interrupt only —
+            # no user_interrupt stamp, no re-pause (that's what makes it "silent";
+            # the cut turn finalizes as a clean idle). Best-effort: if the runtime
+            # is already gone the in-flight chain still drains the promoted head.
+            try:
+                await kernel_client.interrupt(uid, session_id)
+            except Exception:  # noqa: BLE001 — runtime gone / never registered
+                logger.warning("steer: kernel interrupt failed for %s", session_id, exc_info=True)
+        else:
+            schedule_drain(session_id, self._bus)
+
+        return await self.list_queue(session_id)
 
     async def cancel(self, session_id: str) -> SessionDetail:
         session = await kernel_client.get_session(require_current_user_id(), session_id)
@@ -1409,6 +1657,14 @@ class SessionService:
             raise _kernel_session_not_found(session_id)
         await kernel_client.delete_session(require_current_user_id(), session_id)
         await project_index.remove(session_id)
+        # Drop any pending input-queue rows for the gone session.
+        try:
+            async with async_unit_of_work() as db:
+                await SessionDatastore(db).delete_queue_for_session(
+                    require_current_user_id(), session_id
+                )
+        except Exception:  # noqa: BLE001 — cleanup must not fail the delete
+            logger.debug("delete_session: queue cleanup failed for %s", session_id)
 
     async def get_extra_skills(self, session_id: str) -> list[str]:
         session = await kernel_client.get_session(require_current_user_id(), session_id)

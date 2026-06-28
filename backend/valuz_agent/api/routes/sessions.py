@@ -12,9 +12,9 @@ from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.event_sse_adapter import iter_events_sse
 from valuz_agent.api.deps import get_session_service, require_current_user_id
 from valuz_agent.infra.db import get_async_session
-from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
+    QueuedInputList,
     SessionDetail,
     SessionEventEnvelope,
     SessionListItem,
@@ -331,6 +331,79 @@ async def interrupt(
     return await svc.interrupt(session_id)
 
 
+class QueuedInputCreate(BaseModel):
+    prompt: str
+    provider_id: str | None = None
+    model_id: str | None = None
+
+
+class QueuedInputPatch(BaseModel):
+    prompt: str
+
+
+@router.get("/{session_id}/queue")
+async def list_session_queue(
+    session_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """List a session's queued follow-up inputs (FIFO) + paused flag."""
+    return await svc.list_queue(session_id)
+
+
+@router.post("/{session_id}/queue")
+async def enqueue_session_input(
+    session_id: str,
+    body: QueuedInputCreate,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """Enqueue a follow-up input. Drains immediately if idle, else after the
+    active turn (docs/design/session-input-queue.md)."""
+    return await svc.enqueue(
+        session_id,
+        body.prompt,
+        provider_id=body.provider_id,
+        model_id=body.model_id,
+    )
+
+
+@router.patch("/{session_id}/queue/{queue_id}")
+async def edit_session_queued_input(
+    session_id: str,
+    queue_id: str,
+    body: QueuedInputPatch,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    return await svc.edit_queued(session_id, queue_id, body.prompt)
+
+
+@router.delete("/{session_id}/queue/{queue_id}")
+async def delete_session_queued_input(
+    session_id: str,
+    queue_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    return await svc.delete_queued(session_id, queue_id)
+
+
+@router.post("/{session_id}/queue/resume")
+async def resume_session_queue(
+    session_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """Resume draining a queue paused by an interrupt."""
+    return await svc.resume_queue(session_id)
+
+
+@router.post("/{session_id}/queue/{queue_id}/steer")
+async def steer_session_queued_input(
+    session_id: str,
+    queue_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """Steer — send a queued input now, silently interrupting the active turn."""
+    return await svc.steer_queued(session_id, queue_id)
+
+
 @router.post("/{session_id}/cancel")
 async def cancel(
     session_id: str,
@@ -618,27 +691,25 @@ async def upload_attachment(
             ),
         )
 
-    target_dir = fs_registry.attachment_dir(session_id)
+    from valuz_agent.ports.extensions import ext
+
     safe_name = (file.filename or "upload").replace("/", "_").replace("\\", "_")
     # Disambiguate if the same filename is uploaded twice. Don't try to be
     # clever about content hashing — the user can always rename later.
-    target = target_dir / safe_name
-    if target.exists():
-        stem = target.stem
-        suffix = target.suffix
+    name = safe_name
+    key = f"attachments/{session_id}/{name}"
+    if ext.asset_store.exists(user_id, key):
+        stem = Path(safe_name).stem
+        suffix = Path(safe_name).suffix
         i = 1
-        while target.exists():
-            target = target_dir / f"{stem}-{i}{suffix}"
+        while ext.asset_store.exists(user_id, key):
+            name = f"{stem}-{i}{suffix}"
+            key = f"attachments/{session_id}/{name}"
             i += 1
 
-    size = 0
-    with target.open("wb") as fh:
-        while True:
-            chunk = await file.read(64 * 1024)
-            if not chunk:
-                break
-            fh.write(chunk)
-            size += len(chunk)
+    data = await file.read()
+    size = len(data)
+    ext.asset_store.put(user_id, key, data)
 
     # Persist the row as ``parsing`` and kick the heavy parse off the event
     # loop in a background task. The parser (PyMuPDF / MarkItDown / RapidOCR)
@@ -651,8 +722,8 @@ async def upload_attachment(
     # additional-context builder).
     row = SessionAttachmentRow(
         session_id=session_id,
-        filename=file.filename or target.name,
-        stored_path=str(target),
+        filename=file.filename or name,
+        stored_path=key,
         parsed_path=None,
         parse_status="parsing",
         size_bytes=size,
@@ -661,12 +732,12 @@ async def upload_attachment(
     )
     await SessionDatastore(db).create_attachment(user_id, row)
     await db.refresh(row)
-    _spawn_attachment_parse(row.id, str(target), target_dir, target.name)
+    _spawn_attachment_parse(row.id, key, session_id, name, user_id)
     return _row_to_item(row)
 
 
 def _write_parse_result(
-    result: Any, dest_dir: Path, base_name: str
+    result: Any, session_id: str, base_name: str, user_id: str
 ) -> tuple[str | None, str, str | None, str | None]:
     """Write a ``ParseResult``'s markdown into ``dest_dir`` as
     ``{base_name}.parsed.md`` and classify the outcome.
@@ -698,16 +769,18 @@ def _write_parse_result(
     if not markdown or error:
         reason = str(error) if error else "parser produced no content"
         return None, "failed", engine, reason[:2000]
-    target = dest_dir / f"{base_name}.parsed.md"
+    from valuz_agent.ports.extensions import ext
+
+    parsed_key = f"attachments/{session_id}/{base_name}.parsed.md"
     i = 1
-    while target.exists():
-        target = dest_dir / f"{base_name}-{i}.parsed.md"
+    while ext.asset_store.exists(user_id, parsed_key):
+        parsed_key = f"attachments/{session_id}/{base_name}-{i}.parsed.md"
         i += 1
-    target.write_text(markdown, encoding="utf-8")
-    return str(target), "ready", engine, None
+    ext.asset_store.put(user_id, parsed_key, markdown.encode("utf-8"))
+    return parsed_key, "ready", engine, None
 
 
-async def _build_attachment_parser(db: Any) -> Any:
+async def _build_attachment_parser(db: Any, user_id: str) -> Any:
     """Build the configured ``ParserRouter`` for an attachment parse.
 
     Thin indirection over ``deps.build_parser_router`` so tests can monkeypatch
@@ -715,7 +788,7 @@ async def _build_attachment_parser(db: Any) -> Any:
     """
     from valuz_agent.api.deps import build_parser_router
 
-    return await build_parser_router(db)
+    return await build_parser_router(db, user_id)
 
 
 # Strong refs to in-flight parse tasks. ``asyncio`` only holds weak refs to
@@ -752,7 +825,7 @@ def _is_runtime_native(path: str) -> bool:
 
 
 def _spawn_attachment_parse(
-    attachment_id: str, source_path: str, dest_dir: Path, base_name: str
+    attachment_id: str, source: str, session_id: str, base_name: str, user_id: str
 ) -> None:
     """Parse ``source_path`` through the CONFIGURED parser and persist it.
 
@@ -790,15 +863,20 @@ def _spawn_attachment_parse(
             # Build the router in its OWN fresh session — the request's session
             # is closed by the time this background task runs.
             async with async_unit_of_work() as db:
-                router = await _build_attachment_parser(db)
-            if router.plugin_mode_for(source_path) == ParserPluginMode.ASYNC_POLL:
-                result = await router.parse(source_path)
+                router = await _build_attachment_parser(db, user_id)
+            from valuz_agent.modules.sessions.attachments import _resolve_asset_path
+
+            src_path = _resolve_asset_path(user_id, source)
+            if src_path is None:
+                raise FileNotFoundError(f"attachment source not found: {source}")
+            if router.plugin_mode_for(src_path) == ParserPluginMode.ASYNC_POLL:
+                result = await router.parse(src_path)
             else:
                 # Bound concurrent CPU-bound local parses (see semaphore note).
                 async with _LOCAL_PARSE_SEMAPHORE:
-                    result = await asyncio.to_thread(router.parse_sync, source_path)
+                    result = await asyncio.to_thread(router.parse_sync, src_path)
             parsed_path, parse_status, engine, error_message = _write_parse_result(
-                result, dest_dir, base_name
+                result, session_id, base_name, user_id
             )
         except Exception as exc:  # noqa: BLE001 — contain; never crash the loop
             logger.exception("Background parse failed for attachment %s", attachment_id)
@@ -808,7 +886,7 @@ def _spawn_attachment_parse(
         # natively — not a failure. ``parsed_path`` stays None (no text
         # extract); only the original ships, which is exactly what the runtime
         # needs.
-        if parse_status == "failed" and _is_runtime_native(source_path):
+        if parse_status == "failed" and _is_runtime_native(base_name):
             parse_status = "native"
             error_message = None
         try:
@@ -890,7 +968,6 @@ async def add_kb_attachments(
         )
 
     doc_ds = DocumentDatastore(db)
-    target_dir = fs_registry.attachment_dir(session_id)
     for doc_id in body.doc_ids:
         if doc_id in already_attached:
             continue
@@ -925,7 +1002,7 @@ async def add_kb_attachments(
         )
         await ds.create_attachment(user_id, row)
         await db.refresh(row)
-        _spawn_attachment_parse(row.id, doc.source_path, target_dir, safe_name)
+        _spawn_attachment_parse(row.id, doc.source_path, session_id, safe_name, user_id)
 
     rows = await ds.list_attachments(user_id, session_id)
     return AttachmentListResponse(items=[_row_to_item(r) for r in rows])
@@ -964,17 +1041,75 @@ async def delete_attachment(
         raise HTTPException(status_code=404, detail=f"Attachment {attachment_id!r} not found")
     # Local rows own both paths; KB rows own only the parsed
     # derivative — their ``stored_path`` is a KB-owned source file.
+    from valuz_agent.ports.extensions import ext
+
     owned_paths = (
         (row.stored_path, row.parsed_path) if row.source_kind == "local" else (row.parsed_path,)
     )
-    for path in owned_paths:
-        if not path:
+    for ref in owned_paths:
+        if not ref:
             continue
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            logger.exception("Failed to unlink attachment file %s", path)
+        if os.path.isabs(ref):
+            # Legacy absolute path (or a kb_doc's KB-owned source, which never
+            # reaches here) — delete from the local filesystem as before.
+            try:
+                os.unlink(ref)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.exception("Failed to unlink attachment file %s", ref)
+        else:
+            ext.asset_store.delete(user_id, ref)
     await ds.delete_attachment(user_id, attachment_id)
     return Response(status_code=204)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Artifacts (agent-delivered deliverables — the "生成文件" list)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class ArtifactItem(BaseModel):
+    id: str
+    session_id: str
+    file_path: str  # absolute path the agent wrote; the client opens this
+    file_name: str
+    file_size: int
+    mime_type: str | None = None
+    created_at: int
+
+
+class ArtifactListResponse(BaseModel):
+    items: list[ArtifactItem]
+
+
+@router.get("/{session_id}/artifacts")
+async def list_artifacts(
+    session_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(require_current_user_id),
+) -> ArtifactListResponse:
+    """Return the files the agent delivered for ``session_id``.
+
+    These are recorded by the built-in ``deliver_artifacts`` MCP tool (the
+    inverse of the upload pipeline) and rendered in the session panel's
+    "生成文件" section. Durable — no per-turn staging — so the full set is
+    returned every time.
+    """
+    if await kernel_client.get_session(user_id, session_id) is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+    rows = await SessionDatastore(db).list_artifacts(user_id, session_id)
+    return ArtifactListResponse(
+        items=[
+            ArtifactItem(
+                id=r.id,
+                session_id=r.session_id,
+                file_path=r.file_path,
+                file_name=r.file_name,
+                file_size=r.file_size,
+                mime_type=r.mime_type,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+    )

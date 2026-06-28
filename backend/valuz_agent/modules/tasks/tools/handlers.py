@@ -65,6 +65,8 @@ from valuz_agent.modules.tasks.tools.declarations import (
     SEND_TOOL_NAME,
     STOP_SUBTASK_TOOL_DECLARATION,
     STOP_SUBTASK_TOOL_NAME,
+    UPDATE_DELIVERABLE_TOOL_DECLARATION,
+    UPDATE_DELIVERABLE_TOOL_NAME,
     _ABANDON_TASK_PARAMETERS,
     _AWAIT_MEMBERS_PARAMETERS,
     _COMMIT_TASK_PARAMETERS,
@@ -83,6 +85,7 @@ from valuz_agent.modules.tasks.tools.declarations import (
     _REVIEW_SUBTASK_PARAMETERS,
     _SEND_PARAMETERS,
     _STOP_SUBTASK_PARAMETERS,
+    _UPDATE_DELIVERABLE_PARAMETERS,
 )
 
 if TYPE_CHECKING:
@@ -1118,6 +1121,44 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
             description=STOP_SUBTASK_TOOL_DECLARATION.description,
             parameters=_STOP_SUBTASK_PARAMETERS,
             handler=_stop_subtask_handler,
+        )
+    )
+
+    async def _update_deliverable_handler(
+        args: dict[str, Any], ctx: ExecContext
+    ) -> ToolResult:
+        gate = await _check_lead_gate(ctx)
+        if isinstance(gate, ToolResult):
+            return gate
+        task_id, project_id = gate
+
+        summary: str = args.get("summary", "")
+        artifacts: list[str] = args.get("artifacts") or []
+
+        try:
+            result = await orchestrator.update_deliverable(
+                task_id=task_id,
+                project_id=project_id,
+                lead_session_id=ctx.session_id,
+                summary=summary,
+                artifacts=artifacts,
+            )
+            if isinstance(result, dict) and result.get("status") == "rejected":
+                return ToolResult(
+                    content=result.get("error", "update_deliverable rejected"),
+                    is_error=True,
+                )
+            return ToolResult(content="Deliverable card refreshed.")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("update_deliverable handler error for task %s", task_id)
+            return ToolResult(content=f"update_deliverable failed: {exc}", is_error=True)
+
+    register_tool(
+        ToolDef(
+            name=UPDATE_DELIVERABLE_TOOL_NAME,
+            description=UPDATE_DELIVERABLE_TOOL_DECLARATION.description,
+            parameters=_UPDATE_DELIVERABLE_PARAMETERS,
+            handler=_update_deliverable_handler,
         )
     )
     logger.info(

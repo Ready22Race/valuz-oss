@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -41,7 +41,18 @@ from valuz_agent.infra.config import settings
 logger = logging.getLogger("valuz_agent.api")
 
 
-def create_app() -> FastAPI:
+def create_app(api_prefix: list[str] | None = None) -> FastAPI:
+    """Build the host FastAPI application.
+
+    ``api_prefix`` prepends one or more base paths to the whole public HTTP
+    surface (host routers + overlay ``module_registry`` routes + in-process
+    kernel routers) so the backend can sit behind a shared-host ingress that
+    namespaces it by path. ``None`` (default) falls back to
+    ``settings.api_prefix`` (env ``VALUZ_API_PREFIX``); an empty result → routes
+    served at their native paths (behaviour unchanged). The ``/internal/mcp/*``
+    mounts are reached server-side via ``backend_base_url`` and are NEVER
+    prefixed.
+    """
     if getattr(sys, "frozen", False):
         _env_path = settings.data_dir / ".env"
     else:
@@ -90,52 +101,68 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(providers_router)
-    app.include_router(connectors_router)
-    app.include_router(browser_router)
-    app.include_router(runs_router)
-    app.include_router(runtimes_router)
-    app.include_router(system_router)
-    app.include_router(projects_router)
-    app.include_router(sessions_router)
-    app.include_router(skills_router)
-    app.include_router(docs_router)
-    app.include_router(automations_router)
-    app.include_router(decisions_router)
-    app.include_router(agents_router)
-    app.include_router(agent_templates_router)
-    app.include_router(tasks_router)
-    app.include_router(analytics_router)
-    app.include_router(resources_router)
-    app.include_router(onboarding_router)
-    app.include_router(settings_router)
-    app.include_router(memory_router)
+    # The whole public HTTP surface is aggregated into one router so a global
+    # ``api_prefix`` can be applied uniformly (mirrors valuz-server's factory).
+    # Infra mounts (/internal/mcp/*) are added to ``app`` directly below and
+    # stay at fixed native paths — they're reached server-side via
+    # ``backend_base_url``, never through the prefixed ingress.
+    api = APIRouter()
+    api.include_router(providers_router)
+    api.include_router(connectors_router)
+    api.include_router(browser_router)
+    api.include_router(runs_router)
+    api.include_router(runtimes_router)
+    api.include_router(system_router)
+    api.include_router(projects_router)
+    api.include_router(sessions_router)
+    api.include_router(skills_router)
+    api.include_router(docs_router)
+    api.include_router(automations_router)
+    api.include_router(decisions_router)
+    api.include_router(agents_router)
+    api.include_router(agent_templates_router)
+    api.include_router(tasks_router)
+    api.include_router(analytics_router)
+    api.include_router(resources_router)
+    api.include_router(onboarding_router)
+    api.include_router(settings_router)
+    api.include_router(memory_router)
     # Parser routes live in a separate module because they straddle the
     # ``/v1/system`` and ``/v1/settings`` namespaces (setup jobs vs.
     # routing config). One module, two ``APIRouter`` instances.
-    app.include_router(parser_system_router)
-    app.include_router(parser_settings_router)
+    api.include_router(parser_system_router)
+    api.include_router(parser_settings_router)
 
-    # Apply overlay-registered modules and middleware (ADR-001 §2.1).
+    # Apply overlay-registered modules into the same aggregate router so they
+    # inherit the prefix too; middleware is not path-based and stays on the app
+    # (ADR-001 §2.1).
     from valuz_agent.infra.middleware_registry import middleware_registry
     from valuz_agent.infra.module_registry import module_registry
 
-    module_registry.apply(app)
+    module_registry.apply(api)
     middleware_registry.apply(app)
 
-    # Agent Harness V5 kernel — mounted at /api/v1/* (its native prefix).
-    # Valuz business routes stay at /v1/* and are progressively migrated to call
-    # into the kernel via valuz_agent.adapters.* helpers. NOT mounted in http
-    # mode: the kernel runs as a separate process and serves /api/v1/* itself;
-    # mounting the in-process routers here would shadow it with a ghost kernel
-    # bound to a different (host) database (B3).
+    # Agent Harness V5 kernel — native prefix /api/v1/*. Valuz business routes
+    # stay at /v1/* and are progressively migrated to call into the kernel via
+    # valuz_agent.adapters.* helpers. NOT mounted in http mode: the kernel runs
+    # as a separate process and serves /api/v1/* itself; mounting the in-process
+    # routers here would shadow it with a ghost kernel bound to a different
+    # (host) database (B3).
     from valuz_agent.infra.config import settings as _settings
 
     if not _settings.is_http_kernel:
         from valuz_agent.boot.kernel import get_kernel_routers
 
         for kernel_router in get_kernel_routers():
-            app.include_router(kernel_router)
+            api.include_router(kernel_router)
+
+    # Mount the aggregate surface under each configured base path. ``None`` →
+    # fall back to settings; an empty result → a single mount at "" (native
+    # paths, unchanged). Multiple entries (e.g. ["", "/valuz-backend"]) → the
+    # surface is served under each base at once.
+    prefixes = api_prefix if api_prefix is not None else _settings.api_prefix
+    for _prefix in prefixes or [""]:
+        app.include_router(api, prefix=_prefix)
 
     # In-process docs MCP server. Mounted as a Starlette ASGI sub-app
     # because FastMCP owns its own request pipeline (streamable HTTP

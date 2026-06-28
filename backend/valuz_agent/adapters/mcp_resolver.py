@@ -129,9 +129,7 @@ async def _resolve_connector_slug(
     return await _build_http_config(row, connectors)
 
 
-async def _build_http_config(
-    row, connectors: ConnectorDatastore
-) -> list[McpServerConfig] | None:
+async def _build_http_config(row, connectors: ConnectorDatastore) -> list[McpServerConfig] | None:
     # Single injection truth shared with the probe (Acceptance #8 — probe
     # and runtime must produce byte-identical headers/params).
     headers, params = build_overrides(row)
@@ -161,9 +159,9 @@ async def _build_http_config(
 
     if "{module}" in url:
         modules: list[str] = []
-        if row.args_json:
+        if row.args:
             try:
-                parsed = json.loads(row.args_json)
+                parsed = json.loads(row.args)
                 if isinstance(parsed, list):
                     modules = [str(m) for m in parsed]
             except json.JSONDecodeError:
@@ -234,9 +232,9 @@ def _build_stdio_config(row) -> list[McpServerConfig] | None:
         extra_args = tuple(parts[1:])
 
     args: tuple[str, ...] = extra_args
-    if row.args_json:
+    if row.args:
         try:
-            parsed = json.loads(row.args_json)
+            parsed = json.loads(row.args)
             if isinstance(parsed, list):
                 args = extra_args + tuple(_expand(str(a)) for a in parsed)
         except json.JSONDecodeError:

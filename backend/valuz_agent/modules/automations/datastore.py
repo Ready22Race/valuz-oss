@@ -52,6 +52,34 @@ class AutomationDatastore:
             .first()
         )
 
+    async def get_names_by_ids(self, user_id: str, automation_ids: list[str]) -> dict[str, str]:
+        """Map automation id → name for the given ids (used to label a task's
+        "由 自动化《name》触发" provenance without N+1 lookups). Missing ids omitted."""
+        if not automation_ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(AutomationRow.id, AutomationRow.name).where(
+                    AutomationRow.id.in_(automation_ids), AutomationRow.user_id == user_id
+                )
+            )
+        ).all()
+        return {aid: name for aid, name in rows}
+
+    async def list_by_origin_tool_call_ids(
+        self, user_id: str, tool_call_ids: list[str]
+    ) -> list[AutomationRow]:
+        """Rows whose ``origin_tool_call_id`` is in ``tool_call_ids`` (owner-
+        scoped). Backs the proposal re-entry lookup — empty input short-circuits
+        to avoid an ``IN ()`` query."""
+        if not tool_call_ids:
+            return []
+        stmt = select(AutomationRow).where(
+            AutomationRow.user_id == user_id,
+            AutomationRow.origin_tool_call_id.in_(tool_call_ids),
+        )
+        return list((await self._db.execute(stmt)).scalars().all())
+
     async def create_automation(self, user_id: str, row: AutomationRow) -> AutomationRow:
         row.user_id = user_id
         self._db.add(row)
@@ -214,6 +242,23 @@ class AutomationDatastore:
             .scalars()
             .all()
         )
+
+    async def list_run_session_ids(self, user_id: str) -> set[str]:
+        """All kernel ``session_id``s that an automation run produced.
+
+        The runs overview uses this to flag a task/chat as automation-triggered:
+        a task lead session whose id appears here was spawned by a scheduled
+        run, even though the task row itself carries no automation marker.
+        """
+        rows = (
+            await self._db.execute(
+                select(AutomationRunRow.session_id).where(
+                    AutomationRunRow.user_id == user_id,
+                    AutomationRunRow.session_id.is_not(None),
+                )
+            )
+        ).all()
+        return {sid for (sid,) in rows if sid}
 
     async def count_runs(self, user_id: str, automation_id: str) -> int:
         return (

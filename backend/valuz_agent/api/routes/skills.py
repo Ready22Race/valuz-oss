@@ -48,6 +48,7 @@ from valuz_agent.modules.skills.models import (
     SkillImportDirectoryPreviewRequest,
     SkillImportUrlConfirmRequest,
     SkillImportUrlPreviewRequest,
+    SkillLibraryStateRequest,
     SkillsCatalog,
     SkillSubmissionConfirmRequest,
     SkillSubmissionConfirmResponse,
@@ -657,6 +658,16 @@ async def copy_skill(
         return await svc.copy_skill(skill_id, payload)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.put("/v1/skills/{skill_id}/library-state", response_model=SkillView)
+async def set_skill_library_state(
+    skill_id: str,
+    payload: SkillLibraryStateRequest,
+    svc: SkillLibraryService = Depends(get_skill_service),
+) -> SkillView:
+    # SkillNotFound (NotFoundError) maps to 404 via the error middleware.
+    return await svc.set_library_enabled(skill_id, payload.enabled)
 
 
 @router.delete(

@@ -133,19 +133,15 @@ def _materialize(plan: _Plan, skills: list[str]) -> str:
         # Never link a source that lives at / inside the skills root, or whose
         # tree contains the skills root. Either case yields a self-referential
         # or recursive symlink — reading ``<skills_root>/<name>/SKILL.md`` then
-        # fails with ``OSError(ELOOP)`` ("Too many levels of symbolic links"),
-        # which crashes the runtime's skill discovery. A skill authored
-        # in-place under ``.agents/skills`` is already readable where it sits,
-        # so skip + warn rather than corrupt the tree.
+        # fails with ``OSError(ELOOP)`` ("Too many levels of symbolic links").
+        # ``_cyclic_link_reason`` classifies the case so we log a benign
+        # in-place skill at debug (it's already discoverable where it sits) and
+        # only warn on the cases that actually drop a skill or signal a
+        # misconfiguration. Either way we skip rather than corrupt the tree.
         real_src = os.path.realpath(src)
-        if _is_cyclic_link(real_src, real_skills_root, name):
-            logger.warning(
-                "Skipping skill %r: source %s would create a self-referential or "
-                "recursive link under %s.",
-                name,
-                src,
-                plan.skills_root,
-            )
+        reason = _cyclic_link_reason(real_src, real_skills_root, name)
+        if reason is not None:
+            _log_skipped_cycle(name, src, plan.skills_root, reason)
             continue
         # Clear a same-named entry created earlier in THIS call (duplicate
         # basenames). ``created.get(name)`` lets us remove a prior copy too;
@@ -159,23 +155,73 @@ def _materialize(plan: _Plan, skills: list[str]) -> str:
     return plan.skills_root
 
 
-def _is_cyclic_link(real_src: str, real_skills_root: str, name: str) -> bool:
-    """True if linking ``<skills_root>/<name>`` -> ``real_src`` would loop.
+# Why a source can't be linked into the skills root without looping. ``in_place``
+# is benign (the skill already sits where discovery looks); the other two mean
+# the skill won't load and point at a real misconfiguration.
+_CYCLE_IN_PLACE = "in_place"
+_CYCLE_UNDER_ROOT = "under_root"
+_CYCLE_CONTAINS_ROOT = "contains_root"
 
-    Two cases produce a cycle once the link is read as ``.../<name>/...``:
 
-    - the resolved source *is* the destination, or otherwise lives at or under
-      the skills root (a skill authored in-place, or a stale self-link); and
-    - the skills root lives at or under the resolved source (the link would
-      contain itself).
+def _cyclic_link_reason(real_src: str, real_skills_root: str, name: str) -> str | None:
+    """Classify why linking ``<skills_root>/<name>`` -> ``real_src`` would loop.
 
-    Comparison is on real (symlink-resolved) paths so an indirect cycle through
-    an existing symlink is caught too.
+    Returns one of the ``_CYCLE_*`` reasons, or ``None`` when the link is safe.
+    Comparison is on real (symlink-resolved) paths, so realpath has already
+    collapsed any indirect symlink chain into one canonical path — the two
+    containment checks therefore catch indirect cycles too, with no graph walk.
+
+    - ``in_place``      — the source already *is* the destination. Benign: the
+      runtime discovers the skill where it sits; we just don't link it.
+    - ``under_root``    — the source is a nested subdir of the skills root (not a
+      direct child). Linking it would loop, and discovery (direct children only)
+      wouldn't reach it anyway, so the skill is dropped.
+    - ``contains_root`` — the skills root lives at/under the source (the source is
+      an ancestor, e.g. a skill source mistakenly set to the project cwd). The
+      link would contain itself; a real misconfiguration.
     """
     real_dst = os.path.join(real_skills_root, name)
     if real_src == real_dst:
-        return True
-    return _is_within(real_src, real_skills_root) or _is_within(real_skills_root, real_src)
+        return _CYCLE_IN_PLACE
+    if _is_within(real_src, real_skills_root):
+        return _CYCLE_UNDER_ROOT
+    if _is_within(real_skills_root, real_src):
+        return _CYCLE_CONTAINS_ROOT
+    return None
+
+
+def _log_skipped_cycle(name: str, src: str, skills_root: str, reason: str) -> None:
+    """Log a skipped skill at a severity matching its ``_CYCLE_*`` reason.
+
+    The benign ``in_place`` case is debug (expected, no skill lost); the cases
+    that actually drop a skill or signal a misconfiguration warn, and the
+    message names the cause so the loop is self-diagnosing.
+    """
+    if reason == _CYCLE_IN_PLACE:
+        logger.debug(
+            "Skill %r already lives at its skills-root location (%s); discovered "
+            "in place, not linking.",
+            name,
+            src,
+        )
+    elif reason == _CYCLE_UNDER_ROOT:
+        logger.warning(
+            "Skipping skill %r: source %s is nested inside the skills root %s — "
+            "a link there would recurse and discovery (direct children only) "
+            "can't reach it. Move the skill out of the skills root.",
+            name,
+            src,
+            skills_root,
+        )
+    else:  # _CYCLE_CONTAINS_ROOT
+        logger.warning(
+            "Skipping skill %r: source %s is an ancestor of the skills root %s — "
+            "linking it would contain itself. Check the skill's source path "
+            "(it likely resolved to the project cwd or a parent dir).",
+            name,
+            src,
+            skills_root,
+        )
 
 
 def _is_within(child: str, parent: str) -> bool:

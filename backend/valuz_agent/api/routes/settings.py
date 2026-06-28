@@ -13,8 +13,8 @@ from valuz_agent.modules.providers.service import ProviderService
 from valuz_agent.modules.settings.model_options import (
     CurrentDefault,
     ModelOptionsResponse,
-    ProviderOptionInput,
     build_model_options,
+    to_option_input,
 )
 from valuz_agent.modules.settings.preferences import (
     detect_system_timezone,
@@ -306,22 +306,7 @@ async def get_model_options(
         # ADR-011: each model carries its declared ``runtimes`` (or None →
         # derive from compatible_protocols); the builder reads them straight off,
         # no per-source special-casing.
-        inputs = [
-            ProviderOptionInput(
-                id=it.id,
-                name=it.name,
-                provider_kind=it.provider_kind,
-                source=it.source,
-                auth_type=it.auth_type,
-                enabled=it.enabled,
-                unavailable_reason=it.unavailable_reason,
-                compatible_protocols=it.compatible_protocols,
-                models=it.models,
-                group=it.group,
-                group_rank=it.group_rank,
-            )
-            for it in items
-        ]
+        inputs = [to_option_input(it) for it in items]
         current = CurrentDefault(
             runtime=defaults.default_runtime,
             provider_id=defaults.default_provider_id,

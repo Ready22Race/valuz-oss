@@ -8,6 +8,20 @@ export const setTasksApiBase = (url: string): void => {
   _apiBase = url;
 };
 
+/** Resolved "who/what spawned this task" — drives the task-list "由 … 触发" line.
+ * The source_* ids let the UI deep-link to the parent task / automation /
+ * conversation; the resolved names spare a second lookup. */
+export interface TaskTrigger {
+  /** user | chat | agent | automation */
+  type: string;
+  source_task_id?: string | null;
+  source_task_title?: string | null;
+  source_agent_slug?: string | null;
+  source_automation_id?: string | null;
+  source_automation_name?: string | null;
+  source_session_id?: string | null;
+}
+
 /** Durable header for a lead-dispatch task. */
 export interface Task {
   id: string;
@@ -25,6 +39,8 @@ export interface Task {
    * ("active just now" vs "completed yesterday"). */
   created_at: number;
   updated_at: number;
+  /** Trigger provenance, resolved server-side. ``null`` for legacy tasks. */
+  trigger?: TaskTrigger | null;
 }
 
 /** One kernel session that belongs to a task (lead or dispatched subtask). */
@@ -175,8 +191,17 @@ export const tasksApi = {
     });
   },
 
-  listTasks(projectId: string): Promise<{ tasks: Task[] }> {
-    return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks`);
+  listTasks(
+    projectId: string,
+    init?: { signal?: AbortSignal },
+  ): Promise<{ tasks: Task[] }> {
+    // ``init`` (e.g. an ``AbortSignal`` for the project-detail auto-refresh
+    // poller) is forwarded to ``fetchJson`` → ``fetch``. Existing callers pass
+    // nothing, so their behaviour is unchanged.
+    return fetchJson(
+      `/v1/projects/${encodeURIComponent(projectId)}/tasks`,
+      init,
+    );
   },
 
   /** Global cross-project task list, newest activity first. Backs the

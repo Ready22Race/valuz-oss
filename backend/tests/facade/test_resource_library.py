@@ -205,12 +205,21 @@ class TestConnectorListSmoke:
             connect_args={"check_same_thread": False},
             poolclass=StaticPool,
         )
-        from valuz_agent.modules.connectors.models import ConnectorAttrRow, ConnectorRow
+        from valuz_agent.modules.connectors.models import (
+            ConnectorAttrRow,
+            ConnectorOAuthRow,
+            ConnectorRow,
+        )
 
         async with engine.begin() as conn:
             await conn.run_sync(
                 lambda c: Base.metadata.create_all(
-                    c, tables=[ConnectorRow.__table__, ConnectorAttrRow.__table__]
+                    c,
+                    tables=[
+                        ConnectorRow.__table__,
+                        ConnectorAttrRow.__table__,
+                        ConnectorOAuthRow.__table__,
+                    ],
                 )
             )
 
