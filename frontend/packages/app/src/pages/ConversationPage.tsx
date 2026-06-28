@@ -63,12 +63,15 @@ import {
   type RuntimeId,
   type MemberWithAgent,
   type Agent,
+  type ArtifactContent,
+  type ArtifactDescriptor,
 } from "@valuz/core";
 import {
   ApprovalCard,
   ApprovalResolvedStrip,
   AutoApprovedStrip,
   AskUserQuestionCard,
+  ArtifactViewerShell,
   AutomationToolCard,
   DeleteConfirmDialog,
   DropdownMenu,
@@ -133,6 +136,31 @@ function toFileTree(nodes: ProjectFileNode[], prefix = ""): FileTreeNode[] {
     if (n.children) result.children = toFileTree(n.children, path);
     return result;
   });
+}
+
+function resolveConversationArtifactPath(path: string, rootPath: string): string {
+  if (!path) return path;
+  if (path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path)) return path;
+  if (!rootPath) return path;
+  const sep = rootPath.includes("\\") ? "\\" : "/";
+  const trimmed = rootPath.endsWith(sep) ? rootPath.slice(0, -1) : rootPath;
+  return `${trimmed}${sep}${path}`;
+}
+
+function toConversationRelativeArtifactPath(
+  path: string,
+  rootPath: string,
+): string | null {
+  if (!path) return null;
+  const normalizedPath = path.replace(/\\/g, "/");
+  if (!normalizedPath.startsWith("/") && !/^[a-zA-Z]:\//.test(normalizedPath)) {
+    return normalizedPath.replace(/^\/+/, "");
+  }
+  if (!rootPath) return null;
+  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normalizedPath === normalizedRoot) return null;
+  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return null;
+  return normalizedPath.slice(normalizedRoot.length + 1);
 }
 
 function formatFileSize(bytes: number): string {
@@ -939,6 +967,14 @@ export const ConversationPage = () => {
     useState<SkillView | null>(null);
   const [projectSkills, setProjectSkills] = useState<SkillView[]>([]);
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(
+    null,
+  );
+  const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
+  const [artifactContent, setArtifactContent] =
+    useState<ArtifactContent | null>(null);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
 
   const activeProject = useMemo(
     () =>
@@ -947,6 +983,72 @@ export const ConversationPage = () => {
         | undefined) ?? null,
     [selectedProjectId, projects],
   );
+  const activeProjectRootPath = useMemo(() => {
+    const detail = activeProject as ProjectDetail | null;
+    return detail?.cwd ?? detail?.root_path ?? "";
+  }, [activeProject]);
+
+  const openArtifactFile = useCallback(
+    async (path: string) => {
+      if (!selectedProjectId || selectedProjectId === "chat-default") return;
+      const normalized = toConversationRelativeArtifactPath(
+        path,
+        activeProjectRootPath,
+      );
+      if (!normalized) {
+        setSelectedArtifactPath(path);
+        setArtifact(null);
+        setArtifactContent(null);
+        setArtifactLoading(false);
+        setArtifactError(t("task.artifactOpenInFinder" as Parameters<typeof t>[0]));
+        return;
+      }
+      setSelectedArtifactPath(normalized);
+      setArtifactLoading(true);
+      setArtifactError(null);
+      try {
+        const result = await projectsApi.readFile(selectedProjectId, normalized);
+        setArtifact(result.artifact);
+        setArtifactContent(result.content);
+      } catch (error) {
+        setArtifact(null);
+        setArtifactContent(null);
+        setArtifactError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setArtifactLoading(false);
+      }
+    },
+    [activeProjectRootPath, selectedProjectId, t],
+  );
+
+  const handleArtifactReload = useCallback(() => {
+    if (selectedArtifactPath) {
+      void openArtifactFile(selectedArtifactPath);
+    }
+  }, [openArtifactFile, selectedArtifactPath]);
+
+  const handleArtifactClose = useCallback(() => {
+    setSelectedArtifactPath(null);
+    setArtifact(null);
+    setArtifactContent(null);
+    setArtifactLoading(false);
+    setArtifactError(null);
+  }, []);
+
+  const handleArtifactCopy = useCallback(() => {
+    if (artifactContent?.kind !== "text") return;
+    void navigator.clipboard
+      ?.writeText(artifactContent.content)
+      .then(() => toast.success(t("common.copied" as Parameters<typeof t>[0])))
+      .catch(() => toast.error(t("common.failed" as Parameters<typeof t>[0])));
+  }, [artifactContent, t]);
+
+  const handleArtifactOpenExternal = useCallback(() => {
+    if (!selectedArtifactPath) return;
+    void revealInFinder(
+      resolveConversationArtifactPath(selectedArtifactPath, activeProjectRootPath),
+    );
+  }, [activeProjectRootPath, revealInFinder, selectedArtifactPath]);
 
   // Project KB bindings — loaded for project projects only and
   // rendered **read-only** in the session panel (per product rule,
@@ -3784,18 +3886,16 @@ export const ConversationPage = () => {
           }
           void revealInFinder(path);
         }}
+        onFileClick={(relPath) => {
+          void openArtifactFile(relPath);
+        }}
         onFileDoubleClick={(relPath) => {
-          // FileTreeNode.path is relative to the project cwd (built
-          // by ``toFileTree`` from ``ProjectFileNode``). Resolve to
-          // an absolute path before handing off to the main process,
-          // which calls ``shell.openPath`` — opens files in their
-          // OS-associated app (.py -> VSCode/PyCharm, .csv -> Excel/
-          // Numbers, .md -> Typora/system editor, etc.).
-          const ws = activeProject as ProjectDetail | null;
-          const cwd = ws?.cwd ?? ws?.root_path;
-          if (!cwd) return;
-          const sep = cwd.endsWith("/") ? "" : "/";
-          void revealInFinder(`${cwd}${sep}${relPath}`);
+          void openArtifactFile(relPath);
+        }}
+        onOpenInSystem={(relPath) => {
+          void revealInFinder(
+            resolveConversationArtifactPath(relPath, activeProjectRootPath),
+          );
         }}
         onRefreshFiles={refreshFileTree}
         collapsed={panelCollapsed}
@@ -3806,6 +3906,8 @@ export const ConversationPage = () => {
   }, [
     activeProject,
     fileTree,
+    activeProjectRootPath,
+    openArtifactFile,
     panelCollapsed,
     panelSetCollapsed,
     selectedComposerSkill,
@@ -3856,6 +3958,11 @@ export const ConversationPage = () => {
   useEffect(() => {
     setSessionAttachments([]);
     setFileTree([]);
+    setSelectedArtifactPath(null);
+    setArtifact(null);
+    setArtifactContent(null);
+    setArtifactLoading(false);
+    setArtifactError(null);
   }, [selectedSessionId, setSessionAttachments]);
 
   // Drive the right-panel collapsed state from per-session data:
@@ -4101,6 +4208,19 @@ export const ConversationPage = () => {
                 {t("conversation.goToSettings" as Parameters<typeof t>[0])}
               </button>
             </div>
+          </div>
+        ) : selectedArtifactPath || artifactLoading || artifactError ? (
+          <div className="min-h-0 flex-1 p-3">
+            <ArtifactViewerShell
+              artifact={artifact}
+              content={artifactContent}
+              loading={artifactLoading}
+              error={artifactError}
+              onReload={handleArtifactReload}
+              onClose={handleArtifactClose}
+              onCopyContent={handleArtifactCopy}
+              onOpenExternal={handleArtifactOpenExternal}
+            />
           </div>
         ) : (
           <>
