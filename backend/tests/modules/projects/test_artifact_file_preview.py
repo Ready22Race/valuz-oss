@@ -46,6 +46,34 @@ async def test_read_xlsx_file_returns_spreadsheet_artifact(tmp_path) -> None:
     assert result.content.open_url == "/v1/projects/proj_1/raw-files/model.xlsx"
 
 
+async def test_read_large_xlsx_file_within_spreadsheet_limit_returns_raw_url(
+    tmp_path,
+) -> None:
+    path = tmp_path / "large.xlsx"
+    path.write_bytes(b"PK\x03\x04")
+    with path.open("ab") as fh:
+        fh.truncate(21 * 1024 * 1024)
+
+    result = await _service(str(tmp_path)).read_file("user-1", "proj_1", path.name)
+
+    assert result.artifact.preview_kind == "spreadsheet"
+    assert result.content.kind == "binary"
+    assert result.content.open_url == "/v1/projects/proj_1/raw-files/large.xlsx"
+
+
+async def test_read_huge_xlsx_file_returns_external_artifact(tmp_path) -> None:
+    path = tmp_path / "huge.xlsx"
+    path.write_bytes(b"PK\x03\x04")
+    with path.open("ab") as fh:
+        fh.truncate(101 * 1024 * 1024)
+
+    result = await _service(str(tmp_path)).read_file("user-1", "proj_1", path.name)
+
+    assert result.artifact.preview_kind == "spreadsheet"
+    assert result.content.kind == "external"
+    assert "parsing limit" in result.content.reason
+
+
 async def test_read_csv_file_returns_spreadsheet_artifact(tmp_path) -> None:
     (tmp_path / "data.csv").write_text("ticker,value\nAAPL,1", encoding="utf-8")
 
@@ -94,7 +122,7 @@ async def test_read_legacy_doc_file_is_not_docx_preview(tmp_path) -> None:
     assert result.content.kind == "external"
 
 
-async def test_read_image_file_returns_data_url_artifact(tmp_path) -> None:
+async def test_read_image_file_returns_raw_url_artifact(tmp_path) -> None:
     (tmp_path / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\n")
 
     result = await _service(str(tmp_path)).read_file("user-1", "proj_1", "chart.png")
@@ -102,7 +130,18 @@ async def test_read_image_file_returns_data_url_artifact(tmp_path) -> None:
     assert result.artifact.preview_kind == "image"
     assert result.content.kind == "binary"
     assert result.content.mime_type == "image/png"
-    assert result.content.open_url.startswith("data:image/png;base64,")
+    assert result.content.open_url == "/v1/projects/proj_1/raw-files/chart.png"
+
+
+async def test_read_large_image_file_returns_raw_url_artifact(tmp_path) -> None:
+    (tmp_path / "large.png").write_bytes(b"\x89PNG\r\n\x1a\n" + (b"0" * (6 * 1024 * 1024)))
+
+    result = await _service(str(tmp_path)).read_file("user-1", "proj_1", "large.png")
+
+    assert result.artifact.preview_kind == "image"
+    assert result.content.kind == "binary"
+    assert result.content.mime_type == "image/png"
+    assert result.content.open_url == "/v1/projects/proj_1/raw-files/large.png"
 
 
 async def test_read_media_file_returns_raw_url_artifact(tmp_path) -> None:
@@ -138,6 +177,27 @@ async def test_read_pdf_file_returns_raw_url_artifact(tmp_path) -> None:
     assert result.content.kind == "binary"
     assert result.content.mime_type == "application/pdf"
     assert result.content.open_url == "/v1/projects/proj_1/raw-files/report.pdf"
+
+
+async def test_read_large_pdf_file_returns_raw_url_artifact(tmp_path) -> None:
+    (tmp_path / "large.pdf").write_bytes(b"%PDF-1.4\n" + (b"0" * (21 * 1024 * 1024)))
+
+    result = await _service(str(tmp_path)).read_file("user-1", "proj_1", "large.pdf")
+
+    assert result.artifact.preview_kind == "pdf"
+    assert result.content.kind == "binary"
+    assert result.content.mime_type == "application/pdf"
+    assert result.content.open_url == "/v1/projects/proj_1/raw-files/large.pdf"
+
+
+async def test_read_large_docx_file_returns_external_artifact(tmp_path) -> None:
+    (tmp_path / "large.docx").write_bytes(b"PK\x03\x04" + (b"0" * (21 * 1024 * 1024)))
+
+    result = await _service(str(tmp_path)).read_file("user-1", "proj_1", "large.docx")
+
+    assert result.artifact.preview_kind == "docx"
+    assert result.content.kind == "external"
+    assert "parsing limit" in result.content.reason
 
 
 async def test_resolve_file_resource_returns_safe_raw_file_metadata(tmp_path) -> None:

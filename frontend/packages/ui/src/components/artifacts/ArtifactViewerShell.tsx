@@ -357,7 +357,7 @@ function CodeMirrorRenderer({
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden" />
       {content.truncated ? (
         <div className="border-t border-surface-border bg-warning-light px-4 py-2 text-xs text-warning-text">
-          文件较大，当前仅显示前 1 MiB。
+          文件较大，当前仅显示前 5 MiB。
         </div>
       ) : null}
     </div>
@@ -385,7 +385,7 @@ function TextRenderer({
           <div className="mx-auto max-w-[820px]">
             {content.truncated ? (
               <div className="mb-4 rounded-md border border-warning-light bg-warning-light px-3 py-2 text-xs text-warning-text">
-                文件较大，当前仅显示前 1 MiB。
+                文件较大，当前仅显示前 5 MiB。
               </div>
             ) : null}
             <MarkdownContent content={content.content} />
@@ -408,7 +408,7 @@ function TextRenderer({
       </pre>
       {content.truncated ? (
         <div className="border-t border-surface-border bg-warning-light px-4 py-2 text-xs text-warning-text">
-          文件较大，当前仅显示前 1 MiB。
+          文件较大，当前仅显示前 5 MiB。
         </div>
       ) : null}
     </div>
@@ -574,7 +574,7 @@ function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
       </div>
       {content.truncated ? (
         <div className="border-t border-surface-border bg-warning-light px-4 py-2 text-xs text-warning-text">
-          文件较大，当前仅显示前 1 MiB。
+          文件较大，当前仅显示前 5 MiB。
         </div>
       ) : null}
     </div>

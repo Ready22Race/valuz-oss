@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import mimetypes
-from base64 import b64encode
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -52,9 +51,9 @@ HIDDEN_NAMES = frozenset(
     }
 )
 
-TEXT_PREVIEW_LIMIT = 1024 * 1024
-IMAGE_PREVIEW_LIMIT = 5 * 1024 * 1024
-PDF_PREVIEW_LIMIT = 20 * 1024 * 1024
+TEXT_PREVIEW_LIMIT = 5 * 1024 * 1024
+DOCX_PARSE_PREVIEW_LIMIT = 20 * 1024 * 1024
+SPREADSHEET_PARSE_PREVIEW_LIMIT = 100 * 1024 * 1024
 IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "svg"})
 MEDIA_EXTENSIONS = frozenset({"mp3", "wav", "m4a", "ogg", "mp4", "webm", "mov"})
 MARKDOWN_EXTENSIONS = frozenset({"md", "markdown", "mdx"})
@@ -544,19 +543,13 @@ class ProjectService:
             )
         elif preview_kind == "image":
             resolved_mime = mime_type or "application/octet-stream"
-            if stat.st_size <= IMAGE_PREVIEW_LIMIT:
-                encoded = b64encode(target.read_bytes()).decode("ascii")
-                content = BinaryArtifactContent(
-                    kind="binary",
-                    open_url=f"data:{resolved_mime};base64,{encoded}",
-                    mime_type=resolved_mime,
-                    size=stat.st_size,
-                )
-            else:
-                content = ExternalArtifactContent(
-                    kind="external",
-                    reason="Image is larger than the inline preview limit.",
-                )
+            encoded_path = quote(rel_path, safe="/")
+            content = BinaryArtifactContent(
+                kind="binary",
+                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
+                mime_type=resolved_mime,
+                size=stat.st_size,
+            )
         elif preview_kind == "media":
             resolved_mime = mime_type or "application/octet-stream"
             encoded_path = quote(rel_path, safe="/")
@@ -566,11 +559,23 @@ class ProjectService:
                 mime_type=resolved_mime,
                 size=stat.st_size,
             )
-        elif preview_kind in {"pdf", "docx", "spreadsheet"}:
-            resolved_mime = mime_type or (
-                "application/pdf" if preview_kind == "pdf" else "application/octet-stream"
+        elif preview_kind == "pdf":
+            resolved_mime = mime_type or "application/pdf"
+            encoded_path = quote(rel_path, safe="/")
+            content = BinaryArtifactContent(
+                kind="binary",
+                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
+                mime_type=resolved_mime,
+                size=stat.st_size,
             )
-            if stat.st_size <= PDF_PREVIEW_LIMIT:
+        elif preview_kind in {"docx", "spreadsheet"}:
+            resolved_mime = mime_type or "application/octet-stream"
+            parse_limit = (
+                SPREADSHEET_PARSE_PREVIEW_LIMIT
+                if preview_kind == "spreadsheet"
+                else DOCX_PARSE_PREVIEW_LIMIT
+            )
+            if stat.st_size <= parse_limit:
                 encoded_path = quote(rel_path, safe="/")
                 content = BinaryArtifactContent(
                     kind="binary",
@@ -581,7 +586,9 @@ class ProjectService:
             else:
                 content = ExternalArtifactContent(
                     kind="external",
-                    reason=f"{preview_kind.upper()} is larger than the inline preview limit.",
+                    reason=(
+                        f"{preview_kind.upper()} is larger than the in-app parsing limit."
+                    ),
                 )
         else:
             content = ExternalArtifactContent(
