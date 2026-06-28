@@ -6,7 +6,7 @@ import {
   useState,
   type ComponentType,
 } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   ArrowLeft,
@@ -29,6 +29,7 @@ import {
   XCircle,
 } from "lucide-react";
 import {
+  ArtifactViewerShell,
   BackLink,
   Button,
   ConversationTurnList,
@@ -49,6 +50,8 @@ import {
   useDecisionPending,
   useTaskEvents,
   useTranslation,
+  type ArtifactContent,
+  type ArtifactDescriptor,
   type DecisionEntry,
   type IntervenePayload,
   type MemberWithAgent,
@@ -192,6 +195,19 @@ function resolveArtifactPath(path: string, rootPath: string): string {
   return `${trimmed}${sep}${path}`;
 }
 
+function toProjectRelativeArtifactPath(path: string, rootPath: string): string | null {
+  if (!path) return null;
+  const normalizedPath = path.replace(/\\/g, "/");
+  if (!normalizedPath.startsWith("/") && !/^[a-zA-Z]:\//.test(normalizedPath)) {
+    return normalizedPath.replace(/^\/+/, "");
+  }
+  if (!rootPath) return null;
+  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normalizedPath === normalizedRoot) return null;
+  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return null;
+  return normalizedPath.slice(normalizedRoot.length + 1);
+}
+
 function artifactIconClassName(filename: string): string {
   const extension = filename.split(".").pop()?.toLowerCase();
   if (extension === "md" || extension === "markdown") return "text-[#725cf9]";
@@ -316,6 +332,7 @@ const pendingQuestionText = (entry: DecisionEntry): string => {
 export const TaskDetailPage = () => {
   const { taskId = "" } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { t } = useTranslation();
   const { setHeader, setHideHeader, setRightPanel } = useProjectOutlet();
   // Pending confirmations (AskUserQuestion) raised by this task's agents —
@@ -329,6 +346,15 @@ export const TaskDetailPage = () => {
   const [rootPath, setRootPath] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(
+    null,
+  );
+  const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
+  const [artifactContent, setArtifactContent] =
+    useState<ArtifactContent | null>(null);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
+  const selectedFileParam = searchParams.get("file");
 
   // revise-goal dialog (note dialog removed — backend wasn't reading
   // user_note events back into lead context, so the action was a no-op
@@ -442,12 +468,120 @@ export const TaskDetailPage = () => {
     void openArtifact(rootPath, t as Translator);
   }, [rootPath, t]);
 
+  const openArtifactFile = useCallback(
+    async (relPath: string, options?: { syncUrl?: boolean }) => {
+      if (!projectId) return;
+      const normalized = toProjectRelativeArtifactPath(relPath, rootPath);
+      if (!normalized) {
+        setSelectedArtifactPath(relPath);
+        setArtifact(null);
+        setArtifactContent(null);
+        setArtifactError(t("task.artifactOpenInFinder" as Parameters<typeof t>[0]));
+        return;
+      }
+      if (options?.syncUrl !== false && searchParams.get("file") !== normalized) {
+        setSearchParams(
+          (current) => {
+            const next = new URLSearchParams(current);
+            next.set("file", normalized);
+            return next;
+          },
+          { replace: false },
+        );
+      }
+      setSelectedArtifactPath(normalized);
+      setArtifactLoading(true);
+      setArtifactError(null);
+      try {
+        const result = await projectsApi.readFile(projectId, normalized);
+        setArtifact(result.artifact);
+        setArtifactContent(result.content);
+      } catch (error) {
+        setArtifact(null);
+        setArtifactContent(null);
+        setArtifactError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setArtifactLoading(false);
+      }
+    },
+    [projectId, rootPath, searchParams, setSearchParams, t],
+  );
+
+  useEffect(() => {
+    if (!selectedFileParam) {
+      if (selectedArtifactPath) {
+        const timer = window.setTimeout(() => {
+          setSelectedArtifactPath(null);
+          setArtifact(null);
+          setArtifactContent(null);
+          setArtifactError(null);
+        }, 0);
+        return () => window.clearTimeout(timer);
+      }
+      return;
+    }
+    if (
+      selectedFileParam === selectedArtifactPath &&
+      (artifact || artifactLoading || artifactError)
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void openArtifactFile(selectedFileParam, { syncUrl: false });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [
+    artifact,
+    artifactError,
+    artifactLoading,
+    openArtifactFile,
+    selectedArtifactPath,
+    selectedFileParam,
+  ]);
+
+  const handleArtifactReload = useCallback(() => {
+    if (selectedArtifactPath) {
+      void openArtifactFile(selectedArtifactPath);
+    }
+  }, [openArtifactFile, selectedArtifactPath]);
+
+  const handleArtifactClose = useCallback(() => {
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("file");
+        return next;
+      },
+      { replace: true },
+    );
+    setSelectedArtifactPath(null);
+    setArtifact(null);
+    setArtifactContent(null);
+    setArtifactError(null);
+  }, [setSearchParams]);
+
+  const handleArtifactCopy = useCallback(() => {
+    if (artifactContent?.kind !== "text") return;
+    void navigator.clipboard
+      ?.writeText(artifactContent.content)
+      .then(() => toast.success(t("common.copied" as Parameters<typeof t>[0])))
+      .catch(() => toast.error(t("common.failed" as Parameters<typeof t>[0])));
+  }, [artifactContent, t]);
+
+  const handleArtifactOpenExternal = useCallback(() => {
+    if (!rootPath || !selectedArtifactPath) return;
+    void openArtifact(
+      resolveArtifactPath(selectedArtifactPath, rootPath),
+      t as Translator,
+    );
+  }, [rootPath, selectedArtifactPath, t]);
+
   // Open a project file from the right-rail file tree (double-click /
   // right-click → open). The tree node's ``path`` is project-relative, so
   // resolve it against the cwd and hand off to the same ``open_in_finder``
   // IPC (``shell.openPath``) the artifact list uses — opens the file in its
   // OS-associated app.
-  const handleOpenFile = useCallback(
+  const handleOpenFileExternal = useCallback(
     (relPath: string) => {
       if (!rootPath) return;
       void openArtifact(resolveArtifactPath(relPath, rootPath), t as Translator);
@@ -483,11 +617,23 @@ export const TaskDetailPage = () => {
         plannedSubtasks={plannedSubtasks}
         onRefreshFiles={refreshFileTree}
         onOpenInFinder={rootPath ? handleOpenProjectInFinder : undefined}
-        onOpenFile={rootPath ? handleOpenFile : undefined}
+        onPreviewFile={projectId ? (path) => void openArtifactFile(path) : undefined}
+        onOpenFile={rootPath ? handleOpenFileExternal : undefined}
       />,
     );
     return () => setRightPanel(null);
-  }, [detail, members, fileTree, rootPath, setRightPanel]);
+  }, [
+    detail,
+    members,
+    fileTree,
+    rootPath,
+    projectId,
+    setRightPanel,
+    refreshFileTree,
+    handleOpenProjectInFinder,
+    openArtifactFile,
+    handleOpenFileExternal,
+  ]);
 
   const runIntervene = useCallback(
     async (payload: IntervenePayload, successKey: string): Promise<boolean> => {
@@ -837,6 +983,23 @@ export const TaskDetailPage = () => {
   // pure repetition. Only surface the goal card when it adds something — a goal
   // distinct from the title, or staged attachments.
   const goalDiffersFromTitle = task.goal.trim() !== task.title.trim();
+
+  if (selectedArtifactPath || artifactLoading || artifactError) {
+    return (
+      <div className="flex h-full min-h-0 flex-col p-3">
+        <ArtifactViewerShell
+          artifact={artifact}
+          content={artifactContent}
+          loading={artifactLoading}
+          error={artifactError}
+          onReload={handleArtifactReload}
+          onClose={handleArtifactClose}
+          onCopyContent={handleArtifactCopy}
+          onOpenExternal={handleArtifactOpenExternal}
+        />
+      </div>
+    );
+  }
 
   // ``leadSessionId`` / ``subtaskRuns`` / ``activeSubtask`` used to live here
   // for the inline right-rail aside. The aside now lives in the AppShell's
@@ -1197,21 +1360,15 @@ export const TaskDetailPage = () => {
                 // accordion off-screen; the user scrolls inside the list
                 // instead of scrolling the whole page.
                 <ul className="flex max-h-[280px] flex-col overflow-y-auto">
-                  {completionInfo.artifacts.map((path) => {
-                    const basename = path.split(/[\\/]/).pop() || path;
-                    const absolute = resolveArtifactPath(path, rootPath);
-                    return (
-                      <li key={path}>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void openArtifact(absolute, t as Translator)
-                          }
-                          title={t(
-                            "task.artifactOpenInFinder" as Parameters<
-                              typeof t
-                            >[0],
-                          )}
+	                  {completionInfo.artifacts.map((path) => {
+	                    const basename = path.split(/[\\/]/).pop() || path;
+	                    const absolute = resolveArtifactPath(path, rootPath);
+	                    return (
+	                      <li key={path}>
+	                        <button
+	                          type="button"
+	                          onClick={() => void openArtifactFile(path)}
+	                          title={absolute}
                           className="group flex h-[54px] w-full items-center gap-3 px-4 text-left transition-colors hover:bg-[#fafbfd]"
                         >
                           <span

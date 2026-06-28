@@ -5,6 +5,7 @@ export * from "./components/Composer";
 export * from "./components/ContextPanel";
 export * from "./components/SectionCard";
 export * from "./components/ToolCallCard";
+export * from "./components/artifacts/ArtifactViewerShell";
 // Domain components
 export * from "./components/common/ErrorBoundary";
 export * from "./components/common/ActionCardGrid";

@@ -364,6 +364,67 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Task"
+  /v1/projects/{project_id}/files/{file_path}:
+    get:
+      summary: Read a project file as an artifact preview
+      operationId: readProjectFileArtifact
+      tags: [projects]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: file_path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Relative project file path. May include slashes when URL-encoded by the client.
+      responses:
+        "200":
+          description: Artifact descriptor and preview content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactFileResponse"
+        "403":
+          description: File is blocked by preview policy
+        "404":
+          description: Project or file not found
+        "422":
+          description: Invalid file path
+  /v1/projects/{project_id}/raw-files/{file_path}:
+    get:
+      summary: Stream a project file for renderer use
+      operationId: readProjectRawFile
+      tags: [projects]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: file_path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Relative project file path. May include slashes when URL-encoded by the client.
+      responses:
+        "200":
+          description: Raw file bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "403":
+          description: File is blocked by preview policy
+        "404":
+          description: Project or file not found
+        "422":
+          description: Invalid file path
   /v1/tasks:
     get:
       summary: List tasks across every project
@@ -2621,6 +2682,74 @@ paths:
 
 components:
   schemas:
+    ArtifactCapabilities:
+      type: object
+      required: [canPreview, canEdit, canOpenExternal, canCopyContent, canDownload]
+      properties:
+        canPreview: {type: boolean}
+        canEdit: {type: boolean}
+        canOpenExternal: {type: boolean}
+        canCopyContent: {type: boolean}
+        canDownload: {type: boolean}
+    ArtifactDescriptor:
+      type: object
+      required: [id, kind, projectId, path, name, previewKind, capabilities]
+      properties:
+        id: {type: string}
+        kind:
+          type: string
+          enum: [project_file, session_output, document_artifact, slides_artifact, webpage_artifact]
+        projectId: {type: string}
+        path: {type: string}
+        name: {type: string}
+        mimeType: {type: string, nullable: true}
+        extension: {type: string, nullable: true}
+        size: {type: integer, nullable: true}
+        modifiedAt: {type: string, nullable: true}
+        previewKind:
+          type: string
+          enum: [markdown, code, image, pdf, html, docx, media, spreadsheet, plain, unsupported]
+        capabilities:
+          $ref: "#/components/schemas/ArtifactCapabilities"
+    TextArtifactContent:
+      type: object
+      required: [kind, encoding, content, truncated]
+      properties:
+        kind: {type: string, enum: [text]}
+        encoding: {type: string, enum: [utf-8]}
+        content: {type: string}
+        truncated: {type: boolean}
+        etag: {type: string, nullable: true}
+        modifiedAt: {type: string, nullable: true}
+    BinaryArtifactContent:
+      type: object
+      required: [kind, openUrl, mimeType]
+      properties:
+        kind: {type: string, enum: [binary]}
+        openUrl: {type: string}
+        mimeType: {type: string}
+        size: {type: integer, nullable: true}
+        reason: {type: string, nullable: true}
+    ExternalArtifactContent:
+      type: object
+      required: [kind, reason]
+      properties:
+        kind: {type: string, enum: [external]}
+        reason: {type: string}
+        openUrl: {type: string, nullable: true}
+    ArtifactContent:
+      oneOf:
+        - $ref: "#/components/schemas/TextArtifactContent"
+        - $ref: "#/components/schemas/BinaryArtifactContent"
+        - $ref: "#/components/schemas/ExternalArtifactContent"
+    ArtifactFileResponse:
+      type: object
+      required: [artifact, content]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/ArtifactDescriptor"
+        content:
+          $ref: "#/components/schemas/ArtifactContent"
     BrowserStatus:
       type: object
       required: [daemon_running, mode, node_ok, cli_prefix, hints]

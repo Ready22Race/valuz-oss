@@ -39,6 +39,70 @@ export interface ProjectFileNode {
   children?: ProjectFileNode[];
 }
 
+export type ArtifactPreviewKind =
+  | "markdown"
+  | "code"
+  | "image"
+  | "pdf"
+  | "html"
+  | "docx"
+  | "media"
+  | "spreadsheet"
+  | "plain"
+  | "unsupported";
+
+export interface ArtifactDescriptor {
+  id: string;
+  kind:
+    | "project_file"
+    | "session_output"
+    | "document_artifact"
+    | "slides_artifact"
+    | "webpage_artifact";
+  projectId?: string;
+  path?: string;
+  name: string;
+  mimeType?: string | null;
+  extension?: string | null;
+  size?: number | null;
+  modifiedAt?: string | null;
+  previewKind: ArtifactPreviewKind;
+  capabilities: {
+    canPreview: boolean;
+    canEdit: boolean;
+    canOpenExternal: boolean;
+    canCopyContent: boolean;
+    canDownload: boolean;
+  };
+}
+
+export type ArtifactContent =
+  | {
+      kind: "text";
+      encoding: "utf-8";
+      content: string;
+      truncated: boolean;
+      etag?: string | null;
+      modifiedAt?: string | null;
+    }
+  | {
+      kind: "binary";
+      openUrl: string;
+      mimeType: string;
+      size?: number | null;
+      reason?: string | null;
+    }
+  | {
+      kind: "external";
+      openUrl?: string | null;
+      reason: string;
+    };
+
+export interface ArtifactFileResponse {
+  artifact: ArtifactDescriptor;
+  content: ArtifactContent;
+}
+
 export interface LastSessionPick {
   runtime_provider: string | null;
   provider_id: string | null;
@@ -56,6 +120,27 @@ export interface ProjectCreateRequest {
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
+
+function absolutizeApiUrl(url: string): string {
+  if (/^https?:\/\//i.test(url) || url.startsWith("data:") || url.startsWith("blob:")) {
+    return url;
+  }
+  if (!url.startsWith("/")) return url;
+  return `${_apiBase.replace(/\/$/, "")}${url}`;
+}
+
+function normalizeArtifactFileResponse(
+  response: ArtifactFileResponse,
+): ArtifactFileResponse {
+  if (response.content.kind !== "binary") return response;
+  return {
+    ...response,
+    content: {
+      ...response.content,
+      openUrl: absolutizeApiUrl(response.content.openUrl),
+    },
+  };
+}
 
 export const projectsApi = {
   list(): Promise<{ projects: ProjectListItem[] }> {
@@ -120,6 +205,16 @@ export const projectsApi = {
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/files${suffix}`,
     );
+  },
+
+  readFile(projectId: string, filePath: string): Promise<ArtifactFileResponse> {
+    const encodedPath = filePath
+      .split("/")
+      .map((part) => encodeURIComponent(part))
+      .join("/");
+    return fetchJson<ArtifactFileResponse>(
+      `/v1/projects/${encodeURIComponent(projectId)}/files/${encodedPath}`,
+    ).then(normalizeArtifactFileResponse);
   },
 
   deletePreview(projectId: string): Promise<ProjectDeletePreview> {

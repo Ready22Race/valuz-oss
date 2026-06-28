@@ -6,7 +6,7 @@ import {
   useMemo,
   useRef,
 } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Button,
   Composer,
@@ -17,11 +17,7 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
   DeleteConfirmDialog,
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
+  ArtifactViewerShell,
   ProjectDetailContextPanel,
   type FileTreeNode,
   type ProjectMemberItem,
@@ -74,6 +70,8 @@ import {
   type Trigger,
   type ProjectDetail,
   type ProjectFileNode,
+  type ArtifactDescriptor,
+  type ArtifactContent,
   type LLMChannelDetail,
   type LLMChannel,
   type ConnectorItem,
@@ -97,58 +95,6 @@ import {
 import { toFileTree } from "../lib/file-tree";
 import { BUCKET_KEY, groupByTimeBucket } from "../lib/time-buckets";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
-
-const TEXT_EXTENSIONS = new Set([
-  "txt",
-  "md",
-  "py",
-  "ts",
-  "tsx",
-  "js",
-  "jsx",
-  "json",
-  "yml",
-  "yaml",
-  "csv",
-  "xml",
-  "html",
-  "css",
-  "scss",
-  "sh",
-  "bash",
-  "zsh",
-  "toml",
-  "ini",
-  "cfg",
-  "log",
-  "sql",
-  "go",
-  "rs",
-  "java",
-  "c",
-  "cpp",
-  "h",
-  "rb",
-  "php",
-  "swift",
-  "kt",
-  "vue",
-  "svelte",
-  "astro",
-  "env",
-  "gitignore",
-  "dockerignore",
-  "editorconfig",
-  "prettierrc",
-  "eslintrc",
-]);
-
-function isTextFile(name: string): boolean {
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  // Handle dotfiles like .env, .gitignore
-  if (name.startsWith(".") && TEXT_EXTENSIONS.has(name.slice(1))) return true;
-  return TEXT_EXTENSIONS.has(ext);
-}
 
 // Volatile fields that decide whether a polled task row differs from the one
 // already on screen — if equal we reuse the old object reference so unaffected
@@ -672,6 +618,7 @@ export const ProjectDetailPage = () => {
   const { deleteFile, revealInFinder } = usePlatform();
   const { id = "" } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const {
     setRightPanel,
     setHeader,
@@ -1176,9 +1123,15 @@ export const ProjectDetailPage = () => {
     expandFolder: pickerExpandFolder,
   } = useKbDocTree(kbPickerOpen);
   const [scheduledTasks, setScheduledTasks] = useState<AutomationItem[]>([]);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewFileName, setPreviewFileName] = useState("");
-  const [previewContent, setPreviewContent] = useState<string | null>(null);
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(
+    null,
+  );
+  const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
+  const [artifactContent, setArtifactContent] =
+    useState<ArtifactContent | null>(null);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
+  const selectedFileParam = searchParams.get("file");
   const [newTaskOpen, setNewTaskOpen] = useState(false);
   // When set, the automation dialog opens in edit mode (PATCH the row) instead
   // of create. Holds the fetched detail (prompt_template + trigger) so the
@@ -1450,33 +1403,102 @@ export const ProjectDetailPage = () => {
     }
   };
 
-  const handleFileDoubleClick = (relPath: string) => {
-    const fileName = relPath.split("/").pop() ?? relPath;
-    if (!isTextFile(fileName)) {
-      if (project?.root_path) {
-        void revealInFinder(`${project.root_path}/${relPath}`);
+  const openArtifactFile = useCallback(
+    async (relPath: string, options?: { syncUrl?: boolean }) => {
+      if (!id) return;
+      if (options?.syncUrl !== false && searchParams.get("file") !== relPath) {
+        setSearchParams(
+          (current) => {
+            const next = new URLSearchParams(current);
+            next.set("file", relPath);
+            return next;
+          },
+          { replace: false },
+        );
+      }
+      setSelectedArtifactPath(relPath);
+      setArtifactLoading(true);
+      setArtifactError(null);
+      try {
+        const result = await projectsApi.readFile(id, relPath);
+        setArtifact(result.artifact);
+        setArtifactContent(result.content);
+      } catch (error) {
+        setArtifact(null);
+        setArtifactContent(null);
+        setArtifactError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setArtifactLoading(false);
+      }
+    },
+    [id, searchParams, setSearchParams],
+  );
+
+  useEffect(() => {
+    if (!selectedFileParam) {
+      if (selectedArtifactPath) {
+        const timer = window.setTimeout(() => {
+          setSelectedArtifactPath(null);
+          setArtifact(null);
+          setArtifactContent(null);
+          setArtifactError(null);
+        }, 0);
+        return () => window.clearTimeout(timer);
       }
       return;
     }
-    // Text file: read content and show preview dialog
-    if (project?.root_path) {
-      setPreviewFileName(fileName);
-      setPreviewContent(null);
-      setPreviewOpen(true);
-      (
-        window as unknown as {
-          valuzDesktop?: {
-            invoke: <T>(ch: string, args?: unknown) => Promise<T>;
-          };
-        }
-      ).valuzDesktop
-        ?.invoke<{ content: string | null }>("read_file_content", {
-          path: `${project.root_path}/${relPath}`,
-        })
-        .then((res) => setPreviewContent(res.content))
-        .catch(() => setPreviewContent(null));
+    if (
+      selectedFileParam === selectedArtifactPath &&
+      (artifact || artifactLoading || artifactError)
+    ) {
+      return;
     }
-  };
+    const timer = window.setTimeout(() => {
+      void openArtifactFile(selectedFileParam, { syncUrl: false });
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [
+    artifact,
+    artifactError,
+    artifactLoading,
+    openArtifactFile,
+    selectedArtifactPath,
+    selectedFileParam,
+  ]);
+
+  const handleArtifactReload = useCallback(() => {
+    if (selectedArtifactPath) {
+      void openArtifactFile(selectedArtifactPath);
+    }
+  }, [openArtifactFile, selectedArtifactPath]);
+
+  const handleArtifactClose = useCallback(() => {
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("file");
+        return next;
+      },
+      { replace: true },
+    );
+    setSelectedArtifactPath(null);
+    setArtifact(null);
+    setArtifactContent(null);
+    setArtifactError(null);
+  }, [setSearchParams]);
+
+  const handleArtifactCopy = useCallback(() => {
+    if (artifactContent?.kind !== "text") return;
+    void navigator.clipboard
+      ?.writeText(artifactContent.content)
+      .then(() => toast.success(t("common.copied" as Parameters<typeof t>[0])))
+      .catch(() => toast.error(t("common.failed" as Parameters<typeof t>[0])));
+  }, [artifactContent, t]);
+
+  const handleArtifactOpenExternal = useCallback(() => {
+    if (!project?.root_path || !selectedArtifactPath) return;
+    void revealInFinder(`${project.root_path}/${selectedArtifactPath}`);
+  }, [project, selectedArtifactPath, revealInFinder]);
 
   const handleInstructionsChange = async (md: string) => {
     setInstructions(md);
@@ -1704,11 +1726,10 @@ export const ProjectDetailPage = () => {
         rootPath={project?.root_path ?? ""}
         onRefreshFiles={refreshFileTree}
         onFileClick={(path) => {
-          const fileName = path.split("/").pop() ?? path;
-          setComposerValue((prev) => prev + (prev ? " " : "") + `@${fileName}`);
+          void openArtifactFile(path);
         }}
         onOpenInFinder={handleOpenInFinder}
-        onFileDoubleClick={handleFileDoubleClick}
+        onFileDoubleClick={(path) => void openArtifactFile(path)}
         onOpenInSystem={(path: string) => {
           void revealInFinder(path);
         }}
@@ -1764,6 +1785,7 @@ export const ProjectDetailPage = () => {
     connectors,
     selectedMcpSlugs,
     refreshFileTree,
+    openArtifactFile,
     openMember,
     // The right panel is rendered into a layout slot via ``setRightPanel`` —
     // it captures these by closure, so they MUST be deps or the panel shows a
@@ -1791,9 +1813,24 @@ export const ProjectDetailPage = () => {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Anchor the content stack at a stable top offset so the project title
+      {selectedArtifactPath || artifactLoading || artifactError ? (
+        <div className="min-h-0 flex-1 p-3">
+          <ArtifactViewerShell
+            artifact={artifact}
+            content={artifactContent}
+            loading={artifactLoading}
+            error={artifactError}
+            onReload={handleArtifactReload}
+            onClose={handleArtifactClose}
+            onCopyContent={handleArtifactCopy}
+            onOpenExternal={handleArtifactOpenExternal}
+          />
+        </div>
+      ) : (
+        <>
+          {/* Anchor the content stack at a stable top offset so the project title
           keeps a predictable visual position across desktop window sizes. */}
-      <div className="flex flex-1 flex-col items-center px-6 pt-20">
+          <div className="flex flex-1 flex-col items-center px-6 pt-20">
         <div className="flex w-full min-w-[400px] max-w-[760px] flex-col items-center gap-5">
           <div className="text-center">
             <h2 className="text-2xl font-medium leading-tight text-ink-heading">
@@ -1950,6 +1987,8 @@ export const ProjectDetailPage = () => {
           </div>
         </div>
       </div>
+        </>
+      )}
 
       {/* Project automation create — uses the same agent-driven dialog
           as the global Automation page, with task mode enabled (this is
@@ -1994,31 +2033,6 @@ export const ProjectDetailPage = () => {
         onChanged={loadMembers}
         onCreateNew={() => navigate("/agents")}
       />
-
-      {/* File Preview Dialog */}
-      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-        <DialogContent className="max-w-[640px]">
-          <DialogHeader>
-            <DialogTitle>{previewFileName}</DialogTitle>
-          </DialogHeader>
-          <div className="max-h-[480px] overflow-auto rounded-md border border-surface-border bg-surface-base p-3">
-            {previewContent === null ? (
-              <div className="flex items-center justify-center py-10 text-sm text-ink-meta">
-                {t("common.loading" as Parameters<typeof t>[0])}
-              </div>
-            ) : (
-              <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-5 text-ink-body">
-                {previewContent}
-              </pre>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPreviewOpen(false)}>
-              {t("common.close" as Parameters<typeof t>[0])}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Knowledge Base file picker overlay — tree view: documents
           organised under their KB and folders; folders expandable for

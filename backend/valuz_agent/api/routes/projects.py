@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from valuz_agent.api.deps import (
@@ -8,6 +9,7 @@ from valuz_agent.api.deps import (
 )
 from valuz_agent.modules.projects.models import ProjectCreateRequest
 from valuz_agent.modules.projects.service import (
+    ArtifactFileResponse,
     ProjectDeletePreview,
     ProjectDetail,
     ProjectListItem,
@@ -114,6 +116,50 @@ async def list_files(
         }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{project_id}/files/{file_path:path}")
+async def read_file(
+    project_id: str,
+    file_path: str,
+    user_id: str = Depends(require_current_user_id),
+    svc: ProjectService = Depends(get_project_service),
+) -> ArtifactFileResponse:
+    try:
+        return await svc.read_file(user_id, project_id, file_path)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/{project_id}/raw-files/{file_path:path}")
+async def read_raw_file(
+    project_id: str,
+    file_path: str,
+    user_id: str = Depends(require_current_user_id),
+    svc: ProjectService = Depends(get_project_service),
+) -> FileResponse:
+    try:
+        resource = await svc.resolve_file_resource(user_id, project_id, file_path)
+        return FileResponse(
+            resource.path,
+            media_type=resource.mime_type or "application/octet-stream",
+            filename=resource.name,
+            content_disposition_type="inline",
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/{project_id}/delete-preview")
