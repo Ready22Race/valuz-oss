@@ -559,19 +559,13 @@ class ProjectService:
                 )
         elif preview_kind == "media":
             resolved_mime = mime_type or "application/octet-stream"
-            if stat.st_size <= IMAGE_PREVIEW_LIMIT:
-                encoded = b64encode(target.read_bytes()).decode("ascii")
-                content = BinaryArtifactContent(
-                    kind="binary",
-                    open_url=f"data:{resolved_mime};base64,{encoded}",
-                    mime_type=resolved_mime,
-                    size=stat.st_size,
-                )
-            else:
-                content = ExternalArtifactContent(
-                    kind="external",
-                    reason="Media is larger than the inline preview limit.",
-                )
+            encoded_path = quote(rel_path, safe="/")
+            content = BinaryArtifactContent(
+                kind="binary",
+                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
+                mime_type=resolved_mime,
+                size=stat.st_size,
+            )
         elif preview_kind in {"pdf", "docx", "spreadsheet"}:
             resolved_mime = mime_type or (
                 "application/pdf" if preview_kind == "pdf" else "application/octet-stream"

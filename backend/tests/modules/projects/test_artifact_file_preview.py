@@ -105,7 +105,7 @@ async def test_read_image_file_returns_data_url_artifact(tmp_path) -> None:
     assert result.content.open_url.startswith("data:image/png;base64,")
 
 
-async def test_read_media_file_returns_data_url_artifact(tmp_path) -> None:
+async def test_read_media_file_returns_raw_url_artifact(tmp_path) -> None:
     (tmp_path / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42")
 
     result = await _service(str(tmp_path)).read_file("user-1", "proj_1", "clip.mp4")
@@ -113,7 +113,20 @@ async def test_read_media_file_returns_data_url_artifact(tmp_path) -> None:
     assert result.artifact.preview_kind == "media"
     assert result.content.kind == "binary"
     assert result.content.mime_type == "video/mp4"
-    assert result.content.open_url.startswith("data:video/mp4;base64,")
+    assert result.content.open_url == "/v1/projects/proj_1/raw-files/clip.mp4"
+
+
+async def test_read_large_media_file_returns_raw_url_artifact(tmp_path) -> None:
+    (tmp_path / "large.mp4").write_bytes(
+        b"\x00\x00\x00\x18ftypmp42" + (b"0" * (6 * 1024 * 1024))
+    )
+
+    result = await _service(str(tmp_path)).read_file("user-1", "proj_1", "large.mp4")
+
+    assert result.artifact.preview_kind == "media"
+    assert result.content.kind == "binary"
+    assert result.content.mime_type == "video/mp4"
+    assert result.content.open_url == "/v1/projects/proj_1/raw-files/large.mp4"
 
 
 async def test_read_pdf_file_returns_raw_url_artifact(tmp_path) -> None:
