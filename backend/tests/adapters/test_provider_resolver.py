@@ -252,6 +252,43 @@ async def test_dual_protocol_builtin_follows_runtime_to_openai_endpoint() -> Non
     assert result.base_url == "https://open.bigmodel.cn/api/paas/v4"
 
 
+async def test_zhipu_provider_preserves_saved_coding_endpoint_for_openai_runtime() -> None:
+    """One Zhipu card can persist the Coding Plan endpoint after discovery fallback."""
+
+    class _Secrets:
+        def get(self, ref: str) -> str | None:
+            return "sk-test" if ref == "channel/glm-coding" else None
+
+    provider = _FakeProvider(
+        id="ch-zhipu",
+        provider_kind="zhipu",
+        base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+        credential_source="secret_ref",
+        secret_ref="channel/glm-coding",
+    )
+    anthropic = await resolve_model_provider(
+        provider_id="ch-zhipu",
+        model_id="glm-5.2",
+        providers=_FakeProviderDatastore([provider]),
+        secrets=_Secrets(),  # type: ignore[arg-type]
+        runtime_provider="claude_agent",
+    )
+    assert anthropic is not None
+    assert anthropic.api_protocol == "anthropic"
+    assert anthropic.base_url == "https://open.bigmodel.cn/api/anthropic"
+
+    openai = await resolve_model_provider(
+        provider_id="ch-zhipu",
+        model_id="glm-5.2",
+        providers=_FakeProviderDatastore([provider]),
+        secrets=_Secrets(),  # type: ignore[arg-type]
+        runtime_provider="deepagents",
+    )
+    assert openai is not None
+    assert openai.api_protocol == "openai_completion"
+    assert openai.base_url == "https://open.bigmodel.cn/api/coding/paas/v4"
+
+
 async def test_dual_protocol_builtin_fallback_synthesises_anthropic_path() -> None:
     """DeepSeek has no descriptor.anthropic_base_url — fallback is
     ``${default}/anthropic`` so the kernel can still reach the Claude

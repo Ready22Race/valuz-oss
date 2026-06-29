@@ -19,6 +19,7 @@ from sqlalchemy.orm import sessionmaker
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
+from valuz_agent.modules.providers.discover import DiscoveredModel, ModelDiscoveryError
 from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.models import Base, ProviderRow
 from valuz_agent.modules.providers.service import ProviderService
@@ -176,6 +177,70 @@ class TestMaterializeOnLogin:
         monkeypatch.setattr(settings, "subscription_login_enabled", False)
         with pytest.raises(ProviderNotFound):
             await svc.service.enable_provider(OWNER, "ch-claude-subscription")
+
+
+class TestProviderEndpointFallback:
+    async def test_zhipu_create_falls_back_to_coding_endpoint(
+        self, svc: _SvcHandle, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: list[str] = []
+
+        async def fake_discover_model_entries(
+            *, base_url: str, api_key: str, protocol: str
+        ) -> list[DiscoveredModel]:
+            seen.append(base_url)
+            assert api_key == "sk-zhipu"
+            assert protocol == "openai"
+            if base_url == "https://open.bigmodel.cn/api/paas/v4":
+                raise ModelDiscoveryError("API Key 无效，请检查后重试")
+            if base_url == "https://open.bigmodel.cn/api/coding/paas/v4":
+                return [DiscoveredModel(id="glm-5.2")]
+            raise AssertionError(f"unexpected base_url: {base_url}")
+
+        monkeypatch.setattr(
+            "valuz_agent.modules.providers.service.discover_model_entries",
+            fake_discover_model_entries,
+        )
+
+        detail = await svc.service.create_provider(
+            OWNER,
+            name="智谱 (GLM)",
+            provider_kind="zhipu",
+            api_key="sk-zhipu",
+        )
+
+        assert seen == [
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+        ]
+        assert detail.base_url == "https://open.bigmodel.cn/api/coding/paas/v4"
+        assert detail.default_model == "glm-5.2"
+
+    async def test_create_persists_upstream_model_display_name(
+        self, svc: _SvcHandle, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def fake_discover_model_entries(
+            *, base_url: str, api_key: str, protocol: str
+        ) -> list[DiscoveredModel]:
+            assert base_url == "https://api.kimi.com/coding/v1"
+            assert api_key == "sk-kimi"
+            assert protocol == "openai"
+            return [DiscoveredModel(id="kimi-for-coding", label="K2.7 Code")]
+
+        monkeypatch.setattr(
+            "valuz_agent.modules.providers.service.discover_model_entries",
+            fake_discover_model_entries,
+        )
+
+        detail = await svc.service.create_provider(
+            OWNER,
+            name="Moonshot (Kimi Coding)",
+            provider_kind="moonshot-kimi-coding",
+            api_key="sk-kimi",
+        )
+
+        assert detail.models[0].id == "kimi-for-coding"
+        assert detail.models[0].label == "K2.7 Code"
 
 
 class TestSetDefaultMaterializes:

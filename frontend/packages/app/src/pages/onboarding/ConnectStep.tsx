@@ -1,4 +1,10 @@
-import { useEffect, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   Badge,
   Button,
@@ -100,6 +106,11 @@ export const ConnectStep = ({
   // The model id currently being set as default (spinner on its card).
   const [busyModel, setBusyModel] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  // Which channel the user has opened locally. The backend default remains the
+  // source of truth; this only controls the inline model picker expansion.
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
+    null,
+  );
 
   const refresh = async () => {
     const res = await settingsApi.getModelOptions();
@@ -143,6 +154,14 @@ export const ConnectStep = ({
   }, [checkCliLogin]);
 
   const hasDefault = Boolean(current.provider_id && current.model);
+
+  const seededSelectionRef = useRef(false);
+  useEffect(() => {
+    if (current.provider_id && !seededSelectionRef.current) {
+      setSelectedProviderId(current.provider_id);
+      seededSelectionRef.current = true;
+    }
+  }, [current.provider_id]);
 
   const setAsDefault = async (m: ModelOption) => {
     setBusyModel(m.model_id);
@@ -193,7 +212,13 @@ export const ConnectStep = ({
       provider={p}
       cliStatus={cliStatusFor(p)}
       busyModel={busyModel}
+      selected={p.provider_id === selectedProviderId}
       onPick={(m) => void setAsDefault(m)}
+      onSelect={() =>
+        setSelectedProviderId((prev) =>
+          prev === p.provider_id ? null : p.provider_id,
+        )
+      }
       onLogin={() => p.cli_tool && void cliLogin.trigger(p.cli_tool as CliTool)}
     />
   );
@@ -297,6 +322,8 @@ const OptionCard = ({
   provider,
   cliStatus,
   busyModel,
+  selected,
+  onSelect,
   onPick,
   onLogin,
 }: {
@@ -304,6 +331,8 @@ const OptionCard = ({
   cliStatus?: CliLoginStatus;
   /** The model id currently being saved as default (drives the spinner). */
   busyModel: string | null;
+  selected: boolean;
+  onSelect: () => void;
   onPick: (model: ModelOption) => void;
   onLogin: () => void;
 }) => {
@@ -336,19 +365,34 @@ const OptionCard = ({
   const currentModel = models.find((m) => m.is_current_default) ?? null;
   const isDefault = currentModel !== null;
   const busy = models.some((m) => m.model_id === busyModel);
+  const headerProps = connected
+    ? {
+        role: "button" as const,
+        tabIndex: 0,
+        onClick: onSelect,
+        onKeyDown: (e: KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onSelect();
+          }
+        },
+      }
+    : {};
 
   return (
     <div
       className={`rounded-xl border transition-all ${
-        isDefault
-          ? "border-brand/30 bg-brand-light/10"
-          : "border-surface-border bg-surface"
+        selected
+          ? "border-brand/60 bg-brand-light/20 ring-1 ring-brand/40"
+          : isDefault
+            ? "border-brand/30 bg-brand-light/10"
+            : "border-surface-border bg-surface"
       }`}
     >
-      <div className="flex items-center gap-3.5 px-4 py-3.5">
+      <div className="flex items-center gap-3.5 px-4 py-3.5" {...headerProps}>
         <div
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[13px] font-bold ${
-            isDefault
+            selected || isDefault
               ? "bg-brand/10 text-brand"
               : "bg-surface-soft text-ink-meta"
           }`}
@@ -393,7 +437,10 @@ const OptionCard = ({
                 variant="outline"
                 size="sm"
                 className="text-xs"
-                onClick={onLogin}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onLogin();
+                }}
               >
                 {cliStatus && !cliStatus.installed
                   ? t("settings.model.installCli" as Parameters<typeof t>[0])
@@ -413,8 +460,7 @@ const OptionCard = ({
         </div>
       </div>
 
-      {/* Inline model picker — shown on every usable card. */}
-      {connected && models.length > 0 && (
+      {connected && selected && models.length > 0 && (
         <div className="border-t border-brand/20 px-4 pb-4 pt-3">
           <div className="mb-2 text-xs font-medium text-ink-meta">
             {t("onboarding.modelLabel" as Parameters<typeof t>[0], {

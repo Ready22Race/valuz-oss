@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from valuz_agent.infra.database import Base
+from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.modules.agents.datastore import AgentDatastore, ProjectMemberDatastore
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.agents.service import (
@@ -21,6 +22,9 @@ from valuz_agent.modules.agents.service import (
     AgentService,
     AgentStillDeployedError,
 )
+from valuz_agent.modules.projects.datastore import ProjectDatastore
+from valuz_agent.modules.projects.models import ProjectRow
+from valuz_agent.modules.projects.service import ProjectService
 
 
 @pytest.fixture
@@ -30,7 +34,7 @@ async def db(tmp_path) -> AsyncIterator:
     async with engine.begin() as conn:
         await conn.run_sync(
             Base.metadata.create_all,
-            tables=[AgentRow.__table__, ProjectMemberRow.__table__],
+            tables=[AgentRow.__table__, ProjectMemberRow.__table__, ProjectRow.__table__],
         )
     factory = async_sessionmaker(bind=engine, expire_on_commit=False)
     session = factory()
@@ -46,6 +50,7 @@ async def _deploy_row(db, *, slug: str, project_id: str, handle: str) -> None:
     provenance — the post-派驻 state, without the full deploy path."""
     agents = AgentDatastore(db)
     members = ProjectMemberDatastore(db)
+    await _ensure_project(db, project_id)
     await agents.create(
         "local-test-owner",
         AgentRow(user_id="local-test-owner", slug=slug, name=slug.upper(), source="custom"),
@@ -57,6 +62,22 @@ async def _deploy_row(db, *, slug: str, project_id: str, handle: str) -> None:
             project_id=project_id,
             agent_slug=handle,
             source_agent_slug=slug,
+        ),
+    )
+
+
+async def _ensure_project(db, project_id: str) -> None:
+    existing = await ProjectDatastore(db).get_by_id("local-test-owner", project_id)
+    if existing is not None:
+        return
+    await ProjectDatastore(db).create(
+        "local-test-owner",
+        ProjectRow(
+            id=project_id,
+            user_id="local-test-owner",
+            name=project_id.upper(),
+            kind="project",
+            root_path=f"/tmp/{project_id}",
         ),
     )
 
@@ -95,6 +116,7 @@ async def test_cascade_delete_removes_all_deployments_then_agent(db) -> None:
         AgentRow(user_id="local-test-owner", slug="scout", name="SCOUT", source="custom"),
     )
     for pid, handle in (("w1", "scout"), ("w2", "scout-2")):
+        await _ensure_project(db, pid)
         await members.create(
             "local-test-owner",
             ProjectMemberRow(
@@ -149,6 +171,7 @@ async def test_should_resolve_member_back_to_library_agent(db) -> None:
 async def test_should_list_all_deployments_of_a_shared_agent(db) -> None:
     # Same library agent派驻'd into two projects.
     await _deploy_row(db, slug="pm", project_id="w1", handle="pm")
+    await _ensure_project(db, "w2")
     await ProjectMemberDatastore(db).create(
         "local-test-owner",
         ProjectMemberRow(
@@ -163,6 +186,7 @@ async def test_should_list_all_deployments_of_a_shared_agent(db) -> None:
 
 async def test_list_deployments_service_resolves_projects(db) -> None:
     await _deploy_row(db, slug="reviewer", project_id="w1", handle="reviewer")
+    await _ensure_project(db, "w2")
     await ProjectMemberDatastore(db).create(
         "local-test-owner",
         ProjectMemberRow(
@@ -175,6 +199,42 @@ async def test_list_deployments_service_resolves_projects(db) -> None:
     svc = AgentService(db)  # type: ignore[arg-type]
     deployments = await svc.list_deployments("local-test-owner", "reviewer")
     assert {d["project_id"] for d in deployments} == {"w1", "w2"}
+
+
+async def test_should_ignore_orphan_deployment_rows_for_deleted_projects(db) -> None:
+    await _deploy_row(db, slug="archivist", project_id="live", handle="archivist")
+    await ProjectMemberDatastore(db).create(
+        "local-test-owner",
+        ProjectMemberRow(
+            user_id="local-test-owner",
+            project_id="deleted-project",
+            agent_slug="archivist",
+            source_agent_slug="archivist",
+        ),
+    )
+
+    svc = AgentService(db)  # type: ignore[arg-type]
+    deployments = await svc.list_deployments("local-test-owner", "archivist")
+    assert deployments == [{"project_id": "live", "agent_slug": "archivist"}]
+
+    with pytest.raises(AgentStillDeployedError) as exc:
+        await svc.delete_agent("local-test-owner", "archivist")
+    assert exc.value.deployment_count == 1
+
+
+async def test_project_delete_removes_member_rows_but_keeps_library_agent(db) -> None:
+    await _deploy_row(db, slug="planner", project_id="doomed", handle="planner")
+    svc = ProjectService(
+        datastore=ProjectDatastore(db),
+        event_bus=EventBus(),
+        member_datastore=ProjectMemberDatastore(db),
+    )
+
+    await svc.delete_project("local-test-owner", "doomed")
+
+    assert await ProjectDatastore(db).get_by_id("local-test-owner", "doomed") is None
+    assert await ProjectMemberDatastore(db).get("local-test-owner", "doomed", "planner") is None
+    assert await AgentDatastore(db).get_agent("local-test-owner", "planner") is not None
 
 
 async def test_list_deployments_empty_for_never_deployed_agent(db) -> None:

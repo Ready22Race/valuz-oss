@@ -44,6 +44,7 @@ export interface ProviderAddDialogProps {
     protocol?: string;
   }) => Promise<{
     models: string[];
+    model_labels?: Record<string, string>;
     suggested_default: string | null;
   }>;
   /** Stateless chat-ping for custom (compatible) channels — pings every
@@ -97,6 +98,9 @@ export const ProviderAddDialog: FC<ProviderAddDialogProps> = ({
   const [discoveredModels, setDiscoveredModels] = useState<string[] | null>(
     null,
   );
+  const [discoveredModelLabels, setDiscoveredModelLabels] = useState<
+    Record<string, string> | null
+  >(null);
 
   const parseModels = (raw: string): string[] =>
     raw
@@ -132,6 +136,7 @@ export const ProviderAddDialog: FC<ProviderAddDialogProps> = ({
       setTestMsg("");
       setSaving(false);
       setDiscoveredModels(null);
+      setDiscoveredModelLabels(null);
     }
   }, [open]);
 
@@ -153,6 +158,7 @@ export const ProviderAddDialog: FC<ProviderAddDialogProps> = ({
     setTestStatus("idle");
     setTestMsg("");
     setDiscoveredModels(null);
+    setDiscoveredModelLabels(null);
     // ``providers`` is intentionally excluded — its identity flips on every
     // parent render and would re-trigger the reset; reading it inside the
     // effect via ``find`` is sufficient because providerKind is the only
@@ -192,6 +198,7 @@ export const ProviderAddDialog: FC<ProviderAddDialogProps> = ({
           setModelsText(batch.ok.join("\n"));
         }
         setDiscoveredModels(batch.ok.length > 0 ? batch.ok : null);
+        setDiscoveredModelLabels(null);
         if (batch.failed.length === 0) {
           setTestStatus("ok");
           setTestMsg(
@@ -225,6 +232,7 @@ export const ProviderAddDialog: FC<ProviderAddDialogProps> = ({
         protocol: showProtocol ? protocol : undefined,
       });
       setDiscoveredModels(result.models);
+      setDiscoveredModelLabels(result.model_labels ?? null);
       setTestStatus("ok");
       setTestMsg(
         t("settings.model.connectSuccessDiscovered", {
@@ -347,18 +355,21 @@ export const ProviderAddDialog: FC<ProviderAddDialogProps> = ({
               setTestStatus("idle");
               setTestMsg("");
               setDiscoveredModels(null);
+              setDiscoveredModelLabels(null);
             }}
             baseUrl={baseUrl}
             onBaseUrlChange={(v) => {
               setBaseUrl(v);
               setTestStatus("idle");
               setDiscoveredModels(null);
+              setDiscoveredModelLabels(null);
             }}
             showEndpoint={showEndpoint}
             endpointReadOnly={!isCustom}
             testStatus={testStatus}
             testMsg={testMsg}
             discoveredModels={isCustom ? null : discoveredModels}
+            discoveredModelLabels={isCustom ? null : discoveredModelLabels}
             showModelsTextarea={isCustom}
             modelsText={modelsText}
             onModelsTextChange={(v) => {
@@ -366,6 +377,7 @@ export const ProviderAddDialog: FC<ProviderAddDialogProps> = ({
               setTestStatus("idle");
               setTestMsg("");
               setDiscoveredModels(null);
+              setDiscoveredModelLabels(null);
             }}
           />
         </div>

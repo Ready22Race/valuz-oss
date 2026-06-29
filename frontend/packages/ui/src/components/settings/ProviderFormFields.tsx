@@ -46,6 +46,7 @@ export interface ProviderFormFieldsProps {
    *  the channel's default model lives in the global Default-config
    *  card. */
   discoveredModels?: string[] | null;
+  discoveredModelLabels?: Record<string, string> | null;
 
   /** Editable models textarea — only the ``compatible`` (custom) channel
    *  needs this. Anthropic-shape endpoints and many private proxies
@@ -83,6 +84,7 @@ export const ProviderFormFields: FC<ProviderFormFieldsProps> = ({
   testStatus,
   testMsg,
   discoveredModels,
+  discoveredModelLabels,
   showModelsTextarea = false,
   modelsText = "",
   onModelsTextChange,
@@ -243,12 +245,17 @@ export const ProviderFormFields: FC<ProviderFormFieldsProps> = ({
           </label>
           <Select value="" onValueChange={() => {}}>
             <SelectTrigger className="w-full">
-              <SelectValue placeholder={modelLabel(discoveredModels[0])} />
+              <SelectValue
+                placeholder={
+                  discoveredModelLabels?.[discoveredModels[0]] ??
+                  modelLabel(discoveredModels[0])
+                }
+              />
             </SelectTrigger>
             <SelectContent>
               {discoveredModels.map((m) => (
                 <SelectItem key={m} value={m}>
-                  {modelLabel(m)}
+                  {discoveredModelLabels?.[m] ?? modelLabel(m)}
                 </SelectItem>
               ))}
             </SelectContent>
