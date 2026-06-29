@@ -102,11 +102,11 @@ export const SkillSubmissionCard = memo(function SkillSubmissionCard({
       className={cn(
         "rounded-lg border bg-surface-soft transition-colors",
         state === "confirmed" &&
-          "border-[rgba(83,188,118,0.5)] bg-[rgba(83,188,118,0.06)]",
+          "border-success-border bg-success-light",
         state === "dismissed" &&
           "border-surface-border bg-surface-2 opacity-80",
-        state === "error" && "border-error/40 bg-error-light/40",
-        state === "awaiting_files" && "border-warning/40 bg-warning-light/30",
+        state === "error" && "border-error-border bg-error-light",
+        state === "awaiting_files" && "border-warning-border bg-warning-light",
         state !== "confirmed" &&
           state !== "dismissed" &&
           state !== "error" &&
@@ -254,7 +254,7 @@ export const SkillSubmissionCard = memo(function SkillSubmissionCard({
             onClick={onConfirm}
             className={cn(
               "inline-flex h-7 items-center rounded-md px-3 text-xs font-medium",
-              "bg-brand text-white hover:bg-brand/90",
+              "bg-brand text-white hover:bg-brand-hover",
               "disabled:cursor-not-allowed disabled:opacity-50",
             )}
             title={

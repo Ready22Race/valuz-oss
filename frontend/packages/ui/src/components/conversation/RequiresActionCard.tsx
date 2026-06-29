@@ -53,22 +53,23 @@ const SUBJECT_META: Record<
   shell_command: {
     icon: Terminal,
     titleKey: "conversation.requiresShellCommand",
-    tint: "text-amber-600 bg-amber-50",
+    tint: "text-warning-text bg-warning-light",
   },
   file_change: {
     icon: FileEdit,
     titleKey: "conversation.requiresFileChange",
-    tint: "text-sky-600 bg-sky-50",
+    tint:
+      "text-[color-mix(in_oklab,var(--accent-sky)_62%,var(--foreground))] bg-[color-mix(in_oklab,var(--accent-sky)_14%,var(--background))]",
   },
   mcp_tool_call: {
     icon: Plug,
     titleKey: "conversation.requiresMcpCall",
-    tint: "text-violet-600 bg-violet-50",
+    tint: "text-info-text bg-info-light",
   },
   tool_input: {
     icon: Wrench,
     titleKey: "conversation.requiresToolCall",
-    tint: "text-slate-600 bg-slate-50",
+    tint: "text-ink-body bg-surface-2",
   },
 };
 
@@ -110,8 +111,8 @@ function _renderPayload(
             className={cn(
               "mr-1.5 inline-flex rounded px-1.5 py-0.5 text-[10px] font-medium uppercase",
               kind === "create"
-                ? "bg-emerald-50 text-emerald-700"
-                : "bg-sky-50 text-sky-700",
+                ? "bg-success-light text-success-text"
+                : "bg-[color-mix(in_oklab,var(--accent-sky)_14%,var(--background))] text-[color-mix(in_oklab,var(--accent-sky)_62%,var(--foreground))]",
             )}
           >
             {kind || "edit"}
@@ -214,7 +215,7 @@ export const RequiresActionCard = memo(function RequiresActionCard({
           <span
             className={cn(
               "inline-flex items-center gap-1 text-[12px] font-medium",
-              decision === "approve" && "text-emerald-700",
+              decision === "approve" && "text-success-text",
               decision === "reject" && "text-rose-700",
               (decision === "expired" || decision === "interrupted") &&
                 "text-ink-muted",
@@ -258,7 +259,7 @@ export const RequiresActionCard = memo(function RequiresActionCard({
               onClick={onApprove}
               className={cn(
                 "inline-flex h-7 items-center rounded-md px-3 text-xs font-medium",
-                "bg-brand text-white hover:bg-brand/90",
+                "bg-brand text-white hover:bg-brand-hover",
                 "disabled:cursor-not-allowed disabled:opacity-50",
               )}
             >

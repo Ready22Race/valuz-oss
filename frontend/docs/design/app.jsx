@@ -5,6 +5,8 @@ const { useState, useEffect, useRef, useMemo } = React;
 const SIDEBAR_ICON_STROKE = 2;
 const SIDEBAR_SECTION_COLOR = "#6E7481";
 const COMPOSER_HOVER_BG = "#F7F8FA";
+const GHOST_HOVER_BG = "var(--surface-2)";
+const GHOST_HOVER_TEXT = "var(--text)";
 const DISCLOSURE_CHEVRON_SIZE = 12;
 const DISCLOSURE_CHEVRON_STROKE = 2;
 const DISCLOSURE_CHEVRON_COLOR = "#94A3B8";
@@ -830,6 +832,7 @@ function App() {
               <TooltipWrap tooltip="切换边栏" side="bottom" offset={4}>
                 <button
                   onClick={() => setSidebarOpen((value) => !value)}
+                  data-variant="ghost"
                   style={iconBtn()}
                 >
                   <Icon name={sidebarOpen ? "panelLeft" : "panelRight"} size={15} stroke={SIDEBAR_ICON_STROKE} color="#6E7481" />
@@ -840,6 +843,7 @@ function App() {
           {showContextToggle && (
             <button
               onClick={() => setContextOpen(!contextOpen)}
+              data-variant="ghost"
               style={iconBtn()}
               title="会话上下文"
             >
@@ -1486,8 +1490,8 @@ function MessageActions() {
       {[
         { icon: "copy", title: "复制" },
       ].map((a, i) => (
-        <button key={i} title={a.title} style={btn}
-          onMouseEnter={e => { e.currentTarget.style.background = "var(--surface-2)"; e.currentTarget.style.color = "var(--text-2)"; }}
+        <button key={i} title={a.title} data-variant="ghost" style={btn}
+          onMouseEnter={e => { e.currentTarget.style.background = GHOST_HOVER_BG; e.currentTarget.style.color = GHOST_HOVER_TEXT; }}
           onMouseLeave={e => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-3)"; }}
         >
           <Icon name={a.icon} size={13} />
@@ -2072,6 +2076,7 @@ function ComposerBtn({ icon, label, tooltip, onClick, iconSize = 13, iconStroke 
       <button
         onClick={onClick}
         aria-label={tooltip || label}
+        data-variant="ghost"
         style={{
           display: "flex",
           alignItems: "center",
@@ -2083,11 +2088,11 @@ function ComposerBtn({ icon, label, tooltip, onClick, iconSize = 13, iconStroke 
           borderRadius: 8,
           color,
           fontSize,
-          background: active ? COMPOSER_HOVER_BG : "transparent",
+          background: active ? GHOST_HOVER_BG : "transparent",
           transition: "background .12s",
         }}
-        onMouseEnter={e => e.currentTarget.style.background = COMPOSER_HOVER_BG}
-        onMouseLeave={e => e.currentTarget.style.background = active ? COMPOSER_HOVER_BG : "transparent"}
+        onMouseEnter={e => e.currentTarget.style.background = GHOST_HOVER_BG}
+        onMouseLeave={e => e.currentTarget.style.background = active ? GHOST_HOVER_BG : "transparent"}
       >
         <Icon name={icon} size={iconSize} stroke={iconStroke} />
         {!iconOnly && <span>{label}</span>}
@@ -2122,8 +2127,9 @@ function PopoverHeader({ children }) {
 function PopoverItem({ children, onClick }) {
   return (
       <button onClick={onClick}
+      data-variant="ghost"
       style={composerMenuItemStyle(false)}
-      onMouseEnter={e => e.currentTarget.style.background = COMPOSER_HOVER_BG}
+      onMouseEnter={e => e.currentTarget.style.background = GHOST_HOVER_BG}
       onMouseLeave={e => e.currentTarget.style.background = "transparent"}
     >
       {children}
@@ -2346,7 +2352,7 @@ function TweaksPanel({ tweaks, update, onClose }) {
     }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
         <span style={{ fontSize: 13, fontWeight: 600 }}>Tweaks</span>
-        <button onClick={onClose} style={iconBtn()}><Icon name="x" size={13} /></button>
+        <button onClick={onClose} data-variant="ghost" style={iconBtn()}><Icon name="x" size={13} /></button>
       </div>
 
       <TweakRow label="主题色">
@@ -2426,7 +2432,7 @@ function iconBtn(small) {
     borderRadius: DESIGN_TOKENS.radius.md,
     display: "grid", placeItems: "center",
     color: "var(--text-2)",
-    transition: "background .12s",
+    transition: "background .12s, color .12s",
   };
 }
 
@@ -2438,7 +2444,7 @@ function composerIconButtonStyle() {
     display: "grid",
     placeItems: "center",
     background: "transparent",
-    transition: "background .12s",
+    transition: "background .12s, color .12s",
     flexShrink: 0,
   };
 }

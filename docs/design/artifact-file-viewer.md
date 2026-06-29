@@ -88,29 +88,29 @@ near-term target is **artifact feel with file-backed data**:
 
 ## 3. Design Principles
 
-1. **One shell, many renderers**  
+1. **One shell, many renderers**
    All previews use the same `ArtifactViewerShell`; each file type chooses a
    renderer from a registry.
 
-2. **File-backed first, artifact-ready always**  
+2. **File-backed first, artifact-ready always**
    MVP artifacts can be backed by project files or session outputs. The API and
    UI should still call them artifacts so later `document_artifact` or
    `slides_artifact` kinds fit naturally.
 
-3. **Preview before edit**  
+3. **Preview before edit**
    Browsing lands first. Editing capabilities are exposed as metadata and hidden
    or disabled until the write path is implemented.
 
-4. **Renderer replacement should be local**  
+4. **Renderer replacement should be local**
    Replacing Markdown preview with Tiptap, `<pre>` with CodeMirror, or iframe
    PDF preview with PDF.js should not require changes to project pages, task
    pages, chat pages, routing, or file tree selection.
 
-5. **Never scatter type checks through pages**  
+5. **Never scatter type checks through pages**
    No page-level `path.endsWith(".md")` branches. Type detection and renderer
    selection live in one artifact service/registry layer.
 
-6. **Preserve local-first filesystem semantics**  
+6. **Preserve local-first filesystem semantics**
    Project files remain ordinary files on disk. The viewer must not require a
    database artifact migration before users can inspect the current workspace.
 

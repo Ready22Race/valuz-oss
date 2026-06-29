@@ -19,7 +19,7 @@ export const OfflineBanner = () => {
   if (!offline) return null;
 
   return (
-    <div className="flex h-8 items-center justify-center bg-red-500 px-4 text-xs font-medium text-white">
+    <div className="flex h-8 items-center justify-center bg-error-strong px-4 text-xs font-medium text-white">
       {t("offline.banner")}
     </div>
   );

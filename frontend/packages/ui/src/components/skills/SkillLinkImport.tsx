@@ -69,7 +69,7 @@ export const SkillLinkImport = ({
             placeholder="https://github.com/user/repo/tree/main/skills/my-skill"
             className={cn(
               "flex-1 font-mono text-xs",
-              error && "border-red-300 focus-visible:ring-red-200",
+              error && "border-error-border focus-visible:ring-error",
             )}
             onKeyDown={(e) => {
               if (e.key === "Enter" && url.trim() && !fetching) {
@@ -88,9 +88,9 @@ export const SkillLinkImport = ({
 
         {/* Error state */}
         {error && (
-          <div className="flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
-            <p className="text-xs text-red-700">{error}</p>
+          <div className="flex items-start gap-2 rounded-lg bg-error-light px-3 py-2">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-error-text" />
+            <p className="text-xs text-error-text">{error}</p>
           </div>
         )}
 

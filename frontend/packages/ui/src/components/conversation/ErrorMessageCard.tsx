@@ -23,17 +23,17 @@ export const ErrorMessageCard = ({
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+    <div className="rounded-xl border border-error-border bg-error-light px-4 py-3">
       <div className="flex items-start gap-2">
-        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-500" />
+        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-error-text" />
         <div className="flex-1">
-          <div className="text-sm font-medium text-red-700">
+          <div className="text-sm font-medium text-error-text">
             {t("conversation.generatedFailed")}
           </div>
           <button
             type="button"
             onClick={() => setExpanded(!expanded)}
-            className="mt-0.5 flex items-center gap-1 text-xs text-red-500 hover:underline"
+            className="mt-0.5 flex items-center gap-1 text-xs text-error-text hover:underline"
           >
             {t("conversation.viewDetails")}
             <ChevronDown
@@ -41,14 +41,14 @@ export const ErrorMessageCard = ({
             />
           </button>
           {expanded && (
-            <div className="mt-2 rounded-lg bg-surface px-3 py-2 font-mono text-xs text-red-600">
+            <div className="mt-2 rounded-lg bg-surface px-3 py-2 font-mono text-xs text-error-text">
               {message}
             </div>
           )}
         </div>
       </div>
       {retryCount > 0 && (
-        <div className="mt-2 text-2xs text-red-400">
+        <div className="mt-2 text-2xs text-error-text">
           {t("conversation.retriedCount", {
             current: String(retryCount),
             max: String(maxRetries),
@@ -60,7 +60,7 @@ export const ErrorMessageCard = ({
           <Button
             variant="outline"
             size="sm"
-            className="h-7 border-red-200 text-xs text-red-600 hover:bg-red-50"
+            className="h-7 border-error-border text-xs text-error-text hover:bg-error-light"
             onClick={onRetry}
           >
             <RefreshCw className="mr-1 h-3 w-3" /> {t("system.retry")}

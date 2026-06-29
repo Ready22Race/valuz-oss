@@ -90,7 +90,7 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2 text-center sm:text-left", className)}
+      className={cn("flex flex-col text-center sm:text-left", className)}
       {...props}
     />
   );
@@ -108,7 +108,7 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end [&_[data-variant=outline]]:hover:bg-surface-muted [&_[data-variant=outline]]:hover:text-ink-heading [&_[data-variant=secondary]]:hover:bg-surface-muted [&_[data-variant=secondary]]:hover:text-ink-heading",
+        "flex flex-col-reverse gap-2 sm:flex-row sm:justify-end [&_[data-slot=button]]:!h-8 [&_[data-slot=button]]:!rounded-lg [&_[data-slot=button]]:!px-[14px] [&_[data-slot=button]]:!text-sm [&_[data-variant=outline]]:hover:bg-surface-muted [&_[data-variant=outline]]:hover:text-ink-heading [&_[data-variant=secondary]]:hover:bg-surface-muted [&_[data-variant=secondary]]:hover:text-ink-heading",
         className,
       )}
       {...props}
@@ -131,7 +131,7 @@ function DialogTitle({
     <DialogPrimitive.Title
       data-slot="dialog-title"
       className={cn(
-        "text-lg leading-none font-medium text-ink-heading",
+        "text-lg leading-none font-semibold text-ink-heading",
         className,
       )}
       {...props}
@@ -146,7 +146,7 @@ function DialogDescription({
   return (
     <DialogPrimitive.Description
       data-slot="dialog-description"
-      className={cn("text-sm text-muted-foreground", className)}
+      className={cn("mt-0.5 text-xs leading-5 text-muted-foreground", className)}
       {...props}
     />
   );

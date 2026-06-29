@@ -90,7 +90,7 @@ export const MultiSelect = ({
                 return (
                   <Badge
                     key={v}
-                    variant="secondary"
+                    variant="outline"
                     className="group/badge gap-1 pr-1 font-normal [&>svg]:!size-2.5"
                     onClick={(e) => {
                       e.preventDefault();
@@ -99,7 +99,7 @@ export const MultiSelect = ({
                     }}
                   >
                     {opt?.dot && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-success" />
                     )}
                     {opt?.label ?? v}
                     <X
@@ -145,7 +145,7 @@ export const MultiSelect = ({
                       )}
                     />
                     {opt.dot && (
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-success" />
                     )}
                     {opt.label}
                   </CommandItem>

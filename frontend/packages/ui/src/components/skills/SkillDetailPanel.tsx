@@ -497,8 +497,10 @@ export const SkillDetailPanel = ({
       <div className="border-b border-surface-border px-4 pb-4 pt-4">
         <div className="mb-3 flex items-center gap-3">
           <div
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-transparent text-lg font-semibold"
-            style={{ backgroundColor: iconStyle.bg, color: iconStyle.fg }}
+            className={cn(
+              "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-transparent text-lg font-semibold",
+              iconStyle.className,
+            )}
           >
             {iconStyle.letter}
           </div>
@@ -556,7 +558,7 @@ export const SkillDetailPanel = ({
                       type="button"
                       aria-label={t("skill.deleteSkill")}
                       onClick={onDelete}
-                      className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-[#f54b4b] transition-colors hover:bg-[#f54b4b]/10 hover:text-[#f54b4b]"
+                      className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-error-text transition-colors hover:bg-error-light hover:text-error-text"
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>

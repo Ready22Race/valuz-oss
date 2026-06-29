@@ -40,8 +40,8 @@ export const ProjectCard: FC<ProjectCardProps> = ({
         {onDelete ? (
           <Button
             variant="ghost"
-            size="icon-xs"
-            className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+            size="icon"
+            className="size-6 shrink-0 opacity-0 transition-opacity group-hover:opacity-100 [&_svg:not([class*='size-'])]:size-3"
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()

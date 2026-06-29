@@ -38,9 +38,9 @@ const STATE_STYLES: Record<
   NonNullable<SystemStatusResponse["status"]>,
   { dot: string; label: string }
 > = {
-  running: { dot: "bg-emerald-500", label: "system.running" },
-  starting: { dot: "bg-amber-400 animate-pulse", label: "system.starting" },
-  degraded: { dot: "bg-amber-500", label: "system.degraded" },
+  running: { dot: "bg-success", label: "system.running" },
+  starting: { dot: "bg-warning animate-pulse", label: "system.starting" },
+  degraded: { dot: "bg-warning", label: "system.degraded" },
 };
 
 interface MetricProps {
@@ -88,13 +88,18 @@ export const SystemStatusCard = ({
   const { t } = useI18n();
   if (error && !status) {
     return (
-      <Card className="border-red-200 bg-red-50/50 p-4">
-        <div className="flex items-center gap-2 text-sm text-red-700">
+      <Card className="border-error-border bg-error-light p-4">
+        <div className="flex items-center gap-2 text-sm text-error-text">
           <AlertTriangle className="h-4 w-4" />
           <span>{t("system.cannotConnect", { error })}</span>
         </div>
         <div className="mt-3">
-          <Button size="sm" variant="outline" onClick={onRefresh}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="border-error-border bg-error-light text-error-text shadow-none hover:bg-error-border hover:text-error-text"
+            onClick={onRefresh}
+          >
             <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
             {t("system.retry")}
           </Button>
@@ -106,7 +111,7 @@ export const SystemStatusCard = ({
   const stateStyle = status ? STATE_STYLES[status.status] : null;
 
   return (
-    <Card className="p-4">
+    <Card className="border-0 bg-card p-4 shadow-sm">
       <div className="mb-4 flex items-center justify-between gap-3">
         <div className="flex items-center gap-2.5">
           <span
@@ -121,7 +126,7 @@ export const SystemStatusCard = ({
           </h2>
           {stateStyle && (
             <Badge
-              variant="secondary"
+              variant="outline"
               className="font-normal text-xs tabular-nums"
             >
               {t(stateStyle.label)}
@@ -187,12 +192,12 @@ export const SystemStatusCard = ({
           </div>
 
           {status.warnings.length > 0 && (
-            <div className="mt-4 rounded-md border border-amber-200 bg-amber-50/50 p-3">
-              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-amber-800">
+            <div className="mt-4 rounded-md border border-warning-border bg-warning-light p-3">
+              <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-warning-text">
                 <AlertTriangle className="h-3.5 w-3.5" />
                 {t("system.warnings", { count: status.warnings.length })}
               </div>
-              <ul className="space-y-1 text-xs text-amber-900">
+              <ul className="space-y-1 text-xs text-warning-text">
                 {status.warnings.map((w, i) => (
                   <li key={i} className="font-mono leading-tight">
                     • {w}

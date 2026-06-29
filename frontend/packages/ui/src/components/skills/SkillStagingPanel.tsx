@@ -70,7 +70,7 @@ const conflictLabelKeys: Record<StagingConflictKind, string> = {
 const conflictTone: Record<StagingConflictKind, string> = {
   none: "text-success",
   same_source: "text-brand",
-  diverged: "text-amber-500",
+  diverged: "text-warning-text",
 };
 
 interface SlugRowState {
@@ -163,7 +163,7 @@ export const SkillStagingPanel = ({
   };
 
   return (
-    <div className="flex h-full flex-col border-l border-surface-border bg-surface">
+    <div className="flex h-full flex-col bg-surface">
       <div className="flex items-center justify-between px-3 py-2">
         <div className="flex items-center gap-1.5">
           <Sparkles className="h-3.5 w-3.5 text-brand" />

@@ -61,11 +61,11 @@ const ORIGIN_BADGE_TONE: Record<
   default: "bg-surface-soft text-ink-body",
   // "Valuz-managed" — same brand-y neutral the legacy "official" chip
   // used so the visual weight matches existing UI.
-  valuz: "bg-[#eef0ff] text-[#5a63b6]",
+  valuz: "bg-brand-light text-brand-700",
   // Anthropic dust — gentle warm tint for ~/.claude/skills/.
-  claude: "bg-[#fde8d4] text-[#b45309]",
+  claude: "bg-warning-light text-warning-text",
   // OpenAI-ish slate for ~/.codex/skills/.
-  codex: "bg-[#dbeafe] text-[#1d4ed8]",
+  codex: "bg-accent-blue/10 text-accent-blue dark:bg-accent-blue/15 dark:text-accent-blue",
 };
 
 export const SkillCard = ({
@@ -92,19 +92,19 @@ export const SkillCard = ({
     <Card
       onClick={onClick}
       className={cn(
-        "cursor-default border-surface-border transition-all duration-150 select-none",
+        "cursor-default rounded-lg border-surface-border bg-surface py-0 shadow-xs transition-[border-color,box-shadow] select-none",
         active
-          ? "border-brand/60"
-          : "hover:border-surface-border-hover hover:shadow-sm",
+          ? "border-brand bg-surface shadow-sm"
+          : "card-interactive",
         skill.locked && "opacity-60",
       )}
     >
-      <CardContent className="flex items-start gap-2 px-4 py-1">
+      <CardContent className="flex items-start gap-2 px-4 py-3">
         <div
           className={cn(
             "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-transparent text-lg font-semibold",
+            iconStyle.className,
           )}
-          style={{ backgroundColor: iconStyle.bg, color: iconStyle.fg }}
         >
           {iconStyle.letter}
         </div>
@@ -162,7 +162,7 @@ export const SkillCard = ({
                 <Badge
                   key={tag}
                   variant="outline"
-                  className="rounded-[4px] px-1 py-0 text-[10px] font-normal leading-4 text-[#6e7481]"
+                  className="rounded-[4px] px-1 py-0 text-[10px] font-normal leading-4 text-ink-body"
                 >
                   {tag}
                 </Badge>

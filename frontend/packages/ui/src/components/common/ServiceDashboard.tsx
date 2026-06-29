@@ -19,7 +19,7 @@ export const ServiceDashboard = ({ services }: ServiceDashboardProps) => (
       <CardTitle className="text-base dark:text-white text-ink-heading">
         Service dashboard
       </CardTitle>
-      <CardDescription className="dark:text-slate-300 text-ink-body">
+      <CardDescription className="text-ink-body">
         Desktop startup watches these services before revealing the main shell.
       </CardDescription>
     </CardHeader>
@@ -34,7 +34,7 @@ export const ServiceDashboard = ({ services }: ServiceDashboardProps) => (
               <p className="font-medium dark:text-white text-ink-heading">
                 {service.name}
               </p>
-              <p className="text-sm dark:text-slate-300 text-ink-body">
+              <p className="text-sm text-ink-body">
                 {service.port
                   ? `Port ${service.port}`
                   : (service.detail ?? "Pending")}

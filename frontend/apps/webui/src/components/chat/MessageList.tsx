@@ -11,7 +11,7 @@ interface MessageListProps {
 }
 
 const StopReasonHint = ({ reason }: { reason: string }) => (
-  <span className="ml-2 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300">
+  <span className="ml-2 rounded border border-warning-border bg-warning-light px-1.5 py-0.5 text-micro font-medium uppercase tracking-wide text-warning-text">
     {reason === "user_interrupt" ? "stopped" : reason}
   </span>
 );
@@ -52,7 +52,7 @@ export const MessageList = ({
                     <div className="font-medium">{t.name}</div>
                     {t.output != null && (
                       <pre
-                        className={`mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-[11px] ${t.isError ? "text-red-500" : "opacity-80"}`}
+                        className={`mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-2xs ${t.isError ? "text-error-text" : "opacity-80"}`}
                       >
                         {t.output}
                       </pre>

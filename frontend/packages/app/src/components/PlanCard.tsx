@@ -34,8 +34,8 @@ const STATUS_TONE: Record<string, string> = {
   in_progress: "text-brand",
   in_review: "text-brand",
   rework: "text-brand",
-  done: "text-emerald-600",
-  failed: "text-rose-600",
+  done: "text-success-text",
+  failed: "text-error-text",
 };
 
 export interface PlanCardProps {

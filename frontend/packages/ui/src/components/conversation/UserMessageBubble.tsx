@@ -5,7 +5,7 @@ export interface UserMessageBubbleProps {
 }
 
 export const UserMessageBubble = ({ children }: UserMessageBubbleProps) => (
-  <div className="ml-auto max-w-[78%] rounded-[18px] bg-surface-muted px-4 py-2.5 text-sm leading-6 text-ink-heading">
+  <div className="ml-auto max-w-[78%] rounded-2xl bg-surface-muted px-4 py-2.5 text-sm leading-6 text-ink-heading">
     {children}
   </div>
 )
