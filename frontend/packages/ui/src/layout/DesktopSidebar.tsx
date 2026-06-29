@@ -499,20 +499,20 @@ const ProjectRow = ({
                   {t("sidebar.rename")}
                 </DropdownMenuItem>
               )}
-              {onProjectOpenInFinder && (
-                <DropdownMenuItem
-                  onSelect={() => onProjectOpenInFinder(project.id)}
-                >
-                  <ExternalLink />
-                  {t("sidebar.openInFinder")}
-                </DropdownMenuItem>
-              )}
               {onProjectExport && (
                 <DropdownMenuItem
                   onSelect={() => onProjectExport(project.id)}
                 >
                   <Download />
                   {t("project.export")}
+                </DropdownMenuItem>
+              )}
+              {onProjectOpenInFinder && (
+                <DropdownMenuItem
+                  onSelect={() => onProjectOpenInFinder(project.id)}
+                >
+                  <ExternalLink />
+                  {t("sidebar.openInFinder")}
                 </DropdownMenuItem>
               )}
               {onProjectRemove && (
