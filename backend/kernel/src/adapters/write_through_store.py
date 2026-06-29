@@ -30,6 +30,7 @@ Structurally satisfies ``src.core.StorePort`` (does not inherit the Protocol).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Sequence
@@ -51,6 +52,7 @@ class WriteThroughStore:
         *,
         durable_required: bool = True,
         outbox: DurableOutbox | None = None,
+        drain_interval_s: float = 30.0,
     ) -> None:
         if not durable_required and outbox is None:
             raise ValueError("best-effort write-through requires a DurableOutbox")
@@ -58,6 +60,40 @@ class WriteThroughStore:
         self._durable = durable
         self._strict = durable_required
         self._outbox = outbox
+        self._drain_interval_s = drain_interval_s
+        self._drainer: asyncio.Task[None] | None = None
+
+    # ---- lifecycle (best-effort outbox drainer) --------------------------
+
+    def start(self) -> None:
+        """Start the background outbox drainer. A no-op in strict mode (no
+        outbox) and idempotent — mirrors ``SessionOrchestrator.start``. The
+        first iteration re-pushes any backlog left by a prior run."""
+        if self._outbox is not None and self._drainer is None:
+            self._drainer = asyncio.create_task(self._drain_loop())
+
+    async def aclose(self) -> None:
+        """Stop the drainer. The backlog stays durable in the local DB and is
+        re-pushed on the next ``start``. Mirrors ``SessionOrchestrator.shutdown``."""
+        if self._drainer is not None:
+            self._drainer.cancel()
+            try:
+                await self._drainer
+            except asyncio.CancelledError:
+                pass
+            self._drainer = None
+
+    async def _drain_loop(self) -> None:
+        while True:
+            try:
+                drained = await self.drain_outbox()
+                if drained:
+                    logger.info("durable outbox: re-pushed %d op(s)", drained)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — keep the loop alive across blips
+                logger.debug("outbox drain loop iteration failed", exc_info=True)
+            await asyncio.sleep(self._drain_interval_s)
 
     # ---- writes ----------------------------------------------------------
 

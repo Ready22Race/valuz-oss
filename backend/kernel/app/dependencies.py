@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import logging
 import os
@@ -29,9 +28,10 @@ _durable_engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 _store: StorePort | None = None
 _orchestrator: SessionOrchestrator | None = None
-# Background drainer for the best-effort (``pg``) write-through outbox; cancelled
-# on shutdown. ``None`` in strict (``remote``) / local-only modes.
-_outbox_drainer: asyncio.Task[None] | None = None
+# The write-through wrapper (if any), held by its concrete type so its
+# background lifecycle (outbox drainer) is driven without the call sites
+# re-deriving the store policy. ``None`` in local-only mode.
+_write_through: WriteThroughStore | None = None
 # Owner-from-token seam: OSS default never derives identity from a token, so
 # ``get_owner_id`` keeps using the trusted ``X-Valuz-Owner-Id`` header. A SaaS
 # overlay binds a real verifier via ``set_token_verifier``.
@@ -47,7 +47,7 @@ async def init_dependencies(config: AppConfig) -> None:
     (per design doc §6.3 — D6 contract symmetry across runtimes).
     """
     global _engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
-    global _durable_engine, _outbox_drainer  # noqa: PLW0603
+    global _durable_engine, _write_through  # noqa: PLW0603
     # Model A: the LOCAL store ALWAYS exists (local-first). The kernel keeps its
     # own SQLite/PG via this engine; when a durable backend is configured
     # (remote DataService / central PG) every write is mirrored through it
@@ -62,7 +62,8 @@ async def init_dependencies(config: AppConfig) -> None:
         # DB was already provisioned by alembic, and it materializes the full
         # current model (incl. the ``event_uid`` unique index) on a fresh PG.
         await _ensure_durable_schema(_durable_engine)
-    store: StorePort = _wrap_durable(config, local, durable)
+    _write_through = _wrap_durable(config, local, durable)
+    store: StorePort = _write_through or local
     _store = store
     _orchestrator = SessionOrchestrator(
         store,
@@ -73,15 +74,10 @@ async def init_dependencies(config: AppConfig) -> None:
     # subprocesses; see SessionOrchestrator). Safe before the orphan scan's
     # possible early return so it runs regardless of migration state.
     _orchestrator.start()
-    # Best-effort (``pg``) write-through: re-push any backlog left by a prior run,
-    # then keep a background drainer alive so a recovered durable catches up even
-    # without new writes. Strict / local-only modes have no outbox.
-    if isinstance(store, WriteThroughStore) and config.kernel_store == "pg":
-        try:
-            await store.drain_outbox()
-        except Exception:  # noqa: BLE001 — durable may still be down at boot
-            logger.debug("startup outbox drain failed", exc_info=True)
-        _outbox_drainer = asyncio.create_task(_outbox_drain_loop(store))
+    # Drive the write-through lifecycle uniformly — the store decides internally
+    # whether it has a backlog to drain (best-effort) or nothing to do (strict).
+    if _write_through is not None:
+        _write_through.start()
     # Orphan scans run against the always-present local store.
     # Best-effort — schema may not be migrated yet (typical in unit tests that
     # skip Alembic and run against an empty in-memory DB).
@@ -100,17 +96,11 @@ async def init_dependencies(config: AppConfig) -> None:
 async def shutdown_dependencies() -> None:
     """Dispose engine and clear singletons. Called during app lifespan shutdown."""
     global _engine, _durable_engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
-    global _outbox_drainer  # noqa: PLW0603
-    if _outbox_drainer is not None:
-        # Stop the best-effort outbox drainer; a final drain is skipped (the
-        # backlog is durable in the local DB and re-pushed on next startup).
-        _outbox_drainer.cancel()
-        try:
-            await _outbox_drainer
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: BLE001 — shutdown must not raise
-            logger.debug("outbox drainer shutdown error", exc_info=True)
+    global _write_through  # noqa: PLW0603
+    if _write_through is not None:
+        # Stop the write-through drainer (no-op in strict mode). Any backlog
+        # stays durable in the local DB and is re-pushed on next startup.
+        await _write_through.aclose()
     if _orchestrator is not None:
         # Cancel the idle sweeper and close every warm runtime — terminates all
         # live claude/codex subprocesses deterministically on shutdown.
@@ -127,7 +117,7 @@ async def shutdown_dependencies() -> None:
     _session_factory = None
     _store = None
     _orchestrator = None
-    _outbox_drainer = None
+    _write_through = None
 
 
 def _env_int(name: str) -> int | None:
@@ -241,17 +231,22 @@ def _build_durable_store(config: AppConfig) -> StorePort | None:
     )
 
 
-def _wrap_durable(config: AppConfig, local: StorePort, durable: StorePort | None) -> StorePort:
-    """Compose the effective store from the (always-present) local + optional durable.
+def _wrap_durable(
+    config: AppConfig, local: StorePort, durable: StorePort | None
+) -> WriteThroughStore | None:
+    """Wrap the (always-present) local store with a durable backend, by tier.
 
-    - no durable → local-only (single write).
+    Returns ``None`` for local-only (no durable → single write); otherwise a
+    :class:`WriteThroughStore` whose own lifecycle (``start``/``aclose``) the
+    caller drives:
+
     - ``remote`` → STRICT write-through (durable-first events, fail-loud).
     - ``pg`` → BEST-EFFORT write-through: local is authoritative; durable failures
       land in a :class:`DurableOutbox` over the LOCAL session factory so a Postgres
       outage never blocks local-first writes.
     """
     if durable is None:
-        return local
+        return None
     if config.kernel_store == "pg":
         assert _session_factory is not None  # set just above in init
         return WriteThroughStore(
@@ -259,23 +254,9 @@ def _wrap_durable(config: AppConfig, local: StorePort, durable: StorePort | None
             durable,
             durable_required=False,
             outbox=DurableOutbox(_session_factory),
+            drain_interval_s=_env_float("VALUZ_OUTBOX_DRAIN_INTERVAL_S") or 30.0,
         )
     return WriteThroughStore(local, durable, durable_required=True)
-
-
-async def _outbox_drain_loop(store: WriteThroughStore) -> None:
-    """Periodically re-push queued durable writes (best-effort mode)."""
-    interval = _env_float("VALUZ_OUTBOX_DRAIN_INTERVAL_S") or 30.0
-    while True:
-        await asyncio.sleep(interval)
-        try:
-            drained = await store.drain_outbox()
-            if drained:
-                logger.info("durable outbox: re-pushed %d op(s)", drained)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 — keep the loop alive across durable blips
-            logger.debug("outbox drain loop iteration failed", exc_info=True)
 
 
 async def _ensure_durable_schema(engine: AsyncEngine) -> None:
