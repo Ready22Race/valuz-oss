@@ -425,6 +425,10 @@ export function ProjectLayoutBase({
     const byProject = new Map<string, DesktopSidebarRecentItem[]>();
     const loose: DesktopSidebarRecentItem[] = [];
     for (const r of sorted) {
+      // Automation-triggered runs (chats AND tasks) live in the Activity
+      // 自动化 tab, not the sidebar's conversation/task lists — skip them so
+      // recurring fires don't flood the menu.
+      if (r.origin === "automation") continue;
       const item = toItem(r);
       if (r.project_id && projectIdSet.has(r.project_id)) {
         const arr = byProject.get(r.project_id);
@@ -872,14 +876,16 @@ export function ProjectLayoutBase({
           }
         }}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("project.createTitle")}</DialogTitle>
+        <DialogContent className="gap-0 p-0">
+          <DialogHeader className="px-[18px] pt-[18px] pb-1">
+            <DialogTitle className="text-sm leading-5">
+              {t("project.createTitle")}
+            </DialogTitle>
             <DialogDescription>{t("project.createDesc")}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">
+          <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
+            <div className="flex flex-col">
+              <label className="mb-[5px] text-xs font-medium text-foreground">
                 {t("project.projectName")}
               </label>
               <Input
@@ -888,15 +894,15 @@ export function ProjectLayoutBase({
                 onChange={(event) => setNewName(event.target.value)}
               />
             </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">
+            <div className="flex flex-col">
+              <label className="mb-[5px] text-xs font-medium text-foreground">
                 {t("project.projectDir")}
               </label>
               <div className="flex items-center gap-2">
                 {directoryFieldMode === "picker" && platform.isElectron ? (
                   <button
                     type="button"
-                    className="flex h-9 flex-1 items-center rounded-md border border-input bg-transparent px-3 text-sm shadow-sm transition-colors hover:border-ring"
+                    className="flex h-8 flex-1 items-center rounded-lg border border-input bg-surface px-2.5 text-sm text-foreground transition-[border-color,box-shadow,color,background-color] hover:border-ring focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 focus-visible:outline-none"
                     onClick={() => void handleSelectDirectory()}
                   >
                     <span
@@ -925,7 +931,7 @@ export function ProjectLayoutBase({
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="h-9 shrink-0"
+                    className="h-8 shrink-0"
                     onClick={() => void handleSelectDirectory()}
                   >
                     <FolderOpen className="mr-1.5 h-4 w-4" />
@@ -933,11 +939,13 @@ export function ProjectLayoutBase({
                   </Button>
                 ) : null}
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="mt-[3px] text-xs text-muted-foreground">
                 {t("project.dirHint")}
               </p>
               {createError ? (
-                <p className="text-xs text-destructive">{createError}</p>
+                <p className="mt-[3px] text-xs text-destructive">
+                  {createError}
+                </p>
               ) : null}
             </div>
             <div className="space-y-2">
@@ -948,7 +956,7 @@ export function ProjectLayoutBase({
             </div>
             {projectDialogExtraFields}
           </div>
-          <DialogFooter>
+          <DialogFooter className="px-[18px] pt-1 pb-4">
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               {t("common.cancel")}
             </Button>

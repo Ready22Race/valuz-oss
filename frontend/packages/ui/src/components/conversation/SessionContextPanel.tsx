@@ -275,7 +275,7 @@ export const SessionContextPanel = ({
                       <button
                         type="button"
                         onClick={() => onRemoveUploadedFile(file.id!)}
-                        className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition-opacity hover:text-red-500 group-hover:opacity-100"
+                        className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition-opacity hover:text-error-text group-hover:opacity-100"
                         title={t("common.remove", t("common.remove"))}
                       >
                         <X className="h-3 w-3" />
@@ -313,7 +313,7 @@ export const SessionContextPanel = ({
                     <button
                       type="button"
                       onClick={() => onRemoveKBFile?.(file.id)}
-                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-soft hover:text-red-500"
+                      className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-error-light hover:text-error-text"
                       title={t("common.remove", t("common.remove"))}
                     >
                       <X className="h-3 w-3" />

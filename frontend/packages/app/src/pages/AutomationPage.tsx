@@ -6,10 +6,8 @@
  * new `CreateAutomationDialog` which exposes cron + interval triggers
  * and an agent picker instead of a model picker.
  *
- * Reuses `ScheduledTaskTable` + `ExecutionLog` UI by mapping the new
- * `AutomationItem` / `AutomationRunItem` shapes into the table's generic
- * row form — a future slice can swap to dedicated components that
- * surface interval / manual triggers more naturally.
+ * Row clicks navigate to AutomationDetailPage (/automations/:id) where
+ * the execution log and edit/delete affordances live.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -20,21 +18,17 @@ import {
   Button,
   DeleteConfirmDialog,
   EmptyState,
-  ExecutionLog,
   PageHeader,
   PageLoader,
   ScheduledTaskTable,
 } from "@valuz/ui";
-import type { ExecutionLogRow } from "@valuz/ui";
 import {
   agentsApi,
   automationsApi,
   useTranslation,
   type Agent,
-  type AutomationDetail,
   type AutomationGroup,
   type AutomationItem,
-  type AutomationRunItem,
   type AutomationProjectTarget,
   type MemberWithAgent,
   type ActionKind,
@@ -49,48 +43,7 @@ import {
 type I18nKey = Parameters<ReturnType<typeof useTranslation>["t"]>[0];
 const k = (key: string) => key as I18nKey;
 
-// ── Run-row mapping helpers ──────────────────────────────────────
-
-function runStatusToLogStatus(
-  status: AutomationRunItem["status"],
-): ExecutionLogRow["status"] {
-  if (status === "success") return "ok";
-  if (status === "failed") return "err";
-  if (status === "queued" || status === "running") return "pending";
-  return "skip";
-}
-
-// The badge status shown in the execution log. For a task automation the run
-// row freezes to `success` the instant kickoff returns, so prefer the live
-// task status (resolved server-side) — `active`/`paused` are still in flight.
-function runToLogStatus(run: AutomationRunItem): ExecutionLogRow["status"] {
-  if (run.task_status) {
-    if (run.task_status === "completed") return "ok";
-    if (run.task_status === "failed") return "err";
-    return "pending"; // active / paused → still running
-  }
-  return runStatusToLogStatus(run.status);
-}
-
-function formatRunTime(ms: number): string {
-  const d = new Date(ms);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-function formatDuration(ms: number | null): string {
-  if (ms == null) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s`;
-  const mins = Math.floor(secs / 60);
-  const remSecs = secs % 60;
-  return `${mins}m${remSecs > 0 ? `${remSecs}s` : ""}`;
-}
-
-// "just now" / "5m ago" / "3h ago" / "2d ago". Mirrors the formatting
-// the legacy ScheduledPage used so the column reads identically — the
-// design review baked these strings in.
+// "just now" / "5m ago" / "3h ago" / "2d ago".
 function relativeTime(ms: number | null): string {
   if (ms == null) return "—";
   const diff = Date.now() - ms;
@@ -104,15 +57,13 @@ function relativeTime(ms: number | null): string {
 }
 
 // Trigger column — original ScheduledTaskTable shows the cron expression
-// in monospace next to the human-readable subtitle. The column is
-// ``font-mono`` so we keep it locale-neutral: raw cron expression for
-// cron, ``Ns`` for interval, and an em-dash for manual rows (which
-// never fire on the tick; the human-readable subtitle below already
-// says "Manual" for context).
+// Trigger column — cron rows show the raw cron expression (locale-neutral
+// standard, reads fine in monospace); interval / manual rows show the
+// backend's localized human-readable cadence (``每 30 分钟`` / ``Every 30
+// minutes`` / ``手动``) rather than a raw ``1800s``.
 function triggerColumn(item: AutomationItem): string {
   if (item.trigger.kind === "cron") return item.trigger.cron_expr;
-  if (item.trigger.kind === "interval") return `${item.trigger.seconds}s`;
-  return "—";
+  return item.trigger_human_readable;
 }
 
 // Map AutomationItem → the generic shape `ScheduledTaskTable` expects.
@@ -128,7 +79,9 @@ function automationToTableRow(item: AutomationItem) {
   return {
     id: item.automation_id,
     name: item.name,
-    prompt: item.trigger_human_readable,
+    // Subtitle = the bound agent (the schedule now lives in the 触发规则
+    // column, so repeating ``trigger_human_readable`` here would duplicate it).
+    prompt: item.agent_name ?? "",
     trigger: triggerColumn(item),
     triggerTimezone:
       item.trigger.kind === "cron"
@@ -170,24 +123,10 @@ export const AutomationPage = () => {
   const [projectMembers, setProjectMembers] = useState<
     Record<string, MemberWithAgent[]>
   >({});
-  // Aggregated recent runs across every automation, newest first. Keyed
-  // off the run id so duplicates collapse cleanly on re-poll.
-  const [recentRuns, setRecentRuns] = useState<
-    Array<AutomationRunItem & { automation_name: string }>
-  >([]);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AutomationItem | null>(null);
-  // Edit-mode state: the AutomationDetail whose row was clicked, plus
-  // the project it's bound to (drives the agent picker). When set,
-  // the same dialog opens in edit mode and submits route to the update
-  // API. ``null`` = create flow.
-  const [editTarget, setEditTarget] = useState<{
-    detail: AutomationDetail;
-    projectKind: "chat" | "project";
-    projectId: string;
-  } | null>(null);
   // Per-group collapse state — mirrors the legacy ScheduledPage so users
   // can fold the per-project tables once they grow long. Persisted
   // only for the current page lifetime; the design didn't ask for cross-
@@ -206,40 +145,6 @@ export const AutomationPage = () => {
   }, []);
 
   // ── Data loading ─────────────────────────────────────────────────
-
-  // Recent execution log — fan out N parallel `listRuns(id, 3)` calls, merge +
-  // sort by triggered_at desc, cap to a screen-worth. 3 per automation is
-  // enough for "what fired today" while keeping the round-trip count
-  // proportional to user-perceived activity. Reused by both the initial load
-  // and the poll, so it never touches `loading` (no PageLoader flicker).
-  const refreshRuns = useCallback(
-    async (automations: Array<{ automation_id: string; name: string }>) => {
-      if (automations.length === 0) {
-        setRecentRuns([]);
-        return;
-      }
-      const runFetches = await Promise.all(
-        automations.map(async (automation) => {
-          try {
-            const res = await automationsApi.listRuns(automation.automation_id, 3);
-            return res.runs.map((run) => ({
-              ...run,
-              automation_name: automation.name,
-            }));
-          } catch {
-            return [] as Array<AutomationRunItem & { automation_name: string }>;
-          }
-        }),
-      );
-      setRecentRuns(
-        runFetches
-          .flat()
-          .sort((a, b) => b.triggered_at - a.triggered_at)
-          .slice(0, 30),
-      );
-    },
-    [],
-  );
 
   const loadAll = useCallback(async () => {
     try {
@@ -268,30 +173,16 @@ export const AutomationPage = () => {
         }),
       );
       setProjectMembers(Object.fromEntries(memberPairs));
-
-      await refreshRuns(
-        groupsRes.groups.flatMap((group) => group.automations),
-      );
     } catch (error) {
       toast.error(t(k("automation.loadFailed"), { error: String(error) }));
     } finally {
       setLoading(false);
     }
-  }, [t, refreshRuns]);
+  }, [t]);
 
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
-
-  // Poll the execution log so a task automation's live status (resolved
-  // server-side from the lead session's task) updates without a manual
-  // refresh. Lightweight — only re-fetches runs, never the full page load.
-  useEffect(() => {
-    const automations = groups.flatMap((group) => group.automations);
-    if (automations.length === 0) return;
-    const id = setInterval(() => void refreshRuns(automations), 5000);
-    return () => clearInterval(id);
-  }, [groups, refreshRuns]);
 
   // ── Derived state ───────────────────────────────────────────────
 
@@ -416,40 +307,13 @@ export const AutomationPage = () => {
     }
   };
 
-  // ── Create / Edit dialog wiring ──────────────────────────────────
+  // ── Create dialog wiring (create-only; edit lives in AutomationDetailPage) ──
 
   const selectedTarget = targets.find(
     (target) => target.id === selectedTargetId,
   );
-  // Cache of members per project, populated on-demand when an edit
-  // dialog opens. Chat projects are lazy-created (one per automation),
-  // so we can't pre-load them all upfront — we fetch when the user
-  // actually clicks a row. Project members are pre-loaded in ``loadAll``
-  // so the create flow stays instant.
-  const [editProjectMembers, setEditProjectMembers] = useState<
-    MemberWithAgent[] | null
-  >(null);
 
-  /**
-   * Edit mode resolves candidates from the row's project members —
-   * for BOTH chat and project projects. The chat case is the subtle
-   * one: ``library_agent`` rows store the instantiated member slug
-   * (something like ``qa-engineer-ab12cd34``), not the library agent's
-   * own slug, so listing library agents would render an empty picker
-   * (the stored slug doesn't match anything in that list).
-   *
-   * Create mode keeps the original split: library agents when the user
-   * picks the Chat sentinel, members when they pick a project.
-   */
   const agentChoices: AutomationAgentChoice[] = useMemo(() => {
-    if (editTarget) {
-      const members =
-        editProjectMembers ?? projectMembers[editTarget.projectId] ?? [];
-      return members.map((entry) => ({
-        slug: entry.member.agent_slug,
-        name: entry.agent?.name ?? entry.member.agent_slug,
-      }));
-    }
     if (!selectedTarget || selectedTarget.kind === "chat") {
       return libraryAgents.map((agent) => ({
         slug: agent.slug,
@@ -461,66 +325,7 @@ export const AutomationPage = () => {
       slug: entry.member.agent_slug,
       name: entry.agent?.name ?? entry.member.agent_slug,
     }));
-  }, [
-    editTarget,
-    editProjectMembers,
-    selectedTarget,
-    libraryAgents,
-    projectMembers,
-  ]);
-
-  /**
-   * Open the edit dialog for a clicked automation row.
-   *
-   * Row mode → AutomationItem doesn't carry ``prompt_template`` (the
-   * group listing is intentionally trimmed); we fetch the detail before
-   * opening the dialog so all fields are pre-filled in one round trip.
-   * Project kind comes from the group the row was clicked under so
-   * the agent picker shows the right candidates without an extra lookup.
-   */
-  const openEditDialog = async (automationId: string) => {
-    // Find the AutomationItem itself, not just the group it lives in.
-    // The "Chat" virtual group's ``project_id`` is the sentinel
-    // ``"chat"`` (a React-key, not a real project), while each
-    // automation row inside carries the real lazy-created project
-    // it's bound to. Resolving from the item ensures we hand a valid id
-    // to ``agentsApi.listMembers``.
-    let itemHit: AutomationItem | undefined;
-    let kindHit: "chat" | "project" = "chat";
-    for (const group of groups) {
-      const found = group.automations.find(
-        (item) => item.automation_id === automationId,
-      );
-      if (found) {
-        itemHit = found;
-        kindHit = group.project_kind;
-        break;
-      }
-    }
-    if (!itemHit) return;
-    try {
-      // Detail + members fetch in parallel: detail for prompt_template +
-      // trigger, members so the agent picker has the right candidates
-      // for this exact project (load-bearing for chat-kind
-      // automations whose lazy-created projects aren't in the
-      // pre-loaded ``projectMembers`` map).
-      const [detail, membersRes] = await Promise.all([
-        automationsApi.get(automationId),
-        agentsApi.listMembers(itemHit.project_id).catch(() => ({
-          agents: [] as MemberWithAgent[],
-        })),
-      ]);
-      setEditProjectMembers(membersRes.agents);
-      setEditTarget({
-        detail,
-        projectKind: kindHit,
-        projectId: itemHit.project_id,
-      });
-      setCreateOpen(true);
-    } catch (error) {
-      toast.error(t(k("automation.loadFailed"), { error: String(error) }));
-    }
-  };
+  }, [selectedTarget, libraryAgents, projectMembers]);
 
   const handleDialogSubmit = async (data: {
     name: string;
@@ -529,25 +334,6 @@ export const AutomationPage = () => {
     trigger: Trigger;
     action_kind: ActionKind;
   }) => {
-    // Branch: edit (PATCH) vs create (POST) on the same callback so the
-    // dialog stays stateless.
-    if (editTarget) {
-      try {
-        await automationsApi.update(editTarget.detail.automation_id, {
-          name: data.name,
-          prompt_template: data.prompt_template,
-          agent_slug: data.agent_slug,
-          trigger: data.trigger,
-          action_kind: data.action_kind,
-        });
-        toast.success(t(k("automation.updateSuccess"), { name: data.name }));
-        await loadAll();
-      } catch (error) {
-        toast.error(t(k("automation.updateFailed"), { error: String(error) }));
-        throw error;
-      }
-      return;
-    }
     if (!selectedTarget) {
       toast.error(t(k("automation.pickProjectFirst")));
       return;
@@ -572,52 +358,13 @@ export const AutomationPage = () => {
     }
   };
 
-  // Reset edit context whenever the dialog closes so the next "+ New"
-  // click starts fresh in create mode.
-  const handleDialogOpenChange = (open: boolean) => {
-    if (!open) {
-      setEditTarget(null);
-      setEditProjectMembers(null);
-    }
-    setCreateOpen(open);
-  };
-
-  // ── Execution log rows ───────────────────────────────────────────
-
-  const executionRows: ExecutionLogRow[] = recentRuns.map((run) => ({
-    id: run.run_id,
-    time: formatRunTime(run.triggered_at),
-    status: runToLogStatus(run),
-    duration: formatDuration(run.duration_ms),
-    output:
-      (run.error_message_key
-        ? t(run.error_message_key as I18nKey)
-        : null) ??
-      run.result_summary ??
-      run.error_message ??
-      (run.error_code ? `${run.error_code}` : ""),
-    triggerType:
-      // ExecutionLog now recognises all four trigger kinds the runner
-      // emits (cron / interval / manual / recovered_skip). System-emitted
-      // ``auto_paused_notice`` rows (ADR-012) and any unknown future
-      // values fall through to undefined → no badge.
-      run.trigger_type === "cron" ||
-      run.trigger_type === "interval" ||
-      run.trigger_type === "manual" ||
-      run.trigger_type === "recovered_skip"
-        ? run.trigger_type
-        : undefined,
-    taskName: run.automation_name,
-    sessionId: run.session_id,
-  }));
-
   // ── Render ──────────────────────────────────────────────────────
 
   if (loading) return <PageLoader />;
 
   return (
     <div className="relative h-full min-h-0 overflow-y-auto bg-card">
-      <div className="flex min-h-full flex-col px-5 pb-5 pt-3">
+      <div className="mx-auto flex min-h-full w-full max-w-[1000px] flex-col pb-5 pt-3">
         {!hasAutomations ? (
           <div className="flex flex-1 justify-center pt-[160px]">
             <EmptyState
@@ -660,13 +407,7 @@ export const AutomationPage = () => {
                       onToggleCollapse={() =>
                         toggleGroupCollapsed(group.project_id)
                       }
-                      onRowClick={(id) => {
-                        // Edit affordance: clicking a row opens the
-                        // dialog in edit mode pre-filled with the row's
-                        // values. Same code path as the create flow
-                        // (PATCH vs POST decided by handleDialogSubmit).
-                        void openEditDialog(id);
-                      }}
+                      onRowClick={(id) => navigate(`/automations/${id}`)}
                       onToggle={(id) => toggleAutomation(id)}
                       onRunNow={(id) => runNow(id)}
                       onDelete={(id) => {
@@ -679,78 +420,19 @@ export const AutomationPage = () => {
                   </section>
                 ))}
             </div>
-
-            <section className="mt-8">
-              <div className="mb-3 border-b border-[#f7f8fa] pb-3 dark:border-surface-border">
-                <div className="text-base font-semibold text-ink-heading">
-                  {t(k("automation.recentExecutions"))}
-                </div>
-              </div>
-
-              {executionRows.length > 0 ? (
-                <ExecutionLog
-                  rows={executionRows}
-                  onSessionClick={(sessionId) =>
-                    navigate(`/conversation/${sessionId}`)
-                  }
-                />
-              ) : (
-                <div className="flex flex-1 justify-center py-8">
-                  <EmptyState
-                    variant="plain"
-                    title={t(k("automation.noExecutions"))}
-                    icon={<Clock3 className="h-5 w-5" />}
-                  />
-                </div>
-              )}
-            </section>
           </>
         )}
       </div>
 
       <CreateAutomationDialog
         open={createOpen}
-        onOpenChange={handleDialogOpenChange}
+        onOpenChange={(open) => setCreateOpen(open)}
         onSubmit={handleDialogSubmit}
         agents={agentChoices}
-        // Create flow: hand the dialog the full target list (Chat sentinel +
-        // projects) and let it own the selection ↔ mode coupling. Omitted in
-        // edit mode, where the target is fixed to the row's project.
-        targets={editTarget ? undefined : targets}
+        targets={targets}
         selectedTargetId={selectedTargetId}
         onSelectTarget={setSelectedTargetId}
-        allowTaskMode={
-          // Edit mode only: Task is valid iff the row's locked project is a
-          // ``project`` kind. In create mode the dialog derives this from
-          // ``targets`` instead, so this value is ignored there.
-          editTarget ? editTarget.projectKind === "project" : false
-        }
-        // Edit mode: show the row's (locked) project — the target selector is
-        // create-only, so without this the "所属项目" field was blank when
-        // editing a project-bound automation. Create mode leaves it unset.
-        fixedTargetName={editTarget ? editTarget.detail.project_name : undefined}
-        initial={
-          editTarget
-            ? {
-                name: editTarget.detail.name,
-                prompt_template: editTarget.detail.prompt_template,
-                agent_slug: editTarget.detail.agent_slug,
-                trigger: editTarget.detail.trigger,
-                action_kind:
-                  (editTarget.detail.action_kind as ActionKind) ?? "chat",
-              }
-            : undefined
-        }
-        title={
-          // Create flow is now mode-agnostic (chat OR project, picked inside
-          // the dialog), so the title is the generic "New automation". Edit
-          // keeps the named title.
-          editTarget
-            ? t(k("automation.dialogTitleEditNamed"), {
-                name: editTarget.detail.name,
-              })
-            : t(k("automation.dialogTitleNew"))
-        }
+        title={t(k("automation.dialogTitleNew"))}
       />
 
       <DeleteConfirmDialog

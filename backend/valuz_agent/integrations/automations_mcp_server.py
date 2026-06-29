@@ -294,9 +294,7 @@ async def _handle_create(
     except AutomationNameEmpty:
         return _err("create", "name is required for create.", code="MISSING_NAME")
     except AutomationPromptEmpty:
-        return _err(
-            "create", "prompt_template is required for create.", code="MISSING_PROMPT"
-        )
+        return _err("create", "prompt_template is required for create.", code="MISSING_PROMPT")
     except AutomationAgentRequired:
         return _err(
             "create",
@@ -471,7 +469,16 @@ async def _handle_status_change(
                 message=f"Removed '{name}'.",
             )
         elif action == "run":
-            run = await svc.run_now(payload.automation_id)
+            # Agent-initiated off-schedule fire — tag it ``agent`` so the
+            # execution log distinguishes it from a human's "Run now" click
+            # (``manual``) and the scheduled cron/interval runs. Carry the
+            # invoking session so a task this run spawns can chain its
+            # provenance back to the originating task (task→automation→task).
+            run = await svc.run_now(
+                payload.automation_id,
+                trigger_type="agent",
+                invoked_by_session_id=_current_session_id(),
+            )
             return AutomationToolResult(
                 action="run",
                 ok=True,

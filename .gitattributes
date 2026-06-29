@@ -1,0 +1,4 @@
+# The vendored tiktoken vocab is a data blob (token<->rank lines) — treat it as
+# binary so git doesn't render its ~200k lines in diffs or munge line endings.
+# The name is sha1(o200k_base blob url); bump this if the encoding changes.
+backend/vendor/tiktoken/fb374d419588a4632f3f557e76b4b70aebbca790 binary

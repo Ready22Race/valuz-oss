@@ -27,10 +27,10 @@ export const KnowledgeDocTable = ({
 }: KnowledgeDocTableProps) => {
   const { t } = useI18n();
   return (
-    <div className="overflow-hidden rounded-[22px] border border-surface-border bg-card shadow-xs">
+    <div className="overflow-hidden rounded-2xl border border-surface-border bg-card shadow-xs">
       <table className="w-full">
         <thead className="sticky top-0 z-10 border-b border-surface-border bg-surface-soft">
-          <tr className="text-[10px] font-medium uppercase tracking-[0.8px] text-ink-section">
+          <tr className="text-micro font-medium uppercase tracking-wide text-ink-section">
             <th className="px-5 py-3 text-left font-medium">
               {t("knowledge.docColumn")}
             </th>
@@ -59,27 +59,27 @@ export const KnowledgeDocTable = ({
                 className={cn(
                   "group border-b border-surface-border transition-colors last:border-b-0",
                   selectedId === item.id
-                    ? "bg-brand-light/35"
+                    ? "bg-[color:var(--fg-2)]"
                     : "hover:bg-surface-soft",
                 )}
               >
                 <td className="px-5 py-4">
                   <div className="flex items-start gap-3">
-                    <div className="flex h-9 w-9 items-center justify-center rounded-[12px] border border-surface-border bg-surface-soft">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-2xl border border-surface-border bg-surface-soft">
                       <FileText className="h-4 w-4 text-ink-muted" />
                     </div>
                     <div className="min-w-0">
                       <div className="text-sm text-ink-heading">
                         {item.name}
                       </div>
-                      <div className="mt-1 flex items-center gap-2 text-[11px] text-ink-meta sm:hidden">
+                      <div className="mt-1 flex items-center gap-2 text-2xs text-ink-meta sm:hidden">
                         <IndexingStatusBadge
                           status={item.status}
                           chunks={item.chunks}
                           progress={item.progress}
                         />
                       </div>
-                      <div className="mt-1 hidden items-center gap-2 text-[11px] text-ink-meta sm:flex">
+                      <div className="mt-1 hidden items-center gap-2 text-2xs text-ink-meta sm:flex">
                         <BookText className="h-3.5 w-3.5" />
                         {item.size}
                       </div>
@@ -90,7 +90,7 @@ export const KnowledgeDocTable = ({
                   <div className="text-xs text-ink-heading">
                     {itemMeta?.collection}
                   </div>
-                  <div className="mt-1 text-[11px] text-ink-body">
+                  <div className="mt-1 text-2xs text-ink-body">
                     {itemMeta?.owner}
                   </div>
                 </td>

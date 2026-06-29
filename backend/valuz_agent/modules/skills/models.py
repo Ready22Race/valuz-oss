@@ -1,7 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Boolean, String, Text, text
+from sqlalchemy import BigInteger, Boolean, String, Text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
@@ -60,7 +60,7 @@ class SkillIndexRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # conversation's inline ``/`` picker; never affects runtime loading or an
     # agent's own ``/`` (which read source paths, not this flag).
     library_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default=text("1")
+        Boolean, nullable=False, default=True, server_default=true()
     )
 
 

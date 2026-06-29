@@ -70,6 +70,20 @@ class TaskDatastore:
             .first()
         )
 
+    async def get_titles_by_ids(self, user_id: str, task_ids: list[str]) -> dict[str, str]:
+        """Map task id → title for the given ids (used to label trigger provenance
+        — "由 任务《title》触发" — without N+1 lookups). Missing ids are omitted."""
+        if not task_ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(TaskRow.id, TaskRow.title).where(
+                    TaskRow.id.in_(task_ids), TaskRow.user_id == user_id
+                )
+            )
+        ).all()
+        return {tid: title for tid, title in rows}
+
     async def get_task_by_project(
         self, user_id: str, project_id: str, task_id: str
     ) -> TaskRow | None:
@@ -322,6 +336,34 @@ class TaskSessionDatastore:
             )
         ).all()
         return {session_id: status for session_id, status in rows}
+
+    async def get_task_links_by_session_ids(
+        self, user_id: str, session_ids: list[str]
+    ) -> dict[str, tuple[str, str, str]]:
+        """Map run ``session_id`` → ``(task_id, title, status)`` of its owning task.
+
+        Superset of ``get_task_status_by_session_ids`` — adds the task id + title
+        so the automation activity log can deep-link to the spawned task (not only
+        show its live status). Sessions with no task row are omitted.
+        """
+        if not session_ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(
+                    TaskSessionRow.session_id,
+                    TaskRow.id,
+                    TaskRow.title,
+                    TaskRow.status,
+                )
+                .join(TaskRow, TaskRow.id == TaskSessionRow.task_id)
+                .where(
+                    TaskSessionRow.session_id.in_(session_ids),
+                    TaskSessionRow.user_id == user_id,
+                )
+            )
+        ).all()
+        return {sid: (tid, title, status) for sid, tid, title, status in rows}
 
     async def get_run(self, session_id: str) -> TaskSessionRow | None:
         """SYSTEM lookup by the globally-unique kernel ``session_id`` (runner +

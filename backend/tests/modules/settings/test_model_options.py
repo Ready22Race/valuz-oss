@@ -76,17 +76,26 @@ class TestRuntimesFor:
     def test_claude_subscription_runs_claude_only(self) -> None:
         assert runtimes_for(["anthropic"], provider_kind="claude-subscription") == ["claude_agent"]
 
-    def test_user_openai_key_cannot_drive_codex(self) -> None:
-        # A bare user OpenAI key speaking the response wire still can't run codex
-        # (codex walks its own keychain) — the gateway that can declares codex
-        # on its own rows, not via derivation. Only deepagents here.
+    def test_user_openai_key_drives_codex_and_deepagents(self) -> None:
+        # A user OpenAI key speaking both wires drives codex (Responses) AND
+        # deepagents (chat completions). The kernel codex runtime reaches a
+        # user-supplied key via OPENAI_API_KEY / the model_providers.harness
+        # block — it does NOT require the subscription keychain.
         assert runtimes_for(["openai-completion", "openai-response"], provider_kind="openai") == [
-            "deepagents"
+            "codex",
+            "deepagents",
         ]
 
-    def test_response_only_user_row_has_no_runtime(self) -> None:
-        # openai-response alone, non-subscription → nothing derivable.
-        assert runtimes_for(["openai-response"], provider_kind="openai") == []
+    def test_response_only_user_row_drives_codex(self) -> None:
+        # openai-response alone, non-subscription → codex (only the Responses
+        # wire is spoken, and the kernel codex runtime accepts a custom key).
+        assert runtimes_for(["openai-response"], provider_kind="openai") == ["codex"]
+
+    def test_custom_compatible_response_drives_codex(self) -> None:
+        # A custom OpenAI-compatible gateway pinned to the Responses wire
+        # (e.g. Volcengine Ark) → codex, routed through the kernel's
+        # ``model_providers.harness`` block with its base_url + API key.
+        assert runtimes_for(["openai-response"], provider_kind="compatible") == ["codex"]
 
     def test_deepseek_dual_shape_runs_claude_and_deepagents(self) -> None:
         assert runtimes_for(["anthropic", "openai-completion"], provider_kind="deepseek") == [
@@ -95,9 +104,13 @@ class TestRuntimesFor:
         ]
 
     def test_empty_protocols_is_treated_as_no_restriction(self) -> None:
-        # Empty → every protocol; non-subscription system → claude + deepagents
-        # (codex is NOT derived — the gateway declares it itself).
-        assert runtimes_for([], provider_kind="system") == ["claude_agent", "deepagents"]
+        # Empty → every protocol; non-subscription system speaks all wires, so
+        # every derivable runtime applies (claude / codex / deepagents).
+        assert runtimes_for([], provider_kind="system") == [
+            "claude_agent",
+            "codex",
+            "deepagents",
+        ]
 
 
 # ── build_model_options ──────────────────────────────────────────────
@@ -217,8 +230,9 @@ class TestBuildModelOptions:
         assert provider.unavailable_reason == "未登录 Valuz 账户"
 
     def test_models_without_runnable_runtime_are_dropped(self) -> None:
-        # response-only, non-subscription, runtimes undeclared → no runtime → drop.
-        prov = _pin(compatible_protocols=["openai-response"], models=[_m("m")])
+        # A model that declares an empty runtime set (no runnable runtime) is
+        # dropped, and a provider left with no models yields no group.
+        prov = _pin(compatible_protocols=["openai-response"], models=[_m("m", runtimes=())])
         assert build_model_options([prov], _NO_DEFAULT).groups == []
 
     def test_groups_ordered_by_group_rank(self) -> None:

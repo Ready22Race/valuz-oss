@@ -521,6 +521,10 @@ class SessionService:
             resolve_model_provider,
             resolve_runtime_provider,
         )
+        from valuz_agent.modules.providers.service import (
+            materialize_logged_in_subscription,
+            subscription_login_hint,
+        )
 
         if self._secrets is None:
             raise RuntimeError(
@@ -585,6 +589,25 @@ class SessionService:
                 f"enabled provider hosts model '{effective_model}' — add a provider "
                 "for that model or pin one on the agent"
             )
+
+        # Backstop for a stale subscription reference. A logged-in subscription
+        # is normally materialized into a real row the moment its CLI login is
+        # detected (frontend onboarding / Settings). But a value saved before
+        # that — an agent pinned to the virtual ``ch-codex-subscription`` id, or
+        # a composer pick of a not-yet-materialized template — still carries the
+        # catalog id, which owns no row and would resolve to a raw
+        # "provider not found" 400. Materialize it now (CLI-login-gated) and swap
+        # to the real uuid; if the CLI isn't logged in, raise an actionable hint
+        # instead of the cryptic error.
+        uid = require_current_user_id()
+        if await self._providers.get_by_id(uid, provider_id) is None:
+            healed = await materialize_logged_in_subscription(self._providers, uid, provider_id)
+            if healed is not None:
+                provider_id = healed.id
+            else:
+                hint = subscription_login_hint(provider_id)
+                if hint is not None:
+                    raise SessionNotRunnable(hint)
 
         try:
             runtime_provider = await resolve_runtime_provider(
@@ -858,6 +881,10 @@ class SessionService:
             resolve_model_provider,
             resolve_runtime_provider,
         )
+        from valuz_agent.modules.providers.service import (
+            materialize_logged_in_subscription,
+            subscription_login_hint,
+        )
 
         if resolved_provider_id is None:
             raise SessionNotRunnable(
@@ -869,6 +896,23 @@ class SessionService:
                 "SessionService is missing secrets wiring — required "
                 "for provider resolution since kernel V5"
             )
+
+        # Backstop for a composer pick / stale default that still carries a
+        # virtual ``ch-*`` subscription id (no row → raw "provider not found").
+        # Materialize it now if its CLI is logged in (mirrors the frontend's
+        # detect-then-materialize), else raise an actionable login hint. See the
+        # agent-conversation path above for the full rationale.
+        _uid = require_current_user_id()
+        if await self._providers.get_by_id(_uid, resolved_provider_id) is None:
+            _healed = await materialize_logged_in_subscription(
+                self._providers, _uid, resolved_provider_id
+            )
+            if _healed is not None:
+                resolved_provider_id = _healed.id
+            else:
+                _hint = subscription_login_hint(resolved_provider_id)
+                if _hint is not None:
+                    raise SessionNotRunnable(_hint)
 
         # Resolve the runtime BEFORE the model provider: dual-protocol
         # built-ins (DeepSeek / Zhipu / Moonshot / MiniMax) let the
@@ -1429,6 +1473,9 @@ class SessionService:
             session_id=session_id,
             items=[_queued_input_to_dto(r) for r in rows],
             paused=paused,
+            # A dispatched item is invisible in ``items`` — surface the in-flight
+            # drain so per-turn re-subscribers keep following (§14.5).
+            draining=is_draining_queue(session_id),
         )
 
     async def enqueue(
@@ -1520,6 +1567,48 @@ class SessionService:
         status = _map_kernel_status(session.status)
         if status != "running" and not is_draining_queue(session_id):
             schedule_drain(session_id, self._bus)
+        return await self.list_queue(session_id)
+
+    async def steer_queued(self, session_id: str, queue_id: str) -> QueuedInputList:
+        """Send a queued item now, interrupting the active turn (steer / send-now).
+
+        Promotes the item to the FIFO head and clears any soft-pause, then — if a
+        turn is in flight — interrupts it *silently* via the low-level kernel
+        interrupt (NOT ``self.interrupt``, which would stamp ``user_interrupt``
+        and re-pause the queue). The in-flight chain finalizes the cut turn as a
+        clean idle and its post-turn drain dispatches the promoted head; we
+        therefore do NOT kick a drain here (that would race the in-flight chain).
+        Only a genuinely idle session needs the explicit kick. Lossy: the running
+        turn's partial progress is discarded. Runtime-agnostic stand-in for Codex
+        ``turn/steer`` (see docs/design/session-input-queue.md §11).
+        """
+        uid = require_current_user_id()
+        session = await kernel_client.get_session(uid, session_id)
+        if session is None:
+            raise _kernel_session_not_found(session_id)
+
+        async with async_unit_of_work() as db:
+            promoted = await SessionDatastore(db).promote_to_front(uid, session_id, queue_id)
+        if promoted is None:
+            raise QueuedInputNotFound()
+
+        # Steer overrides any interrupt soft-pause so the drain proceeds.
+        await project_index.set_queue_paused(session_id, False)
+
+        status = _map_kernel_status(session.status)
+        if status == "running" or is_draining_queue(session_id):
+            # Silent interrupt: cut the in-flight turn so the existing post-turn
+            # drain picks up the promoted head. Low-level kernel interrupt only —
+            # no user_interrupt stamp, no re-pause (that's what makes it "silent";
+            # the cut turn finalizes as a clean idle). Best-effort: if the runtime
+            # is already gone the in-flight chain still drains the promoted head.
+            try:
+                await kernel_client.interrupt(uid, session_id)
+            except Exception:  # noqa: BLE001 — runtime gone / never registered
+                logger.warning("steer: kernel interrupt failed for %s", session_id, exc_info=True)
+        else:
+            schedule_drain(session_id, self._bus)
+
         return await self.list_queue(session_id)
 
     async def cancel(self, session_id: str) -> SessionDetail:

@@ -44,9 +44,17 @@ class ModuleRegistry:
             _ModuleEntry(name=name, router=router, prefix=prefix, tags=tags or [name])
         )
 
-    def apply(self, app: FastAPI) -> None:
+    def apply(self, target: FastAPI | APIRouter) -> None:
+        """Mount every registered router onto ``target``.
+
+        ``target`` is normally the ``FastAPI`` app, but may also be an
+        ``APIRouter`` — ``create_app`` aggregates the whole public surface into
+        one router so a global ``api_prefix`` can be applied uniformly, and
+        passes that router here. Both types expose the same
+        ``include_router(router, prefix=, tags=)`` signature.
+        """
         for entry in self._modules:
-            app.include_router(entry.router, prefix=entry.prefix, tags=entry.tags)
+            target.include_router(entry.router, prefix=entry.prefix, tags=entry.tags)
 
     @property
     def registered_names(self) -> list[str]:

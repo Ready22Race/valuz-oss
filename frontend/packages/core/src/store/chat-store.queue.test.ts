@@ -26,6 +26,7 @@ vi.mock("../api/queue-api", () => ({
     edit: vi.fn(async () => ({ session_id: "s", items: [], paused: false })),
     remove: vi.fn(async () => ({ session_id: "s", items: [], paused: false })),
     resume: vi.fn(async () => ({ session_id: "s", items: [], paused: false })),
+    steer: vi.fn(async () => ({ session_id: "s", items: [], paused: false })),
   },
 }));
 
@@ -99,6 +100,19 @@ describe("chat-store input queue", () => {
     useChatStore.setState({ queuePaused: true });
     await useChatStore.getState().resumeQueue();
     expect(queueApi.resume).toHaveBeenCalledWith("s");
+    expect(useChatStore.getState().queuePaused).toBe(false);
+  });
+
+  it("steerQueued sends the item now and syncs queue + paused", async () => {
+    (queueApi.steer as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      session_id: "s",
+      items: [],
+      paused: false,
+    });
+    useChatStore.setState({ queuePaused: true });
+    await useChatStore.getState().steerQueued("q1");
+    expect(queueApi.steer).toHaveBeenCalledWith("s", "q1");
+    expect(useChatStore.getState().queue).toHaveLength(0);
     expect(useChatStore.getState().queuePaused).toBe(false);
   });
 });

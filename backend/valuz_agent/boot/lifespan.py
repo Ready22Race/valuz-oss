@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await steps.start_automation_runner(app)
     await steps.start_polling_scheduler()
     steps.warm_parse_pool()
+    steps.warm_token_estimator()
     await steps.start_skills(app)
     await steps.start_decision_aggregator(app)
     steps.mark_boot_complete()  # LAST

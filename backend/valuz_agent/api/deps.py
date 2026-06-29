@@ -286,6 +286,7 @@ async def get_runs_service() -> AsyncGenerator[RunsService, None]:
             task_sessions=TaskSessionDatastore(db),
             tasks=TaskDatastore(db),
             task_events=TaskEventDatastore(db),
+            automations=AutomationDatastore(db),
         )
 
 

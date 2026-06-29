@@ -143,7 +143,7 @@ export const ProviderFormFields: FC<ProviderFormFieldsProps> = ({
               className={cn(
                 "w-full rounded-lg border bg-surface px-3 py-2 pr-10 text-sm text-ink-heading focus:outline-none",
                 testStatus === "fail"
-                  ? "border-red-400 focus:border-red-400"
+                  ? "border-error-border focus:border-error-border"
                   : "border-surface-border focus:border-brand/30",
               )}
             />

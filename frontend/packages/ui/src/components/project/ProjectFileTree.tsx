@@ -135,7 +135,7 @@ const TreeNode = ({
         <button
           type="button"
           onClick={() => setOpen(!open)}
-          className="relative flex w-full items-center gap-1.5 rounded px-2 py-1 text-xs text-ink-label hover:bg-surface-muted"
+          className="relative flex w-full items-center gap-1.5 rounded px-2 py-1 text-xs text-ink-label hover:bg-[color:var(--fg-1)]"
           style={rowStyle}
         >
           {guideColumns}
@@ -184,7 +184,7 @@ const TreeNode = ({
         "relative flex w-full items-center gap-1.5 rounded-[4px] px-2 py-1 text-xs transition-colors",
         isActive
           ? "bg-surface-soft text-ink-heading"
-          : "text-ink-heading hover:bg-surface-muted",
+          : "text-ink-heading hover:bg-[color:var(--fg-1)]",
       )}
       style={rowStyle}
     >

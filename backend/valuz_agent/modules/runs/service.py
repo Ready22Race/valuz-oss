@@ -26,6 +26,7 @@ from app.schemas import TodoItem
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel on sys.path
 from valuz_agent.adapters import kernel_client
+from valuz_agent.modules.automations.datastore import AutomationDatastore
 from valuz_agent.modules.projects.datastore import ProjectDatastore
 from valuz_agent.modules.projects.models import ProjectRow
 from valuz_agent.modules.sessions import project_index
@@ -64,6 +65,9 @@ _RUNNING_RUN_STATUS = {"running", "paused"}
 # above, not history.
 _FINISHED_RUN_STATUS = {"idle", "completed", "stopped", "blocked", "failed"}
 _FINISHED_LIMIT = 50
+# Index-pool size for the recency window. Generous so user activity stays in
+# range as automation runs accrue; the per-group _FINISHED_LIMIT bounds output.
+_INDEX_POOL = 500
 _OUTPUT_CHARS = 200
 
 
@@ -95,6 +99,7 @@ class RunSummary:
     updated_at: int  # Unix epoch milliseconds (UTC)
     project_name: str | None = None
     task_id: str | None = None
+    origin: str = "user"
     current_todo: TodoSnapshot | None = None
     last_message: str | None = None
     # Chats: last round's assistant output (truncated). Tasks use ``last_event``.
@@ -140,20 +145,24 @@ class RunsService:
         task_sessions: TaskSessionDatastore,
         tasks: TaskDatastore,
         task_events: TaskEventDatastore,
+        automations: AutomationDatastore,
     ) -> None:
         self._projects = projects
         self._task_sessions = task_sessions
         self._tasks = tasks
         self._task_events = task_events
+        self._automations = automations
 
     async def list_runs(self, user_id: str, status: str = "running") -> list[RunSummary]:
         # Recent sessions come from the host project↔session index; the
         # kernel rows are bulk-fetched by id (the kernel itself is
-        # project-agnostic).
-        index_rows = await project_index.list_recent(limit=200)
+        # project-agnostic). The pool is generous (automation runs accrue
+        # fast); the per-group ``_FINISHED_LIMIT`` budget below is what bounds
+        # the response, not this fetch.
+        index_rows = await project_index.list_recent(limit=_INDEX_POOL)
         proj_by_session = {r.session_id: r.project_id for r in index_rows}
         sessions: list[KernelSession] = await kernel_client.list_sessions(
-            user_id, ids=[r.session_id for r in index_rows], limit=200
+            user_id, ids=[r.session_id for r in index_rows], limit=_INDEX_POOL
         )
         ws_map: dict[str, ProjectRow] = {
             str(r.id): r for r in await self._projects.list_projects(user_id)
@@ -164,6 +173,12 @@ class RunsService:
         task_map: dict[str, TaskRow] = {
             str(r.id): r for r in await self._tasks.list_all(user_id, limit=None)
         }
+        # Session ids spawned by a scheduled automation run. A task created by
+        # an automation has a lead session whose own origin stays "user" and
+        # whose task row carries no automation marker — but the automation's
+        # run record points at this session. Membership here is the reliable
+        # "automation-triggered" signal for both chats and task leads.
+        automation_session_ids = await self._automations.list_run_session_ids(user_id)
 
         out: list[RunSummary] = []
         for sess in sessions:
@@ -188,6 +203,7 @@ class RunsService:
                     task_map,
                     effective,
                     project_id=proj_by_session.get(sess.id, ""),
+                    automation_session_ids=automation_session_ids,
                 )
             except Exception:
                 logger.exception(
@@ -198,7 +214,15 @@ class RunsService:
             out.append(summary)
 
         out.sort(key=lambda r: r.updated_at, reverse=True)
-        return out if status == "running" else out[:_FINISHED_LIMIT]
+        if status == "running":
+            return out
+        # Separate budgets so a flood of automation runs can't crowd user
+        # chats/tasks out of the recency-sorted window (and vice-versa). Each
+        # group keeps its own ``_FINISHED_LIMIT`` of most-recent runs; the
+        # client splits them across the 全部/对话/任务/自动化 tabs.
+        user_runs = [r for r in out if r.origin != "automation"]
+        automation_runs = [r for r in out if r.origin == "automation"]
+        return user_runs[:_FINISHED_LIMIT] + automation_runs[:_FINISHED_LIMIT]
 
     @staticmethod
     def _effective_status(
@@ -224,6 +248,7 @@ class RunsService:
         effective_status: str,
         *,
         project_id: str,
+        automation_session_ids: set[str],
     ) -> RunSummary:
         meta: dict[str, Any] = (sess.metadata or {}).get("valuz") or {}
         project = ws_map.get(project_id)
@@ -246,12 +271,25 @@ class RunsService:
                 "project_chat" if project is not None and project.kind == "project" else "assistant"
             )
             last_output = _truncate_output(await self._latest_assistant_text(user_id, sess.id))
+
+        # ``origin`` = who triggered this run.
+        # - Chat sessions: read the session's own metadata origin (the
+        #   automation runner stamps "automation" at creation).
+        # - Task leads: the lead session's own origin stays "user" (the task
+        #   orchestrator doesn't propagate the trigger) and the task row carries
+        #   no marker. The reliable signal is the automation *run* record: if
+        #   this session id was produced by a scheduled run, it's automation.
+        own_origin = str(meta.get("origin") or "user")
+        if own_origin == "user" and sess.id in automation_session_ids:
+            own_origin = "automation"
+
         return RunSummary(
             session_id=sess.id,
             source_kind=source,
             project_id=project_id,
             project_name=project.name if project is not None else None,
             task_id=task_id,
+            origin=own_origin,
             title=str(title),
             status=effective_status,
             updated_at=sess.created_at,

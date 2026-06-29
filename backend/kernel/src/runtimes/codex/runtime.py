@@ -95,7 +95,7 @@ from src.runtimes.codex.event_mapper import (
     extract_turn_completed,
     map_notification,
 )
-from src.runtimes.interruption import is_runtime_interruption
+from src.runtimes.interruption import describe_exception, is_runtime_interruption
 
 logger = logging.getLogger(__name__)
 
@@ -519,12 +519,20 @@ class CodexRuntime:
                     message="runtime process interrupted",
                 )
             else:
+                # See ``describe_exception``: a wrapped ``ExceptionGroup`` would
+                # otherwise reach the user as the opaque "unhandled errors in a
+                # TaskGroup" — unwrap to the leaf and log the traceback (this
+                # branch previously logged nothing).
+                cause = describe_exception(exc)
+                logger.exception(
+                    "codex: turn failed for session %s: %s", session.id, cause
+                )
                 session.stop_reason = Error(
                     category="execution_error",
                     retry_status="exhausted",
-                    message=str(exc),
+                    message=cause,
                 )
-                await self.event_sink.emit(Event(type="session_error", data={"message": str(exc)}))
+                await self.event_sink.emit(Event(type="session_error", data={"message": cause}))
                 if self.config.hooks:
                     await self.config.hooks.fire("on_error", error=exc, session_id=session.id)
         finally:
@@ -1368,6 +1376,14 @@ def _build_codex_env(
     merged: dict[str, str] = dict(os.environ)
     if provider.base_url is not None:
         merged[_HARNESS_PROVIDER_ENV_KEY] = provider.api_key
+        # Present as the CLI's originator (``codex_exec``) rather than the SDK's
+        # default (``codex_python_sdk``). Some third-party OpenAI-compatible
+        # gateways (e.g. Volcengine/Doubao) whitelist codex's proprietary tool
+        # types (``namespace``…) + ``client_metadata`` only for the CLI
+        # originator and 400 ("unknown tool type: namespace") for the SDK one —
+        # even though the request body is byte-identical. Same App Server, so
+        # spoofing the originator makes the SDK path match the working CLI path.
+        merged["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] = "codex_exec"
     else:
         merged["OPENAI_API_KEY"] = provider.api_key
     return merged

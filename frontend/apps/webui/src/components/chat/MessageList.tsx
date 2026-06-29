@@ -11,7 +11,7 @@ interface MessageListProps {
 }
 
 const StopReasonHint = ({ reason }: { reason: string }) => (
-  <span className="ml-2 rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-amber-700 dark:text-amber-300">
+  <span className="ml-2 rounded border border-warning-border bg-warning-light px-1.5 py-0.5 text-micro font-medium uppercase tracking-wide text-warning-text">
     {reason === "user_interrupt" ? "stopped" : reason}
   </span>
 );
@@ -36,7 +36,7 @@ export const MessageList = ({
   return (
     <ScrollArea className="h-full pr-2">
       <div ref={scrollRef} className="space-y-5 px-2 pb-4 pt-2">
-        {messages.map((msg) => (
+        {messages.map((msg, idx) => (
           <div key={msg.id} className="flex flex-col gap-1">
             {msg.role === "user" ? (
               <UserMessageBubble>
@@ -52,7 +52,7 @@ export const MessageList = ({
                     <div className="font-medium">{t.name}</div>
                     {t.output != null && (
                       <pre
-                        className={`mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-[11px] ${t.isError ? "text-red-500" : "opacity-80"}`}
+                        className={`mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-2xs ${t.isError ? "text-error-text" : "opacity-80"}`}
                       >
                         {t.output}
                       </pre>
@@ -71,7 +71,14 @@ export const MessageList = ({
                 )}
                 <p className="whitespace-pre-wrap text-sm leading-6">
                   {msg.text || (msg.stopReason ? "" : "...")}
-                  {msg.stopReason && <StopReasonHint reason={msg.stopReason} />}
+                  {/* Only surface the stop hint on the last settled message: a
+                      "steer" (silent interrupt + send-now) cuts the turn and
+                      continues, so the cut turn is no longer last and its hint
+                      auto-hides — matching the "no 已中断 in the foreground"
+                      intent (docs/design/session-input-queue.md §11). */}
+                  {msg.stopReason &&
+                    idx === messages.length - 1 &&
+                    !isStreaming && <StopReasonHint reason={msg.stopReason} />}
                 </p>
               </AssistantMessage>
             )}

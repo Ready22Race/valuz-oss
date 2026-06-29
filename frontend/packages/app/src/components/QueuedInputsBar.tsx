@@ -1,7 +1,15 @@
 import { useState } from "react";
 import { Button, Textarea } from "@valuz/ui";
 import { useTranslation, type QueuedInput } from "@valuz/core";
-import { Check, Paperclip, Pencil, Play, Trash2, X } from "lucide-react";
+import {
+  Check,
+  CornerDownRight,
+  Paperclip,
+  Pencil,
+  Play,
+  Trash2,
+  X,
+} from "lucide-react";
 
 interface QueuedInputsBarProps {
   queue: QueuedInput[];
@@ -9,13 +17,16 @@ interface QueuedInputsBarProps {
   onEdit: (queueId: string, text: string) => void | Promise<void>;
   onDelete: (queueId: string) => void | Promise<void>;
   onResume: () => void | Promise<void>;
+  /** Steer — send this item now, interrupting the active turn. */
+  onSteer: (queueId: string) => void | Promise<void>;
 }
 
 /**
  * Pending follow-up inputs queued while a turn is running, rendered above the
  * Composer (docs/design/session-input-queue.md). Each item drains FIFO after
- * the active turn; queued items can be edited or deleted. After an interrupt
- * the queue is soft-paused and shows a "Continue" affordance.
+ * the active turn; queued items can be edited, deleted, or steered (sent now,
+ * interrupting the active turn). After an interrupt the queue is soft-paused
+ * and shows a "Continue" affordance.
  */
 export const QueuedInputsBar = ({
   queue,
@@ -23,6 +34,7 @@ export const QueuedInputsBar = ({
   onEdit,
   onDelete,
   onResume,
+  onSteer,
 }: QueuedInputsBarProps) => {
   const { t } = useTranslation();
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -42,7 +54,9 @@ export const QueuedInputsBar = ({
   };
 
   return (
-    <div className="mb-1.5 space-y-1.5">
+    // Match the Composer's outer box (``mx-auto max-w-[760px]``) so the queue
+    // lines up with the input below it instead of spanning the full column.
+    <div className="mx-auto mb-1.5 w-full max-w-[760px] space-y-1.5">
       <div className="flex items-center justify-between px-1">
         <span className="text-[11px] text-ink-meta">
           {t("common.queueRunsAfter")} ({queue.length})
@@ -113,6 +127,19 @@ export const QueuedInputsBar = ({
                 )}
               </div>
               <div className="flex shrink-0 gap-0.5">
+                {item.status === "queued" && (
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    className="size-6 text-brand hover:text-brand"
+                    onClick={() => void onSteer(item.id)}
+                    aria-label={t("common.queueSteer")}
+                    title={t("common.queueSteer")}
+                  >
+                    <CornerDownRight className="size-3" />
+                  </Button>
+                )}
                 {item.status === "queued" && (
                   <Button
                     type="button"

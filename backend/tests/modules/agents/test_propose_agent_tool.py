@@ -29,6 +29,7 @@ from valuz_agent.integrations.tools_agent_proposal import (
     _list_project_members_handler,
     _list_skills_handler,
     _propose_agent_handler,
+    _update_agent_handler,
     _validate_runtime_model,
 )
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
@@ -382,6 +383,167 @@ async def test_propose_codex_with_compatible_model_ok(seeded_db, monkeypatch) ->
     assert not res.is_error
     payload = json.loads(res.content)
     assert payload["spec"]["model"] == "gpt-5-codex"
+
+
+# ── update_agent (direct edit of an existing library agent) ──────────────
+
+
+async def _get_agent_row(slug: str):
+    import valuz_agent.infra.db as db_mod
+    from valuz_agent.modules.agents.datastore import AgentDatastore
+
+    async with db_mod.AsyncSessionLocal() as db:
+        return await AgentDatastore(db).get_agent(USER_ID, slug)
+
+
+async def test_update_agent_changes_instructions(seeded_db) -> None:
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "instructions": "New method.", "description": "d2"},
+        _ctx(),
+    )
+    assert not res.is_error
+    payload = json.loads(res.content)
+    assert payload["ok"] is True
+    assert payload["slug"] == "research-helper"
+    assert set(payload["changed"]) == {"instructions", "description"}
+    row = await _get_agent_row("research-helper")
+    assert row.instructions == "New method."
+    assert row.description == "d2"
+
+
+async def test_update_agent_unknown_slug(seeded_db) -> None:
+    res = await _update_agent_handler(
+        {"agent_slug": "ghost", "instructions": "x"}, _ctx()
+    )
+    assert res.is_error
+    assert "ghost" in res.content
+
+
+async def test_update_agent_no_fields(seeded_db) -> None:
+    res = await _update_agent_handler({"agent_slug": "research-helper"}, _ctx())
+    assert res.is_error
+    assert "no editable fields" in res.content
+
+
+async def test_update_agent_blank_name_rejected(seeded_db) -> None:
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "name": "  "}, _ctx()
+    )
+    assert res.is_error
+    assert "name" in res.content
+    # The agent's name is untouched.
+    row = await _get_agent_row("research-helper")
+    assert row.name == "Research Helper"
+
+
+async def test_update_agent_unindexed_skill_rejected(seeded_db) -> None:
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "skills": ["does-not-exist"]}, _ctx()
+    )
+    assert res.is_error
+    assert "does-not-exist" in res.content
+
+
+async def test_update_agent_replaces_skills(seeded_db) -> None:
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "skills": ["market-research"]}, _ctx()
+    )
+    assert not res.is_error
+    row = await _get_agent_row("research-helper")
+    assert row.skills == ["market-research"]
+
+
+async def test_update_agent_omitted_skills_and_connectors_preserved(seeded_db) -> None:
+    """Not passing skills/connectors leaves them exactly as they were — only the
+    fields actually submitted are touched."""
+    # Give the agent equipment first.
+    await _update_agent_handler(
+        {
+            "agent_slug": "research-helper",
+            "skills": ["market-research"],
+            "connectors": ["github"],
+        },
+        _ctx(),
+    )
+    # Now edit only the description — equipment must survive untouched.
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "description": "edited"}, _ctx()
+    )
+    assert not res.is_error
+    assert json.loads(res.content)["changed"] == ["description"]
+    row = await _get_agent_row("research-helper")
+    assert row.description == "edited"
+    assert row.skills == ["market-research"]
+    assert row.connector_types == ["github"]
+
+
+async def test_update_agent_empty_list_clears(seeded_db) -> None:
+    """Submitting an explicit empty list overwrites (clears) the set."""
+    await _update_agent_handler(
+        {"agent_slug": "research-helper", "skills": ["market-research"]}, _ctx()
+    )
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "skills": []}, _ctx()
+    )
+    assert not res.is_error
+    assert (await _get_agent_row("research-helper")).skills == []
+
+
+async def test_update_agent_clears_effort_with_empty_string(seeded_db) -> None:
+    # Set an effort, then clear it.
+    await _update_agent_handler(
+        {"agent_slug": "research-helper", "effort": "high"}, _ctx()
+    )
+    assert (await _get_agent_row("research-helper")).effort == "high"
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "effort": ""}, _ctx()
+    )
+    assert not res.is_error
+    assert (await _get_agent_row("research-helper")).effort is None
+
+
+async def test_update_agent_runtime_only_validated_against_existing_model(
+    seeded_db, monkeypatch
+) -> None:
+    """Switching ONLY the runtime to codex while the agent keeps its Claude
+    model is rejected — the effective pair is checked, not just the field
+    passed."""
+    _set_catalog(monkeypatch, _catalog(("claude-sonnet-4-6", ["claude_agent", "deepagents"])))
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "runtime": "codex"}, _ctx()
+    )
+    assert res.is_error
+    assert "update_agent:" in res.content
+    assert "codex" in res.content
+    # Rejected before any write — runtime stays claude_agent.
+    assert (await _get_agent_row("research-helper")).runtime == "claude_agent"
+
+
+async def test_update_agent_runtime_and_model_together_ok(seeded_db, monkeypatch) -> None:
+    _set_catalog(monkeypatch, _catalog(("gpt-5-codex", ["codex"])))
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "runtime": "codex", "model": "gpt-5-codex"},
+        _ctx(),
+    )
+    assert not res.is_error
+    row = await _get_agent_row("research-helper")
+    assert row.runtime == "codex"
+    assert row.model == "gpt-5-codex"
+
+
+async def test_update_agent_missing_connector_warns_not_fails(seeded_db) -> None:
+    res = await _update_agent_handler(
+        {"agent_slug": "research-helper", "connectors": ["github", "ghost-connector"]},
+        _ctx(),
+    )
+    assert not res.is_error
+    payload = json.loads(res.content)
+    assert any("ghost-connector" in w for w in payload["warnings"])
+    # The write still lands with the full set.
+    assert (await _get_agent_row("research-helper")).connector_types == [
+        "github",
+        "ghost-connector",
+    ]
 
 
 async def test_list_model_options_returns_runtimes_and_models(seeded_db, monkeypatch) -> None:

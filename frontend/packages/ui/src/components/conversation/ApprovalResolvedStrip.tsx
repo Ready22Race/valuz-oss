@@ -40,31 +40,31 @@ const _STYLE: Record<
   { tint: string; icon: typeof CheckCircle2 | null }
 > = {
   approve: {
-    tint: "border-emerald-200 bg-emerald-50/60 text-emerald-800",
+    tint: "border-success-border bg-success-light text-success-text",
     icon: CheckCircle2,
   },
   approve_with_changes: {
-    tint: "border-emerald-200 bg-emerald-50/60 text-emerald-800",
+    tint: "border-success-border bg-success-light text-success-text",
     icon: CheckCircle2,
   },
   approve_for_session: {
-    tint: "border-sky-200 bg-sky-50/60 text-sky-800",
+    tint: "border-info-border bg-info-light text-info-text",
     icon: Sparkles,
   },
   reject: {
-    tint: "border-rose-200 bg-rose-50/60 text-rose-800",
+    tint: "border-error-border bg-error-light text-error-text",
     icon: XCircle,
   },
   answer: {
-    tint: "border-emerald-200 bg-emerald-50/60 text-emerald-800",
+    tint: "border-success-border bg-success-light text-success-text",
     icon: CheckCircle2,
   },
   expired: {
-    tint: "border-slate-200 bg-slate-50/60 text-ink-muted",
+    tint: "border-surface-border bg-surface-2 text-ink-body",
     icon: Clock,
   },
   interrupted: {
-    tint: "border-slate-200 bg-slate-50/60 text-ink-muted",
+    tint: "border-surface-border bg-surface-2 text-ink-body",
     icon: Clock,
   },
 };

@@ -7,6 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-06-27
+
+### Added
+
+- Automation runs are now a first-class concept across the app. A dedicated
+  automation detail page (`/automations/:id`) shows execution history and the
+  rendered instruction side by side; the automation list opens it on row click
+  (the inline recent-runs section is gone). The activity overview and project
+  detail both gain a 自动化 tab, and the 全部 tabs mark each automation row with
+  a 自动化 chip instead of 对话/任务. Trigger cadence is localized (`每 30 分钟`
+  / `Every 30 minutes` / `手动` / `Manual`) instead of a raw `1800s`. Project
+  detail tabs also group rows by time bucket (今天/昨天/本周/更早), matching the
+  activity list. (#307 @St0neWan9)
+- Task trigger provenance — each task records and surfaces what spawned it
+  (chat / agent / automation), shown both ways with the automation→task link.
+  (#300, #297 @Ready22Race)
+- Durable session input queue: enqueue follow-ups while a turn is running, and
+  "Send now" to interrupt the current turn and dispatch immediately.
+  (#284 @jiaoqsh, #299 @jiaoqsh)
+- Post-completion follow-up chat with the task lead on the task-detail page.
+  (#289 @zhourongyu)
+- Automation propose→confirm card for creating automations from chat.
+  (#273 @Ready22Race)
+- Unified project + global automation action menus. (#295 @St0neWan9)
+- Group the agent list by project deployments. (#306 @zhourongyu)
+- `update_agent` host-toolkit tool to edit existing agents. (#286 @Ready22Race)
+- Host-domain files moved onto an owner-scoped `AssetStore`. (#285 @homeant)
+- Custom Responses-API channels can now drive the Codex runtime.
+  (#290 @zhourongyu)
+- `create_app(api_prefix=)` seam for shared-host path routing. (#301 @homeant)
+
+### Changed
+
+- Flatten the data dir to `~/.valuz-oss` with a safe one-time migration.
+  (#276 @Ready22Race)
+- Context-panel section heights + list-row menu actions; model-setup composer
+  banner and Activity list column width. (#292, #278 @St0neWan9)
+- Align the queued-inputs bar width with the composer. (#294 @St0neWan9)
+
+### Fixed
+
+- KB auto-discovery rescans failed on every tick with `OwnerContextUnsetError`:
+  the scheduler called `load_routing_config` (owner-scoped settings reads)
+  before any owner context was published. Each per-KB iteration now publishes
+  the KB's owner on the `current_user_id` ContextVar (try/finally, mirroring the
+  automation in-process runner) so the routing-config read and the rescan both
+  resolve against the right user. (#308 @St0neWan9)
+- Boot crashed with `MissingGreenlet` when `database_url` pointed at Postgres
+  via the async driver (`postgresql+asyncpg://`): the kernel/host schema
+  preflights built a **sync** engine and called `inspect()` on it, which can't
+  drive an async DBAPI. The preflights (`ensure_kernel_schema_migratable` /
+  `ensure_host_schema_migratable`) now reflect through an **async** engine and
+  run off the event loop in the migration worker thread, so a Postgres DSN
+  resolves to asyncpg cleanly. (#303 @homeant)
+- Host migration `0007` (skill-library on/off toggle) crashed on Postgres with
+  `column "library_enabled" is of type boolean but default expression is of
+  type integer`: the `server_default` was a bare `text("1")`, which renders
+  `DEFAULT 1` (an integer literal) and is rejected by Postgres' strict boolean
+  typing. Switched both the migration and the `SkillIndexRow` model to
+  `sa.true()`, which SQLAlchemy renders portably as `1` on SQLite and `true`
+  on Postgres. (#304 @homeant)
+- Resolve owner per work-item in background scanners instead of an
+  ambient/device id. (#302 @homeant)
+- Schema preflight never drops — preserve data, fail loud on any non-migratable
+  DB; harden the `~/.valuz-oss` data-dir migration (preserve `user_id`, version
+  compatibility, skill-reindex resilience). (#282, #280 @Ready22Race)
+- Unwrap `ExceptionGroup` so a wrapped transport death stays resumable.
+  (#288 @Ready22Race)
+- Auto-materialize logged-in subscription channels. (#291 @Ready22Race)
+- Present the CLI originator (`codex_exec`) to third-party gateways.
+  (#293 @jiaoqsh)
+- Spill over-long goal-mode task briefs to a doc; stabilize the internal MCP
+  token across restarts. (#298 @Ready22Race)
+
+### Docs & Chore
+
+- Nudge agents to deliver finished files via `deliver_artifacts`.
+  (#287 @Ready22Race)
+- gitignore the local `.claude/` and `.agents/` agent-harness dirs and remove
+  stray design-draft markdown that had been committed by accident. (#309
+  @St0neWan9)
+
 ## [0.2.4] - 2026-06-25
 
 ### Added

@@ -149,7 +149,7 @@ export const AutoApprovedStrip = memo(function AutoApprovedStrip({
   return (
     <div
       className={cn(
-        "flex items-center gap-2 rounded-md border border-dashed border-slate-300 bg-slate-50/40 px-2.5 py-1.5",
+        "flex items-center gap-2 rounded-md border border-dashed border-surface-border bg-surface-soft px-2.5 py-1.5",
       )}
     >
       <Sparkles className="h-3.5 w-3.5 shrink-0 text-ink-muted" />

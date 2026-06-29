@@ -92,6 +92,28 @@ class TaskRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     # path. See module docstring for interpretation.
     committed_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # ── Trigger provenance (who/what spawned this task) ──────────────────────
+    # Resolved once at kickoff/draft and immutable thereafter. Surfaced in the
+    # task list ("由 … 触发") and enables reverse "spawned tasks" queries via the
+    # indexed source ids. ``trigger_session_id`` (the originating session, for
+    # the chat link) keeps living on ``metadata.originating_session_id`` — it is
+    # load-bearing for the plan-writer gate — so it is not duplicated here.
+    #   user      — direct user action (default; no source)
+    #   chat      — a project conversation spawned it (source = originating session)
+    #   agent     — a task lead/member spawned it (source = trigger_task_id + agent)
+    #   automation— a scheduled/agent-run automation fired it (source = automation)
+    trigger_type: Mapped[str] = mapped_column(
+        String(32), default="user", server_default="user", nullable=False
+    )
+    # Parent task whose lead/member triggered this one (trigger_type=agent).
+    # Indexed so "what did task X spawn?" is a cheap lookup.
+    trigger_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # The agent slug that triggered it (trigger_type=agent), for the label.
+    trigger_agent_slug: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Automation that fired this task (trigger_type=automation). Indexed so
+    # "what did automation X spawn?" is a cheap lookup.
+    trigger_automation_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+
 
 class TaskEventRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     """Append-only event log for one task — timeline backbone."""

@@ -29,6 +29,7 @@ const makeState = (overrides: Partial<ChatStoreState> = {}): ChatStoreState => {
     editQueued: async () => {},
     deleteQueued: async () => {},
     resumeQueue: async () => {},
+    steerQueued: async () => {},
     refreshQueue: async () => {},
     reconnect: () => {},
     _ingest: () => {},

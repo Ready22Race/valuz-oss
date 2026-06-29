@@ -9,7 +9,7 @@ export const MetricStrip = ({ items }: MetricStripProps) => (
     {items.map((item) => (
       <div
         key={item.label}
-        className="rounded-xl bg-card px-3.5 py-3 shadow-xs"
+        className="rounded-xl bg-card px-3.5 py-3 shadow-sm"
       >
         <div className="text-[10px] uppercase tracking-[0.8px] text-ink-section">
           {item.label}

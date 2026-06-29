@@ -7,7 +7,7 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { ListChecks, MessageSquare } from "lucide-react";
+import { Clock3, ListChecks, MessageSquare } from "lucide-react";
 import {
   DeleteConfirmDialog,
   PageHeader,
@@ -33,10 +33,14 @@ import {
   type SessionEventDTO,
 } from "@valuz/shared";
 import { toast } from "sonner";
-import { RowActionsMenu, formatCreatedAt } from "@valuz/app/components";
+import {
+  RenameInput,
+  RowActionsMenu,
+  formatCreatedAt,
+} from "@valuz/app/components";
 import { useProjectOutlet } from "@valuz/app/layout";
 
-type SourceFilter = "all" | "chat" | "task";
+type SourceFilter = "all" | "chat" | "task" | "automation";
 type TimeBucket = "today" | "yesterday" | "thisWeek" | "earlier";
 
 const tk = (key: string) =>
@@ -187,7 +191,8 @@ const RunningCard = ({
   onOpen,
   t,
 }: RunningCardProps) => {
-  const ScopeIcon = isTask ? ListChecks : MessageSquare;
+  const ScopeIcon =
+    run.origin === "automation" ? Clock3 : isTask ? ListChecks : MessageSquare;
   // No ``max`` override — rely on the hook default. The visible-line cap
   // below handles display trimming; the buffer needs to be large enough that
   // batch counts (``Called harness 10 times``, ``Ran 6 commands``) survive
@@ -281,11 +286,12 @@ export const ActivityPage = () => {
   // task rows in the first place.
   const [deletingChat, setDeletingChat] = useState<RunSummary | null>(null);
   const [deleteInFlight, setDeleteInFlight] = useState(false);
+  // Inline rename (RenameInput, mirroring the sidebar): which row's title is
+  // being edited. ``null`` = none.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
 
   useEffect(() => {
-    setHeader(
-      <PageHeader title={t(tk("nav.activity"))} />,
-    );
+    setHeader(<PageHeader title={t(tk("nav.activity"))} />);
     setHeaderClassName("h-auto px-5 py-5");
     // Drop the AppShell's default vertical padding for this page —
     // the page already self-manages top/bottom space (``pt-4`` on the
@@ -370,19 +376,25 @@ export const ActivityPage = () => {
       r.source_kind === "project_chat" ||
       (r.source_kind === "task" &&
         projectKindById.get(r.project_id) === "project");
+    // Automation-triggered runs read as 自动化 regardless of chat/task — in the
+    // 全部 tab the kind chip should mark provenance, not surface type.
     const kind =
-      r.source_kind === "task"
-        ? t(tk("activity.taskTag"))
-        : t(tk("activity.chatTag"));
+      r.origin === "automation"
+        ? t(tk("activity.automationTag"))
+        : r.source_kind === "task"
+          ? t(tk("activity.taskTag"))
+          : t(tk("activity.chatTag"));
     if (!isProject) return kind;
     const scope = r.project_name ?? "Project";
     return `${scope} · ${kind}`;
   };
 
   const matchesFilter = (r: RunSummary): boolean => {
+    const isAuto = r.origin === "automation";
+    if (filter === "automation") return isAuto;
     if (filter === "all") return true;
-    if (filter === "task") return r.source_kind === "task";
-    return r.source_kind !== "task"; // chat
+    if (filter === "task") return r.source_kind === "task" && !isAuto;
+    return r.source_kind !== "task" && !isAuto; // chat
   };
 
   const filteredRunning = useMemo(
@@ -420,8 +432,30 @@ export const ActivityPage = () => {
   // ``button``, and nested buttons are invalid HTML. Keyboard accessibility:
   // ``role="button"`` + ``tabIndex`` + Enter / Space.
   const historyRow = (run: RunSummary) => {
-    const ScopeIcon = run.source_kind === "task" ? ListChecks : MessageSquare;
+    const ScopeIcon =
+      run.origin === "automation"
+        ? Clock3
+        : run.source_kind === "task"
+          ? ListChecks
+          : MessageSquare;
     const canDelete = run.source_kind !== "task";
+    if (canDelete && renamingId === run.session_id) {
+      return (
+        <div
+          key={run.session_id}
+          className="flex w-full items-center gap-2 rounded-xl px-3 py-3"
+        >
+          <RenameInput
+            initial={run.title}
+            onConfirm={(v) => {
+              void handleRenameRunConfirm(run, v);
+              setRenamingId(null);
+            }}
+            onCancel={() => setRenamingId(null)}
+          />
+        </div>
+      );
+    }
     return (
       <div
         key={run.session_id}
@@ -434,7 +468,7 @@ export const ActivityPage = () => {
             openRun(run);
           }
         }}
-        className="group flex w-full cursor-pointer items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
+        className="group flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
       >
         <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
           <ScopeIcon className="h-3 w-3" strokeWidth={2} />
@@ -460,7 +494,7 @@ export const ActivityPage = () => {
           )}
           {canDelete && (
             <RowActionsMenu
-              onRename={() => handleRenameRun(run)}
+              onRename={() => setRenamingId(run.session_id)}
               onDelete={() => setDeletingChat(run)}
             />
           )}
@@ -469,13 +503,9 @@ export const ActivityPage = () => {
     );
   };
 
-  const handleRenameRun = async (run: RunSummary) => {
-    const next = window.prompt(t(tk("sidebar.rename")), run.title);
-    if (next === null) return;
-    const trimmed = next.trim();
-    if (!trimmed || trimmed === run.title) return;
+  const handleRenameRunConfirm = async (run: RunSummary, name: string) => {
     try {
-      await renameSession(run.session_id, trimmed);
+      await renameSession(run.session_id, name);
       refreshFinished();
       toast.success(t(tk("sidebar.renamed")));
     } catch {
@@ -546,6 +576,7 @@ export const ActivityPage = () => {
     { value: "all", labelKey: "activity.filterAll" },
     { value: "chat", labelKey: "activity.chatTag" },
     { value: "task", labelKey: "activity.taskTag" },
+    { value: "automation", labelKey: "activity.automationTag" },
   ];
 
   // ──────────────────────────────────────────────────────────────

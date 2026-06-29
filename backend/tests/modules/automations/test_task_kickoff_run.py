@@ -56,6 +56,7 @@ async def test_task_kickoff_leaves_duration_unset_and_titles_summary() -> None:
         duration_ms=None,
         result_summary=None,
         session_id=None,
+        invoked_by_session_id=None,
         triggered_at=500,
     )
 

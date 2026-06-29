@@ -244,7 +244,7 @@ const PresetDetail = ({
           SessionNotRunnable. Tell the user up-front and let them jump
           straight back. */}
       {missingDefault && (
-        <div className="mb-4 flex items-start gap-3 rounded-xl border border-amber-300/60 bg-amber-50/70 p-3.5 text-amber-900">
+        <div className="mb-4 flex items-start gap-3 rounded-xl border border-warning-border bg-warning-light p-3.5 text-warning-text">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <div className="min-w-0 flex-1">
             <div className="text-sm font-medium">
@@ -256,7 +256,7 @@ const PresetDetail = ({
             <button
               type="button"
               onClick={onBackToConnect}
-              className="mt-2 inline-flex items-center gap-1 rounded-md text-xs font-medium text-amber-900 underline-offset-4 hover:underline"
+              className="mt-2 inline-flex items-center gap-1 rounded-md text-xs font-medium text-warning-text underline-offset-4 hover:underline"
             >
               <ArrowLeft className="h-3 w-3" />
               {t("onboarding.backToConnect" as Parameters<typeof t>[0])}
@@ -264,7 +264,7 @@ const PresetDetail = ({
           </div>
         </div>
       )}
-      <div className="overflow-hidden rounded-xl border border-surface-border bg-surface shadow-sm [&>*+*]:border-t [&>*+*]:border-[#f7f8fa]">
+      <div className="overflow-hidden rounded-xl bg-card shadow-sm dark:[&>*+*]:border-surface-border [&>*+*]:border-t [&>*+*]:border-surface-border/40">
         {team.members.map((m) => (
           <MemberCard key={m.nameKey} member={m} />
         ))}
@@ -294,7 +294,7 @@ const MemberCard = ({ member }: { member: TeamMember }) => {
             {t(member.nameKey as Parameters<typeof t>[0])}
           </span>
           {member.tag && (
-            <span className="inline-flex h-4 items-center rounded-[4px] bg-[#725cf9]/10 px-1 text-[10px] leading-none font-normal uppercase text-[#725cf9]">
+            <span className="inline-flex h-4 items-center rounded-sm bg-brand-light px-1 text-micro leading-none font-normal uppercase text-brand-700">
               {member.tag}
             </span>
           )}

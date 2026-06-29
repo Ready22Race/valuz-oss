@@ -225,7 +225,7 @@ function JobRow({ job, onAuthorize, onCancel, t }: JobRowProps) {
   const isRunning = job.status === "running";
   const isDone = job.status === "succeeded";
   return (
-    <div className="rounded-xl border border-surface-border bg-surface px-5 py-3">
+    <div className="rounded-xl bg-card px-5 py-3 shadow-sm">
       <div className="flex items-center justify-between gap-3">
         <div className="flex-1">
           <div className="flex items-center gap-2">
@@ -247,7 +247,7 @@ function JobRow({ job, onAuthorize, onCancel, t }: JobRowProps) {
             })}
           </div>
           {job.error ? (
-            <div className="mt-1 text-xs text-red-600">{job.error}</div>
+            <div className="mt-1 text-xs text-error-text">{job.error}</div>
           ) : null}
           {isRunning ? (
             <ProgressBar

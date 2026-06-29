@@ -36,6 +36,7 @@ from valuz_agent.infra.auth_context import (
     set_current_user_id,
 )
 from valuz_agent.adapters import kernel_client
+from valuz_agent.adapters.agent_resolver import spill_goal_brief_if_too_long
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.actor_runner import ActorRunner, collect_manifest
@@ -239,7 +240,9 @@ class RecoveryService:
         from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         member_done: list[tuple[str, dict[str, Any]]] = []
-        resume_members: list[tuple[str, str]] = []  # (session_id, brief)
+        # (session_id, brief, run_dir, agent_slug, subtask_key) — run_dir + slug
+        # + key let us spill an over-cap resume brief before re-injecting it.
+        resume_members: list[tuple[str, str, str, str, str]] = []
         summary: list[str] = []
         lead_session_id: str | None = None
 
@@ -296,7 +299,15 @@ class RecoveryService:
                 if rec.deliver_member_done and manifest is not None:
                     member_done.append((run.session_id, manifest))
                 if rec.resume:
-                    resume_members.append((run.session_id, run.goal or ""))
+                    resume_members.append(
+                        (
+                            run.session_id,
+                            run.goal or "",
+                            run.run_dir or "",
+                            run.agent_slug or "",
+                            run.subtask_key or "",
+                        )
+                    )
                 summary.append(f"- {run.subtask_key}({run.agent_slug}): {rec.disposition}")
 
             if plan_dirty:
@@ -320,12 +331,23 @@ class RecoveryService:
                 lead_session_id,
                 InboxMsg(kind="member_done", from_session=member_sid, payload=manifest),
             )
-        for member_sid, brief in resume_members:
+        for member_sid, brief, m_run_dir, m_slug, m_key in resume_members:
             self._members.add_member(task_id, member_sid)
+            resume_prompt = brief or "继续完成你的子任务,完成后会汇报给 lead。"
+            # Fence the goal-mode re-injection: spill an over-cap subtask goal to
+            # a doc and re-inject a short pointer (same fence as first dispatch).
+            if brief and m_run_dir:
+                resume_prompt = spill_goal_brief_if_too_long(
+                    brief,
+                    run_dir=m_run_dir,
+                    task_id=task_id,
+                    label=f"{m_slug}-{m_key}",
+                    is_lead=False,
+                )
             asyncio.create_task(
                 self._actor.run_actor_loop(
                     session_id=member_sid,
-                    initial_prompt=brief or "继续完成你的子任务,完成后会汇报给 lead。",
+                    initial_prompt=resume_prompt,
                     role="subtask",
                     task_id=task_id,
                     project_id=project_id,

@@ -20,7 +20,7 @@ export const SetupStepCard: FC<SetupStepCardProps> = ({
   return (
     <div
       className={cn(
-        'flex items-start gap-4 rounded-[18px] border p-5 transition-all',
+        'flex items-start gap-4 rounded-2xl border p-5 transition-all',
         active
           ? 'border-brand/25 bg-card shadow-md'
           : 'border-surface-border bg-card/72',

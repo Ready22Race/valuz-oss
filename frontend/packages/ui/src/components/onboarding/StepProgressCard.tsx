@@ -16,7 +16,7 @@ export const StepProgressCard: FC<StepProgressCardProps> = ({
   const clampedProgress = Math.min(100, Math.max(0, progress));
 
   return (
-    <div className="flex flex-col gap-4 rounded-[18px] border border-surface-border bg-card p-5">
+    <div className="flex flex-col gap-4 rounded-2xl border border-surface-border bg-card p-5">
       <span className="text-xs font-medium uppercase tracking-wide text-ink-muted">
         Progress
       </span>

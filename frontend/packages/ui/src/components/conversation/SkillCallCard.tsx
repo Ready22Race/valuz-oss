@@ -33,7 +33,7 @@ export const SkillCallCard = ({
               ? "text-brand animate-pulse"
               : status === "completed"
                 ? "text-success"
-                : "text-red-500",
+                : "text-error-text",
           )}
         />
         <span className="flex-1 text-xs font-medium text-ink-label">
@@ -46,7 +46,7 @@ export const SkillCallCard = ({
               ? "text-brand"
               : status === "completed"
                 ? "text-success"
-                : "text-red-500",
+                : "text-error-text",
           )}
         >
           {status === "running"

@@ -142,13 +142,13 @@ function AutomationLine({
       type="button"
       onClick={() => onOpen?.(item.automation_id)}
       className={cn(
-        "flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-[12.5px]",
+        "flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-xs",
         "transition-colors hover:bg-surface-muted",
       )}
     >
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="truncate font-medium text-[#1f2937]">{item.name}</span>
-        <span className="truncate text-[11.5px] text-[#6e7481]">
+        <span className="truncate text-2xs text-[#6e7481]">
           {item.trigger_human_readable} · {tz}
           {nextRun
             ? ` ${t("cron.nextRunInline" as Parameters<typeof t>[0], { time: nextRun })}`
@@ -175,14 +175,14 @@ export const AutomationToolCard = memo(function AutomationToolCard({
 
   if (!result.ok) {
     return (
-      <div className="rounded-lg border border-[#fecaca] bg-[#fef2f2] px-3 py-2.5 text-[12.5px]">
-        <div className="flex items-center gap-1.5 text-[#b91c1c]">
+      <div className="rounded-lg border border-error-border bg-error-light px-3 py-2.5 text-xs">
+        <div className="flex items-center gap-1.5 text-error-text">
           <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
           <span className="font-medium">{t("skill.automationFailed")}</span>
         </div>
-        <p className="mt-1 text-[12px] text-[#7f1d1d]">{result.message}</p>
+        <p className="mt-1 text-xs text-error-text">{result.message}</p>
         {result.error_code ? (
-          <p className="mt-0.5 font-mono text-[11px] text-[#b91c1c]/80">
+          <p className="mt-0.5 font-mono text-2xs text-error-text">
             {result.error_code}
           </p>
         ) : null}
@@ -195,12 +195,12 @@ export const AutomationToolCard = memo(function AutomationToolCard({
   const singleItem = result.automation ?? null;
 
   return (
-    <div className="rounded-lg border border-surface-border bg-surface px-3 py-2.5 text-[12.5px] shadow-sm">
+    <div className="rounded-lg border border-surface-border bg-surface px-3 py-2.5 text-xs shadow-sm">
       <div className="flex items-center gap-1.5 text-[#1f2937]">
         <Icon className="h-3.5 w-3.5 text-[#525860]" aria-hidden="true" />
         <span className="font-medium">{label}</span>
       </div>
-      <p className="mt-0.5 text-[12px] text-[#6e7481]">{result.message}</p>
+      <p className="mt-0.5 text-xs text-[#6e7481]">{result.message}</p>
 
       {singleItem ? (
         <div className="mt-1.5 border-t border-[#f1f3f5] pt-1.5">

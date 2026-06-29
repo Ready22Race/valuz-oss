@@ -91,7 +91,7 @@ export const GeneralSection = () => {
       <div className="mb-2 mt-5 text-sm font-medium text-ink-heading">
         {t("settings.appearance.title")}
       </div>
-      <Card className="mb-5 rounded-xl shadow-xs">
+      <Card className="mb-5 rounded-xl border-0 bg-card shadow-sm">
         <CardContent className="py-5">
           <SettingsRow
             className="px-0 py-0"
@@ -165,7 +165,7 @@ export const GeneralSection = () => {
       <div className="mb-2 text-sm font-medium text-ink-heading">
         {t("settings.onboarding.title")}
       </div>
-      <Card className="mb-5 rounded-xl shadow-xs">
+      <Card className="mb-5 rounded-xl border-0 bg-card shadow-sm">
         <CardContent className="py-5">
           <SettingsRow
             className="px-0 py-0"
@@ -189,7 +189,7 @@ export const GeneralSection = () => {
       <div className="mb-2 text-sm font-medium text-ink-heading">
         {t("settings.shortcuts.title")}
       </div>
-      <Card className="rounded-xl shadow-xs">
+      <Card className="rounded-xl border-0 bg-card shadow-sm">
         <CardContent className="py-0">
           {[
             {

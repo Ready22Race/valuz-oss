@@ -21,7 +21,12 @@ from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.models import Base, ProviderRow
-from valuz_agent.modules.providers.service import ProviderService
+from valuz_agent.modules.providers.service import (
+    ProviderService,
+    materialize_logged_in_subscription,
+    subscription_catalog_kind,
+    subscription_login_hint,
+)
 from valuz_agent.modules.settings.models import AppSettingRow
 from valuz_agent.ports.extensions import ext
 from valuz_agent.ports.llm_provider import NoopLLMProvider
@@ -318,3 +323,102 @@ class TestSubscriptionLoginGate:
         detail = await svc.service.get_provider(OWNER, "my-claude")
         assert detail.models == []
         assert detail.default_model is None
+
+
+def _patch_login(monkeypatch, value: bool) -> None:
+    async def _probe(_tool: str) -> bool:
+        return value
+
+    monkeypatch.setattr(
+        "valuz_agent.modules.providers.service.detect_cli_login", _probe, raising=True
+    )
+
+
+class TestMaterializeLoggedInSubscription:
+    """The session-resolution backstop: a stale virtual ``ch-*`` id is swapped
+    onto a real row only when its CLI is logged in. This is the server half of
+    "可用 = configurable" — the frontend auto-materializes on detection, this
+    catches an already-saved reference at session-creation time."""
+
+    async def test_materializes_real_row_when_logged_in(self, svc: _SvcHandle, monkeypatch) -> None:
+        _patch_login(monkeypatch, True)
+        ds = svc.service._ds  # noqa: SLF001
+        row = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        assert row is not None
+        assert row.id != "ch-codex-subscription"  # fresh uuid, not the catalog id
+        assert row.provider_kind == "codex-subscription"
+        assert row.deletable is True
+        assert row.enabled is True
+        assert row.credential_source == "cli_keychain"
+        assert row.auth_type == "oauth"
+
+    async def test_returns_none_when_logged_out(self, svc: _SvcHandle, monkeypatch) -> None:
+        _patch_login(monkeypatch, False)
+        ds = svc.service._ds  # noqa: SLF001
+        row = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        assert row is None
+        assert await ds.list_providers(OWNER) == []  # no row conjured from a logged-out CLI
+
+    async def test_returns_none_for_non_subscription_id(self, svc: _SvcHandle, monkeypatch) -> None:
+        _patch_login(monkeypatch, True)
+        ds = svc.service._ds  # noqa: SLF001
+        assert await materialize_logged_in_subscription(ds, OWNER, "ch-anthropic") is None
+        assert await materialize_logged_in_subscription(ds, OWNER, "some-user-uuid") is None
+
+    async def test_idempotent_by_kind(self, svc: _SvcHandle, monkeypatch) -> None:
+        _patch_login(monkeypatch, True)
+        ds = svc.service._ds  # noqa: SLF001
+        a = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        b = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        assert a is not None and b is not None and a.id == b.id
+        codex = [r for r in await ds.list_providers(OWNER) if r.provider_kind == "codex-subscription"]
+        assert len(codex) == 1
+
+    async def test_normalizes_legacy_undeletable_row(self, svc: _SvcHandle, monkeypatch) -> None:
+        # A legacy seeded row (deletable=False, not yet cli_keychain) is reused
+        # by kind AND normalized — otherwise it would stay stuck without its
+        # management affordance and read as un-credentialed.
+        svc.seed(
+            ProviderRow(
+                user_id=OWNER,
+                id="legacy-codex",
+                name="Codex · ChatGPT",
+                provider_kind="codex-subscription",
+                source="user",
+                enabled=False,
+                is_default=False,
+                deletable=False,
+                default_model=None,
+                test_status="never",
+                credential_source="none",
+                auth_type="oauth",
+            )
+        )
+        _patch_login(monkeypatch, True)
+        ds = svc.service._ds  # noqa: SLF001
+        row = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        assert row is not None and row.id == "legacy-codex"  # reused, not duplicated
+        assert row.deletable is True
+        assert row.enabled is True
+        assert row.credential_source == "cli_keychain"
+
+
+class TestSubscriptionLoginHint:
+    """The friendly error a logged-out subscription raises at session creation,
+    instead of the raw "provider 'ch-codex-subscription' not found"."""
+
+    def test_catalog_kind_helper(self) -> None:
+        assert subscription_catalog_kind("ch-codex-subscription") == "codex-subscription"
+        assert subscription_catalog_kind("ch-claude-subscription") == "claude-subscription"
+        assert subscription_catalog_kind("ch-anthropic") is None
+        assert subscription_catalog_kind("some-user-uuid") is None
+
+    def test_hint_for_subscription_id_is_actionable(self) -> None:
+        hint = subscription_login_hint("ch-codex-subscription")
+        assert hint is not None
+        assert hint != "settings.model.subscriptionLoginRequired"  # i18n resolved, not the raw key
+        assert "codex" in hint.lower()  # names the channel / its login command
+
+    def test_no_hint_for_non_subscription_id(self) -> None:
+        assert subscription_login_hint("ch-anthropic") is None
+        assert subscription_login_hint("some-user-uuid") is None
