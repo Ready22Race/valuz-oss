@@ -50,6 +50,24 @@ explicit `database_url` (Postgres) co-locates both instead. A one-time boot step
 `kernel.db`. Both layers run **async** SQLAlchemy on aiosqlite; WAL +
 per-connection `busy_timeout` make concurrent access safe.
 
+**Kernel store — model A (local-first + optional write-through).** The kernel
+ALWAYS binds the local `SQLAlchemyStore` on `database_url` (local-first reads +
+availability). `KERNEL_STORE` selects an OPTIONAL **durable** target every write
+is *also* mirrored to, via `WriteThroughStore` (`src/adapters/`):
+
+| `KERNEL_STORE` | Durable | Notes |
+|----------------|---------|-------|
+| `local` (default) | none | single write; zero behaviour change |
+| `pg` | in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL` | OSS "configure a Postgres"; same process, no HTTP. Schema auto-created (`_ensure_durable_schema`, checkfirst) |
+| `remote` | `RemoteStoreHttp` → trusted data service | sandbox/SaaS; holds ONLY a JWT (`VALUZ_DATA_API_*`) — never a DB DSN |
+
+`append_event` is **durable-first**: the durable store assigns the authoritative
+`seq` (central ordering for SaaS) and the local copy mirrors it; `event_uid` +
+`request_id` make the pair idempotent. The data service (`kernel/app/data_service.py`,
+`POST /rpc/{op}` per StorePort method) is the durable end for `remote`; its
+route↔client↔StorePort contract is pinned by `test_data_service_contract.py`.
+Sandbox always keeps a local `kernel.db`; `remote` only *adds* the write-through.
+
 ## The two boundary contracts
 
 These are the backend's load-bearing rules. Both are mechanically enforced.
