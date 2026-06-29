@@ -7,9 +7,10 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { Clock3, ListChecks, MessageSquare } from "lucide-react";
+import { Clock3, Inbox, ListChecks, MessageSquare } from "lucide-react";
 import {
   DeleteConfirmDialog,
+  EmptyState,
   PageHeader,
   StatusPill,
   Tabs,
@@ -109,7 +110,7 @@ interface DashboardLine {
  * or overshoots the row. */
 const tailTruncate = (text: string): string => {
   if (!text) return text;
-  const hasCjk = /[　-鿿＀-￯]/.test(text);
+  const hasCjk = /[\u3000-\u9fff\uff00-\uffef]/.test(text);
   const limit = hasCjk ? 28 : 70;
   if (text.length <= limit) return text;
   return `…${text.slice(-limit)}`;
@@ -583,7 +584,7 @@ export const ActivityPage = () => {
   // Render
   // ──────────────────────────────────────────────────────────────
 
-  const hasAny = displayRunning.length > 0 || filteredFinished.length > 0;
+  const isEmpty = displayRunning.length === 0 && filteredFinished.length === 0;
 
   return (
     <div className="mx-auto max-w-[760px] pb-12 pt-4">
@@ -627,11 +628,13 @@ export const ActivityPage = () => {
       {/* History — grouped by time bucket; always rendered (no tab gate). */}
       <section className={displayRunning.length > 0 ? "" : "mt-5"}>
         {filteredFinished.length === 0 ? (
-          hasAny ? null : (
-            <div className="px-3 py-12 text-center text-sm text-ink-meta">
-              {t(tk("activity.noHistory"))}
-            </div>
-          )
+          isEmpty ? (
+            <EmptyState
+              message={t(tk("activity.noHistory"))}
+              icon={<Inbox strokeWidth={1.5} />}
+              className="mx-auto px-3 py-12"
+            />
+          ) : null
         ) : (
           <div className="flex flex-col gap-5">
             {BUCKET_ORDER.filter((b) => groupedHistory.has(b)).map((b) => (
@@ -645,15 +648,6 @@ export const ActivityPage = () => {
           </div>
         )}
       </section>
-
-      {/* Truly empty (nothing matches the filter, nothing running). Falls
-          through to here only when there's neither a running nor a history
-          entry matching the current filter. */}
-      {!hasAny && filter !== "all" && (
-        <div className="px-3 py-12 text-center text-sm text-ink-meta">
-          {t(tk("activity.noHistory"))}
-        </div>
-      )}
       <DeleteConfirmDialog
         open={deletingChat !== null}
         onOpenChange={(open) => {
