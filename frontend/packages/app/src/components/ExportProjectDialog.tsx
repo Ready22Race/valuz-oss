@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Download, PackagePlus } from "lucide-react";
 import {
@@ -8,17 +8,27 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  Input,
 } from "@valuz/ui";
 import { projectsApi, useTranslation } from "@valuz/core";
 
 type Tx = ReturnType<typeof useTranslation>["t"];
 const k = (key: string) => key as Parameters<Tx>[0];
 
+/** Turn the user's filename input into a ``<stem>.valuzpack`` download name —
+ *  trims, drops a pack extension the user may have typed (so it isn't doubled),
+ *  and falls back to the project name when empty. */
+function toValuzpackFilename(input: string, fallback: string): string {
+  let stem = input.trim() || fallback.trim() || "project";
+  stem = stem.replace(/\.(valuzpack|valuz-project|zip)$/i, "").trim();
+  return `${stem || "project"}.valuzpack`;
+}
+
 /**
- * Confirm-and-download flow for a single project export into a
- * ``.valuz-project`` bundle. The project's name is already known (no
- * collection header to fill), so this is a one-button confirmation.
- * On confirm we fetch the blob and trigger an anchor-click download.
+ * Name-and-download flow for a single project export into a ``.valuzpack``
+ * bundle (the unified pack format, project target). The user picks the export
+ * file name (defaults to the project name); the downloaded file is
+ * ``<name>.valuzpack``. On confirm we fetch the blob and anchor-click download.
  */
 export function ExportProjectDialog({
   projectId,
@@ -32,16 +42,31 @@ export function ExportProjectDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
+  const [fileName, setFileName] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Default the file name to the project name each time the dialog opens
+  // (deferred off the synchronous effect body to satisfy the cascading-render
+  // lint, mirroring ExportPackDialog).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) setFileName(projectName);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, projectName]);
 
   const handleExport = async () => {
     setBusy(true);
     try {
-      const { blob, filename } = await projectsApi.exportProject(projectId);
+      const { blob } = await projectsApi.exportProject(projectId);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = filename;
+      a.download = toValuzpackFilename(fileName, projectName);
       a.click();
       URL.revokeObjectURL(url);
       toast.success(t(k("project.exportDone"), { name: projectName }));
@@ -68,9 +93,19 @@ export function ExportProjectDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-2 py-1">
-          <div className="text-sm font-medium text-ink-body">
-            {projectName}
+        <div className="space-y-3 py-1">
+          <div className="space-y-1.5">
+            <label className="text-xs text-ink-meta">
+              {t(k("project.exportFileName"))}
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                value={fileName}
+                onChange={(e) => setFileName(e.target.value)}
+                autoFocus
+              />
+              <span className="shrink-0 text-xs text-ink-meta">.valuzpack</span>
+            </div>
           </div>
           <p className="text-xs leading-5 text-ink-meta">
             {t(k("project.exportNote"))}

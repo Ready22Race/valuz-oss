@@ -77,7 +77,7 @@ export interface ImportProjectPreviewConnector {
   already_present: boolean;
 }
 
-/** Staged preview of an uploaded ``.valuz-project`` — what's inside + how it lands. */
+/** Staged preview of an uploaded ``.valuzpack`` project — what's inside + how it lands. */
 export interface ImportProjectPreview {
   preview_id: string;
   /** True when a project with this name already exists (confirm will skip). */
@@ -208,7 +208,7 @@ const fetchJson = createFetchJson(() => _apiBase);
 
 function filenameFromDisposition(header: string | null): string {
   const m = header ? /filename="?([^";]+)"?/.exec(header) : null;
-  return m?.[1] ?? "project.valuz-project";
+  return m?.[1] ?? "project.valuzpack";
 }
 
 function absolutizeApiUrl(url: string): string {
@@ -339,7 +339,7 @@ export const projectsApi = {
     );
   },
 
-  /** Export a project as a ``.valuz-project`` — returns the blob + filename for
+  /** Export a project as a ``.valuzpack`` — returns the blob + filename for
    *  the caller to trigger a browser download (core stays DOM-free). Uses raw
    *  ``fetch()`` because ``fetchJson`` only handles JSON, not binary blobs. */
   async exportProject(projectId: string): Promise<ExportedProject> {
@@ -357,7 +357,7 @@ export const projectsApi = {
     };
   },
 
-  /** Upload a ``.valuz-project`` and stage it — returns a preview to confirm with. */
+  /** Upload a ``.valuzpack`` project and stage it — returns a preview to confirm with. */
   importProjectPreview(file: File): Promise<ImportProjectPreview> {
     const form = new FormData();
     form.append("file", file);

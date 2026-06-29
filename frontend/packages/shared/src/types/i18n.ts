@@ -1096,6 +1096,7 @@ export type KnownI18nKey =
   | "project.export"
   | "project.exportDone"
   | "project.exportFailed"
+  | "project.exportFileName"
   | "project.exportNote"
   | "project.exportSub"
   | "project.exportTitle"

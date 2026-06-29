@@ -27,11 +27,11 @@ from valuz_agent.modules.connectors.models import (
     ProjectConnectorRow,
 )
 from valuz_agent.modules.connectors.service import ConnectorService
+from valuz_agent.modules.packs_common import extract_archive
 from valuz_agent.modules.project_packs.errors import (
     ProjectNotExportable,
     ProjectPackNotFound,
 )
-from valuz_agent.modules.project_packs.packaging import extract_project_archive
 from valuz_agent.modules.project_packs.service import ProjectPackService
 from valuz_agent.modules.projects.datastore import ProjectDatastore
 from valuz_agent.modules.projects.models import ProjectRow
@@ -196,24 +196,28 @@ async def test_export_round_trips_members_and_automations(env) -> None:
     data = await svc.export_project(USER, project.id)
     assert isinstance(data, bytes) and len(data) > 0
 
-    parsed, root = extract_project_archive(data)
+    parsed, root = extract_archive(data)
+    assert parsed.project is not None
     assert parsed.project.name == "Test Project"
-    assert len(parsed.members) == 1
-    m = parsed.members[0]
+    assert len(parsed.project.members) == 1
+    m = parsed.project.members[0]
     assert m.agent_slug == "lead"
     assert m.source_agent_slug == "lead-1"
+    # The agent definition is hoisted into the top-level ``agents[]`` payload,
+    # referenced by the member's source slug.
+    agent = next(a for a in parsed.agents if a.slug == "lead-1")
     # provider_id is dropped (PackAgent has no provider_id field)
-    assert not hasattr(m.agent, "provider_id") or getattr(m.agent, "provider_id", None) is None
+    assert not hasattr(agent, "provider_id") or getattr(agent, "provider_id", None) is None
     # model is demoted to model_hint
-    assert m.agent.model_hint == "claude-sonnet-4-6"
-    assert len(parsed.automations) == 1
-    assert parsed.automations[0].name == "Daily brief"
-    assert parsed.automations[0].trigger_kind == "cron"
-    assert parsed.automations[0].cron_expr == "0 9 * * *"
+    assert agent.model_hint == "claude-sonnet-4-6"
+    assert len(parsed.project.automations) == 1
+    assert parsed.project.automations[0].name == "Daily brief"
+    assert parsed.project.automations[0].trigger_kind == "cron"
+    assert parsed.project.automations[0].cron_expr == "0 9 * * *"
     # prompt_template must travel in the archive — the list shape omits it,
     # so the export fetches detail per automation. An empty prompt here would
     # make every automation fail AutomationPromptEmpty on import.
-    assert parsed.automations[0].prompt_template == "Prompt body text"
+    assert parsed.project.automations[0].prompt_template == "Prompt body text"
 
 
 async def test_export_strips_connector_secrets(env) -> None:
@@ -259,7 +263,7 @@ async def test_export_strips_connector_secrets(env) -> None:
     await session.commit()
 
     data = await svc.export_project(USER, project.id)
-    parsed, _ = extract_project_archive(data)
+    parsed, _ = extract_archive(data)
     assert len(parsed.connectors) == 1
     c = parsed.connectors[0]
     assert c.slug == "my-mcp"

@@ -31,7 +31,7 @@ type Tx = ReturnType<typeof useTranslation>["t"];
 const k = (key: string) => key as Parameters<Tx>[0];
 
 /**
- * Upload → preview → confirm flow for a ``.valuz-project`` bundle. The
+ * Upload → preview → confirm flow for a ``.valuzpack`` project bundle. The
  * parent owns the file pick and passes the chosen ``file``; this dialog
  * stages a preview (what's inside, what already exists, name-conflict
  * warning), commits on confirm, and shows the result — including
