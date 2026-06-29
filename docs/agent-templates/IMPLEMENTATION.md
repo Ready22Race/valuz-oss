@@ -9,7 +9,7 @@
 | 维度 | 结论 | 依据 |
 |---|---|---|
 | Agent 字段 | `AgentRow` 已有 slug/avatar/skills/connector_types/effort/source，**不改表** | `modules/agents/models.py` |
-| Skill 落地 | 做成 **bundled official skill**：提交进 `resources/official_skills/`，boot 时 `sync_bundled_official_skills()` 自动同步到 `~/.valuz/app/official-skills/`，带 `.bundled-version` 标记 → 免费、开箱、**不被 entitlement gate** | `integrations/skills_official_bootstrap.py`、`capability_resolver.py:172` |
+| Skill 落地 | 做成 **bundled official skill**：提交进 `resources/official_skills/`，boot 时 `sync_bundled_official_skills()` 自动同步到 `~/.valuz-oss/official-skills/`，带 `.bundled-version` 标记 → 免费、开箱、**不被 entitlement gate** | `integrations/skills_official_bootstrap.py`、`capability_resolver.py:172` |
 | MCP 落地 | 进 `resources/connector_catalog.json`；stdio 类型由 `mcp_resolver._build_stdio_config()` 拉起 | `adapters/mcp_resolver.py` |
 | 模板定义 | 新建 `modules/agent_templates/` 模块；文案走 i18n（`agentTemplates.*`），结构字段（slug/avatar/skills/connectors/effort/runtime）在模块内 | 参照 `onboarding.py` |
 | 契约优先 | 先改 `api/openapi.yaml` → 后端 → `make generate-types` → 前端 | 项目铁律 |

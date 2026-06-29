@@ -143,7 +143,7 @@ export const SystemLogsSection = () => {
         onRefresh={() => void refreshStatus()}
       />
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-surface-border bg-card">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card shadow-sm">
         <SystemLogToolbar
           searchQuery={view.searchQuery}
           onSearchChange={setSearchQuery}
@@ -162,7 +162,7 @@ export const SystemLogsSection = () => {
         />
 
         {!logsAvailable && (
-          <div className="border-b border-amber-200 bg-amber-50/60 px-3 py-2 text-xs text-amber-800">
+          <div className="border-b border-warning-border bg-warning-light px-3 py-2 text-xs text-warning-text">
             {t("settings.systemLogs.unavailable")}
             {status?.log_path ? `（${status.log_path}）` : ""}。
           </div>

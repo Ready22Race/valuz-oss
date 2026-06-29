@@ -28,7 +28,7 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
     monkeypatch.setattr(fsmod.FsRegistry, "data_dir", lambda self: tmp_path / "app")
     monkeypatch.setattr(m, "async_unit_of_work", lambda *_a, **_k: _UOW())
 
-    state = {"enabled": True, "auto_extract": True}
+    state = {"enabled": True, "auto_extract": True, "custom_instructions": ""}
 
     async def _ge(_db):  # noqa: ANN001, ANN202
         return state["enabled"]
@@ -36,16 +36,24 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
     async def _ga(_db):  # noqa: ANN001, ANN202
         return state["auto_extract"]
 
+    async def _gc(_db):  # noqa: ANN001, ANN202
+        return state["custom_instructions"]
+
     async def _se(_db, v):  # noqa: ANN001, ANN202
         state["enabled"] = v
 
     async def _sa(_db, v):  # noqa: ANN001, ANN202
         state["auto_extract"] = v
 
+    async def _sc(_db, v):  # noqa: ANN001, ANN202
+        state["custom_instructions"] = v.strip()[:1500]
+
     monkeypatch.setattr(m, "get_memory_enabled", _ge)
     monkeypatch.setattr(m, "get_memory_auto_extract", _ga)
+    monkeypatch.setattr(m, "get_memory_custom_instructions", _gc)
     monkeypatch.setattr(m, "set_memory_enabled", _se)
     monkeypatch.setattr(m, "set_memory_auto_extract", _sa)
+    monkeypatch.setattr(m, "set_memory_custom_instructions", _sc)
     return state
 
 
@@ -88,3 +96,33 @@ def test_clear_scope(patched):
     memory_store.add("global", "y")
     view = asyncio.run(m.clear_memory_scope(m.MemoryClear(target="global")))
     assert view.entries["global"] == []
+
+
+def test_patch_and_view_custom_instructions(patched):
+    out = asyncio.run(
+        m.patch_memory_settings(
+            m.MemorySettingsPatch(custom_instructions="  Remember key conclusions.  ")
+        )
+    )
+    # Stub setter trims; toggles untouched when not sent.
+    assert out.custom_instructions == "Remember key conclusions."
+    assert out.enabled is True and out.auto_extract is True
+    # And it surfaces in the full view.
+    assert asyncio.run(m.get_memory()).custom_instructions == "Remember key conclusions."
+
+
+def test_set_custom_instructions_trims_and_caps(monkeypatch):
+    """The real setter strips whitespace and hard-caps to the max length so the
+    review prompt stays bounded."""
+    import valuz_agent.modules.settings.preferences as prefs
+
+    captured: dict[str, str] = {}
+
+    async def _capture_write(_db, key, value):  # noqa: ANN001, ANN202
+        captured[key] = value
+
+    monkeypatch.setattr(prefs, "_write", _capture_write)
+    asyncio.run(prefs.set_memory_custom_instructions(object(), "  " + "x" * 5000 + "  "))
+    written = captured[prefs.KEY_MEMORY_CUSTOM_INSTRUCTIONS]
+    assert len(written) == prefs.MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS
+    assert written == "x" * prefs.MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS  # trimmed, no spaces

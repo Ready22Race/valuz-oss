@@ -391,7 +391,7 @@ export interface SessionAttachmentItem {
   created_at: number;
   /**
    * Origin of the attachment. ``local`` is a multipart upload the host
-   * owns under ``~/.valuz/app/attachments/{session_id}/``; ``kb_doc``
+   * owns under ``~/.valuz-oss/attachments/{session_id}/``; ``kb_doc``
    * is a live reference to a global knowledge-base document — the
    * row's ``stored_path``/``parsed_path`` reuse KB-owned paths
    * directly, no copy. Drives the panel icon + source label + delete
@@ -410,16 +410,38 @@ export interface SessionAttachmentItem {
   consumed_at?: number | null;
 }
 
+/**
+ * A file the **agent** delivered as a finished output via the built-in
+ * ``deliver_artifacts`` MCP tool — the inverse of {@link SessionAttachmentItem}
+ * (user uploads). Durable (no per-turn staging); rendered as the read-only
+ * "生成文件" panel list. ``file_path`` is an absolute path the client opens.
+ */
+export interface SessionArtifactItem {
+  id: string;
+  session_id: string;
+  file_path: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string | null;
+  created_at: number;
+}
+
 const fetchJson = createFetchJson(() => _apiBase);
 
 export type SessionStreamCallback = (event: SessionEventDTO) => void;
 
 export const sessionsApi = {
-  list(projectId?: string): Promise<{ sessions: SessionListItem[] }> {
+  list(
+    projectId?: string,
+    init?: { signal?: AbortSignal },
+  ): Promise<{ sessions: SessionListItem[] }> {
     const qs = new URLSearchParams();
     if (projectId) qs.set("project_id", projectId);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/sessions${suffix}`);
+    // ``init`` (e.g. an ``AbortSignal`` for the project-detail auto-refresh
+    // poller) is forwarded to ``fetchJson`` → ``fetch``. Existing callers pass
+    // nothing, so their behaviour is unchanged.
+    return fetchJson(`/v1/sessions${suffix}`, init);
   },
 
   get(sessionId: string): Promise<SessionDetail> {
@@ -650,6 +672,19 @@ export const sessionsApi = {
   ): Promise<{ items: SessionAttachmentItem[] }> {
     return fetchJson(
       `/v1/sessions/${encodeURIComponent(sessionId)}/attachments`,
+    );
+  },
+
+  /**
+   * List the files the agent delivered for ``sessionId`` (the "生成文件"
+   * panel list), recorded by the built-in ``deliver_artifacts`` MCP tool.
+   * Durable — the full set is returned every call.
+   */
+  listArtifacts(
+    sessionId: string,
+  ): Promise<{ items: SessionArtifactItem[] }> {
+    return fetchJson(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`,
     );
   },
 

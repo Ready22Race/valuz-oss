@@ -49,7 +49,7 @@ async def test_import_url_preview_fetches_off_the_event_loop() -> None:
     svc._fetch_url_into_staging = fake_fetch  # type: ignore[method-assign,assignment]
 
     with pytest.raises(SkillImportFailed):
-        await svc.import_url_preview("https://example.com/skill.zip")
+        await svc.import_url_preview("local-test-owner", "https://example.com/skill.zip")
 
     assert "tid" in captured, "the blocking fetch helper must be invoked"
     assert captured["tid"] != loop_tid, "the fetch must run on a worker thread, not the loop"

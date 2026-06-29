@@ -189,3 +189,50 @@ describe("Composer slash-command pass-through", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 });
+
+describe("Composer ``/`` picker decoupled from the toolbar skill button", () => {
+  const SKILLS: SkillSearchItem[] = [
+    { id: "1", name: "deep-research", description: "research deeply" },
+  ];
+  const typeSlashToken = (editor: HTMLElement, token: string) => {
+    editor.textContent = "/";
+    fireEvent.input(editor);
+    editor.textContent = token;
+    fireEvent.input(editor);
+  };
+
+  it("keeps the ``/`` picker closed when the toolbar button is hidden and slash is unset (back-compat)", () => {
+    // showSkillSlash defaults to showSkillButton, so hiding the button still
+    // disables the inline picker for callers that never opt in.
+    const onSend = vi.fn();
+    render(<Composer onSend={onSend} skills={SKILLS} showSkillButton={false} />);
+    const editor = screen.getByRole("textbox");
+
+    typeSlashToken(editor, "/deep");
+    expect(screen.queryByText("deep-research")).toBeNull();
+    // Picker never opened → Enter sends the verbatim command.
+    fireEvent.keyDown(editor, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the ``/`` picker via showSkillSlash even when the toolbar button is hidden (project conversation)", () => {
+    // The project-conversation case: no "add skill" button, but the selected
+    // agent's bound skills are invocable with ``/``.
+    const onSend = vi.fn();
+    render(
+      <Composer
+        onSend={onSend}
+        skills={SKILLS}
+        showSkillButton={false}
+        showSkillSlash
+      />,
+    );
+    const editor = screen.getByRole("textbox");
+
+    typeSlashToken(editor, "/deep");
+    expect(screen.queryByText("deep-research")).toBeTruthy();
+    // Picker open with a match → Enter is captured, not sent.
+    fireEvent.keyDown(editor, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+});

@@ -4,6 +4,7 @@ import { useChatStore, useChatSession, useSessionStore } from "@valuz/core";
 import { SessionPicker } from "../components/chat/SessionPicker";
 import { MessageList } from "../components/chat/MessageList";
 import { ChatComposer } from "../components/chat/ChatComposer";
+import { QueuedInputs } from "../components/chat/QueuedInputs";
 import { ConnectionStatusBadge } from "../components/chat/ConnectionStatusBadge";
 import { RecoveryBanner } from "../components/chat/RecoveryBanner";
 
@@ -76,6 +77,7 @@ export const ChatPage = () => {
                 />
               </div>
               <div className="py-3">
+                <QueuedInputs />
                 <ChatComposer
                   isStreaming={isStreaming}
                   isInterrupting={isInterrupting}

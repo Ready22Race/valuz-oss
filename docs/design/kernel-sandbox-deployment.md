@@ -298,7 +298,7 @@ kernel.db 为 `turn_end`，skills/KB 为只读 `none`）：
 
 **红线（不进沙箱的东西）**：host 的 `valuz.db`（业务库，单写者锁属于
 host 进程）与 OS 钥匙串/secrets **永不进入挂载清单** —— 本地 Seatbelt
-同样如此，这正是沙箱化的意义；`~/.valuz` 整目录挂载是禁止项，清单只
+同样如此，这正是沙箱化的意义；`~/.valuz-oss` 整目录挂载是禁止项，清单只
 枚举上表中 kernel 真正需要的子集。云端 KB 默认只带项目绑定子集
 （local-first：全量上云必须是用户显式选择）。
 
@@ -692,7 +692,7 @@ class SandboxProvider(Protocol):
 沙箱的固有边界，需 per-project 沙箱（§3.5）。
 
 **红线（强制）**：host 的 `valuz.db` 所在目录与 `secrets_dir` 显式
-`deny`，`~/.valuz` 不整体放行 —— 这正是沙箱化的意义。
+`deny`，`~/.valuz-oss` 不整体放行 —— 这正是沙箱化的意义。
 
 **(b) 进程驱动**：`provision()` = spawn `valuz-server` 子进程（套上
 profile），私有 DB + 自迁移 + token + `--port 0` 读回端口 + 等 `/health`；

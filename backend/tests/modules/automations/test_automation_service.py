@@ -130,6 +130,14 @@ class FakeAutomationDatastore:
     async def list_enabled(self) -> list[AutomationRow]:
         return [r for r in self.rows.values() if r.status == "enabled"]
 
+    async def list_by_origin_tool_call_ids(
+        self, user_id: str, tool_call_ids: list[str]
+    ) -> list[AutomationRow]:
+        if not tool_call_ids:
+            return []
+        wanted = set(tool_call_ids)
+        return [r for r in self.rows.values() if r.origin_tool_call_id in wanted]
+
 
 class FakeProject:
     def __init__(self, ws_id: str, name: str, kind: str) -> None:
@@ -156,7 +164,9 @@ class FakeProjectService:
     async def list_projects(self, user_id: str) -> list[FakeProject]:
         return list(self._projects.values())
 
-    async def create_chat_project_for_session(self, name: str = "Chat") -> FakeProject:
+    async def create_chat_project_for_session(
+        self, user_id: str, name: str = "Chat"
+    ) -> FakeProject:
         self._counter += 1
         ws_id = f"chat-ws-{self._counter}"
         ws = FakeProject(ws_id, name, "chat")
@@ -632,3 +642,105 @@ class TestMarkMissedRuns:
         fresh = datastore.rows[row.id]
         assert fresh.next_run_at is not None
         assert fresh.next_run_at > now
+
+
+# ── Propose / confirm plumbing (create → confirm card) ──────────────
+
+
+class TestProposeConfirmPlumbing:
+    async def test_preview_returns_spec_without_persisting(
+        self, service: AutomationService, datastore: FakeAutomationDatastore
+    ) -> None:
+        spec = await service.preview(_project_payload())
+        assert spec.name == "Daily report"
+        assert spec.action_kind == "chat"
+        assert spec.trigger.kind == "cron"
+        # Human-readable + first fire are computed off a transient row.
+        assert spec.trigger_human_readable
+        assert spec.next_run_at is not None
+        # Nothing was written — the user's confirm click does that.
+        assert datastore.rows == {}
+
+    async def test_preview_rejects_task_on_chat(self, service: AutomationService) -> None:
+        with pytest.raises(AutomationTaskOnlyOnProject):
+            await service.preview(_project_payload(project_kind="chat", action_kind="task"))
+
+    async def test_create_stamps_origin_tool_call_id(
+        self, service: AutomationService, datastore: FakeAutomationDatastore
+    ) -> None:
+        detail = await service.create(_project_payload(), origin_tool_call_id="tc-123")
+        row = datastore.rows[detail.automation_id]
+        assert row.origin_tool_call_id == "tc-123"
+
+    async def test_create_without_origin_leaves_it_null(
+        self, service: AutomationService, datastore: FakeAutomationDatastore
+    ) -> None:
+        detail = await service.create(_project_payload())
+        assert datastore.rows[detail.automation_id].origin_tool_call_id is None
+
+    async def test_confirmed_origin_map_maps_tool_call_to_automation(
+        self, service: AutomationService, datastore: FakeAutomationDatastore
+    ) -> None:
+        d1 = await service.create(_project_payload(), origin_tool_call_id="tc-a")
+        d2 = await service.create(_project_payload(), origin_tool_call_id="tc-b")
+        mapping = await service.confirmed_origin_map(["tc-a", "tc-b", "tc-missing"])
+        assert mapping == {"tc-a": d1.automation_id, "tc-b": d2.automation_id}
+
+    async def test_confirmed_origin_map_empty_input(self, service: AutomationService) -> None:
+        assert await service.confirmed_origin_map([]) == {}
+
+
+class TestBuildCreatePayload:
+    def test_chat_defaults_agent_slug_to_session_agent(self) -> None:
+        payload = AutomationService.build_create_payload(
+            name="Daily",
+            prompt_template="x",
+            trigger=CronTrigger(cron_expr="0 9 * * *"),
+            agent_slug=None,
+            action_kind="chat",
+            project_kind="chat",
+            project_id="ws-chat-1",
+            session_agent_slug="default-assistant",
+        )
+        assert payload.agent_kind == "library_agent"
+        assert payload.agent_slug == "default-assistant"
+
+    def test_project_derives_project_member_kind(self) -> None:
+        payload = AutomationService.build_create_payload(
+            name="Daily",
+            prompt_template="x",
+            trigger=CronTrigger(cron_expr="0 9 * * *"),
+            agent_slug="qa",
+            action_kind="chat",
+            project_kind="project",
+            project_id="ws-proj",
+            session_agent_slug=None,
+        )
+        assert payload.agent_kind == "project_member"
+        assert payload.agent_slug == "qa"
+
+    def test_task_on_chat_raises(self) -> None:
+        with pytest.raises(AutomationTaskOnlyOnProject):
+            AutomationService.build_create_payload(
+                name="Daily",
+                prompt_template="x",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+                agent_slug="qa",
+                action_kind="task",
+                project_kind="chat",
+                project_id=None,
+                session_agent_slug=None,
+            )
+
+    def test_missing_agent_raises(self) -> None:
+        with pytest.raises(AutomationAgentRequired):
+            AutomationService.build_create_payload(
+                name="Daily",
+                prompt_template="x",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+                agent_slug=None,
+                action_kind="chat",
+                project_kind="project",
+                project_id="ws-proj",
+                session_agent_slug=None,
+            )

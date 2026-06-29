@@ -21,12 +21,11 @@ import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.provider_resolver import resolve_model_provider
 from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
-from valuz_agent.infra.config import settings
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.fs_registry import fs_registry
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.modules.memory.extraction import Completer, MemoryExtractor
 from valuz_agent.modules.providers.datastore import ProviderDatastore
+from valuz_agent.ports.extensions import ext
 
 logger = logging.getLogger(__name__)
 
@@ -157,11 +156,13 @@ async def run_extraction_for_session(session_id: str, user_id: str | None) -> No
         async with async_unit_of_work() as db:
             from valuz_agent.modules.settings.preferences import (
                 get_memory_auto_extract,
+                get_memory_custom_instructions,
                 get_memory_enabled,
             )
 
             if not (await get_memory_enabled(db) and await get_memory_auto_extract(db)):
                 return
+            custom_instructions = await get_memory_custom_instructions(db)
 
         provider_id = valuz.get("locked_provider_id")
         if not provider_id or not source.model:
@@ -192,7 +193,7 @@ async def run_extraction_for_session(session_id: str, user_id: str | None) -> No
                 provider_id=str(provider_id),
                 model_id=source.model,
                 providers=ProviderDatastore(db),
-                secrets=FileSecretStore(settings.secrets_dir),
+                secrets=ext.secret_store,
                 runtime_provider=source.runtime_provider,
             )
         # ``mp is None`` is EXPECTED for OAuth/subscription channels (Codex/Claude
@@ -206,7 +207,10 @@ async def run_extraction_for_session(session_id: str, user_id: str | None) -> No
             mp=mp,
         )
         await MemoryExtractor(complete=completer).extract(
-            transcript=transcript, project_id=project_id, project_context=project_context
+            transcript=transcript,
+            project_id=project_id,
+            project_context=project_context,
+            custom_instructions=custom_instructions,
         )
     except Exception:  # noqa: BLE001 — best-effort; never affect the turn
         logger.debug("memory extraction failed for %s", session_id, exc_info=True)
@@ -291,11 +295,13 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
         async with async_unit_of_work() as db:
             from valuz_agent.modules.settings.preferences import (
                 get_memory_auto_extract,
+                get_memory_custom_instructions,
                 get_memory_enabled,
             )
 
             if not (await get_memory_enabled(db) and await get_memory_auto_extract(db)):
                 return
+            custom_instructions = await get_memory_custom_instructions(db)
 
         # Tasks live on real projects; bail if the project is missing/chat-kind.
         project_id = task.project_id or None
@@ -329,7 +335,7 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
                 provider_id=provider_id,
                 model_id=source.model,
                 providers=ProviderDatastore(db),
-                secrets=FileSecretStore(settings.secrets_dir),
+                secrets=ext.secret_store,
                 runtime_provider=source.runtime_provider,
             )
         logger.info("task memory: reviewing finished task %s (project=%s)", task_id, project_id)
@@ -344,6 +350,7 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
             project_id=project_id,
             project_context=project_context,
             task_digest=digest,
+            custom_instructions=custom_instructions,
         )
     except Exception:  # noqa: BLE001 — best-effort; never affect the task
         logger.debug("task memory extraction failed for %s", task_id, exc_info=True)

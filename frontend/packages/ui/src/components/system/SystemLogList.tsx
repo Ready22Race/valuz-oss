@@ -39,19 +39,19 @@ import { useI18n } from "../../hooks/use-i18n";
 
 const LEVEL_TEXT: Record<LogLevel, string> = {
   DEBUG: "text-ink-meta",
-  INFO: "text-emerald-700",
-  WARNING: "text-amber-700",
-  ERROR: "text-red-700",
-  CRITICAL: "text-red-800 font-semibold",
+  INFO: "text-info-text",
+  WARNING: "text-warning-text",
+  ERROR: "text-error-text",
+  CRITICAL: "font-semibold text-error-text",
   RAW: "text-ink-meta",
 };
 
 const LEVEL_BADGE_BG: Record<LogLevel, string> = {
   DEBUG: "bg-ink-meta/10",
-  INFO: "bg-emerald-100",
-  WARNING: "bg-amber-100",
-  ERROR: "bg-red-100",
-  CRITICAL: "bg-red-200",
+  INFO: "bg-info-light",
+  WARNING: "bg-warning-light",
+  ERROR: "bg-error-light",
+  CRITICAL: "bg-error-light",
   RAW: "bg-surface-muted",
 };
 
@@ -130,7 +130,7 @@ const Highlight = ({ text, query, className }: HighlightProps) => {
     <span className={className}>
       {segments.map((seg, i) =>
         seg.highlight ? (
-          <mark key={i} className="rounded bg-amber-200 text-ink-heading">
+          <mark key={i} className="rounded bg-warning-light text-ink-heading">
             {seg.text}
           </mark>
         ) : (

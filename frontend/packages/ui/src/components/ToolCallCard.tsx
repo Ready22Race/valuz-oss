@@ -20,13 +20,13 @@ const STATUS_KEYS: Record<PrototypeToolCallStatus, string> = {
 const STATUS_CLASSES: Record<PrototypeToolCallStatus, string> = {
   // done: 文字 #131313, bg rgba(83,188,118,0.15), border rgba(83,188,118,0.5)
   success:
-    "bg-[rgba(83,188,118,0.15)] border border-[rgba(83,188,118,0.5)] text-ink-heading",
+    "bg-success-light border border-success-border text-success-text",
   // running: 文字 #131313, bg rgba(114,92,249,0.08), border #D9D9DD
   running:
-    "bg-[rgba(114,92,249,0.08)] border border-[#D9D9DD] text-ink-heading",
+    "bg-info-light border border-info-border text-info-text",
   // queued: 文字 text-3, bg surface-2
   cached: "bg-surface-2 text-ink-muted",
-  error: "bg-error-light border border-error/30 text-error-text",
+  error: "bg-error-light border border-error-border text-error-text",
 };
 
 export const ToolCallCard = memo(
@@ -78,7 +78,7 @@ export const ToolCallCard = memo(
         </button>
 
         {open ? (
-          <div className="space-y-2 border-t border-surface-border px-3 pt-2 pb-3 pl-8 font-mono text-[11.5px] leading-[1.6]">
+          <div className="space-y-2 border-t border-surface-border px-3 pt-2 pb-3 pl-8 font-mono text-2xs leading-[1.6]">
             {tc.input ? (
               <div>
                 <div className="label-mono mb-1">Input</div>

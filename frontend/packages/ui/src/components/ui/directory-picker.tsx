@@ -21,8 +21,9 @@ export const DirectoryPicker = ({
 
   return (
     <div className={cn("flex min-w-0 items-center gap-2", className)}>
-      <div
-        className="flex h-9 min-w-0 flex-1 items-center rounded-md border border-input bg-transparent px-3 text-sm shadow-sm transition-colors hover:border-ring"
+      <button
+        type="button"
+        className="flex h-8 min-w-0 flex-1 items-center rounded-lg border border-input bg-surface px-2.5 text-left text-sm text-foreground shadow-none outline-none transition-[border-color,box-shadow,color,background-color] hover:border-ring focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20"
         onClick={onBrowse}
       >
         <span
@@ -33,12 +34,12 @@ export const DirectoryPicker = ({
         >
           {value || ph}
         </span>
-      </div>
+      </button>
       <Button
         type="button"
         variant="outline"
         size="sm"
-        className="h-9 shrink-0"
+        className="h-8 shrink-0 rounded-lg border-input px-2.5 text-sm focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 focus-visible:ring-offset-0"
         onClick={onBrowse}
       >
         <FolderOpen className="mr-1.5 h-3.5 w-3.5" />

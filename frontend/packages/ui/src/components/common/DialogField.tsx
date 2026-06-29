@@ -39,13 +39,16 @@ export const DialogField = ({
   className,
 }: DialogFieldProps) => (
   <div className={className}>
-    <label htmlFor={htmlFor} className="mb-1 block text-xs text-ink-meta">
+    <label
+      htmlFor={htmlFor}
+      className="mb-[5px] block text-xs font-medium text-foreground"
+    >
       {label}
       {required && <span className="ml-0.5 text-error-text">*</span>}
     </label>
     {children}
     {(help || helpUrl) && (
-      <div className="mt-1 text-2xs text-ink-meta">
+      <div className="mt-[3px] text-2xs text-ink-meta">
         {help}
         {helpUrl && (
           <a
@@ -74,7 +77,7 @@ export const DialogInput = forwardRef<
   <input
     ref={ref}
     className={cn(
-      "w-full rounded-lg border border-surface-border bg-background px-3 py-1.5 text-sm text-ink-heading outline-none focus:ring-1 focus:ring-brand disabled:cursor-not-allowed disabled:opacity-50",
+      "h-8 w-full rounded-lg border border-input bg-surface px-2.5 py-0 text-sm leading-none text-foreground outline-none transition-[border-color,box-shadow,color,background-color] placeholder:text-muted-foreground focus:border-ring focus:ring-[3px] focus:ring-ring/20 disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-ink-disabled disabled:opacity-100",
       className,
     )}
     {...props}

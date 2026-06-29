@@ -47,15 +47,19 @@ logger = logging.getLogger(__name__)
 async def _restamp_always_on_mcp(session_id: str) -> None:
     """Refresh the always-on in-process MCP token before driving a turn.
 
-    ``settings.internal_mcp_token`` rotates per process, so a session re-driven
-    after a backend restart — task **resume / recovery**, the persistent actor
-    loop, a sync kickoff — carries a *stale* ``X-Valuz-Internal`` in its
-    persisted ``mcp_servers``. The in-process MCP gate then 403s every request
-    and the runtime parks the ``harness`` server in ``needsAuth``, hiding ALL
-    its tools — both the base set (memory / submit_skill) and, for a lead, the
-    orchestration set (dispatch / review_subtask / finish_task / await_members /
-    send / get_plan). The symptom: a re-launched lead reports it "has no
-    orchestration tools" and only the runtime's built-ins remain.
+    A session re-driven after a backend restart — task **resume / recovery**,
+    the persistent actor loop, a sync kickoff — can carry *stale* always-on MCP
+    headers in its persisted ``mcp_servers``. The in-process MCP gate then 403s
+    every request and the runtime parks the ``harness`` server in ``needsAuth``,
+    hiding ALL its tools — both the base set (memory / submit_skill) and, for a
+    lead, the orchestration set (dispatch / review_subtask / finish_task /
+    await_members / send / get_plan). The symptom: a re-launched lead reports it
+    "has no orchestration tools" and only the runtime's built-ins remain.
+
+    ``internal_mcp_token`` is now DERIVED from the stable owner id so it no
+    longer rotates across restarts (the historical root cause); the re-stamp
+    stays to converge the other drift-prone header bits (``backend_base_url`` /
+    ``session_id``, an ``internal_mcp_token_override`` change).
 
     The chat path already self-heals this in ``send_message`` /
     ``send_message_sync``; the task/actor turn path had no equivalent. Re-stamp
@@ -70,9 +74,7 @@ async def _restamp_always_on_mcp(session_id: str) -> None:
 
         await refresh_always_on_mcp_for_session(session_id)
     except Exception:  # noqa: BLE001 — never block a turn on a re-stamp failure
-        logger.warning(
-            "always-on MCP re-stamp failed for session %s", session_id, exc_info=True
-        )
+        logger.warning("always-on MCP re-stamp failed for session %s", session_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +115,8 @@ async def run_session_to_idle(
     content: str,
     event_bus: EventBus,
     on_message: Any | None = None,
+    *,
+    queued_attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     """Drive one agent turn to completion and return the final session status.
 
@@ -128,10 +132,19 @@ async def run_session_to_idle(
     it to meter billing; the task member/lead path leaves it ``None`` so its
     behaviour is byte-identical.
 
+    ``queued_attachments`` is set only by the session input-queue drain
+    (docs/design/session-input-queue.md): the per-item attachment snapshot
+    (``[{source_path, parsed_path}]``) frozen + consumed at enqueue time. When
+    provided the pending-set load and the post-turn consume are BOTH skipped —
+    the files already left the staging area at enqueue — and the additional
+    context announces these snapshotted files instead. ``None`` (the default)
+    keeps the existing pending-set behaviour byte-identical for task paths.
+
     Used by:
       - dispatch handler via asyncio.create_task (sibling task, not recursive)
       - TaskOrchestrator.kickoff for the lead session background turn
       - sessions/run_orchestrator._run_agent_background (chat path, with meter)
+      - sessions/run_orchestrator._drain_queue_after_turn (queue drain)
     """
     from valuz_agent.modules.sessions.events import SESSION_FINISHED
 
@@ -153,9 +166,31 @@ async def run_session_to_idle(
             )
             from valuz_agent.modules.sessions.context_builder import _build_additional_context
 
-            pending_attachments = await _load_pending_attachments(session_id)
-            consumed_attachment_ids = [row.id for row in pending_attachments]
-            attachment_specs = _attachment_specs(pending_attachments)
+            if queued_attachments is not None:
+                # Queue drain: rebuild minimal (detached) attachment rows from
+                # the per-item snapshot so the additional-context announcement
+                # works; skip the pending load + the post-turn consume (the
+                # rows were consumed at enqueue, see §8.6).
+                from valuz_agent.modules.sessions.models import SessionAttachmentRow
+
+                pending_attachments = [
+                    SessionAttachmentRow(
+                        session_id=session_id,
+                        filename=Path(str(a.get("source_path") or "")).name
+                        or str(a.get("source_path") or ""),
+                        stored_path=str(a.get("source_path") or ""),
+                        parsed_path=a.get("parsed_path"),
+                        parse_status="ready" if a.get("parsed_path") else "uploaded",
+                        source_kind="local",
+                    )
+                    for a in queued_attachments
+                ]
+                consumed_attachment_ids = []
+                attachment_specs = _attachment_specs(pending_attachments, require_current_user_id())
+            else:
+                pending_attachments = await _load_pending_attachments(session_id)
+                consumed_attachment_ids = [row.id for row in pending_attachments]
+                attachment_specs = _attachment_specs(pending_attachments, require_current_user_id())
         except Exception:  # noqa: BLE001
             pending_attachments = []
             consumed_attachment_ids = []
@@ -250,8 +285,7 @@ async def run_session_to_idle(
                 # is pointless; boot recovery reconciles this session. Skip quietly
                 # rather than logging a shutdown-race traceback.
                 logger.debug(
-                    "run_session_to_idle: kernel unavailable (shutdown), skipping "
-                    "finalize for %s",
+                    "run_session_to_idle: kernel unavailable (shutdown), skipping finalize for %s",
                     session_id,
                 )
         except Exception:  # noqa: BLE001

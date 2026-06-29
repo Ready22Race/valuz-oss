@@ -294,3 +294,46 @@ describe("ProjectDetailContextPanel — Todos section", () => {
     expect(onDeleteScheduledTask).toHaveBeenCalledWith("task-1");
   });
 });
+
+describe("ProjectDetailContextPanel — Generated files section", () => {
+  it("should render agent-delivered artifacts under the 生成文件 section", () => {
+    render(
+      <ProjectDetailContextPanel
+        generatedFiles={[
+          { id: "a1", name: "报告.html", size: "76.8 KB", path: "/d/报告.html" },
+          { id: "a2", name: "报告.md", size: "19.8 KB", path: "/d/报告.md" },
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("生成文件")).toBeTruthy();
+    expect(screen.getByText("报告.html")).toBeTruthy();
+    expect(screen.getByText("报告.md")).toBeTruthy();
+  });
+
+  it("should render the empty state when no artifacts have been delivered", () => {
+    render(<ProjectDetailContextPanel generatedFiles={[]} />);
+    expect(screen.getByText("生成文件")).toBeTruthy();
+    expect(screen.getByText("暂无生成文件")).toBeTruthy();
+  });
+
+  it("should open the file's absolute path when a row is clicked", async () => {
+    const onOpenGeneratedFile = vi.fn();
+    render(
+      <ProjectDetailContextPanel
+        generatedFiles={[
+          { id: "a1", name: "报告.html", path: "/deliverables/报告.html" },
+        ]}
+        onOpenGeneratedFile={onOpenGeneratedFile}
+      />,
+    );
+
+    await userEvent.click(screen.getByText("报告.html"));
+    expect(onOpenGeneratedFile).toHaveBeenCalledWith("/deliverables/报告.html");
+  });
+
+  it("should hide the section entirely when generatedFiles is undefined", () => {
+    render(<ProjectDetailContextPanel todos={[]} />);
+    expect(screen.queryByText("生成文件")).toBeNull();
+  });
+});

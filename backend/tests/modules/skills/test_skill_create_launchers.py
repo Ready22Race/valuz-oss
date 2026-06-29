@@ -42,7 +42,7 @@ def client_and_svc(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, _Captur
     async def _override():  # type: ignore[no-untyped-def]
         yield svc
 
-    async def _default_present() -> str | None:
+    async def _default_present(user_id: str) -> str | None:  # noqa: ARG001
         return DEFAULT_ASSISTANT_SLUG
 
     app.dependency_overrides[get_session_service] = _override
@@ -99,7 +99,7 @@ def test_falls_back_to_agentless_when_default_assistant_missing(
     """Fresh install (onboarding hasn't seeded the assistant) → legacy path."""
     client, svc = client_and_svc
 
-    async def _absent() -> str | None:
+    async def _absent(user_id: str) -> str | None:  # noqa: ARG001
         return None
 
     monkeypatch.setattr(skills_routes, "_default_assistant_slug_if_present", _absent)

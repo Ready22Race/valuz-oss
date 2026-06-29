@@ -22,6 +22,7 @@ from the legacy schedule:
 from __future__ import annotations
 
 import json
+from typing import Literal
 from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,6 +63,7 @@ from valuz_agent.modules.automations.schemas import (
     AutomationGroupResponse,
     AutomationItemResponse,
     AutomationProjectTarget,
+    AutomationProposalSpec,
     AutomationRunAcceptedResponse,
     AutomationRunItemResponse,
     AutomationUpdatePayload,
@@ -86,26 +88,32 @@ def _normalise_tz(value: str | None) -> str | None:
     return trimmed or None
 
 
-def _format_interval_human(seconds: int) -> str:
-    """Render an interval as a human-readable cadence.
+def _format_interval_human(seconds: int, locale: str | None = None) -> str:
+    """Render an interval as a localized human-readable cadence.
 
-    Examples: ``30 -> "every 30 seconds"``, ``300 -> "every 5 minutes"``,
-    ``3900 -> "every 1 hour 5 minutes"``. The frontend can override this
-    with locale-specific formatting; the server-side string is the
-    fallback for the LLM tool result and the i18n-less tests.
+    Examples (en): ``30 -> "Every 30 seconds"``, ``300 -> "Every 5 minutes"``,
+    ``3900 -> "Every 1 hours 5 minutes"``. Chinese renders ``每 …``. The
+    server-side string is also the fallback for the LLM tool result.
     """
     if seconds < 60:
-        return f"every {seconds} seconds"
+        return t("automation.intervalEverySeconds", params={"count": seconds}, locale=locale)
     minutes, secs = divmod(seconds, 60)
     if minutes < 60:
         if secs == 0:
-            return f"every {minutes} minute{'s' if minutes != 1 else ''}"
-        return f"every {minutes}m {secs}s"
+            return t("automation.intervalEveryMinutes", params={"count": minutes}, locale=locale)
+        return t(
+            "automation.intervalEveryMinutesSeconds",
+            params={"minutes": minutes, "seconds": secs},
+            locale=locale,
+        )
     hours, mins = divmod(minutes, 60)
-    parts = [f"{hours} hour{'s' if hours != 1 else ''}"]
     if mins:
-        parts.append(f"{mins} minute{'s' if mins != 1 else ''}")
-    return "every " + " ".join(parts)
+        return t(
+            "automation.intervalEveryHoursMinutes",
+            params={"hours": hours, "minutes": mins},
+            locale=locale,
+        )
+    return t("automation.intervalEveryHours", params={"count": hours}, locale=locale)
 
 
 class AutomationService:
@@ -172,8 +180,8 @@ class AutomationService:
         if row.trigger_kind == "cron" and row.cron_expr:
             return self._cron.describe(row.cron_expr, locale=self._locale)
         if row.trigger_kind == "interval" and row.interval_seconds:
-            return _format_interval_human(row.interval_seconds)
-        return "Manual"
+            return _format_interval_human(row.interval_seconds, locale=self._locale)
+        return t("automation.triggerManual", locale=self._locale)
 
     def _apply_trigger(self, row: AutomationRow, trigger: Trigger) -> None:
         """Project a Trigger union back onto the row's flat columns.
@@ -274,7 +282,8 @@ class AutomationService:
 
     @staticmethod
     def _run_to_item(
-        row: AutomationRunRow, task_status: str | None = None
+        row: AutomationRunRow,
+        task_link: tuple[str, str, str] | None = None,
     ) -> AutomationRunItemResponse:
         created_files: list[str] = []
         if row.created_files:
@@ -282,6 +291,7 @@ class AutomationService:
                 created_files = json.loads(row.created_files)
             except (json.JSONDecodeError, TypeError):
                 pass
+        task_id, task_title, task_status = task_link or (None, None, None)
         return AutomationRunItemResponse(
             run_id=row.id,
             automation_id=row.automation_id,
@@ -297,6 +307,11 @@ class AutomationService:
             error_message_key=row.error_message_key,
             session_id=row.session_id,
             created_files=created_files,
+            # The spawned task (task-action automations): id + title deep-link to
+            # it; status is its *live* outcome (the run row froze to success at
+            # kickoff, but the lead may run for hours after).
+            task_id=task_id,
+            task_title=task_title,
             task_status=task_status,
         )
 
@@ -480,13 +495,15 @@ class AutomationService:
                     # The calling session was a project session that asked
                     # for kind=chat — treat as "lazy create".
                     fresh = await self._ws.create_chat_project_for_session(
-                        name=payload.name.strip()
+                        require_current_user_id(), name=payload.name.strip()
                     )
                     project_id = fresh.id
             else:
                 # Automation page "Chat" picker: no calling session, no
                 # explicit ws — lazy-create one named after the automation.
-                fresh = await self._ws.create_chat_project_for_session(name=payload.name.strip())
+                fresh = await self._ws.create_chat_project_for_session(
+                    require_current_user_id(), name=payload.name.strip()
+                )
                 project_id = fresh.id
 
             # 2. Resolve the agent for that project
@@ -545,6 +562,158 @@ class AutomationService:
             raise AgentNotInProject()
         return payload.project_id, payload.agent_slug
 
+    # ── Proposal (propose → confirm) ────────────────────────────────────
+
+    @staticmethod
+    def build_create_payload(
+        *,
+        name: str | None,
+        prompt_template: str | None,
+        trigger: Trigger,
+        agent_slug: str | None,
+        action_kind: str,
+        project_kind: str,
+        project_id: str | None,
+        session_agent_slug: str | None,
+    ) -> AutomationCreatePayload:
+        """Assemble an :class:`AutomationCreatePayload` from raw create inputs.
+
+        The single source of truth for the create-input rules shared by the
+        ``automation`` MCP tool (which previews) and the confirm route (which
+        persists), so the two never drift:
+
+        - ``agent_slug`` defaults to the session's bound agent in a chat (so the
+          user/LLM need not pick one); it's mandatory otherwise.
+        - ``agent_kind`` is derived from ``project_kind`` — project sessions
+          store ``project_member``, chats store ``library_agent``.
+        - ``task`` mode is rejected outside a project session.
+
+        Raises the same typed errors ``create`` would; callers map them to a
+        tool ``_err`` or an HTTP response. ``trigger`` is required here — the
+        tool checks for a missing trigger first (with a richer message).
+        """
+        name = (name or "").strip()
+        if not name:
+            raise AutomationNameEmpty()
+        if not (prompt_template or "").strip():
+            raise AutomationPromptEmpty()
+        effective_agent_slug = agent_slug
+        if not effective_agent_slug and project_kind == "chat":
+            effective_agent_slug = session_agent_slug
+        if not effective_agent_slug:
+            raise AutomationAgentRequired()
+        action = action_kind or "chat"
+        if action == "task" and project_kind != "project":
+            raise AutomationTaskOnlyOnProject()
+        agent_kind = "project_member" if project_kind == "project" else "library_agent"
+        return AutomationCreatePayload(
+            name=name,
+            project_kind=project_kind,  # type: ignore[arg-type]
+            project_id=project_id,
+            agent_kind=agent_kind,  # type: ignore[arg-type]
+            agent_slug=effective_agent_slug,
+            prompt_template=(prompt_template or "").strip(),
+            trigger=trigger,
+            action_kind=action,  # type: ignore[arg-type]
+        )
+
+    async def _preview_agent_name(
+        self, payload: AutomationCreatePayload, calling_session_project_id: str | None
+    ) -> str | None:
+        """Resolve the bound agent's display name WITHOUT side effects.
+
+        Unlike ``_resolve_project_and_agent`` (which may deploy a library agent
+        or lazy-create a chat project), preview must not write — so it looks the
+        name up directly: library agents from the agent library, project members
+        from the (chat or project) project they belong to.
+        """
+        uid = require_current_user_id()
+        if payload.agent_kind == "library_agent":
+            agent = await self._agents.get_agent(uid, payload.agent_slug)
+            if agent is None:
+                raise AgentNotFound()
+            return agent.name
+        project_id = payload.project_id or calling_session_project_id
+        if not project_id:
+            raise AgentNotInProject()
+        member = await self._members.get(uid, project_id, payload.agent_slug)
+        if member is None:
+            raise AgentNotInProject()
+        probe = AutomationRow(
+            id="preview",
+            name="",
+            agent_kind="project_member",
+            agent_slug=payload.agent_slug,
+            project_id=project_id,
+            prompt_template="",
+            action_kind="chat",
+            trigger_kind="manual",
+            status="enabled",
+        )
+        return await self._resolve_agent_name(probe)
+
+    async def preview(
+        self,
+        payload: AutomationCreatePayload,
+        *,
+        calling_session_project_id: str | None = None,
+    ) -> AutomationProposalSpec:
+        """Validate a create payload and return a resolved-but-unsaved spec.
+
+        Mirrors ``create`` minus the write: validates the trigger, resolves the
+        agent's display name, and computes the human-readable cadence + first
+        fire instant off a transient row. The ``automation create`` tool returns
+        this as a confirmation card; the actual write happens on confirm.
+        """
+        name = payload.name.strip()
+        if not name:
+            raise AutomationNameEmpty()
+        if not payload.prompt_template.strip():
+            raise AutomationPromptEmpty()
+        if not payload.agent_slug:
+            raise AutomationAgentRequired()
+        if payload.action_kind == "task" and payload.project_kind != "project":
+            raise AutomationTaskOnlyOnProject()
+
+        self._validate_trigger(payload.trigger)
+        agent_name = await self._preview_agent_name(payload, calling_session_project_id)
+
+        now = now_ms()
+        row = AutomationRow(
+            id="preview",
+            name=name,
+            agent_kind=payload.agent_kind,
+            agent_slug=payload.agent_slug,
+            project_id=payload.project_id or "preview",
+            prompt_template=payload.prompt_template.strip(),
+            action_kind=payload.action_kind,
+            trigger_kind="cron",  # overwritten by _apply_trigger
+            status="enabled",
+            next_run_at=None,
+            last_run_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._apply_trigger(row, payload.trigger)
+        next_run = self._triggers.initial_next_fire(row, now=now)
+        return AutomationProposalSpec(
+            name=name,
+            prompt_template=payload.prompt_template.strip(),
+            trigger=self._row_to_trigger(row),
+            agent_slug=payload.agent_slug,
+            agent_kind=payload.agent_kind,
+            agent_name=agent_name,
+            action_kind=payload.action_kind,
+            trigger_human_readable=self._trigger_human(row),
+            next_run_at=next_run,
+        )
+
+    async def confirmed_origin_map(self, tool_call_ids: list[str]) -> dict[str, str]:
+        """Map each already-confirmed proposing ``tool_call_id`` → its created
+        automation id (owner-scoped). Backs the proposal re-entry status route."""
+        rows = await self._ds.list_by_origin_tool_call_ids(require_current_user_id(), tool_call_ids)
+        return {r.origin_tool_call_id: r.id for r in rows if r.origin_tool_call_id}
+
     # ── CRUD ──────────────────────────────────────────────────────────
 
     async def create(
@@ -552,6 +721,7 @@ class AutomationService:
         payload: AutomationCreatePayload,
         *,
         calling_session_project_id: str | None = None,
+        origin_tool_call_id: str | None = None,
     ) -> AutomationDetailResponse:
         """Create a new automation row.
 
@@ -596,6 +766,7 @@ class AutomationService:
             status="enabled",
             next_run_at=None,
             last_run_at=None,
+            origin_tool_call_id=origin_tool_call_id,
             created_at=now,
             updated_at=now,
         )
@@ -609,6 +780,122 @@ class AutomationService:
             automation_id=row.id,
         )
         return await self._row_to_detail(row)
+
+    async def create_from_row(
+        self,
+        row: AutomationRow,
+        *,
+        owner_user_id: str | None = None,
+    ) -> AutomationDetailResponse:
+        """Persist a ``AutomationRow`` built by a peer module (project-pack
+        import) without going through ``AutomationCreatePayload`` routing.
+
+        The caller has already set ``id`` / ``project_id`` / ``agent_slug``
+        / ``name`` / ``prompt_template`` / ``action_kind`` / ``trigger_kind``
+        / ``cron_expr`` / ``timezone`` / ``interval_seconds`` / ``status``
+        on the row. This method:
+
+        - re-validates the discriminated-trigger invariants
+          (cron→``cron_expr`` set; interval→``interval_seconds >= 30``);
+        - recomputes ``next_run_at`` for enabled rows;
+        - writes via the datastore and pokes the scheduler exactly like the
+          public ``create``.
+
+        ``owner_user_id`` is threaded explicitly because the import path
+        must not depend on the ambient ``require_current_user_id()``
+        ContextVar (which is set by HTTP middleware and may differ in
+        tests / batched imports). When ``None`` the ambient owner is used,
+        matching the rest of this service.
+        """
+        uid = owner_user_id or require_current_user_id()
+        # Enforce the same invariants the DB CHECK constraints do, so a bad
+        # import surfaces a typed error instead of an IntegrityError.
+        if row.trigger_kind == "cron" and not (row.cron_expr or "").strip():
+            raise AutomationAgentRequired()  # type: ignore[misc]
+        if row.trigger_kind == "interval" and (
+            row.interval_seconds is None or row.interval_seconds < MIN_INTERVAL_SECONDS
+        ):
+            raise IntervalTooShort()
+        if row.trigger_kind == "cron":
+            tz = self._effective_tz_for(row.timezone)
+            valid, _, _, err_msg = self._cron.validate(row.cron_expr or "", tz)
+            if not valid:
+                raise InvalidCronExpression(err_msg)
+        if not row.name.strip():
+            raise AutomationNameEmpty()
+        if not row.prompt_template.strip():
+            raise AutomationPromptEmpty()
+        if not row.agent_slug:
+            raise AutomationAgentRequired()
+
+        now = now_ms()
+        row.id = row.id or uuid4().hex
+        row.user_id = uid
+        row.created_at = now
+        row.updated_at = now
+        row.origin_tool_call_id = None
+        row.last_run_at = None
+        if row.status == "enabled":
+            row.next_run_at = self._triggers.initial_next_fire(row, now=now)
+        else:
+            row.next_run_at = None
+
+        await self._ds.create_automation(uid, row)
+        self._bus.publish(
+            "automation.changed",
+            project_id=row.project_id,
+            automation_id=row.id,
+        )
+        return await self._row_to_detail_for(row, uid)
+
+    async def _row_to_detail_for(
+        self, row: AutomationRow, user_id: str
+    ) -> AutomationDetailResponse:
+        """Detail projection scoped to an explicit owner (the import path
+        threads the owner explicitly rather than reading the ambient
+        ContextVar, so this avoids surprising ContextVar dependencies)."""
+        try:
+            ws_name, ws_kind = await self._get_project_info_for(row.project_id, user_id)
+        except AutomationProjectNotFound:
+            ws_name, ws_kind = row.project_id, "project"
+        last_run = await self._ds.last_run(user_id, row.id)
+        item = AutomationItemResponse(
+            automation_id=row.id,
+            project_id=row.project_id,
+            project_name=ws_name,
+            project_kind=ws_kind,
+            name=row.name,
+            agent_kind=row.agent_kind,
+            agent_slug=row.agent_slug,
+            agent_name=None,
+            action_kind=row.action_kind,
+            trigger=self._row_to_trigger(row),
+            trigger_human_readable=self._trigger_human(row),
+            status=row.status,
+            next_run_at=row.next_run_at,
+            last_run_at=row.last_run_at,
+            last_run_status=last_run.status if last_run else None,
+        )
+        return AutomationDetailResponse(
+            **item.model_dump(),
+            prompt_template=row.prompt_template,
+            total_runs=await self._ds.count_runs(user_id, row.id),
+            recent_failures=await self._ds.count_recent_failures(user_id, row.id),
+            created_at=row.created_at or now_ms(),
+            updated_at=row.updated_at or now_ms(),
+        )
+
+    async def _get_project_info_for(self, project_id: str, user_id: str) -> tuple[str, str]:
+        """Owner-explicit variant of ``_get_project_info`` for the import path."""
+        if self._ws is None:
+            raise AutomationProjectNotFound()
+        try:
+            ws = await self._ws.get_project(user_id, project_id)
+            return ws.name, ws.kind
+        except AutomationProjectNotFound:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise AutomationProjectNotFound() from exc
 
     async def update(
         self, automation_id: str, payload: AutomationUpdatePayload
@@ -712,8 +999,25 @@ class AutomationService:
             automation_id=automation_id,
         )
 
-    async def run_now(self, automation_id: str) -> AutomationRunAcceptedResponse:
-        """Enqueue a manual run for this automation.
+    async def run_now(
+        self,
+        automation_id: str,
+        *,
+        trigger_type: Literal["manual", "agent"] = "manual",
+        invoked_by_session_id: str | None = None,
+    ) -> AutomationRunAcceptedResponse:
+        """Enqueue an immediate, off-schedule run for this automation.
+
+        ``trigger_type`` records *who* asked for this off-schedule fire so the
+        execution log can tell them apart from the scheduled (``cron`` /
+        ``interval``) runs:
+
+        - ``"manual"`` (default) — a human clicked "Run now" in the UI
+          (``POST /v1/automations/{id}/run-now``).
+        - ``"agent"`` — an agent invoked the ``automation`` MCP tool with
+          ``action="run"``.
+
+        Both share the same enqueue path; only the recorded provenance differs.
 
         Single-flight: refuses to enqueue while the most recent run is
         still queued or running. The runner's in-memory ``_active_ids``
@@ -742,9 +1046,10 @@ class AutomationService:
             id=uuid4().hex,
             automation_id=automation_id,
             project_id=row.project_id,
-            trigger_type="manual",
+            trigger_type=trigger_type,
             status="queued",
             triggered_at=now,
+            invoked_by_session_id=invoked_by_session_id,
         )
         await self._ds.create_run(require_current_user_id(), run)
         self._bus.publish(
@@ -768,20 +1073,19 @@ class AutomationService:
             require_current_user_id(), automation_id, limit=limit, cursor=cursor
         )
         # Task automations: the run row freezes to ``success`` at kickoff, so
-        # resolve each lead session's live task status and let the client show
-        # that instead. Batched to avoid an N+1 over the runs page.
-        task_status_by_session = await self._resolve_task_statuses(runs)
+        # resolve each lead session's spawned task (id + title + live status) and
+        # let the client deep-link to it. Batched to avoid an N+1 over the page.
+        task_link_by_session = await self._resolve_task_links(runs)
         return [
-            self._run_to_item(
-                r, task_status_by_session.get(r.session_id) if r.session_id else None
-            )
+            self._run_to_item(r, task_link_by_session.get(r.session_id) if r.session_id else None)
             for r in runs
         ]
 
-    async def _resolve_task_statuses(
+    async def _resolve_task_links(
         self, runs: list[AutomationRunRow]
-    ) -> dict[str, str]:
-        """Map each run's lead ``session_id`` → its task's current status.
+    ) -> dict[str, tuple[str, str, str]]:
+        """Map each run's lead ``session_id`` → ``(task_id, title, status)`` of
+        its spawned task.
 
         Returns ``{}`` when no run carries a session id (e.g. conversation
         automations), avoiding the tasks-datastore round trip entirely.
@@ -791,7 +1095,7 @@ class AutomationService:
             return {}
         from valuz_agent.modules.tasks.datastore import TaskSessionDatastore
 
-        return await TaskSessionDatastore(self._db).get_task_status_by_session_ids(
+        return await TaskSessionDatastore(self._db).get_task_links_by_session_ids(
             require_current_user_id(), session_ids
         )
 
@@ -817,7 +1121,7 @@ class AutomationService:
             )
         return IntervalValidationResultResponse(
             valid=True,
-            human_readable=_format_interval_human(seconds),
+            human_readable=_format_interval_human(seconds, locale=self._locale),
         )
 
     # ── Recovered-skip during offline windows ─────────────────────────

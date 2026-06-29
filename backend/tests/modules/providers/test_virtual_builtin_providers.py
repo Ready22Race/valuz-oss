@@ -22,7 +22,12 @@ from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.discover import DiscoveredModel, ModelDiscoveryError
 from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.models import Base, ProviderRow
-from valuz_agent.modules.providers.service import ProviderService
+from valuz_agent.modules.providers.service import (
+    ProviderService,
+    materialize_logged_in_subscription,
+    subscription_catalog_kind,
+    subscription_login_hint,
+)
 from valuz_agent.modules.settings.models import AppSettingRow
 from valuz_agent.ports.extensions import ext
 from valuz_agent.ports.llm_provider import NoopLLMProvider
@@ -32,16 +37,16 @@ OWNER = "owner-A"
 
 class _InMemorySecretStore(SecretStorePort):
     def __init__(self) -> None:
-        self._values: dict[str, str] = {}
+        self._values: dict[tuple[str, str], str] = {}
 
-    def get(self, key: str) -> str | None:
-        return self._values.get(key)
+    def get(self, user_id: str, key: str) -> str | None:
+        return self._values.get((user_id, key))
 
-    def put(self, key: str, value: str) -> None:
-        self._values[key] = value
+    def put(self, user_id: str, key: str, value: str) -> None:
+        self._values[(user_id, key)] = value
 
-    def delete(self, key: str) -> None:
-        self._values.pop(key, None)
+    def delete(self, user_id: str, key: str) -> None:
+        self._values.pop((user_id, key), None)
 
 
 class _SvcHandle:
@@ -317,3 +322,168 @@ class TestGetVirtualTemplate:
         # row — configure/login the channel first.
         with pytest.raises(ProviderNotFound):
             await svc.service.update_provider(OWNER, "ch-claude-subscription", name="Renamed")
+
+
+class TestSubscriptionLoginGate:
+    """A logged-out subscription channel keeps its card but drops its models — but
+    ONLY on the per-channel detail path (``get_provider``), which is what the chat
+    composer fetches. ``list_providers`` (which feeds model-options →
+    onboarding ConnectStep + Settings default-model picker) is deliberately NOT
+    gated: those surfaces already gate client-side on the keychain probe, and
+    stripping there would drop the channel from model-options and break the
+    onboarding login card. Covers the virtual template AND a persisted
+    ``cli_keychain`` row (the real-world repro — logged in once, keychain since
+    cleared, composer still showing Claude·Codex models)."""
+
+    @staticmethod
+    def _set_logged_out(monkeypatch) -> None:
+        async def _no(_tool: str) -> bool:
+            return False
+
+        monkeypatch.setattr(
+            "valuz_agent.modules.providers.service.detect_cli_login", _no, raising=True
+        )
+
+    async def test_detail_models_hidden_when_logged_out(self, svc: _SvcHandle, monkeypatch) -> None:
+        self._set_logged_out(monkeypatch)
+        detail = await svc.service.get_provider(OWNER, "ch-claude-subscription")
+        assert detail.models == []  # card stays, models gone
+        assert detail.default_model is None
+
+    async def test_list_not_gated_so_onboarding_keeps_models(
+        self, svc: _SvcHandle, monkeypatch
+    ) -> None:
+        # Even logged out, the list feed must keep its models — model-options /
+        # onboarding gate client-side, and an empty list drops the login card.
+        self._set_logged_out(monkeypatch)
+        by_id = {i.id: i for i in await svc.service.list_providers(OWNER)}
+        assert by_id["ch-claude-subscription"].models
+
+    async def test_detail_models_shown_when_logged_in(self, svc: _SvcHandle) -> None:
+        # Default autouse fixture = logged in → recommended catalog surfaces.
+        detail = await svc.service.get_provider(OWNER, "ch-claude-subscription")
+        assert detail.models
+
+    async def test_persisted_keychain_row_detail_hidden_when_logged_out(
+        self, svc: _SvcHandle, monkeypatch
+    ) -> None:
+        svc.seed(
+            ProviderRow(
+                user_id=OWNER,
+                id="my-claude",
+                name="Claude Pro / Max",
+                provider_kind="claude-subscription",
+                source="user",
+                enabled=True,
+                is_default=False,
+                deletable=True,
+                default_model="claude-sonnet-4-6",
+                test_status="never",
+                credential_source="cli_keychain",
+                auth_type="oauth",
+                model_ids=None,  # tracks the live recommended catalog
+            )
+        )
+        self._set_logged_out(monkeypatch)
+        detail = await svc.service.get_provider(OWNER, "my-claude")
+        assert detail.models == []
+        assert detail.default_model is None
+
+
+def _patch_login(monkeypatch, value: bool) -> None:
+    async def _probe(_tool: str) -> bool:
+        return value
+
+    monkeypatch.setattr(
+        "valuz_agent.modules.providers.service.detect_cli_login", _probe, raising=True
+    )
+
+
+class TestMaterializeLoggedInSubscription:
+    """The session-resolution backstop: a stale virtual ``ch-*`` id is swapped
+    onto a real row only when its CLI is logged in. This is the server half of
+    "可用 = configurable" — the frontend auto-materializes on detection, this
+    catches an already-saved reference at session-creation time."""
+
+    async def test_materializes_real_row_when_logged_in(self, svc: _SvcHandle, monkeypatch) -> None:
+        _patch_login(monkeypatch, True)
+        ds = svc.service._ds  # noqa: SLF001
+        row = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        assert row is not None
+        assert row.id != "ch-codex-subscription"  # fresh uuid, not the catalog id
+        assert row.provider_kind == "codex-subscription"
+        assert row.deletable is True
+        assert row.enabled is True
+        assert row.credential_source == "cli_keychain"
+        assert row.auth_type == "oauth"
+
+    async def test_returns_none_when_logged_out(self, svc: _SvcHandle, monkeypatch) -> None:
+        _patch_login(monkeypatch, False)
+        ds = svc.service._ds  # noqa: SLF001
+        row = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        assert row is None
+        assert await ds.list_providers(OWNER) == []  # no row conjured from a logged-out CLI
+
+    async def test_returns_none_for_non_subscription_id(self, svc: _SvcHandle, monkeypatch) -> None:
+        _patch_login(monkeypatch, True)
+        ds = svc.service._ds  # noqa: SLF001
+        assert await materialize_logged_in_subscription(ds, OWNER, "ch-anthropic") is None
+        assert await materialize_logged_in_subscription(ds, OWNER, "some-user-uuid") is None
+
+    async def test_idempotent_by_kind(self, svc: _SvcHandle, monkeypatch) -> None:
+        _patch_login(monkeypatch, True)
+        ds = svc.service._ds  # noqa: SLF001
+        a = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        b = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        assert a is not None and b is not None and a.id == b.id
+        codex = [r for r in await ds.list_providers(OWNER) if r.provider_kind == "codex-subscription"]
+        assert len(codex) == 1
+
+    async def test_normalizes_legacy_undeletable_row(self, svc: _SvcHandle, monkeypatch) -> None:
+        # A legacy seeded row (deletable=False, not yet cli_keychain) is reused
+        # by kind AND normalized — otherwise it would stay stuck without its
+        # management affordance and read as un-credentialed.
+        svc.seed(
+            ProviderRow(
+                user_id=OWNER,
+                id="legacy-codex",
+                name="Codex · ChatGPT",
+                provider_kind="codex-subscription",
+                source="user",
+                enabled=False,
+                is_default=False,
+                deletable=False,
+                default_model=None,
+                test_status="never",
+                credential_source="none",
+                auth_type="oauth",
+            )
+        )
+        _patch_login(monkeypatch, True)
+        ds = svc.service._ds  # noqa: SLF001
+        row = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
+        assert row is not None and row.id == "legacy-codex"  # reused, not duplicated
+        assert row.deletable is True
+        assert row.enabled is True
+        assert row.credential_source == "cli_keychain"
+
+
+class TestSubscriptionLoginHint:
+    """The friendly error a logged-out subscription raises at session creation,
+    instead of the raw "provider 'ch-codex-subscription' not found"."""
+
+    def test_catalog_kind_helper(self) -> None:
+        assert subscription_catalog_kind("ch-codex-subscription") == "codex-subscription"
+        assert subscription_catalog_kind("ch-claude-subscription") == "claude-subscription"
+        assert subscription_catalog_kind("ch-anthropic") is None
+        assert subscription_catalog_kind("some-user-uuid") is None
+
+    def test_hint_for_subscription_id_is_actionable(self) -> None:
+        hint = subscription_login_hint("ch-codex-subscription")
+        assert hint is not None
+        assert hint != "settings.model.subscriptionLoginRequired"  # i18n resolved, not the raw key
+        assert "codex" in hint.lower()  # names the channel / its login command
+
+    def test_no_hint_for_non_subscription_id(self) -> None:
+        assert subscription_login_hint("ch-anthropic") is None
+        assert subscription_login_hint("some-user-uuid") is None

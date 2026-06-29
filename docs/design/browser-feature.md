@@ -48,7 +48,7 @@ agent ──shell(skill)──> chrome-devtools navigate/snapshot/click/… ─�
 |---|---|---|
 | 引擎 | `chrome-devtools-mcp`(pin `1.2.0`) | 官方、CDP 原生、自带对话框/iframe;catalog 早有此连接器 |
 | 暴露方式 | Skill + CLI(操作)/ MCP 工具(管理) | 渐进披露省 token;三 runtime 有 shell → 仍 runtime 中立 |
-| 浏览器 | 独立、隔离、可见、持久 profile(`~/.valuz/app/browser-chrome`)| 不劫持日常 Chrome(单实例限制);隔离 = blast-radius 收口;持久 = 登一次复用 |
+| 浏览器 | 独立、隔离、可见、持久 profile(`~/.valuz-oss/browser-chrome`)| 不劫持日常 Chrome(单实例限制);隔离 = blast-radius 收口;持久 = 登一次复用 |
 | 连接模式 | `managed`(默认,自管 profile)/ `attach`(连用户已起的 Chrome,`--browserUrl`)| managed 覆盖主场景;attach 给 power-user |
 | 安全(MVP) | `full_access` + 独立 profile | 平台默认即 full_access;隔离 profile 是实在的边界。完整审批模型见 §6 延后 |
 
@@ -134,7 +134,7 @@ agent ──shell(skill)──> chrome-devtools navigate/snapshot/click/… ─�
 3. **`build-desktop.sh` Phase A4**:`npm ci --omit=dev` 装 chrome-devtools-mcp → stage 进 `libexec/chrome-devtools-mcp/`,下载 node 进 `libexec/node`(`--skip-node` 跳过;dist tag → node target 的映射在此)。
 4. **`sidecar.ts`**:设 `VALUZ_NODE_PATH`(`libexec/node`)+ `VALUZ_CDT_ENTRY`(`libexec/chrome-devtools-mcp/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools.js`)为绝对路径,绕开 GUI app 的精简 PATH。
 5. **`modules/browser/service.py`**:`_engine_argv()` 是*真实*调用 —— 两个 env 都设 → `[node, entry]`;否则 `npx`(仅 dev/带系统 node 的 headless)。host 自己的 status/start/stop 直接用它。`node_available()`:两个 env 都设即可用,否则探测系统 node。
-6. **友好命令 `chrome-devtools`(显示友好)**:绝对路径前缀会原样显示在客户端工具卡里、很丑。故 `ensure_cli_on_path()` 在 **boot** 时(早于任何 session spawn —— env 在 spawn 时被继承,不是实时)往 `FsRegistry.browser_bin_dir()`(`~/.valuz/app/bin`)写一个 wrapper(posix `sh` / win `.cmd`,内容 `exec <engine argv> "$@"`),并把该目录 **prepend 进 `os.environ["PATH"]`**;三 runtime 的 agent shell 都继承此 PATH —— Claude SDK 继承父 env、Codex `dict(os.environ)`、DeepAgents `LocalShellBackend(inherit_env=True)`(**其默认是空 env、无 PATH,必须显式开启**,否则连 wrapper/npx/node 都解析不到 → exit 127)。于是 `cli_prefix()` 返回 `chrome-devtools`,agent 跑/显示的就是 `chrome-devtools take_snapshot …`;wrapper 装不上时回退到真实前缀。dev 与打包一致(dev 底层仍 npx)。
+6. **友好命令 `chrome-devtools`(显示友好)**:绝对路径前缀会原样显示在客户端工具卡里、很丑。故 `ensure_cli_on_path()` 在 **boot** 时(早于任何 session spawn —— env 在 spawn 时被继承,不是实时)往 `FsRegistry.browser_bin_dir()`(`~/.valuz-oss/bin`)写一个 wrapper(posix `sh` / win `.cmd`,内容 `exec <engine argv> "$@"`),并把该目录 **prepend 进 `os.environ["PATH"]`**;三 runtime 的 agent shell 都继承此 PATH —— Claude SDK 继承父 env、Codex `dict(os.environ)`、DeepAgents `LocalShellBackend(inherit_env=True)`(**其默认是空 env、无 PATH,必须显式开启**,否则连 wrapper/npx/node 都解析不到 → exit 127)。于是 `cli_prefix()` 返回 `chrome-devtools`,agent 跑/显示的就是 `chrome-devtools take_snapshot …`;wrapper 装不上时回退到真实前缀。dev 与打包一致(dev 底层仍 npx)。
 7. **gate**:引擎不可用(env 未全设且系统无 node)时,`capability_resolver.always_on_skill_paths` 不注入 browser skill、`boot/steps` 不注册 `browser_start`/`browser_stop`(也不装 wrapper),避免 headless/TUI 广告一个跑不起来的功能。
 
 **平台矩阵**:node 覆盖桌面构建目标(mac arm64/x64、linux arm64、win x64;由 `VALUZ_DIST_TAG` 映射到 node release token);JS 树一份共享。

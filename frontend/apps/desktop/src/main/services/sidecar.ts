@@ -1,4 +1,4 @@
-import { ChildProcess, spawn } from "node:child_process";
+import { ChildProcess, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -23,8 +23,50 @@ export interface DesktopSidecarResult {
   name: string;
   pid: number | null;
   port: number;
-  stop: () => void;
+  /** Tear the sidecar (and its whole process tree) down. Resolves once the
+   *  process has actually exited (or after the forced-kill grace window), so
+   *  callers like ``before-quit`` can await a clean teardown. */
+  stop: () => Promise<void>;
 }
+
+/** Grace period after SIGTERM before escalating to SIGKILL on POSIX. */
+const GRACEFUL_SHUTDOWN_MS = 5000;
+
+/**
+ * Kill a process AND its whole descendant tree on Windows.
+ *
+ * ``child.kill()`` maps to ``TerminateProcess``, which terminates ONLY the
+ * target PID. The backend spawns grandchildren (codex CLI, the node
+ * chrome-devtools engine, MCP servers, a sub-process kernel); under
+ * ``TerminateProcess`` those survive as ORPHANS and keep file handles open
+ * (SQLite WAL, the magika ONNX model, skill dirs). On Windows an open file
+ * can't be deleted/overwritten, so the next launch then trips ``[WinError 32]``.
+ *
+ * ``taskkill /T`` walks the descendant tree; ``/F`` forces it (a window-less
+ * console child has no graceful signal we can deliver per-PID from Node — and
+ * WAL + next-boot session recovery already cover abrupt termination). Run
+ * synchronously so the tree is dead before ``before-quit`` returns and the
+ * updater's installer touches those files.
+ *
+ * Returns ``true`` if ``taskkill`` launched; ``false`` (caller should fall back
+ * to ``child.kill()``) if the binary itself couldn't run.
+ */
+export const killWindowsProcessTree = (
+  pid: number,
+  onLog?: (line: string) => void,
+): boolean => {
+  const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], {
+    windowsHide: true,
+  });
+  if (result.error) {
+    onLog?.(
+      `[warn] taskkill tree-kill failed for pid ${pid}: ${result.error.message}` +
+        " — falling back to single-process kill",
+    );
+    return false;
+  }
+  return true;
+};
 
 /**
  * Locate the backend server binary.
@@ -213,7 +255,7 @@ export const startSidecar = async (
   // _pyinstaller_entry" before the sidecar can even log a line.
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
-    VALUZ_DATA_DIR: path.join(homedir(), ".valuz", "app"),
+    VALUZ_DATA_DIR: path.join(homedir(), ".valuz-oss"),
   };
 
   // The backend builds its public callback URLs (notably the connector OAuth
@@ -255,6 +297,11 @@ export const startSidecar = async (
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
+    // POSIX: give the child its own process group (setsid) so stop() can signal
+    // the WHOLE tree via process.kill(-pid, …) — the analog of taskkill /T on
+    // Windows. Not on Windows (no POSIX groups; the tree is killed via taskkill
+    // /T /F there). stdio stays piped, so this does not detach the log streams.
+    detached: process.platform !== "win32",
   });
 
   // Capture stdout/stderr for logs
@@ -290,41 +337,65 @@ export const startSidecar = async (
     onLog?.(`[error] Failed to start sidecar: ${err.message}`);
   });
 
-  const stop = () => {
-    if (stopped || !child.pid) return;
+  const stop = (): Promise<void> => {
+    if (stopped || !child.pid) return Promise.resolve();
     stopped = true;
+    const pid = child.pid;
 
     if (process.platform === "win32") {
-      // On Windows, child.kill() without args calls TerminateProcess.
-      // There is no graceful SIGTERM equivalent for child processes.
-      // SQLite WAL mode prevents corruption on abrupt termination, and
-      // session recovery (recover_running_sessions, seal_orphan_pendings)
-      // handles crash cleanup at next startup.
-      try {
-        child.kill();
-      } catch {
-        // Process may have already exited
-      }
-    } else {
-      // Send SIGTERM for graceful shutdown
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // Process may have already exited
-      }
-
-      // Force kill after 5 seconds
-      const timeout = setTimeout(() => {
+      // Kill the WHOLE descendant tree, not just the top PID — child.kill()
+      // (TerminateProcess) would orphan the backend's grandchildren (codex /
+      // node chrome-devtools / MCP / sub-process kernel), which then hold file
+      // handles and trip [WinError 32] on the next launch. taskkill /T /F runs
+      // synchronously, so the tree is gone before this returns. WAL + next-boot
+      // session recovery cover the abrupt (forced) termination.
+      if (!killWindowsProcessTree(pid, onLog)) {
         try {
-          child.kill("SIGKILL");
+          child.kill();
         } catch {
-          // Already dead
+          // Process may have already exited
         }
-      }, 5000);
-
-      // Clean up timeout if process exits on its own
-      child.on("exit", () => clearTimeout(timeout));
+      }
+      return Promise.resolve();
     }
+
+    // POSIX: signal the whole process GROUP (the child leads its own group via
+    // detached spawn), SIGTERM first for a graceful shutdown, then SIGKILL after
+    // a grace period. ``-pid`` targets the group so the backend's children go
+    // down with it. Resolve once it has actually exited so callers can await a
+    // clean teardown instead of racing app exit.
+    const killGroup = (signal: NodeJS.Signals) => {
+      try {
+        process.kill(-pid, signal); // negative pid → the whole group
+      } catch {
+        // Group already gone (ESRCH) — fall back to the bare child, ignore if dead.
+        try {
+          child.kill(signal);
+        } catch {
+          // Already exited
+        }
+      }
+    };
+
+    return new Promise<void>((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      child.once("exit", done);
+      killGroup("SIGTERM");
+      const escalate = setTimeout(() => {
+        if (settled) return; // exited within the grace window — nothing to force
+        killGroup("SIGKILL");
+        // Resolve shortly after the force-kill even if 'exit' is slow to fire,
+        // so an awaiting caller is never blocked indefinitely.
+        setTimeout(done, 200);
+      }, GRACEFUL_SHUTDOWN_MS);
+      // Don't let the escalation timer keep the event loop alive on its own.
+      escalate.unref?.();
+    });
   };
 
   return {

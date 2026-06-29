@@ -28,7 +28,7 @@ class _FakeRow:
     auth_type: str = "bearer"
     headers_json: str | None = None
     params_json: str | None = None
-    args_json: str | None = None
+    args: str | None = None
 
 
 def _row(name: str) -> _FakeRow:

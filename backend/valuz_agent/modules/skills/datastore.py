@@ -131,6 +131,33 @@ class SkillDatastore:
         await async_commit_with_retry(self._db, where="SkillDatastore.set_project_skills")
 
     # ------------------------------------------------------------------
+    # Global library on/off switch (``valuz_skill_index.library_enabled``)
+    # ------------------------------------------------------------------
+
+    async def list_library_disabled_ids(self, user_id: str) -> set[str]:
+        """Index-row ids the user has turned OFF in the library. Default is on,
+        so this returns only the explicitly-disabled rows — the set the catalog
+        overlay reads to flip ``SkillView.library_enabled`` by id."""
+        rows = (
+            await self._db.execute(
+                select(SkillIndexRow.id).where(
+                    SkillIndexRow.user_id == user_id,
+                    SkillIndexRow.library_enabled.is_(False),
+                )
+            )
+        ).scalars()
+        return set(rows)
+
+    async def set_library_enabled(self, user_id: str, skill_id: str, enabled: bool) -> None:
+        """Set the global library switch on one index row (the Skills-page
+        representative). No-op if the id is unknown to this owner."""
+        row = await self.get_by_id(user_id, skill_id)
+        if row is None:
+            return
+        row.library_enabled = enabled
+        await async_commit_with_retry(self._db, where="SkillDatastore.set_library_enabled")
+
+    # ------------------------------------------------------------------
     # Filesystem-based project skill config (JSON project-config.json)
     # ------------------------------------------------------------------
 

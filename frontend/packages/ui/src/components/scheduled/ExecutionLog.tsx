@@ -5,6 +5,7 @@ export type ExecutionLogTriggerType =
   | "cron"
   | "interval"
   | "manual"
+  | "agent"
   | "recovered_skip";
 
 export interface ExecutionLogRow {
@@ -28,6 +29,10 @@ export interface ExecutionLogRow {
    *  produced a session yet (queued / running but pre-spawn,
    *  ``recovered_skip``). The link is suppressed when null. */
   sessionId?: string | null;
+  /** Title of the Task this run spawned (task-action automations only).
+   *  Rendered as a "→ 任务《title》" line so the user sees which task the
+   *  automation produced. ``null`` for chat-action / non-task runs. */
+  taskTitle?: string | null;
 }
 
 export interface ExecutionLogProps {
@@ -40,11 +45,11 @@ export interface ExecutionLogProps {
 
 function cnStatus(status: string) {
   if (status === "ok")
-    return "bg-[#53cb76]/10 text-[#53cb76] [&_[data-slot=status-dot]]:bg-[#53cb76]";
+    return "bg-success-light text-success-text [&_[data-slot=status-dot]]:bg-success";
   if (status === "err")
-    return "bg-[#f54b4b]/10 text-[#f54b4b] [&_[data-slot=status-dot]]:bg-[#f54b4b]";
+    return "bg-error-light text-error-text [&_[data-slot=status-dot]]:bg-error";
   if (status === "pending")
-    return "bg-brand/10 text-brand [&_[data-slot=status-dot]]:bg-brand";
+    return "bg-info-light text-info-text [&_[data-slot=status-dot]]:bg-brand";
   return "bg-surface-soft text-ink-meta";
 }
 
@@ -68,6 +73,8 @@ export const ExecutionLog = ({ rows, onSessionClick }: ExecutionLogProps) => {
   const labelForTrigger = (type?: ExecutionLogTriggerType): string => {
     if (type === "manual")
       return t("automation.execTriggerManual" as Parameters<typeof t>[0]);
+    if (type === "agent")
+      return t("automation.execTriggerAgent" as Parameters<typeof t>[0]);
     if (type === "interval")
       return t("automation.execTriggerInterval" as Parameters<typeof t>[0]);
     if (type === "recovered_skip")
@@ -121,6 +128,18 @@ export const ExecutionLog = ({ rows, onSessionClick }: ExecutionLogProps) => {
                       {labelForTrigger(row.triggerType)}
                     </span>
                   </div>
+
+                  {row.taskTitle ? (
+                    <div
+                      className="mt-1 truncate text-[11px] text-ink-meta"
+                      title={row.taskTitle}
+                    >
+                      {"→ "}
+                      {t("automation.spawnedTask" as Parameters<typeof t>[0], {
+                        title: row.taskTitle,
+                      })}
+                    </div>
+                  ) : null}
 
                   {output && output !== "—" ? (
                     <div

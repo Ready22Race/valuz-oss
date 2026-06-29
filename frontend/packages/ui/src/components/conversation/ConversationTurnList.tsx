@@ -262,11 +262,11 @@ const SegmentDetails = ({
     : undefined;
 
   return (
-    <div className="font-sans text-[12.5px] leading-[1.7] text-[#6e7481]">
+    <div className="font-sans text-xs leading-[1.7] text-ink-body">
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="inline-flex items-center gap-1.5 py-1 text-left text-[12px] font-normal text-[#6e7481] transition-colors hover:text-[#525860]"
+        className="inline-flex items-center gap-1.5 py-1 text-left text-xs font-normal text-ink-body transition-colors hover:text-ink-heading"
         aria-expanded={open}
       >
         <Icon
@@ -308,7 +308,7 @@ const SegmentDetails = ({
             item.kind === "thinking" ? (
               <div
                 key={`thinking-${idx}`}
-                className="whitespace-pre-wrap text-[#6e7481]"
+                className="whitespace-pre-wrap text-ink-body"
               >
                 {item.text}
               </div>
@@ -750,7 +750,7 @@ const TurnRow = memo(
           <div className="group flex flex-col items-end gap-1">
             {turn.userText ? (
               <div className="max-w-[78%]">
-                <div className="whitespace-pre-wrap rounded-xl bg-surface-soft px-3.5 py-3 text-[13.5px] leading-[1.6] text-ink-heading">
+                <div className="whitespace-pre-wrap rounded-xl bg-surface-soft px-3.5 py-3 text-base leading-[1.6] text-ink-heading">
                   <UserMessageBody
                     text={turn.userText}
                     skillsBySlug={skillsBySlug}

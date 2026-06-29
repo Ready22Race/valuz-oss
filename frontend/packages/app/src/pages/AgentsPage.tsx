@@ -33,6 +33,7 @@ import {
   agentsApi,
   projectsApi,
   usePanelStore,
+  useResourceCategories,
   useTranslation,
   type Agent,
   type MemberWithAgent,
@@ -238,7 +239,10 @@ export const AgentsPage = () => {
 
   const visibleAgents = agents;
 
-  const categories = useMemo(() => buildAgentCategories(t), [t]);
+  const categories = useResourceCategories<Agent>(
+    "agent",
+    buildAgentCategories(t),
+  );
 
   const deploymentCountBySlug = useMemo(() => {
     const counts = new Map<string, number>();

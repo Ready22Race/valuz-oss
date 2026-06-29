@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import { Link2, Plus, Search, Trash2 } from "lucide-react";
 import {
   CategorizedList,
+  Button,
   ConnectorDetailPanel,
   ConnectorListItem,
   DeleteConfirmDialog,
@@ -10,6 +11,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  EmptyState,
   PageLoader,
 } from "@valuz/ui";
 import { ResourceActionSlot } from "../components/ResourceActionSlot";
@@ -646,7 +648,7 @@ export const ConnectorsPage = () => {
                             c.status !== "connected" && (
                               <button
                                 type="button"
-                                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-[#f54b4b]/10 hover:text-[#f54b4b]"
+                                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-error-light hover:text-error-text"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setDeleteTarget(c);
@@ -684,14 +686,53 @@ export const ConnectorsPage = () => {
                 );
               }}
               emptyState={
-                <div className="flex flex-col items-center justify-center py-16 text-center">
-                  <Link2 className="mb-3 h-10 w-10 text-ink-muted" />
-                  <div className="text-sm text-ink-body">
-                    {connectors.length === 0 && catalog.length === 0
-                      ? t("connector.empty")
-                      : t("connector.noMatch")}
-                  </div>
-                </div>
+                <EmptyState
+                  className="py-16"
+                  icon={
+                    connectors.length === 0 && catalog.length === 0 ? (
+                      <Link2 />
+                    ) : (
+                      <Search />
+                    )
+                  }
+                  title={
+                    connectors.length === 0 && catalog.length === 0
+                      ? t("connector.emptyTitle")
+                      : t("connector.noMatch")
+                  }
+                  message={
+                    connectors.length === 0 && catalog.length === 0
+                      ? t("connector.emptyDesc")
+                      : undefined
+                  }
+                  action={
+                    connectors.length === 0 && catalog.length === 0 ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="default" size="sm">
+                            <Plus className="h-3 w-3" />
+                            {t("connector.emptyAction")}
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="center"
+                          className="min-w-[180px]"
+                        >
+                          <DropdownMenuItem onSelect={() => setAddMode("http")}>
+                            <Link2 className="h-4 w-4" />
+                            {t("connector.addHttp")}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onSelect={() => setAddMode("stdio")}
+                          >
+                            <Plus className="h-4 w-4" />
+                            {t("connector.addStdio")}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : undefined
+                  }
+                />
               }
             />
           </div>

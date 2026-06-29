@@ -5,6 +5,7 @@ import {
   Bot,
   ChevronDown,
   Clock,
+  Download,
   ExternalLink,
   FilePenLine,
   FolderOpen,
@@ -16,6 +17,7 @@ import {
   Plus,
   Settings,
   Trash2,
+  Upload,
   Zap,
 } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -342,6 +344,7 @@ interface ProjectRowProps {
   onProjectRenameConfirm?: (projectId: string, newName: string) => void;
   onProjectRenameCancel?: () => void;
   onProjectOpenInFinder?: (projectId: string) => void;
+  onProjectExport?: (projectId: string) => void;
   onProjectRemove?: (projectId: string) => void;
 }
 
@@ -359,13 +362,17 @@ const ProjectRow = ({
   onProjectRenameConfirm,
   onProjectRenameCancel,
   onProjectOpenInFinder,
+  onProjectExport,
   onProjectRemove,
 }: ProjectRowProps) => {
   const { t } = useI18n();
   const isActiveProject = isActivePath(activePath, project.href);
 
   const hasAnyAction =
-    !!onProjectOpenInFinder || !!onProjectRenameStart || !!onProjectRemove;
+    !!onProjectOpenInFinder ||
+    !!onProjectRenameStart ||
+    !!onProjectRemove ||
+    !!onProjectExport;
 
   return (
     <div className="mx-1">
@@ -492,6 +499,14 @@ const ProjectRow = ({
                   {t("sidebar.rename")}
                 </DropdownMenuItem>
               )}
+              {onProjectExport && (
+                <DropdownMenuItem
+                  onSelect={() => onProjectExport(project.id)}
+                >
+                  <Download />
+                  {t("project.export")}
+                </DropdownMenuItem>
+              )}
               {onProjectOpenInFinder && (
                 <DropdownMenuItem
                   onSelect={() => onProjectOpenInFinder(project.id)}
@@ -570,10 +585,18 @@ export interface DesktopSidebarProps {
    * its navigation — including when the home route is already active (a
    * same-path click that wouldn't otherwise trigger a route effect). */
   onPrimaryAction?: () => void;
-  /** Callback when the "+" button next to Projects is clicked */
+  /** Callback when the "+" button next to Projects is clicked. When
+   *  provided alongside ``onImportProject`` the "+" becomes a dropdown
+   *  with Create (this) + Import actions. */
   onAddProject?: () => void;
+  /** When provided, the "+" Projects dropdown shows an "Import project…"
+   *  item that calls this. Hidden otherwise (the "+" stays a single action). */
+  onImportProject?: () => void;
   /** Project row "..." actions. Pass ``undefined`` to hide an option. */
   onProjectOpenInFinder?: (projectId: string) => void;
+  /** When provided, the project "..." menu shows an "Export project" item
+   *  that calls this with the project id. */
+  onProjectExport?: (projectId: string) => void;
   /** When provided, the "..." menu shows a Rename entry. The callback is
    * triggered with the new name after the user inline-edits the project
    * header. The sidebar manages the inline edit state itself; the host
@@ -605,7 +628,9 @@ export const DesktopSidebar = ({
   onPrimaryAction,
   projectGroups,
   onAddProject,
+  onImportProject,
   onProjectOpenInFinder,
+  onProjectExport,
   onProjectRename,
   onProjectRemove,
   onRecentRename,
@@ -618,10 +643,10 @@ export const DesktopSidebar = ({
   );
   const [projectsSectionOpen, setProjectsSectionOpen] = useState(true);
   const [chatsSectionOpen, setChatsSectionOpen] = useState(true);
-  // Multi-open accordion: every expanded project id is held independently, so
-  // opening one — or navigating anywhere — never collapses another (a project
-  // with running chats/tasks stays open until you collapse it yourself). Purely
-  // user-controlled via the row chevron; nothing auto-expands or auto-collapses.
+  // Navigation-following accordion: navigating to any menu item outside an open
+  // project collapses it (the effect below keeps only the active project open).
+  // Between navigations the row chevron can expand additional projects — a
+  // chevron toggle never collapses another project, only a navigation does.
   const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -642,19 +667,22 @@ export const DesktopSidebar = ({
   const RUNS_COLLAPSED = 5;
   const CHATS_COLLAPSED = 10;
 
-  // Auto-expand on *entry*: when the route moves into a different project's
-  // conversation, open that project once. Keyed on activeProjectId so it fires
-  // only on that transition — a later manual collapse (chevron) then sticks
-  // while you stay in the project, and re-entering it (navigate away and back)
-  // opens it again. This is a genuine route→state sync, not derivable: deriving
-  // "expanded == active" would make the active project impossible to collapse.
+  // Collapse-on-navigate: selecting any menu item outside an open project
+  // collapses it. On every navigation keep only the active project's accordion
+  // open; a chevron toggle doesn't change activePath, so peeking another project
+  // (or toggling the active one) never collapses anything — only navigating
+  // does. The active project's own collapse chevron is hidden, so it stays open.
   useEffect(() => {
-    if (!activeProjectId) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setExpandedProjectIds((prev) =>
-      prev.has(activeProjectId) ? prev : new Set(prev).add(activeProjectId),
-    );
-  }, [activeProjectId]);
+    setExpandedProjectIds((prev) => {
+      const next = activeProjectId
+        ? new Set<string>([activeProjectId])
+        : new Set<string>();
+      const unchanged =
+        prev.size === next.size && [...prev].every((id) => next.has(id));
+      return unchanged ? prev : next;
+    });
+  }, [activePath, activeProjectId]);
 
   const toggleGroup = (key: string) =>
     setGroupExpanded((m) => ({ ...m, [key]: !m[key] }));
@@ -701,11 +729,16 @@ export const DesktopSidebar = ({
         key={`run-${item.id}`}
         to={item.href}
         className={cn(
-          "group/recent-row relative mx-1 flex cursor-default items-center gap-2 rounded-[7px] py-[5px] pr-[10px] text-[12.5px] outline-none transition-colors duration-[120ms] hover:bg-surface-soft hover:text-ink-heading focus-visible:outline-none focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
+          "group/recent-row relative mx-1 flex cursor-default items-center gap-2 rounded-[7px] py-[5px] pr-[10px] text-[12.5px] outline-none transition-colors duration-[120ms] focus-visible:outline-none focus-visible:shadow-[0_6px_16px_rgba(17,24,39,0.12)]",
           padClass,
+          // The selected row carries the bg-card highlight + drop shadow. Don't
+          // layer a hover background on top of it (the hover affordance is for
+          // non-selected rows only), and lift it with z-10 so its shadow paints
+          // above the adjacent rows — otherwise hovering the row right below it
+          // covers that shadow with the hover background.
           active
-            ? "bg-card text-ink-heading shadow-[0_6px_16px_rgba(17,24,39,0.12)] dark:bg-surface-muted dark:shadow-none"
-            : "text-ink-meta",
+            ? "z-10 bg-card text-ink-heading shadow-[0_6px_16px_rgba(17,24,39,0.12)] dark:bg-surface-muted dark:shadow-none"
+            : "text-ink-meta hover:bg-surface-soft hover:text-ink-heading",
         )}
       >
         <span className="min-w-0 flex-1 truncate">{item.title}</span>
@@ -998,13 +1031,43 @@ export const DesktopSidebar = ({
                   open={projectsSectionOpen}
                   onToggle={() => setProjectsSectionOpen((v) => !v)}
                   action={
-                    <button
-                      type="button"
-                      className="flex h-6 w-6 items-center justify-center rounded-md text-ink-body transition-colors hover:bg-surface-muted"
-                      onClick={onAddProject}
-                    >
-                      <Plus className="h-3 w-3" />
-                    </button>
+                    onImportProject ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label={t("sidebar.addProject")}
+                            className="flex h-6 w-6 items-center justify-center rounded-md text-ink-body transition-colors hover:bg-surface-muted"
+                          >
+                            <Plus className="h-3 w-3" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="start"
+                          className="min-w-[180px]"
+                          onCloseAutoFocus={(e) => e.preventDefault()}
+                        >
+                          {onAddProject && (
+                            <DropdownMenuItem onSelect={onAddProject}>
+                              <Plus />
+                              {t("project.create")}
+                            </DropdownMenuItem>
+                          )}
+                          <DropdownMenuItem onSelect={onImportProject}>
+                            <Upload />
+                            {t("project.import")}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : (
+                      <button
+                        type="button"
+                        className="flex h-6 w-6 items-center justify-center rounded-md text-ink-body transition-colors hover:bg-surface-muted"
+                        onClick={onAddProject}
+                      >
+                        <Plus className="h-3 w-3" />
+                      </button>
+                    )
                   }
                 >
                   {t("sidebar.projects")}
@@ -1054,6 +1117,7 @@ export const DesktopSidebar = ({
                             setProjectRenamingId(null)
                           }
                           onProjectOpenInFinder={onProjectOpenInFinder}
+                          onProjectExport={onProjectExport}
                           onProjectRemove={onProjectRemove}
                         />
                         {expanded &&

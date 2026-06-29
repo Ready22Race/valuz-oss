@@ -83,6 +83,8 @@ import { usePlatform } from "../platform";
 import { UpdateButton } from "../components/UpdateButton";
 import { useAgentDeployPicker } from "../components/agent-deploy-picker";
 import { AgentCheckboxList } from "../components/AgentDeployField";
+import { ExportProjectDialog } from "../components/ExportProjectDialog";
+import { ImportProjectDialog } from "../components/ImportProjectDialog";
 import type { ProjectOutletContext } from "./types";
 
 export type DirectoryFieldMode = "input" | "picker";
@@ -177,6 +179,15 @@ export function ProjectLayoutBase({
     id: string;
     name: string;
   } | null>(null);
+  // Project export target — owns ExportProjectDialog open state.
+  const [exportTarget, setExportTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  // Project import — owns the hidden file input + ImportProjectDialog.
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const [newName, setNewName] = useState("");
   const [newRootPath, setNewRootPath] = useState("");
   const [createError, setCreateError] = useState("");
@@ -425,6 +436,10 @@ export function ProjectLayoutBase({
     const byProject = new Map<string, DesktopSidebarRecentItem[]>();
     const loose: DesktopSidebarRecentItem[] = [];
     for (const r of sorted) {
+      // Automation-triggered runs (chats AND tasks) live in the Activity
+      // 自动化 tab, not the sidebar's conversation/task lists — skip them so
+      // recurring fires don't flood the menu.
+      if (r.origin === "automation") continue;
       const item = toItem(r);
       if (r.project_id && projectIdSet.has(r.project_id)) {
         const arr = byProject.get(r.project_id);
@@ -806,6 +821,7 @@ export function ProjectLayoutBase({
             onPrimaryAction={refreshConnectorAlert}
             collapsed={sidebarCollapsed}
             onAddProject={() => setCreateOpen(true)}
+            onImportProject={() => importInputRef.current?.click()}
             onProjectOpenInFinder={(projectId) => {
               const ws = allProjects.find(
                 (project) => project.id === projectId,
@@ -838,6 +854,12 @@ export function ProjectLayoutBase({
                 (project) => project.id === projectId,
               );
               if (ws) setRemoveTarget({ id: ws.id, name: ws.name });
+            }}
+            onProjectExport={(projectId) => {
+              const ws = allProjects.find(
+                (project) => project.id === projectId,
+              );
+              if (ws) setExportTarget({ id: ws.id, name: ws.name });
             }}
           />
         }
@@ -872,14 +894,16 @@ export function ProjectLayoutBase({
           }
         }}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("project.createTitle")}</DialogTitle>
+        <DialogContent className="gap-0 p-0">
+          <DialogHeader className="px-[18px] pt-[18px] pb-1">
+            <DialogTitle className="text-sm leading-5">
+              {t("project.createTitle")}
+            </DialogTitle>
             <DialogDescription>{t("project.createDesc")}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">
+          <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
+            <div className="flex flex-col">
+              <label className="mb-[5px] text-xs font-medium text-foreground">
                 {t("project.projectName")}
               </label>
               <Input
@@ -888,15 +912,15 @@ export function ProjectLayoutBase({
                 onChange={(event) => setNewName(event.target.value)}
               />
             </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-foreground">
+            <div className="flex flex-col">
+              <label className="mb-[5px] text-xs font-medium text-foreground">
                 {t("project.projectDir")}
               </label>
               <div className="flex items-center gap-2">
                 {directoryFieldMode === "picker" && platform.isElectron ? (
                   <button
                     type="button"
-                    className="flex h-9 flex-1 items-center rounded-md border border-input bg-transparent px-3 text-sm shadow-sm transition-colors hover:border-ring"
+                    className="flex h-8 flex-1 items-center rounded-lg border border-input bg-surface px-2.5 text-sm text-foreground transition-[border-color,box-shadow,color,background-color] hover:border-ring focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 focus-visible:outline-none"
                     onClick={() => void handleSelectDirectory()}
                   >
                     <span
@@ -925,7 +949,7 @@ export function ProjectLayoutBase({
                     type="button"
                     variant="outline"
                     size="sm"
-                    className="h-9 shrink-0"
+                    className="h-8 shrink-0"
                     onClick={() => void handleSelectDirectory()}
                   >
                     <FolderOpen className="mr-1.5 h-4 w-4" />
@@ -933,11 +957,13 @@ export function ProjectLayoutBase({
                   </Button>
                 ) : null}
               </div>
-              <p className="text-xs text-muted-foreground">
+              <p className="mt-[3px] text-xs text-muted-foreground">
                 {t("project.dirHint")}
               </p>
               {createError ? (
-                <p className="text-xs text-destructive">{createError}</p>
+                <p className="mt-[3px] text-xs text-destructive">
+                  {createError}
+                </p>
               ) : null}
             </div>
             <div className="space-y-2">
@@ -948,7 +974,7 @@ export function ProjectLayoutBase({
             </div>
             {projectDialogExtraFields}
           </div>
-          <DialogFooter>
+          <DialogFooter className="px-[18px] pt-1 pb-4">
             <Button variant="outline" onClick={() => setCreateOpen(false)}>
               {t("common.cancel")}
             </Button>
@@ -981,6 +1007,46 @@ export function ProjectLayoutBase({
             })
             .catch(() => toast.error(t("sidebar.removeFailed")))
             .finally(() => setRemoveTarget(null));
+        }}
+      />
+
+      {/* Project export/import — hidden file input + the two dialogs. The input
+          is re-used for any "Import project…" entry point (sidebar, projects
+          page). Same value-reset trick as AgentsPage so re-picking the same
+          file still fires onChange. */}
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".valuzpack,.zip"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0] ?? null;
+          e.target.value = "";
+          if (f) {
+            setImportFile(f);
+            setImportOpen(true);
+          }
+        }}
+      />
+      <ExportProjectDialog
+        projectId={exportTarget?.id ?? ""}
+        projectName={exportTarget?.name ?? ""}
+        open={!!exportTarget}
+        onOpenChange={(open) => {
+          if (!open) setExportTarget(null);
+        }}
+      />
+      <ImportProjectDialog
+        file={importFile}
+        open={importOpen}
+        onOpenChange={(open) => {
+          setImportOpen(open);
+          if (!open) setImportFile(null);
+        }}
+        onImported={(project) => {
+          useProjectStore.getState().upsertProject(project);
+          void fetchProjects();
+          navigate(`/projects/${project.id}`);
         }}
       />
     </ErrorBoundary>

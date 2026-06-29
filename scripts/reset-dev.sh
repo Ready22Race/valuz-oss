@@ -4,7 +4,7 @@
 # run is recoverable.
 #
 # Touches:
-#   - ~/.valuz/app/      (DB, secrets, project files) → moved to timestamped backup
+#   - ~/.valuz-oss/      (DB, secrets, project files) → moved to timestamped backup
 #   - kills any running valuz_agent uvicorn process
 #
 # Does NOT touch:
@@ -19,8 +19,10 @@
 
 set -euo pipefail
 
-DATA_DIR="${VALUZ_DATA_DIR:-$HOME/.valuz/app}"
-BACKUP_ROOT="$HOME/.valuz"
+DATA_DIR="${VALUZ_DATA_DIR:-$HOME/.valuz-oss}"
+# The data root is now flat (~/.valuz-oss IS the data dir), so backups can't sit
+# under it without polluting the dir we just wiped. Park them in a sibling.
+BACKUP_ROOT="$HOME/.valuz-oss-backups"
 # Electron desktop user data (localStorage / IndexedDB / Service Worker cache /
 # preferences). On macOS this is Application Support; the Electron app name is
 # "Valuz". Without wiping this, the localStorage flag (valuz-onboarded) +
@@ -122,7 +124,7 @@ else
 fi
 
 if [[ -d "$ELECTRON_DIR" ]]; then
-  # Park Electron backups alongside the dir itself rather than under ~/.valuz —
+  # Park Electron backups alongside the dir itself rather than under the backup root —
   # easier to spot + the restore picker only needs to look in two places.
   backup="${ELECTRON_DIR}.bak.${ts}"
   log "moving $ELECTRON_DIR → $backup"

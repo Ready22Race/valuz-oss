@@ -63,6 +63,20 @@ class ProjectDatastore:
             .first()
         )
 
+    async def get_by_name(self, user_id: str, name: str) -> ProjectRow | None:
+        """Owner-scoped exact-name (case-sensitive) lookup. Used by project
+        import to detect a name collision before creating a row — import
+        skips (rather than overwrites) a same-named project."""
+        return (
+            (
+                await self._db.execute(
+                    select(ProjectRow).where(ProjectRow.name == name, ProjectRow.user_id == user_id)
+                )
+            )
+            .scalars()
+            .first()
+        )
+
     async def create(self, user_id: str, row: ProjectRow) -> ProjectRow:
         # Owner passed explicitly (no ContextVar write-stamp default).
         row.user_id = user_id

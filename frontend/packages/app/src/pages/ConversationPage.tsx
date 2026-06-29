@@ -28,7 +28,10 @@ import {
 import {
   ApiError,
   sessionsApi,
+  queueApi,
+  type QueuedInput,
   agentsApi,
+  automationsApi,
   connectorsApi,
   useSessionStore,
   useProjectStore,
@@ -59,23 +62,29 @@ import {
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
+  useSessionArtifacts,
   useSessionAttachments,
   type RuntimeId,
   type MemberWithAgent,
   type Agent,
+  type ArtifactContent,
+  type ArtifactDescriptor,
 } from "@valuz/core";
 import {
   ApprovalCard,
   ApprovalResolvedStrip,
   AutoApprovedStrip,
   AskUserQuestionCard,
+  ArtifactViewerShell,
   AutomationToolCard,
+  Button,
   DeleteConfirmDialog,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
+  EmptyState,
   UserAnswerSummaryCard,
   WorkflowProgressCard,
   cn,
@@ -84,6 +93,8 @@ import {
   ProjectDetailContextPanel,
   SkillStagingPanel,
   SkillSubmissionCard,
+  AgentProposalCard,
+  AutomationProposalCard,
   parseAskUserQuestionInput,
   parseAutomationToolOutput,
   type ApprovalCardSubject,
@@ -109,8 +120,13 @@ import {
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
 import { LiveTaskCard } from "../components/LiveTaskCard";
+import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
+import {
+  resolveAgentSkillItems,
+  type AgentSkillItem,
+} from "../lib/agent-skill-items";
 import { getLastTempAgent, setLastTempAgent } from "../lib/last-temp-agent";
 
 /** True while a workflow snapshot's status denotes an in-flight run (vs a
@@ -133,6 +149,31 @@ function toFileTree(nodes: ProjectFileNode[], prefix = ""): FileTreeNode[] {
     if (n.children) result.children = toFileTree(n.children, path);
     return result;
   });
+}
+
+function resolveConversationArtifactPath(path: string, rootPath: string): string {
+  if (!path) return path;
+  if (path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path)) return path;
+  if (!rootPath) return path;
+  const sep = rootPath.includes("\\") ? "\\" : "/";
+  const trimmed = rootPath.endsWith(sep) ? rootPath.slice(0, -1) : rootPath;
+  return `${trimmed}${sep}${path}`;
+}
+
+function toConversationRelativeArtifactPath(
+  path: string,
+  rootPath: string,
+): string | null {
+  if (!path) return null;
+  const normalizedPath = path.replace(/\\/g, "/");
+  if (!normalizedPath.startsWith("/") && !/^[a-zA-Z]:\//.test(normalizedPath)) {
+    return normalizedPath.replace(/^\/+/, "");
+  }
+  if (!rootPath) return null;
+  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normalizedPath === normalizedRoot) return null;
+  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return null;
+  return normalizedPath.slice(normalizedRoot.length + 1);
 }
 
 function formatFileSize(bytes: number): string {
@@ -240,9 +281,9 @@ function renderChatplanStatusPill(
 
   const accentDot: Record<typeof accent, string> = {
     indigo: "bg-brand",
-    emerald: "bg-emerald-500",
+    emerald: "bg-success",
     rose: "bg-rose-500",
-    amber: "bg-amber-500",
+    amber: "bg-warning",
     slate: "bg-ink-muted",
   };
 
@@ -317,7 +358,7 @@ const SessionStatusPill = ({ status }: { status?: string }) => {
       : status === "created"
         ? "bg-brand/5 text-brand/80"
         : status === "failed"
-          ? "bg-red-500/10 text-red-600"
+          ? "bg-error-light text-error-text"
           : "bg-surface-soft text-ink-meta";
   return (
     <span
@@ -342,6 +383,88 @@ const SessionStatusPill = ({ status }: { status?: string }) => {
  * lock-step with the route definition.
  */
 const NEW_SESSION_ID = "new";
+
+/**
+ * Parse an ``automation`` tool call's INPUT into a create spec, or null if it
+ * isn't a ``create`` action. ``create`` is the only action that renders a
+ * propose→confirm card (others render ``AutomationToolCard``).
+ *
+ * We render the card from the input (not the tool output) because the output is
+ * runtime-dependent: the Valuz/DeepAgents (LangChain) runtime wraps it in a
+ * content envelope that isn't bare JSON, so ``parseAutomationToolOutput``
+ * returns null there. The input is always clean — same reason ``AgentProposalCard``
+ * renders from input. Note ``trigger`` may arrive as a JSON *string* (the model
+ * sometimes stringifies it), so we parse it back into the discriminated union.
+ */
+function parseAutomationCreateInput(input: unknown): {
+  name: string;
+  prompt_template: string;
+  trigger: import("@valuz/core").Trigger | null;
+  agent_slug?: string;
+  action_kind?: "chat" | "task";
+} | null {
+  if (!input) return null;
+  let parsed: unknown;
+  try {
+    parsed = typeof input === "string" ? JSON.parse(input) : input;
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    (parsed as { action?: unknown }).action !== "create"
+  ) {
+    return null;
+  }
+  const p = parsed as Record<string, unknown>;
+  let trigger: unknown = p.trigger ?? null;
+  if (typeof trigger === "string") {
+    try {
+      trigger = JSON.parse(trigger);
+    } catch {
+      trigger = null;
+    }
+  }
+  const actionKind =
+    p.action_kind === "task"
+      ? "task"
+      : p.action_kind === "chat"
+        ? "chat"
+        : undefined;
+  return {
+    name: typeof p.name === "string" ? p.name : "",
+    prompt_template: typeof p.prompt_template === "string" ? p.prompt_template : "",
+    trigger:
+      trigger && typeof trigger === "object"
+        ? (trigger as import("@valuz/core").Trigger)
+        : null,
+    agent_slug: typeof p.agent_slug === "string" ? p.agent_slug : undefined,
+    action_kind: actionKind,
+  };
+}
+
+/** Compact, locale-agnostic schedule summary from a trigger — a fallback for
+ *  when the server's ``trigger_human_readable`` isn't available (the tool output
+ *  wasn't parseable on this runtime). */
+function automationTriggerSummary(
+  trigger: import("@valuz/core").Trigger | null,
+): string | undefined {
+  if (!trigger) return undefined;
+  if (trigger.kind === "cron") {
+    return trigger.timezone
+      ? `${trigger.cron_expr} · ${trigger.timezone}`
+      : trigger.cron_expr;
+  }
+  if (trigger.kind === "interval") {
+    const s = trigger.seconds;
+    if (s % 86400 === 0) return `every ${s / 86400}d`;
+    if (s % 3600 === 0) return `every ${s / 3600}h`;
+    if (s % 60 === 0) return `every ${s / 60}m`;
+    return `every ${s}s`;
+  }
+  return "Manual";
+}
 
 export const ConversationPage = () => {
   const { t } = useTranslation();
@@ -560,6 +683,16 @@ export const ConversationPage = () => {
   } | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  // Session input queue (docs/design/session-input-queue.md): follow-up inputs
+  // submitted while a turn is running, drained FIFO after it. ``queuePaused``
+  // is set after an interrupt — the user resumes explicitly.
+  const [queue, setQueue] = useState<QueuedInput[]>([]);
+  const [queuePaused, setQueuePaused] = useState(false);
+  // True while a host drain chain is in flight. A dispatched (in-flight) item
+  // is invisible in ``queue`` (only queued/blocked list), so the drain-follower
+  // keys on this to keep re-subscribing until the LAST drained turn finishes —
+  // not just while ``queue`` is non-empty (session-input-queue §14.5).
+  const [queueDraining, setQueueDraining] = useState(false);
   const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
@@ -711,6 +844,41 @@ export const ConversationPage = () => {
   };
   const [submissionStates, setSubmissionStates] = useState<
     Record<string, SubmissionEntry>
+  >({});
+  // Per-``tool.id`` state for ``propose_agent`` cards (natural-language agent
+  // creation). Unlike skills there's no server-side staging — the full spec
+  // rides the tool input — so the card starts ``pending`` and dismiss is
+  // purely client-side.
+  type ProposalEntry = {
+    state:
+      | "pending"
+      | "confirming"
+      | "confirmed"
+      | "dismissing"
+      | "dismissed"
+      | "error";
+    errorMessage?: string;
+    deployedProjectLabel?: string | null;
+  };
+  const [proposalStates, setProposalStates] = useState<
+    Record<string, ProposalEntry>
+  >({});
+  // Per-``tool.id`` state for ``automation create`` proposal cards. Same
+  // propose→confirm model as agents; ``automationId`` is filled on confirm /
+  // re-entry so a confirmed card can deep-link into the automation page.
+  type AutomationProposalEntry = {
+    state:
+      | "pending"
+      | "confirming"
+      | "confirmed"
+      | "dismissing"
+      | "dismissed"
+      | "error";
+    errorMessage?: string;
+    automationId?: string | null;
+  };
+  const [automationProposalStates, setAutomationProposalStates] = useState<
+    Record<string, AutomationProposalEntry>
   >({});
   // Local mirror of ``answers`` captured at submit time. Keyed by
   // ``tool_use_id`` (== renderer's ``tool.id``). Lets the renderer
@@ -932,6 +1100,11 @@ export const ConversationPage = () => {
     remove: removeSessionAttachmentRow,
     markPendingConsumed,
   } = useSessionAttachments(selectedSessionId);
+  // Agent-delivered artifacts (the "生成文件" list) — recorded by the
+  // ``deliver_artifacts`` MCP tool. Loads on session change; refreshed on
+  // turn-end (below) so newly delivered files appear without a manual reload.
+  const { artifacts: sessionArtifacts, refresh: refreshArtifacts } =
+    useSessionArtifacts(selectedSessionId);
   const navigate = useNavigate();
 
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
@@ -939,6 +1112,14 @@ export const ConversationPage = () => {
     useState<SkillView | null>(null);
   const [projectSkills, setProjectSkills] = useState<SkillView[]>([]);
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(
+    null,
+  );
+  const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
+  const [artifactContent, setArtifactContent] =
+    useState<ArtifactContent | null>(null);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
 
   const activeProject = useMemo(
     () =>
@@ -947,6 +1128,72 @@ export const ConversationPage = () => {
         | undefined) ?? null,
     [selectedProjectId, projects],
   );
+  const activeProjectRootPath = useMemo(() => {
+    const detail = activeProject as ProjectDetail | null;
+    return detail?.cwd ?? detail?.root_path ?? "";
+  }, [activeProject]);
+
+  const openArtifactFile = useCallback(
+    async (path: string) => {
+      if (!selectedProjectId || selectedProjectId === "chat-default") return;
+      const normalized = toConversationRelativeArtifactPath(
+        path,
+        activeProjectRootPath,
+      );
+      if (!normalized) {
+        setSelectedArtifactPath(path);
+        setArtifact(null);
+        setArtifactContent(null);
+        setArtifactLoading(false);
+        setArtifactError(t("task.artifactOpenInFinder" as Parameters<typeof t>[0]));
+        return;
+      }
+      setSelectedArtifactPath(normalized);
+      setArtifactLoading(true);
+      setArtifactError(null);
+      try {
+        const result = await projectsApi.readFile(selectedProjectId, normalized);
+        setArtifact(result.artifact);
+        setArtifactContent(result.content);
+      } catch (error) {
+        setArtifact(null);
+        setArtifactContent(null);
+        setArtifactError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setArtifactLoading(false);
+      }
+    },
+    [activeProjectRootPath, selectedProjectId, t],
+  );
+
+  const handleArtifactReload = useCallback(() => {
+    if (selectedArtifactPath) {
+      void openArtifactFile(selectedArtifactPath);
+    }
+  }, [openArtifactFile, selectedArtifactPath]);
+
+  const handleArtifactClose = useCallback(() => {
+    setSelectedArtifactPath(null);
+    setArtifact(null);
+    setArtifactContent(null);
+    setArtifactLoading(false);
+    setArtifactError(null);
+  }, []);
+
+  const handleArtifactCopy = useCallback(() => {
+    if (artifactContent?.kind !== "text") return;
+    void navigator.clipboard
+      ?.writeText(artifactContent.content)
+      .then(() => toast.success(t("common.copied" as Parameters<typeof t>[0])))
+      .catch(() => toast.error(t("common.failed" as Parameters<typeof t>[0])));
+  }, [artifactContent, t]);
+
+  const handleArtifactOpenExternal = useCallback(() => {
+    if (!selectedArtifactPath) return;
+    void revealInFinder(
+      resolveConversationArtifactPath(selectedArtifactPath, activeProjectRootPath),
+    );
+  }, [activeProjectRootPath, revealInFinder, selectedArtifactPath]);
 
   // Project KB bindings — loaded for project projects only and
   // rendered **read-only** in the session panel (per product rule,
@@ -978,6 +1225,15 @@ export const ConversationPage = () => {
     () => sessions.find((s) => s.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
   );
+
+  // The agent actually bound to this composer: an existing session is frozen to
+  // its ``sessionAgentSlug`` (ADR-006), a fresh draft uses the picker's
+  // ``selectedAgentSlug``. The Composer's ``selectedAgentSlug`` prop derives the
+  // same value — skill resolution and the ``/`` gate must use it too, or they'd
+  // read a null draft slug while viewing a live conversation.
+  const effectiveAgentSlug = selectedSession
+    ? sessionAgentSlug
+    : selectedAgentSlug;
 
   // Publish the open conversation's project to the store so the sidebar keeps
   // that project's accordion expanded — authoritative and immediate (straight
@@ -1150,6 +1406,256 @@ export const ConversationPage = () => {
     [],
   );
 
+  // Create + deploy the agent the assistant proposed via ``propose_agent``.
+  // The spec is replayed from the tool input (no server staging, unlike
+  // skills); the backend derives the slug and deploys into the session's
+  // project when there is one.
+  const handleConfirmProposal = useCallback(
+    async (
+      toolId: string,
+      spec: {
+        name: string;
+        instructions: string;
+        description?: string;
+        runtime?: string;
+        model?: string;
+        skills?: string[];
+        connectors?: string[];
+      },
+    ) => {
+      const sid = selectedSessionIdRef.current;
+      if (!sid) return;
+      setProposalStates((prev) => ({
+        ...prev,
+        [toolId]: { ...(prev[toolId] || { state: "pending" }), state: "confirming" },
+      }));
+      try {
+        const res = await agentsApi.confirmProposal(sid, spec);
+        setProposalStates((prev) => ({
+          ...prev,
+          [toolId]: {
+            state: "confirmed",
+            deployedProjectLabel:
+              res.deployed && res.project_id ? submissionProjectLabel : null,
+          },
+        }));
+        toast.success(t("agent.proposalCreated" as Parameters<typeof t>[0]));
+      } catch (cause) {
+        const msg =
+          cause instanceof Error
+            ? cause.message
+            : t("common.saveFailed" as Parameters<typeof t>[0]);
+        setProposalStates((prev) => ({
+          ...prev,
+          [toolId]: { state: "error", errorMessage: msg },
+        }));
+        toast.error(msg);
+      }
+    },
+    [submissionProjectLabel],
+  );
+
+  const handleDismissProposal = useCallback((toolId: string) => {
+    // Client-side only — nothing was written, so there's nothing to clean up.
+    setProposalStates((prev) => ({
+      ...prev,
+      [toolId]: { state: "dismissed" },
+    }));
+  }, []);
+
+  // Create the automation the assistant proposed via ``automation create``.
+  // The confirmable spec is replayed from the parsed tool output; the backend
+  // re-resolves project / bound-agent context from the session and stamps the
+  // proposing ``tool_call_id`` so a reload can detect the row already exists.
+  const handleConfirmAutomation = useCallback(
+    async (
+      toolId: string,
+      spec: {
+        name: string;
+        prompt_template: string;
+        trigger: import("@valuz/core").Trigger;
+        agent_slug?: string | null;
+        action_kind?: "chat" | "task";
+      },
+    ) => {
+      const sid = selectedSessionIdRef.current;
+      if (!sid) return;
+      setAutomationProposalStates((prev) => ({
+        ...prev,
+        [toolId]: { ...(prev[toolId] || { state: "pending" }), state: "confirming" },
+      }));
+      try {
+        const res = await automationsApi.confirmProposal(sid, {
+          tool_call_id: toolId,
+          name: spec.name,
+          prompt_template: spec.prompt_template,
+          trigger: spec.trigger,
+          agent_slug: spec.agent_slug ?? null,
+          action_kind: spec.action_kind,
+        });
+        setAutomationProposalStates((prev) => ({
+          ...prev,
+          [toolId]: { state: "confirmed", automationId: res.automation_id },
+        }));
+        toast.success(t("automation.proposalCreated" as Parameters<typeof t>[0]));
+      } catch (cause) {
+        const msg =
+          cause instanceof Error
+            ? cause.message
+            : t("common.saveFailed" as Parameters<typeof t>[0]);
+        setAutomationProposalStates((prev) => ({
+          ...prev,
+          [toolId]: { state: "error", errorMessage: msg },
+        }));
+        toast.error(msg);
+      }
+    },
+    [t],
+  );
+
+  const handleDismissAutomation = useCallback((toolId: string) => {
+    // Client-side only — nothing was written, so there's nothing to clean up.
+    setAutomationProposalStates((prev) => ({
+      ...prev,
+      [toolId]: { state: "dismissed" },
+    }));
+  }, []);
+
+  // Stable signature of the propose_agent tool_use ids in this session, so the
+  // re-entry detection below fetches only when the set of proposal cards
+  // changes (not on every streamed token).
+  const proposeAgentToolSig = useMemo(() => {
+    const ids: string[] = [];
+    for (const turn of turns) {
+      for (const block of turn.blocks) {
+        if (block.kind !== "tool") continue;
+        const tname = block.tool.title || "";
+        if (tname === "propose_agent" || tname.endsWith("__propose_agent")) {
+          ids.push(block.tool.id);
+        }
+      }
+    }
+    return ids.join(",");
+  }, [turns]);
+
+  // Reflect agents already created from a propose_agent card when the user
+  // RE-ENTERS the session. In-memory ``proposalStates`` is lost on reload, so a
+  // confirmed card would otherwise show "pending" again (and a second click
+  // would create a duplicate). ``propose_agent`` always creates a
+  // ``source=custom`` library agent named exactly as proposed, so a library
+  // match means the proposal was confirmed. Best-effort + name-based; never
+  // overwrites a live user transition (confirming/dismissing/terminal).
+  useEffect(() => {
+    if (!selectedSessionId || !proposeAgentToolSig) return;
+    const proposeTools: { id: string; name: string }[] = [];
+    for (const turn of turns) {
+      for (const block of turn.blocks) {
+        if (block.kind !== "tool") continue;
+        const tname = block.tool.title || "";
+        if (tname !== "propose_agent" && !tname.endsWith("__propose_agent")) {
+          continue;
+        }
+        let nm = "";
+        if (block.tool.input) {
+          try {
+            const parsed =
+              typeof block.tool.input === "string"
+                ? JSON.parse(block.tool.input)
+                : block.tool.input;
+            nm = String(parsed?.name || "");
+          } catch {
+            /* malformed/streaming input — skip */
+          }
+        }
+        if (nm) proposeTools.push({ id: block.tool.id, name: nm });
+      }
+    }
+    if (proposeTools.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await agentsApi.listAgents("custom");
+        if (cancelled) return;
+        const names = new Set(res.agents.map((a) => a.name));
+        setProposalStates((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const { id, name } of proposeTools) {
+            const cur = next[id];
+            // Keep live (confirming/dismissing) and terminal (confirmed/
+            // dismissed/error) states — only seed an untracked/pending card.
+            if (cur && cur.state !== "pending") continue;
+            if (names.has(name)) {
+              next[id] = { state: "confirmed" };
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      } catch {
+        /* non-fatal — list endpoint can fail transiently */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSessionId, proposeAgentToolSig]);
+
+  // Stable signature of the ``automation create`` proposal tool_use ids in this
+  // session — only create-action calls render a proposal card.
+  const automationCreateToolSig = useMemo(() => {
+    const ids: string[] = [];
+    for (const turn of turns) {
+      for (const block of turn.blocks) {
+        if (block.kind !== "tool") continue;
+        const tname = block.tool.title || "";
+        if (tname !== "automation" && !tname.endsWith("__automation")) continue;
+        if (parseAutomationCreateInput(block.tool.input)) ids.push(block.tool.id);
+      }
+    }
+    return ids.join(",");
+  }, [turns]);
+
+  // Reflect automations already created from a proposal card on session
+  // RE-ENTRY (in-memory state is lost on reload). Unlike agents (matched by
+  // name), automations are matched by ID: the confirm endpoint stamped the
+  // proposing ``tool_call_id`` onto the row, so the status endpoint maps each
+  // tool id → its created automation. Only seeds untracked/pending cards.
+  useEffect(() => {
+    if (!selectedSessionId || !automationCreateToolSig) return;
+    const ids = automationCreateToolSig.split(",").filter(Boolean);
+    if (ids.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await automationsApi.proposalStatus(selectedSessionId, ids);
+        if (cancelled) return;
+        setAutomationProposalStates((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const id of ids) {
+            const cur = next[id];
+            if (cur && cur.state !== "pending") continue;
+            const hit = res.confirmed[id];
+            if (hit) {
+              next[id] = { state: "confirmed", automationId: hit.automation_id };
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      } catch {
+        /* non-fatal — status endpoint can fail transiently */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSessionId, automationCreateToolSig]);
+
   // Scan staging for every ``submit_skill`` tool_use we've seen, so the
   // card renders the actual file tree (not just the agent's
   // ``files_touched`` claim) and gates its save button on real file
@@ -1295,19 +1801,70 @@ export const ConversationPage = () => {
         name === "automation" || name.endsWith("__automation");
       if (isAutomation) {
         const result = parseAutomationToolOutput(tool.output);
+        const openInAutomation = (automationId: string) => {
+          // The automation page is at ``/automations`` and reads
+          // ``?automation=<id>`` for direct linking. Soft navigation keeps the
+          // conversation mounted in the project sidebar.
+          navigate(`/automations?automation=${encodeURIComponent(automationId)}`);
+        };
+
+        // ``create`` PROPOSES — render a propose→confirm card (mirrors
+        // propose_agent). Every other action keeps the read-only tool card.
+        // We render primarily from the INPUT (always clean) and enrich from the
+        // OUTPUT proposal when it's parseable — the Valuz/DeepAgents runtime
+        // wraps the output so ``result`` is null there, but the card must still
+        // render and be confirmable.
+        const inputSpec = parseAutomationCreateInput(tool.input);
+        const proposal = result?.proposal ?? null;
+        const isCreate = result?.action === "create" || inputSpec != null;
+        if (isCreate) {
+          // The create tool rejected the proposal (bad cron / task-in-chat).
+          const validationError = result && !result.ok ? result.message : null;
+          // Nothing to show yet (no parsed input, no proposal, no error) —
+          // generic renderer until something lands.
+          if (!inputSpec && !proposal && !validationError) return null;
+          const cardName = proposal?.name ?? inputSpec?.name ?? "";
+          const cardPrompt = proposal?.prompt_template ?? inputSpec?.prompt_template;
+          const confirmTrigger = proposal?.trigger ?? inputSpec?.trigger ?? null;
+          const cardTriggerHuman =
+            proposal?.trigger_human_readable ??
+            automationTriggerSummary(confirmTrigger);
+          const cardActionKind =
+            proposal?.action_kind ?? inputSpec?.action_kind ?? "chat";
+          const cardAgentName = proposal?.agent_name ?? inputSpec?.agent_slug ?? null;
+          const entry = automationProposalStates[tool.id] || {
+            state: "pending" as const,
+          };
+          return (
+            <AutomationProposalCard
+              name={cardName}
+              promptTemplate={cardPrompt}
+              triggerHuman={cardTriggerHuman}
+              agentName={cardAgentName}
+              actionKind={cardActionKind}
+              state={entry.state}
+              errorMessage={entry.errorMessage}
+              validationError={validationError}
+              onConfirm={() => {
+                if (!confirmTrigger || !cardName) return;
+                void handleConfirmAutomation(tool.id, {
+                  name: cardName,
+                  prompt_template: cardPrompt ?? "",
+                  trigger: confirmTrigger,
+                  agent_slug: proposal?.agent_slug ?? inputSpec?.agent_slug,
+                  action_kind: cardActionKind,
+                });
+              }}
+              onDismiss={() => handleDismissAutomation(tool.id)}
+            />
+          );
+        }
+
         if (result) {
           return (
             <AutomationToolCard
               result={result}
-              onOpenInAutomation={(automationId) => {
-                // The automation page is at ``/automations`` and reads
-                // ``?automation=<id>`` for direct linking. We use a soft
-                // navigation so the conversation stays mounted in the
-                // project sidebar.
-                navigate(
-                  `/automations?automation=${encodeURIComponent(automationId)}`,
-                );
-              }}
+              onOpenInAutomation={openInAutomation}
             />
           );
         }
@@ -1424,6 +1981,61 @@ export const ConversationPage = () => {
         return null;
       }
 
+      // ``propose_agent`` — natural-language agent creation. Renders a card
+      // letting the user create + deploy the proposed agent. Tool name comes
+      // through plain or MCP-bridged (``mcp__harness__propose_agent``).
+      const isProposeAgent =
+        name === "propose_agent" || name.endsWith("__propose_agent");
+      if (isProposeAgent) {
+        let spec: {
+          name?: string;
+          instructions?: string;
+          description?: string;
+          runtime?: string;
+          model?: string;
+          effort?: string;
+          skills?: string[];
+          connectors?: string[];
+        } = {};
+        if (tool.input) {
+          try {
+            spec =
+              typeof tool.input === "string"
+                ? JSON.parse(tool.input)
+                : tool.input;
+          } catch {
+            // Partial/malformed args (still streaming) — render with blanks;
+            // the confirm button stays disabled until a name is present.
+          }
+        }
+        const entry = proposalStates[tool.id] || { state: "pending" as const };
+        const confirmSpec = {
+          name: spec.name || "",
+          instructions: spec.instructions || "",
+          description: spec.description,
+          runtime: spec.runtime,
+          model: spec.model,
+          skills: Array.isArray(spec.skills) ? spec.skills : [],
+          connectors: Array.isArray(spec.connectors) ? spec.connectors : [],
+        };
+        return (
+          <AgentProposalCard
+            name={confirmSpec.name}
+            description={spec.description}
+            instructions={confirmSpec.instructions}
+            runtime={spec.runtime || "claude_agent"}
+            model={spec.model || "claude-sonnet-4-6"}
+            skills={confirmSpec.skills}
+            connectors={confirmSpec.connectors}
+            state={entry.state}
+            errorMessage={entry.errorMessage}
+            deployedProjectLabel={entry.deployedProjectLabel}
+            onConfirm={() => void handleConfirmProposal(tool.id, confirmSpec)}
+            onDismiss={() => handleDismissProposal(tool.id)}
+          />
+        );
+      }
+
       const isSubmit =
         name === "submit_skill" || name.endsWith("__submit_skill");
       if (!isSubmit) return null;
@@ -1486,6 +2098,12 @@ export const ConversationPage = () => {
       submissionStates,
       handleConfirmSubmission,
       handleDismissSubmission,
+      proposalStates,
+      handleConfirmProposal,
+      handleDismissProposal,
+      automationProposalStates,
+      handleConfirmAutomation,
+      handleDismissAutomation,
       askUserQuestionAnswersByToolId,
       askUserQuestionLocalAnswers,
       askUserQuestionSubmitRef,
@@ -1670,24 +2288,59 @@ export const ConversationPage = () => {
   ]);
 
   // For project project "/" mention, only show enabled/bound skills
-  const composerMentionSkills = useMemo(() => {
-    if (activeProject?.kind === "project") {
-      return projectSkills
-        .filter((s) => s.enabled)
-        .map((s) => ({
-          id: s.id,
-          name: s.name,
-          slug: s.slug,
-          description: s.description,
-        }));
+  // Resolve an agent's stored skill entries to ``/`` picker items via the loaded
+  // catalogs (shared with ProjectDetailPage to avoid drift).
+  const resolveSkillItems = useCallback(
+    (entries: string[] | null | undefined) =>
+      resolveAgentSkillItems(entries, [availableSkills, projectSkills]),
+    [availableSkills, projectSkills],
+  );
+
+  // The bound skills of the currently selected member agent — the ``/`` picker
+  // list for a PROJECT conversation. Project chats can't attach skills ad-hoc
+  // (skills are the agent's equipment), so ``/`` surfaces exactly that agent's
+  // skills.
+  const selectedAgentSkillItems = useMemo(() => {
+    if (!effectiveAgentSlug) return [];
+    const agent = projectAgents.find(
+      (m) => m.member.agent_slug === effectiveAgentSlug,
+    )?.agent;
+    return resolveSkillItems(agent?.skills);
+  }, [effectiveAgentSlug, projectAgents, resolveSkillItems]);
+
+  // The ``/`` picker list for a NEW (non-project) conversation: the union of
+  // the library-ENABLED skills and the selected agent's bound skills, deduped
+  // by slug. A new conversation may have no agent (library skills only); the
+  // global library switch (``library_enabled``) is what the Skills page toggles.
+  const composerMentionSkills = useMemo<AgentSkillItem[]>(() => {
+    const libraryItems: AgentSkillItem[] = availableSkills
+      .filter((s) => s.library_enabled !== false)
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        slug: s.slug,
+        description: s.description,
+      }));
+    const agentEntries = isTempConversation
+      ? myAgents.find((a) => a.slug === effectiveAgentSlug)?.skills
+      : undefined;
+    const seen = new Set(
+      libraryItems.map((i) => i.slug).filter((s): s is string => !!s),
+    );
+    const merged: AgentSkillItem[] = [...libraryItems];
+    for (const it of resolveSkillItems(agentEntries)) {
+      if (it.slug && seen.has(it.slug)) continue;
+      merged.push(it);
+      if (it.slug) seen.add(it.slug);
     }
-    return availableSkills.map((s) => ({
-      id: s.id,
-      name: s.name,
-      slug: s.slug,
-      description: s.description,
-    }));
-  }, [activeProject?.kind, projectSkills, availableSkills]);
+    return merged;
+  }, [
+    availableSkills,
+    isTempConversation,
+    myAgents,
+    effectiveAgentSlug,
+    resolveSkillItems,
+  ]);
 
   // Slug → display-name map for rendering inline ``/skill-slug`` chips
   // in past user messages. We blend availableSkills (the global picker
@@ -2182,9 +2835,12 @@ export const ConversationPage = () => {
   useEffect(() => {
     if (prevSendingRef.current && !sending) {
       refreshFileTree();
+      // The agent may have called ``deliver_artifacts`` during the turn —
+      // pull the fresh 生成文件 list alongside the file tree.
+      void refreshArtifacts();
     }
     prevSendingRef.current = sending;
-  }, [sending, refreshFileTree]);
+  }, [sending, refreshFileTree, refreshArtifacts]);
 
   // Loading server-side attachments on session change + polling parse status
   // is owned by ``useSessionAttachments`` above.
@@ -2862,8 +3518,168 @@ export const ConversationPage = () => {
   // Send entry point. Blocks on attachments that are still parsing — the
   // confirm dialog lets the user wait or submit with only the raw file
   // (no parsed content / doc-search until parsing finishes).
+  // ---- Session input queue (docs/design/session-input-queue.md) ----
+
+  const refreshQueue = useCallback(async () => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.list(selectedSessionId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch {
+      /* best-effort — a queue fetch failure must not break the conversation */
+    }
+  }, [selectedSessionId]);
+
+  const performEnqueue = async () => {
+    const text = draft.trim();
+    if (!text || !selectedSessionId) return;
+    setDraft("");
+    setSelectedComposerSkill(null);
+    try {
+      const list = await queueApi.enqueue(selectedSessionId, text, {
+        providerId: selectedProviderId,
+        modelId: selectedModelId,
+      });
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch (cause) {
+      toast.error(
+        cause instanceof Error ? cause.message : "Failed to queue message.",
+      );
+      setDraft(text); // restore so the user can retry
+    }
+  };
+
+  const handleEditQueued = async (queueId: string, text: string) => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.edit(selectedSessionId, queueId, text);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Edit failed.");
+    }
+  };
+
+  const handleDeleteQueued = async (queueId: string) => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.remove(selectedSessionId, queueId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Delete failed.");
+    }
+  };
+
+  const handleResumeQueue = async () => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.resume(selectedSessionId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+      // The drain-follower effect picks up from here (status → running →
+      // re-subscribe), the same path as a drain after a normal turn.
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Resume failed.");
+    }
+  };
+
+  const handleSteerQueued = async (queueId: string) => {
+    if (!selectedSessionId) return;
+    try {
+      // Send-now: the backend silently interrupts the active turn and drains
+      // this item. The drain-follower effect re-subscribes (status → running)
+      // so the steered turn streams live, same path as a normal drain.
+      const list = await queueApi.steer(selectedSessionId, queueId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Send failed.");
+    }
+  };
+
+  // Hydrate the persisted queue when the active session changes.
+  useEffect(() => {
+    void refreshQueue();
+  }, [refreshQueue]);
+
+  // Stream queued items as they drain. Each queued item runs as its OWN kernel
+  // turn after the previous one idles (which tears down that turn's SSE), so
+  // while a drain is in flight or items remain (and nothing is streaming), poll
+  // for the next drained turn and re-subscribe. ``subscribeToSession`` replays
+  // every event after ``maxSeqRef`` from the DB and then streams live (the same
+  // proven path as reopen / mid-turn reconnect). We subscribe when the session
+  // is ``running`` OR when the DB already has events past ``maxSeqRef`` — the
+  // latter catches a turn that finished *inside* the poll interval (fast turns
+  // / steer-interrupted turns); the replay renders it and self-terminates on
+  // the replayed ``session.idle``. We must NOT subscribe on a quiet idle with
+  // nothing new (a bare subscribe hangs the SSE open — fine between items, but
+  // after the LAST item it would never release ``sending``). ``queueDraining``
+  // (a dispatched item is invisible in ``queue``) keeps this alive until the
+  // last item finishes; then the effect goes quiet (§14.5).
+  useEffect(() => {
+    if (!selectedSessionId || sending || queuePaused) return;
+    if (!queueDraining && !queue.some((i) => i.status === "queued")) return;
+    const sid = selectedSessionId;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+      try {
+        const detail = await sessionsApi.get(sid);
+        if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+        if (detail.status === "running") {
+          subscribeToSession(sid, maxSeqRef.current);
+          return;
+        }
+        const resp = await sessionsApi.listEvents(sid, maxSeqRef.current);
+        if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+        if (resp.items.length > 0) {
+          subscribeToSession(sid, maxSeqRef.current);
+        }
+      } catch {
+        // best-effort — a transient poll failure retries on the next tick.
+      }
+    };
+    const timer = window.setInterval(() => void tick(), 500);
+    void tick();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    selectedSessionId,
+    sending,
+    queuePaused,
+    queueDraining,
+    queue,
+    subscribeToSession,
+  ]);
+
+  // Refetch on a turn boundary (sending → idle): drained items drop and any
+  // blocked / paused state surfaces (session-input-queue §8.4).
+  const prevQueueSendingRef = useRef(false);
+  useEffect(() => {
+    if (prevQueueSendingRef.current && !sending) void refreshQueue();
+    prevQueueSendingRef.current = sending;
+  }, [sending, refreshQueue]);
+
+  // Send entry point. While a turn is running, a follow-up is queued (drains
+  // after the active turn). Otherwise it blocks on attachments still parsing —
+  // the confirm dialog lets the user wait or submit with only the raw file.
   const handleSend = () => {
-    if (!draft.trim() || sending) return;
+    if (!draft.trim()) return;
+    if (sending) {
+      void performEnqueue();
+      return;
+    }
     if (attachmentsParsing) {
       setParsingConfirmOpen(true);
       return;
@@ -3709,6 +4525,13 @@ export const ConversationPage = () => {
         | "native"
         | undefined,
     }));
+    // Agent-delivered artifacts → the curated "生成文件" panel section.
+    const generatedFiles = sessionArtifacts.map((a) => ({
+      id: a.id,
+      name: a.file_name,
+      size: formatFileSize(a.file_size),
+      path: a.file_path,
+    }));
     // Always render the panel — even when it has nothing in it — so the
     // right-side toggle button stays visible on every conversation page.
     // The layout hides the panel column when the user collapses it; the
@@ -3749,6 +4572,10 @@ export const ConversationPage = () => {
         uploadedFiles={uploadedFiles}
         onUploadFile={handlePanelUpload}
         onRemoveUploadedFile={handleRemoveUploadedFile}
+        // Agent-delivered deliverables (生成文件) — shown in both chat and
+        // project sessions; rows open in the in-app artifact viewer.
+        generatedFiles={generatedFiles}
+        onOpenGeneratedFile={(path) => void openArtifactFile(path)}
         // KB binding tree — project sessions only, **read-only**: we
         // pass ``kbTree`` + ``bindings`` (so the checkbox state shows
         // which folders/files are bound) and ``onExpandKbFolder`` (so
@@ -3764,7 +4591,10 @@ export const ConversationPage = () => {
         fileTreeTitle={
           isProject
             ? t("project.fileTree" as Parameters<typeof t>[0])
-            : t("conversation.generatedFiles" as Parameters<typeof t>[0])
+            : // Chat sessions: the curated "生成文件" section now owns that
+              // label (agent-delivered artifacts), so the raw cwd file tree
+              // uses the neutral "文件" title to avoid two identical headers.
+              t("conversation.files" as Parameters<typeof t>[0])
         }
         fileTreeInTab={isProject}
         rootPath={
@@ -3784,18 +4614,16 @@ export const ConversationPage = () => {
           }
           void revealInFinder(path);
         }}
+        onFileClick={(relPath) => {
+          void openArtifactFile(relPath);
+        }}
         onFileDoubleClick={(relPath) => {
-          // FileTreeNode.path is relative to the project cwd (built
-          // by ``toFileTree`` from ``ProjectFileNode``). Resolve to
-          // an absolute path before handing off to the main process,
-          // which calls ``shell.openPath`` — opens files in their
-          // OS-associated app (.py -> VSCode/PyCharm, .csv -> Excel/
-          // Numbers, .md -> Typora/system editor, etc.).
-          const ws = activeProject as ProjectDetail | null;
-          const cwd = ws?.cwd ?? ws?.root_path;
-          if (!cwd) return;
-          const sep = cwd.endsWith("/") ? "" : "/";
-          void revealInFinder(`${cwd}${sep}${relPath}`);
+          void openArtifactFile(relPath);
+        }}
+        onOpenInSystem={(relPath) => {
+          void revealInFinder(
+            resolveConversationArtifactPath(relPath, activeProjectRootPath),
+          );
         }}
         onRefreshFiles={refreshFileTree}
         collapsed={panelCollapsed}
@@ -3806,6 +4634,8 @@ export const ConversationPage = () => {
   }, [
     activeProject,
     fileTree,
+    activeProjectRootPath,
+    openArtifactFile,
     panelCollapsed,
     panelSetCollapsed,
     selectedComposerSkill,
@@ -3816,6 +4646,8 @@ export const ConversationPage = () => {
     stagingSyncing,
     refreshStaging,
     sessionAttachments,
+    sessionArtifacts,
+    revealInFinder,
     handleRemoveSessionAttachment,
     handleSyncStaging,
     todos,
@@ -3856,6 +4688,11 @@ export const ConversationPage = () => {
   useEffect(() => {
     setSessionAttachments([]);
     setFileTree([]);
+    setSelectedArtifactPath(null);
+    setArtifact(null);
+    setArtifactContent(null);
+    setArtifactLoading(false);
+    setArtifactError(null);
   }, [selectedSessionId, setSessionAttachments]);
 
   // Drive the right-panel collapsed state from per-session data:
@@ -3921,6 +4758,10 @@ export const ConversationPage = () => {
     panelSetCollapsed,
   ]);
 
+  const artifactViewerOpen = Boolean(
+    selectedArtifactPath || artifactLoading || artifactError,
+  );
+
   return (
     <>
       <div className="relative flex h-full min-h-0 flex-col bg-surface">
@@ -3938,7 +4779,7 @@ export const ConversationPage = () => {
                     onClick={() =>
                       navigate(`/tasks/${encodeURIComponent(fromTaskId)}`)
                     }
-                    className="inline-flex shrink-0 items-center gap-1 text-ink-meta transition-colors hover:text-ink-heading"
+                    className="inline-flex shrink-0 items-center gap-1 text-[13px] text-ink-meta transition-colors hover:text-ink-heading"
                   >
                     <ArrowLeft className="h-3.5 w-3.5" />
                     <span>
@@ -3951,7 +4792,7 @@ export const ConversationPage = () => {
               {isSkillCreatorMode ? (
                 <span className="flex shrink-0 items-center gap-1 rounded-md bg-brand/10 px-2 py-0.5 text-2xs text-brand">
                   <Sparkles className="h-3 w-3" />
-                  Skill Creator {t("cron.model" as Parameters<typeof t>[0])}
+                  Skill Creator
                 </span>
               ) : null}
               {headerTitle ? (
@@ -4083,24 +4924,23 @@ export const ConversationPage = () => {
 
         {providers.length === 0 && !loading ? (
           <div className="flex flex-1 items-center justify-center p-8">
-            <div className="max-w-sm text-center">
-              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-brand/10">
-                <Settings className="h-6 w-6 text-brand" />
-              </div>
-              <h2 className="mb-2 text-base font-semibold text-ink-heading">
-                {t("conversation.noModel" as Parameters<typeof t>[0])}
-              </h2>
-              <p className="mb-4 text-sm text-ink-body">
-                {t("conversation.noModelHint" as Parameters<typeof t>[0])}
-              </p>
-              <button
-                type="button"
-                onClick={() => navigate("/settings")}
-                className="rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
-              >
-                {t("conversation.goToSettings" as Parameters<typeof t>[0])}
-              </button>
-            </div>
+            <EmptyState
+              icon={<Settings />}
+              title={t("conversation.noModel" as Parameters<typeof t>[0])}
+              message={t(
+                "conversation.noModelHint" as Parameters<typeof t>[0],
+              )}
+              action={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="default"
+                  onClick={() => navigate("/settings")}
+                >
+                  {t("conversation.goToSettings" as Parameters<typeof t>[0])}
+                </Button>
+              }
+            />
           </div>
         ) : (
           <>
@@ -4294,8 +5134,8 @@ export const ConversationPage = () => {
               (isTempConversation &&
                 myAgentsLoaded &&
                 myAgents.length === 0)) && (
-              <div className="mx-auto mb-2 flex w-full max-w-3xl items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs dark:border-amber-900/40 dark:bg-amber-950/30">
-                <span className="text-ink-body">
+              <div className="mx-auto mb-2 flex w-full max-w-[760px] items-center justify-between gap-3 rounded-lg border border-info-border bg-info-light px-3 py-2 text-xs text-info-text">
+                <span>
                   {channelLoaded && !hasChannel
                     ? isTempConversation &&
                       myAgentsLoaded &&
@@ -4327,6 +5167,21 @@ export const ConversationPage = () => {
               setComposerTouched(true);
             }}
           />
+          {selectedSessionId ? (
+            // Mirror the Composer root's horizontal inset (``px-5``) so the
+            // queue lines up with the input box, which is its own
+            // ``mx-auto max-w-[760px]`` inside that same px-5.
+            <div className="px-5">
+              <QueuedInputsBar
+                queue={queue}
+                paused={queuePaused}
+                onEdit={handleEditQueued}
+                onDelete={handleDeleteQueued}
+                onResume={handleResumeQueue}
+                onSteer={handleSteerQueued}
+              />
+            </div>
+          ) : null}
           <Composer
             // Remount per route so the textarea's native autoFocus refires when
             // the user navigates to a different conversation (or back to the
@@ -4334,10 +5189,18 @@ export const ConversationPage = () => {
             key={id ?? "new"}
             value={draft}
             onChange={setDraft}
-            // Project conversations configure skills per-agent, so the inline
-            // skill picker is hidden there; the assistant (non-project) chat
-            // keeps it for global ``/`` skills.
+            // Keep the composer usable while a turn runs — submitting queues a
+            // follow-up (session-input-queue) instead of being blocked.
+            queueWhileSending
+            // Project conversations can't attach skills ad-hoc (skills are the
+            // agent's equipment), so the toolbar "add skill" button stays hidden
+            // there. The ``/`` picker, however, is enabled once a member agent
+            // is selected so the user can invoke that agent's bound skills; the
+            // assistant (non-project) chat keeps both for global ``/`` skills.
             showSkillButton={!isProjectProject}
+            showSkillSlash={
+              isProjectProject ? effectiveAgentSlug != null : undefined
+            }
             autoFocus
             onSend={() => {
               void handleSend();
@@ -4494,7 +5357,9 @@ export const ConversationPage = () => {
               setSelectedModelId(mId);
               setComposerTouched(true);
             }}
-            skills={composerMentionSkills}
+            skills={
+              isProjectProject ? selectedAgentSkillItems : composerMentionSkills
+            }
             onSkillSelect={(s) => {
               const skill =
                 availableSkills.find((sk) => sk.id === s.id) ?? null;
@@ -4521,6 +5386,24 @@ export const ConversationPage = () => {
             onCancel={() => setParsingConfirmOpen(false)}
           />
         </div>
+        {artifactViewerOpen ? (
+          <div
+            className="absolute inset-0 z-30 overflow-hidden overscroll-contain bg-surface p-3"
+            onWheel={(event) => event.stopPropagation()}
+            onTouchMove={(event) => event.stopPropagation()}
+          >
+            <ArtifactViewerShell
+              artifact={artifact}
+              content={artifactContent}
+              loading={artifactLoading}
+              error={artifactError}
+              onReload={handleArtifactReload}
+              onClose={handleArtifactClose}
+              onCopyContent={handleArtifactCopy}
+              onOpenExternal={handleArtifactOpenExternal}
+            />
+          </div>
+        ) : null}
       </div>
 
       {/* Knowledge Base file picker overlay — tree view: documents are

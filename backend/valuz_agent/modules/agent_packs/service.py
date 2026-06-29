@@ -34,19 +34,20 @@ from valuz_agent.modules.agent_packs.manifest import (
     PackSkill,
     resolve_text,
 )
-from valuz_agent.modules.agent_packs.packaging import (
+from valuz_agent.modules.agents.service import AgentService
+from valuz_agent.modules.packs_common import (
+    PackManifest,
     build_archive,
     embedded_skill_dir,
     extract_archive,
     sanitize_skill_slug,
 )
-from valuz_agent.modules.agents.service import AgentService
 
 logger = logging.getLogger(__name__)
 
 # Staged uploads between preview and confirm: preview_id → (manifest, temp root).
 # The temp root holds extracted embedded skills; confirm consumes + cleans it.
-_pack_import_stage: dict[str, tuple[AgentPackManifest, Path]] = {}
+_pack_import_stage: dict[str, tuple[PackManifest, Path]] = {}
 
 
 class AgentPackService:
@@ -100,7 +101,7 @@ class AgentPackService:
     async def import_manifest(
         self,
         user_id: str,
-        manifest: AgentPackManifest,
+        manifest: AgentPackManifest | PackManifest,
         *,
         runtime: str,
         provider_id: str,
@@ -110,6 +111,11 @@ class AgentPackService:
     ) -> dict[str, Any]:
         """Install the pack's skills, register its connectors, then create its
         agents (de-dup by slug). Returns ``{pack_id, created, skipped, roles}``.
+
+        Accepts both the unified :class:`PackManifest` (user imports / project
+        packs) and the legacy v1 :class:`AgentPackManifest` (built-in packs):
+        the install path only reads the shared ``agents`` / ``skills`` /
+        ``connectors`` / ``collection`` fields, which both models carry.
 
         ``embedded_skills_root`` is the extracted archive root for a user-imported
         pack — ``embedded`` skills are copied from ``<root>/skills/<slug>/`` into
@@ -124,22 +130,29 @@ class AgentPackService:
         # Install embedded (user-authored) skills carried inside the archive.
         embedded = [s.slug for s in manifest.skills if s.source == "embedded"]
         if embedded and embedded_skills_root is not None:
-            await asyncio.to_thread(
-                self._install_embedded_skills, embedded_skills_root, embedded
-            )
+            await asyncio.to_thread(self._install_embedded_skills, embedded_skills_root, embedded)
 
-        # Index the just-materialized official/template skills NOW so the pack's
-        # agents resolve them immediately. Without this they're only picked up by
-        # the next boot scan, so a session started right after the team is created
-        # drops the skill ("Unknown skill" — the skill is on disk but not yet in
-        # valuz_skill_index, which resolve_skill_slugs_to_paths reads).
+        # Index the just-installed skills NOW so the pack's agents resolve them
+        # immediately. Without this they're only picked up by the next boot scan
+        # or the periodic auto-scan (≤30 min), so a session started right after
+        # the team is created drops the skill ("Unknown skill" — the skill is on
+        # disk but not yet in valuz_skill_index, which resolve_skill_slugs_to_paths
+        # reads). Both scopes are covered: ``bundled`` skills land in the official
+        # library, ``embedded`` skills in the user library.
         if bundled:
             try:
                 from valuz_agent.modules.skills.service import reindex_official_skills
 
-                await reindex_official_skills()
+                await reindex_official_skills(user_id)
             except Exception:  # noqa: BLE001 — best-effort; the boot scan backstops it
                 logger.exception("reindex_official_skills after pack import failed")
+        if embedded:
+            try:
+                from valuz_agent.modules.skills.service import reindex_user_skills
+
+                await reindex_user_skills(user_id)
+            except Exception:  # noqa: BLE001 — best-effort; the boot scan backstops it
+                logger.exception("reindex_user_skills after pack import failed")
 
         # Register the pack's connectors as the user's own ConnectorRows so they
         # activate on import (and actually resolve at session time — the runtime
@@ -178,9 +191,7 @@ class AgentPackService:
             created += 1
 
         pack_id = manifest.collection.id if manifest.collection else "agent-pack"
-        logger.info(
-            "agent-packs: import %r — created=%d skipped=%d", pack_id, created, skipped
-        )
+        logger.info("agent-packs: import %r — created=%d skipped=%d", pack_id, created, skipped)
         return {
             "template_id": pack_id,
             "created": created,
@@ -213,30 +224,14 @@ class AgentPackService:
         user_id: str,
         agents: list[Any],
         collection: dict[str, Any] | None,
-    ) -> tuple[AgentPackManifest, dict[str, Path]]:
+    ) -> tuple[PackManifest, dict[str, Path]]:
         from valuz_agent.adapters.capability_resolver import resolve_skill_slugs_to_paths
 
         pack_agents: list[PackAgent] = []
         skill_slugs: list[str] = []
         connector_slugs: list[str] = []
         for a in agents:
-            pack_agents.append(
-                PackAgent(
-                    slug=a.slug,
-                    name=a.name,
-                    description=a.description or "",
-                    instructions=a.instructions or "",
-                    avatar=a.avatar,
-                    runtime=a.runtime,
-                    model_hint=a.model or None,
-                    effort=a.effort,
-                    # Sanitize each slug to a single safe segment — some installs
-                    # stored it as a full path (Windows drive letters etc.), which
-                    # must not leak into the portable manifest or the archive.
-                    skills=[sanitize_skill_slug(s) for s in (a.skills or [])],
-                    connectors=list(a.connector_types or []),
-                )
-            )
+            pack_agents.append(self.pack_agent_from_row(a))
             for s in a.skills or []:
                 if s not in skill_slugs:
                     skill_slugs.append(s)
@@ -307,13 +302,38 @@ class AgentPackService:
             scenario=col.get("scenario") or "",
             icon=col.get("icon"),
         )
-        manifest = AgentPackManifest(
+        manifest = PackManifest(
             collection=collection_obj,
             agents=pack_agents,
             skills=skills_idx,
             connectors=conns_idx,
         )
         return manifest, skill_dirs
+
+    def pack_agent_from_row(self, row: Any) -> PackAgent:
+        """Build a portable :class:`PackAgent` snapshot from a library
+        ``AgentRow``.
+
+        Drops ``provider_id`` (machine-local), demotes ``model``→
+        ``model_hint`` (the concrete ``(provider_id, model)`` is re-resolved
+        against the recipient's channel at import time), and sanitizes each
+        carried skill slug to a single safe archive segment. The single
+        source of truth for this projection — ``_build_export_manifest`` and
+        ``ProjectPackService`` both call it so the agent-pack and
+        project-pack shapes never drift.
+        """
+        return PackAgent(
+            slug=row.slug,
+            name=row.name,
+            description=row.description or "",
+            instructions=row.instructions or "",
+            avatar=row.avatar,
+            runtime=row.runtime,
+            model_hint=row.model or None,
+            effort=row.effort,
+            skills=[sanitize_skill_slug(s) for s in (row.skills or [])],
+            connectors=list(row.connector_types or []),
+        )
 
     # -- import (upload → preview → confirm) ------------------------------
 
@@ -324,6 +344,15 @@ class AgentPackService:
             manifest, root = extract_archive(data)
         except Exception as exc:
             raise PackImportFailed(str(exc)) from exc
+
+        # This endpoint imports an agent collection. A project pack (carries a
+        # ``project`` target, no ``collection``) belongs to the project import
+        # flow — reject it clearly instead of half-importing its agents.
+        if manifest.collection is None:
+            shutil.rmtree(root, ignore_errors=True)
+            raise PackImportFailed(
+                "this is a project pack — import it from the projects page, not here"
+            )
 
         preview_id = f"pack-{uuid4().hex[:8]}"
         _pack_import_stage[preview_id] = (manifest, root)
@@ -427,7 +456,9 @@ class AgentPackService:
             except Exception:  # noqa: BLE001 — one bad skill shouldn't sink the import
                 logger.exception("agent-packs: failed to install embedded skill %s", slug)
 
-    async def _register_connectors(self, user_id: str, manifest: AgentPackManifest) -> None:
+    async def _register_connectors(
+        self, user_id: str, manifest: AgentPackManifest | PackManifest
+    ) -> None:
         """Register the pack's connectors as the user's ConnectorRows (idempotent
         by slug). These are deferred from the default catalog, so importing the
         team is what makes them appear and resolve. Best-effort: a bad connector

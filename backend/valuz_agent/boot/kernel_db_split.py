@@ -13,7 +13,7 @@ step moves that data across ONCE so existing history survives the cutover:
 Idempotent and re-entrant: rows copy with ``INSERT OR IGNORE`` on the primary
 key, so an interrupted run re-copies the gap on the next boot; once
 ``valuz.db`` no longer holds the kernel tables the whole step is a no-op. Runs
-synchronously off the event loop (like ``drop_stale_kernel_tables``) — it owns
+synchronously off the event loop (like ``ensure_kernel_schema_migratable``) — it owns
 no ORM session and touches the SQLite files directly, before any engine opens
 them, under the single-writer lock acquired earlier in boot.
 """

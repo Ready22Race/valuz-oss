@@ -11,7 +11,6 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.docs.datastore import DocumentDatastore
@@ -368,6 +367,7 @@ class DocumentLibraryService:
 
     async def create_kb(
         self,
+        user_id: str,
         name: str,
         root_path: str,
         parser_routing: str = "local_only",
@@ -377,7 +377,7 @@ class DocumentLibraryService:
         if not root.is_dir():
             raise KbRootInaccessible()
         root_str = str(root)
-        if await self._ds.kb_root_path_exists(require_current_user_id(), root_str):
+        if await self._ds.kb_root_path_exists(user_id, root_str):
             raise KbRootDuplicated()
 
         kb = KnowledgeBaseRow(
@@ -387,33 +387,34 @@ class DocumentLibraryService:
             parser_routing=parser_routing,
             auto_discover=auto_discover,
         )
-        await self._ds.create_kb(require_current_user_id(), kb)
+        await self._ds.create_kb(user_id, kb)
         self._bus.publish("kb.created", kb_id=kb.id)
         # Kick off the initial scan in a background thread so the
         # HTTP response returns immediately. The rescan diff handles
         # the empty-DB case (every folder + file looks "new") just as
         # well as the steady-state diff, so there's no need for a
         # separate ``_initial_scan`` code path.
-        await self.start_rescan_kb(kb.id)
-        return await self._kb_to_detail(kb)
+        await self.start_rescan_kb(user_id, kb.id)
+        return await self._kb_to_detail(user_id, kb)
 
-    async def list_kbs(self) -> list[KbListItem]:
-        rows = await self._ds.list_kbs(require_current_user_id())
-        return [await self._kb_to_list_item(r) for r in rows]
+    async def list_kbs(self, user_id: str) -> list[KbListItem]:
+        rows = await self._ds.list_kbs(user_id)
+        return [await self._kb_to_list_item(user_id, r) for r in rows]
 
-    async def get_kb(self, kb_id: str) -> KbDetail:
-        row = await self._ds.get_kb(require_current_user_id(), kb_id)
+    async def get_kb(self, user_id: str, kb_id: str) -> KbDetail:
+        row = await self._ds.get_kb(user_id, kb_id)
         if not row:
             raise KbNotFound()
-        return await self._kb_to_detail(row)
+        return await self._kb_to_detail(user_id, row)
 
     async def update_kb(
         self,
+        user_id: str,
         kb_id: str,
         name: str | None = None,
         parser_routing: str | None = None,
     ) -> KbDetail:
-        row = await self._ds.get_kb(require_current_user_id(), kb_id)
+        row = await self._ds.get_kb(user_id, kb_id)
         if not row:
             raise KbNotFound()
         if name is not None:
@@ -421,26 +422,26 @@ class DocumentLibraryService:
         if parser_routing is not None:
             row.parser_routing = parser_routing
         await self._ds.update_kb(row)
-        return await self._kb_to_detail(row)
+        return await self._kb_to_detail(user_id, row)
 
-    async def delete_kb(self, kb_id: str) -> None:
-        row = await self._ds.get_kb(require_current_user_id(), kb_id)
+    async def delete_kb(self, user_id: str, kb_id: str) -> None:
+        row = await self._ds.get_kb(user_id, kb_id)
         if not row:
             raise KbNotFound()
-        await self._ds.delete_kb(require_current_user_id(), kb_id)
+        await self._ds.delete_kb(user_id, kb_id)
         self._bus.publish("kb.deleted", kb_id=kb_id)
 
     # ── KB tree view ──────────────────────────────────────────────────
 
-    async def get_kb_tree(self, kb_id: str, folder_id: str | None = None) -> list[KbTreeNode]:
-        folders = await self._ds.list_folders(
-            require_current_user_id(), kb_id, parent_folder_id=folder_id
-        )
+    async def get_kb_tree(
+        self, user_id: str, kb_id: str, folder_id: str | None = None
+    ) -> list[KbTreeNode]:
+        folders = await self._ds.list_folders(user_id, kb_id, parent_folder_id=folder_id)
 
         nodes: list[KbTreeNode] = []
         for f in folders:
             doc_count = await self._ds.count_docs_in_folder_subtree(
-                require_current_user_id(),
+                user_id,
                 kb_id,
                 f.id,
             )
@@ -457,15 +458,13 @@ class DocumentLibraryService:
 
         if folder_id is not None:
             folder_docs = await self._ds.list_documents(
-                require_current_user_id(),
+                user_id,
                 kb_id=kb_id,
                 kb_folder_id=folder_id,
             )
         else:
-            all_docs = await self._ds.list_documents(require_current_user_id(), kb_id=kb_id)
-            all_folder_ids = {
-                f.id for f in await self._ds.list_all_folders(require_current_user_id(), kb_id)
-            }
+            all_docs = await self._ds.list_documents(user_id, kb_id=kb_id)
+            all_folder_ids = {f.id for f in await self._ds.list_all_folders(user_id, kb_id)}
             folder_docs = [
                 d for d in all_docs if not d.kb_folder_id or d.kb_folder_id not in all_folder_ids
             ]
@@ -487,18 +486,22 @@ class DocumentLibraryService:
     # ── Rescan ────────────────────────────────────────────────────────
 
     async def rescan_kb(self, kb_id: str) -> ImportTaskResult:
-        """Rescan a KB end-to-end (diff + reindex dispatch) — used by the
-        auto-discovery scheduler (already off the HTTP request path), and as
-        the inner work loop of ``start_rescan_kb``. See ``_run_rescan`` for the
-        three-phase diff algorithm.
+        """Rescan a KB end-to-end (diff + reindex dispatch) — the inner work loop
+        called by the auto-discovery scheduler (off the HTTP request path).  See
+        ``_run_rescan`` for the three-phase diff algorithm.
 
-        HTTP / user-triggered rescans should call ``start_rescan_kb``
-        instead so the request returns immediately on large libraries.
+        HTTP / user-triggered rescans should call ``start_rescan_kb`` instead so
+        the request returns immediately on large libraries.
+
+        This is a SYSTEM/background entry — it derives the owner from the KB row
+        itself (``get_kb_by_id``) so the rescan runs as the KB's owner without
+        requiring an ambient ContextVar.  HTTP rescans authorize the caller in
+        ``start_rescan_kb`` before any rescan work runs.
         """
-        user_id = require_current_user_id()
-        if not await self._ds.get_kb(user_id, kb_id):
+        kb = await self._ds.get_kb_by_id(kb_id)
+        if kb is None:
             raise KbNotFound()
-        task = await self._create_rescan_task(kb_id)
+        task = await self._create_rescan_task(kb.user_id, kb_id)
         # Re-fetch the kb AFTER creating the task. ``create_import_task``
         # commits, and under SQLite write contention its lock-retry rolls the
         # session back — a rollback expires every ORM instance in it
@@ -507,13 +510,13 @@ class DocumentLibraryService:
         # implicit sync reload on the AsyncSession and raise MissingGreenlet.
         # A fresh fetch keeps ``_run_rescan``'s opening attribute reads loaded
         # (mirrors the background-rescan path).
-        kb = await self._ds.get_kb(user_id, kb_id)
-        if not kb:
+        kb = await self._ds.get_kb_by_id(kb_id)
+        if kb is None:
             raise KbNotFound()
         await self._run_rescan(kb, task)
         return _task_to_result(task)
 
-    async def start_rescan_kb(self, kb_id: str) -> ImportTaskResult:
+    async def start_rescan_kb(self, user_id: str, kb_id: str) -> ImportTaskResult:
         """Kick off a rescan in a background thread and return the
         task row immediately. The HTTP layer + ``create_kb`` use this
         so the dialog doesn't freeze on large directories — the
@@ -523,22 +526,26 @@ class DocumentLibraryService:
 
         Progress is observable via ``/v1/docs/tasks/{task_id}`` on
         the returned task row.
+
+        ``user_id`` is the request principal — it authorizes that the caller
+        owns the KB before any rescan work is scheduled. The background rescan
+        itself derives the owner from the KB row (see ``rescan_kb``).
         """
-        kb = await self._ds.get_kb(require_current_user_id(), kb_id)
+        kb = await self._ds.get_kb(user_id, kb_id)
         if not kb:
             raise KbNotFound()
-        task = await self._create_rescan_task(kb_id)
+        task = await self._create_rescan_task(kb.user_id, kb_id)
         self._schedule_background_rescan(kb_id, task.id)
         return _task_to_result(task)
 
-    async def _create_rescan_task(self, kb_id: str) -> DocumentImportTaskRow:
+    async def _create_rescan_task(self, user_id: str, kb_id: str) -> DocumentImportTaskRow:
         task = DocumentImportTaskRow(
             id=uuid.uuid4().hex,
             task_type="rescan",
             kb_id=kb_id,
             status="processing",
         )
-        await self._ds.create_import_task(require_current_user_id(), task)
+        await self._ds.create_import_task(user_id, task)
         return task
 
     async def _run_rescan(self, kb: KnowledgeBaseRow, task: DocumentImportTaskRow) -> None:
@@ -574,6 +581,7 @@ class DocumentLibraryService:
         every tick, so each phase must be idempotent and tolerant of
         partial-write races.
         """
+        user_id = kb.user_id
         kb_id = kb.id
         root = Path(kb.root_path)
 
@@ -597,8 +605,7 @@ class DocumentLibraryService:
         # folder's id keyed by relative_path so phase 2/3 can look up
         # parent ids without DB hits.
         existing_by_path: dict[str, KbFolderRow] = {
-            f.relative_path: f
-            for f in await self._ds.list_all_folders(require_current_user_id(), kb_id)
+            f.relative_path: f for f in await self._ds.list_all_folders(user_id, kb_id)
         }
         folder_map: dict[str, str] = {}
 
@@ -619,7 +626,7 @@ class DocumentLibraryService:
                     display_name=os.path.basename(dir_rel),
                     status="active",
                 )
-                await self._ds.create_folder(require_current_user_id(), row)
+                await self._ds.create_folder(user_id, row)
                 folder_map[dir_rel] = row.id
             else:
                 changed = False
@@ -665,7 +672,7 @@ class DocumentLibraryService:
 
         kind_to_plugin = self._snapshot_routing_for_kinds()
 
-        all_docs = await self._ds.list_documents(require_current_user_id(), kb_id=kb_id)
+        all_docs = await self._ds.list_documents(user_id, kb_id=kb_id)
         new_count = 0
         for doc in all_docs:
             if doc.relative_path in current_files:
@@ -752,19 +759,17 @@ class DocumentLibraryService:
                 discovery_source="rescan",
                 status="queued",
             )
-            await self._ds.create(require_current_user_id(), doc)
+            await self._ds.create(user_id, doc)
             new_count += 1
 
-        await self._update_folder_counts(kb_id)
+        await self._update_folder_counts(user_id, kb_id)
         task.total_items = new_count
         task.status = "completed"
         await self._ds.update_import_task(task)
         kb.last_full_scan_at = now_ms()
         await self._ds.update_kb(kb)
 
-        queued_ids = await self._ds.list_doc_ids_by_kb(
-            require_current_user_id(), kb_id, status="queued"
-        )
+        queued_ids = await self._ds.list_doc_ids_by_kb(user_id, kb_id, status="queued")
         if queued_ids:
             # Reindex in a background thread so the rescan HTTP request
             # returns immediately. Cloud parsers (MinerU/PaddleOCR) can
@@ -779,7 +784,7 @@ class DocumentLibraryService:
                 status="processing",
                 total_items=len(queued_ids),
             )
-            await self._ds.create_import_task(require_current_user_id(), reindex_task)
+            await self._ds.create_import_task(user_id, reindex_task)
             self._schedule_background_reindex(queued_ids, reindex_task.id)
 
         self._bus.publish("kb.rescanned", kb_id=kb_id)
@@ -794,6 +799,9 @@ class DocumentLibraryService:
         The thread has no event loop of its own, so it hosts one via
         ``asyncio.run`` to drive the now-async service against an
         ``async_unit_of_work`` session.
+
+        Owner is derived from the loaded KB and task rows — no ambient
+        ContextVar is read or set here.
         """
         import asyncio
         import threading
@@ -804,16 +812,10 @@ class DocumentLibraryService:
         scan_state_dir = self._scan_state_dir
         session_factory = self._session_factory
 
-        # Capture the owner in the request/scheduler context; the daemon
-        # thread below doesn't inherit the ContextVar (see _arun seeding).
-        owner_id = require_current_user_id()
-
         async def _arun() -> None:
-            from valuz_agent.infra.auth_context import set_current_user_id
             from valuz_agent.infra.db import async_unit_of_work
             from valuz_agent.modules.docs.datastore import DocumentDatastore
 
-            set_current_user_id(owner_id)
             try:
                 async with async_unit_of_work(commit=False) as db:
                     local_service = DocumentLibraryService(
@@ -824,10 +826,8 @@ class DocumentLibraryService:
                         scan_state_dir=scan_state_dir,
                         session_factory=session_factory,
                     )
-                    kb = await local_service._ds.get_kb(require_current_user_id(), kb_id)
-                    task = await local_service._ds.get_import_task(
-                        require_current_user_id(), task_id
-                    )
+                    kb = await local_service._ds.get_kb_by_id(kb_id)
+                    task = await local_service._ds.get_import_task_by_id(task_id)
                     if kb is None or task is None:
                         logger.warning(
                             "background rescan skipped: kb=%s task=%s missing",
@@ -843,9 +843,7 @@ class DocumentLibraryService:
                 try:
                     async with async_unit_of_work(commit=False) as fail_db:
                         failed_ds = DocumentDatastore(fail_db)
-                        failed_task = await failed_ds.get_import_task(
-                            require_current_user_id(), task_id
-                        )
+                        failed_task = await failed_ds.get_import_task_by_id(task_id)
                         if failed_task is not None and failed_task.status == "processing":
                             failed_task.status = "failed"
                             await failed_ds.update_import_task(failed_task)
@@ -874,6 +872,9 @@ class DocumentLibraryService:
         The thread has no event loop of its own, so it hosts one via
         ``asyncio.run`` to drive the now-async service against an
         ``async_unit_of_work`` session.
+
+        Owner is derived from the loaded task row — no ambient ContextVar is
+        read or set here.
         """
         import asyncio
         import threading
@@ -889,18 +890,10 @@ class DocumentLibraryService:
         scan_state_dir = self._scan_state_dir
         session_factory = self._session_factory
 
-        # Capture the owner HERE — this method runs in the request context
-        # where ``valuz_current_user_id`` is set. The daemon thread below has
-        # its own ContextVar scope and would otherwise raise
-        # OwnerContextUnsetError on the first owner-scoped read.
-        owner_id = require_current_user_id()
-
         async def _arun() -> None:
-            from valuz_agent.infra.auth_context import set_current_user_id
             from valuz_agent.infra.db import async_unit_of_work
             from valuz_agent.modules.docs.datastore import DocumentDatastore
 
-            set_current_user_id(owner_id)
             try:
                 async with async_unit_of_work(commit=False) as db:
                     local_service = DocumentLibraryService(
@@ -911,9 +904,7 @@ class DocumentLibraryService:
                         scan_state_dir=scan_state_dir,
                         session_factory=session_factory,
                     )
-                    task = await local_service._ds.get_import_task(
-                        require_current_user_id(), task_id
-                    )
+                    task = await local_service._ds.get_import_task_by_id(task_id)
                     if task is None:
                         logger.error("background reindex: task %s not found", task_id)
                         return
@@ -925,7 +916,7 @@ class DocumentLibraryService:
                 try:
                     async with async_unit_of_work(commit=False) as fail_db:
                         fail_ds = DocumentDatastore(fail_db)
-                        t = await fail_ds.get_import_task(require_current_user_id(), task_id)
+                        t = await fail_ds.get_import_task_by_id(task_id)
                         if t is not None and t.status == "processing":
                             t.status = "failed"
                             await fail_ds.update_import_task(t)
@@ -944,40 +935,46 @@ class DocumentLibraryService:
     # ── Document CRUD ─────────────────────────────────────────────────
 
     async def list_documents(
-        self, query: str | None = None, status: str | None = None, kb_id: str | None = None
+        self,
+        user_id: str,
+        query: str | None = None,
+        status: str | None = None,
+        kb_id: str | None = None,
     ) -> list[DocumentListItem]:
-        rows = await self._ds.list_documents(
-            require_current_user_id(), query=query, status=status, kb_id=kb_id
-        )
+        rows = await self._ds.list_documents(user_id, query=query, status=status, kb_id=kb_id)
         return [_row_to_list_item(r) for r in rows]
 
-    async def get_document(self, doc_id: str) -> DocumentDetail:
-        row = await self._ds.get_by_id(require_current_user_id(), doc_id)
+    async def get_document(self, user_id: str, doc_id: str) -> DocumentDetail:
+        row = await self._ds.get_by_id(user_id, doc_id)
         if not row:
             raise DocumentNotFound()
         return _row_to_detail(row)
 
-    async def delete_document(self, doc_id: str) -> None:
-        row = await self._ds.get_by_id(require_current_user_id(), doc_id)
+    async def delete_document(self, user_id: str, doc_id: str) -> None:
+        row = await self._ds.get_by_id(user_id, doc_id)
         if not row:
             raise DocumentNotFound()
         folder_id = row.kb_folder_id
-        await self._ds.delete(require_current_user_id(), doc_id)
+        await self._ds.delete(user_id, doc_id)
         if folder_id:
-            await self._update_folder_counts(row.kb_id)
+            await self._update_folder_counts(user_id, row.kb_id)
         self._bus.publish("doc.deleted", document_id=doc_id)
 
-    async def get_document_preview(self, doc_id: str) -> str:
-        row = await self._ds.get_by_id(require_current_user_id(), doc_id)
+    async def get_document_preview(self, user_id: str, doc_id: str) -> str:
+        row = await self._ds.get_by_id(user_id, doc_id)
         if not row:
             raise DocumentNotFound()
         if row.preview_text_path:
-            p = Path(row.preview_text_path)
-            if p.exists():
-                return p.read_text(encoding="utf-8")
+            from valuz_agent.infra.asset_store import resolve_asset_path
+
+            local = resolve_asset_path(user_id, row.preview_text_path)
+            if local:
+                p = Path(local)
+                if p.exists():
+                    return p.read_text(encoding="utf-8")
         return ""
 
-    async def reindex_documents(self, document_ids: list[str]) -> ImportTaskResult:
+    async def reindex_documents(self, user_id: str, document_ids: list[str]) -> ImportTaskResult:
         """Create a reindex task and dispatch the per-doc parse loop to a
         background thread.  Returns immediately with a ``processing`` task so
         the HTTP request is not blocked by potentially slow cloud parsers.
@@ -988,7 +985,7 @@ class DocumentLibraryService:
             status="processing",
             total_items=len(document_ids),
         )
-        await self._ds.create_import_task(require_current_user_id(), task)
+        await self._ds.create_import_task(user_id, task)
         self._schedule_background_reindex(document_ids, task.id)
         return _task_to_result(task)
 
@@ -1000,10 +997,11 @@ class DocumentLibraryService:
         parse can block for many seconds."""
         import json as _json
 
+        user_id = task.user_id
         task_errors: list[dict[str, str]] = []
 
         for doc_id in document_ids:
-            row = await self._ds.get_by_id(require_current_user_id(), doc_id)
+            row = await self._ds.get_by_id(user_id, doc_id)
             if not row:
                 task.failed_items += 1
                 await self._ds.update_import_task(task)
@@ -1091,8 +1089,8 @@ class DocumentLibraryService:
                 attempts.append(success_record)
                 preview_path = self._save_preview(
                     row.id,
-                    row.source_filename,
                     result.markdown,
+                    user_id,
                 )
                 row.status = "ready"
                 row.parser_mode = result.metadata.get("engine", "unknown")
@@ -1113,8 +1111,8 @@ class DocumentLibraryService:
         task.status = "completed"
         await self._ds.update_import_task(task)
 
-    async def get_import_task(self, task_id: str) -> ImportTaskResult:
-        row = await self._ds.get_import_task(require_current_user_id(), task_id)
+    async def get_import_task(self, user_id: str, task_id: str) -> ImportTaskResult:
+        row = await self._ds.get_import_task(user_id, task_id)
         if not row:
             raise ImportTaskNotFound()
         return _task_to_result(row)
@@ -1123,22 +1121,21 @@ class DocumentLibraryService:
 
     async def search_docs(
         self,
+        user_id: str,
         project_id: str,
         query: str,
         top_k: int = 5,
         folder_ids: list[str] | None = None,
         document_ids: list[str] | None = None,
     ) -> list[DocSearchHit]:
-        scope_ids = await self.resolve_doc_scope(project_id)
+        scope_ids = await self.resolve_doc_scope(user_id, project_id)
         if not scope_ids:
             return []
 
         if folder_ids:
             folder_doc_ids: set[str] = set()
             for fid in folder_ids:
-                folder_doc_ids.update(
-                    await self._ds.list_doc_ids_by_folder_subtree(require_current_user_id(), fid)
-                )
+                folder_doc_ids.update(await self._ds.list_doc_ids_by_folder_subtree(user_id, fid))
             scope_ids = [d for d in scope_ids if d in folder_doc_ids]
 
         if document_ids:
@@ -1147,14 +1144,19 @@ class DocumentLibraryService:
         if not scope_ids:
             return []
 
+        from valuz_agent.infra.asset_store import resolve_asset_path
+
         doc_paths: dict[str, str] = {}
         doc_names: dict[str, str] = {}
+        uid = user_id
         for did in scope_ids:
-            row = await self._ds.get_by_id(require_current_user_id(), did)
+            row = await self._ds.get_by_id(uid, did)
             if row:
                 doc_names[did] = row.source_filename
                 if row.preview_text_path:
-                    doc_paths[did] = row.preview_text_path
+                    local = resolve_asset_path(uid, row.preview_text_path)
+                    if local:
+                        doc_paths[did] = local
 
         from valuz_agent.integrations.docs_embedded import EmbeddedDocsRuntime
 
@@ -1182,11 +1184,14 @@ class DocumentLibraryService:
 
     # ── Project binding (D3 minimal cover) ────────────────────────────
 
-    async def list_project_bindings(self, project_id: str) -> list[ProjectKbBindingRow]:
-        return await self._ds.list_bindings(require_current_user_id(), project_id)
+    async def list_project_bindings(
+        self, user_id: str, project_id: str
+    ) -> list[ProjectKbBindingRow]:
+        return await self._ds.list_bindings(user_id, project_id)
 
     async def update_project_bindings(
         self,
+        user_id: str,
         project_id: str,
         bindings: list[dict[str, str]],
     ) -> list[ProjectKbBindingRow]:
@@ -1198,52 +1203,50 @@ class DocumentLibraryService:
             )
             for b in bindings
         ]
-        minimized = await self._minimize_bindings(rows)
-        await self._ds.set_bindings(require_current_user_id(), project_id, minimized)
+        minimized = await self._minimize_bindings(user_id, rows)
+        await self._ds.set_bindings(user_id, project_id, minimized)
         self._bus.publish("project.bindings.changed", project_id=project_id)
-        return await self._ds.list_bindings(require_current_user_id(), project_id)
+        return await self._ds.list_bindings(user_id, project_id)
 
-    async def remove_project_bindings(self, project_id: str) -> None:
-        await self._ds.remove_all_bindings(require_current_user_id(), project_id)
+    async def remove_project_bindings(self, user_id: str, project_id: str) -> None:
+        await self._ds.remove_all_bindings(user_id, project_id)
 
-    async def count_project_bindings(self, project_id: str) -> int:
-        return await self._ds.count_bindings(require_current_user_id(), project_id)
+    async def count_project_bindings(self, user_id: str, project_id: str) -> int:
+        return await self._ds.count_bindings(user_id, project_id)
 
     # ── Scope resolution ──────────────────────────────────────────────
 
-    async def resolve_doc_scope(self, project_id: str) -> list[str]:
-        bindings = await self._ds.list_bindings(require_current_user_id(), project_id)
+    async def resolve_doc_scope(self, user_id: str, project_id: str) -> list[str]:
+        bindings = await self._ds.list_bindings(user_id, project_id)
         doc_ids: set[str] = set()
         for b in bindings:
             if b.binding_kind == "kb":
                 doc_ids.update(
-                    await self._ds.list_doc_ids_by_kb(
-                        require_current_user_id(), b.target_id, status="ready"
-                    )
+                    await self._ds.list_doc_ids_by_kb(user_id, b.target_id, status="ready")
                 )
             elif b.binding_kind == "folder":
                 doc_ids.update(
                     await self._ds.list_doc_ids_by_folder_subtree(
-                        require_current_user_id(), b.target_id, status="ready"
+                        user_id, b.target_id, status="ready"
                     )
                 )
             elif b.binding_kind == "document":
-                row = await self._ds.get_by_id(require_current_user_id(), b.target_id)
+                row = await self._ds.get_by_id(user_id, b.target_id)
                 if row and row.status == "ready":
                     doc_ids.add(b.target_id)
         return list(doc_ids)
 
-    async def resolve_preview_paths(self, doc_ids: list[str]) -> dict[str, str]:
+    async def resolve_preview_paths(self, user_id: str, doc_ids: list[str]) -> dict[str, str]:
         """Return {doc_id: preview_text_path} for docs that have a preview file."""
         result: dict[str, str] = {}
         for did in doc_ids:
-            row = await self._ds.get_by_id(require_current_user_id(), did)
+            row = await self._ds.get_by_id(user_id, did)
             if row and row.preview_text_path and Path(row.preview_text_path).exists():
                 result[did] = row.preview_text_path
         return result
 
-    async def build_doc_scope_tree(self, project_id: str) -> DocScopeTreeView:
-        bindings = await self._ds.list_bindings(require_current_user_id(), project_id)
+    async def build_doc_scope_tree(self, user_id: str, project_id: str) -> DocScopeTreeView:
+        bindings = await self._ds.list_bindings(user_id, project_id)
         if not bindings:
             return DocScopeTreeView(knowledge_bases=(), total_documents=0)
 
@@ -1255,12 +1258,12 @@ class DocumentLibraryService:
             if b.binding_kind == "kb":
                 kb_ids.add(b.target_id)
             elif b.binding_kind == "folder":
-                folder = await self._ds.get_folder(require_current_user_id(), b.target_id)
+                folder = await self._ds.get_folder(user_id, b.target_id)
                 if folder:
                     kb_ids.add(folder.kb_id)
                     bound_folder_ids.add(b.target_id)
             elif b.binding_kind == "document":
-                doc = await self._ds.get_by_id(require_current_user_id(), b.target_id)
+                doc = await self._ds.get_by_id(user_id, b.target_id)
                 if doc:
                     kb_ids.add(doc.kb_id)
                     bound_doc_ids.add(b.target_id)
@@ -1268,21 +1271,20 @@ class DocumentLibraryService:
         total = 0
         kb_nodes: list[DocScopeBoundNode] = []
         for kb_id in kb_ids:
-            kb = await self._ds.get_kb(require_current_user_id(), kb_id)
+            kb = await self._ds.get_kb(user_id, kb_id)
             if not kb:
                 continue
             is_kb_bound = any(b.binding_kind == "kb" and b.target_id == kb_id for b in bindings)
 
             folder_children = await self._build_scope_folder_children(
+                user_id,
                 kb_id,
                 parent_folder_id=None,
                 is_kb_bound=is_kb_bound,
                 bound_folder_ids=bound_folder_ids,
                 bound_doc_ids=bound_doc_ids,
             )
-            doc_count = len(
-                await self._ds.list_doc_ids_by_kb(require_current_user_id(), kb_id, status="ready")
-            )
+            doc_count = len(await self._ds.list_doc_ids_by_kb(user_id, kb_id, status="ready"))
             total += doc_count
             kb_nodes.append(
                 DocScopeBoundNode(
@@ -1303,6 +1305,7 @@ class DocumentLibraryService:
 
     async def _build_scope_folder_children(
         self,
+        user_id: str,
         kb_id: str,
         parent_folder_id: str | None,
         is_kb_bound: bool,
@@ -1310,30 +1313,25 @@ class DocumentLibraryService:
         bound_doc_ids: set[str],
     ) -> list[DocScopeBoundNode]:
         nodes: list[DocScopeBoundNode] = []
-        folders = await self._ds.list_folders(
-            require_current_user_id(), kb_id, parent_folder_id=parent_folder_id
-        )
+        folders = await self._ds.list_folders(user_id, kb_id, parent_folder_id=parent_folder_id)
         for f in folders:
             in_scope = is_kb_bound or f.id in bound_folder_ids
             if not in_scope:
                 has_bound_descendant = any(
                     did in bound_doc_ids
-                    for did in await self._ds.list_doc_ids_by_folder_subtree(
-                        require_current_user_id(), f.id
-                    )
+                    for did in await self._ds.list_doc_ids_by_folder_subtree(user_id, f.id)
                 )
                 if not has_bound_descendant:
                     continue
             sub_children = await self._build_scope_folder_children(
+                user_id,
                 kb_id,
                 parent_folder_id=f.id,
                 is_kb_bound=is_kb_bound or f.id in bound_folder_ids,
                 bound_folder_ids=bound_folder_ids,
                 bound_doc_ids=bound_doc_ids,
             )
-            doc_count = await self._ds.count_docs_in_folder_subtree(
-                require_current_user_id(), kb_id, f.id
-            )
+            doc_count = await self._ds.count_docs_in_folder_subtree(user_id, kb_id, f.id)
             nodes.append(
                 DocScopeBoundNode(
                     kind="folder",
@@ -1348,13 +1346,11 @@ class DocumentLibraryService:
 
         if parent_folder_id is not None:
             docs = await self._ds.list_documents(
-                require_current_user_id(), kb_id=kb_id, kb_folder_id=parent_folder_id
+                user_id, kb_id=kb_id, kb_folder_id=parent_folder_id
             )
         else:
-            all_docs = await self._ds.list_documents(require_current_user_id(), kb_id=kb_id)
-            all_folder_ids = {
-                f.id for f in await self._ds.list_all_folders(require_current_user_id(), kb_id)
-            }
+            all_docs = await self._ds.list_documents(user_id, kb_id=kb_id)
+            all_folder_ids = {f.id for f in await self._ds.list_all_folders(user_id, kb_id)}
             docs = [
                 d for d in all_docs if not d.kb_folder_id or d.kb_folder_id not in all_folder_ids
             ]
@@ -1380,8 +1376,8 @@ class DocumentLibraryService:
 
     # ── Health ────────────────────────────────────────────────────────
 
-    async def get_docs_health(self) -> dict[str, object]:
-        rows = await self._ds.list_documents(require_current_user_id())
+    async def get_docs_health(self, user_id: str) -> dict[str, object]:
+        rows = await self._ds.list_documents(user_id)
         total = len(rows)
         ready = sum(1 for r in rows if r.status == "ready")
         processing = sum(1 for r in rows if r.status in ("processing", "queued"))
@@ -1399,7 +1395,7 @@ class DocumentLibraryService:
     # ── Internal helpers ──────────────────────────────────────────────
 
     async def _minimize_bindings(
-        self, bindings: list[ProjectKbBindingRow]
+        self, user_id: str, bindings: list[ProjectKbBindingRow]
     ) -> list[ProjectKbBindingRow]:
         kb_bindings = [b for b in bindings if b.binding_kind == "kb"]
         kb_bound_ids = {b.target_id for b in kb_bindings}
@@ -1407,14 +1403,14 @@ class DocumentLibraryService:
         folder_bindings: list[ProjectKbBindingRow] = []
         for b in bindings:
             if b.binding_kind == "folder" and not await self._folder_covered_by_kb(
-                b.target_id, kb_bound_ids
+                user_id, b.target_id, kb_bound_ids
             ):
                 folder_bindings.append(b)
 
         covered_folder_ids: set[str] = set()
         for fb in folder_bindings:
             desc = await self._ds.list_descendant_folder_ids(
-                require_current_user_id(), await self._get_folder_kb_id(fb.target_id), fb.target_id
+                user_id, await self._get_folder_kb_id(user_id, fb.target_id), fb.target_id
             )
             covered_folder_ids.add(fb.target_id)
             covered_folder_ids.update(desc)
@@ -1423,53 +1419,49 @@ class DocumentLibraryService:
         for b in bindings:
             if (
                 b.binding_kind == "document"
-                and not await self._doc_covered_by_kb(b.target_id, kb_bound_ids)
-                and not await self._doc_covered_by_folder(b.target_id, covered_folder_ids)
+                and not await self._doc_covered_by_kb(user_id, b.target_id, kb_bound_ids)
+                and not await self._doc_covered_by_folder(user_id, b.target_id, covered_folder_ids)
             ):
                 doc_bindings.append(b)
 
         return kb_bindings + folder_bindings + doc_bindings
 
-    async def _folder_covered_by_kb(self, folder_id: str, kb_ids: set[str]) -> bool:
-        folder = await self._ds.get_folder(require_current_user_id(), folder_id)
+    async def _folder_covered_by_kb(self, user_id: str, folder_id: str, kb_ids: set[str]) -> bool:
+        folder = await self._ds.get_folder(user_id, folder_id)
         return folder is not None and folder.kb_id in kb_ids
 
-    async def _doc_covered_by_kb(self, doc_id: str, kb_ids: set[str]) -> bool:
-        doc = await self._ds.get_by_id(require_current_user_id(), doc_id)
+    async def _doc_covered_by_kb(self, user_id: str, doc_id: str, kb_ids: set[str]) -> bool:
+        doc = await self._ds.get_by_id(user_id, doc_id)
         return doc is not None and doc.kb_id in kb_ids
 
-    async def _doc_covered_by_folder(self, doc_id: str, folder_ids: set[str]) -> bool:
-        doc = await self._ds.get_by_id(require_current_user_id(), doc_id)
+    async def _doc_covered_by_folder(self, user_id: str, doc_id: str, folder_ids: set[str]) -> bool:
+        doc = await self._ds.get_by_id(user_id, doc_id)
         if not doc:
             return False
         return doc.kb_folder_id in folder_ids
 
-    async def _get_folder_kb_id(self, folder_id: str) -> str:
-        folder = await self._ds.get_folder(require_current_user_id(), folder_id)
+    async def _get_folder_kb_id(self, user_id: str, folder_id: str) -> str:
+        folder = await self._ds.get_folder(user_id, folder_id)
         return folder.kb_id if folder else ""
 
-    async def _update_folder_counts(self, kb_id: str) -> None:
-        folders = await self._ds.list_all_folders(require_current_user_id(), kb_id)
+    async def _update_folder_counts(self, user_id: str, kb_id: str) -> None:
+        folders = await self._ds.list_all_folders(user_id, kb_id)
         for folder in folders:
             direct = len(
-                await self._ds.list_documents(
-                    require_current_user_id(), kb_id=kb_id, kb_folder_id=folder.id
-                )
+                await self._ds.list_documents(user_id, kb_id=kb_id, kb_folder_id=folder.id)
             )
-            descendant = len(
-                await self._ds.list_doc_ids_by_folder_subtree(require_current_user_id(), folder.id)
-            )
+            descendant = len(await self._ds.list_doc_ids_by_folder_subtree(user_id, folder.id))
             if folder.document_count != direct or folder.descendant_document_count != descendant:
                 folder.document_count = direct
                 folder.descendant_document_count = descendant
                 await self._ds.update_folder(folder)
 
-    async def _kb_to_list_item(self, row: KnowledgeBaseRow) -> KbListItem:
-        doc_count = await self._ds.count_docs_by_kb(require_current_user_id(), row.id)
-        docs = await self._ds.list_documents(require_current_user_id(), kb_id=row.id)
-        has_processing = await self._ds.has_active_kb_task(
-            require_current_user_id(), row.id
-        ) or any(d.status in ("queued", "processing", "indexing") for d in docs)
+    async def _kb_to_list_item(self, user_id: str, row: KnowledgeBaseRow) -> KbListItem:
+        doc_count = await self._ds.count_docs_by_kb(user_id, row.id)
+        docs = await self._ds.list_documents(user_id, kb_id=row.id)
+        has_processing = await self._ds.has_active_kb_task(user_id, row.id) or any(
+            d.status in ("queued", "processing", "indexing") for d in docs
+        )
         has_missing = any(d.status == "missing" for d in docs)
         if has_processing:
             status = "has_processing"
@@ -1487,8 +1479,8 @@ class DocumentLibraryService:
             created_at=row.created_at,
         )
 
-    async def _kb_to_detail(self, row: KnowledgeBaseRow) -> KbDetail:
-        item = await self._kb_to_list_item(row)
+    async def _kb_to_detail(self, user_id: str, row: KnowledgeBaseRow) -> KbDetail:
+        item = await self._kb_to_list_item(user_id, row)
         return KbDetail(
             id=item.id,
             name=item.name,
@@ -1501,19 +1493,15 @@ class DocumentLibraryService:
             last_full_scan_at=row.last_full_scan_at,
         )
 
-    def _save_preview(self, doc_id: str, source_filename: str, markdown: str) -> str:
-        from valuz_agent.integrations.docs_embedded import sanitize_preview_filename
+    def _save_preview(self, doc_id: str, markdown: str, user_id: str) -> str:
+        from valuz_agent.ports.extensions import ext
 
-        preview_dir = getattr(self._docs_rt, "preview_dir", None)
-        if preview_dir is None:
-            preview_dir = Path.home() / ".valuz" / "app" / "docs" / "preview"
-        preview_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = sanitize_preview_filename(source_filename)
-        preview_path = preview_dir / safe_name
-        if preview_path.exists():
-            preview_path = preview_dir / f"{doc_id}_{safe_name}"
-        preview_path.write_text(markdown, encoding="utf-8")
-        return str(preview_path)
+        # Preview markdown is valuz-owned (the original KB file is not). Store it
+        # on the asset store under a deterministic per-doc key; the row keeps the
+        # key (relative), resolved back to a local path on read.
+        key = f"docs/preview/{doc_id}.md"
+        ext.asset_store.put(user_id, key, markdown.encode("utf-8"))
+        return key
 
     def _parser_parse_sync(self, file_path: str) -> ParseResult:
         # Fast path: any backend that exposes ``parse_sync`` is invoked

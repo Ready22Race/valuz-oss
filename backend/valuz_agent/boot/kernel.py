@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 from valuz_agent.infra.config import settings
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +47,8 @@ KERNEL_ALEMBIC_INI: Path = KERNEL_ALEMBIC_DIR / "alembic.ini"
 # The kernel chain stamps the default ``alembic_version`` table (the host chain
 # uses ``alembic_version_host`` in the same file so the two never collide).
 KERNEL_VERSION_TABLE = "alembic_version"
-# Tables the kernel owns and may drop on a stale-stamp rebuild — the current
-# trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
+# Kernel-owned tables the schema preflight inspects (never drops) — the
+# current trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
 # langgraph checkpoint tables in the same file are off-limits.
 _KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
 
@@ -78,7 +78,7 @@ def _known_kernel_revisions() -> set[str]:
 
     A DB stamped at any of these is on a valid upgrade path and is migrated
     forward by ``alembic upgrade head`` (data-preserving) — see
-    ``drop_stale_kernel_tables``.
+    ``ensure_kernel_schema_migratable``.
     """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
@@ -88,62 +88,89 @@ def _known_kernel_revisions() -> set[str]:
     return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
 
 
-def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
-    """Self-heal probe for a corrupt/foreign kernel stamp (incremental chain).
+async def _any_kernel_rows(engine: AsyncEngine, tables: list[str]) -> bool:
+    """True if any of ``tables`` holds at least one row. On a read error, assume
+    data IS present (conservative — never wipe what we can't inspect)."""
+    from sqlalchemy import text
 
-    Mirrors the host's ``boot.schema.drop_stale_host_tables``: the kernel
-    alembic chain is incremental, so a DB stamped at a *known* revision is
-    migrated forward by ``run_kernel_migrations`` (``alembic upgrade head``) —
-    data-preserving. Only an unknown/foreign stamp, or kernel tables present
-    with no stamp at all (a boot that died mid-initialization, or a half-created
-    trio), triggers a drop-and-rebuild so the upgrade re-initializes cleanly.
+    async with engine.connect() as conn:
+        for table in tables:
+            try:
+                result = await conn.execute(
+                    text(f'SELECT 1 FROM "{table}" LIMIT 1')  # noqa: S608
+                )
+                row = result.first()
+            except Exception:
+                return True
+            if row is not None:
+                return True
+    return False
 
-    Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES`` — the current trio
-    plus pre-cutover fossils) plus the kernel ``alembic_version`` stamp. The
-    host ``valuz_*`` tables and the DeepAgents langgraph checkpoint tables that
-    share the same SQLite file are never touched.
 
-    No-op on a fresh file / healthy DB. Runs synchronously off the event loop —
-    it owns no session and reads no business data, like the host probe.
+async def ensure_kernel_schema_migratable(engine: AsyncEngine | None = None) -> None:
+    """Preflight the kernel DB before ``alembic upgrade head`` — NEVER drops anything.
+
+    Mirrors the host's ``boot.schema.ensure_host_schema_migratable``: the kernel
+    alembic chain is incremental. Returns when the DB is safe to migrate (stamped
+    at a *known* revision, or no kernel tables yet — a fresh file). Otherwise
+    RAISES, deleting nothing:
+
+    - an unknown/foreign stamp WITH kernel data → the store was written by a
+      newer or divergent build (a downgrade); preserve it, run a build that knows
+      the revision.
+    - kernel tables present but unstamped / a foreign stamp with empty tables → a
+      half-initialised / foreign DB; asks the operator to remove the data dir and
+      restart. No committed data to lose, and still nothing is auto-deleted.
+
+    Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES``); host ``valuz_*``
+    tables and the langgraph checkpoint tables in the same file are never read or
+    touched. No drops, ever. Reflects through an ASYNC engine (so a Postgres
+    ``database_url`` resolves to asyncpg rather than choking a sync engine on an
+    async driver); the caller runs it off the event loop in a worker thread.
     """
-    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy import inspect, text
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     owns_engine = engine is None
     if engine is None:
-        engine = create_engine(settings.kernel_db_url)
+        engine = create_async_engine(settings.kernel_db_url_async)
     try:
-        inspector = inspect(engine)
-        existing = set(inspector.get_table_names())
+        async with engine.connect() as conn:
+            existing = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
 
-        stamp: str | None = None
-        if KERNEL_VERSION_TABLE in existing:
-            with engine.connect() as conn:
-                row = conn.execute(
+            stamp: str | None = None
+            if KERNEL_VERSION_TABLE in existing:
+                result = await conn.execute(
                     text(f"SELECT version_num FROM {KERNEL_VERSION_TABLE}")  # noqa: S608
-                ).fetchone()
+                )
+                row = result.fetchone()
                 stamp = row[0] if row else None
 
         if stamp in _known_kernel_revisions():
             return  # known revision — `alembic upgrade head` migrates it forward
 
-        stale = [t for t in _KERNEL_OWNED_TABLES if t in existing]
-        if not stale:
-            return  # fresh install / no kernel tables — nothing to reset
-        if KERNEL_VERSION_TABLE in existing:
-            stale.append(KERNEL_VERSION_TABLE)
+        owned = [t for t in _KERNEL_OWNED_TABLES if t in existing]
+        if not owned:
+            return  # fresh install / no kernel tables — alembic initialises it
 
-        logger.warning(
-            "kernel schema stamp=%s is not a known revision — "
-            "dropping %d kernel table(s) for a clean re-initialization",
-            stamp,
-            len(stale),
+        if await _any_kernel_rows(engine, owned):
+            raise RuntimeError(
+                f"kernel schema stamp={stamp!r} is not a known revision for this "
+                f"build, but {len(owned)} kernel table(s) hold data. Refusing to "
+                f"start — nothing is deleted. The kernel store was written by a "
+                f"newer or divergent build (or lost its migration stamp); run a "
+                f"build whose migrations include {stamp!r} (usually: update to the latest)."
+            )
+
+        raise RuntimeError(
+            f"kernel schema is in an unrecognized state (stamp={stamp!r}) — kernel "
+            f"table(s) present but no recoverable data (a half-initialised or "
+            f"foreign DB). Nothing was deleted; remove the data dir and restart to "
+            f"reinitialise cleanly."
         )
-        with engine.begin() as conn:
-            for table in stale:
-                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
     finally:
         if owns_engine:
-            engine.dispose()
+            await engine.dispose()
 
 
 def _do_alembic_upgrade() -> None:
@@ -170,32 +197,33 @@ def run_kernel_migrations() -> None:
 
     Two steps under one entry point:
 
-    1. ``drop_stale_kernel_tables`` — data-preserving self-heal probe. Trusts
+    1. ``ensure_kernel_schema_migratable`` — preflight that NEVER drops. Trusts
        any DB stamped at a known kernel revision (the upgrade migrates it
-       forward); only an unknown/foreign/unstamped kernel schema is dropped so
-       the upgrade can rebuild it. No-op on a healthy DB.
+       forward); an unknown/foreign/unstamped kernel schema makes boot fail loud
+       (data preserved), never wiped. No-op on a healthy / fresh DB.
     2. The kernel's own alembic ``upgrade head``. Writes its revision into the
        default ``alembic_version`` table; the host's chain uses a separate
        ``alembic_version_host`` row in the same file so the two don't collide.
        Schema changes ship as new, reversible revisions chained onto the head —
        existing ``sessions`` / ``messages`` / ``events`` data migrates in place.
 
-    Always runs in a dedicated thread because the kernel's
-    ``alembic/env.py`` calls ``asyncio.run()`` to drive its async
-    migrations, and that fails if the calling thread already has a
-    running event loop — which is the case for FastAPI/Starlette
-    ``on_event("startup")`` and any test using ``TestClient``.
-    Spawning a thread keeps the kernel migration code unchanged and
-    the host code obvious at the call site.
+    Both steps run in a dedicated thread: the preflight reflects through an
+    async engine (``asyncio.run``) and the kernel's ``alembic/env.py`` also
+    calls ``asyncio.run()`` to drive its async migrations — either nested in the
+    already-running FastAPI/Starlette startup loop would raise. Running them off
+    the loop in a worker thread keeps the kernel migration code unchanged and the
+    host code obvious at the call site.
     """
+    import asyncio
     import threading
-
-    drop_stale_kernel_tables()
 
     error: list[BaseException] = []
 
     def _runner() -> None:
         try:
+            # Preflight (async reflection) then the kernel alembic upgrade, both
+            # off the event loop in this worker thread (see the docstring).
+            asyncio.run(ensure_kernel_schema_migratable())
             _do_alembic_upgrade()
         except BaseException as exc:  # noqa: BLE001 — re-raised on the main thread
             error.append(exc)

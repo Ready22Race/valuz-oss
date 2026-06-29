@@ -5,20 +5,21 @@ import { Slot } from "radix-ui"
 import { cn } from "@valuz/ui/lib/utils"
 
 const badgeVariants = cva(
-  "inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-full border border-transparent px-2 py-0.5 text-xs font-medium whitespace-nowrap transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&>svg]:pointer-events-none [&>svg]:size-3",
+  "inline-flex w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-sm border border-transparent px-2 py-0.5 text-2xs font-medium whitespace-nowrap transition-[color,box-shadow] focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background aria-invalid:border-destructive aria-invalid:ring-destructive/20 [&>svg]:pointer-events-none [&>svg]:size-3",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground [a&]:hover:bg-primary/90",
+        default:
+          "bg-primary text-primary-foreground [a&]:hover:bg-primary-hover",
         secondary:
-          "bg-secondary text-secondary-foreground [a&]:hover:bg-secondary/90",
+          "border-border bg-transparent text-ink-body [a&]:hover:bg-surface-2 [a&]:hover:text-ink-heading",
         destructive:
-          "bg-destructive text-white focus-visible:ring-destructive/20 dark:bg-destructive/60 dark:focus-visible:ring-destructive/40 [a&]:hover:bg-destructive/90",
+          "bg-destructive text-white focus-visible:ring-destructive [a&]:hover:bg-error-hover",
         outline:
-          "border-border text-foreground [a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
-        ghost: "[a&]:hover:bg-accent [a&]:hover:text-accent-foreground",
+          "border-border text-ink-body [a&]:hover:bg-surface-2 [a&]:hover:text-ink-heading",
+        ghost: "[a&]:hover:bg-surface-2 [a&]:hover:text-ink-heading",
         link: "text-primary underline-offset-4 [a&]:hover:underline",
-        brand: "bg-brand-light text-brand [a&]:hover:bg-brand-light/80",
+        brand: "bg-info-light text-info-text [a&]:hover:bg-brand-100",
         success:
           "bg-success-light text-success-text border-transparent",
         warning: "bg-warning-light text-warning-text border-transparent",

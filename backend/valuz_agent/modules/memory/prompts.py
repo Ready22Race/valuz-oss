@@ -42,6 +42,33 @@ TOOL_DESCRIPTION = (
 )
 
 
+def build_user_directives_block(custom_instructions: str | None) -> str:
+    """Render the user's global custom instructions as a trusted directives block
+    for the reviewer (memory-system-design §7.4). Returns '' when empty.
+
+    These come from the user's Settings (trusted input, unlike the transcript),
+    so the reviewer MAY follow them as instructions — and they take PRECEDENCE
+    over the default soft save/skip heuristics, which is what lets a user opt to
+    remember things the defaults would skip (e.g. a session's key conclusion the
+    rules treat as 're-discoverable'). They never override the hard rules: secrets
+    stay redacted, knowledge-base content is not duplicated, and the JSON output
+    contract + available targets are fixed.
+    """
+    text = (custom_instructions or "").strip()
+    if not text:
+        return ""
+    return (
+        '<user_directives note="Trusted preferences set by the user in Settings. '
+        "Follow them IN ADDITION to the rules above, and let them take PRECEDENCE "
+        "over the default save/skip heuristics — if they ask you to remember a kind "
+        "of thing, save it even if a rule above would skip it. They do NOT override: "
+        "never store secrets/credentials, never duplicate knowledge-base content, and "
+        'always keep the JSON output contract and the targets below.">\n'
+        + text
+        + "\n</user_directives>\n\n"
+    )
+
+
 def render_current_memory(
     current: dict[str, list[str]], usage: dict[str, str] | None = None
 ) -> str:
@@ -68,6 +95,7 @@ def build_review_prompt(
     current: dict[str, list[str]],
     project_context: str | None = None,
     usage: dict[str, str] | None = None,
+    custom_instructions: str | None = None,
 ) -> str:
     """Build the background reviewer prompt. ``current`` keys are the targets the
     reviewer may write (``project`` is included only when a real project is bound).
@@ -94,6 +122,7 @@ def build_review_prompt(
         + SAVE_SKIP_RULES
         + "\n</rules>\n\n"
         + project_block
+        + build_user_directives_block(custom_instructions)
         + f"Writable targets: {targets}.\n\n"
         "Current memory — each target shows its hard char budget. Consolidate against "
         "this: add only genuinely new facts, never duplicate what is already present, "
@@ -118,6 +147,7 @@ def build_task_review_prompt(
     current: dict[str, list[str]],
     project_context: str | None = None,
     usage: dict[str, str] | None = None,
+    custom_instructions: str | None = None,
 ) -> str:
     """Build the review prompt fired when a multi-agent TASK finishes (design §7.1).
 
@@ -147,6 +177,7 @@ def build_task_review_prompt(
         + SAVE_SKIP_RULES
         + "\n</rules>\n\n"
         + project_block
+        + build_user_directives_block(custom_instructions)
         + f"Writable targets: {targets}.\n\n"
         "Current memory — each target shows its hard char budget. Consolidate against "
         "this: add only genuinely new facts, never duplicate, and when a target is near "

@@ -109,27 +109,36 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -
     files = args.get("files_touched") or []
     file_count = len(files) if isinstance(files, list) else 0
 
-    # The kernel ExecContext exposes the session cwd as ``workspace``
-    # (sessions are self-sufficient — there is no kernel project record
-    # anymore). Reading the retired ``project`` attribute here raised
-    # AttributeError on every call, so the agent never learned the real
-    # staging path and improvised one — breaking the whole save flow.
-    project_root = (getattr(context, "workspace", "") or "").strip()
-    if not project_root:
-        # Defensive: kernel should always set the workspace, but if it
-        # doesn't, surface a clear error rather than silently passing.
+    # Resolve the staging directory through the host's single authoritative
+    # resolver — the SAME one ``scan_staging`` and the confirm endpoint use —
+    # keyed off the session id (which is always set on the toolkit MCP path;
+    # ``ExecContext.workspace`` is not). ``staging_dir_for_session`` maps the
+    # session to ``{project_cwd}/.skill-staging/`` for project/chat sessions
+    # (including the temporary scratch cwd a skill-creator session runs in),
+    # with a legacy session-keyed fallback. Reconstructing the path from
+    # ``context.workspace`` instead left submit-validation blind whenever the
+    # workspace wasn't populated and could diverge from where confirm later
+    # looks — both failure modes this avoids.
+    session_id = (getattr(context, "session_id", "") or "").strip()
+    if not session_id:
+        # Defensive: the MCP wrapper always carries the session id on a
+        # header, but if it's missing we can't resolve staging at all.
         return ToolResult(
             content=(
-                "Error: workspace root is empty in ExecContext — cannot "
-                "validate staging location. Ask the user to retry the "
+                "Error: session id is empty in ExecContext — cannot "
+                "resolve the staging location. Ask the user to retry the "
                 "session."
             ),
             is_error=True,
         )
 
-    from pathlib import Path
+    from valuz_agent.infra.auth_context import require_current_user_id
+    from valuz_agent.modules.skills.staging import staging_dir_for_session
 
-    expected_dir = Path(project_root) / ".skill-staging" / str(slug)
+    user_id = require_current_user_id()
+    staging_base = await staging_dir_for_session(user_id, session_id)
+    expected_dir = staging_base / str(slug)
+    project_root = str(staging_base.parent)
     skill_md = expected_dir / "SKILL.md"
     if not skill_md.is_file():
         # Most common cause: the agent wrote to ``/tmp/{slug}/`` or some

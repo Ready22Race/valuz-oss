@@ -163,6 +163,7 @@ class MemoryExtractor:
         project_id: str | None = None,
         project_context: str | None = None,
         task_digest: str | None = None,
+        custom_instructions: str | None = None,
     ) -> dict[str, Any]:
         """Review ``transcript`` and write any durable memories. Returns a small
         report. Caller runs this in the background and swallows failures.
@@ -181,6 +182,10 @@ class MemoryExtractor:
         # Surface each target's char budget so the reviewer consolidates before a
         # target overflows (over-cap writes are rejected, not auto-grown).
         usage = {t: MemoryStore.usage_for(v, t) for t, v in current.items()}  # type: ignore[arg-type]
+        # ``custom_instructions`` is trusted user config (from Settings), not
+        # untrusted transcript text, so it is forwarded verbatim — not run
+        # through ``redact_secrets`` (that would mangle legitimate guidance, and
+        # op content is redacted again at write time regardless).
         if task_digest is not None:
             prompt = build_task_review_prompt(
                 task_digest=redact_secrets(task_digest),
@@ -188,6 +193,7 @@ class MemoryExtractor:
                 current=current,
                 project_context=project_context,
                 usage=usage,
+                custom_instructions=custom_instructions,
             )
         else:
             prompt = build_review_prompt(
@@ -195,6 +201,7 @@ class MemoryExtractor:
                 current=current,
                 project_context=project_context,
                 usage=usage,
+                custom_instructions=custom_instructions,
             )
 
         raw = await self._complete(prompt)

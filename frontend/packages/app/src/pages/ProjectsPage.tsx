@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Input,
   Textarea,
@@ -12,18 +12,28 @@ import {
   EmptyState,
   FormDialog,
   PageHeader,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
 } from "@valuz/ui";
 import { toast } from "sonner";
-import { FolderKanban, Plus } from "lucide-react";
-import { projectsApi, type ProjectListItem } from "@valuz/core";
+import { FolderKanban, MoreVertical, Plus, Upload } from "lucide-react";
+import {
+  projectsApi,
+  useProjectStore,
+  useTranslation,
+  type ProjectListItem,
+} from "@valuz/core";
 import { usePlatform } from "@valuz/app/platform";
-import { useTranslation } from "@valuz/core";
 import { useProjectOutlet } from "@valuz/app/layout";
 import { useAgentDeployPicker } from "../components/agent-deploy-picker";
 import { AgentCheckboxList } from "../components/AgentDeployField";
+import { ImportProjectDialog } from "../components/ImportProjectDialog";
 
 export const ProjectsPage = () => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { selectDirectory } = usePlatform();
   const { setHeader, setHeaderClassName } = useProjectOutlet();
@@ -38,6 +48,11 @@ export const ProjectsPage = () => {
     null,
   );
   const [busy, setBusy] = useState(false);
+  // Project import — hidden file input + ImportProjectDialog. Mirrors the
+  // sidebar entry; this page owns its own so it works without the sidebar.
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
   // Initial members for the create dialog (shared with the sidebar entry).
   const memberPicker = useAgentDeployPicker();
 
@@ -71,14 +86,27 @@ export const ProjectsPage = () => {
         title={t("sidebar.projects" as Parameters<typeof t>[0])}
         description={t("project.createDesc" as Parameters<typeof t>[0])}
         action={
-          <Button
-            variant="default"
-            size="sm"
-            onClick={() => setCreateOpen(true)}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            {t("project.create" as Parameters<typeof t>[0])}
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="default" size="sm">
+                <Plus className="h-3.5 w-3.5" />
+                {t("project.create" as Parameters<typeof t>[0])}
+                <MoreVertical className="ml-0.5 h-3 w-3 opacity-70" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="min-w-[180px]">
+              <DropdownMenuItem onSelect={() => setCreateOpen(true)}>
+                <Plus className="h-4 w-4" />
+                {t("project.create" as Parameters<typeof t>[0])}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onSelect={() => importInputRef.current?.click()}
+              >
+                <Upload className="h-4 w-4" />
+                {t("project.import" as Parameters<typeof t>[0])}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         }
       />
     ),
@@ -276,6 +304,35 @@ export const ProjectsPage = () => {
         }}
         itemName={deleteTarget?.name}
         onConfirm={() => void handleDelete()}
+      />
+
+      {/* Hidden import input + dialog — mirrors the sidebar's import entry. */}
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".valuzpack,.zip"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0] ?? null;
+          e.target.value = "";
+          if (f) {
+            setImportFile(f);
+            setImportOpen(true);
+          }
+        }}
+      />
+      <ImportProjectDialog
+        file={importFile}
+        open={importOpen}
+        onOpenChange={(open) => {
+          setImportOpen(open);
+          if (!open) setImportFile(null);
+        }}
+        onImported={(project) => {
+          useProjectStore.getState().upsertProject(project);
+          void fetchProjects();
+          navigate(`/projects/${project.id}`);
+        }}
       />
     </div>
   );

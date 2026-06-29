@@ -33,9 +33,11 @@ def sessionmaker_(tmp_path):
     return async_sessionmaker(bind=async_engine, expire_on_commit=False)
 
 
-async def _create_kb(sm, owner: str, name: str, root: str) -> str:
+async def _create_kb(sm, owner: str, name: str, root: str, auto: bool = False) -> str:
     async with sm() as db:
-        row = KnowledgeBaseRow(user_id="local-test-owner", name=name, root_path=root)
+        row = KnowledgeBaseRow(
+            user_id="local-test-owner", name=name, root_path=root, auto_discover=auto
+        )
         await DocumentDatastore(db).create_kb(owner, row)
         return row.id
 
@@ -68,3 +70,17 @@ class TestDocsOwnerScoping:
             await DocumentDatastore(db).delete_kb("user-B", kid)
         async with sessionmaker_() as db:
             assert await DocumentDatastore(db).get_kb("user-A", kid) is not None
+
+    async def test_list_auto_discover_kbs_spans_owners(self, sessionmaker_) -> None:
+        # The ONE deliberate cross-owner system read (for the background scan):
+        # returns every owner's auto-discover KB carrying its owner; the
+        # scheduler then rescans each AS that owner. Excludes non-auto KBs.
+        await _create_kb(sessionmaker_, "user-A", "A-auto", "/tmp/aa", auto=True)
+        await _create_kb(sessionmaker_, "user-A", "A-manual", "/tmp/am", auto=False)
+        await _create_kb(sessionmaker_, "user-B", "B-auto", "/tmp/ba", auto=True)
+        async with sessionmaker_() as db:
+            rows = await DocumentDatastore(db).list_auto_discover_kbs()
+        assert {(r.name, r.user_id) for r in rows} == {
+            ("A-auto", "user-A"),
+            ("B-auto", "user-B"),
+        }

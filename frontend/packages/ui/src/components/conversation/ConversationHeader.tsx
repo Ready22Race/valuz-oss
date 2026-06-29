@@ -140,12 +140,12 @@ export const ConversationHeader = ({
       {/* Actions */}
       <div className="flex items-center gap-1">
         {onCopyLink ? (
-          <Button variant="ghost" size="icon-sm" onClick={onCopyLink}>
+          <Button variant="ghost" size="icon" onClick={onCopyLink}>
             <Link2 className="h-4 w-4" />
           </Button>
         ) : null}
         {onRefresh ? (
-          <Button variant="ghost" size="icon-sm" onClick={onRefresh}>
+          <Button variant="ghost" size="icon" onClick={onRefresh}>
             <RotateCw className="h-4 w-4" />
           </Button>
         ) : null}

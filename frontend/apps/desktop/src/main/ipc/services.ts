@@ -25,8 +25,8 @@ export const createDesktopRuntime = (
     emitEvent('service-status-changed', snapshot)
     return snapshot
   },
-  stopAllServices() {
-    const snapshot = manager.stopAllServices()
+  async stopAllServices() {
+    const snapshot = await manager.stopAllServices()
     emitEvent('service-status-changed', snapshot)
     return snapshot
   },

@@ -46,7 +46,7 @@ export const DeleteConfirmDialog: FC<DeleteConfirmDialogProps> = ({
       <DialogContent onOpenAutoFocus={(e) => e.preventDefault()}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <AlertTriangle className="h-5 w-5 text-[#f54b4b]" />
+            <AlertTriangle className="h-5 w-5 text-error-text" />
             {title ??
               (itemName
                 ? t("ui.deleteConfirm.titleWithName", { name: itemName })
@@ -68,7 +68,6 @@ export const DeleteConfirmDialog: FC<DeleteConfirmDialogProps> = ({
             variant="destructive"
             onClick={onConfirm}
             disabled={loading}
-            className="bg-[#f54b4b] hover:bg-[#f54b4b]/90 focus-visible:ring-[#f54b4b]/20"
           >
             {loading ? t("ui.deleteConfirm.loading") : _confirmLabel}
           </Button>

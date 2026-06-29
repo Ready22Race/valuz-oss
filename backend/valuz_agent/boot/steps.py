@@ -42,7 +42,7 @@ def ensure_local_identity() -> None:
     fallback: a context that was never seeded raises ``LookupError`` on read,
     so an unattributed insert fails loudly instead of being silently owned by
     the install id. OSS derives the id from the device fingerprint and persists
-    it once to ``~/.valuz/app/installation.json``; the commercial overlay
+    it once to ``~/.valuz-oss/installation.json``; the commercial overlay
     overrides per-request identity by swapping ``AuthMiddleware`` (overriding
     ``resolve_user_id``) via ``ext.auth_middleware``.
     """
@@ -83,6 +83,25 @@ def acquire_single_writer_lock() -> None:
         _sys.exit(2)
 
 
+def migrate_data_dir() -> None:
+    """One-time data-dir cutover: carry a pre-rename ``~/.valuz/app`` install
+    into the new flat ``~/.valuz-oss`` root (copy → rewrite DB path prefixes →
+    repoint skill symlinks → verify).
+
+    Runs under the single-writer lock and BEFORE ``ensure_local_identity`` and
+    before any engine opens the SQLite files. The ordering vs. identity is
+    load-bearing: the install owner id is read from ``installation.json``, so the
+    migrated copy of that file must be in place first — otherwise the boot
+    context caches a freshly-derived id that mismatches the migrated rows' owner,
+    which breaks the owner-scoped official-skills reindex (a global skill ``id``
+    INSERTed under a new owner collides with the migrated row). No-op once
+    migrated / on a fresh install.
+    """
+    from valuz_agent.boot.migrate_data_dir import migrate_legacy_data_dir
+
+    migrate_legacy_data_dir()
+
+
 async def bootstrap_schema() -> None:
     """Host schema bootstrap — run alembic on both the kernel and host
     chains, then seed.
@@ -108,6 +127,9 @@ async def bootstrap_schema() -> None:
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.seeds import seed_all
 
+    # NB: the ``~/.valuz/app`` → ``~/.valuz-oss`` data-dir cutover runs earlier in
+    # the lifespan (``migrate_data_dir``), before identity resolution — see that
+    # step's docstring for why the ordering is load-bearing.
     settings.data_dir.mkdir(parents=True, exist_ok=True)
 
     # One-shot courtesy rename from the workspace→project naming cutover:
@@ -203,10 +225,13 @@ async def init_kernel(app: FastAPI) -> None:
     # submit_skill; ``lead`` (task leads) = dispatch set + memory +
     # submit_skill. The lead gate stays enforced inside each handler.
     from valuz_agent.integrations.toolkit_mcp_server import install_toolkit_toolsets
+    from valuz_agent.integrations.tools_agent_proposal import build_agent_proposal_tool_defs
     from valuz_agent.integrations.tools_skill_creator import build_submit_skill_tool_defs
     from valuz_agent.modules.browser import service as browser_service
     from valuz_agent.modules.browser.tools import build_browser_tool_defs
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
+    from valuz_agent.modules.projects.tools import build_project_instructions_tool_defs
+    from valuz_agent.modules.sessions.artifacts_tool import build_deliver_artifacts_tool_defs
     from valuz_agent.modules.tasks.dispatch_mcp import build_task_tool_defs
     from valuz_agent.modules.tasks.orchestrator import task_orchestrator
     from valuz_agent.modules.tasks.tools.declarations import (
@@ -218,7 +243,13 @@ async def init_kernel(app: FastAPI) -> None:
     by_name = {t.name: t for t in task_defs}
     orchestration_names = [d.name for d in ORCHESTRATION_TOOL_DECLARATIONS]
     dispatch_names = [d.name for d in DISPATCH_TOOL_DECLARATIONS]
-    shared = build_memory_tool_defs() + build_submit_skill_tool_defs()
+    shared = (
+        build_memory_tool_defs()
+        + build_project_instructions_tool_defs()
+        + build_submit_skill_tool_defs()
+        + build_agent_proposal_tool_defs()
+        + build_deliver_artifacts_tool_defs()
+    )
     # browser_start/browser_stop only work when the engine (Node +
     # chrome-devtools-mcp) is available; don't expose dead tools otherwise
     # (e.g. headless/TUI without Node). See docs/design/browser-feature.md §8.
@@ -309,6 +340,19 @@ async def recover_stranded_sessions() -> None:
     )
 
     await recover_running_sessions()
+
+
+async def resume_queued_input_drains() -> None:
+    """Resume persisted session input-queue drains (session-input-queue §9 ②).
+
+    Runs after ``recover_stranded_sessions`` so it sees the post-① state (any
+    mid-turn session already terminated). Valid in both kernel modes — the queue
+    is host-owned and the drain drives turns through the kernel client either
+    way. Best-effort.
+    """
+    from valuz_agent.modules.sessions.recovery import resume_queued_drains
+
+    await resume_queued_drains()
 
 
 async def seal_orphan_pendings() -> None:
@@ -459,6 +503,19 @@ def warm_parse_pool() -> None:
         pass
 
 
+def warm_token_estimator() -> None:
+    """Pre-load the tiktoken vocab used by the goal-mode length fence in a
+    background thread. The first ``get_encoding`` can fetch + parse the vocab
+    (seconds); warming here keeps that off the event loop so the first task's
+    spill check is instant. Best-effort, never fatal."""
+    from valuz_agent.adapters.agent_resolver import prewarm_token_estimator
+
+    try:
+        prewarm_token_estimator()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def shutdown_parse_pool() -> None:
     from valuz_agent.infra import parse_pool
 
@@ -466,6 +523,14 @@ def shutdown_parse_pool() -> None:
 
 
 async def start_skills(app: FastAPI) -> None:
+    from valuz_agent.infra.config import settings
+
+    if not settings.skill_local_index_enabled:
+        logger.info(
+            "local skill indexing disabled (VALUZ_SKILL_LOCAL_INDEX_ENABLED=false)"
+        )
+        return
+
     # Sync bundled official skills (e.g. skill-creator, valuz-handbook) into
     # the user's official-skills directory before scanning, so they appear
     # on first run. (Previously mis-placed in stop_polling_scheduler's
@@ -481,7 +546,11 @@ async def start_skills(app: FastAPI) -> None:
         pass
 
     from valuz_agent.api.deps import get_skill_service
+    from valuz_agent.infra.auth_context import require_current_user_id
 
+    # Boot context: ``ensure_local_identity`` has seeded the owner for the
+    # startup install id — resolve it once and thread it into the scans.
+    owner = require_current_user_id()
     skill_gen = get_skill_service()
     skill_svc = await skill_gen.__anext__()
     try:
@@ -492,12 +561,12 @@ async def start_skills(app: FastAPI) -> None:
         # references them unable to resolve the skill. This targeted upsert
         # guarantees they are in valuz_skill_index every boot.
         try:
-            indexed = await skill_svc.index_official_skills()
+            indexed = await skill_svc.index_official_skills(owner)
             logger.info("index_official_skills: indexed %d official skill(s)", indexed)
         except Exception:
             logger.exception("index_official_skills failed")
         try:
-            await skill_svc.startup_scan()
+            await skill_svc.startup_scan(owner)
         except Exception:
             # Best-effort, but no longer silent: a failed scan that leaves the
             # index stale was exactly the bug this step hardens against.

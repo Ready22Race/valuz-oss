@@ -30,7 +30,7 @@ const STATUS_COLOR = {
   uploading: "text-brand",
   processing: "text-brand",
   ready: "text-success",
-  failed: "text-red-500",
+  failed: "text-error-text",
 };
 
 const STATUS_ANIMATE = {
@@ -56,14 +56,14 @@ export const FileUploadMessage = ({
         <div
           className={cn(
             "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg",
-            status === "failed" ? "bg-red-100" : "bg-brand-light",
+            status === "failed" ? "bg-error-light" : "bg-info-light",
           )}
         >
           <FileIcon
             data-testid="conversation-file-type-icon"
             className={cn(
               "h-4 w-4",
-              status === "failed" ? "text-red-500" : "text-brand",
+              status === "failed" ? "text-error-text" : "text-info-text",
             )}
           />
         </div>

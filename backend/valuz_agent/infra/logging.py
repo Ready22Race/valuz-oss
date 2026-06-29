@@ -8,7 +8,7 @@ Two handlers are installed on the root logger:
    don't change this so existing tooling keeps working.
 
 2. **Rotating JSON file handler** — writes structured JSON-line logs
-   to ``settings.log_file`` (``~/.valuz/app/logs/backend.log`` by
+   to ``settings.log_file`` (``~/.valuz-oss/logs/backend.log`` by
    default). Rotates at 10 MB, keeps 5 backups. The desktop ``服务``
    panel reads these lines for KV-aware rendering, and "open log file
    in editor" jumps to the same file.

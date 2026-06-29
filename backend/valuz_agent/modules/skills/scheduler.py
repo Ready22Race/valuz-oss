@@ -6,8 +6,9 @@ interval, so skills added out-of-band (a team import, a dropped folder) become
 resolvable without a restart. Shares ``SkillLibraryService.startup_scan`` with
 the boot scan and the manual ``POST /v1/skills/scan`` endpoint.
 
-Interval is ``VALUZ_SKILL_SCAN_INTERVAL_SEC`` (default 30 min); ``<= 0`` disables
-the scheduler entirely.
+Interval is ``VALUZ_SKILL_SCAN_INTERVAL_SEC`` (default 5 min, matching the KB
+auto-discovery scheduler's ``RESCAN_INTERVAL_SEC``); ``<= 0`` disables the
+scheduler entirely.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_INTERVAL_SEC = 30 * 60  # 30 minutes
+_DEFAULT_INTERVAL_SEC = 5 * 60  # 5 minutes (matches docs KB RESCAN_INTERVAL_SEC)
 
 
 def _interval_sec() -> int:
@@ -88,22 +89,19 @@ def run_skill_scan() -> None:
 
 
 async def _arun_skill_scan() -> None:
-    # Seed the owner ContextVar — this daemon thread's loop does not inherit the
-    # main thread's boot-seeded ``valuz_current_user_id`` (see auth_context
-    # contract). ``resolve_local_user_id`` is process-cached, so it matches.
-    from valuz_agent.infra.auth_context import set_current_user_id
-    from valuz_agent.infra.local_identity import resolve_local_user_id
-
-    set_current_user_id(resolve_local_user_id())
-
+    # The skills auto-scan daemon runs as the local install owner.
+    # ``startup_scan`` is fully owner-explicit (threads ``user_id`` down), so we
+    # pass the owner directly instead of seeding the ambient ContextVar.
     from valuz_agent.api.deps import get_skill_service
     from valuz_agent.infra.eventbus import event_bus
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.modules.skills.events import SKILL_CHANGED
 
+    owner = resolve_local_user_id()
     gen = get_skill_service()
     svc = await gen.__anext__()
     try:
-        indexed = await svc.startup_scan()
+        indexed = await svc.startup_scan(owner)
         logger.info("skill auto-scan: indexed %d skill(s)", indexed)
         # Refresh any open catalog (the same event the manual endpoint emits).
         event_bus.publish(SKILL_CHANGED, skill_id="*", reason="auto-scan")
@@ -118,8 +116,15 @@ _scheduler: SkillAutoScanScheduler | None = None
 
 
 def start_skill_auto_scan() -> None:
+    from valuz_agent.infra.config import settings
+
     global _scheduler
     if _scheduler:
+        return
+    if not settings.skill_local_index_enabled:
+        logger.info(
+            "skill auto-scan disabled (VALUZ_SKILL_LOCAL_INDEX_ENABLED=false)"
+        )
         return
     interval = _interval_sec()
     if interval <= 0:

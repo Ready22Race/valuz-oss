@@ -438,10 +438,25 @@ export interface ComposerProps {
   /** Called when the user clicks the stop button (only while sending). */
   onStop?: () => void;
   /**
-   * Show the inline skill (``/``) picker button. Hidden in project composers
-   * where skills are configured per-agent, not picked inline. Default true.
+   * When true, a small send button is shown alongside Stop while a turn is in
+   * flight so the user can submit a follow-up that gets queued (the page routes
+   * ``onSend`` to its enqueue path). Enter also works. Off for non-chat uses.
+   */
+  queueWhileSending?: boolean;
+  /**
+   * Show the toolbar "add skill" affordance (the ``+`` menu's Skills submenu).
+   * Hidden in project composers where skills are configured per-agent, not
+   * attached inline. Default true.
    */
   showSkillButton?: boolean;
+  /**
+   * Enable the inline ``/`` skill picker (read-only query over ``skills``).
+   * Decoupled from ``showSkillButton`` so a project conversation can let the
+   * user invoke the *selected agent's* bound skills with ``/`` without exposing
+   * a separate "add skill" button. Defaults to ``showSkillButton`` when unset,
+   * preserving the prior coupled behavior for existing callers.
+   */
+  showSkillSlash?: boolean;
   /** Optional class override for the outer composer wrapper. */
   wrapperClassName?: string;
 }
@@ -529,9 +544,15 @@ export const Composer = ({
   autoFocus = false,
   sending = false,
   onStop,
+  queueWhileSending = false,
   showSkillButton = true,
+  showSkillSlash,
   wrapperClassName,
 }: ComposerProps) => {
+  // The ``/`` inline picker defaults to the toolbar button's visibility so
+  // existing callers keep their behavior; a caller can enable it independently
+  // (e.g. project conversations exposing the bound agent's skills via ``/``).
+  const slashEnabled = showSkillSlash ?? showSkillButton;
   // Toolbar dropdowns flip direction based on where the composer sits in the
   // viewport: top half → open downward (room below), bottom half → open
   // upward. Recomputed on resize/scroll via rAF; ``setMenuDir`` bails when the
@@ -691,7 +712,7 @@ export const Composer = ({
   // visibility and the Enter-capture below, using the same predicate the menu
   // renders with so the two can't drift apart.
   const skillMatches =
-    showSkillButton && skillSearch.active
+    slashEnabled && skillSearch.active
       ? filterSkillItems(skills, skillSearch.query)
       : [];
   const skillMenuOpen = skillMatches.length > 0;
@@ -1493,6 +1514,10 @@ export const Composer = ({
                 query={skillSearch.query}
                 onSelect={handleSkillSelect}
                 onClose={() => setSkillSearch({ active: false, query: "" })}
+                // Open the menu away from the nearer viewport edge — downward
+                // for a top-anchored composer (project detail page), upward for
+                // a bottom-anchored one — matching the toolbar dropdowns.
+                direction={menuDir}
               />
             )}
           </div>
@@ -2041,7 +2066,11 @@ export const Composer = ({
                   // falls back to a placeholder). Default/agentless uses the
                   // composer's resolved model.
                   const triggerModelLabel =
-                    selectedAgent?.modelLabel ?? selectedModelLabel;
+                    selectedAgent?.modelLabel ??
+                    // Hide the "Model" placeholder when no model channel is
+                    // configured — ``selectedModelLabel`` falls back to that
+                    // literal only when ``providers`` is empty.
+                    (providers.length > 0 ? selectedModelLabel : null);
                   return (
                     <>
                       <button
@@ -2890,18 +2919,37 @@ export const Composer = ({
                 clicking it routes to ``onStop`` (the page maps to its
                 interrupt handler). */}
             {sending ? (
-              <button
-                type="button"
-                className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-white transition-opacity duration-[120ms] hover:opacity-90"
-                onClick={() => onStop?.()}
-                title={t("conversation.stop")}
-                aria-label={t("conversation.stop")}
-              >
-                <Square
-                  className="h-[11px] w-[11px] fill-current"
-                  strokeWidth={0}
-                />
-              </button>
+              <div className="flex items-center gap-1.5">
+                {queueWhileSending && (
+                  <button
+                    type="button"
+                    className={cn(
+                      "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
+                      hasContent && !sendDisabled
+                        ? "bg-brand text-white"
+                        : "bg-brand/40 text-white/60",
+                    )}
+                    onClick={handleSend}
+                    disabled={!hasContent || sendDisabled}
+                    title={t("common.queueSend")}
+                    aria-label={t("common.queueSend")}
+                  >
+                    <ArrowUp className="h-[13px] w-[13px]" strokeWidth={2} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-white transition-opacity duration-[120ms] hover:opacity-90"
+                  onClick={() => onStop?.()}
+                  title={t("conversation.stop")}
+                  aria-label={t("conversation.stop")}
+                >
+                  <Square
+                    className="h-[11px] w-[11px] fill-current"
+                    strokeWidth={0}
+                  />
+                </button>
+              </div>
             ) : mode === "task" ? (
               // Task mode submit. Labelled accent pill ``⚡ Launch task`` when
               // the composer is wide (≥500px); collapses to the compact 28×28

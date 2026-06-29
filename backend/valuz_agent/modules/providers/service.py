@@ -15,6 +15,13 @@ from valuz_agent.i18n import t
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.infra.time_utils import now_ms
+from valuz_agent.modules.providers.cli_login_probe import (
+    CliTool,
+    detect_cli_login,
+)
+from valuz_agent.modules.providers.cli_login_probe import (
+    invalidate as invalidate_cli_login,
+)
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.discover import (
     ApiProtocol,
@@ -51,6 +58,62 @@ def derive_runtime_provider(provider_kind: str) -> str:
     if provider_kind == "codex-subscription":
         return "codex"
     return "deepagents"
+
+
+# provider_kind → the CLI tool whose keychain holds its credential. Subscription
+# channels are gated on this CLI being logged in (see ``_gate_subscription_login``).
+_SUBSCRIPTION_KIND_TO_TOOL: dict[str, CliTool] = {
+    "claude-subscription": "claude",
+    "codex-subscription": "codex",
+}
+
+
+async def _gate_subscription_login(channels: list[LLMChannel]) -> None:
+    """Hide a subscription channel's models when its CLI keychain isn't logged in.
+
+    The Claude Pro·Max / Codex·ChatGPT credential lives in the CLI's own keychain
+    — only ``claude auth status`` / ``codex login status`` know whether it's
+    usable (see :mod:`cli_login_probe`). The chat composer flattens a channel's
+    ``models`` straight into its picker while trusting ``auth_type == "oauth"``
+    (no client-side keychain probe), so a logged-out subscription channel would
+    offer models that 422 at session creation. Clearing ``models`` /
+    ``default_model`` leaves the card but removes the bad picks.
+
+    Applied on the **per-channel detail path** (``get_provider``) ONLY — that is
+    what the composer fetches. It is deliberately NOT applied to ``list_providers``:
+    that list feeds ``GET /v1/settings/model-options`` (onboarding ConnectStep +
+    Settings default-model picker), which already gate subscription rows
+    client-side on the keychain probe; stripping there drops the channel from
+    model-options and breaks the onboarding login card.
+
+    Mutates ``channels`` in place. Probes once per tool (cached); skipped entirely
+    when subscription login is disabled (cloud / shared multi-user, no local
+    keychain) or when no subscription channel is present.
+    """
+    from valuz_agent.infra.config import settings
+
+    if not settings.subscription_login_enabled:
+        return
+    present = {c.provider_kind for c in channels if c.provider_kind in _SUBSCRIPTION_KIND_TO_TOOL}
+    if not present:
+        return
+    logged_in = {kind: await detect_cli_login(_SUBSCRIPTION_KIND_TO_TOOL[kind]) for kind in present}
+    for c in channels:
+        if c.provider_kind in _SUBSCRIPTION_KIND_TO_TOOL and not logged_in.get(c.provider_kind):
+            c.models = []
+            c.default_model = None
+
+
+def _invalidate_login_cache(provider_kind: str) -> None:
+    """Force a re-probe of ``provider_kind``'s CLI login on the next list.
+
+    Called after a subscription login is materialized (``enable_provider``) so the
+    freshly logged-in channel's models surface immediately instead of waiting out
+    the probe's TTL. No-op for non-subscription kinds.
+    """
+    tool = _SUBSCRIPTION_KIND_TO_TOOL.get(provider_kind)
+    if tool is not None:
+        invalidate_cli_login(tool)
 
 
 # ── Value Objects ───────────────────────────────────────────────────
@@ -775,6 +838,10 @@ def _builtin_subscription_row(entry: Any) -> ProviderRow | None:
     (``_virtual_builtin_subscription_detail``) so the virtual template a user
     sees in the list opens identically in the edit dialog. ``model_ids=None``
     keeps the picker tracking the live recommended subscription catalog.
+
+    The template carries its full recommended model list here; whether those
+    models are actually surfaced is decided later by ``_gate_subscription_login``
+    (stripped when the CLI keychain isn't logged in).
     """
     descriptor = _PROVIDER_MAP.get(entry.provider_kind)
     if descriptor is None or descriptor.auth_type != "oauth":
@@ -855,6 +922,141 @@ def _virtual_builtin_subscription_detail(provider_id: str) -> LLMChannelDetail |
     return _row_to_detail(row)
 
 
+def subscription_catalog_kind(provider_id: str) -> str | None:
+    """Return the ``provider_kind`` when ``provider_id`` is a built-in OAuth
+    subscription catalog id (e.g. ``ch-codex-subscription``), else ``None``.
+
+    Lets the session-resolution boundary tell a not-yet-materialized subscription
+    template apart from any other unknown id, so it can raise an actionable
+    "log in to Codex" error instead of a raw "provider not found".
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.seeds._io import load_provider_seeds
+
+    if not settings.subscription_login_enabled:
+        return None
+    entry = next((e for e in load_provider_seeds().providers if e.id == provider_id), None)
+    if entry is None:
+        return None
+    descriptor = _PROVIDER_MAP.get(entry.provider_kind)
+    if descriptor is None or descriptor.auth_type != "oauth":
+        return None
+    return entry.provider_kind
+
+
+async def materialize_subscription(
+    ds: ProviderDatastore,
+    user_id: str,
+    provider_id: str,
+    *,
+    require_login: bool,
+) -> ProviderRow | None:
+    """Create (or reuse) the real ``valuz_provider`` row for a built-in OAuth
+    subscription catalog id (e.g. ``ch-codex-subscription``).
+
+    A logged-in subscription is a *real* channel, not a virtual template: it must
+    own a row so it resolves at session time (the virtual ``ch-*`` id owns none →
+    400 "provider not found") and so "可用" genuinely means "configurable for an
+    agent". Materialization is bound to *availability*, not to an in-app login
+    click — the frontend auto-enables a kind the moment it detects the CLI is
+    logged in (onboarding ConnectStep / Settings model page); this is the shared
+    core both that path and the session-resolution backstop call.
+
+    ``require_login=True`` first probes the CLI keychain and returns ``None`` when
+    not logged in (the backstop must not conjure a usable channel out of a
+    logged-out CLI). ``require_login=False`` materializes unconditionally — the
+    explicit ``enable_provider`` / ``set_default`` path, where the caller already
+    proved login.
+
+    Idempotent by *kind*: an existing row of the same kind (a prior login or a
+    legacy seeded row) is enabled, marked CLI-backed, and — importantly —
+    normalized to ``deletable=True`` so a legacy ``deletable=False`` seed doesn't
+    leave the channel stuck without its management affordance. Returns ``None``
+    for a non-subscription id or when subscription login is disabled here.
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.seeds._io import load_provider_seeds
+
+    if not settings.subscription_login_enabled:
+        return None
+    entry = next((e for e in load_provider_seeds().providers if e.id == provider_id), None)
+    if entry is None:
+        return None
+    descriptor = _PROVIDER_MAP.get(entry.provider_kind)
+    if descriptor is None or descriptor.auth_type != "oauth":
+        return None
+    if require_login:
+        tool = _SUBSCRIPTION_KIND_TO_TOOL.get(entry.provider_kind)
+        if tool is None or not await detect_cli_login(tool):
+            return None
+
+    # Idempotency by kind — reuse an existing row (prior login / legacy seed),
+    # normalizing it to the canonical CLI-backed + deletable state.
+    for existing in await ds.list_providers(user_id):
+        if existing.provider_kind == entry.provider_kind:
+            if not (
+                existing.enabled
+                and existing.credential_source == "cli_keychain"
+                and existing.deletable
+            ):
+                existing.enabled = True
+                existing.credential_source = "cli_keychain"
+                existing.deletable = True
+                existing.updated_at = now_ms()
+                await ds.update(existing)
+            return existing
+
+    row = ProviderRow(
+        name=entry.name,
+        provider_kind=entry.provider_kind,
+        source="user",
+        credential_source="cli_keychain",
+        base_url=descriptor.default_base_url or None,
+        default_model=descriptor.default_model or None,
+        model_ids=None,
+        enabled=True,
+        is_default=False,
+        deletable=True,
+        test_status="never",
+        auth_type="oauth",
+    )
+    await ds.create(user_id, row)
+    return row
+
+
+async def materialize_logged_in_subscription(
+    ds: ProviderDatastore, user_id: str, provider_id: str
+) -> ProviderRow | None:
+    """Session-resolution backstop: materialize a built-in subscription catalog
+    id into its real row **iff** its CLI is logged in.
+
+    Login-gated wrapper over :func:`materialize_subscription`. Returns the row
+    (real uuid id) a stale ``ch-*`` reference should switch onto, or ``None`` when
+    the id isn't a subscription template or its CLI isn't logged in.
+    """
+    return await materialize_subscription(ds, user_id, provider_id, require_login=True)
+
+
+def subscription_login_hint(provider_id: str) -> str | None:
+    """A localized, actionable hint for a subscription whose CLI isn't logged in,
+    or ``None`` when ``provider_id`` isn't a subscription template.
+
+    The session-resolution backstop surfaces this verbatim instead of the raw
+    "provider not found" so the user knows exactly how to make the channel usable
+    (log the CLI in, or connect it from Settings → Models).
+    """
+    kind = subscription_catalog_kind(provider_id)
+    if kind is None:
+        return None
+    descriptor = _PROVIDER_MAP.get(kind)
+    name = descriptor.display_name if descriptor else kind
+    command = (descriptor.oauth_login_command if descriptor else "") or ""
+    return t(
+        "settings.model.subscriptionLoginRequired",
+        params={"name": name, "command": command},
+    )
+
+
 class ProviderService:
     def __init__(
         self,
@@ -901,12 +1103,24 @@ class ProviderService:
         hidden = await policy.hidden_provider_ids(combined)
         if hidden:
             combined = [it for it in combined if it.id not in hidden]
+        # NB: subscription-login gating is applied in ``get_provider`` (the
+        # per-channel detail the composer fetches), NOT here. The list feeds
+        # ``GET /v1/settings/model-options`` (onboarding ConnectStep + Settings
+        # default-model picker), which already gate subscription rows client-side
+        # on the CLI keychain probe (``status="client_resolved"`` +
+        # ``isModelProviderUsable``). Stripping models here would drop the channel
+        # from model-options entirely and break the onboarding login card.
         return combined
 
     async def get_provider(self, user_id: str, provider_id: str) -> LLMChannelDetail:
         row = await self._ds.get_by_id(user_id, provider_id)
         if row is not None:
-            return _row_to_detail(row)
+            detail = _row_to_detail(row)
+            # Same login gate as ``list_providers`` — the composer fetches the
+            # per-channel detail, so a logged-out subscription row must hide its
+            # models here too.
+            await _gate_subscription_login([detail])
+            return detail
         # Not a user row — maybe an overlay-contributed (catalog) channel
         # (ADR-011). Catalog ids don't collide with user UUIDs, so checking
         # the user table first is safe.
@@ -918,6 +1132,7 @@ class ProviderService:
         # dialog opens instead of erroring with "获取模型详情失败".
         virtual = _virtual_builtin_subscription_detail(provider_id)
         if virtual is not None:
+            await _gate_subscription_login([virtual])
             return virtual
         raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
@@ -1011,7 +1226,7 @@ class ProviderService:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
         if not row.secret_ref:
             return None
-        return self._secrets.get(row.secret_ref)
+        return self._secrets.get(user_id, row.secret_ref)
 
     async def ping_compatible_batch(
         self,
@@ -1226,7 +1441,7 @@ class ProviderService:
         secret_ref: str | None = None
         if api_key:
             secret_ref = f"channel/{uuid4().hex[:12]}"
-            self._secrets.put(secret_ref, api_key.strip())
+            self._secrets.put(user_id, secret_ref, api_key.strip())
 
         row = ProviderRow(
             name=name.strip(),
@@ -1316,7 +1531,7 @@ class ProviderService:
             # currently-stored key out of secret_store.
             stripped_new_key = (api_key or "").strip() if api_key else None
             effective_key = stripped_new_key or (
-                self._secrets.get(row.secret_ref) if row.secret_ref else None
+                self._secrets.get(user_id, row.secret_ref) if row.secret_ref else None
             )
             effective_url = (base_url or row.base_url or "").strip()
             effective_proto = protocol or row.protocol
@@ -1340,10 +1555,10 @@ class ProviderService:
                 row.default_model = cleaned[0]
         if api_key:
             if row.secret_ref:
-                self._secrets.put(row.secret_ref, api_key.strip())
+                self._secrets.put(user_id, row.secret_ref, api_key.strip())
             else:
                 row.secret_ref = f"channel/{uuid4().hex[:12]}"
-                self._secrets.put(row.secret_ref, api_key.strip())
+                self._secrets.put(user_id, row.secret_ref, api_key.strip())
                 row.credential_source = "secret_ref"
             row.test_status = "never"
             # Setting an api_key explicitly opts the provider into the api_key
@@ -1395,7 +1610,7 @@ class ProviderService:
                 "add models manually instead"
             )
 
-        api_key = self._secrets.get(row.secret_ref)
+        api_key = self._secrets.get(user_id, row.secret_ref)
         if not api_key:
             raise ModelDiscoveryError("provider's API key is missing from secret store")
 
@@ -1447,7 +1662,7 @@ class ProviderService:
             raise ProviderNotDeletable(f"Provider {provider_id!r} cannot be deleted")
 
         if row.secret_ref:
-            self._secrets.delete(row.secret_ref)
+            self._secrets.delete(user_id, row.secret_ref)
 
         was_default = row.is_default
         await self._ds.delete(user_id, provider_id)
@@ -1483,6 +1698,9 @@ class ProviderService:
             materialized = await self._materialize_builtin_subscription(user_id, provider_id)
             if materialized is None:
                 raise ProviderNotFound(f"Provider {provider_id!r} not found")
+            # The frontend calls enable right after detecting a fresh CLI login —
+            # drop the cached logged-out state so the new models surface at once.
+            _invalidate_login_cache(materialized.provider_kind)
             self._bus.publish("provider.updated", provider_id=materialized.id)
             return _row_to_detail(materialized)
 
@@ -1495,6 +1713,7 @@ class ProviderService:
             row.credential_source = "cli_keychain"
         row.updated_at = now_ms()
         await self._ds.update(row)
+        _invalidate_login_cache(row.provider_kind)
         self._bus.publish("provider.updated", provider_id=row.id)
         return _row_to_detail(row)
 
@@ -1503,54 +1722,17 @@ class ProviderService:
     ) -> ProviderRow | None:
         """Create (or reuse) the row for a built-in OAuth subscription channel.
 
-        ``provider_id`` is a well-known catalog id (e.g. ``ch-claude-subscription``).
-        Built-ins aren't seeded, so the first ``claude``/``codex`` ``/login`` is
-        when the row first appears. Idempotent by *kind*: if the user already has
-        a row of that kind (a prior login, or a legacy seeded row) it is enabled
-        and returned rather than duplicated — the materialized row carries a fresh
-        uuid id, not the catalog id, so a lookup by id alone can't dedupe.
+        The explicit-login path (``enable_provider`` / ``set_default``): the
+        caller already proved the CLI login, so materialize unconditionally. The
+        materialized row carries a fresh uuid id, not the ``ch-*`` catalog id, so
+        dedupe is by *kind*. Returns ``None`` when ``provider_id`` isn't a known
+        OAuth built-in or subscription login is disabled for this deployment — the
+        caller maps that to ``ProviderNotFound``.
 
-        Returns ``None`` when ``provider_id`` isn't a known OAuth built-in or
-        subscription login is disabled for this deployment — the caller maps that
-        to ``ProviderNotFound``.
+        Shared logic lives in :func:`materialize_subscription` (also used by the
+        session-resolution backstop ``materialize_logged_in_subscription``).
         """
-        from valuz_agent.infra.config import settings
-        from valuz_agent.seeds._io import load_provider_seeds
-
-        if not settings.subscription_login_enabled:
-            return None
-        entry = next((e for e in load_provider_seeds().providers if e.id == provider_id), None)
-        if entry is None:
-            return None
-        descriptor = _PROVIDER_MAP.get(entry.provider_kind)
-        if descriptor is None or descriptor.auth_type != "oauth":
-            return None
-
-        # Idempotency by kind — reuse an existing row (prior login / legacy seed).
-        for existing in await self._ds.list_providers(user_id):
-            if existing.provider_kind == entry.provider_kind:
-                existing.enabled = True
-                existing.credential_source = "cli_keychain"
-                existing.updated_at = now_ms()
-                await self._ds.update(existing)
-                return existing
-
-        row = ProviderRow(
-            name=entry.name,
-            provider_kind=entry.provider_kind,
-            source="user",
-            credential_source="cli_keychain",
-            base_url=descriptor.default_base_url or None,
-            default_model=descriptor.default_model or None,
-            model_ids=None,
-            enabled=True,
-            is_default=False,
-            deletable=True,
-            test_status="never",
-            auth_type="oauth",
-        )
-        await self._ds.create(user_id, row)
-        return row
+        return await materialize_subscription(self._ds, user_id, provider_id, require_login=False)
 
     async def set_default(
         self, user_id: str, provider_id: str, *, default_model: str | None = None
@@ -1682,7 +1864,7 @@ class ProviderService:
         api_key: str | None = None
         auth_type = "none"
         if row.credential_source == "secret_ref" and row.secret_ref:
-            api_key = self._secrets.get(row.secret_ref)
+            api_key = self._secrets.get(user_id, row.secret_ref)
             auth_type = "api_key"
 
         # Protocol override drives the wire shape used during connection

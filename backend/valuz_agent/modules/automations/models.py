@@ -82,6 +82,14 @@ class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # ── Provenance ────────────────────────────────────────────────────
+    # Kernel ``tool_use`` id of the ``automation create`` call that proposed
+    # this row, stamped when the user confirms the proposal card. NULL for
+    # rows created from the UI (no proposing tool call). Indexed so a session
+    # reload can map historical proposing tool-calls → their created rows and
+    # show "already added" instead of a fresh Confirm button.
+    origin_tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+
     # ── Schedule state ────────────────────────────────────────────────
     status: Mapped[str] = mapped_column(String(32), default="enabled")
     # Cron / interval write a concrete next-fire instant; manual leaves it
@@ -95,8 +103,10 @@ class AutomationRunRow(Base, PrimaryKeyMixin, UserMixin):
 
     automation_id: Mapped[str] = mapped_column(String(36), index=True)
     project_id: Mapped[str] = mapped_column(String(36))
-    # ``cron`` / ``interval`` / ``manual`` / ``recovered_skip`` today;
-    # ``webhook`` enum value reserved for the follow-up ADR.
+    # ``cron`` / ``interval`` (scheduled) · ``manual`` (human "Run now")
+    # · ``agent`` (agent fired it via the ``automation`` MCP tool) ·
+    # ``recovered_skip`` / ``system`` (bookkeeping) today; ``webhook`` enum
+    # value reserved for the follow-up ADR.
     trigger_type: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), default="queued")
     triggered_at: Mapped[int] = mapped_column(BigInteger)
@@ -111,3 +121,8 @@ class AutomationRunRow(Base, PrimaryKeyMixin, UserMixin):
     error_message: Mapped[str | None] = mapped_column(Text)
     session_id: Mapped[str | None] = mapped_column(String(36))
     created_files: Mapped[str | None] = mapped_column(Text)
+    # The session that asked for this run, when an AGENT invoked the automation
+    # via the MCP tool (trigger_type="agent"). Lets a task spawned by this run
+    # chain its provenance back to the originating task (transitive
+    # task→automation→task nesting). NULL for cron/interval/manual runs.
+    invoked_by_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

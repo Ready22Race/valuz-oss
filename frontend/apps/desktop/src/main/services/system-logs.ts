@@ -12,7 +12,7 @@
  * console stream doesn't).
  *
  * Solution: tail the file at the canonical path
- * (``~/.valuz/app/logs/backend.log``) using ``fs.watchFile``. Same code
+ * (``~/.valuz-oss/logs/backend.log``) using ``fs.watchFile``. Same code
  * path for both modes. The tail handles file rotation (size shrink) by
  * resetting the read offset to 0.
  *
@@ -65,7 +65,7 @@ const ring: LogLine[] = [];
 const subscribers = new Set<WebContents>();
 let nextId = 1;
 
-const LOG_FILE_PATH = join(homedir(), ".valuz", "app", "logs", "backend.log");
+const LOG_FILE_PATH = join(homedir(), ".valuz-oss", "logs", "backend.log");
 const LOG_DIR_PATH = dirname(LOG_FILE_PATH);
 
 /** Append a parsed entry to the ring + broadcast to subscribers. */
