@@ -26,12 +26,16 @@ import {
   Trash2,
 } from "lucide-react";
 import {
+  ApiError,
   sessionsApi,
+  queueApi,
+  type QueuedInput,
   agentsApi,
+  automationsApi,
   connectorsApi,
   useSessionStore,
-  useWorkspaceStore,
-  workspacesApi,
+  useProjectStore,
+  projectsApi,
   providersApi,
   skillsApi,
   usePanelStore,
@@ -39,32 +43,39 @@ import {
   type SessionEventDTO,
   type SessionListItem,
   type TodoItem,
-  type WorkspaceDetail,
-  type WorkspaceListItem,
-  type ProviderListItem,
-  type ProviderDetail,
+  type ProjectDetail,
+  type ProjectListItem,
+  type LLMChannel,
+  type LLMChannelDetail,
   type SkillView,
   type StagingSlugView,
   type StagingSyncStrategy,
-  type WorkspaceFileNode,
+  type ProjectFileNode,
   parseTodosUpdate,
   parseRequiresAction,
   parseActionResolved,
+  parseWorkflowProgress,
   SESSION_REQUIRES_ACTION_EVENT,
   SESSION_ACTION_RESOLVED_EVENT,
+  SESSION_WORKFLOW_PROGRESS_EVENT,
+  type WorkflowState,
   useComposerProviders,
   useModelDefaults,
   useRuntimes,
+  useSessionArtifacts,
   useSessionAttachments,
   type RuntimeId,
   type MemberWithAgent,
   type Agent,
+  type ArtifactContent,
+  type ArtifactDescriptor,
 } from "@valuz/core";
 import {
   ApprovalCard,
   ApprovalResolvedStrip,
   AutoApprovedStrip,
   AskUserQuestionCard,
+  ArtifactViewerShell,
   AutomationToolCard,
   Button,
   DeleteConfirmDialog,
@@ -75,12 +86,15 @@ import {
   DropdownMenuTrigger,
   EmptyState,
   UserAnswerSummaryCard,
+  WorkflowProgressCard,
   cn,
   Composer,
   KnowledgeFileTreePicker,
   ProjectDetailContextPanel,
   SkillStagingPanel,
   SkillSubmissionCard,
+  AgentProposalCard,
+  AutomationProposalCard,
   parseAskUserQuestionInput,
   parseAutomationToolOutput,
   type ApprovalCardSubject,
@@ -90,22 +104,41 @@ import {
   type UploadedFileItem,
   type ComposerAgentItem,
   type ComposerProjectItem,
+  type ComposerConnector,
 } from "@valuz/ui";
 import { modelLabel } from "@valuz/shared";
 import { t as _t } from "@valuz/shared/i18n";
 import type { I18nKey } from "@valuz/shared";
-import { useWorkspaceOutlet } from "@valuz/app/layout";
+import { useProjectOutlet } from "@valuz/app/layout";
 import { buildTurns, useStableTurns, type PlanSubtask } from "@valuz/core";
 import { ConversationTurnList } from "@valuz/ui";
 import { usePlatform } from "@valuz/app/platform";
 import { useHasUsableChannel, useTranslation } from "@valuz/core";
 import { useProjectKbBindings, useKbDocTree } from "@valuz/app/hooks";
+import {
+  computePlanAnchors,
+  extractToolOutputJson,
+} from "./conversation-plan-anchors";
 import { LiveTaskCard } from "../components/LiveTaskCard";
+import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
+import {
+  resolveAgentSkillItems,
+  type AgentSkillItem,
+} from "../lib/agent-skill-items";
 import { getLastTempAgent, setLastTempAgent } from "../lib/last-temp-agent";
 
-function toFileTree(nodes: WorkspaceFileNode[], prefix = ""): FileTreeNode[] {
+/** True while a workflow snapshot's status denotes an in-flight run (vs a
+ *  terminal ``completed`` / ``killed`` / ``failed`` verb). Used to decide
+ *  whether the turn-end safety net should coerce a card to ``completed``. */
+const isWorkflowRunning = (status: string): boolean =>
+  status === "running" ||
+  status === "active" ||
+  status === "queued" ||
+  status === "pending";
+
+function toFileTree(nodes: ProjectFileNode[], prefix = ""): FileTreeNode[] {
   return nodes.map((n) => {
     const path = prefix ? `${prefix}/${n.name}` : n.name;
     const result: FileTreeNode = {
@@ -118,6 +151,31 @@ function toFileTree(nodes: WorkspaceFileNode[], prefix = ""): FileTreeNode[] {
   });
 }
 
+function resolveConversationArtifactPath(path: string, rootPath: string): string {
+  if (!path) return path;
+  if (path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path)) return path;
+  if (!rootPath) return path;
+  const sep = rootPath.includes("\\") ? "\\" : "/";
+  const trimmed = rootPath.endsWith(sep) ? rootPath.slice(0, -1) : rootPath;
+  return `${trimmed}${sep}${path}`;
+}
+
+function toConversationRelativeArtifactPath(
+  path: string,
+  rootPath: string,
+): string | null {
+  if (!path) return null;
+  const normalizedPath = path.replace(/\\/g, "/");
+  if (!normalizedPath.startsWith("/") && !/^[a-zA-Z]:\//.test(normalizedPath)) {
+    return normalizedPath.replace(/^\/+/, "");
+  }
+  if (!rootPath) return null;
+  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normalizedPath === normalizedRoot) return null;
+  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return null;
+  return normalizedPath.slice(normalizedRoot.length + 1);
+}
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -125,61 +183,6 @@ function formatFileSize(bytes: number): string {
 }
 
 // ── VALUZ-CHATPLAN S3 helpers ────────────────────────────────────────────
-
-/** Tool outputs from the kernel are wrapped as a content-block repr
- *  ``[{'type': 'text', 'text': '<json>'}]`` (Python repr, single-quoted
- *  on the outer wrapper, JSON-quoted on the inner ``text`` payload).
- *  Pull the inner JSON object back out:
- *    1. Try a direct ``JSON.parse`` first — some runtimes do skip the wrap.
- *    2. Otherwise walk for the first ``{"`` (canonical JSON-object start)
- *       and balance-count braces forward to find its matching ``}``.
- *  A naive ``/{[\s\S]*}/`` greedy regex would land on the OUTER Python dict
- *  (single-quoted) and JSON.parse would fail every time. */
-function extractToolOutputJson(output: string): unknown | null {
-  try {
-    return JSON.parse(output);
-  } catch {
-    /* fall through */
-  }
-  const start = output.indexOf('{"');
-  if (start < 0) return null;
-  let depth = 0;
-  let end = -1;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < output.length; i++) {
-    const ch = output[i];
-    if (inString) {
-      if (escape) {
-        escape = false;
-      } else if (ch === "\\") {
-        escape = true;
-      } else if (ch === '"') {
-        inString = false;
-      }
-      continue;
-    }
-    if (ch === '"') {
-      inString = true;
-      continue;
-    }
-    if (ch === "{") {
-      depth++;
-    } else if (ch === "}") {
-      depth--;
-      if (depth === 0) {
-        end = i + 1;
-        break;
-      }
-    }
-  }
-  if (end < 0) return null;
-  try {
-    return JSON.parse(output.slice(start, end));
-  } catch {
-    return null;
-  }
-}
 
 /** Compact one-line status pill for chatplan tool results. Each pill is a
  *  pure timeline anchor — the canonical "current state" view lives in the
@@ -314,7 +317,7 @@ function renderChatplanStatusPill(
 function sessionDetailToListItem(detail: SessionDetail): SessionListItem {
   return {
     id: detail.id,
-    workspace_id: detail.workspace_id,
+    project_id: detail.project_id,
     name: detail.name,
     status: detail.status,
     origin: detail.origin,
@@ -381,12 +384,94 @@ const SessionStatusPill = ({ status }: { status?: string }) => {
  */
 const NEW_SESSION_ID = "new";
 
+/**
+ * Parse an ``automation`` tool call's INPUT into a create spec, or null if it
+ * isn't a ``create`` action. ``create`` is the only action that renders a
+ * propose→confirm card (others render ``AutomationToolCard``).
+ *
+ * We render the card from the input (not the tool output) because the output is
+ * runtime-dependent: the Valuz/DeepAgents (LangChain) runtime wraps it in a
+ * content envelope that isn't bare JSON, so ``parseAutomationToolOutput``
+ * returns null there. The input is always clean — same reason ``AgentProposalCard``
+ * renders from input. Note ``trigger`` may arrive as a JSON *string* (the model
+ * sometimes stringifies it), so we parse it back into the discriminated union.
+ */
+function parseAutomationCreateInput(input: unknown): {
+  name: string;
+  prompt_template: string;
+  trigger: import("@valuz/core").Trigger | null;
+  agent_slug?: string;
+  action_kind?: "chat" | "task";
+} | null {
+  if (!input) return null;
+  let parsed: unknown;
+  try {
+    parsed = typeof input === "string" ? JSON.parse(input) : input;
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    (parsed as { action?: unknown }).action !== "create"
+  ) {
+    return null;
+  }
+  const p = parsed as Record<string, unknown>;
+  let trigger: unknown = p.trigger ?? null;
+  if (typeof trigger === "string") {
+    try {
+      trigger = JSON.parse(trigger);
+    } catch {
+      trigger = null;
+    }
+  }
+  const actionKind =
+    p.action_kind === "task"
+      ? "task"
+      : p.action_kind === "chat"
+        ? "chat"
+        : undefined;
+  return {
+    name: typeof p.name === "string" ? p.name : "",
+    prompt_template: typeof p.prompt_template === "string" ? p.prompt_template : "",
+    trigger:
+      trigger && typeof trigger === "object"
+        ? (trigger as import("@valuz/core").Trigger)
+        : null,
+    agent_slug: typeof p.agent_slug === "string" ? p.agent_slug : undefined,
+    action_kind: actionKind,
+  };
+}
+
+/** Compact, locale-agnostic schedule summary from a trigger — a fallback for
+ *  when the server's ``trigger_human_readable`` isn't available (the tool output
+ *  wasn't parseable on this runtime). */
+function automationTriggerSummary(
+  trigger: import("@valuz/core").Trigger | null,
+): string | undefined {
+  if (!trigger) return undefined;
+  if (trigger.kind === "cron") {
+    return trigger.timezone
+      ? `${trigger.cron_expr} · ${trigger.timezone}`
+      : trigger.cron_expr;
+  }
+  if (trigger.kind === "interval") {
+    const s = trigger.seconds;
+    if (s % 86400 === 0) return `every ${s / 86400}d`;
+    if (s % 3600 === 0) return `every ${s / 3600}h`;
+    if (s % 60 === 0) return `every ${s / 60}m`;
+    return `every ${s}s`;
+  }
+  return "Manual";
+}
+
 export const ConversationPage = () => {
   const { t } = useTranslation();
   const { revealInFinder } = usePlatform();
   const { id = NEW_SESSION_ID } = useParams<{ id: string }>();
   const location = useLocation();
-  const { setRightPanel, setHeader, setHideHeader } = useWorkspaceOutlet();
+  const { setRightPanel, setHeader, setHideHeader } = useProjectOutlet();
   const panelCollapsed = usePanelStore((s) => s.collapsed);
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
   const [searchParams] = useSearchParams();
@@ -396,7 +481,7 @@ export const ConversationPage = () => {
   const [sessionTriggerMode, setSessionTriggerMode] = useState<string | null>(
     null,
   );
-  // Workspace-agent handle for the open session (Project Task lead/member).
+  // Project-agent handle for the open session (Project Task lead/member).
   const [sessionAgentSlug, setSessionAgentSlug] = useState<string | null>(null);
   // Project conversations pick a configured project agent instead of a raw
   // model. ``projectAgents`` is the member roster for the active project;
@@ -433,6 +518,13 @@ export const ConversationPage = () => {
   const isSkillCreatorMode =
     searchParams.get("mode") === "skill-creator" ||
     sessionTriggerMode === "skill-creator";
+  // Draft-first skill creation (技能库 → 添加技能 → AI 创建): the entry no
+  // longer pre-creates a session (that locked an empty agent binding — a
+  // dead conversation). It lands here as a normal draft carrying the
+  // creation context in the URL; ``ensureSession`` mints the session via
+  // the skills launcher on the first send, with the agent the user picked.
+  const skillKindParam = searchParams.get("skill_kind");
+  const skillProjectParam = searchParams.get("skill_project");
   const shouldRevealPanelFromNavigation =
     (
       location.state as {
@@ -448,6 +540,8 @@ export const ConversationPage = () => {
 
   const refreshStaging = useCallback(async () => {
     if (!isSkillCreatorMode) return;
+    // Draft-first entry: no session exists yet — nothing staged to scan.
+    if (id === NEW_SESSION_ID) return;
     setStagingRefreshing(true);
     try {
       const res = await skillsApi.scanStaging(id);
@@ -520,9 +614,9 @@ export const ConversationPage = () => {
   const titleTriggerRef = useRef<HTMLButtonElement>(null);
   const [titleDeleting, setTitleDeleting] = useState(false);
   const [titleDeleteInFlight, setTitleDeleteInFlight] = useState(false);
-  const [workspaces, setWorkspaces] = useState<WorkspaceListItem[]>([]);
+  const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
   );
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
@@ -548,6 +642,15 @@ export const ConversationPage = () => {
   // a TodoWrite snapshot for this session"; an empty array means
   // "all done" (kernel preserves it as a meaningful state).
   const [todos, setTodos] = useState<TodoItem[] | null>(null);
+  // Live progress of Claude dynamic-workflow (``Workflow`` tool) runs in this
+  // session, keyed by the launch tool_use_id. Fed by ``session.workflow_progress``
+  // SSE snapshots; ``renderToolCall`` reads it to render the progress card on the
+  // matching Workflow tool block. Live-only (the kernel never persists these), so
+  // it stays empty on history replay / reconnect — the persisted Workflow tool
+  // call then renders as a plain tool card. Cleared on session switch.
+  const [workflowStates, setWorkflowStates] = useState<
+    Map<string, WorkflowState>
+  >(() => new Map());
   // Optimistic pending user message — rendered IMMEDIATELY when the user
   // hits Send so they see their text in the conversation without waiting
   // for the (potentially multi-second) round-trip through ensureSession ⇒
@@ -580,7 +683,17 @@ export const ConversationPage = () => {
   } | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
-  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+  // Session input queue (docs/design/session-input-queue.md): follow-up inputs
+  // submitted while a turn is running, drained FIFO after it. ``queuePaused``
+  // is set after an interrupt — the user resumes explicitly.
+  const [queue, setQueue] = useState<QueuedInput[]>([]);
+  const [queuePaused, setQueuePaused] = useState(false);
+  // True while a host drain chain is in flight. A dispatched (in-flight) item
+  // is invisible in ``queue`` (only queued/blocked list), so the drain-follower
+  // keys on this to keep re-subscribing until the LAST drained turn finishes —
+  // not just while ``queue`` is non-empty (session-input-queue §14.5).
+  const [queueDraining, setQueueDraining] = useState(false);
+  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -671,22 +784,44 @@ export const ConversationPage = () => {
   // pre-select every connected connector at session-creation time so the
   // new session inherits the user's globally-enabled data sources.
   const [selectedMcpSlugs, setSelectedMcpSlugs] = useState<string[]>([]);
+  // Connected connectors shown in the composer "+" menu. On a new conversation
+  // they're toggleable (the selection is handed to the session at creation); on
+  // an existing one they're read-only (connectors lock at creation). Fetched +
+  // defaulted to all-on once on mount, so a new conversation keeps the user's
+  // pick across the new→existing URL transition (which reuses this component).
+  const [connectorOptions, setConnectorOptions] = useState<ComposerConnector[]>(
+    [],
+  );
   const isNewSession = id === NEW_SESSION_ID;
   useEffect(() => {
-    if (!isNewSession) return;
     connectorsApi
       .list()
       .then(({ connectors: list }) => {
-        setSelectedMcpSlugs(
-          list
-            .filter((c) => c.enabled && c.status === "connected")
-            .map((c) => c.slug),
+        const connected = list.filter((c) => c.status === "connected");
+        setConnectorOptions(
+          connected.map((c) => ({
+            slug: c.slug,
+            label: c.display_name,
+            description: c.description ?? undefined,
+          })),
         );
+        setSelectedMcpSlugs(connected.map((c) => c.slug));
       })
       .catch(() => {
         /* non-fatal */
       });
-  }, [isNewSession]);
+    // Mount-only: re-running on the new→existing id change would reset the
+    // user's connector selection right after they created the session.
+  }, []);
+  const toggleConnector = useCallback((slug: string, enabled: boolean) => {
+    setSelectedMcpSlugs((prev) =>
+      enabled
+        ? prev.includes(slug)
+          ? prev
+          : [...prev, slug]
+        : prev.filter((s) => s !== slug),
+    );
+  }, []);
   // Per-``submit_skill`` tool_use state — keyed by tool_use id so multiple
   // submissions in the same conversation render independently. Persists
   // for the lifetime of the page; on refresh the cards re-render in
@@ -695,7 +830,7 @@ export const ConversationPage = () => {
   type SubmissionEntry = {
     state: SkillSubmissionState;
     errorMessage?: string;
-    boundToWorkspaceLabel?: string | null;
+    boundToProjectLabel?: string | null;
     // Live snapshot of the staged slug's contents — populated by the
     // page's scan poll. Drives both the "save" gate (we only enable the
     // save button when files are actually present) and the file tree
@@ -709,6 +844,41 @@ export const ConversationPage = () => {
   };
   const [submissionStates, setSubmissionStates] = useState<
     Record<string, SubmissionEntry>
+  >({});
+  // Per-``tool.id`` state for ``propose_agent`` cards (natural-language agent
+  // creation). Unlike skills there's no server-side staging — the full spec
+  // rides the tool input — so the card starts ``pending`` and dismiss is
+  // purely client-side.
+  type ProposalEntry = {
+    state:
+      | "pending"
+      | "confirming"
+      | "confirmed"
+      | "dismissing"
+      | "dismissed"
+      | "error";
+    errorMessage?: string;
+    deployedProjectLabel?: string | null;
+  };
+  const [proposalStates, setProposalStates] = useState<
+    Record<string, ProposalEntry>
+  >({});
+  // Per-``tool.id`` state for ``automation create`` proposal cards. Same
+  // propose→confirm model as agents; ``automationId`` is filled on confirm /
+  // re-entry so a confirmed card can deep-link into the automation page.
+  type AutomationProposalEntry = {
+    state:
+      | "pending"
+      | "confirming"
+      | "confirmed"
+      | "dismissing"
+      | "dismissed"
+      | "error";
+    errorMessage?: string;
+    automationId?: string | null;
+  };
+  const [automationProposalStates, setAutomationProposalStates] = useState<
+    Record<string, AutomationProposalEntry>
   >({});
   // Local mirror of ``answers`` captured at submit time. Keyed by
   // ``tool_use_id`` (== renderer's ``tool.id``). Lets the renderer
@@ -911,7 +1081,10 @@ export const ConversationPage = () => {
   const sidebarSessions = useSessionStore((state) => state.sessions);
   const setSidebarSessions = useSessionStore((state) => state.setSessions);
   const fetchSidebarSessions = useSessionStore((state) => state.fetchSessions);
-  const upsertWorkspace = useWorkspaceStore((s) => s.upsertWorkspace);
+  const setStoreActiveProjectId = useSessionStore(
+    (state) => state.setActiveProjectId,
+  );
+  const upsertProject = useProjectStore((s) => s.upsertProject);
   // Server-stored attachments + async parse status, owned by the shared hook:
   // upload-on-attach, poll ``parsing → ready|failed``, and live progress for
   // the composer chips + context panel. ``setSessionAttachments`` is the
@@ -927,41 +1100,120 @@ export const ConversationPage = () => {
     remove: removeSessionAttachmentRow,
     markPendingConsumed,
   } = useSessionAttachments(selectedSessionId);
+  // Agent-delivered artifacts (the "生成文件" list) — recorded by the
+  // ``deliver_artifacts`` MCP tool. Loads on session change; refreshed on
+  // turn-end (below) so newly delivered files appear without a manual reload.
+  const { artifacts: sessionArtifacts, refresh: refreshArtifacts } =
+    useSessionArtifacts(selectedSessionId);
   const navigate = useNavigate();
 
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
   const [selectedComposerSkill, setSelectedComposerSkill] =
     useState<SkillView | null>(null);
-  const [workspaceSkills, setWorkspaceSkills] = useState<SkillView[]>([]);
+  const [projectSkills, setProjectSkills] = useState<SkillView[]>([]);
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(
+    null,
+  );
+  const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
+  const [artifactContent, setArtifactContent] =
+    useState<ArtifactContent | null>(null);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactError, setArtifactError] = useState<string | null>(null);
 
-  const activeWorkspace = useMemo(
+  const activeProject = useMemo(
     () =>
-      (workspaces.find((w) => w.id === selectedWorkspaceId) as
-        | WorkspaceDetail
+      (projects.find((w) => w.id === selectedProjectId) as
+        | ProjectDetail
         | undefined) ?? null,
-    [selectedWorkspaceId, workspaces],
+    [selectedProjectId, projects],
+  );
+  const activeProjectRootPath = useMemo(() => {
+    const detail = activeProject as ProjectDetail | null;
+    return detail?.cwd ?? detail?.root_path ?? "";
+  }, [activeProject]);
+
+  const openArtifactFile = useCallback(
+    async (path: string) => {
+      if (!selectedProjectId || selectedProjectId === "chat-default") return;
+      const normalized = toConversationRelativeArtifactPath(
+        path,
+        activeProjectRootPath,
+      );
+      if (!normalized) {
+        setSelectedArtifactPath(path);
+        setArtifact(null);
+        setArtifactContent(null);
+        setArtifactLoading(false);
+        setArtifactError(t("task.artifactOpenInFinder" as Parameters<typeof t>[0]));
+        return;
+      }
+      setSelectedArtifactPath(normalized);
+      setArtifactLoading(true);
+      setArtifactError(null);
+      try {
+        const result = await projectsApi.readFile(selectedProjectId, normalized);
+        setArtifact(result.artifact);
+        setArtifactContent(result.content);
+      } catch (error) {
+        setArtifact(null);
+        setArtifactContent(null);
+        setArtifactError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setArtifactLoading(false);
+      }
+    },
+    [activeProjectRootPath, selectedProjectId, t],
   );
 
-  // Project KB bindings — loaded for project workspaces only and
+  const handleArtifactReload = useCallback(() => {
+    if (selectedArtifactPath) {
+      void openArtifactFile(selectedArtifactPath);
+    }
+  }, [openArtifactFile, selectedArtifactPath]);
+
+  const handleArtifactClose = useCallback(() => {
+    setSelectedArtifactPath(null);
+    setArtifact(null);
+    setArtifactContent(null);
+    setArtifactLoading(false);
+    setArtifactError(null);
+  }, []);
+
+  const handleArtifactCopy = useCallback(() => {
+    if (artifactContent?.kind !== "text") return;
+    void navigator.clipboard
+      ?.writeText(artifactContent.content)
+      .then(() => toast.success(t("common.copied" as Parameters<typeof t>[0])))
+      .catch(() => toast.error(t("common.failed" as Parameters<typeof t>[0])));
+  }, [artifactContent, t]);
+
+  const handleArtifactOpenExternal = useCallback(() => {
+    if (!selectedArtifactPath) return;
+    void revealInFinder(
+      resolveConversationArtifactPath(selectedArtifactPath, activeProjectRootPath),
+    );
+  }, [activeProjectRootPath, revealInFinder, selectedArtifactPath]);
+
+  // Project KB bindings — loaded for project projects only and
   // rendered **read-only** in the session panel (per product rule,
   // binding edits happen on the project detail page and apply to the
   // next session). ``handleExpandKbFolder`` is still wired so the
   // user can drill folders to inspect what's selected; only the
   // toggle handler is withheld. Passing ``null`` for chat /
-  // skill-creator workspaces makes the hook no-op so those panels
+  // skill-creator projects makes the hook no-op so those panels
   // show no KB tree.
   const {
     kbTree: projectKbTree,
     bindings: projectKbBindings,
     handleExpandKbFolder: handleExpandProjectKbFolder,
   } = useProjectKbBindings(
-    activeWorkspace?.kind === "project" ? selectedWorkspaceId : null,
+    activeProject?.kind === "project" ? selectedProjectId : null,
   );
 
   // Global KB document tree for the attachment picker. Loads lazily —
   // only when the picker is open — and is independent of the
-  // workspace (chat sessions have no project scope; the picker shows
+  // project (chat sessions have no project scope; the picker shows
   // every KB for both chat and project conversations).
   const {
     kbTree: pickerKbTree,
@@ -973,6 +1225,25 @@ export const ConversationPage = () => {
     () => sessions.find((s) => s.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
   );
+
+  // The agent actually bound to this composer: an existing session is frozen to
+  // its ``sessionAgentSlug`` (ADR-006), a fresh draft uses the picker's
+  // ``selectedAgentSlug``. The Composer's ``selectedAgentSlug`` prop derives the
+  // same value — skill resolution and the ``/`` gate must use it too, or they'd
+  // read a null draft slug while viewing a live conversation.
+  const effectiveAgentSlug = selectedSession
+    ? sessionAgentSlug
+    : selectedAgentSlug;
+
+  // Publish the open conversation's project to the store so the sidebar keeps
+  // that project's accordion expanded — authoritative and immediate (straight
+  // from the loaded session detail), unlike the lagging runs list. Cleared when
+  // the conversation is project-less or this page unmounts.
+  const openConversationProjectId = selectedSession?.project_id ?? null;
+  useEffect(() => {
+    setStoreActiveProjectId(openConversationProjectId);
+    return () => setStoreActiveProjectId(null);
+  }, [openConversationProjectId, setStoreActiveProjectId]);
   const rawTurns = useMemo(() => buildTurns(events), [events]);
   const turns = useStableTurns(rawTurns);
 
@@ -981,51 +1252,15 @@ export const ConversationPage = () => {
   // LiveTaskCard (subtask list + status + actions, SSE-subscribed). Earlier
   // plan writes for the same task degrade to compact history pills, so the
   // user always lands on the "current state" surface near the bottom of
-  // the timeline. ``richPlanToolByTask`` also doubles as a "this is a plan
-  // write for a known task" set for the pill renderer.
-  const planAnchors = useMemo(() => {
-    const PLAN_WRITE_NAMES = new Set(["plan_task", "modify_plan"]);
-    const matchesPlanWrite = (n: string) => {
-      if (PLAN_WRITE_NAMES.has(n)) return true;
-      for (const k of PLAN_WRITE_NAMES) {
-        if (n.endsWith(`__${k}`)) return true;
-      }
-      return false;
-    };
-    const richToolByTask = new Map<string, string>();
-    const taskByRichTool = new Map<string, string>();
-    for (const turn of turns) {
-      for (const block of turn.blocks) {
-        if (block.kind !== "tool") continue;
-        const tool = block.tool;
-        const name = tool.title || "";
-        if (!matchesPlanWrite(name)) continue;
-        // plan_task / modify_plan responses don't echo task_id; it lives
-        // in the input arg. Falling back to output regardless covers
-        // future runtimes that may echo it.
-        let tid: string | undefined;
-        if (tool.input) {
-          const parsedIn = extractToolOutputJson(tool.input) as {
-            task_id?: string;
-          } | null;
-          tid = parsedIn?.task_id;
-        }
-        if (!tid && tool.output) {
-          const parsed = extractToolOutputJson(tool.output) as {
-            task_id?: string;
-          } | null;
-          tid = parsed?.task_id;
-        }
-        if (!tid) continue;
-        // Last write wins — drop any earlier tool_use_id for this task.
-        const prev = richToolByTask.get(tid);
-        if (prev) taskByRichTool.delete(prev);
-        richToolByTask.set(tid, tool.id);
-        taskByRichTool.set(tool.id, tid);
-      }
-    }
-    return { taskByRichTool };
-  }, [turns]);
+  // the timeline. ``taskByRichTool`` also doubles as a "this is a plan
+  // write for a known task" set for the pill renderer. The task id is
+  // resolved from the lead session's ``metadata.valuz.task_id`` (the
+  // authoritative binding) rather than the unreliable tool args — see
+  // ``computePlanAnchors``.
+  const planAnchors = useMemo(
+    () => computePlanAnchors(turns, selectedSession?.task_id ?? null),
+    [turns, selectedSession],
+  );
   // Append the optimistic pending turn so the user sees their message +
   // a thinking hint immediately on Send. ``ConversationTurnList`` keys
   // off ``sending && isLatest`` to draw the waiting indicator on the
@@ -1084,7 +1319,7 @@ export const ConversationPage = () => {
   // bridge as ``mcp__harness__submit_skill`` (Claude Agent SDK) or
   // plain ``submit_skill`` (deepagents/codex). Match either — the
   // kernel doesn't normalise.
-  const submissionWorkspaceLabel = useMemo(() => {
+  const submissionProjectLabel = useMemo(() => {
     if (selectedSession?.name) return selectedSession.name;
     return null;
   }, [selectedSession]);
@@ -1113,14 +1348,14 @@ export const ConversationPage = () => {
           files_touched: filesTouched,
         });
         const boundLabel =
-          res.bound_to_workspace_id && res.creation_context.kind === "project"
-            ? submissionWorkspaceLabel
+          res.bound_to_project_id && res.creation_context.kind === "project"
+            ? submissionProjectLabel
             : null;
         setSubmissionStates((prev) => ({
           ...prev,
           [toolId]: {
             state: "confirmed",
-            boundToWorkspaceLabel: boundLabel,
+            boundToProjectLabel: boundLabel,
           },
         }));
         toast.success(t("skill.savedToLib" as Parameters<typeof t>[0]));
@@ -1136,7 +1371,7 @@ export const ConversationPage = () => {
         toast.error(msg);
       }
     },
-    [submissionWorkspaceLabel],
+    [submissionProjectLabel],
   );
 
   const handleDismissSubmission = useCallback(
@@ -1170,6 +1405,256 @@ export const ConversationPage = () => {
     },
     [],
   );
+
+  // Create + deploy the agent the assistant proposed via ``propose_agent``.
+  // The spec is replayed from the tool input (no server staging, unlike
+  // skills); the backend derives the slug and deploys into the session's
+  // project when there is one.
+  const handleConfirmProposal = useCallback(
+    async (
+      toolId: string,
+      spec: {
+        name: string;
+        instructions: string;
+        description?: string;
+        runtime?: string;
+        model?: string;
+        skills?: string[];
+        connectors?: string[];
+      },
+    ) => {
+      const sid = selectedSessionIdRef.current;
+      if (!sid) return;
+      setProposalStates((prev) => ({
+        ...prev,
+        [toolId]: { ...(prev[toolId] || { state: "pending" }), state: "confirming" },
+      }));
+      try {
+        const res = await agentsApi.confirmProposal(sid, spec);
+        setProposalStates((prev) => ({
+          ...prev,
+          [toolId]: {
+            state: "confirmed",
+            deployedProjectLabel:
+              res.deployed && res.project_id ? submissionProjectLabel : null,
+          },
+        }));
+        toast.success(t("agent.proposalCreated" as Parameters<typeof t>[0]));
+      } catch (cause) {
+        const msg =
+          cause instanceof Error
+            ? cause.message
+            : t("common.saveFailed" as Parameters<typeof t>[0]);
+        setProposalStates((prev) => ({
+          ...prev,
+          [toolId]: { state: "error", errorMessage: msg },
+        }));
+        toast.error(msg);
+      }
+    },
+    [submissionProjectLabel],
+  );
+
+  const handleDismissProposal = useCallback((toolId: string) => {
+    // Client-side only — nothing was written, so there's nothing to clean up.
+    setProposalStates((prev) => ({
+      ...prev,
+      [toolId]: { state: "dismissed" },
+    }));
+  }, []);
+
+  // Create the automation the assistant proposed via ``automation create``.
+  // The confirmable spec is replayed from the parsed tool output; the backend
+  // re-resolves project / bound-agent context from the session and stamps the
+  // proposing ``tool_call_id`` so a reload can detect the row already exists.
+  const handleConfirmAutomation = useCallback(
+    async (
+      toolId: string,
+      spec: {
+        name: string;
+        prompt_template: string;
+        trigger: import("@valuz/core").Trigger;
+        agent_slug?: string | null;
+        action_kind?: "chat" | "task";
+      },
+    ) => {
+      const sid = selectedSessionIdRef.current;
+      if (!sid) return;
+      setAutomationProposalStates((prev) => ({
+        ...prev,
+        [toolId]: { ...(prev[toolId] || { state: "pending" }), state: "confirming" },
+      }));
+      try {
+        const res = await automationsApi.confirmProposal(sid, {
+          tool_call_id: toolId,
+          name: spec.name,
+          prompt_template: spec.prompt_template,
+          trigger: spec.trigger,
+          agent_slug: spec.agent_slug ?? null,
+          action_kind: spec.action_kind,
+        });
+        setAutomationProposalStates((prev) => ({
+          ...prev,
+          [toolId]: { state: "confirmed", automationId: res.automation_id },
+        }));
+        toast.success(t("automation.proposalCreated" as Parameters<typeof t>[0]));
+      } catch (cause) {
+        const msg =
+          cause instanceof Error
+            ? cause.message
+            : t("common.saveFailed" as Parameters<typeof t>[0]);
+        setAutomationProposalStates((prev) => ({
+          ...prev,
+          [toolId]: { state: "error", errorMessage: msg },
+        }));
+        toast.error(msg);
+      }
+    },
+    [t],
+  );
+
+  const handleDismissAutomation = useCallback((toolId: string) => {
+    // Client-side only — nothing was written, so there's nothing to clean up.
+    setAutomationProposalStates((prev) => ({
+      ...prev,
+      [toolId]: { state: "dismissed" },
+    }));
+  }, []);
+
+  // Stable signature of the propose_agent tool_use ids in this session, so the
+  // re-entry detection below fetches only when the set of proposal cards
+  // changes (not on every streamed token).
+  const proposeAgentToolSig = useMemo(() => {
+    const ids: string[] = [];
+    for (const turn of turns) {
+      for (const block of turn.blocks) {
+        if (block.kind !== "tool") continue;
+        const tname = block.tool.title || "";
+        if (tname === "propose_agent" || tname.endsWith("__propose_agent")) {
+          ids.push(block.tool.id);
+        }
+      }
+    }
+    return ids.join(",");
+  }, [turns]);
+
+  // Reflect agents already created from a propose_agent card when the user
+  // RE-ENTERS the session. In-memory ``proposalStates`` is lost on reload, so a
+  // confirmed card would otherwise show "pending" again (and a second click
+  // would create a duplicate). ``propose_agent`` always creates a
+  // ``source=custom`` library agent named exactly as proposed, so a library
+  // match means the proposal was confirmed. Best-effort + name-based; never
+  // overwrites a live user transition (confirming/dismissing/terminal).
+  useEffect(() => {
+    if (!selectedSessionId || !proposeAgentToolSig) return;
+    const proposeTools: { id: string; name: string }[] = [];
+    for (const turn of turns) {
+      for (const block of turn.blocks) {
+        if (block.kind !== "tool") continue;
+        const tname = block.tool.title || "";
+        if (tname !== "propose_agent" && !tname.endsWith("__propose_agent")) {
+          continue;
+        }
+        let nm = "";
+        if (block.tool.input) {
+          try {
+            const parsed =
+              typeof block.tool.input === "string"
+                ? JSON.parse(block.tool.input)
+                : block.tool.input;
+            nm = String(parsed?.name || "");
+          } catch {
+            /* malformed/streaming input — skip */
+          }
+        }
+        if (nm) proposeTools.push({ id: block.tool.id, name: nm });
+      }
+    }
+    if (proposeTools.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await agentsApi.listAgents("custom");
+        if (cancelled) return;
+        const names = new Set(res.agents.map((a) => a.name));
+        setProposalStates((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const { id, name } of proposeTools) {
+            const cur = next[id];
+            // Keep live (confirming/dismissing) and terminal (confirmed/
+            // dismissed/error) states — only seed an untracked/pending card.
+            if (cur && cur.state !== "pending") continue;
+            if (names.has(name)) {
+              next[id] = { state: "confirmed" };
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      } catch {
+        /* non-fatal — list endpoint can fail transiently */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSessionId, proposeAgentToolSig]);
+
+  // Stable signature of the ``automation create`` proposal tool_use ids in this
+  // session — only create-action calls render a proposal card.
+  const automationCreateToolSig = useMemo(() => {
+    const ids: string[] = [];
+    for (const turn of turns) {
+      for (const block of turn.blocks) {
+        if (block.kind !== "tool") continue;
+        const tname = block.tool.title || "";
+        if (tname !== "automation" && !tname.endsWith("__automation")) continue;
+        if (parseAutomationCreateInput(block.tool.input)) ids.push(block.tool.id);
+      }
+    }
+    return ids.join(",");
+  }, [turns]);
+
+  // Reflect automations already created from a proposal card on session
+  // RE-ENTRY (in-memory state is lost on reload). Unlike agents (matched by
+  // name), automations are matched by ID: the confirm endpoint stamped the
+  // proposing ``tool_call_id`` onto the row, so the status endpoint maps each
+  // tool id → its created automation. Only seeds untracked/pending cards.
+  useEffect(() => {
+    if (!selectedSessionId || !automationCreateToolSig) return;
+    const ids = automationCreateToolSig.split(",").filter(Boolean);
+    if (ids.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await automationsApi.proposalStatus(selectedSessionId, ids);
+        if (cancelled) return;
+        setAutomationProposalStates((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const id of ids) {
+            const cur = next[id];
+            if (cur && cur.state !== "pending") continue;
+            const hit = res.confirmed[id];
+            if (hit) {
+              next[id] = { state: "confirmed", automationId: hit.automation_id };
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      } catch {
+        /* non-fatal — status endpoint can fail transiently */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedSessionId, automationCreateToolSig]);
 
   // Scan staging for every ``submit_skill`` tool_use we've seen, so the
   // card renders the actual file tree (not just the agent's
@@ -1285,6 +1770,26 @@ export const ConversationPage = () => {
     (tool: { id: string; title: string; input?: string; output?: string }) => {
       const name = tool.title || "";
 
+      // Claude dynamic-workflow launch → WorkflowProgressCard. The kernel
+      // streams ``session.workflow_progress`` snapshots keyed by this tool's
+      // tool_use_id while the background runtime executes; we render the live
+      // overview (status + agents-done/total + per-agent list) in place of the
+      // opaque generic tool card. When no snapshot exists yet (history replay /
+      // reconnect — the progress is live-only and never persisted), fall through
+      // to the generic ToolCallCard so the launch still shows.
+      if (name === "Workflow") {
+        const wfState = workflowStates.get(tool.id);
+        if (wfState) {
+          return (
+            <WorkflowProgressCard
+              state={wfState}
+              fallbackTitle={name}
+              onOpenStateFile={revealInFinder}
+            />
+          );
+        }
+      }
+
       // ADR-021: automation tool result → AutomationToolCard. The MCP
       // server returns a structured JSON blob as ``tool.output``; we
       // parse it and hand off to the card. If the output is missing
@@ -1296,19 +1801,70 @@ export const ConversationPage = () => {
         name === "automation" || name.endsWith("__automation");
       if (isAutomation) {
         const result = parseAutomationToolOutput(tool.output);
+        const openInAutomation = (automationId: string) => {
+          // The automation page is at ``/automations`` and reads
+          // ``?automation=<id>`` for direct linking. Soft navigation keeps the
+          // conversation mounted in the project sidebar.
+          navigate(`/automations?automation=${encodeURIComponent(automationId)}`);
+        };
+
+        // ``create`` PROPOSES — render a propose→confirm card (mirrors
+        // propose_agent). Every other action keeps the read-only tool card.
+        // We render primarily from the INPUT (always clean) and enrich from the
+        // OUTPUT proposal when it's parseable — the Valuz/DeepAgents runtime
+        // wraps the output so ``result`` is null there, but the card must still
+        // render and be confirmable.
+        const inputSpec = parseAutomationCreateInput(tool.input);
+        const proposal = result?.proposal ?? null;
+        const isCreate = result?.action === "create" || inputSpec != null;
+        if (isCreate) {
+          // The create tool rejected the proposal (bad cron / task-in-chat).
+          const validationError = result && !result.ok ? result.message : null;
+          // Nothing to show yet (no parsed input, no proposal, no error) —
+          // generic renderer until something lands.
+          if (!inputSpec && !proposal && !validationError) return null;
+          const cardName = proposal?.name ?? inputSpec?.name ?? "";
+          const cardPrompt = proposal?.prompt_template ?? inputSpec?.prompt_template;
+          const confirmTrigger = proposal?.trigger ?? inputSpec?.trigger ?? null;
+          const cardTriggerHuman =
+            proposal?.trigger_human_readable ??
+            automationTriggerSummary(confirmTrigger);
+          const cardActionKind =
+            proposal?.action_kind ?? inputSpec?.action_kind ?? "chat";
+          const cardAgentName = proposal?.agent_name ?? inputSpec?.agent_slug ?? null;
+          const entry = automationProposalStates[tool.id] || {
+            state: "pending" as const,
+          };
+          return (
+            <AutomationProposalCard
+              name={cardName}
+              promptTemplate={cardPrompt}
+              triggerHuman={cardTriggerHuman}
+              agentName={cardAgentName}
+              actionKind={cardActionKind}
+              state={entry.state}
+              errorMessage={entry.errorMessage}
+              validationError={validationError}
+              onConfirm={() => {
+                if (!confirmTrigger || !cardName) return;
+                void handleConfirmAutomation(tool.id, {
+                  name: cardName,
+                  prompt_template: cardPrompt ?? "",
+                  trigger: confirmTrigger,
+                  agent_slug: proposal?.agent_slug ?? inputSpec?.agent_slug,
+                  action_kind: cardActionKind,
+                });
+              }}
+              onDismiss={() => handleDismissAutomation(tool.id)}
+            />
+          );
+        }
+
         if (result) {
           return (
             <AutomationToolCard
               result={result}
-              onOpenInAutomation={(automationId) => {
-                // The automation page is at ``/automations`` and reads
-                // ``?automation=<id>`` for direct linking. We use a soft
-                // navigation so the conversation stays mounted in the
-                // workspace sidebar.
-                navigate(
-                  `/automations?automation=${encodeURIComponent(automationId)}`,
-                );
-              }}
+              onOpenInAutomation={openInAutomation}
             />
           );
         }
@@ -1425,6 +1981,61 @@ export const ConversationPage = () => {
         return null;
       }
 
+      // ``propose_agent`` — natural-language agent creation. Renders a card
+      // letting the user create + deploy the proposed agent. Tool name comes
+      // through plain or MCP-bridged (``mcp__harness__propose_agent``).
+      const isProposeAgent =
+        name === "propose_agent" || name.endsWith("__propose_agent");
+      if (isProposeAgent) {
+        let spec: {
+          name?: string;
+          instructions?: string;
+          description?: string;
+          runtime?: string;
+          model?: string;
+          effort?: string;
+          skills?: string[];
+          connectors?: string[];
+        } = {};
+        if (tool.input) {
+          try {
+            spec =
+              typeof tool.input === "string"
+                ? JSON.parse(tool.input)
+                : tool.input;
+          } catch {
+            // Partial/malformed args (still streaming) — render with blanks;
+            // the confirm button stays disabled until a name is present.
+          }
+        }
+        const entry = proposalStates[tool.id] || { state: "pending" as const };
+        const confirmSpec = {
+          name: spec.name || "",
+          instructions: spec.instructions || "",
+          description: spec.description,
+          runtime: spec.runtime,
+          model: spec.model,
+          skills: Array.isArray(spec.skills) ? spec.skills : [],
+          connectors: Array.isArray(spec.connectors) ? spec.connectors : [],
+        };
+        return (
+          <AgentProposalCard
+            name={confirmSpec.name}
+            description={spec.description}
+            instructions={confirmSpec.instructions}
+            runtime={spec.runtime || "claude_agent"}
+            model={spec.model || "claude-sonnet-4-6"}
+            skills={confirmSpec.skills}
+            connectors={confirmSpec.connectors}
+            state={entry.state}
+            errorMessage={entry.errorMessage}
+            deployedProjectLabel={entry.deployedProjectLabel}
+            onConfirm={() => void handleConfirmProposal(tool.id, confirmSpec)}
+            onDismiss={() => handleDismissProposal(tool.id)}
+          />
+        );
+      }
+
       const isSubmit =
         name === "submit_skill" || name.endsWith("__submit_skill");
       if (!isSubmit) return null;
@@ -1467,7 +2078,7 @@ export const ConversationPage = () => {
           filesTouched={filesTouched}
           state={entry.state}
           errorMessage={entry.errorMessage}
-          boundToWorkspaceLabel={entry.boundToWorkspaceLabel}
+          boundToProjectLabel={entry.boundToProjectLabel}
           stagedFiles={entry.stagedFiles}
           stagingPath={entry.stagingPath}
           onConfirm={() =>
@@ -1487,10 +2098,18 @@ export const ConversationPage = () => {
       submissionStates,
       handleConfirmSubmission,
       handleDismissSubmission,
+      proposalStates,
+      handleConfirmProposal,
+      handleDismissProposal,
+      automationProposalStates,
+      handleConfirmAutomation,
+      handleDismissAutomation,
       askUserQuestionAnswersByToolId,
       askUserQuestionLocalAnswers,
       askUserQuestionSubmitRef,
       planAnchors,
+      workflowStates,
+      revealInFinder,
       selectedSessionId,
       navigate,
       t,
@@ -1524,22 +2143,22 @@ export const ConversationPage = () => {
     [runtimeList],
   );
 
-  // 09-assistant: the 📁 chip's dropdown options — every project workspace.
-  // ``WorkspaceListItem`` carries no member count, so the count is left
+  // 09-assistant: the 📁 chip's dropdown options — every project project.
+  // ``ProjectListItem`` carries no member count, so the count is left
   // undefined for now (chip renders fine without it).
   const composerProjects = useMemo<ComposerProjectItem[]>(
     () =>
-      workspaces
+      projects
         .filter((w) => w.kind === "project")
         .map((w) => ({ id: w.id, name: w.name })),
-    [workspaces],
+    [projects],
   );
 
   // 09-assistant: whether the conversation currently targets 临时对话
   // (chat-default / non-project). The page stores the ``"chat-default"``
-  // sentinel for 临时, so derive temp-ness from the resolved workspace kind
+  // sentinel for 临时, so derive temp-ness from the resolved project kind
   // rather than a literal null.
-  const isTempConversation = activeWorkspace?.kind !== "project";
+  const isTempConversation = activeProject?.kind !== "project";
 
   // Agent options for the composer's 🤖 chip. Candidates depend on the 📁
   // chip: 临时对话 → the "我的" library (``myAgents``); a project → its
@@ -1629,13 +2248,6 @@ export const ConversationPage = () => {
   // Whether this conversation's model diverges from the bound agent's default
   // (i.e. the user actually overrode it). Drives the muted model hint in the
   // agent button — hidden until an override happens, so a default chat is clean.
-  const agentModelOverridden = useMemo(
-    () =>
-      !!selectedAgentBrain &&
-      (selectedModelId ?? null) !== (selectedAgentBrain.model ?? null),
-    [selectedAgentBrain, selectedModelId],
-  );
-
   // Slug → display name, so the header chip shows the agent's full name
   // ("研究分析师") rather than the raw kernel slug.
   const agentNameBySlug = useMemo(
@@ -1675,29 +2287,64 @@ export const ConversationPage = () => {
     defaultsLoading,
   ]);
 
-  // For project workspace "/" mention, only show enabled/bound skills
-  const composerMentionSkills = useMemo(() => {
-    if (activeWorkspace?.kind === "project") {
-      return workspaceSkills
-        .filter((s) => s.enabled)
-        .map((s) => ({
-          id: s.id,
-          name: s.name,
-          slug: s.slug,
-          description: s.description,
-        }));
+  // For project project "/" mention, only show enabled/bound skills
+  // Resolve an agent's stored skill entries to ``/`` picker items via the loaded
+  // catalogs (shared with ProjectDetailPage to avoid drift).
+  const resolveSkillItems = useCallback(
+    (entries: string[] | null | undefined) =>
+      resolveAgentSkillItems(entries, [availableSkills, projectSkills]),
+    [availableSkills, projectSkills],
+  );
+
+  // The bound skills of the currently selected member agent — the ``/`` picker
+  // list for a PROJECT conversation. Project chats can't attach skills ad-hoc
+  // (skills are the agent's equipment), so ``/`` surfaces exactly that agent's
+  // skills.
+  const selectedAgentSkillItems = useMemo(() => {
+    if (!effectiveAgentSlug) return [];
+    const agent = projectAgents.find(
+      (m) => m.member.agent_slug === effectiveAgentSlug,
+    )?.agent;
+    return resolveSkillItems(agent?.skills);
+  }, [effectiveAgentSlug, projectAgents, resolveSkillItems]);
+
+  // The ``/`` picker list for a NEW (non-project) conversation: the union of
+  // the library-ENABLED skills and the selected agent's bound skills, deduped
+  // by slug. A new conversation may have no agent (library skills only); the
+  // global library switch (``library_enabled``) is what the Skills page toggles.
+  const composerMentionSkills = useMemo<AgentSkillItem[]>(() => {
+    const libraryItems: AgentSkillItem[] = availableSkills
+      .filter((s) => s.library_enabled !== false)
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        slug: s.slug,
+        description: s.description,
+      }));
+    const agentEntries = isTempConversation
+      ? myAgents.find((a) => a.slug === effectiveAgentSlug)?.skills
+      : undefined;
+    const seen = new Set(
+      libraryItems.map((i) => i.slug).filter((s): s is string => !!s),
+    );
+    const merged: AgentSkillItem[] = [...libraryItems];
+    for (const it of resolveSkillItems(agentEntries)) {
+      if (it.slug && seen.has(it.slug)) continue;
+      merged.push(it);
+      if (it.slug) seen.add(it.slug);
     }
-    return availableSkills.map((s) => ({
-      id: s.id,
-      name: s.name,
-      slug: s.slug,
-      description: s.description,
-    }));
-  }, [activeWorkspace?.kind, workspaceSkills, availableSkills]);
+    return merged;
+  }, [
+    availableSkills,
+    isTempConversation,
+    myAgents,
+    effectiveAgentSlug,
+    resolveSkillItems,
+  ]);
 
   // Slug → display-name map for rendering inline ``/skill-slug`` chips
   // in past user messages. We blend availableSkills (the global picker
-  // catalog) and workspaceSkills (project-bound skills) so chips render
+  // catalog) and projectSkills (project-bound skills) so chips render
   // even for project-only skills that wouldn't appear in the global
   // catalog.
   const skillsBySlug = useMemo(() => {
@@ -1705,11 +2352,11 @@ export const ConversationPage = () => {
     for (const s of availableSkills) {
       if (s.slug) map[s.slug] = { name: s.name };
     }
-    for (const s of workspaceSkills) {
+    for (const s of projectSkills) {
       if (s.slug) map[s.slug] = { name: s.name };
     }
     return map;
-  }, [availableSkills, workspaceSkills]);
+  }, [availableSkills, projectSkills]);
 
   // Initial load fetches the latest ``TURN_PAGE_SIZE`` turns through the
   // turn-aligned window endpoint instead of pulling every event. Earlier
@@ -1735,6 +2382,9 @@ export const ConversationPage = () => {
     // "stacking" under the new session header.
     setEvents([]);
     setTodos(null);
+    // Workflow progress is live-only and per-session — drop the previous
+    // session's snapshots so a Workflow tool card can't leak across a switch.
+    setWorkflowStates(new Map());
     // The clarifying-pending ref is keyed to whatever session we're
     // leaving. Reset it so a stale pending_id from the previous session
     // can't get POSTed against the new one — and so the post-fetch walk
@@ -1877,12 +2527,12 @@ export const ConversationPage = () => {
   /**
    * Re-fetch the *one* session this page is currently rendering.
    *
-   * Replaces the previous ``refreshSessions(workspaceId, preferredId)``
-   * which did ``GET /v1/sessions?workspace_id=…`` and ``find()``-d the
+   * Replaces the previous ``refreshSessions(projectId, preferredId)``
+   * which did ``GET /v1/sessions?project_id=…`` and ``find()``-d the
    * row we cared about. That pattern had two problems:
    *
-   *   1. It needed a workspace id to call the list endpoint, but the
-   *      ``selectedWorkspaceId`` captured in callback closures could be
+   *   1. It needed a project id to call the list endpoint, but the
+   *      ``selectedProjectId`` captured in callback closures could be
    *      stale (the ``"chat-default"`` sentinel before
    *      ``ensureSession``'s state update settled). The post-turn
    *      refresh would then list against a non-existent project id,
@@ -1890,11 +2540,11 @@ export const ConversationPage = () => {
    *      ``selectedSessionId`` — the symptom users saw as "refresh"
    *      ".
    *   2. The page only ever renders one session at a time. Listing a
-   *      whole workspace's sessions just to ``find()`` one was
+   *      whole project's sessions just to ``find()`` one was
    *      wasteful and brittle.
    *
    * The clean replacement uses ``GET /v1/sessions/{id}`` directly. No
-   * workspace id needed; one round-trip; the result feeds both the
+   * project id needed; one round-trip; the result feeds both the
    * one-row ``sessions[]`` (the optimistic-merge code paths still
    * mutate this) and ``selectedSessionId``.
    */
@@ -1933,31 +2583,31 @@ export const ConversationPage = () => {
     setError(null);
     try {
       const [wsResponse, chListResponse] = await Promise.all([
-        workspacesApi.list(),
+        projectsApi.list(),
         providersApi
           .list()
-          .catch(() => ({ providers: [] as ProviderListItem[] })),
+          .catch(() => ({ providers: [] as LLMChannel[] })),
       ]);
-      setWorkspaces(wsResponse.workspaces);
+      setProjects(wsResponse.projects);
       const details = await Promise.all(
         chListResponse.providers
           .filter((c) => c.enabled)
           .map((c) => providersApi.get(c.id).catch(() => null)),
       );
-      setProviders(details.filter((d): d is ProviderDetail => d !== null));
+      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
 
       // Two URL shapes drive the page:
       //
       //   /conversation/new           — fresh draft, no session yet
       //   /conversation/{session_id}  — existing session, fetch detail
       //
-      // For the fresh-draft case we set ``selectedWorkspaceId`` to the
+      // For the fresh-draft case we set ``selectedProjectId`` to the
       // ``"chat-default"`` sentinel so skill autocomplete still loads
       // (the backend skills router treats it as the global chat-scope
-      // key); the file tree 404s and renders empty — correct for a
-      // not-yet-allocated workdir. The real workspace materializes
-      // when the user sends the first message and ``ensureSession``
-      // navigates us to ``/conversation/{real-id}``.
+      // key); ``refreshFileTree`` skips the sentinel (no project row /
+      // workdir exists yet) and renders an empty tree. The real project
+      // materializes when the user sends the first message and
+      // ``ensureSession`` navigates us to ``/conversation/{real-id}``.
       if (id === NEW_SESSION_ID) {
         setSessionTriggerMode(null);
         setSessionAgentSlug(null);
@@ -1969,12 +2619,12 @@ export const ConversationPage = () => {
         const projectParam = searchParams.get("project");
         const presetProject =
           projectParam &&
-          wsResponse.workspaces.some(
+          wsResponse.projects.some(
             (w) => w.id === projectParam && w.kind === "project",
           )
             ? projectParam
             : null;
-        setSelectedWorkspaceId(presetProject ?? "chat-default");
+        setSelectedProjectId(presetProject ?? "chat-default");
         setSessions([]);
         setSelectedSessionId(null);
         // CRITICAL: also clear the conversation state (events / todos
@@ -1991,13 +2641,13 @@ export const ConversationPage = () => {
       // Existing session path — one round-trip via the dedicated
       // ``GET /v1/sessions/{id}`` endpoint feeds every piece of state
       // the page needs: trigger_meta (skill-creator banner restore),
-      // workspace_id (right panel cwd / file tree), the session row
+      // project_id (right panel cwd / file tree), the session row
       // itself (composer status + optimistic-merge target).
       try {
         const sessionDetail = await sessionsApi.get(id);
         setSessionTriggerMode(sessionDetail.trigger_meta?.mode ?? null);
         setSessionAgentSlug(sessionDetail.agent_slug ?? null);
-        setSelectedWorkspaceId(sessionDetail.workspace_id);
+        setSelectedProjectId(sessionDetail.project_id);
         setSessions([sessionDetailToListItem(sessionDetail)]);
         // Skip the events refetch when bootstrap re-fires onto the
         // same session id we're already on — the URL change from
@@ -2019,14 +2669,14 @@ export const ConversationPage = () => {
         // typed / clicked.
         setSessionTriggerMode(null);
         setSessionAgentSlug(null);
-        setSelectedWorkspaceId(null);
+        setSelectedProjectId(null);
         setSessions([]);
         setSelectedSessionId(null);
         setError("Session not found.");
       }
     } catch (cause) {
       setError(
-        cause instanceof Error ? cause.message : "Failed to load workspace.",
+        cause instanceof Error ? cause.message : "Failed to load project.",
       );
     } finally {
       setLoading(false);
@@ -2039,28 +2689,28 @@ export const ConversationPage = () => {
 
   // Load all skills for composer autocomplete
   useEffect(() => {
-    if (!selectedWorkspaceId) return;
+    if (!selectedProjectId) return;
     skillsApi
-      .list(selectedWorkspaceId)
+      .list(selectedProjectId)
       .then((catalog) => {
         setAvailableSkills(catalog.skills);
       })
       .catch(() => {
         setAvailableSkills([]);
       });
-  }, [selectedWorkspaceId]);
+  }, [selectedProjectId]);
 
   // Load the project's configured member agents. Project conversations
   // pick one of these (instead of a raw model); the composer renders them
   // as an Agent selector. Default the picker to the first agent.
   useEffect(() => {
-    if (!selectedWorkspaceId || activeWorkspace?.kind !== "project") {
+    if (!selectedProjectId || activeProject?.kind !== "project") {
       setProjectAgents([]);
       return;
     }
     let cancelled = false;
     agentsApi
-      .listMembers(selectedWorkspaceId)
+      .listMembers(selectedProjectId)
       .then((res) => {
         if (cancelled) return;
         setProjectAgents(res.agents);
@@ -2077,7 +2727,7 @@ export const ConversationPage = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedWorkspaceId, activeWorkspace?.kind]);
+  }, [selectedProjectId, activeProject?.kind]);
 
   // 09-assistant: load the "我的" agent library once. These back the 🤖 chip
   // when the 📁 chip is on 临时对话 (no project member roster).
@@ -2101,7 +2751,7 @@ export const ConversationPage = () => {
     // so the new agent is present in the roster the composer renders from.
   }, [agentParam]);
 
-  // 09-assistant: when the 📁 chip sits on 临时对话 (non-project workspace)
+  // 09-assistant: when the 📁 chip sits on 临时对话 (non-project project)
   // and no session exists yet, default the 🤖 chip to the first "我的" agent.
   // Empty library → null; handleSend then nudges the user to pick/create
   // (10-new-conversation-guidance). The project case is handled by the
@@ -2109,56 +2759,69 @@ export const ConversationPage = () => {
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (selectedSession) return; // existing session is frozen (ADR-006)
-    if (activeWorkspace?.kind === "project") return; // project path elsewhere
+    if (activeProject?.kind === "project") return; // project path elsewhere
     setSelectedAgentSlug((prev) => {
       // A freshly-created agent handed off via ?agent= (「去临时对话」) wins as
       // soon as it appears in the reloaded roster.
       if (agentParam && myAgents.some((a) => a.slug === agentParam))
         return agentParam;
       if (prev && myAgents.some((a) => a.slug === prev)) return prev;
-      // 10-new-conversation-guidance slice 3: prefer the agent from the last
-      // 临时对话 (per-device memory), then fall back to the first library agent.
-      const lastUsed = getLastTempAgent();
-      if (lastUsed && myAgents.some((a) => a.slug === lastUsed))
-        return lastUsed;
-      // Then the onboarding-seeded Valuz 小助手 as the general default.
-      if (myAgents.some((a) => a.slug === "valuz-helper"))
-        return "valuz-helper";
-      return myAgents[0]?.slug ?? null;
+      // Skill-creator still needs an agent (its create flow binds one), so keep
+      // the old defaulting there: last-used → Valuz 小助手 → first library agent.
+      if (isSkillCreatorMode) {
+        const lastUsed = getLastTempAgent();
+        if (lastUsed && myAgents.some((a) => a.slug === lastUsed))
+          return lastUsed;
+        if (myAgents.some((a) => a.slug === "valuz-helper"))
+          return "valuz-helper";
+        return myAgents[0]?.slug ?? null;
+      }
+      // A normal new conversation now defaults to NO agent — an agentless quick
+      // chat on the global default model (the model-defaults effect seeds it).
+      return null;
     });
     // Re-run only on the data that decides the default — existence of a
-    // session (frozen), the workspace kind, the candidate roster, and the
-    // explicit ?agent= hand-off.
-  }, [activeWorkspace?.kind, myAgents, selectedSession, agentParam]);
+    // session (frozen), the project kind, the candidate roster, the explicit
+    // ?agent= hand-off, and whether this is the skill-creator flow.
+  }, [
+    activeProject?.kind,
+    myAgents,
+    selectedSession,
+    agentParam,
+    isSkillCreatorMode,
+  ]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // Load bound skills for project workspace context panel
+  // Load bound skills for project project context panel
   useEffect(() => {
-    if (!selectedWorkspaceId || activeWorkspace?.kind !== "project") return;
+    if (!selectedProjectId || activeProject?.kind !== "project") return;
     skillsApi
-      .workspaceCatalog(selectedWorkspaceId)
+      .projectCatalog(selectedProjectId)
       .then((catalog) => {
-        setWorkspaceSkills(catalog.skills);
+        setProjectSkills(catalog.skills);
       })
       .catch(() => {
-        setWorkspaceSkills([]);
+        setProjectSkills([]);
       });
-  }, [selectedWorkspaceId, activeWorkspace?.kind]);
+  }, [selectedProjectId, activeProject?.kind]);
 
-  // Load workspace file tree for the right context panel's Files tab.
-  // Loaded for both project AND chat workspaces — chat sessions write
+  // Load project file tree for the right context panel's Files tab.
+  // Loaded for both project AND chat projects — chat sessions write
   // generated artifacts into their managed cwd, and the user wants
   // those visible in the right rail too (under the "Generated files" label).
+  // The ``"chat-default"`` sentinel is NOT a real project (no row, no cwd —
+  // the backend materializes a fresh chat project only when the first
+  // session is created), so fetching its tree would just 404.
   const refreshFileTree = useCallback(() => {
-    if (!selectedWorkspaceId) {
+    if (!selectedProjectId || selectedProjectId === "chat-default") {
       setFileTree([]);
       return;
     }
-    workspacesApi
-      .listFiles(selectedWorkspaceId, { depth: 3 })
+    projectsApi
+      .listFiles(selectedProjectId, { depth: 3 })
       .then((res) => setFileTree(toFileTree(res.files)))
       .catch(() => setFileTree([]));
-  }, [selectedWorkspaceId]);
+  }, [selectedProjectId]);
 
   useEffect(() => {
     refreshFileTree();
@@ -2167,55 +2830,85 @@ export const ConversationPage = () => {
   // Auto-refresh on turn end: when ``sending`` flips false, the agent
   // has just finished writing whatever artifacts it was going to. Pull
   // a fresh tree so the panel reflects new files without the user
-  // having to switch workspaces or hit refresh manually.
+  // having to switch projects or hit refresh manually.
   const prevSendingRef = useRef(sending);
   useEffect(() => {
     if (prevSendingRef.current && !sending) {
       refreshFileTree();
+      // The agent may have called ``deliver_artifacts`` during the turn —
+      // pull the fresh 生成文件 list alongside the file tree.
+      void refreshArtifacts();
     }
     prevSendingRef.current = sending;
-  }, [sending, refreshFileTree]);
+  }, [sending, refreshFileTree, refreshArtifacts]);
 
   // Loading server-side attachments on session change + polling parse status
   // is owned by ``useSessionAttachments`` above.
 
   const ensureSession = useCallback(async (navigateOnCreate = true) => {
     if (selectedSession) return selectedSession;
-    if (!selectedWorkspaceId) throw new Error("No active workspace.");
+    if (!selectedProjectId) throw new Error("No active project.");
     // For quick-chat (kind="chat"), send the ``"chat-default"`` sentinel so
-    // the backend allocates a fresh, isolated chat workspace + cwd for this
-    // session. Project conversations keep passing their real workspace id.
-    const isChat = activeWorkspace?.kind === "chat";
+    // the backend allocates a fresh, isolated chat project + cwd for this
+    // session. Project conversations keep passing their real project id.
+    const isChat = activeProject?.kind === "chat";
     // 09-assistant §2.1/§2.2: every session binds to an agent — project
     // conversations to the chosen 派驻 member, 临时对话 to the picked "我的"
     // agent. There is no agentless path; the backend derives
     // runtime/model/provider/effort/skills/connectors from the agent, so the
     // model-picker fields below are ignored when it resolves the brain.
-    // handleSend guards the empty-library case; this throw is the
-    // type-narrowing backstop (10-new-conversation-guidance).
-    if (!selectedAgentSlug) {
+    // Skill-creator must bind an agent; a normal conversation may be agentless
+    // (the create below sends ``agent_slug: undefined`` → backend chat path).
+    if (isSkillCreatorMode && !selectedAgentSlug) {
       throw new Error("No agent selected.");
     }
-    const created = await sessionsApi.create({
-      workspace_id: isChat ? "chat-default" : selectedWorkspaceId,
-      agent_slug: selectedAgentSlug,
-      provider_id: selectedProviderId ?? undefined,
-      model_id: selectedModelId ?? undefined,
-      runtime_id: selectedRuntimeId ?? undefined,
-      mcp_provider_slugs:
-        selectedMcpSlugs.length > 0 ? selectedMcpSlugs : undefined,
-      permission_mode: selectedPermissionMode,
-      effort: selectedEffort,
-    });
+    let created: Awaited<ReturnType<typeof sessionsApi.create>>;
+    if (isSkillCreatorMode) {
+      // Skill-creator draft: mint through the skills launcher so the
+      // session carries trigger_meta + creation_context (the
+      // ``submit_skill`` confirm flow reads them), bound to the agent
+      // picked in the composer — same UX as 新对话.
+      const start = await skillsApi.startCreate({
+        context:
+          skillKindParam === "project" && skillProjectParam
+            ? { kind: "project", project_id: skillProjectParam }
+            : { kind: skillKindParam === "chat" ? "chat" : "skills_library" },
+        agent_slug: selectedAgentSlug,
+        provider_id: selectedProviderId ?? undefined,
+        model_id: selectedModelId ?? undefined,
+      });
+      created = await sessionsApi.get(start.session_id);
+    } else {
+      created = await sessionsApi.create({
+        project_id: isChat ? "chat-default" : selectedProjectId,
+        agent_slug: selectedAgentSlug ?? undefined,
+        provider_id: selectedProviderId ?? undefined,
+        model_id: selectedModelId ?? undefined,
+        runtime_id: selectedRuntimeId ?? undefined,
+        mcp_provider_slugs:
+          selectedMcpSlugs.length > 0 ? selectedMcpSlugs : undefined,
+        permission_mode: selectedPermissionMode,
+        effort: selectedEffort,
+      });
+    }
     // 10-new-conversation-guidance slice 3: remember which agent this 临时对话
     // used so the next new conversation pre-selects it.
-    if (isChat) setLastTempAgent(selectedAgentSlug);
+    if (isChat && selectedAgentSlug) setLastTempAgent(selectedAgentSlug);
     // Update local state IMMEDIATELY (before navigate / sendMessage)
     // so the rest of ``handleSend`` and the SSE subscription closures
-    // — which capture ``selectedWorkspaceId`` and friends — see the
+    // — which capture ``selectedProjectId`` and friends — see the
     // freshly minted ids. This is what the old ``refreshSessions``
     // race ultimately failed at.
     setSelectedSessionId(created.id);
+    // Seed the bound agent immediately. Attach-on-upload mints the session
+    // WITHOUT navigating (``navigateOnCreate=false``), so the bootstrap effect
+    // — which normally sets ``sessionAgentSlug`` from the fetched detail on a
+    // URL change — never fires. Without this, the moment ``selectedSession``
+    // turns truthy the composer flips ``selectedSession ? sessionAgentSlug :
+    // selectedAgentSlug`` to a null agent and the picker looks deselected. The
+    // session was just created with ``selectedAgentSlug``, so that is the
+    // authoritative bound agent.
+    setSessionAgentSlug(selectedAgentSlug);
     const createdItem = sessionDetailToListItem(created);
     setSessions([createdItem]);
     // Push the new session into the global session store IMMEDIATELY
@@ -2230,27 +2923,27 @@ export const ConversationPage = () => {
           )
         : [createdItem, ...sidebarSessions],
     );
-    if (created.workspace_id !== selectedWorkspaceId) {
-      // Quick-chat: the backend just minted a fresh workspace + cwd
-      // for this session. Pull the authoritative ``WorkspaceDetail``
+    if (created.project_id !== selectedProjectId) {
+      // Quick-chat: the backend just minted a fresh project + cwd
+      // for this session. Pull the authoritative ``ProjectDetail``
       // (cwd lives on the backend — host writes flow through
       // ``fs_registry`` and we never derive it locally) and merge.
       try {
-        const wsDetail = await workspacesApi.get(created.workspace_id);
-        setWorkspaces((prev) => {
+        const wsDetail = await projectsApi.get(created.project_id);
+        setProjects((prev) => {
           const filtered = prev.filter((w) => w.id !== wsDetail.id);
           return [...filtered, wsDetail];
         });
-        // Also push into the global workspace store so the layout's
-        // "New Chat" filter (``allWorkspaces.filter(kind === "chat")``)
+        // Also push into the global project store so the layout's
+        // "New Chat" filter (``allProjects.filter(kind === "chat")``)
         // immediately sees this row — without it, the new session
         // would still be filtered out of the chat group until the
         // path-change ``fetchProjects`` round-trip completes.
-        upsertWorkspace(wsDetail);
+        upsertProject(wsDetail);
       } catch {
         /* non-fatal — file tree falls back gracefully */
       }
-      setSelectedWorkspaceId(created.workspace_id);
+      setSelectedProjectId(created.project_id);
     }
     void fetchSidebarSessions();
     // Promote the URL from ``/conversation/new`` (or any other
@@ -2267,16 +2960,19 @@ export const ConversationPage = () => {
     // churn that was dropping the freshly-attached file from the panel. The
     // send path navigates explicitly (see ``performSend``).
     if (id === NEW_SESSION_ID && navigateOnCreate) {
-      navigate(`/conversation/${created.id}`, { replace: true });
+      navigate(
+        `/conversation/${created.id}${isSkillCreatorMode ? "?mode=skill-creator" : ""}`,
+        { replace: true },
+      );
     }
     return created;
   }, [
-    selectedWorkspaceId,
-    activeWorkspace?.kind,
+    selectedProjectId,
+    activeProject?.kind,
     fetchSidebarSessions,
     sidebarSessions,
     setSidebarSessions,
-    upsertWorkspace,
+    upsertProject,
     selectedSession,
     selectedProviderId,
     selectedModelId,
@@ -2294,6 +2990,9 @@ export const ConversationPage = () => {
     selectedPermissionMode,
     selectedEffort,
     selectedAgentSlug,
+    isSkillCreatorMode,
+    skillKindParam,
+    skillProjectParam,
     id,
     navigate,
   ]);
@@ -2362,6 +3061,26 @@ export const ConversationPage = () => {
             refreshed,
           );
           if (refreshed) setTodos(refreshed);
+        }
+        // Live workflow progress — Claude ``Workflow`` tool runs stream a
+        // snapshot per tick (phases / per-agent state / status), keyed by the
+        // launch tool_use_id. Merge into the per-tool map so the Workflow tool
+        // card renders live progress. ``script`` / ``scriptPath`` arrive only on
+        // the first snapshot, so carry them forward when a later tick omits them.
+        if (event.event.event_type === SESSION_WORKFLOW_PROGRESS_EVENT) {
+          const wp = parseWorkflowProgress(event);
+          if (wp) {
+            setWorkflowStates((prev) => {
+              const prevState = prev.get(wp.id);
+              const next = new Map(prev);
+              next.set(wp.id, {
+                ...wp.state,
+                scriptPath: wp.state.scriptPath ?? prevState?.scriptPath,
+                script: wp.state.script ?? prevState?.script,
+              });
+              return next;
+            });
+          }
         }
         // ADR-013 approval contract: track the current unresolved
         // clarifying_questions pending so the AskUserQuestionCard's
@@ -2538,6 +3257,26 @@ export const ConversationPage = () => {
               status !== "running" &&
               status !== "created"));
         if (terminal) {
+          // Safety net for workflow cards: the turn is over, so any Workflow
+          // run is definitively finished (the kernel blocks the turn until the
+          // run completes, then force-emits a terminal snapshot). But that
+          // snapshot is live-only and can lose the race against this terminal
+          // event — which immediately ``stopSubscription()``s the SSE stream
+          // below, so a late terminal frame would never arrive. Coerce any
+          // still-"running" card to ``completed`` here so it can't get stuck
+          // pulsing. A card that already received a terminal status (completed
+          // / killed / failed) is left untouched.
+          setWorkflowStates((prev) => {
+            let changed = false;
+            const next = new Map(prev);
+            for (const [wfId, wfState] of prev) {
+              if (isWorkflowRunning(wfState.status)) {
+                next.set(wfId, { ...wfState, status: "completed" });
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
+          });
           stopSubscription();
         }
       };
@@ -2631,11 +3370,10 @@ export const ConversationPage = () => {
   // uploads — it just mints/reuses the session and posts the message.
   const performSend = async () => {
     if (!draft.trim() || sending) return;
-    // 10-new-conversation-guidance: every conversation binds an agent. A new
-    // 临时对话 with an empty library / no pick has no agent — nudge the user to
-    // pick (via the 🤖 「+ Agent」 menu or the banner) instead of creating a
-    // session with a null agent.
-    if (!selectedSession && !selectedAgentSlug) {
+    // Skill-creator binds an agent (its create flow needs one) — nudge if none.
+    // A normal new 临时对话 may now be agentless (a quick chat on the default
+    // model), so it sends without an agent pick.
+    if (!selectedSession && !selectedAgentSlug && isSkillCreatorMode) {
       toast.error(_t("conversation.selectAgentFirst" as I18nKey));
       return;
     }
@@ -2685,7 +3423,10 @@ export const ConversationPage = () => {
       // navigate→bootstrap churn) it returns cached without navigating, so do
       // the swap here. ``replace:true`` keeps Back from returning to the draft.
       if (id === NEW_SESSION_ID && session.id !== NEW_SESSION_ID) {
-        navigate(`/conversation/${session.id}`, { replace: true });
+        navigate(
+          `/conversation/${session.id}${isSkillCreatorMode ? "?mode=skill-creator" : ""}`,
+          { replace: true },
+        );
       }
 
       // Attachments were already uploaded (on attach) and the backend's
@@ -2740,8 +3481,18 @@ export const ConversationPage = () => {
       );
       setSelectedSessionId(detail.id);
     } catch (cause) {
+      // The backend may attach an i18n key to a business error (structured
+      // ``detail.key``) and let the client render it — e.g. a commercial
+      // billing rejection. Prefer that key; otherwise show the raw message.
       const msg =
-        cause instanceof Error ? cause.message : "Failed to send message.";
+        cause instanceof ApiError && cause.i18nKey
+          ? _t(
+              cause.i18nKey as Parameters<typeof _t>[0],
+              cause.i18nParams as Parameters<typeof _t>[1],
+            )
+          : cause instanceof Error
+            ? cause.message
+            : "Failed to send message.";
       setError(msg);
       toast.error(msg);
       setSending(false);
@@ -2767,8 +3518,168 @@ export const ConversationPage = () => {
   // Send entry point. Blocks on attachments that are still parsing — the
   // confirm dialog lets the user wait or submit with only the raw file
   // (no parsed content / doc-search until parsing finishes).
+  // ---- Session input queue (docs/design/session-input-queue.md) ----
+
+  const refreshQueue = useCallback(async () => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.list(selectedSessionId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch {
+      /* best-effort — a queue fetch failure must not break the conversation */
+    }
+  }, [selectedSessionId]);
+
+  const performEnqueue = async () => {
+    const text = draft.trim();
+    if (!text || !selectedSessionId) return;
+    setDraft("");
+    setSelectedComposerSkill(null);
+    try {
+      const list = await queueApi.enqueue(selectedSessionId, text, {
+        providerId: selectedProviderId,
+        modelId: selectedModelId,
+      });
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch (cause) {
+      toast.error(
+        cause instanceof Error ? cause.message : "Failed to queue message.",
+      );
+      setDraft(text); // restore so the user can retry
+    }
+  };
+
+  const handleEditQueued = async (queueId: string, text: string) => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.edit(selectedSessionId, queueId, text);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Edit failed.");
+    }
+  };
+
+  const handleDeleteQueued = async (queueId: string) => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.remove(selectedSessionId, queueId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Delete failed.");
+    }
+  };
+
+  const handleResumeQueue = async () => {
+    if (!selectedSessionId) return;
+    try {
+      const list = await queueApi.resume(selectedSessionId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+      // The drain-follower effect picks up from here (status → running →
+      // re-subscribe), the same path as a drain after a normal turn.
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Resume failed.");
+    }
+  };
+
+  const handleSteerQueued = async (queueId: string) => {
+    if (!selectedSessionId) return;
+    try {
+      // Send-now: the backend silently interrupts the active turn and drains
+      // this item. The drain-follower effect re-subscribes (status → running)
+      // so the steered turn streams live, same path as a normal drain.
+      const list = await queueApi.steer(selectedSessionId, queueId);
+      setQueue(list.items);
+      setQueuePaused(list.paused);
+      setQueueDraining(list.draining ?? false);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : "Send failed.");
+    }
+  };
+
+  // Hydrate the persisted queue when the active session changes.
+  useEffect(() => {
+    void refreshQueue();
+  }, [refreshQueue]);
+
+  // Stream queued items as they drain. Each queued item runs as its OWN kernel
+  // turn after the previous one idles (which tears down that turn's SSE), so
+  // while a drain is in flight or items remain (and nothing is streaming), poll
+  // for the next drained turn and re-subscribe. ``subscribeToSession`` replays
+  // every event after ``maxSeqRef`` from the DB and then streams live (the same
+  // proven path as reopen / mid-turn reconnect). We subscribe when the session
+  // is ``running`` OR when the DB already has events past ``maxSeqRef`` — the
+  // latter catches a turn that finished *inside* the poll interval (fast turns
+  // / steer-interrupted turns); the replay renders it and self-terminates on
+  // the replayed ``session.idle``. We must NOT subscribe on a quiet idle with
+  // nothing new (a bare subscribe hangs the SSE open — fine between items, but
+  // after the LAST item it would never release ``sending``). ``queueDraining``
+  // (a dispatched item is invisible in ``queue``) keeps this alive until the
+  // last item finishes; then the effect goes quiet (§14.5).
+  useEffect(() => {
+    if (!selectedSessionId || sending || queuePaused) return;
+    if (!queueDraining && !queue.some((i) => i.status === "queued")) return;
+    const sid = selectedSessionId;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+      try {
+        const detail = await sessionsApi.get(sid);
+        if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+        if (detail.status === "running") {
+          subscribeToSession(sid, maxSeqRef.current);
+          return;
+        }
+        const resp = await sessionsApi.listEvents(sid, maxSeqRef.current);
+        if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+        if (resp.items.length > 0) {
+          subscribeToSession(sid, maxSeqRef.current);
+        }
+      } catch {
+        // best-effort — a transient poll failure retries on the next tick.
+      }
+    };
+    const timer = window.setInterval(() => void tick(), 500);
+    void tick();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    selectedSessionId,
+    sending,
+    queuePaused,
+    queueDraining,
+    queue,
+    subscribeToSession,
+  ]);
+
+  // Refetch on a turn boundary (sending → idle): drained items drop and any
+  // blocked / paused state surfaces (session-input-queue §8.4).
+  const prevQueueSendingRef = useRef(false);
+  useEffect(() => {
+    if (prevQueueSendingRef.current && !sending) void refreshQueue();
+    prevQueueSendingRef.current = sending;
+  }, [sending, refreshQueue]);
+
+  // Send entry point. While a turn is running, a follow-up is queued (drains
+  // after the active turn). Otherwise it blocks on attachments still parsing —
+  // the confirm dialog lets the user wait or submit with only the raw file.
   const handleSend = () => {
-    if (!draft.trim() || sending) return;
+    if (!draft.trim()) return;
+    if (sending) {
+      void performEnqueue();
+      return;
+    }
     if (attachmentsParsing) {
       setParsingConfirmOpen(true);
       return;
@@ -3328,7 +4239,7 @@ export const ConversationPage = () => {
     // Sync the composer selector to whatever the kernel locked at session
     // creation. Both ids must come from the session (not just locked_model_id)
     // — the composer matches on (providerId, modelId) pairs, so a missing
-    // provider id makes the selector silently fall back to the workspace
+    // provider id makes the selector silently fall back to the project
     // default's display label even when the session is wired to a different
     // model end-to-end.
     if (selectedSession.locked_provider_id) {
@@ -3580,15 +4491,15 @@ export const ConversationPage = () => {
         />
       );
     }
-    // Unified panel for both project and chat workspaces. Chat (kind="chat")
+    // Unified panel for both project and chat projects. Chat (kind="chat")
     // is treated as a "special project" — same component, same visual style,
     // but with KB binding / project instructions / file tree / scheduled
     // tasks omitted. The panel's section visibility is data-driven: pass
     // ``undefined`` for sections that don't apply.
-    const isProject = activeWorkspace?.kind === "project";
+    const isProject = activeProject?.kind === "project";
     // 09-assistant Phase B: 临时对话 collapses to a 2-column layout — no right
     // context panel until/unless a live session exists. Returning ``null``
-    // makes the layout drop the aside column (WorkspaceLayoutBase reserves it
+    // makes the layout drop the aside column (ProjectLayoutBase reserves it
     // only when ``resolvedRightPanel`` is truthy). Flipping the 📁 chip back
     // to 临时 recomputes this to ``null`` and the column slides away. A live
     // chat session keeps the panel so its generated files / todos stay
@@ -3607,7 +4518,19 @@ export const ConversationPage = () => {
       name: a.filename,
       size: formatFileSize(a.size_bytes),
       sourceKind: a.source_kind,
-      parseStatus: a.parse_status as "parsing" | "ready" | "failed" | undefined,
+      parseStatus: a.parse_status as
+        | "parsing"
+        | "ready"
+        | "failed"
+        | "native"
+        | undefined,
+    }));
+    // Agent-delivered artifacts → the curated "生成文件" panel section.
+    const generatedFiles = sessionArtifacts.map((a) => ({
+      id: a.id,
+      name: a.file_name,
+      size: formatFileSize(a.file_size),
+      path: a.file_path,
     }));
     // Always render the panel — even when it has nothing in it — so the
     // right-side toggle button stays visible on every conversation page.
@@ -3649,13 +4572,17 @@ export const ConversationPage = () => {
         uploadedFiles={uploadedFiles}
         onUploadFile={handlePanelUpload}
         onRemoveUploadedFile={handleRemoveUploadedFile}
+        // Agent-delivered deliverables (生成文件) — shown in both chat and
+        // project sessions; rows open the file in its OS-associated app.
+        generatedFiles={generatedFiles}
+        onOpenGeneratedFile={(path) => void revealInFinder(path)}
         // KB binding tree — project sessions only, **read-only**: we
         // pass ``kbTree`` + ``bindings`` (so the checkbox state shows
         // which folders/files are bound) and ``onExpandKbFolder`` (so
         // the user can drill in to inspect), but deliberately omit
         // ``onToggleBinding`` — editing happens on the project detail
         // page and takes effect for the next session. Chat /
-        // skill-creator workspaces pass ``undefined`` so the section
+        // skill-creator projects pass ``undefined`` so the section
         // doesn't render at all.
         kbTree={isProject ? projectKbTree : undefined}
         bindings={isProject ? projectKbBindings : undefined}
@@ -3664,19 +4591,22 @@ export const ConversationPage = () => {
         fileTreeTitle={
           isProject
             ? t("project.fileTree" as Parameters<typeof t>[0])
-            : t("conversation.generatedFiles" as Parameters<typeof t>[0])
+            : // Chat sessions: the curated "生成文件" section now owns that
+              // label (agent-delivered artifacts), so the raw cwd file tree
+              // uses the neutral "文件" title to avoid two identical headers.
+              t("conversation.files" as Parameters<typeof t>[0])
         }
         fileTreeInTab={isProject}
         rootPath={
           isProject
-            ? ((activeWorkspace as WorkspaceDetail)?.root_path ?? undefined)
+            ? ((activeProject as ProjectDetail)?.root_path ?? undefined)
             : t("conversation.workDir" as Parameters<typeof t>[0])
         }
         onOpenInFinder={() => {
-          const ws = activeWorkspace as WorkspaceDetail | null;
+          const ws = activeProject as ProjectDetail | null;
           // Prefer the kernel-resolved cwd (project + chat both have one);
           // fall back to root_path so a stale backend that hasn't
-          // populated ``cwd`` yet still works for project workspaces.
+          // populated ``cwd`` yet still works for project projects.
           const path = ws?.cwd ?? ws?.root_path;
           if (!path) {
             toast.info(t("conversation.noWorkDir" as Parameters<typeof t>[0]));
@@ -3684,18 +4614,16 @@ export const ConversationPage = () => {
           }
           void revealInFinder(path);
         }}
+        onFileClick={(relPath) => {
+          void openArtifactFile(relPath);
+        }}
         onFileDoubleClick={(relPath) => {
-          // FileTreeNode.path is relative to the workspace cwd (built
-          // by ``toFileTree`` from ``WorkspaceFileNode``). Resolve to
-          // an absolute path before handing off to the main process,
-          // which calls ``shell.openPath`` — opens files in their
-          // OS-associated app (.py -> VSCode/PyCharm, .csv -> Excel/
-          // Numbers, .md -> Typora/system editor, etc.).
-          const ws = activeWorkspace as WorkspaceDetail | null;
-          const cwd = ws?.cwd ?? ws?.root_path;
-          if (!cwd) return;
-          const sep = cwd.endsWith("/") ? "" : "/";
-          void revealInFinder(`${cwd}${sep}${relPath}`);
+          void openArtifactFile(relPath);
+        }}
+        onOpenInSystem={(relPath) => {
+          void revealInFinder(
+            resolveConversationArtifactPath(relPath, activeProjectRootPath),
+          );
         }}
         onRefreshFiles={refreshFileTree}
         collapsed={panelCollapsed}
@@ -3704,8 +4632,10 @@ export const ConversationPage = () => {
       />
     );
   }, [
-    activeWorkspace,
+    activeProject,
     fileTree,
+    activeProjectRootPath,
+    openArtifactFile,
     panelCollapsed,
     panelSetCollapsed,
     selectedComposerSkill,
@@ -3716,6 +4646,8 @@ export const ConversationPage = () => {
     stagingSyncing,
     refreshStaging,
     sessionAttachments,
+    sessionArtifacts,
+    revealInFinder,
     handleRemoveSessionAttachment,
     handleSyncStaging,
     todos,
@@ -3745,7 +4677,7 @@ export const ConversationPage = () => {
 
   // Synchronously reset all panel-driving data on session change.
   // ``fileTree`` / ``sessionAttachments`` / ``attachments`` are all
-  // refreshed asynchronously (per-workspace fetch, per-session fetch,
+  // refreshed asynchronously (per-project fetch, per-session fetch,
   // user-queued composer state) so without this the right-panel
   // collapsed effect below would run a SECOND time with the previous
   // session's stale ``hasData = true`` and edge-trigger an unwanted
@@ -3756,16 +4688,21 @@ export const ConversationPage = () => {
   useEffect(() => {
     setSessionAttachments([]);
     setFileTree([]);
+    setSelectedArtifactPath(null);
+    setArtifact(null);
+    setArtifactContent(null);
+    setArtifactLoading(false);
+    setArtifactError(null);
   }, [selectedSessionId, setSessionAttachments]);
 
   // Drive the right-panel collapsed state from per-session data:
-  //   * Project workspaces always have meaningful panel content
+  //   * Project projects always have meaningful panel content
   //     (instructions / skills / KB / file tree) — open by default,
   //     and re-open on every session switch within the project.
-  //   * Chat workspaces start collapsed and auto-expand on the
+  //   * Chat projects start collapsed and auto-expand on the
   //     empty → has-data edge (todos / attachments / files). Manual
   //     collapses survive subsequent growth (we only edge-trigger).
-  const isProjectWorkspace = activeWorkspace?.kind === "project";
+  const isProjectProject = activeProject?.kind === "project";
   const prevSessionIdRef = useRef<string | null>(null);
   const prevHasDataRef = useRef(false);
   useEffect(() => {
@@ -3802,7 +4739,7 @@ export const ConversationPage = () => {
       panelSetCollapsed(!selectedSessionId);
       return;
     }
-    if (isProjectWorkspace) return;
+    if (isProjectProject) return;
     const hasData =
       (todos?.length ?? 0) > 0 ||
       sessionAttachments.length > 0 ||
@@ -3814,7 +4751,7 @@ export const ConversationPage = () => {
   }, [
     selectedSessionId,
     id,
-    isProjectWorkspace,
+    isProjectProject,
     todos,
     sessionAttachments,
     fileTree,
@@ -3851,7 +4788,7 @@ export const ConversationPage = () => {
               {isSkillCreatorMode ? (
                 <span className="flex shrink-0 items-center gap-1 rounded-md bg-brand/10 px-2 py-0.5 text-2xs text-brand">
                   <Sparkles className="h-3 w-3" />
-                  Skill Creator {t("cron.model" as Parameters<typeof t>[0])}
+                  Skill Creator
                 </span>
               ) : null}
               {headerTitle ? (
@@ -3972,9 +4909,9 @@ export const ConversationPage = () => {
                   {agentNameBySlug.get(sessionAgentSlug) ?? sessionAgentSlug}
                 </span>
               ) : null}
-              {activeWorkspace?.name && !isSkillCreatorMode ? (
+              {activeProject?.name && !isSkillCreatorMode ? (
                 <span className="shrink-0 rounded-md bg-surface-soft px-2 py-0.5 text-2xs text-ink-meta">
-                  {activeWorkspace.name}
+                  {activeProject.name}
                 </span>
               ) : null}
             </div>
@@ -3999,6 +4936,19 @@ export const ConversationPage = () => {
                   {t("conversation.goToSettings" as Parameters<typeof t>[0])}
                 </Button>
               }
+            />
+          </div>
+        ) : selectedArtifactPath || artifactLoading || artifactError ? (
+          <div className="min-h-0 flex-1 p-3">
+            <ArtifactViewerShell
+              artifact={artifact}
+              content={artifactContent}
+              loading={artifactLoading}
+              error={artifactError}
+              onReload={handleArtifactReload}
+              onClose={handleArtifactClose}
+              onCopyContent={handleArtifactCopy}
+              onOpenExternal={handleArtifactOpenExternal}
             />
           </div>
         ) : (
@@ -4226,6 +5176,21 @@ export const ConversationPage = () => {
               setComposerTouched(true);
             }}
           />
+          {selectedSessionId ? (
+            // Mirror the Composer root's horizontal inset (``px-5``) so the
+            // queue lines up with the input box, which is its own
+            // ``mx-auto max-w-[760px]`` inside that same px-5.
+            <div className="px-5">
+              <QueuedInputsBar
+                queue={queue}
+                paused={queuePaused}
+                onEdit={handleEditQueued}
+                onDelete={handleDeleteQueued}
+                onResume={handleResumeQueue}
+                onSteer={handleSteerQueued}
+              />
+            </div>
+          ) : null}
           <Composer
             // Remount per route so the textarea's native autoFocus refires when
             // the user navigates to a different conversation (or back to the
@@ -4233,10 +5198,18 @@ export const ConversationPage = () => {
             key={id ?? "new"}
             value={draft}
             onChange={setDraft}
-            // Project conversations configure skills per-agent, so the inline
-            // skill picker is hidden there; the assistant (non-project) chat
-            // keeps it for global ``/`` skills.
-            showSkillButton={!isProjectWorkspace}
+            // Keep the composer usable while a turn runs — submitting queues a
+            // follow-up (session-input-queue) instead of being blocked.
+            queueWhileSending
+            // Project conversations can't attach skills ad-hoc (skills are the
+            // agent's equipment), so the toolbar "add skill" button stays hidden
+            // there. The ``/`` picker, however, is enabled once a member agent
+            // is selected so the user can invoke that agent's bound skills; the
+            // assistant (non-project) chat keeps both for global ``/`` skills.
+            showSkillButton={!isProjectProject}
+            showSkillSlash={
+              isProjectProject ? effectiveAgentSlug != null : undefined
+            }
             autoFocus
             onSend={() => {
               void handleSend();
@@ -4267,6 +5240,7 @@ export const ConversationPage = () => {
                   | "parsing"
                   | "ready"
                   | "failed"
+                  | "native"
                   | undefined,
                 sourceKind: a.source_kind,
               }))}
@@ -4289,40 +5263,40 @@ export const ConversationPage = () => {
             // session creation; the agent itself is never modified); for an
             // EXISTING temp session runtime/model are read-only (frozen,
             // ADR-006) but visible, and effort stays editable (live-reconcile).
-            allowAgentBrainOverride={!isProjectWorkspace}
-            agentModelOverridden={agentModelOverridden}
+            allowAgentBrainOverride={!isProjectProject}
             // ADR-006: once a session exists both chips freeze (the locked
             // 🤖 chip shows the bound ``sessionAgentSlug``).
             agentLocked={selectedSession != null}
             onAgentChange={(slug) => {
               setSelectedAgentSlug(slug);
-              // Clear the "touched" flag so the override re-seeds from the
-              // newly-bound agent's brain (see the seeding effect).
-              setComposerTouched(false);
+              // Switching to an agent re-seeds runtime/model/effort from that
+              // agent's brain. Picking "Default" (slug = null) keeps whatever
+              // you already chose in the rows below — don't reset it.
+              if (slug) setComposerTouched(false);
             }}
             // 09-assistant 📁 project chip: switches the draft between 临时对话
-            // (chat-default) and a project workspace. The page stores the
+            // (chat-default) and a project project. The page stores the
             // ``"chat-default"`` sentinel for 临时, so the chip sees ``null``
-            // when the active workspace isn't a project, and a change to
+            // when the active project isn't a project, and a change to
             // ``null`` maps back to the sentinel. Frozen once a session exists.
             projects={composerProjects}
-            selectedWorkspaceId={
-              isProjectWorkspace ? selectedWorkspaceId : null
+            selectedProjectId={
+              isProjectProject ? selectedProjectId : null
             }
-            workspaceLocked={selectedSession != null}
-            onWorkspaceChange={(idOrNull) => {
-              setSelectedWorkspaceId(idOrNull ?? "chat-default");
-              // The picked skill belongs to the previous workspace scope —
+            projectLocked={selectedSession != null}
+            onProjectChange={(idOrNull) => {
+              setSelectedProjectId(idOrNull ?? "chat-default");
+              // The picked skill belongs to the previous project scope —
               // drop it so a project-scoped skill can't leak into a 临时 send
               // (and vice versa). availableSkills reloads off the new id.
               setSelectedComposerSkill(null);
               setComposerTouched(true);
             }}
             onAddAgent={
-              isProjectWorkspace && selectedWorkspaceId
+              isProjectProject && selectedProjectId
                 ? () =>
                     navigate(
-                      `/projects/${encodeURIComponent(selectedWorkspaceId)}`,
+                      `/projects/${encodeURIComponent(selectedProjectId)}`,
                     )
                 : () => setCreateAgentOpen(true)
             }
@@ -4331,7 +5305,7 @@ export const ConversationPage = () => {
             // even with an empty library — handleSend then nudges the user to
             // pick/create an agent (10-new-conversation-guidance).
             sendDisabled={
-              isProjectWorkspace &&
+              isProjectProject &&
               !selectedSession &&
               (composerAgents.length === 0 || !selectedAgentSlug)
             }
@@ -4392,7 +5366,9 @@ export const ConversationPage = () => {
               setSelectedModelId(mId);
               setComposerTouched(true);
             }}
-            skills={composerMentionSkills}
+            skills={
+              isProjectProject ? selectedAgentSkillItems : composerMentionSkills
+            }
             onSkillSelect={(s) => {
               const skill =
                 availableSkills.find((sk) => sk.id === s.id) ?? null;
@@ -4403,6 +5379,12 @@ export const ConversationPage = () => {
             }}
             onLocalUpload={handleLocalFilesAttach}
             onFileDrop={handleLocalFilesAttach}
+            connectors={connectorOptions}
+            selectedConnectorSlugs={selectedMcpSlugs}
+            onToggleConnector={toggleConnector}
+            connectorsReadOnly={!isNewSession}
+            onManageSkills={() => navigate("/skills")}
+            onManageConnectors={() => navigate("/connectors")}
           />
           <AttachmentParsingDialog
             open={parsingConfirmOpen}

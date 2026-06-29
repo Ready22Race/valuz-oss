@@ -1,22 +1,24 @@
-"""Stream the kernel ``events`` table to clients as Server-Sent Events.
+"""Stream kernel session events to clients as Server-Sent Events.
 
-The valuz frontend talks SSE (``/v1/sessions/{id}/events/stream``); the V5
-kernel exposes events via WebSocket on ``/api/v1/sessions/{id}/run`` and a
-plain GET ``/api/v1/sessions/{id}/events`` for replay. To keep the frontend
-unchanged through this migration, valuz keeps the SSE shell and reads the
-kernel's ``events`` table directly.
+The valuz frontend talks SSE (``/v1/sessions/{id}/events/stream``) in the
+legacy pre-V5 frame shape; the kernel exposes events through the
+``KernelClient`` seam — cursor reads (``get_events(after_seq=...)`` /
+``get_events_window``) plus the live subscription
+(``subscribe_session_events``). This adapter keeps the SSE shell and the
+kernel→legacy event-type translation, sourcing every frame from the seam
+(no direct kernel storage access).
 
-This module gives the session router two helpers:
+This module gives the session router three helpers:
 
-- ``list_events_after`` — synchronous one-shot fetch for the polling
+- ``list_events_after`` — one-shot cursor fetch for the polling
   ``GET /v1/sessions/{id}/events?after_seq=N`` endpoint.
+- ``list_events_window`` — turn-aligned history pagination.
 - ``iter_events_sse`` — async generator yielding ``EventSourceResponse``-
-  shaped frames; calls ``list_events_after`` on a short interval and
+  shaped frames; merges the live subscription with a DB-poll fallback and
   reconnects gracefully when the client provides ``after_seq``.
 
-The kernel's ``events.id`` column is an autoincrement integer — we expose
-it as ``seq`` to the frontend, replacing the old per-session ``seq``
-counter that the deleted ``valuz_session_event`` table used to maintain.
+The kernel exposes the events row id as ``seq`` — the frontend's paging
+cursor.
 """
 
 from __future__ import annotations
@@ -27,9 +29,9 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import text
-
-from valuz_agent.infra.database import async_engine
+from valuz_agent.adapters import kernel_client
+from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.infra.sse import shielded
 
 POLL_INTERVAL_SECONDS = 0.3
 IDLE_HEARTBEAT_SECONDS = 15.0
@@ -126,12 +128,23 @@ def _translate_kernel_event(
         carries the canonical record)
       - ``tool_use``          → ``tool.call.started``
       - ``tool_result``       → ``tool.call.completed``
+      - ``tool_input_delta``  → ``tool.call.input_delta``  (live-only: partial
+        tool-call input JSON streaming in *before* ``tool_use`` — the first
+        delta is the frontend's build-the-card signal, so large-file writes
+        show progress instead of a dead wait)
+      - ``tool_output_delta`` → ``tool.call.output_delta`` (live-only: streamed
+        tool output between started and completed; ``stream`` discriminates
+        codex patch vs stdout)
       - ``session_error``     → ``run.failed``
       - ``usage_update``      → ``runtime.engine.usage``  (V5+messages: replaces
         the dropped ``cost_update`` event; carries token counts +
         per-model ``model_usage``)
       - ``todo_update``       → ``session.todos.update``  (V5+messages: lets
         the frontend hydrate a Todos panel from live agent planning)
+      - ``workflow_progress`` → ``session.workflow_progress``  (live-only:
+        Claude ``Workflow`` tool run progress — phases + per-agent state +
+        status, keyed by the launch tool_use_id so the frontend attaches a
+        progress card to the matching tool call)
       - ``session_idle`` / ``session_update`` → surfaced for status display
       - Every translated payload also carries ``message_id`` when the
         kernel event was stamped with one (most events during a turn).
@@ -208,19 +221,33 @@ def _translate_kernel_event(
         output_tokens = int(data.get("output_tokens") or 0)
         # Billing meter call — best-effort, never breaks the SSE stream.
         # Cost estimate uses claude-sonnet-4-6 rates: $3/M input, $15/M output.
+        # ``meter`` is async (it may do network I/O in commercial overlays);
+        # this translation helper is sync but always runs on the event loop
+        # (both callers are async), so fire-and-forget via ``create_task`` —
+        # metering must never block or break the SSE stream.
         try:
-            from valuz_agent.ports.billing import MeterEvent, get_billing_port
+            from valuz_agent.infra.auth_context import get_current_user_id
+            from valuz_agent.ports.billing import MeterEvent
+            from valuz_agent.ports.extensions import ext
 
+            uid = data.get("user_id") or get_current_user_id()
+            if uid is None:
+                # Explicitly-anonymous context — nothing to attribute the
+                # usage to; surfaces via the best-effort except below.
+                raise LookupError("usage_update without an owner user_id")
             cost_usd = (input_tokens * 3 + output_tokens * 15) / 1_000_000
-            billing = get_billing_port()
-            billing.meter(
+            coro = ext.billing.meter(
                 MeterEvent(
-                    user_id=data.get("user_id", "local-user"),
+                    user_id=uid,
                     event_type="llm_call",
                     cost_usd=cost_usd,
                     metadata={"input_tokens": input_tokens, "output_tokens": output_tokens},
                 )
             )
+            try:
+                asyncio.get_running_loop().create_task(coro)
+            except RuntimeError:
+                coro.close()  # no running loop — drop the meter event
         except Exception:
             pass  # billing is best-effort; never break the SSE stream
         return "runtime.engine.usage", _with_message_id(
@@ -285,6 +312,35 @@ def _translate_kernel_event(
     if kernel_type == "thinking_delta":
         return "message.assistant.thinking_delta", _with_message_id(
             {
+                "text": _stringify(data.get("text") or data.get("delta") or ""),
+            },
+            data,
+        )
+
+    if kernel_type == "tool_input_delta":
+        # Live, non-persisted: partial tool-call input JSON streaming in as
+        # the model emits it. Arrives BEFORE the canonical ``tool_use``
+        # (tool.call.started) — the first delta is the frontend's
+        # build-the-card signal, so large-file writes show progress instead
+        # of a dead wait. ``id`` is the tool_use_id that started/completed
+        # also key on; ``name`` lets the card render its real title at once.
+        return "tool.call.input_delta", _with_message_id(
+            {
+                "tool_use_id": _stringify(data.get("id") or ""),
+                "name": _stringify(data.get("name") or ""),
+                "text": _stringify(data.get("text") or data.get("delta") or ""),
+            },
+            data,
+        )
+
+    if kernel_type == "tool_output_delta":
+        # Live, non-persisted: streamed tool output (codex command stdout /
+        # file-change patch) arriving between started and completed. ``stream``
+        # discriminates patch vs stdout when the runtime supplies it.
+        return "tool.call.output_delta", _with_message_id(
+            {
+                "tool_use_id": _stringify(data.get("id") or ""),
+                "stream": _stringify(data.get("stream") or ""),
                 "text": _stringify(data.get("text") or data.get("delta") or ""),
             },
             data,
@@ -379,42 +435,51 @@ def _translate_kernel_event(
             data,
         )
 
+    if kernel_type == "workflow_progress":
+        # Claude dynamic-workflow (``Workflow`` tool) live progress. The
+        # kernel streams a snapshot of the run's phases / per-agent progress /
+        # status while the background runtime executes. ``id`` is the
+        # ``Workflow`` tool_use_id (so the frontend can attach the progress
+        # card to the matching tool call); ``state`` is the nested progress
+        # dict (runId / workflowName / status / agentCount / agentsDone /
+        # workflowProgress[] / optional script). JSON-stringified for the
+        # legacy ``Record<string, string>`` SSE contract; the frontend re-
+        # parses. Live-only (non-persisted in the kernel) — it arrives only
+        # over the live subscription, never on history replay.
+        return "session.workflow_progress", _with_message_id(
+            {
+                "id": _stringify(data.get("id") or ""),
+                "run_id": _stringify(data.get("run_id") or ""),
+                "state": _stringify(data.get("state") or {}),
+            },
+            data,
+        )
+
     return None
 
 
-def _rows_to_frames(rows: list[Any]) -> list[SessionEventFrame]:
-    """Translate raw event rows into legacy-shaped frames.
+def _items_to_frames(items: list[Any]) -> list[SessionEventFrame]:
+    """Translate kernel wire events (``EventData``) into legacy-shaped frames.
 
-    Pulled out of ``list_events_after`` so the new turn-windowed paging
-    helper can reuse the same row → frame conversion (JSON coercion,
-    timestamp parsing, kernel → legacy type translation, drop frames the
-    legacy renderer doesn't know about).
+    Shared by the cursor fetch and the turn-windowed paging helper:
+    message-id stamping, kernel → legacy type translation, dropping frames
+    the legacy renderer doesn't know about.
     """
     frames: list[SessionEventFrame] = []
-    for row in rows:
-        seq, message_id, event_type, data, timestamp = row
-        # SQLite stores JSON as TEXT — coerce defensively.
-        if isinstance(data, str):
-            try:
-                kernel_data = json.loads(data)
-            except json.JSONDecodeError:
-                kernel_data = {"raw": data}
-        else:
-            kernel_data = dict(data) if data is not None else {}
-        if not isinstance(kernel_data, dict):
-            kernel_data = {"raw": kernel_data}
-        kernel_data = _with_row_message_id(kernel_data, message_id)
-        # Kernel events.timestamp is Unix epoch ms (BIGINT). Pass it straight
-        # through to the wire as an int; the frontend formats via new Date(ms).
-        ts_ms: int | None = int(timestamp) if isinstance(timestamp, (int, float)) else None
+    for item in items:
+        kernel_data = dict(item.data) if item.data is not None else {}
+        kernel_data = _with_row_message_id(kernel_data, item.message_id)
+        # Kernel event timestamps are Unix epoch ms. Pass straight through;
+        # the frontend formats via new Date(ms).
+        ts_ms: int | None = int(item.timestamp) if item.timestamp is not None else None
 
-        translated = _translate_kernel_event(str(event_type), kernel_data)
+        translated = _translate_kernel_event(str(item.type), kernel_data)
         if translated is None:
             continue
         legacy_type, legacy_payload = translated
         frames.append(
             SessionEventFrame(
-                seq=int(seq),
+                seq=int(item.seq or 0),
                 event_type=legacy_type,
                 payload=legacy_payload,
                 timestamp=ts_ms,
@@ -442,24 +507,41 @@ class TurnWindow:
     has_more: bool
 
 
+# The kernel's GET events route caps ``limit`` at 1000 (FastAPI Query
+# le=1000). Page under that so callers can ask for more without tripping
+# the cap — which the in-process client silently dodged (it called the
+# route function directly, skipping Query validation) but the HTTP
+# transport rightly rejects.
+_EVENTS_PAGE = 1000
+
+
 async def list_events_after(
     session_id: str,
     *,
     after_seq: int = 0,
     limit: int = 200,
 ) -> list[SessionEventFrame]:
-    """Return rows from ``events`` for ``session_id`` with ``id > after_seq``."""
-    async with async_engine.connect() as conn:
-        result = await conn.execute(
-            text(
-                "SELECT id, message_id, type, data, timestamp FROM events "
-                "WHERE session_id = :sid AND id > :after "
-                "ORDER BY id LIMIT :lim"
-            ),
-            {"sid": session_id, "after": after_seq, "lim": limit},
-        )
-        rows = result.fetchall()
-    return _rows_to_frames(rows)
+    """Return the session's events with ``seq > after_seq``, translated.
+
+    Pages in chunks of ``_EVENTS_PAGE`` so a request larger than the
+    kernel's per-call cap returns the full set (not a silently truncated
+    first page) over both transports.
+    """
+    user_id = require_current_user_id()
+    items: list = []
+    cursor = after_seq
+    while len(items) < limit:
+        want = min(_EVENTS_PAGE, limit - len(items))
+        page = await kernel_client.get_events(user_id, session_id, after_seq=cursor, limit=want)
+        if not page:
+            break
+        items.extend(page)
+        last_seq = page[-1].seq
+        if last_seq is None or len(page) < want:
+            break  # drained (or no advanceable cursor — persisted events
+            # always carry a seq, but guard against a non-advancing loop)
+        cursor = last_seq
+    return _items_to_frames(items)
 
 
 async def list_events_window(
@@ -489,65 +571,10 @@ async def list_events_window(
     if turn_limit <= 0:
         return TurnWindow(items=[], has_more=False)
 
-    cursor_clause = "" if before_seq is None else "AND id < :before"
-    params: dict[str, Any] = {"sid": session_id, "tlim": turn_limit}
-    if before_seq is not None:
-        params["before"] = int(before_seq)
-
-    async with async_engine.connect() as conn:
-        # Step 1: most recent ``turn_limit`` user_message ids under the cursor.
-        result = await conn.execute(
-            text(
-                f"SELECT id FROM events "
-                f"WHERE session_id = :sid AND type = 'user_message' {cursor_clause} "
-                f"ORDER BY id DESC LIMIT :tlim"
-            ),
-            params,
-        )
-        user_msg_ids = [int(row[0]) for row in result.fetchall()]
-        if not user_msg_ids:
-            return TurnWindow(items=[], has_more=False)
-
-        floor_id = min(user_msg_ids)
-        range_params: dict[str, Any] = {
-            "sid": session_id,
-            "floor": floor_id,
-        }
-        if before_seq is not None:
-            range_params["before"] = int(before_seq)
-
-        # Step 2: every event in [floor_id, before_seq), ASC. No cap —
-        # the turn_limit upstream is the user-facing pagination knob;
-        # capping per-event silently dropped recent turns when a single
-        # turn produced more events than the cap (tool-heavy skill
-        # sessions).
-        result = await conn.execute(
-            text(
-                f"SELECT id, message_id, type, data, timestamp FROM events "
-                f"WHERE session_id = :sid AND id >= :floor {cursor_clause} "
-                f"ORDER BY id ASC"
-            ),
-            range_params,
-        )
-        rows = list(result.fetchall())
-
-        # Step 4: probe whether older user_message rows exist (pagination
-        # cursor for the next call).
-        if not rows:
-            has_more = False
-        else:
-            earliest_returned = int(rows[0][0])
-            probe = await conn.execute(
-                text(
-                    "SELECT 1 FROM events "
-                    "WHERE session_id = :sid AND type = 'user_message' "
-                    "AND id < :earliest LIMIT 1"
-                ),
-                {"sid": session_id, "earliest": earliest_returned},
-            )
-            has_more = probe.fetchone() is not None
-
-    return TurnWindow(items=_rows_to_frames(rows), has_more=has_more)
+    window = await kernel_client.get_events_window(
+        require_current_user_id(), session_id, before_seq=before_seq, turn_limit=turn_limit
+    )
+    return TurnWindow(items=_items_to_frames(window.items), has_more=window.has_more)
 
 
 async def iter_events_sse(
@@ -558,43 +585,54 @@ async def iter_events_sse(
 ) -> AsyncIterator[dict[str, str]]:
     """Yield ``EventSourceResponse``-shaped dicts (``{"data": ...}``) forever.
 
-    When a live broadcast channel exists for the session (agent turn in
-    progress), events are delivered in real-time from the in-memory queue
-    — including ``text_delta`` which is never persisted to the DB.  When
-    the session is idle or on reconnect, falls back to DB polling so
-    historical events are always available.
+    Live events arrive through the kernel seam's session subscription
+    (``subscribe_session_events``) — including ``text_delta`` which is
+    never persisted to the DB. When the session is idle or on reconnect,
+    falls back to DB polling so historical events are always available.
 
     The caller is expected to wrap this with ``EventSourceResponse``.
     """
-    from valuz_agent.adapters.broadcast_sink import subscribe, unsubscribe
-
     cursor = after_seq
     last_emit = asyncio.get_event_loop().time()
 
     # First, drain any DB events we missed (replay on reconnect).
-    frames = await list_events_after(session_id, after_seq=cursor)
+    # ``shielded``: a client disconnect cancels this generator; landing that
+    # cancellation inside an in-flight DB read would tear the pooled
+    # connection down mid-checkin (see ``infra.sse.shielded``).
+    frames = await shielded(list_events_after(session_id, after_seq=cursor))
     for frame in frames:
         yield {"event": frame.event_type, "data": frame.to_sse_data()}
         cursor = frame.seq
         last_emit = asyncio.get_event_loop().time()
 
-    # Subscribe to the broadcast channel for real-time events.
-    queue = await subscribe(session_id)
+    # Subscribe to the kernel's live stream. A pump task moves frames into
+    # a local queue so the merge loop below can use timeouts without
+    # cancelling (and thereby closing) the subscription iterator.
+    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=4096)
+
+    async def _pump() -> None:
+        async for item in kernel_client.subscribe_session_events(
+            require_current_user_id(), session_id
+        ):
+            await queue.put(item)
+
+    pump_task = asyncio.create_task(_pump(), name=f"sse-pump-{session_id}")
     try:
         while True:
             if is_disconnected is not None and is_disconnected():
                 break
 
-            # Try to read from the broadcast queue first (real-time path).
+            # Try to read from the live queue first (real-time path).
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=POLL_INTERVAL_SECONDS)
             except TimeoutError:
                 event = None
 
             if event is None:
-                # Queue timeout or sentinel (session ended). Poll DB for any
-                # events we might have missed, then check if session is done.
-                db_frames = await list_events_after(session_id, after_seq=cursor)
+                # Queue timeout. Poll DB for any events we might have
+                # missed (covers the subscribe/backfill race), then
+                # heartbeat if idle.
+                db_frames = await shielded(list_events_after(session_id, after_seq=cursor))
                 for frame in db_frames:
                     yield {"event": frame.event_type, "data": frame.to_sse_data()}
                     cursor = frame.seq
@@ -605,12 +643,25 @@ async def iter_events_sse(
                     last_emit = asyncio.get_event_loop().time()
                 continue
 
-            # Live event from broadcast — translate and yield.
+            # Live event from the subscription — translate and yield.
+            # Persisted events arrive with their row id in ``seq`` (see
+            # the kernel's PersistThenBroadcastSink): skip anything the
+            # cursor already covers (no duplicates against backfill or a
+            # previous idle poll) and ADVANCE the cursor so the idle poll
+            # below never re-reads what was already delivered live —
+            # fixing the legacy double-delivery after busy turns.
+            if event.seq is not None:
+                # ``cursor`` is int-typed today (after_seq defaults to 0),
+                # but guard anyway so a future None-cursor caller degrades
+                # to no-dedup instead of a TypeError in the SSE pump.
+                if cursor is not None and event.seq <= cursor:
+                    continue
+                cursor = event.seq
             translated = _translate_kernel_event(event.type, event.data)
             if translated is not None:
                 legacy_type, legacy_payload = translated
                 frame = SessionEventFrame(
-                    seq=0,
+                    seq=event.seq if event.seq is not None else 0,
                     event_type=legacy_type,
                     payload=legacy_payload,
                     timestamp=event.timestamp,  # Unix epoch ms (UTC)
@@ -618,7 +669,11 @@ async def iter_events_sse(
                 yield {"event": frame.event_type, "data": frame.to_sse_data()}
                 last_emit = asyncio.get_event_loop().time()
     finally:
-        await unsubscribe(session_id, queue)
+        pump_task.cancel()
+        try:
+            await pump_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
 
 
 __all__ = [

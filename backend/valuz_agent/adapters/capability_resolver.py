@@ -10,7 +10,7 @@ Outputs are pure data — the resolver does no writes. The session router
 takes the result and hands it to the kernel via ``StorePort.save_session``.
 
 Currently covered:
-- ``skills``: workspace-enabled skill paths plus session-attached extras,
+- ``skills``: project-enabled skill paths plus session-attached extras,
   resolved to filesystem absolute paths via the skill index.
 - ``mcp_servers``: enabled MCP-provider slugs are expanded into kernel
   ``McpServerConfig`` rows by ``adapters.mcp_resolver``. The resolver
@@ -25,23 +25,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from src.core.types import (  # type: ignore[import-not-found]
-    McpHttpServerConfig,
-    McpServerConfig,
+from app.schemas import (
+    McpHttpServerConfigSchema as McpHttpServerConfig,
+)
+from app.schemas import (
+    McpServerConfigSchema as McpServerConfig,
 )
 
 # Side-effect import — surfaces ``src.core...`` on sys.path.
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters.mcp_resolver import resolve_mcp_servers
-from valuz_agent.infra.secret_store import FileSecretStore
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
-from valuz_agent.modules.projects.datastore import WorkspaceDatastore
+from valuz_agent.modules.projects.datastore import ProjectDatastore
 from valuz_agent.modules.skills.contracts import (
+    ProjectRef,
     RuntimeContext,
     SkillManifest,
-    WorkspaceRef,
 )
 from valuz_agent.modules.skills.datastore import SkillDatastore
 
@@ -60,14 +62,20 @@ logger = logging.getLogger(__name__)
 
 # Path to the bundled builtin skill that teaches the agent how to search
 # the project's knowledge base. Auto-injected into ``session.skills`` when
-# the workspace has at least one ``valuz_project_kb_binding`` row.
+# the project has at least one ``valuz_project_kb_binding`` row.
 _BUILTIN_SKILLS_DIR = Path(__file__).resolve().parents[1] / "resources" / "builtin_skills"
 _PROJECT_DOCS_SKILL_DIR = _BUILTIN_SKILLS_DIR / "valuz-project-docs"
+# Teaches the agent to drive the managed browser via the ``chrome-devtools`` CLI
+# (pairs with the ``browser_start``/``browser_stop`` toolkit tools). M0 ships it
+# always-on — progressive disclosure means the body is only read when a task
+# actually needs a browser; a later iteration may make it a deploy-per-agent
+# catalog skill instead.
+_BROWSER_SKILL_DIR = _BUILTIN_SKILLS_DIR / "browser"
 
 
 @dataclass(frozen=True)
 class ResolvedCapabilities:
-    """Inputs the kernel needs to create a session for a valuz workspace."""
+    """Inputs the kernel needs to create a session for a valuz project."""
 
     skills: tuple[str, ...] = ()
     mcp_servers: tuple[McpServerConfig, ...] = ()
@@ -76,20 +84,19 @@ class ResolvedCapabilities:
 
 async def resolve_session_capabilities(
     *,
-    workspaces: WorkspaceDatastore,
+    projects: ProjectDatastore,
     skills: SkillDatastore,
-    workspace_id: str,
+    project_id: str,
     extra_skill_ids: list[str] | None = None,
     skill_source: FilesystemSkillSource | None = None,
     extra_skill_sources: list[_SkillSource] | None = None,
     official_entitled: bool = False,
-    secrets: FileSecretStore | None = None,
     enabled_mcp_provider_slugs: list[str] | None = None,
     connectors: ConnectorDatastore | None = None,
     docs: DocumentDatastore | None = None,
     session_id: str | None = None,
 ) -> ResolvedCapabilities:
-    """Compute kernel-shaped capabilities for a session in ``workspace_id``.
+    """Compute kernel-shaped capabilities for a session in ``project_id``.
 
     The MCP arguments are optional so the resolver stays usable in code paths
     that don't (yet) expose data-source selection. When all three are
@@ -97,24 +104,24 @@ async def resolve_session_capabilities(
     the corresponding ``McpServerConfig`` list.
     """
 
-    workspace = await workspaces.get_by_id(workspace_id)
-    if workspace is None:
-        raise KeyError(workspace_id)
+    project = await projects.get_by_id(require_current_user_id(), project_id)
+    if project is None:
+        raise KeyError(project_id)
 
     skill_paths: list[str] = []
     warnings: list[str] = []
     seen: set[str] = set()
 
-    # 1) Workspace-enabled skills — read from the filesystem-based
+    # 1) Project-enabled skills — read from the filesystem-based
     #    ``project-config.json`` which is the canonical source of truth
-    #    for which skills are enabled for a workspace.  The DB-backed
+    #    for which skills are enabled for a project.  The DB-backed
     #    ``ProjectSkillConfigRow`` table is not currently populated by the
     #    UI's ``set_skill_enabled`` flow; it writes to JSON instead.
-    enabled_paths = skills.enabled_skill_paths(workspace)
+    enabled_paths = skills.enabled_skill_paths(project)
     for path in enabled_paths:
-        absolute = _resolve_to_absolute(path, workspace.root_path)
+        absolute = _resolve_to_absolute(path, project.root_path)
         if absolute is None:
-            warnings.append(f"workspace-enabled skill path is not resolvable: {path!r}")
+            warnings.append(f"project-enabled skill path is not resolvable: {path!r}")
             continue
         if absolute in seen:
             continue
@@ -123,30 +130,30 @@ async def resolve_session_capabilities(
             if fallback:
                 absolute = fallback
             else:
-                warnings.append(f"workspace-enabled skill path does not exist: {absolute!r}")
+                warnings.append(f"project-enabled skill path does not exist: {absolute!r}")
                 continue
         seen.add(absolute)
         skill_paths.append(absolute)
 
-    # 1b) For non-project (chat) workspaces, every user-library skill is
+    # 1b) For non-project (chat) projects, every user-library skill is
     #     implicitly enabled. The skills panel UI advertises them as enabled
-    #     for chat (datastore.list_workspace_skills sets ``enabled=True`` for
-    #     workspace.kind == "chat") and there is no per-workspace toggle to
+    #     for chat (datastore.list_project_skills sets ``enabled=True`` for
+    #     project.kind == "chat") and there is no per-project toggle to
     #     opt out, so the resolver must mirror that for the runtime.
-    if workspace.kind != "project" and (skill_source is not None or extra_skill_sources):
+    if project.kind != "project" and (skill_source is not None or extra_skill_sources):
         ctx = RuntimeContext(
-            workspace=WorkspaceRef(
-                id=workspace.id,
-                slug=workspace.id,
-                kind=workspace.kind,
-                root_path=workspace.root_path,
+            project=ProjectRef(
+                id=project.id,
+                slug=project.id,
+                kind=project.kind,
+                root_path=project.root_path,
             ),
         )
         if skill_source is not None:
             for manifest in skill_source.list_skills(ctx):
                 if manifest.scope != "user":
                     continue
-                absolute = _resolve_to_absolute(manifest.path, workspace.root_path)
+                absolute = _resolve_to_absolute(manifest.path, project.root_path)
                 if absolute is None or absolute in seen:
                     continue
                 if not Path(absolute).is_dir():
@@ -168,7 +175,7 @@ async def resolve_session_capabilities(
                 is_bundled = manifest.origin_label == "Built-in"
                 if not is_bundled and not official_entitled:
                     continue
-                absolute = _resolve_to_absolute(manifest.path, workspace.root_path)
+                absolute = _resolve_to_absolute(manifest.path, project.root_path)
                 if absolute is None or absolute in seen:
                     continue
                 if not Path(absolute).is_dir():
@@ -177,14 +184,14 @@ async def resolve_session_capabilities(
                 skill_paths.append(absolute)
 
     # 2) Session-level extras — opaque skill IDs attached just for this session
-    #    on top of whatever the workspace already enables. Look each one up in
+    #    on top of whatever the project already enables. Look each one up in
     #    the skill index to recover its source_path.
     for skill_id in extra_skill_ids or []:
-        row = await skills.get_by_id(skill_id)
+        row = await skills.get_by_id(require_current_user_id(), skill_id)
         if row is None:
             warnings.append(f"extra skill id not found: {skill_id!r}")
             continue
-        absolute = _resolve_to_absolute(row.source_path, workspace.root_path)
+        absolute = _resolve_to_absolute(row.source_path, project.root_path)
         if absolute is None:
             warnings.append(f"extra skill {skill_id!r} has unresolvable source path")
             continue
@@ -199,17 +206,17 @@ async def resolve_session_capabilities(
     #      product surface. The skill teaches the agent to use
     #      ``doc_search`` / ``list_doc_scope``; the MCP server (mounted
     #      at ``/internal/mcp/docs/{session_id}/mcp``) implements those
-    #      tools scoped to the session's workspace.
+    #      tools scoped to the session's project.
     #
     #      Why unconditional: the skill + MCP form a stable,
     #      prompt-cache-friendly capability layer that mirrors the
-    #      ``valuz_automations`` automation pattern. Whether the workspace
+    #      ``valuz_automations`` automation pattern. Whether the project
     #      actually has KB bindings (or per-turn attachments) is
     #      announced inside ``UserMessage.additional_context`` — that's
     #      the channel for dynamic state. Putting that state in the
     #      skill set or system prompt would invalidate Anthropic's
     #      prompt cache on every binding / attachment change; making
-    #      docs MCP conditional on workspace.kind == "project" had the
+    #      docs MCP conditional on project.kind == "project" had the
     #      same effect across the chat / project boundary.
     #
     #      The pair MUST travel together: a skill without the MCP
@@ -223,19 +230,18 @@ async def resolve_session_capabilities(
             seen.add(absolute)
             skill_paths.append(absolute)
     logger.info(
-        "Auto-injecting always-on baseline skills for workspace %s (kind=%s)",
-        workspace_id,
-        workspace.kind,
+        "Auto-injecting always-on baseline skills for project %s (kind=%s)",
+        project_id,
+        project.kind,
     )
 
     # 3) MCP servers — only when the caller wires the catalog in. Anything
     #    missing (no credentials, unknown slug, disabled provider) is logged
     #    inside ``mcp_resolver`` and silently skipped here.
     mcp_configs_list: list[McpServerConfig] = []
-    if secrets is not None:
+    if connectors is not None:
         mcp_configs_list.extend(
             await resolve_mcp_servers(
-                secrets=secrets,
                 enabled_slugs=enabled_mcp_provider_slugs or [],
                 connectors=connectors,
             )
@@ -255,8 +261,8 @@ async def resolve_session_capabilities(
         )
 
     logger.info(
-        "Resolved capabilities for workspace %s: %d skills, %d MCP servers, %d warnings",
-        workspace_id,
+        "Resolved capabilities for project %s: %d skills, %d MCP servers, %d warnings",
+        project_id,
         len(skill_paths),
         len(mcp_configs_list),
         len(warnings),
@@ -272,24 +278,33 @@ async def resolve_session_capabilities(
 
 
 def always_on_skill_paths() -> list[str]:
-    """Bundled skills every session carries: ``valuz-project-docs`` + ``skill-creator``.
+    """Bundled skills every session carries: project-docs + skill-creator (+ browser).
 
     These are the skill half of the always-on baseline (the MCP half lives in
     ``always_on_http_mcp_servers``). ``valuz-project-docs`` teaches the
     ``doc_search`` / ``list_doc_scope`` tools that pair with the ``valuz_docs``
     MCP; ``skill-creator`` (+ its ``submit_skill`` in-process tool) lets any
-    session author skills. Returned as absolute dirs the kernel materialises
-    into the session cwd. Both are injected by every session-build path
-    (``resolve_session_capabilities`` for chat/project, ``build_member_session``
-    for task lead/member) so the baseline is identical everywhere. A missing
-    dir is skipped + logged so a partial install can't break session creation.
+    session author skills; ``browser`` teaches the ``chrome-devtools`` CLI that
+    pairs with the ``browser_start``/``browser_stop`` toolkit tools (injected
+    only when the browser engine is available). Returned as
+    absolute dirs the kernel materialises into the session cwd. All are injected
+    by every session-build path (``resolve_session_capabilities`` for
+    chat/project, ``build_member_session`` for task lead/member) so the baseline
+    is identical everywhere. A missing dir is skipped + logged so a partial
+    install can't break session creation.
     """
     from valuz_agent.infra.fs_registry import fs_registry
+    from valuz_agent.modules.browser import service as browser_service
 
     candidates = [
         _PROJECT_DOCS_SKILL_DIR,
         fs_registry.official_skill_root() / "skill-creator",
     ]
+    # The browser skill teaches the ``chrome-devtools`` CLI, which only works
+    # when the engine (Node + chrome-devtools-mcp) is available; don't inject a
+    # dead skill otherwise. See docs/design/browser-feature.md §8.
+    if browser_service.node_available():
+        candidates.append(_BROWSER_SKILL_DIR)
     paths: list[str] = []
     for d in candidates:
         if d.is_dir():
@@ -299,23 +314,34 @@ def always_on_skill_paths() -> list[str]:
     return paths
 
 
-def always_on_http_mcp_servers(session_id: str) -> list[McpHttpServerConfig]:
-    """Built-in HTTP MCP servers every session carries: docs, schedules, connectors.
+def always_on_http_mcp_servers(
+    session_id: str, *, toolkit: str = "base"
+) -> list[McpHttpServerConfig]:
+    """Built-in HTTP MCP servers every session carries: docs, schedules,
+    connectors, and the harness toolkit.
 
     These are always-on for every kind of session (chat / project / task
     dispatch). They are appended after external catalog providers so their
-    reserved ``valuz_*`` names never collide. The shared secret travels in the
-    ``X-Valuz-Internal`` header so a misrouted request can't reach them; the
-    ``X-Valuz-Session-Id`` header scopes each call to the calling session.
+    reserved ``valuz_*`` / ``harness`` names never collide. The shared secret
+    travels in the ``X-Valuz-Internal`` header so a misrouted request can't
+    reach them; the ``X-Valuz-Session-Id`` header scopes each call to the
+    calling session.
 
-    Stable tool list across all sessions (no kind/attachment gating) keeps the
-    Anthropic prompt cache warm. See ADR-009 + ``resolve_session_capabilities``
-    §2.5 for the rationale.
+    ``toolkit`` selects the harness tool surface: ``base`` (orchestration
+    launchers + memory + submit_skill — every ordinary session) or ``lead``
+    (the dispatch set — task-lead sessions). The server name stays
+    ``harness`` either way so the model-visible tool names
+    (``mcp__harness__*``) are stable across kinds.
+
+    Stable tool list across all sessions of a kind keeps the Anthropic
+    prompt cache warm. See ADR-009 + ``resolve_session_capabilities`` §2.5
+    for the rationale.
     """
     from valuz_agent.infra.config import settings as _settings
     from valuz_agent.integrations.automations_mcp_server import automations_mcp_url
     from valuz_agent.integrations.connectors_mcp_server import connectors_mcp_url
     from valuz_agent.integrations.docs_mcp_server import docs_mcp_url
+    from valuz_agent.integrations.toolkit_mcp_server import toolkit_mcp_url
 
     headers = {
         "X-Valuz-Internal": _settings.internal_mcp_token,
@@ -341,7 +367,18 @@ def always_on_http_mcp_servers(session_id: str) -> list[McpHttpServerConfig]:
             transport="http",
             headers=dict(headers),
         ),
+        McpHttpServerConfig(
+            name="harness",
+            url=toolkit_mcp_url(base_url=base, toolset=toolkit),
+            transport="http",
+            headers=dict(headers),
+        ),
     ]
+
+
+def harness_toolkit_for_run_kind(run_kind: str | None) -> str:
+    """Map a session's ``metadata.valuz.run_kind`` to its harness toolset."""
+    return "lead" if run_kind == "lead" else "base"
 
 
 def _resolve_to_absolute(path: str | None, project_root: str | None) -> str | None:
@@ -349,7 +386,7 @@ def _resolve_to_absolute(path: str | None, project_root: str | None) -> str | No
 
     Accepts the same forms ``SkillDatastore.set_skill_enabled`` accepts:
     absolute paths pass through; relative paths are joined to the
-    workspace root when one exists. Paths whose parent does not exist
+    project root when one exists. Paths whose parent does not exist
     are still returned (the kernel's materializer will raise a clean
     ``SkillSourceMissingError`` later); paths that cannot be normalised
     return ``None`` and bubble up as a warning.
@@ -397,7 +434,7 @@ async def resolve_skill_slugs_to_paths(
     # ``await`` this.
     by_slug: dict[str, str] = {}
     async with async_unit_of_work(commit=False) as db:
-        for row in await SkillDatastore(db).list_skills():
+        for row in await SkillDatastore(db).list_skills(require_current_user_id()):
             if row.slug and row.source_path:
                 by_slug.setdefault(row.slug, row.source_path)
 

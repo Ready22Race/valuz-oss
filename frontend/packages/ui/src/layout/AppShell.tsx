@@ -116,10 +116,10 @@ export const AppShell = ({
           </div>
 
           <nav
-            aria-label="Workspace sections"
+            aria-label="Project sections"
             className="flex flex-1 flex-col gap-0.5 overflow-y-auto px-2 pt-3"
           >
-            <div className="label-mono px-3 pb-1 pt-2">Workspace</div>
+            <div className="label-mono px-3 pb-1 pt-2">Project</div>
             {navItems.map((item) => {
               const active = isActivePath(activePath, item.path);
               return (
@@ -166,7 +166,7 @@ export const AppShell = ({
       >
         <main
           className={cn(
-            "flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-surface-border bg-card",
+            "flex min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card",
             mainClassName,
           )}
         >
@@ -225,40 +225,25 @@ export const AppShell = ({
           </div>
         </main>
 
-        {aside
-          ? (() => {
-              console.log("[AppShell] rendering aside element");
-              return (
-                <aside
-                  className={cn(
-                    "hidden shrink-0 flex-col overflow-hidden rounded-2xl border border-surface-border bg-card lg:flex",
-                    asideClassName,
-                  )}
-                >
-                  {aside}
-                </aside>
-              );
-            })()
-          : right
-            ? (() => {
-                console.log("[AppShell] rendering right element");
-                return (
-                  <aside
-                    className={cn(
-                      "hidden shrink-0 flex-col overflow-hidden rounded-2xl border border-surface-border bg-card lg:flex",
-                      asideClassName,
-                    )}
-                  >
-                    {right}
-                  </aside>
-                );
-              })()
-            : (() => {
-                console.log(
-                  "[AppShell] NOT rendering aside (both null/undefined)",
-                );
-                return null;
-              })()}
+        {aside ? (
+          <aside
+            className={cn(
+              "hidden shrink-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card lg:flex",
+              asideClassName,
+            )}
+          >
+            {aside}
+          </aside>
+        ) : right ? (
+          <aside
+            className={cn(
+              "hidden shrink-0 flex-col overflow-hidden rounded-[14px] border border-surface-border bg-card lg:flex",
+              asideClassName,
+            )}
+          >
+            {right}
+          </aside>
+        ) : null}
       </div>
     </div>
   </div>

@@ -7,10 +7,10 @@ import {
   type ReactNode,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, ListChecks, MessageSquare, Trash2 } from "lucide-react";
+import { Clock3, ListChecks, MessageSquare } from "lucide-react";
 import {
   DeleteConfirmDialog,
-  EmptyState,
+  PageHeader,
   StatusPill,
   Tabs,
   TabsList,
@@ -22,8 +22,9 @@ import {
   sessionsApi,
   useRunningRuns,
   useSessionEvents,
+  useSessionStore,
   useTranslation,
-  useWorkspaceStore,
+  useProjectStore,
   type RunSummary,
 } from "@valuz/core";
 import {
@@ -31,9 +32,15 @@ import {
   summarizeSegmentPhrase,
   type SessionEventDTO,
 } from "@valuz/shared";
-import { useWorkspaceOutlet } from "@valuz/app/layout";
+import { toast } from "sonner";
+import {
+  RenameInput,
+  RowActionsMenu,
+  formatCreatedAt,
+} from "@valuz/app/components";
+import { useProjectOutlet } from "@valuz/app/layout";
 
-type SourceFilter = "all" | "chat" | "task";
+type SourceFilter = "all" | "chat" | "task" | "automation";
 type TimeBucket = "today" | "yesterday" | "thisWeek" | "earlier";
 
 const tk = (key: string) =>
@@ -97,7 +104,7 @@ interface DashboardLine {
  * ``-webkit-box``) or get overridden by ``unicode-bidi``. JS slicing is
  * uglier but actually works across mixed CJK / Latin / emoji content.
  *
- * Limit picked per script - CJK glyphs are about 2x the width of ASCII at the
+ * Limit picked per script — CJK glyphs are ~2× the width of ASCII at the
  * dashboard's ``text-xs`` size, so a flat char limit either wastes space
  * or overshoots the row. */
 const tailTruncate = (text: string): string => {
@@ -184,7 +191,8 @@ const RunningCard = ({
   onOpen,
   t,
 }: RunningCardProps) => {
-  const ScopeIcon = isTask ? ListChecks : MessageSquare;
+  const ScopeIcon =
+    run.origin === "automation" ? Clock3 : isTask ? ListChecks : MessageSquare;
   // No ``max`` override — rely on the hook default. The visible-line cap
   // below handles display trimming; the buffer needs to be large enough that
   // batch counts (``Called harness 10 times``, ``Ran 6 commands``) survive
@@ -264,9 +272,11 @@ const RunningCard = ({
 export const ActivityPage = () => {
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { setHeader, setContentInnerClassName } = useWorkspaceOutlet();
+  const { setHeader, setHeaderClassName, setContentInnerClassName } =
+    useProjectOutlet();
   const { runs: running } = useRunningRuns();
-  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const projects = useProjectStore((s) => s.projects);
+  const renameSession = useSessionStore((s) => s.renameSession);
 
   const [filter, setFilter] = useState<SourceFilter>("all");
   const [finished, setFinished] = useState<RunSummary[]>([]);
@@ -276,13 +286,13 @@ export const ActivityPage = () => {
   // task rows in the first place.
   const [deletingChat, setDeletingChat] = useState<RunSummary | null>(null);
   const [deleteInFlight, setDeleteInFlight] = useState(false);
+  // Inline rename (RenameInput, mirroring the sidebar): which row's title is
+  // being edited. ``null`` = none.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
 
   useEffect(() => {
-    setHeader(
-      <span className="text-base font-medium text-ink-heading">
-        {t(tk("nav.activity"))}
-      </span>,
-    );
+    setHeader(<PageHeader title={t(tk("nav.activity"))} />);
+    setHeaderClassName("h-auto px-5 py-5");
     // Drop the AppShell's default vertical padding for this page —
     // the page already self-manages top/bottom space (``pt-4`` on the
     // tab strip, ``pb-12`` at the bottom) and the outer ``py-7`` was
@@ -291,9 +301,10 @@ export const ActivityPage = () => {
     setContentInnerClassName("px-6 sm:px-7");
     return () => {
       setHeader(null);
+      setHeaderClassName(undefined);
       setContentInnerClassName(undefined);
     };
-  }, [setHeader, setContentInnerClassName, t]);
+  }, [setHeader, setHeaderClassName, setContentInnerClassName, t]);
 
   // Load finished runs on mount + refresh whenever a session leaves the
   // running set (i.e., a run just finished). Without this, a run that
@@ -350,34 +361,40 @@ export const ActivityPage = () => {
   }, [refreshFinished]);
 
   // Label: ``<project> · <kind>`` for project-scoped runs, bare ``<kind>``
-  // for the default workspace. Prefixing the default chats with the
-  // workspace name ("New chat") just reads as "New chat · Chat" — redundant
+  // for the default project. Prefixing the default chats with the
+  // project name ("New chat") just reads as "New chat · Chat" — redundant
   // — so we drop the scope there and only keep it when it carries real
   // information (the project name). Chats carry their scope in
-  // ``source_kind`` directly; tasks don't, so look the workspace kind up by id.
-  const workspaceKindById = useMemo(
-    () => new Map(workspaces.map((w) => [w.id, w.kind])),
-    [workspaces],
+  // ``source_kind`` directly; tasks don't, so look the project kind up by id.
+  const projectKindById = useMemo(
+    () => new Map(projects.map((w) => [w.id, w.kind])),
+    [projects],
   );
 
   const sourceLabel = (r: RunSummary): string => {
     const isProject =
       r.source_kind === "project_chat" ||
       (r.source_kind === "task" &&
-        workspaceKindById.get(r.workspace_id) === "project");
+        projectKindById.get(r.project_id) === "project");
+    // Automation-triggered runs read as 自动化 regardless of chat/task — in the
+    // 全部 tab the kind chip should mark provenance, not surface type.
     const kind =
-      r.source_kind === "task"
-        ? t(tk("activity.taskTag"))
-        : t(tk("activity.chatTag"));
+      r.origin === "automation"
+        ? t(tk("activity.automationTag"))
+        : r.source_kind === "task"
+          ? t(tk("activity.taskTag"))
+          : t(tk("activity.chatTag"));
     if (!isProject) return kind;
-    const scope = r.workspace_name ?? "Project";
+    const scope = r.project_name ?? "Project";
     return `${scope} · ${kind}`;
   };
 
   const matchesFilter = (r: RunSummary): boolean => {
+    const isAuto = r.origin === "automation";
+    if (filter === "automation") return isAuto;
     if (filter === "all") return true;
-    if (filter === "task") return r.source_kind === "task";
-    return r.source_kind !== "task"; // chat
+    if (filter === "task") return r.source_kind === "task" && !isAuto;
+    return r.source_kind !== "task" && !isAuto; // chat
   };
 
   const filteredRunning = useMemo(
@@ -407,16 +424,38 @@ export const ActivityPage = () => {
     return <StatusPill status={run.status} label={t(tk(key))} />;
   };
 
-  // History rows: title only (small scope label + status pill on the side).
-  // Always list-shaped — the dashboard above already has the heavy card
-  // visualisation, so the history rail stays a quiet scannable index.
-  // Outer wrapper is a ``div`` (not a ``button``) because we nest a real
-  // trash ``button`` inside for chat rows, and nested buttons are invalid
-  // HTML — the trash click would also trip the row's navigation. Keyboard
-  // accessibility: ``role="button"`` + ``tabIndex`` + Enter / Space.
+  // History rows: title + relative created time + status pill on the side,
+  // matching the project-home conversation rows. Always list-shaped — the
+  // dashboard above already has the heavy card visualisation, so the history
+  // rail stays a quiet scannable index. Outer wrapper is a ``div`` (not a
+  // ``button``) because chat rows nest a ``RowActionsMenu`` trigger
+  // ``button``, and nested buttons are invalid HTML. Keyboard accessibility:
+  // ``role="button"`` + ``tabIndex`` + Enter / Space.
   const historyRow = (run: RunSummary) => {
-    const ScopeIcon = run.source_kind === "task" ? ListChecks : MessageSquare;
+    const ScopeIcon =
+      run.origin === "automation"
+        ? Clock3
+        : run.source_kind === "task"
+          ? ListChecks
+          : MessageSquare;
     const canDelete = run.source_kind !== "task";
+    if (canDelete && renamingId === run.session_id) {
+      return (
+        <div
+          key={run.session_id}
+          className="flex w-full items-center gap-2 rounded-xl px-3 py-3"
+        >
+          <RenameInput
+            initial={run.title}
+            onConfirm={(v) => {
+              void handleRenameRunConfirm(run, v);
+              setRenamingId(null);
+            }}
+            onCancel={() => setRenamingId(null)}
+          />
+        </div>
+      );
+    }
     return (
       <div
         key={run.session_id}
@@ -429,7 +468,7 @@ export const ActivityPage = () => {
             openRun(run);
           }
         }}
-        className="group flex w-full cursor-pointer items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
+        className="group flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
       >
         <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
           <ScopeIcon className="h-3 w-3" strokeWidth={2} />
@@ -438,31 +477,40 @@ export const ActivityPage = () => {
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
           {run.title}
         </span>
-        {renderStatusChip(run)}
-        {canDelete ? (
-          // Hover swaps the navigation arrow for a trash button — keeps the
-          // row's right-edge slot stable but exposes the destructive action
-          // only when the user is actively pointing at the row. Click stops
-          // propagation so it doesn't also navigate into the conversation.
-          <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
-            <ArrowRight className="absolute h-4 w-4 text-ink-muted transition-opacity group-hover:opacity-0" />
-            <button
-              type="button"
-              aria-label={t(tk("activity.deleteChat"))}
-              onClick={(e) => {
-                e.stopPropagation();
-                setDeletingChat(run);
-              }}
-              className="absolute flex h-4 w-4 items-center justify-center text-ink-muted opacity-0 transition-opacity hover:text-error focus:opacity-100 group-hover:opacity-100"
-            >
-              <Trash2 className="h-3.5 w-3.5" strokeWidth={2} />
-            </button>
-          </span>
-        ) : (
-          <ArrowRight className="h-4 w-4 shrink-0 text-ink-muted" />
-        )}
+        <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
+          {run.updated_at ? formatCreatedAt(run.updated_at, t) : ""}
+        </span>
+        <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
+          {STATUS_LABEL_KEY[run.status] && (
+            <StatusPill
+              status={run.status}
+              label={t(tk(STATUS_LABEL_KEY[run.status]))}
+              className={
+                canDelete
+                  ? "transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
+                  : undefined
+              }
+            />
+          )}
+          {canDelete && (
+            <RowActionsMenu
+              onRename={() => setRenamingId(run.session_id)}
+              onDelete={() => setDeletingChat(run)}
+            />
+          )}
+        </span>
       </div>
     );
+  };
+
+  const handleRenameRunConfirm = async (run: RunSummary, name: string) => {
+    try {
+      await renameSession(run.session_id, name);
+      refreshFinished();
+      toast.success(t(tk("sidebar.renamed")));
+    } catch {
+      toast.error(t(tk("sidebar.renameFailed")));
+    }
   };
 
   const handleDeleteChat = async () => {
@@ -528,6 +576,7 @@ export const ActivityPage = () => {
     { value: "all", labelKey: "activity.filterAll" },
     { value: "chat", labelKey: "activity.chatTag" },
     { value: "task", labelKey: "activity.taskTag" },
+    { value: "automation", labelKey: "activity.automationTag" },
   ];
 
   // ──────────────────────────────────────────────────────────────
@@ -537,14 +586,14 @@ export const ActivityPage = () => {
   const hasAny = displayRunning.length > 0 || filteredFinished.length > 0;
 
   return (
-    <div className="mx-auto max-w-3xl px-5 pb-12 pt-4">
+    <div className="mx-auto max-w-[760px] pb-12 pt-4">
       {/* Toolbar — line-tab filter shared with project home / conversation
           right panel for visual consistency. */}
       <Tabs value={filter} onValueChange={(v) => setFilter(v as SourceFilter)}>
-        <div>
+        <div className="border-b border-surface-border">
           <TabsList
             variant="line"
-            className="h-auto justify-start"
+            className="h-9 justify-start gap-4 border-0 p-0"
           >
             {FILTERS.map((f) => (
               <TabsTrigger key={f.value} value={f.value}>
@@ -563,10 +612,10 @@ export const ActivityPage = () => {
       {displayRunning.length > 0 && (
         <section className="mt-5">
           <div className="mb-2 flex items-center gap-2 px-3">
-            <span className="text-2xs font-normal uppercase tracking-[0.06em] text-ink-body">
+            <span className="text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
               {t(tk("activity.running"))}
             </span>
-            <span className="text-2xs font-medium text-ink-meta">
+            <span className="text-[11.5px] font-medium text-ink-meta">
               · {displayRunning.length}
             </span>
           </div>
@@ -579,17 +628,15 @@ export const ActivityPage = () => {
       <section className={displayRunning.length > 0 ? "" : "mt-5"}>
         {filteredFinished.length === 0 ? (
           hasAny ? null : (
-            <EmptyState
-              className="py-12"
-              icon={<ListChecks />}
-              title={t(tk("activity.noHistory"))}
-            />
+            <div className="px-3 py-12 text-center text-sm text-ink-meta">
+              {t(tk("activity.noHistory"))}
+            </div>
           )
         ) : (
           <div className="flex flex-col gap-5">
             {BUCKET_ORDER.filter((b) => groupedHistory.has(b)).map((b) => (
               <div key={b}>
-                <div className="mb-1.5 px-3 text-2xs font-normal uppercase tracking-[0.06em] text-ink-body">
+                <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
                   {t(tk(BUCKET_KEY[b]))}
                 </div>
                 {renderHistory(groupedHistory.get(b) ?? [])}
@@ -599,6 +646,14 @@ export const ActivityPage = () => {
         )}
       </section>
 
+      {/* Truly empty (nothing matches the filter, nothing running). Falls
+          through to here only when there's neither a running nor a history
+          entry matching the current filter. */}
+      {!hasAny && filter !== "all" && (
+        <div className="px-3 py-12 text-center text-sm text-ink-meta">
+          {t(tk("activity.noHistory"))}
+        </div>
+      )}
       <DeleteConfirmDialog
         open={deletingChat !== null}
         onOpenChange={(open) => {

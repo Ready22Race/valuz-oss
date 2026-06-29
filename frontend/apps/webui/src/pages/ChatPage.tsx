@@ -4,11 +4,12 @@ import { useChatStore, useChatSession, useSessionStore } from "@valuz/core";
 import { SessionPicker } from "../components/chat/SessionPicker";
 import { MessageList } from "../components/chat/MessageList";
 import { ChatComposer } from "../components/chat/ChatComposer";
+import { QueuedInputs } from "../components/chat/QueuedInputs";
 import { ConnectionStatusBadge } from "../components/chat/ConnectionStatusBadge";
 import { RecoveryBanner } from "../components/chat/RecoveryBanner";
 
 /**
- * Full chat workspace. Selects a session in the sidebar, drives the
+ * Full chat project. Selects a session in the sidebar, drives the
  * chat-store via ``useChatSession``, and renders three lifecycle
  * affordances:
  *
@@ -76,6 +77,7 @@ export const ChatPage = () => {
                 />
               </div>
               <div className="py-3">
+                <QueuedInputs />
                 <ChatComposer
                   isStreaming={isStreaming}
                   isInterrupting={isInterrupting}

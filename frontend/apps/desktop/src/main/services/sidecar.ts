@@ -42,8 +42,11 @@ export interface DesktopSidecarResult {
  * 3. Returns null when no bundled binary is found (caller falls back to ``uv run``).
  */
 function resolveServerBinary(): string | null {
+  const serverName =
+    process.platform === "win32" ? "valuz-server.exe" : "valuz-server";
+
   // Production: packaged Electron app
-  const bundled = path.join(process.resourcesPath, "libexec", "valuz-server");
+  const bundled = path.join(process.resourcesPath, "libexec", serverName);
   if (fs.existsSync(bundled)) return bundled;
 
   // Dev: check if the build script has placed a binary in the project tree.
@@ -54,7 +57,7 @@ function resolveServerBinary(): string | null {
     "..",
     "resources",
     "libexec",
-    "valuz-server",
+    serverName,
   );
   if (fs.existsSync(devBinary)) return devBinary;
 
@@ -85,6 +88,68 @@ function resolveRgBinary(): string | null {
     bundledExt,
   );
   if (fs.existsSync(devRg)) return devRg;
+
+  return null;
+}
+
+/**
+ * Locate the bundled Node binary that runs the browser engine.
+ *
+ * A GUI-launched app gets a stripped PATH that hides the user's Node, so the
+ * browser feature ships its own (downloaded + verified at build time by
+ * scripts/download-node.sh, staged at libexec/node). See
+ * docs/design/browser-feature.md §8.
+ *
+ * Returns null when not bundled (dev), so the backend falls back to npx.
+ */
+function resolveNodeBinary(): string | null {
+  const nodeName = process.platform === "win32" ? "node.exe" : "node";
+
+  const bundled = path.join(process.resourcesPath, "libexec", nodeName);
+  if (fs.existsSync(bundled)) return bundled;
+
+  const devNode = path.join(
+    __dirname,
+    "..",
+    "..",
+    "resources",
+    "libexec",
+    nodeName,
+  );
+  if (fs.existsSync(devNode)) return devNode;
+
+  return null;
+}
+
+/**
+ * Locate the bundled chrome-devtools-mcp CLI entry (committed JS tree staged at
+ * libexec/chrome-devtools-mcp/node_modules/...). Run as ``node <entry>``.
+ *
+ * Returns null when not bundled (dev), so the backend falls back to npx.
+ */
+function resolveCdtEntry(): string | null {
+  const rel = path.join(
+    "chrome-devtools-mcp",
+    "node_modules",
+    "chrome-devtools-mcp",
+    "build",
+    "src",
+    "bin",
+    "chrome-devtools.js",
+  );
+
+  const bundled = path.join(process.resourcesPath, "libexec", rel);
+  if (fs.existsSync(bundled)) return bundled;
+
+  const devEntry = path.join(
+    __dirname,
+    "..",
+    "..",
+    "resources",
+    "libexec",
+    rel,
+  );
+  if (fs.existsSync(devEntry)) return devEntry;
 
   return null;
 }
@@ -148,14 +213,32 @@ export const startSidecar = async (
   // _pyinstaller_entry" before the sidecar can even log a line.
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
-    VALUZ_DATA_DIR: path.join(homedir(), ".valuz", "app"),
+    VALUZ_DATA_DIR: path.join(homedir(), ".valuz-oss"),
   };
+
+  // The backend builds its public callback URLs (notably the connector OAuth
+  // redirect_uri) from VALUZ_BACKEND_BASE_URL, which defaults to :8000. The
+  // sidecar listens on ``port`` (19100 by default), so without this the OAuth
+  // redirect points at a dead :8000 and the browser callback is refused. Pin
+  // the base URL to the actual port the sidecar is bound to.
+  env.VALUZ_BACKEND_BASE_URL = `http://127.0.0.1:${port}`;
 
   // Point the backend's docs_embedded._detect_rg() at the bundled binary.
   // It already honours VALUZ_RG_PATH ahead of bundled / PATH lookup.
   const rgBinary = resolveRgBinary();
   if (rgBinary) {
     env.VALUZ_RG_PATH = rgBinary;
+  }
+
+  // Point the backend's browser service at the vendored Node + chrome-devtools-mcp
+  // entry (modules/browser/service.py::_cli_argv). Both must be present; with
+  // them set the backend invokes ``node <entry>`` by absolute path, bypassing
+  // the GUI app's stripped PATH. Absent (dev), it falls back to npx.
+  const nodeBinary = resolveNodeBinary();
+  const cdtEntry = resolveCdtEntry();
+  if (nodeBinary && cdtEntry) {
+    env.VALUZ_NODE_PATH = nodeBinary;
+    env.VALUZ_CDT_ENTRY = cdtEntry;
   }
 
   if (serverBinary) {
@@ -211,24 +294,37 @@ export const startSidecar = async (
     if (stopped || !child.pid) return;
     stopped = true;
 
-    // Send SIGTERM for graceful shutdown
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // Process may have already exited
-    }
-
-    // Force kill after 5 seconds
-    const timeout = setTimeout(() => {
+    if (process.platform === "win32") {
+      // On Windows, child.kill() without args calls TerminateProcess.
+      // There is no graceful SIGTERM equivalent for child processes.
+      // SQLite WAL mode prevents corruption on abrupt termination, and
+      // session recovery (recover_running_sessions, seal_orphan_pendings)
+      // handles crash cleanup at next startup.
       try {
-        child.kill("SIGKILL");
+        child.kill();
       } catch {
-        // Already dead
+        // Process may have already exited
       }
-    }, 5000);
+    } else {
+      // Send SIGTERM for graceful shutdown
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // Process may have already exited
+      }
 
-    // Clean up timeout if process exits on its own
-    child.on("exit", () => clearTimeout(timeout));
+      // Force kill after 5 seconds
+      const timeout = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Already dead
+        }
+      }, 5000);
+
+      // Clean up timeout if process exits on its own
+      child.on("exit", () => clearTimeout(timeout));
+    }
   };
 
   return {

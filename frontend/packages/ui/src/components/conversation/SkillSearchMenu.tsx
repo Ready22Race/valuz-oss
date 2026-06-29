@@ -2,14 +2,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Search, Zap } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../hooks/use-i18n";
+import { filterSkillItems, type SkillSearchItem } from "./skill-search-filter";
 
-export interface SkillSearchItem {
-  id: string;
-  name: string;
-  slug?: string;
-  description?: string;
-  icon?: string;
-}
+// Re-exported for back-compat: existing consumers import the type (and the
+// barrel re-exports it) from this module. The value/logic lives in
+// ``skill-search-filter`` so this component file only exports a component.
+export type { SkillSearchItem } from "./skill-search-filter";
 
 export interface SkillSearchMenuProps {
   skills: SkillSearchItem[];
@@ -18,6 +16,13 @@ export interface SkillSearchMenuProps {
   onClose: () => void;
   /** Position relative to anchor (CSS top/left) */
   position?: { top: number; left: number };
+  /**
+   * Which way the menu opens relative to the anchor when ``position`` is not
+   * given: ``"up"`` (above the input — the default, for a bottom-anchored
+   * composer) or ``"down"`` (below it, for a top-anchored composer like the
+   * project detail page, where opening up would overflow the page header).
+   */
+  direction?: "up" | "down";
 }
 
 export const SkillSearchMenu = ({
@@ -26,6 +31,7 @@ export const SkillSearchMenu = ({
   onSelect,
   onClose,
   position,
+  direction = "up",
 }: SkillSearchMenuProps) => {
   const { t } = useI18n();
   const [highlightState, setHighlightState] = useState({
@@ -35,12 +41,7 @@ export const SkillSearchMenu = ({
   const menuRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  const filtered = skills.filter(
-    (s) =>
-      s.name.toLowerCase().includes(query.toLowerCase()) ||
-      (s.description &&
-        s.description.toLowerCase().includes(query.toLowerCase())),
-  );
+  const filtered = filterSkillItems(skills, query);
 
   const highlightIndex =
     highlightState.query === query ? highlightState.index : 0;
@@ -98,23 +99,12 @@ export const SkillSearchMenu = ({
     el?.scrollIntoView({ block: "nearest" });
   }, [highlightIndex]);
 
-  if (filtered.length === 0) {
-    return (
-      <div
-        ref={menuRef}
-        className="absolute z-50 min-w-[280px] max-w-[340px] rounded-lg border border-surface-border bg-surface p-1 shadow-lg"
-        style={
-          position
-            ? { top: position.top, left: position.left }
-            : { bottom: "100%", left: 0 }
-        }
-      >
-        <div className="rounded-lg px-2 py-2 text-[14px] text-ink-meta">
-          {t("conversation.noSkillMatch")}
-        </div>
-      </div>
-    );
-  }
+  // Zero matches is no longer a dead-end. A ``/xxx`` that matches no skill is
+  // treated as a pass-through slash command: the composer stops rendering this
+  // menu (see ``skillMenuOpen``) and lets Enter send the command normally,
+  // instead of showing a discouraging "no matching skill". Render nothing if we
+  // ever get here with an empty list so the component stays self-consistent.
+  if (filtered.length === 0) return null;
 
   return (
     <div
@@ -123,7 +113,9 @@ export const SkillSearchMenu = ({
       style={
         position
           ? { top: position.top, left: position.left }
-          : { bottom: "100%", left: 0 }
+          : direction === "down"
+            ? { top: "calc(100% + 4px)", left: 0 }
+            : { bottom: "calc(100% + 4px)", left: 0 }
       }
     >
       <div className="flex items-center gap-2 border-b border-surface-border px-2 py-1.5">

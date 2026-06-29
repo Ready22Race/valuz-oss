@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { onboardingApi, type OnboardingTeamId } from "@valuz/core";
+import { usePlatform } from "../../platform";
 import { useTranslation } from "@valuz/core";
 import { t as _t } from "@valuz/shared/i18n";
 import { toast } from "sonner";
+import { WindowControls } from "@valuz/ui";
 import { markOnboarded } from "../../lib/onboarding";
 import { WelcomeStep } from "./WelcomeStep";
 import { ConnectStep } from "./ConnectStep";
@@ -35,9 +37,21 @@ export const OnboardingFlow = () => {
 
   const go = (next: Step) => setStep(next);
 
-  // Terminal (skip path): mark done and route into the app without deploying
-  // a team.
-  const finish = () => {
+  // Terminal (skip path): best-effort seed the Valuz 小助手 so the user never
+  // lands in an empty agent library, then mark done and route into the app —
+  // ConversationPage defaults to `valuz-helper` when present, so it's pre-
+  // selected on arrival. Creation is best-effort: when no model channel is
+  // configured yet it 422s (e.g. skipping before ConnectStep), and any other
+  // failure is equally non-fatal. We swallow it and finish anyway — the
+  // outcome is the pre-fix empty workspace, so there's no regression, and we
+  // never trap the user in onboarding.
+  const finish = async () => {
+    try {
+      await onboardingApi.createAssistant();
+    } catch {
+      // No channel configured (422) or transient failure — leave the library
+      // as-is and still let the user out.
+    }
     markOnboarded();
     navigate("/");
   };
@@ -48,9 +62,9 @@ export const OnboardingFlow = () => {
   // — we do NOT mark onboarded on failure.
   const enterExampleProject = async (teamId: OnboardingTeamId) => {
     try {
-      const { workspace_id } = await onboardingApi.createExampleProject(teamId);
+      const { project_id } = await onboardingApi.createExampleProject(teamId);
       markOnboarded();
-      navigate(`/projects/${workspace_id}`);
+      navigate(`/projects/${project_id}`);
     } catch (err) {
       toast.error(
         _t("onboarding.createProjectFailed" as Parameters<typeof _t>[0]),
@@ -136,13 +150,22 @@ const OnboardingChrome = ({
   onBack,
 }: ChromeProps) => {
   const { t } = useTranslation();
+  const platform = usePlatform();
+  const [isMaximized, setIsMaximized] = useState(false);
+  const showWindowControls = platform.isElectron && !platform.isMac;
+
+  useEffect(() => {
+    if (showWindowControls && platform.windowIsMaximized) {
+      void platform.windowIsMaximized().then(setIsMaximized);
+    }
+  }, [showWindowControls, platform.windowIsMaximized]);
+
   return (
     <div className="relative min-h-screen bg-background">
       {/* pl-20 leaves room for the macOS traffic-light cluster (~78px); on
-          web the extra space just reads as breathing room. pr-5 keeps the
-          right edge from feeling crowded. */}
+          web the extra space just reads as breathing room. */}
       <header
-        className="absolute inset-x-0 top-0 z-10 flex items-center justify-between pl-20 pr-5 py-3"
+        className={`absolute inset-x-0 top-0 z-10 flex items-center justify-between pl-20 ${showWindowControls ? "pr-0" : "pr-5"} py-3`}
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
         <div className="flex items-center gap-4">
@@ -199,6 +222,16 @@ const OnboardingChrome = ({
           >
             {t("onboarding.skipGuide" as Parameters<typeof t>[0])}
           </button>
+          {showWindowControls && (
+            <WindowControls
+              onMinimize={() => void platform.windowMinimize?.()}
+              onMaximize={() =>
+                void platform.windowMaximize?.().then(setIsMaximized)
+              }
+              onClose={() => void platform.windowClose?.()}
+              isMaximized={isMaximized}
+            />
+          )}
         </div>
       </header>
 

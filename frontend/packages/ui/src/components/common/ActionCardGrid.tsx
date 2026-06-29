@@ -1,5 +1,6 @@
 import type { FC } from "react";
 import { Card, CardContent } from "../ui/card";
+import { IconBox } from "./IconBox";
 
 export interface ActionCardGridProps {
   actions: Array<{
@@ -26,9 +27,9 @@ export const ActionCardGrid: FC<ActionCardGridProps> = ({ actions }) => {
           >
             <Card className="transition-all hover:shadow-md">
               <CardContent className="flex flex-col gap-3 pt-0">
-                <div className="flex h-10 w-10 items-center justify-center rounded-[12px] border border-brand/20 bg-brand-light">
-                  <action.icon className="h-5 w-5 text-brand" />
-                </div>
+                <IconBox size="lg" variant="brand">
+                  <action.icon className="h-5 w-5" />
+                </IconBox>
                 <span className="text-sm font-medium text-ink-title">
                   {action.title}
                 </span>

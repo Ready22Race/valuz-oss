@@ -1,5 +1,10 @@
 """Port: metering, budget checks, and balance queries.
 
+All methods are async — commercial implementations do network I/O
+(cloud wallet / meter endpoints) and several call sites live on the
+event loop (routes, SSE adapters), so a sync contract would force
+blocking HTTP onto the loop (see ADR-003 in the commercial repo).
+
 OSS mode uses ``NoopBillingProvider`` — all operations are no-ops that
 report unlimited budget. The commercial overlay binds a real provider
 via ``set_billing_port()`` in ``api/deps.py`` at app startup.
@@ -24,6 +29,11 @@ class BudgetStatus:
     allowed: bool
     remaining_credits: float | None = None
     reason: str | None = None
+    # Optional i18n key + params an overlay can attach so the client renders a
+    # localized message (e.g. a billing rejection) instead of the raw ``reason``.
+    # OSS leaves these None; the default Noop provider never sets them.
+    message_key: str | None = None
+    message_params: dict[str, Any] | None = None
 
 
 @dataclass
@@ -35,15 +45,30 @@ class Balance:
 class BillingPort(Protocol):
     """Metering, budget enforcement, and balance queries."""
 
-    def meter(self, event: MeterEvent) -> None:
+    async def meter(self, event: MeterEvent) -> None:
         """Record a billable event."""
         ...
 
-    def check_budget(self, user_id: str, estimated_cost: float = 0.0) -> BudgetStatus:
-        """Check whether the user has sufficient budget to proceed."""
+    async def check_budget(
+        self,
+        user_id: str,
+        estimated_cost: float = 0.0,
+        *,
+        provider_id: str | None = None,
+    ) -> BudgetStatus:
+        """Check whether the user has sufficient budget to proceed.
+
+        ``provider_id`` is the **effective channel** the upcoming turn will use
+        — the session's locked channel (or a request override). A billing
+        overlay MAY use it to skip enforcement for channels it does not meter:
+        e.g. a user's own direct API-key channel or an org BYOK channel never
+        consume platform credits, so an empty wallet must not block them. When
+        ``None`` (the caller could not resolve a channel) the provider should
+        apply its default policy.
+        """
         ...
 
-    def get_balance(self, user_id: str) -> Balance:
+    async def get_balance(self, user_id: str) -> Balance:
         """Return the user's current credit balance."""
         ...
 
@@ -51,13 +76,19 @@ class BillingPort(Protocol):
 class NoopBillingProvider:
     """Default billing provider — everything is free, budget is unlimited."""
 
-    def meter(self, event: MeterEvent) -> None:
+    async def meter(self, event: MeterEvent) -> None:
         pass
 
-    def check_budget(self, user_id: str, estimated_cost: float = 0.0) -> BudgetStatus:
+    async def check_budget(
+        self,
+        user_id: str,
+        estimated_cost: float = 0.0,
+        *,
+        provider_id: str | None = None,
+    ) -> BudgetStatus:
         return BudgetStatus(allowed=True)
 
-    def get_balance(self, user_id: str) -> Balance:
+    async def get_balance(self, user_id: str) -> Balance:
         return Balance(credits=float("inf"))
 
 
@@ -65,13 +96,16 @@ _billing_port: BillingPort = NoopBillingProvider()
 
 
 def get_billing_port() -> BillingPort:
-    return _billing_port
+    from valuz_agent.ports.extensions import ext
+
+    return ext.billing
 
 
 def set_billing_port(port: BillingPort) -> None:
     """Replace the billing provider (called by commercial app at startup)."""
-    global _billing_port
-    _billing_port = port
+    from valuz_agent.ports.extensions import ext
+
+    ext.billing = port
 
 
 __all__ = [

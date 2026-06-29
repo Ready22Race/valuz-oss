@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.db import async_commit_with_retry
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
-from valuz_agent.modules.skills.contracts import RuntimeContext, SkillManifest, WorkspaceRef
+from valuz_agent.modules.skills.contracts import ProjectRef, RuntimeContext, SkillManifest
 from valuz_agent.modules.skills.models import (
     ProjectSkillConfigRow,
     SkillIndexRow,
@@ -28,10 +28,11 @@ class SkillDatastore:
 
     async def list_skills(
         self,
+        user_id: str,
         query: str | None = None,
         scope: str | None = None,
     ) -> list[SkillIndexRow]:
-        stmt = select(SkillIndexRow)
+        stmt = select(SkillIndexRow).where(SkillIndexRow.user_id == user_id)
         if scope:
             stmt = stmt.filter_by(scope=scope)
         if query:
@@ -39,10 +40,20 @@ class SkillDatastore:
         stmt = stmt.order_by(SkillIndexRow.name)
         return list((await self._db.execute(stmt)).scalars().all())
 
-    async def get_by_id(self, skill_id: str) -> SkillIndexRow | None:
-        return await self._db.get(SkillIndexRow, skill_id)
+    async def get_by_id(self, user_id: str, skill_id: str) -> SkillIndexRow | None:
+        return (
+            (
+                await self._db.execute(
+                    select(SkillIndexRow).where(
+                        SkillIndexRow.id == skill_id, SkillIndexRow.user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
 
-    async def set_creation_origin(self, skill_id: str, origin: str) -> None:
+    async def set_creation_origin(self, user_id: str, skill_id: str, origin: str) -> None:
         """Stamp ``creation_origin`` on an existing ``valuz_skill_index`` row.
 
         ``creation_origin`` is host-only bookkeeping — it never touches
@@ -51,26 +62,27 @@ class SkillDatastore:
         missing row is a no-op rather than an error, since the next
         ``startup_scan`` recreates it as ``"discovered"`` anyway.
         """
-        row = await self._db.get(SkillIndexRow, skill_id)
+        row = await self.get_by_id(user_id, skill_id)
         if row is None:
             return
         row.creation_origin = origin
         await async_commit_with_retry(self._db, where="SkillDatastore.set_creation_origin")
 
-    async def set_origin_metadata(self, skill_id: str, origin_json: str) -> None:
+    async def set_origin_metadata(self, user_id: str, skill_id: str, origin_json: str) -> None:
         """Stamp import provenance (``origin_json``) on an existing row.
 
         Host-only bookkeeping like ``creation_origin`` — never touches SKILL.md
         and survives ``startup_scan`` rescans (the scan never writes this
         column). A missing row is a no-op.
         """
-        row = await self._db.get(SkillIndexRow, skill_id)
+        row = await self.get_by_id(user_id, skill_id)
         if row is None:
             return
         row.origin_json = origin_json
         await async_commit_with_retry(self._db, where="SkillDatastore.set_origin_metadata")
 
-    async def create(self, row: SkillIndexRow) -> SkillIndexRow:
+    async def create(self, user_id: str, row: SkillIndexRow) -> SkillIndexRow:
+        row.user_id = user_id
         self._db.add(row)
         await async_commit_with_retry(self._db, where="SkillDatastore.create")
         return row
@@ -80,15 +92,24 @@ class SkillDatastore:
         await async_commit_with_retry(self._db, where="SkillDatastore.update")
         return row
 
-    async def delete(self, skill_id: str) -> None:
-        await self._db.execute(sa_delete(SkillIndexRow).where(SkillIndexRow.id == skill_id))
+    async def delete(self, user_id: str, skill_id: str) -> None:
+        await self._db.execute(
+            sa_delete(SkillIndexRow).where(
+                SkillIndexRow.id == skill_id, SkillIndexRow.user_id == user_id
+            )
+        )
         await async_commit_with_retry(self._db, where="SkillDatastore.delete")
 
-    async def list_project_skills(self, workspace_id: str) -> list[ProjectSkillConfigRow]:
+    async def list_project_skills(
+        self, user_id: str, project_id: str
+    ) -> list[ProjectSkillConfigRow]:
         return list(
             (
                 await self._db.execute(
-                    select(ProjectSkillConfigRow).filter_by(workspace_id=workspace_id)
+                    select(ProjectSkillConfigRow).where(
+                        ProjectSkillConfigRow.project_id == project_id,
+                        ProjectSkillConfigRow.user_id == user_id,
+                    )
                 )
             )
             .scalars()
@@ -96,47 +117,77 @@ class SkillDatastore:
         )
 
     async def set_project_skills(
-        self, workspace_id: str, rows: list[ProjectSkillConfigRow]
+        self, user_id: str, project_id: str, rows: list[ProjectSkillConfigRow]
     ) -> None:
         await self._db.execute(
             sa_delete(ProjectSkillConfigRow).where(
-                ProjectSkillConfigRow.workspace_id == workspace_id
+                ProjectSkillConfigRow.project_id == project_id,
+                ProjectSkillConfigRow.user_id == user_id,
             )
         )
+        for r in rows:
+            r.user_id = user_id
         self._db.add_all(rows)
         await async_commit_with_retry(self._db, where="SkillDatastore.set_project_skills")
 
     # ------------------------------------------------------------------
-    # Filesystem-based workspace skill config (JSON project-config.json)
+    # Global library on/off switch (``valuz_skill_index.library_enabled``)
     # ------------------------------------------------------------------
 
-    def list_workspace_skills(
+    async def list_library_disabled_ids(self, user_id: str) -> set[str]:
+        """Index-row ids the user has turned OFF in the library. Default is on,
+        so this returns only the explicitly-disabled rows — the set the catalog
+        overlay reads to flip ``SkillView.library_enabled`` by id."""
+        rows = (
+            await self._db.execute(
+                select(SkillIndexRow.id).where(
+                    SkillIndexRow.user_id == user_id,
+                    SkillIndexRow.library_enabled.is_(False),
+                )
+            )
+        ).scalars()
+        return set(rows)
+
+    async def set_library_enabled(self, user_id: str, skill_id: str, enabled: bool) -> None:
+        """Set the global library switch on one index row (the Skills-page
+        representative). No-op if the id is unknown to this owner."""
+        row = await self.get_by_id(user_id, skill_id)
+        if row is None:
+            return
+        row.library_enabled = enabled
+        await async_commit_with_retry(self._db, where="SkillDatastore.set_library_enabled")
+
+    # ------------------------------------------------------------------
+    # Filesystem-based project skill config (JSON project-config.json)
+    # ------------------------------------------------------------------
+
+    def list_project_skill_manifests(
         self,
-        workspace: _WorkspaceLike,
+        project: _ProjectLike,
         source: FilesystemSkillSource,
     ) -> list[SkillManifest]:
         context = RuntimeContext(
-            workspace=WorkspaceRef(
-                id=workspace.id,
-                slug=workspace.id,
-                kind=workspace.kind,
-                root_path=workspace.root_path,
+            project=ProjectRef(
+                id=project.id,
+                slug=project.id,
+                kind=project.kind,
+                root_path=project.root_path,
             ),
         )
         manifests = source.list_skills(context)
-        enabled_paths = self.enabled_skill_paths(workspace)
+        enabled_paths = self.enabled_skill_paths(project)
 
         items: list[SkillManifest] = []
         for manifest in manifests:
-            enabled = workspace.kind == "chat" or manifest.path in enabled_paths
+            enabled = project.kind == "chat" or manifest.path in enabled_paths
             items.append(manifest.model_copy(update={"enabled": enabled}))
         return items
 
-    def enabled_skill_paths(self, workspace: _WorkspaceLike) -> set[str]:
-        if workspace.kind != "project":
+    def enabled_skill_paths(self, project: _ProjectLike) -> set[str]:
+        if project.kind != "project":
             return set()
 
-        config = self._project_config_path(workspace)
+        config = self._project_config_path(project)
         if not config.exists():
             return set()
 
@@ -151,34 +202,34 @@ class SkillDatastore:
                 continue
             candidate = Path(value).expanduser()
             if not candidate.is_absolute():
-                candidate = Path(workspace.root_path) / value
+                candidate = Path(project.root_path) / value
             resolved.add(str(candidate.resolve(strict=False)))
         return resolved
 
     def set_skill_enabled(
         self,
-        workspace: _WorkspaceLike,
+        project: _ProjectLike,
         skill_path: str,
         enabled: bool,
     ) -> set[str]:
-        if workspace.kind != "project":
+        if project.kind != "project":
             return set()
 
-        current = self.enabled_skill_paths(workspace)
+        current = self.enabled_skill_paths(project)
         resolved_path = str(Path(skill_path).expanduser().resolve(strict=False))
         if enabled:
             current.add(resolved_path)
         else:
             current.discard(resolved_path)
-        self._write_enabled_skill_paths(workspace, current)
+        self._write_enabled_skill_paths(project, current)
         return current
 
     def overwrite_enabled_skill_paths(
         self,
-        workspace: _WorkspaceLike,
+        project: _ProjectLike,
         skill_paths: list[str],
     ) -> set[str]:
-        if workspace.kind != "project":
+        if project.kind != "project":
             return set()
 
         resolved: set[str] = set()
@@ -187,68 +238,66 @@ class SkillDatastore:
                 continue
             candidate = Path(skill_path).expanduser()
             if not candidate.is_absolute():
-                candidate = Path(workspace.root_path) / skill_path
+                candidate = Path(project.root_path) / skill_path
             resolved.add(str(candidate.resolve(strict=False)))
-        self._write_enabled_skill_paths(workspace, resolved)
+        self._write_enabled_skill_paths(project, resolved)
         return resolved
 
-    def remove_skill_path_from_workspace(
+    def remove_skill_path_from_project(
         self,
-        workspace: _WorkspaceLike,
+        project: _ProjectLike,
         skill_path: str,
     ) -> None:
-        if workspace.kind != "project":
+        if project.kind != "project":
             return
-        current = self.enabled_skill_paths(workspace)
+        current = self.enabled_skill_paths(project)
         current.discard(str(Path(skill_path).expanduser().resolve(strict=False)))
-        self._write_enabled_skill_paths(workspace, current)
+        self._write_enabled_skill_paths(project, current)
 
-    def scan(self, workspace: _WorkspaceLike, source: FilesystemSkillSource) -> int:
-        return len(self.list_workspace_skills(workspace, source))
+    def scan(self, project: _ProjectLike, source: FilesystemSkillSource) -> int:
+        return len(self.list_project_skill_manifests(project, source))
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _project_config_path(self, workspace: _WorkspaceLike) -> Path:
-        return Path(workspace.root_path) / ".claude" / self._config_name
+    def _project_config_path(self, project: _ProjectLike) -> Path:
+        return Path(project.root_path) / ".claude" / self._config_name
 
-    def _read_config(self, workspace: _WorkspaceLike) -> dict:
-        config = self._project_config_path(workspace)
+    def _read_config(self, project: _ProjectLike) -> dict:
+        config = self._project_config_path(project)
         if not config.exists():
             return {}
         return json.loads(config.read_text(encoding="utf-8"))
 
-    def _write_config(self, workspace: _WorkspaceLike, data: dict) -> None:
-        config_path = self._project_config_path(workspace)
+    def _write_config(self, project: _ProjectLike, data: dict) -> None:
+        config_path = self._project_config_path(project)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
-    def _write_enabled_skill_paths(
-        self, workspace: _WorkspaceLike, enabled_paths: set[str]
-    ) -> None:
-        data = self._read_config(workspace)
+    def _write_enabled_skill_paths(self, project: _ProjectLike, enabled_paths: set[str]) -> None:
+        data = self._read_config(project)
         data["skills_enabled"] = sorted(
-            self._normalize_ref(workspace, path) for path in enabled_paths
+            self._normalize_ref(project, path) for path in enabled_paths
         )
-        self._write_config(workspace, data)
+        self._write_config(project, data)
 
-    def get_mcp_servers(self, workspace: _WorkspaceLike) -> list[str]:
-        if workspace.kind != "project" or not workspace.root_path:
+    def get_mcp_servers(self, project: _ProjectLike) -> list[str]:
+        if project.kind != "project" or not project.root_path:
             return []
-        data = self._read_config(workspace)
+        data = self._read_config(project)
         value = data.get("mcp_servers", [])
         return value if isinstance(value, list) else []
 
-    def set_mcp_servers(self, workspace: _WorkspaceLike, slugs: list[str]) -> None:
-        data = self._read_config(workspace)
+    def set_mcp_servers(self, project: _ProjectLike, slugs: list[str]) -> None:
+        data = self._read_config(project)
         data["mcp_servers"] = slugs
-        self._write_config(workspace, data)
+        self._write_config(project, data)
 
-    def _normalize_ref(self, workspace: _WorkspaceLike, skill_path: str) -> str:
+    def _normalize_ref(self, project: _ProjectLike, skill_path: str) -> str:
         candidate = Path(skill_path).expanduser().resolve(strict=False)
-        if workspace.kind == "project" and workspace.root_path:
-            project_skill_root = (Path(workspace.root_path) / ".claude" / "skills").resolve(
+        if project.kind == "project" and project.root_path:
+            project_skill_root = (Path(project.root_path) / ".claude" / "skills").resolve(
                 strict=False
             )
             try:
@@ -259,7 +308,7 @@ class SkillDatastore:
         return str(candidate)
 
 
-class _WorkspaceLike(Protocol):
+class _ProjectLike(Protocol):
     id: str
     kind: str
     root_path: str | None

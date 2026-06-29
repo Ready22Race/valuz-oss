@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from valuz_agent.adapters import kernel_store
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 async def _build_additional_context(
     session_id: str,
-    workspace_id: str,
+    project_id: str,
     attachment_rows=None,  # type: ignore[no-untyped-def]
 ) -> str:
     """Compose the per-turn ``<additional-context>`` block for a session.
@@ -87,16 +87,16 @@ async def _build_additional_context(
         attachments = (
             attachment_rows
             if attachment_rows is not None
-            else await SessionDatastore(db).list_attachments(session_id)
+            else await SessionDatastore(db).list_attachments(require_current_user_id(), session_id)
         )
         if attachments:
             lines = [f"Uploaded attachments ({len(attachments)} this turn):"]
             for row in attachments:
                 source_tag = " [from knowledge base]" if row.source_kind == "kb_doc" else ""
                 if row.parse_status == "ready" and row.parsed_path:
-                    lines.append(f"- {row.filename}{source_tag} → parsed text at {row.parsed_path}")
+                    lines.append(f"- {row.filename}{source_tag} (parsed text available)")
                 else:
-                    lines.append(f"- {row.filename}{source_tag} (raw at {row.stored_path})")
+                    lines.append(f"- {row.filename}{source_tag} (raw file)")
             sections.append("\n".join(lines))
 
         # 2) Bound knowledge-base scope. Doc tools (search / list) are
@@ -105,7 +105,7 @@ async def _build_additional_context(
         #    them at all and biases first searches toward the right KB.
         ds = DocumentDatastore(db)
         try:
-            bindings = await ds.list_bindings(workspace_id)
+            bindings = await ds.list_bindings(require_current_user_id(), project_id)
         except Exception:  # noqa: BLE001 — never block a turn on docs lookup
             bindings = []
         if bindings:
@@ -113,32 +113,23 @@ async def _build_additional_context(
             if kb_section:
                 sections.append(kb_section)
 
-        # 3) Memory (memory-system-design §3.4): global core in full +
-        #    project/task index (full bodies on demand via memory_get).
-        #    MVP injects via additional-context (per-turn) rather than the
-        #    frozen system prompt — build_workspace_system_prompt must stay
-        #    byte-identical to the user-visible instructions_md. Guarded so a
+        # 3) Memory (memory-system-design §8): a frozen snapshot — USER +
+        #    cross-project MEMORY + (in a project) that project's MEMORY,
+        #    captured once per session and reused byte-for-byte (prefix-cache
+        #    friendly). Rides additional-context, not the frozen system prompt,
+        #    so it never pollutes the user-visible instructions_md. Guarded so a
         #    memory lookup never blocks a turn.
         try:
-            from valuz_agent.modules.memory.injection import injection_assembler
+            from valuz_agent.modules.settings.preferences import get_memory_enabled
 
-            mem_parts: list[str] = []
-            g = injection_assembler.global_block()
-            if g.strip():
-                mem_parts.append(g.strip())
-            proj = await kernel_store.load_project(workspace_id)
-            project_cwd = getattr(proj, "cwd", "") if proj else ""
-            task_id = None
-            sess = await kernel_store.load_session(session_id)
-            if sess is not None:
-                task_id = ((sess.metadata or {}).get("valuz", {}) or {}).get("task_id")
-            idx = injection_assembler.context_index_block(
-                project_cwd=project_cwd or None, task_id=task_id
-            )
-            if idx.strip():
-                mem_parts.append(idx.strip())
-            if mem_parts:
-                sections.append("\n\n".join(mem_parts))
+            if await get_memory_enabled(db):
+                from valuz_agent.modules.memory.injection import injection_assembler
+
+                mem_block = injection_assembler.snapshot_for_session(
+                    session_id=session_id, project_id=project_id or None
+                )
+                if mem_block.strip():
+                    sections.append(mem_block.strip())
         except Exception:  # noqa: BLE001 — never block a turn on memory
             logger.debug("memory injection skipped", exc_info=True)
 
@@ -178,7 +169,7 @@ async def _format_kb_scope(ds, bindings) -> str:  # type: ignore[no-untyped-def]
             assert isinstance(items, list)
             items.append(f"folder: {folder.relative_path or folder.id}")
         elif b.binding_kind == "document":
-            doc = await ds.get_by_id(b.target_id)
+            doc = await ds.get_by_id(require_current_user_id(), b.target_id)
             if not doc:
                 continue
             kb = await ds.get_kb(doc.kb_id)

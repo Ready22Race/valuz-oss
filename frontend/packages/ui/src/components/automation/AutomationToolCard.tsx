@@ -42,9 +42,9 @@ export type AutomationTrigger =
 
 export interface AutomationToolItem {
   automation_id: string;
-  workspace_id: string;
-  workspace_name: string;
-  workspace_kind: "chat" | "project";
+  project_id: string;
+  project_name: string;
+  project_kind: "chat" | "project";
   name: string;
   agent_kind: string;
   agent_slug: string;
@@ -58,6 +58,20 @@ export interface AutomationToolItem {
   last_run_status: string | null;
 }
 
+/** Resolved-but-unsaved automation echoed by the ``create`` action — the
+ *  confirmation card renders this (the page maps it into AutomationProposalCard). */
+export interface AutomationProposalSpecPayload {
+  name: string;
+  prompt_template: string;
+  trigger: AutomationTrigger;
+  agent_slug: string;
+  agent_kind: string;
+  agent_name: string | null;
+  action_kind: "chat" | "task";
+  trigger_human_readable: string;
+  next_run_at: number | null;
+}
+
 export interface AutomationToolResultPayload {
   action: AutomationAction;
   ok: boolean;
@@ -65,6 +79,8 @@ export interface AutomationToolResultPayload {
   automation?: AutomationToolItem | null;
   automations?: AutomationToolItem[];
   next_runs?: number[];
+  // Set only by the ``create`` action — the proposed (not yet saved) automation.
+  proposal?: AutomationProposalSpecPayload | null;
   error_code?: string | null;
 }
 

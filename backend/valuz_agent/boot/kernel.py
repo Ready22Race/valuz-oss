@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 from valuz_agent.infra.config import settings
 
 if TYPE_CHECKING:
-    from sqlalchemy import Engine
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = logging.getLogger(__name__)
 
@@ -44,134 +44,133 @@ KERNEL_DIR: Path = Path(__file__).resolve().parents[2] / "kernel"
 KERNEL_ALEMBIC_DIR: Path = Path(__file__).resolve().parents[2] / "alembic" / "kernel"
 KERNEL_ALEMBIC_INI: Path = KERNEL_ALEMBIC_DIR / "alembic.ini"
 
+# The kernel chain stamps the default ``alembic_version`` table (the host chain
+# uses ``alembic_version_host`` in the same file so the two never collide).
+KERNEL_VERSION_TABLE = "alembic_version"
+# Kernel-owned tables the schema preflight inspects (never drops) — the
+# current trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
+# langgraph checkpoint tables in the same file are off-limits.
+_KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
+
 
 def _set_kernel_env() -> None:
     """Make the kernel see the valuz database URL and a sane workspace dir.
 
-    The kernel's ``app.config.AppConfig`` reads ``DATABASE_URL`` and
-    ``HARNESS_WORKSPACE_DIR`` from os.environ at construction time, so we set
-    them before anything imports ``app.config``. ``HARNESS_WORKSPACE_DIR`` is
-    a default landing spot; valuz will override it per-project via the
-    workspace cwd resolved through ``FsRegistry``.
+    The kernel's ``app.config.AppConfig`` reads ``DATABASE_URL`` from
+    os.environ at construction time, so we set it before anything imports
+    ``app.config``.
 
     ``DEEPAGENTS_CHECKPOINT_DB`` points the kernel's DeepAgentsRuntime
-    langgraph checkpointer at the SAME SQLite file as the rest of valuz —
-    one file to back up, no stray ``./deepagents_checkpoints.db`` left
-    in whatever cwd happened to be active when the runtime first booted.
-    Langgraph's checkpoint tables (``checkpoints`` / ``writes`` /
-    ``checkpoint_blobs``) don't collide with the kernel's
-    ``projects/agents/sessions/messages/events`` or valuz's ``valuz_*``
-    namespaces; setdefault honours an external override.
+    langgraph checkpointer at the kernel's OWN SQLite file (``kernel.db``),
+    alongside ``sessions/messages/events`` — so the checkpoint tables
+    (``checkpoints`` / ``writes`` / ``checkpoint_blobs``) travel with the
+    kernel into a sandbox/remote deployment instead of being stranded in the
+    host ``valuz.db``. No stray ``./deepagents_checkpoints.db`` in whatever
+    cwd happened to be active at first boot; setdefault honours an external
+    override.
     """
-    os.environ["DATABASE_URL"] = settings.db_url_async
-    os.environ.setdefault("HARNESS_WORKSPACE_DIR", str(settings.data_dir / "workspaces"))
-    os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.db_path))
+    os.environ["DATABASE_URL"] = settings.kernel_db_url_async
+    os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.kernel_db_path))
 
 
-def drop_stale_kernel_tables(engine: Engine | None = None) -> None:
-    """Belt-and-braces drop trigger for kernel-shape drift.
+def _known_kernel_revisions() -> set[str]:
+    """Every revision id in the kernel alembic chain.
 
-    The kernel's Alembic chain is the only thing that's *supposed* to
-    rewrite ``projects`` / ``agents`` / ``sessions`` / ``events``, but
-    historically the kernel has shipped schema changes that reuse the
-    same revision id (so already-stamped DBs skip the upgrade and end
-    up missing required columns). This function detects those known
-    fingerprints by checking for the presence of marker columns —
-    anything missing means "drop the kernel quartet so the next
-    ``alembic upgrade head`` rebuilds clean".
-
-    Per dev-stage policy: no data preservation. Internal dogfood users
-    accepted this trade in exchange for cleaner kernel upgrade
-    semantics — see CHANGELOG entry for the V1+V2 schema bootstrap.
-
-    Idempotent: a healthy four-table kernel passes through unchanged.
-
-    Lives next to ``run_kernel_migrations`` so the boot sequence has
-    a single import surface for "do everything the kernel needs at
-    startup". Called automatically by ``run_kernel_migrations``; tests
-    can pass in an ad-hoc engine to pin specific fingerprint cases.
+    A DB stamped at any of these is on a valid upgrade path and is migrated
+    forward by ``alembic upgrade head`` (data-preserving) — see
+    ``ensure_kernel_schema_migratable``.
     """
-    from sqlalchemy import create_engine, inspect, text
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(KERNEL_ALEMBIC_INI))
+    cfg.set_main_option("script_location", str(KERNEL_ALEMBIC_DIR))
+    return {rev.revision for rev in ScriptDirectory.from_config(cfg).walk_revisions()}
+
+
+async def _any_kernel_rows(engine: AsyncEngine, tables: list[str]) -> bool:
+    """True if any of ``tables`` holds at least one row. On a read error, assume
+    data IS present (conservative — never wipe what we can't inspect)."""
+    from sqlalchemy import text
+
+    async with engine.connect() as conn:
+        for table in tables:
+            try:
+                result = await conn.execute(
+                    text(f'SELECT 1 FROM "{table}" LIMIT 1')  # noqa: S608
+                )
+                row = result.first()
+            except Exception:
+                return True
+            if row is not None:
+                return True
+    return False
+
+
+async def ensure_kernel_schema_migratable(engine: AsyncEngine | None = None) -> None:
+    """Preflight the kernel DB before ``alembic upgrade head`` — NEVER drops anything.
+
+    Mirrors the host's ``boot.schema.ensure_host_schema_migratable``: the kernel
+    alembic chain is incremental. Returns when the DB is safe to migrate (stamped
+    at a *known* revision, or no kernel tables yet — a fresh file). Otherwise
+    RAISES, deleting nothing:
+
+    - an unknown/foreign stamp WITH kernel data → the store was written by a
+      newer or divergent build (a downgrade); preserve it, run a build that knows
+      the revision.
+    - kernel tables present but unstamped / a foreign stamp with empty tables → a
+      half-initialised / foreign DB; asks the operator to remove the data dir and
+      restart. No committed data to lose, and still nothing is auto-deleted.
+
+    Scoped to kernel-owned tables (``_KERNEL_OWNED_TABLES``); host ``valuz_*``
+    tables and the langgraph checkpoint tables in the same file are never read or
+    touched. No drops, ever. Reflects through an ASYNC engine (so a Postgres
+    ``database_url`` resolves to asyncpg rather than choking a sync engine on an
+    async driver); the caller runs it off the event loop in a worker thread.
+    """
+    from sqlalchemy import inspect, text
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     owns_engine = engine is None
     if engine is None:
-        engine = create_engine(settings.db_url)
+        engine = create_async_engine(settings.kernel_db_url_async)
     try:
-        inspector = inspect(engine)
-        existing = set(inspector.get_table_names())
+        async with engine.connect() as conn:
+            existing = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
 
-        def _has_col(table: str, col: str) -> bool:
-            if table not in existing:
-                return False
-            return col in {c["name"] for c in inspector.get_columns(table)}
+            stamp: str | None = None
+            if KERNEL_VERSION_TABLE in existing:
+                result = await conn.execute(
+                    text(f"SELECT version_num FROM {KERNEL_VERSION_TABLE}")  # noqa: S608
+                )
+                row = result.fetchone()
+                stamp = row[0] if row else None
 
-        suspect: list[str] = []
+        if stamp in _known_kernel_revisions():
+            return  # known revision — `alembic upgrade head` migrates it forward
 
-        # V4 fossils that survived the V5 cutover. Anything with the V4
-        # column shape is wholly incompatible with the V5 schema.
-        if _has_col("sessions", "environment_id"):
-            suspect.append("sessions")
-        if _has_col("environments", "workspace_mounts"):
-            suspect.append("environments")
+        owned = [t for t in _KERNEL_OWNED_TABLES if t in existing]
+        if not owned:
+            return  # fresh install / no kernel tables — alembic initialises it
 
-        # Per-upgrade fingerprints. Each row pins a "new required column"
-        # whose ABSENCE uniquely identifies a pre-upgrade kernel DB.
-        # When the kernel cleanly bumps the revision id these fingerprints
-        # become defensive-only; when it reuses an existing revision
-        # id (which has happened multiple times — see KERNEL_VERSION
-        # commentary) the fingerprint is the only thing that triggers the
-        # rebuild.
-        kernel_column_fingerprints: list[tuple[str, str]] = [
-            ("sessions", "model_provider"),  # post-39ec84c
-            ("events", "message_id"),  # post-c215c8a
-            ("agents", "instructions"),  # post-e8d6c87 / ADR-008
-            ("sessions", "runtime_provider"),  # post-d66241e
-            ("sessions", "permission_mode"),  # post-1aae940 / approval v1
-            ("sessions", "mode"),  # post-cb25177 / session-modes (4b2490e2b9c4
-            # inserted MID-CHAIN: a DB stamped at the old tail won't backfill)
-            ("sessions", "user_id"),  # ownership cutover: every kernel table
-            # gained a required user_id via a regenerated baseline (no ALTER),
-            # so a pre-cutover DB must be wiped + rebuilt — see the host
-            # counterpart boot.schema.drop_stale_host_tables.
-        ]
-        for table, col in kernel_column_fingerprints:
-            if table in existing and not _has_col(table, col):
-                if "sessions" not in suspect:
-                    suspect.append("sessions")
+        if await _any_kernel_rows(engine, owned):
+            raise RuntimeError(
+                f"kernel schema stamp={stamp!r} is not a known revision for this "
+                f"build, but {len(owned)} kernel table(s) hold data. Refusing to "
+                f"start — nothing is deleted. The kernel store was written by a "
+                f"newer or divergent build (or lost its migration stamp); run a "
+                f"build whose migrations include {stamp!r} (usually: update to the latest)."
+            )
 
-        # Torn-state recovery: an interrupted previous boot can leave the
-        # quartet half-created. Drop whatever's there so the next
-        # ``alembic upgrade`` rebuilds.
-        kernel_tables = {"projects", "agents", "sessions", "events"} & existing
-        if kernel_tables and len(kernel_tables) < 4:
-            for t in kernel_tables:
-                if t not in suspect:
-                    suspect.append(t)
-
-        # Cascade: if any quartet member is stale the others are too —
-        # the kernel's initial migration creates them as a unit.
-        if "sessions" in suspect:
-            for t in ("projects", "agents", "events", "environments", "messages"):
-                if t in existing and t not in suspect:
-                    suspect.append(t)
-            # Also reset the kernel's alembic stamp so the upgrade
-            # treats this as a fresh install.
-            if "alembic_version" in existing and "alembic_version" not in suspect:
-                suspect.append("alembic_version")
-
-        if not suspect:
-            return
-
-        logger.warning(
-            "Stale kernel tables detected (%s) — dropping for fresh alembic baseline",
-            ", ".join(suspect),
+        raise RuntimeError(
+            f"kernel schema is in an unrecognized state (stamp={stamp!r}) — kernel "
+            f"table(s) present but no recoverable data (a half-initialised or "
+            f"foreign DB). Nothing was deleted; remove the data dir and restart to "
+            f"reinitialise cleanly."
         )
-        with engine.begin() as conn:
-            for table in suspect:
-                conn.execute(text(f"DROP TABLE IF EXISTS {table}"))
     finally:
         if owns_engine:
-            engine.dispose()
+            await engine.dispose()
 
 
 def _do_alembic_upgrade() -> None:
@@ -183,7 +182,12 @@ def _do_alembic_upgrade() -> None:
 
     cfg = Config(str(KERNEL_ALEMBIC_INI))
     cfg.set_main_option("script_location", str(KERNEL_ALEMBIC_DIR))
-    cfg.set_main_option("sqlalchemy.url", settings.db_url_async)
+    # The kernel alembic ``env.py`` prefers the ``DATABASE_URL`` env (set by
+    # ``_set_kernel_env`` to ``kernel_db_url_async``) over this option, so the
+    # two must agree on the kernel file — point the config at the kernel URL,
+    # not the host ``db_url_async``, so the migration can never land on
+    # ``valuz.db`` if the env is ever cleared.
+    cfg.set_main_option("sqlalchemy.url", settings.kernel_db_url_async)
 
     command.upgrade(cfg, "head")
 
@@ -193,29 +197,33 @@ def run_kernel_migrations() -> None:
 
     Two steps under one entry point:
 
-    1. ``_drop_stale_kernel_tables`` — safety net for kernel shape drift
-       (see its docstring). No-op on healthy DBs.
-    2. The kernel's own alembic ``upgrade head``. Writes its revision
-       into the default ``alembic_version`` table; the host's chain
-       uses a separate ``alembic_version_host`` row in the same file
-       so the two don't collide.
+    1. ``ensure_kernel_schema_migratable`` — preflight that NEVER drops. Trusts
+       any DB stamped at a known kernel revision (the upgrade migrates it
+       forward); an unknown/foreign/unstamped kernel schema makes boot fail loud
+       (data preserved), never wiped. No-op on a healthy / fresh DB.
+    2. The kernel's own alembic ``upgrade head``. Writes its revision into the
+       default ``alembic_version`` table; the host's chain uses a separate
+       ``alembic_version_host`` row in the same file so the two don't collide.
+       Schema changes ship as new, reversible revisions chained onto the head —
+       existing ``sessions`` / ``messages`` / ``events`` data migrates in place.
 
-    Always runs in a dedicated thread because the kernel's
-    ``alembic/env.py`` calls ``asyncio.run()`` to drive its async
-    migrations, and that fails if the calling thread already has a
-    running event loop — which is the case for FastAPI/Starlette
-    ``on_event("startup")`` and any test using ``TestClient``.
-    Spawning a thread keeps the kernel migration code unchanged and
-    the host code obvious at the call site.
+    Both steps run in a dedicated thread: the preflight reflects through an
+    async engine (``asyncio.run``) and the kernel's ``alembic/env.py`` also
+    calls ``asyncio.run()`` to drive its async migrations — either nested in the
+    already-running FastAPI/Starlette startup loop would raise. Running them off
+    the loop in a worker thread keeps the kernel migration code unchanged and the
+    host code obvious at the call site.
     """
+    import asyncio
     import threading
-
-    drop_stale_kernel_tables()
 
     error: list[BaseException] = []
 
     def _runner() -> None:
         try:
+            # Preflight (async reflection) then the kernel alembic upgrade, both
+            # off the event loop in this worker thread (see the docstring).
+            asyncio.run(ensure_kernel_schema_migratable())
             _do_alembic_upgrade()
         except BaseException as exc:  # noqa: BLE001 — re-raised on the main thread
             error.append(exc)
@@ -240,16 +248,9 @@ async def init_kernel_dependencies() -> None:
 
     await init_dependencies(AppConfig())
 
-    # Seed the kernel-side owner id so every projects/agents/sessions/messages/
-    # events row is stamped with the local install owner (OSS). A ContextVar set
-    # on the host thread would not cross into the kernel's own event loop/thread,
-    # so we seed the module-level default (thread-independent); the commercial
-    # overlay refines per-request. Mirrors the host's owner_context default seed.
-    from src.core.owner_context import set_default_owner  # type: ignore[import-not-found]
-
-    from valuz_agent.infra.local_identity import resolve_local_user_id
-
-    set_default_owner(resolve_local_user_id())
+    # No kernel-side owner default to seed: every kernel write stamps ``user_id``
+    # explicitly (host → kernel_client → route → store), so there is nothing to
+    # fall back to. Reads/writes that reach the kernel always carry an owner.
 
     # The kernel's engine factory (kernel/src/adapters/sqlalchemy_store/engine.py)
     # sets journal_mode=WAL but NOT busy_timeout, so kernel connections run with
@@ -298,15 +299,16 @@ def get_kernel_routers() -> list:
     history (one row per ``run_turn``, with usage + todo snapshots).
 
     Per ADR-008 the kernel's ``app.routes.agents`` is *not* mounted here.
-    Valuz keeps a private synthetic agent per workspace
-    (``agent-<workspace_id>``); exposing the kernel CRUD surface would
+    Valuz keeps a private synthetic agent per project
+    (``agent-<project_id>``); exposing the kernel CRUD surface would
     leak those rows to any frontend listing them, and we have no
     user-facing agent gallery yet. If/when product introduces agent
     presets, this decision is revisited in a new ADR.
     """
+    from app.routes.events import router as events_router
     from app.routes.messages import router as messages_router
-    from app.routes.projects import router as projects_router
     from app.routes.run import router as run_router
     from app.routes.sessions import router as sessions_router
+    from app.routes.usage import router as usage_router
 
-    return [projects_router, sessions_router, messages_router, run_router]
+    return [sessions_router, messages_router, run_router, events_router, usage_router]

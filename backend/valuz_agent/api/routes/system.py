@@ -20,11 +20,11 @@ router = APIRouter(prefix="/v1/system", tags=["system"])
 
 
 @router.get("/status", response_model=SystemStatusResponse)
-def get_system_status() -> SystemStatusResponse:
+async def get_system_status() -> SystemStatusResponse:
     """Snapshot of the running backend process.
 
     Drives the desktop ``服务`` panel. See
     ``components.schemas.SystemStatusResponse`` in
     ``api/openapi.yaml`` for the wire shape.
     """
-    return collect_system_status(port=listen_port())
+    return await collect_system_status(port=listen_port())

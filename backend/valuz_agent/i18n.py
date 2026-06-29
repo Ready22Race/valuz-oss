@@ -24,6 +24,7 @@ configured language.
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -46,13 +47,23 @@ _pushed_locale: str | None = None
 _default_locale_provider: Callable[[], str] | None = None
 
 
-def _repo_root() -> Path:
-    p = Path(__file__).resolve().parent
-    while p != p.parent:
-        if (p / "Makefile").is_file() and (p / "frontend").is_dir():
-            return p
-        p = p.parent
-    raise RuntimeError("Cannot locate repo root")
+def _locales_dir() -> Path:
+    """Locate the shared i18n locale catalogs (``i18n/locales/*.json``).
+
+    ``i18n.py`` lives at ``<root>/backend/valuz_agent/i18n.py`` and the catalogs
+    at ``<root>/i18n/locales`` — a FIXED relative position, three levels up
+    (file → ``valuz_agent`` → ``backend`` → ``<root>``). Resolving straight off
+    ``__file__`` works for a source checkout AND for the backend run as plain
+    Python (e.g. in a container), with no repo-marker or cwd assumptions.
+
+    A PyInstaller-frozen ``valuz-server`` has no such source tree — the catalogs
+    are bundled under ``_internal/i18n/locales`` (see
+    ``backend/scripts/valuz_agent.spec`` ``datas``) and ``sys._MEIPASS`` points
+    at that ``_internal`` dir.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "i18n" / "locales"  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parents[2] / "i18n" / "locales"
 
 
 def _flatten(obj: object, prefix: str = "") -> dict[str, str]:
@@ -71,8 +82,7 @@ def _flatten(obj: object, prefix: str = "") -> dict[str, str]:
 def _load(locale: str) -> dict[str, str]:
     if locale in _loaded:
         return _loaded[locale]
-    root = _repo_root()
-    path = root / "i18n" / "locales" / f"{locale}.json"
+    path = _locales_dir() / f"{locale}.json"
     if not path.is_file():
         # Unknown locale → empty table; resolution will fall back to
         # ``_FALLBACK_LOCALE`` and then to the key itself.

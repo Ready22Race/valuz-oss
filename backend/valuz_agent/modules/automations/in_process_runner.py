@@ -15,7 +15,7 @@ single-flight ``_active_ids`` guard, stranded-run reconciliation on startup,
    per-trigger guards without churning the datastore.
 
 2. **Session creation goes through the bound agent.** ``_execute_run``
-   resolves ``(workspace_id, agent_slug)`` into a project member and calls
+   resolves ``(project_id, agent_slug)`` into a project member and calls
    ``SessionService.create_session(agent_slug=...)`` — the model / provider
    / runtime / instructions / skills all flow from the agent. No more
    ``_resolve_fire_target`` two-tier model_id fallback.
@@ -32,6 +32,11 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from valuz_agent.i18n import t
+from valuz_agent.infra.auth_context import (
+    require_current_user_id,
+    reset_current_user_id,
+    set_current_user_id,
+)
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.automations.models import AutomationRow, AutomationRunRow
 from valuz_agent.modules.automations.triggers import TriggerEvaluator
@@ -52,12 +57,12 @@ def _render_template(template: str, variables: dict[str, str]) -> str:
 def _build_template_variables(
     *,
     row: AutomationRow,
-    workspace_name: str,
+    project_name: str,
     effective_tz: str,
 ) -> dict[str, str]:
     """Compose the variable map for ``{{...}}`` substitution.
 
-    Same vocabulary as the legacy runner (workspace / now / today / yesterday
+    Same vocabulary as the legacy runner (project / now / today / yesterday
     / etc.) — the schedule-side template variables already pinned to the
     user's effective tz, and that contract carries over unchanged.
     ``last_run_at`` is rendered in the effective tz too so successive runs
@@ -83,8 +88,8 @@ def _build_template_variables(
         last_run_at_local = last.astimezone(tz).isoformat()
 
     return {
-        "workspace.id": row.workspace_id,
-        "workspace.name": workspace_name,
+        "project.id": row.project_id,
+        "project.name": project_name,
         # ``task.*`` aliases preserved for prompt-template compatibility with
         # the legacy schedule prompts users may carry over — see the variable
         # vocabulary in the v0 schedule README. New prompts should use
@@ -114,8 +119,8 @@ class InProcessAutomationRunner:
 
     def __init__(self) -> None:
         self._running = False
-        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
-        self._active_ids: set[str] = set()
+        self._queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue()
+        self._active_ids: dict[str, str] = {}  # automation_id -> owner user_id
         self._tick_task: asyncio.Task[None] | None = None
         self._worker_task: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -151,16 +156,18 @@ class InProcessAutomationRunner:
         await self._mark_active_runs_interrupted()
         logger.info("InProcessAutomationRunner stopped")
 
-    async def enqueue(self, automation_id: str, run_id: str) -> None:
-        await self._queue.put((automation_id, run_id))
+    async def enqueue(self, automation_id: str, run_id: str, user_id: str) -> None:
+        await self._queue.put((automation_id, run_id, user_id))
 
-    def enqueue_threadsafe(self, automation_id: str, run_id: str) -> None:
+    def enqueue_threadsafe(self, automation_id: str, run_id: str, user_id: str) -> None:
         """Enqueue from a sync context (e.g. ``run_now`` from a FastAPI
         threadpool handler). Falls through silently when the runner is
         stopped — the route still creates the queued row, the next start
         will reconcile it as stranded."""
         if self._loop is not None and self._running:
-            asyncio.run_coroutine_threadsafe(self.enqueue(automation_id, run_id), self._loop)
+            asyncio.run_coroutine_threadsafe(
+                self.enqueue(automation_id, run_id, user_id), self._loop
+            )
 
     # ── Stranded-run reconciliation ───────────────────────────────────
 
@@ -203,8 +210,10 @@ class InProcessAutomationRunner:
 
         async with async_unit_of_work() as db:
             ds = AutomationDatastore(db)
-            for automation_id in list(self._active_ids):
-                last_run = await ds.last_run(automation_id)
+            # Active automations span owners (shutdown path has no request
+            # context) — use each automation's own owner, never ambient.
+            for automation_id, owner in list(self._active_ids.items()):
+                last_run = await ds.last_run(owner, automation_id)
                 if last_run and last_run.status == "running":
                     last_run.status = "interrupted_by_shutdown"
                     last_run.error_code = "AUTOMATION_INTERRUPTED_BY_SHUTDOWN"
@@ -233,7 +242,7 @@ class InProcessAutomationRunner:
                 run = AutomationRunRow(
                     id=uuid4().hex,
                     automation_id=row.id,
-                    workspace_id=row.workspace_id,
+                    project_id=row.project_id,
                     trigger_type="recovered_skip",
                     status="skipped",
                     triggered_at=row.next_run_at or now,
@@ -242,7 +251,7 @@ class InProcessAutomationRunner:
                     error_code="AUTOMATION_MISSED_WHILE_OFFLINE",
                     created_files="[]",
                 )
-                await ds.create_run(run)
+                await ds.create_run(row.user_id, run)
                 row.last_run_at = row.next_run_at
                 row.next_run_at = self._triggers.next_fire_at(row, now)
                 row.updated_at = now
@@ -291,14 +300,14 @@ class InProcessAutomationRunner:
                 run = AutomationRunRow(
                     id=uuid4().hex,
                     automation_id=row.id,
-                    workspace_id=row.workspace_id,
+                    project_id=row.project_id,
                     trigger_type=trigger_type,
                     status="queued",
                     triggered_at=now,
                     created_files="[]",
                 )
-                await ds.create_run(run)
-                asyncio.create_task(self.enqueue(row.id, run.id))
+                await ds.create_run(row.user_id, run)
+                asyncio.create_task(self.enqueue(row.id, run.id, row.user_id))
                 logger.info(
                     "Enqueued %s run for automation %s (%s)",
                     trigger_type,
@@ -309,8 +318,10 @@ class InProcessAutomationRunner:
     async def _worker_loop(self) -> None:
         while self._running:
             try:
-                automation_id, run_id = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-                await self._execute_run(automation_id, run_id)
+                automation_id, run_id, user_id = await asyncio.wait_for(
+                    self._queue.get(), timeout=1.0
+                )
+                await self._execute_run(user_id, automation_id, run_id)
             except TimeoutError:
                 continue
             except asyncio.CancelledError:
@@ -320,26 +331,32 @@ class InProcessAutomationRunner:
 
     # ── Per-run execution ────────────────────────────────────────────
 
-    async def _execute_run(self, automation_id: str, run_id: str) -> None:
+    async def _execute_run(self, user_id: str, automation_id: str, run_id: str) -> None:
         from valuz_agent.infra.db import async_unit_of_work
         from valuz_agent.modules.automations.datastore import AutomationDatastore
 
         assert self._triggers is not None
         async with async_unit_of_work() as db:
             ds = AutomationDatastore(db)
-            row = await ds.get_automation(automation_id)
-            run = await ds.last_run(automation_id)
+            row = await ds.get_automation(user_id, automation_id)
+            run = await ds.last_run(user_id, automation_id)
             if not row or not run or run.id != run_id:
                 logger.warning("Run %s for automation %s not found", run_id, automation_id)
                 return
 
-            self._active_ids.add(automation_id)
+            # Owner boundary: an automation fires from the background scheduler
+            # with no request context. Publish the automation's owner so the
+            # session it creates and every owner-scoped read below attribute to
+            # the user who owns the automation (mirrors AuthMiddleware on the
+            # request path).
+            owner_token = set_current_user_id(row.user_id) if row.user_id else None
+            self._active_ids[automation_id] = user_id
             try:
-                workspace_name = await self._resolve_workspace_name(db, row.workspace_id)
+                project_name = await self._resolve_project_name(db, row.project_id)
                 effective_tz = self._effective_tz_for(row)
                 variables = _build_template_variables(
                     row=row,
-                    workspace_name=workspace_name,
+                    project_name=project_name,
                     effective_tz=effective_tz,
                 )
                 rendered_prompt = _render_template(row.prompt_template, variables)
@@ -348,15 +365,15 @@ class InProcessAutomationRunner:
                 #
                 # ``chat`` — create a fresh session bound to the agent and
                 #   send the rendered prompt as one user turn. The original
-                #   schedule semantic; works on chat or project workspaces.
+                #   schedule semantic; works on chat or projects.
                 #
                 # ``task`` — kick off a project task with the bound agent
                 #   as Lead. The rendered prompt becomes the task goal; the
                 #   lead plans + dispatches sub-members via the existing
-                #   task orchestrator. Only valid on project workspaces
+                #   task orchestrator. Only valid on projects
                 #   (validated at the service layer; defence-in-depth here
                 #   just falls through to chat if a row somehow stored
-                #   ``task`` on a chat workspace).
+                #   ``task`` on a chat project).
                 if row.action_kind == "task":
                     await self._execute_task_kickoff(
                         ds=ds,
@@ -374,7 +391,7 @@ class InProcessAutomationRunner:
                     # provider / runtime override surface remains. The agent's
                     # ``AgentConfig`` is the single source of truth.
                     session = await session_svc.create_session(
-                        workspace_id=row.workspace_id,
+                        project_id=row.project_id,
                         origin="automation",
                         title=f"{t('backend.automation.titlePrefix')} {row.name}",
                         agent_slug=row.agent_slug,
@@ -382,6 +399,7 @@ class InProcessAutomationRunner:
                 except Exception as exc:
                     run.status = "failed"
                     run.error_code = type(exc).__name__
+                    run.error_message_key = getattr(exc, "message_key", None)
                     run.error_message = str(exc)[:500]
                     run.completed_at = now_ms()
                     await ds.replace_run(run)
@@ -441,6 +459,7 @@ class InProcessAutomationRunner:
                 except Exception as exc:
                     run.status = "failed"
                     run.error_code = type(exc).__name__
+                    run.error_message_key = getattr(exc, "message_key", None)
                     run.error_message = str(exc)[:500]
                     logger.exception("Run %s failed for automation %s", run_id, automation_id)
 
@@ -456,11 +475,13 @@ class InProcessAutomationRunner:
                     row.next_run_at = None
                 row.updated_at = now_ms()
                 await ds.update_automation(row)
-                await ds.trim_runs(automation_id, keep=100)
+                await ds.trim_runs(row.user_id, automation_id, keep=100)
 
                 logger.info("Run %s completed: %s", run_id, run.status)
             finally:
-                self._active_ids.discard(automation_id)
+                self._active_ids.pop(automation_id, None)
+                if owner_token is not None:
+                    reset_current_user_id(owner_token)
 
     # ── Task-mode execution ────────────────────────────────────────
 
@@ -495,13 +516,22 @@ class InProcessAutomationRunner:
 
         try:
             title = rendered_prompt[:60] if len(rendered_prompt) > 60 else rendered_prompt
+            run.started_at = now_ms()
             task = await task_orchestrator.kickoff(
-                workspace_id=row.workspace_id,
+                project_id=row.project_id,
                 goal=rendered_prompt,
                 lead_agent_slug=row.agent_slug,
                 title=title or row.name,
                 dispatch_mode="async",
                 created_by="automation",
+                # Record the back-link so the spawned task shows "由 自动化 … 触发"
+                # and the reverse "what did this automation spawn?" is queryable.
+                trigger_type="automation",
+                trigger_automation_id=automation_id,
+                # When an AGENT invoked this run, carry its session so the spawned
+                # task also chains back to the originating task (transitive
+                # task→automation→task nesting in the task tree).
+                originating_session_id=run.invoked_by_session_id,
             )
             # ``kickoff`` returns the ``TaskRow``; the lead session id lives
             # on the matching ``TaskSessionRow`` (kind="lead"). Fetch it
@@ -510,7 +540,9 @@ class InProcessAutomationRunner:
             lead_session_id: str | None = None
             try:
                 async with async_unit_of_work(commit=False) as ts_db:
-                    runs = await TaskSessionDatastore(ts_db).list_runs(task.id)
+                    runs = await TaskSessionDatastore(ts_db).list_runs(
+                        require_current_user_id(), task.id
+                    )
                     lead_run = next(
                         (r for r in runs if r.kind == "lead"),
                         None,
@@ -528,12 +560,15 @@ class InProcessAutomationRunner:
                 )
 
             run.status = "success"
-            run.started_at = now_ms()
             run.completed_at = now_ms()
             run.session_id = lead_session_id
-            run.result_summary = f"Task kicked off: {task.id}"
-            if run.started_at:
-                run.duration_ms = run.completed_at - run.started_at
+            # Just the task title — no "kicked off" prefix. The run is a
+            # fire-and-forget kickoff: the lead session runs in the background
+            # (deep-linked via ``session_id``), so ``duration_ms`` is left unset
+            # rather than reporting the few-ms kickoff cost, which never matches
+            # the task's real running time in the activity log.
+            run.result_summary = title or row.name
+            run.duration_ms = None
             await ds.replace_run(run)
             logger.info(
                 "Automation %s kicked off task %s (lead session %s)",
@@ -544,6 +579,7 @@ class InProcessAutomationRunner:
         except Exception as exc:
             run.status = "failed"
             run.error_code = type(exc).__name__
+            run.error_message_key = getattr(exc, "message_key", None)
             run.error_message = str(exc)[:500]
             run.completed_at = now_ms()
             await ds.replace_run(run)
@@ -565,7 +601,7 @@ class InProcessAutomationRunner:
             row.next_run_at = None
         row.updated_at = now_ms()
         await ds.update_automation(row)
-        await ds.trim_runs(automation_id, keep=100)
+        await ds.trim_runs(row.user_id, automation_id, keep=100)
 
     # ── Helpers ──────────────────────────────────────────────────────
 
@@ -594,22 +630,22 @@ class InProcessAutomationRunner:
             logger.exception("Falling back to UTC after preferences lookup failure")
             return "UTC"
 
-    async def _resolve_workspace_name(self, db: Any, workspace_id: str) -> str:
-        """Look up the workspace's display name for ``{{workspace.name}}``.
+    async def _resolve_project_name(self, db: Any, project_id: str) -> str:
+        """Look up the project's display name for ``{{project.name}}``.
 
-        Falls back to the id if the workspace was deleted out from under the
+        Falls back to the id if the project was deleted out from under the
         automation — the run still fires, the prompt just renders a UUID in
         place of the friendly name.
         """
-        from valuz_agent.modules.projects.datastore import WorkspaceDatastore
+        from valuz_agent.modules.projects.datastore import ProjectDatastore
 
         try:
-            row = await WorkspaceDatastore(db).get_by_id(workspace_id)
+            row = await ProjectDatastore(db).get_by_id(require_current_user_id(), project_id)
             if row is not None:
                 return row.name
         except Exception:
-            logger.exception("Failed to resolve workspace name for %s", workspace_id)
-        return workspace_id
+            logger.exception("Failed to resolve project name for %s", project_id)
+        return project_id
 
     def _build_session_service(self, db: Any) -> Any:
         """Construct a per-fire ``SessionService`` with all collaborators.
@@ -624,22 +660,22 @@ class InProcessAutomationRunner:
         from valuz_agent.integrations.skills_official import OfficialSkillSource
         from valuz_agent.modules.connectors.datastore import ConnectorDatastore
         from valuz_agent.modules.docs.datastore import DocumentDatastore
-        from valuz_agent.modules.projects.datastore import WorkspaceDatastore
-        from valuz_agent.modules.projects.service import WorkspaceService
+        from valuz_agent.modules.projects.datastore import ProjectDatastore
+        from valuz_agent.modules.projects.service import ProjectService
         from valuz_agent.modules.providers.datastore import ProviderDatastore
         from valuz_agent.modules.sessions.service import SessionService
         from valuz_agent.modules.skills.datastore import SkillDatastore
 
-        workspace_ds = WorkspaceDatastore(db)
-        workspace_svc = WorkspaceService(datastore=workspace_ds, event_bus=event_bus)
+        project_ds = ProjectDatastore(db)
+        project_svc = ProjectService(datastore=project_ds, event_bus=event_bus)
         secrets = _secret_store()
 
         return SessionService(
             event_bus=event_bus,
-            workspace_svc=workspace_svc,
+            project_svc=project_svc,
             providers=ProviderDatastore(db),
             skills=SkillDatastore(db),
-            workspaces=workspace_ds,
+            projects=project_ds,
             docs=DocumentDatastore(db),
             secrets=secrets,
             connectors=ConnectorDatastore(db),

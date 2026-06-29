@@ -6,13 +6,11 @@ from collections.abc import AsyncGenerator
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
-from fastapi import Request
-
+from valuz_agent.infra import auth_context
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
-from valuz_agent.infra.secret_store import FileSecretStore
+from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.integrations.docs_embedded import EmbeddedDocsRuntime
-from valuz_agent.integrations.identity_local import LocalIdentityResolver
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.integrations.skills_official import OfficialSkillSource
 from valuz_agent.modules.automations.datastore import AutomationDatastore
@@ -20,8 +18,8 @@ from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
 from valuz_agent.modules.docs.service import DocumentLibraryService
 from valuz_agent.modules.parser import ParserRouter, build_default_registry
-from valuz_agent.modules.projects.datastore import WorkspaceDatastore
-from valuz_agent.modules.projects.service import WorkspaceService
+from valuz_agent.modules.projects.datastore import ProjectDatastore
+from valuz_agent.modules.projects.service import ProjectService
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.service import ProviderService
 from valuz_agent.modules.runs.service import RunsService
@@ -36,52 +34,41 @@ from valuz_agent.modules.tasks.datastore import (
     TaskEventDatastore,
     TaskSessionDatastore,
 )
-from valuz_agent.ports.identity import ANONYMOUS, IdentityResolver, UserIdentity
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from valuz_agent.modules.automations.service import AutomationService
     from valuz_agent.modules.decisions.aggregator import DecisionAggregator
-    from valuz_agent.modules.skills.contracts import RuntimeContext
-
-# ---------------------------------------------------------------------------
-# Identity resolver — replaceable by commercial app via set_identity_resolver()
-# ---------------------------------------------------------------------------
-
-_identity_resolver: IdentityResolver = LocalIdentityResolver()
 
 
-def set_identity_resolver(resolver: IdentityResolver) -> None:
-    """Replace the identity resolver (called by commercial app at startup)."""
-    global _identity_resolver
-    _identity_resolver = resolver
+async def get_current_user_id() -> str | None:
+    """Resolve the current user_id from the request. OSS → ANONYMOUS."""
+    return auth_context.get_current_user_id()
 
 
-def get_current_user(request: Request) -> UserIdentity:
-    """Resolve the current user from the request. OSS → ANONYMOUS."""
-    result = _identity_resolver.resolve(request)
-    return result or ANONYMOUS
+async def require_current_user_id() -> str:
+    """FastAPI dependency: the request owner, required.
 
-
-def build_runtime_context(user: UserIdentity | None = None) -> RuntimeContext:
-    """Build a RuntimeContext from a UserIdentity.
-
-    OSS mode: ``user`` is None or ANONYMOUS → ``user_id="local-user", org_id=None``.
-    Commercial mode: fields populated from JWT-resolved identity.
+    Routes that perform owner-scoped work inject this and thread the value down
+    as the first argument (``user_id``) of the service/datastore methods they
+    call. ``AuthMiddleware`` sets the owner once it resolves an identity; an
+    unauthenticated request (no identity resolved — e.g. the commercial overlay
+    with no/invalid bearer token) leaves it unset and this raises
+    ``OwnerContextUnsetError``, which ``ErrorHandlerMiddleware`` maps to 401 (so
+    both this injected path and routes that source the owner internally surface
+    the same auth failure uniformly).
     """
-    from valuz_agent.modules.skills.contracts import RuntimeContext
-
-    if user is None:
-        user = ANONYMOUS
-    return RuntimeContext(user_id=user.user_id, org_id=user.org_id)
+    return auth_context.require_current_user_id()
 
 
-@lru_cache
-def _secret_store() -> FileSecretStore:
-    from valuz_agent.infra.config import settings
+def _secret_store() -> SecretStorePort:
+    # Convenience accessor for the configured secret store. OSS default is the
+    # local file store; the commercial overlay binds a shared store on ``ext``.
+    # Resolved per call (not cached) so a late overlay binding is honoured.
+    from valuz_agent.ports.extensions import ext
 
-    return FileSecretStore(settings.secrets_dir)
+    return ext.secret_store
 
 
 async def get_provider_service() -> AsyncGenerator[ProviderService, None]:
@@ -93,10 +80,10 @@ async def get_provider_service() -> AsyncGenerator[ProviderService, None]:
         )
 
 
-async def get_workspace_service() -> AsyncGenerator[WorkspaceService, None]:
+async def get_project_service() -> AsyncGenerator[ProjectService, None]:
     async with async_unit_of_work() as db:
-        yield WorkspaceService(
-            datastore=WorkspaceDatastore(db),
+        yield ProjectService(
+            datastore=ProjectDatastore(db),
             event_bus=event_bus,
             session_datastore=SessionDatastore(db),
             document_datastore=DocumentDatastore(db),
@@ -111,11 +98,10 @@ async def get_skill_service() -> AsyncGenerator[SkillLibraryService, None]:
         yield SkillLibraryService(
             datastore=SkillDatastore(db),
             skill_source=FilesystemSkillSource(),
-            workspace_service=WorkspaceService(
-                datastore=WorkspaceDatastore(db),
+            project_service=ProjectService(
+                datastore=ProjectDatastore(db),
                 event_bus=event_bus,
             ),
-            session_datastore=SessionDatastore(db),
             event_bus=event_bus,
             extra_sources=[OfficialSkillSource()],
         )
@@ -165,20 +151,21 @@ def get_polling_scheduler():  # type: ignore[no-untyped-def]
 
 
 class _SecretStoreResolver:
-    """Bridges ``ParserPlugin.SecretResolver`` to ``FileSecretStore``.
+    """Bridges ``ParserPlugin.SecretResolver`` to ``SecretStorePort``.
     Plugins call ``resolve(secret_ref)`` to fetch the API key at build
     time; we never plumb the plaintext through routing layers."""
 
-    def __init__(self, store: FileSecretStore) -> None:
+    def __init__(self, store: SecretStorePort, user_id: str) -> None:
         self._store = store
+        self._user_id = user_id
 
     def resolve(self, secret_ref: str | None) -> str | None:
         if not secret_ref:
             return None
-        return self._store.get(secret_ref)
+        return self._store.get(self._user_id, secret_ref)
 
 
-async def build_parser_router(db: AsyncSession) -> ParserRouter:
+async def build_parser_router(db: AsyncSession, user_id: str) -> ParserRouter:
     """Build the config-aware ``ParserRouter`` — the SAME engine KB/Docs
     ingestion uses — from the process-wide plugin registry (+ polling
     scheduler), the secret resolver, and the user's routing snapshot loaded
@@ -196,7 +183,7 @@ async def build_parser_router(db: AsyncSession) -> ParserRouter:
     routing_config = await load_routing_config(db)
     return ParserRouter(
         registry=_parser_registry(),
-        secret_resolver=_SecretStoreResolver(_secret_store()),
+        secret_resolver=_SecretStoreResolver(_secret_store(), user_id),
         routing_config=routing_config,
         setup_complete_probe=_setup_controller().is_complete,
     )
@@ -205,6 +192,7 @@ async def build_parser_router(db: AsyncSession) -> ParserRouter:
 async def get_document_service() -> AsyncGenerator[DocumentLibraryService, None]:
     from valuz_agent.infra.config import settings
 
+    user_id = auth_context.require_current_user_id()
     async with async_unit_of_work() as db:
         preview_dir = settings.docs_dir / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -212,7 +200,7 @@ async def get_document_service() -> AsyncGenerator[DocumentLibraryService, None]
         # ``ParserRouter`` reads its routing config from an immutable snapshot
         # resolved here (one async read per request) instead of opening a sync
         # session per parse.
-        parser = await build_parser_router(db)
+        parser = await build_parser_router(db, user_id)
         yield DocumentLibraryService(
             datastore=DocumentDatastore(db),
             parser=parser,
@@ -227,14 +215,14 @@ async def get_document_service() -> AsyncGenerator[DocumentLibraryService, None]
 
 async def get_session_service() -> AsyncGenerator[SessionService, None]:
     async with async_unit_of_work() as db:
-        workspace_ds = WorkspaceDatastore(db)
-        workspace_svc = WorkspaceService(datastore=workspace_ds, event_bus=event_bus)
+        project_ds = ProjectDatastore(db)
+        project_svc = ProjectService(datastore=project_ds, event_bus=event_bus)
         yield SessionService(
             event_bus=event_bus,
-            workspace_svc=workspace_svc,
+            project_svc=project_svc,
             providers=ProviderDatastore(db),
             skills=SkillDatastore(db),
-            workspaces=workspace_ds,
+            projects=project_ds,
             docs=DocumentDatastore(db),
             secrets=_secret_store(),
             connectors=ConnectorDatastore(db),
@@ -248,7 +236,7 @@ async def get_automation_service() -> AsyncGenerator[AutomationService, None]:
 
     Locale + default tz come from settings preferences via the sync
     settings bridge, then the service is constructed with both the
-    workspace and agent collaborator services so ``create`` can run the
+    project and agent collaborator services so ``create`` can run the
     chat/project branching from ADR-021 §4.
     """
     from valuz_agent.modules.agents.service import AgentService
@@ -265,21 +253,18 @@ async def get_automation_service() -> AsyncGenerator[AutomationService, None]:
         # schedule created without an explicit tz lands on the user's local
         # clock, not UTC).
         default_timezone = await get_effective_default_timezone(db)
-        workspace_svc = WorkspaceService(
-            datastore=WorkspaceDatastore(db),
+        project_svc = ProjectService(
+            datastore=ProjectDatastore(db),
             event_bus=event_bus,
         )
         # AgentService needs a ConnectorService so library-agent instantiation
         # can resolve MCP servers from the agent's connector_types.
-        connector_svc = ConnectorService(
-            datastore=ConnectorDatastore(db),
-            secrets=_secret_store(),
-        )
+        connector_svc = ConnectorService(datastore=ConnectorDatastore(db))
         agent_svc = AgentService(db=db, connector_service=connector_svc)
         yield AutomationService(
             db=db,
             event_bus=event_bus,
-            workspace_service=workspace_svc,
+            project_service=project_svc,
             agent_service=agent_svc,
             locale=locale,
             default_timezone=default_timezone,
@@ -297,10 +282,11 @@ async def get_settings_service() -> AsyncGenerator[SettingsService, None]:
 async def get_runs_service() -> AsyncGenerator[RunsService, None]:
     async with async_unit_of_work() as db:
         yield RunsService(
-            workspaces=WorkspaceDatastore(db),
+            projects=ProjectDatastore(db),
             task_sessions=TaskSessionDatastore(db),
             tasks=TaskDatastore(db),
             task_events=TaskEventDatastore(db),
+            automations=AutomationDatastore(db),
         )
 
 

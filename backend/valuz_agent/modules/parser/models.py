@@ -23,21 +23,23 @@ progress UI with handler-level retry detail.
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, Integer, String, Text
+from sqlalchemy import BigInteger, Integer, PrimaryKeyConstraint, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from valuz_agent.infra.database import Base, OwnedMixin
+from valuz_agent.infra.database import Base, UserMixin
 
 
-class SetupJobRow(Base, OwnedMixin):
+class SetupJobRow(Base, UserMixin):
     """Persistent state for a one-time setup operation (model download,
     license acceptance gate, etc.)."""
 
     __tablename__ = "valuz_setup_job"
+    # Composite PK ``(setup_id, user_id)``: one row per setup id *per owner*.
+    __table_args__ = (PrimaryKeyConstraint("setup_id", "user_id"),)
 
     # ``setup_id`` is the stable key from ``SetupRequirement.id`` — e.g.
-    # ``rapidocr_models``. There is at most one row per setup_id.
-    setup_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # ``rapidocr_models``. There is at most one row per setup_id per owner.
+    setup_id: Mapped[str] = mapped_column(String(64))
 
     # ``status`` ∈ {pending, running, succeeded, failed, cancelled}.
     # ``pending`` exists for symmetry with the polling table but a setup
@@ -65,7 +67,7 @@ class SetupJobRow(Base, OwnedMixin):
     updated_at: Mapped[int] = mapped_column(BigInteger)
 
 
-class PollingTaskRow(Base, OwnedMixin):
+class PollingTaskRow(Base, UserMixin):
     """Persistent state for one remote async parse task."""
 
     __tablename__ = "valuz_polling_task"

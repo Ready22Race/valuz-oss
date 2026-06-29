@@ -88,12 +88,14 @@ start_backend() {
     info "backend → http://127.0.0.1:$BACKEND_PORT (log: $log_file)"
     cd "$BACKEND_DIR"
     uv run python -m valuz_agent --host 127.0.0.1 --port "$BACKEND_PORT" $RELOAD_FLAG \
-        2>&1 | tee "$log_file" &
+        2>&1 | python3 "$ROOT_DIR/scripts/devlog.py" "$log_file" &
     PIDS+=("$!")
 
-    # Wait up to 30s for the backend to come up.
+    # Wait up to 30s for the backend to come up. ``--noproxy '*'`` keeps the
+    # localhost probe off any system/terminal HTTP proxy (curl proxies even
+    # 127.0.0.1 when http_proxy is exported, e.g. by Clash).
     for _ in $(seq 1 30); do
-        if curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$BACKEND_PORT/v1/workspaces" 2>/dev/null | grep -q '^200$'; then
+        if curl -sS --noproxy '*' -o /dev/null -w "%{http_code}" "http://127.0.0.1:$BACKEND_PORT/v1/system/status" 2>/dev/null | grep -q '^200$'; then
             ok "backend ready"
             return 0
         fi
@@ -114,7 +116,7 @@ start_frontend() {
     info "frontend desktop dev (log: $log_file)"
     cd "$FRONTEND_DIR"
     pnpm --filter @valuz/desktop dev \
-        2>&1 | tee "$log_file" &
+        2>&1 | python3 "$ROOT_DIR/scripts/devlog.py" "$log_file" &
     PIDS+=("$!")
 }
 

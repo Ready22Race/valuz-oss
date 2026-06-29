@@ -140,7 +140,7 @@ async def evaluate_candidates(
     for row in rows:
         if row.status != "enabled":
             continue
-        total, failed = await ds.count_terminal_runs_since(row.id, since)
+        total, failed = await ds.count_terminal_runs_since(row.user_id, row.id, since)
         if total < config.min_runs:
             continue
         if total == 0:
@@ -170,7 +170,7 @@ async def perform_sweep(
         # Re-read to defend against another sweep / manual pause racing us.
         # AutomationDatastore lacks a conditional UPDATE today; the single-
         # writer guarantee from ADR-011 keeps the race window tiny.
-        fresh = await ds.get_automation(c.row.id)
+        fresh = await ds.get_automation(c.row.user_id, c.row.id)
         if fresh is None or fresh.status != "enabled":
             continue
 
@@ -188,10 +188,11 @@ async def perform_sweep(
             },
         )
         await ds.create_run(
+            c.row.user_id,
             AutomationRunRow(
                 id=uuid4().hex,
                 automation_id=fresh.id,
-                workspace_id=fresh.workspace_id,
+                project_id=fresh.project_id,
                 trigger_type="system",
                 status="auto_paused_notice",
                 triggered_at=now,
@@ -200,7 +201,7 @@ async def perform_sweep(
                 result_summary=summary,
                 error_code="HIGH_FAILURE_RATE",
                 created_files="[]",
-            )
+            ),
         )
         logger.warning(
             "auto-paused automation %s (%s): %d/%d failed (%s%%) over %s",
@@ -215,7 +216,7 @@ async def perform_sweep(
             try:
                 publish_event(
                     "automation.auto_paused",
-                    workspace_id=fresh.workspace_id,
+                    project_id=fresh.project_id,
                     automation_id=fresh.id,
                     failed=c.failed,
                     total=c.total,

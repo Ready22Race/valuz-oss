@@ -36,7 +36,7 @@ export const MessageList = ({
   return (
     <ScrollArea className="h-full pr-2">
       <div ref={scrollRef} className="space-y-5 px-2 pb-4 pt-2">
-        {messages.map((msg) => (
+        {messages.map((msg, idx) => (
           <div key={msg.id} className="flex flex-col gap-1">
             {msg.role === "user" ? (
               <UserMessageBubble>
@@ -71,7 +71,14 @@ export const MessageList = ({
                 )}
                 <p className="whitespace-pre-wrap text-sm leading-6">
                   {msg.text || (msg.stopReason ? "" : "...")}
-                  {msg.stopReason && <StopReasonHint reason={msg.stopReason} />}
+                  {/* Only surface the stop hint on the last settled message: a
+                      "steer" (silent interrupt + send-now) cuts the turn and
+                      continues, so the cut turn is no longer last and its hint
+                      auto-hides — matching the "no 已中断 in the foreground"
+                      intent (docs/design/session-input-queue.md §11). */}
+                  {msg.stopReason &&
+                    idx === messages.length - 1 &&
+                    !isStreaming && <StopReasonHint reason={msg.stopReason} />}
                 </p>
               </AssistantMessage>
             )}

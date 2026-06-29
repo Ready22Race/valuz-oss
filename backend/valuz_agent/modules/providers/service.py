@@ -15,6 +15,13 @@ from valuz_agent.i18n import t
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.infra.time_utils import now_ms
+from valuz_agent.modules.providers.cli_login_probe import (
+    CliTool,
+    detect_cli_login,
+)
+from valuz_agent.modules.providers.cli_login_probe import (
+    invalidate as invalidate_cli_login,
+)
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.discover import (
     ModelDiscoveryError,
@@ -29,11 +36,13 @@ from valuz_agent.modules.providers.errors import (
     ProviderNotFound,
 )
 from valuz_agent.modules.providers.models import ProviderRow
-from valuz_agent.ports.llm_provider import (
-    SystemLLMProvider,
-    SystemProviderImmutable,
-    get_llm_registry,
+from valuz_agent.modules.providers.schemas import (
+    LLMChannel,
+    LLMChannelDetail,
+    LLMModel,
 )
+from valuz_agent.ports.extensions import ext
+from valuz_agent.ports.llm_provider import SystemProviderImmutable
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +56,62 @@ def derive_runtime_provider(provider_kind: str) -> str:
     if provider_kind == "codex-subscription":
         return "codex"
     return "deepagents"
+
+
+# provider_kind → the CLI tool whose keychain holds its credential. Subscription
+# channels are gated on this CLI being logged in (see ``_gate_subscription_login``).
+_SUBSCRIPTION_KIND_TO_TOOL: dict[str, CliTool] = {
+    "claude-subscription": "claude",
+    "codex-subscription": "codex",
+}
+
+
+async def _gate_subscription_login(channels: list[LLMChannel]) -> None:
+    """Hide a subscription channel's models when its CLI keychain isn't logged in.
+
+    The Claude Pro·Max / Codex·ChatGPT credential lives in the CLI's own keychain
+    — only ``claude auth status`` / ``codex login status`` know whether it's
+    usable (see :mod:`cli_login_probe`). The chat composer flattens a channel's
+    ``models`` straight into its picker while trusting ``auth_type == "oauth"``
+    (no client-side keychain probe), so a logged-out subscription channel would
+    offer models that 422 at session creation. Clearing ``models`` /
+    ``default_model`` leaves the card but removes the bad picks.
+
+    Applied on the **per-channel detail path** (``get_provider``) ONLY — that is
+    what the composer fetches. It is deliberately NOT applied to ``list_providers``:
+    that list feeds ``GET /v1/settings/model-options`` (onboarding ConnectStep +
+    Settings default-model picker), which already gate subscription rows
+    client-side on the keychain probe; stripping there drops the channel from
+    model-options and breaks the onboarding login card.
+
+    Mutates ``channels`` in place. Probes once per tool (cached); skipped entirely
+    when subscription login is disabled (cloud / shared multi-user, no local
+    keychain) or when no subscription channel is present.
+    """
+    from valuz_agent.infra.config import settings
+
+    if not settings.subscription_login_enabled:
+        return
+    present = {c.provider_kind for c in channels if c.provider_kind in _SUBSCRIPTION_KIND_TO_TOOL}
+    if not present:
+        return
+    logged_in = {kind: await detect_cli_login(_SUBSCRIPTION_KIND_TO_TOOL[kind]) for kind in present}
+    for c in channels:
+        if c.provider_kind in _SUBSCRIPTION_KIND_TO_TOOL and not logged_in.get(c.provider_kind):
+            c.models = []
+            c.default_model = None
+
+
+def _invalidate_login_cache(provider_kind: str) -> None:
+    """Force a re-probe of ``provider_kind``'s CLI login on the next list.
+
+    Called after a subscription login is materialized (``enable_provider``) so the
+    freshly logged-in channel's models surface immediately instead of waiting out
+    the probe's TTL. No-op for non-subscription kinds.
+    """
+    tool = _SUBSCRIPTION_KIND_TO_TOOL.get(provider_kind)
+    if tool is not None:
+        invalidate_cli_login(tool)
 
 
 # ── Value Objects ───────────────────────────────────────────────────
@@ -72,62 +137,44 @@ class ConnectionTestResult:
     error_message: str | None = None
 
 
-@dataclass
-class ProviderListItem:
-    id: str
-    name: str
-    provider_kind: str
-    source: str
-    enabled: bool
-    is_default: bool
-    deletable: bool
-    default_model: str | None
-    test_status: str
-    credential_source: str
-    auth_type: str = "api_key"
-    # Raw ``protocol`` value (may be None if the user never disambiguated).
-    # User-facing hyphen form: ``anthropic | openai-completion |
-    # openai-response | gemini``.
-    protocol: str | None = None
-    # Derived wire protocol the kernel runtime expects. Same hyphen
-    # form as ``protocol`` — one of ``"anthropic"`` / ``"openai-completion"``
-    # / ``"openai-response"`` / ``"gemini"``. Used as a fallback when only a
-    # single protocol matters; the full set of protocols this provider can
-    # speak is ``compatible_protocols``.
-    effective_protocol: str = "openai-completion"
-    # All wire protocols this provider can speak. Some upstream services
-    # (DeepSeek, Zhipu, Moonshot, MiniMax, plus user-defined custom
-    # endpoints) expose both an OpenAI-shape and an Anthropic-shape API
-    # — they should appear in BOTH "Claude Code" and "Deep Agents"
-    # runtime dropdowns. Subscription providers pin to their CLI's wire
-    # shape and have a single-element list. The frontend uses this set
-    # to compute "可用于" badges and the Default-config picker filter.
-    compatible_protocols: list[str] = field(default_factory=list)
-    # Available model ids for this provider — same data the
-    # ProviderDetail endpoint returns, surfaced on the list response so
-    # the Default-config picker can flatten (provider × model) entries
-    # in a single request. ``[]`` when the provider has no discoverable
-    # models (subscription providers, unconfigured api-key rows).
-    model_options: list[str] = field(default_factory=list)
-    # Optional ``{model_id: human_label}`` map for the picker UI. Populated
-    # for system providers whose overlay surfaces admin-set display names
-    # alongside the wire-level model id; the UI shows the label and still
-    # sends the id on the wire. Empty when the provider has no labels
-    # (typical: user api_key providers — model picker shows ids as-is).
-    model_labels: dict[str, str] = field(default_factory=dict)
-    # Human-readable reason the provider is currently disabled. Only
-    # populated for ``source="system"`` (overlay-contributed system
-    # providers) when ``enabled=False`` — e.g. "未登录 Valuz 账户". The
-    # SettingsPage card renders this next to the badge so users know
-    # what to do. ``None`` for everything else.
-    unavailable_reason: str | None = None
+# ``LLMChannel`` / ``LLMModel`` / ``LLMChannelDetail`` now live in
+# ``modules.providers.schemas`` — the shared contract OSS / overlay / frontend
+# all speak (ADR-011). The helpers below judge OSS's OWN rows onto that shape;
+# contributed rows (``ext.llm_provider.list()``) arrive pre-judged.
+
+# Display order of provider groups in the model picker (smaller = earlier).
+# Mirrors ``modules.settings.model_options`` group ordering.
+_GROUP_RANK: dict[str, int] = {
+    "subscription": 10,
+    "system": 20,
+    "org": 30,
+    "api_key": 40,
+}
 
 
-@dataclass
-class ProviderDetail(ProviderListItem):
-    base_url: str | None = None
-    supports_custom_base_url: bool = False
-    supports_connection_test: bool = True
+def _group_for(source: str, auth_type: str) -> str:
+    """Bucket an OSS-owned row into a picker group key.
+
+    Contributed (catalog) rows set their own ``group`` — this only judges OSS's
+    own rows. Mirrors ``modules.settings.model_options._group_key``.
+    """
+    if source == "org":
+        return "org"
+    if source == "system":
+        return "system"
+    if auth_type == "oauth":
+        return "subscription"
+    return "api_key"
+
+
+def _models_for(model_ids: list[str], labels: dict[str, str] | None = None) -> list[LLMModel]:
+    """Wrap a row's flat model-id list into per-model rows. The backend supplies a
+    display ``label`` for curated lists (the OAuth subscription channels, from
+    ``subscription_models.json``); other rows leave it ``None`` so the frontend
+    resolves the name. ``runtimes`` stays None → the picker derives it from the
+    channel's ``compatible_protocols``."""
+    labels = labels or {}
+    return [LLMModel(id=m, label=labels.get(m)) for m in model_ids]
 
 
 # ── Provider Registry ───────────────────────────────────────────────
@@ -144,6 +191,10 @@ class ProviderDescriptor:
     default_base_url: str = ""
     default_model: str = ""
     model_options: tuple[str, ...] = ()
+    # ``{model_id: display_name}`` for curated lists that ship friendly names
+    # (the OAuth subscription channels, from subscription_models.json). Empty for
+    # api-key descriptors — their model labels are resolved client-side.
+    model_labels: dict[str, str] = field(default_factory=dict)
     docs_url: str = ""
     # When ``supports_protocol_selection`` is True, the anthropic-shape
     # endpoint may live at a different path than ``default_base_url`` +
@@ -300,7 +351,22 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
             default_model = spec.get("default_model")
             if not isinstance(models, list):
                 continue
-            cleaned_models = tuple(m for m in models if isinstance(m, str) and m)
+            # A model entry is either a bare id (``"gpt-5.5"``) or
+            # ``{"id": ..., "label": ...}`` — the curated file ships friendly
+            # display names so the backend, not the frontend, owns them.
+            ids: list[str] = []
+            labels: dict[str, str] = {}
+            for item in models:
+                if isinstance(item, str) and item:
+                    ids.append(item)
+                elif isinstance(item, dict):
+                    mid = item.get("id")
+                    if isinstance(mid, str) and mid:
+                        ids.append(mid)
+                        lbl = item.get("label")
+                        if isinstance(lbl, str) and lbl.strip():
+                            labels[mid] = lbl
+            cleaned_models = tuple(ids)
             if not cleaned_models:
                 continue
             merged[kind] = {
@@ -308,6 +374,7 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
                 if isinstance(default_model, str) and default_model
                 else cleaned_models[0],
                 "model_options": cleaned_models,
+                "model_labels": labels,
             }
 
     try:
@@ -359,6 +426,7 @@ def _hydrate_subscription_providers(
                 provider,
                 default_model=spec["default_model"],
                 model_options=spec["model_options"],
+                model_labels=spec.get("model_labels", {}),
             )
         )
     return out
@@ -391,10 +459,11 @@ def get_provider(kind: str) -> ProviderDescriptor:
 
 async def reset_providers(
     ds: ProviderDatastore,
+    user_id: str,
     *,
     drop_table: bool = False,
     engine: Any | None = None,
-) -> list[ProviderListItem]:
+) -> list[LLMChannel]:
     """Wipe ``valuz_provider`` and re-seed it from the current code.
 
     Use cases:
@@ -433,14 +502,14 @@ async def reset_providers(
             await conn.run_sync(lambda c: table.drop(c, checkfirst=True))
             await conn.run_sync(lambda c: table.create(c, checkfirst=True))
     else:
-        for row in list(await ds.list_providers()):
-            await ds.delete(row.id)
+        for row in list(await ds.list_providers(user_id)):
+            await ds.delete(user_id, row.id)
 
     from valuz_agent.seeds.providers import seed_builtin_providers
 
-    await seed_builtin_providers(ds)
+    await seed_builtin_providers(user_id, ds)
 
-    return [_row_to_list_item(r) for r in await ds.list_providers()]
+    return [_row_to_list_item(r) for r in await ds.list_providers(user_id)]
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -549,8 +618,11 @@ def _resolve_model_options(row: ProviderRow) -> list[str]:
     return fallback
 
 
-def _row_to_list_item(row: ProviderRow) -> ProviderListItem:
-    return ProviderListItem(
+def _row_to_list_item(row: ProviderRow) -> LLMChannel:
+    compatible = _derive_compatible_protocols(row)
+    group = _group_for(row.source, row.auth_type)
+    descriptor = _PROVIDER_MAP.get(row.provider_kind)
+    return LLMChannel(
         id=row.id,
         name=row.name,
         provider_kind=row.provider_kind,
@@ -563,152 +635,57 @@ def _row_to_list_item(row: ProviderRow) -> ProviderListItem:
         credential_source=row.credential_source,
         auth_type=row.auth_type,
         protocol=row.protocol,
-        effective_protocol=_derive_effective_protocol(row),
-        compatible_protocols=_derive_compatible_protocols(row),
-        model_options=_resolve_model_options(row),
+        effective_protocol=compatible[0],
+        compatible_protocols=compatible,
+        # models leave runtimes unset (None) → the picker derives them from
+        # compatible_protocols. OSS user/builtin rows never drive codex (codex
+        # walks its own keychain) except codex-subscription, which runtimes_for
+        # matches by provider_kind.
+        group=group,
+        group_rank=_GROUP_RANK[group],
+        models=_models_for(
+            _resolve_model_options(row), descriptor.model_labels if descriptor else None
+        ),
     )
 
 
-def _system_compatible_protocols(api_protocol: str) -> list[str]:
-    """Map kernel underscore-form api_protocol to UI hyphen-form list.
+def _list_item_to_detail(it: LLMChannel) -> LLMChannelDetail:
+    """Wrap a contributed (catalog) list row into a detail view.
 
-    The frontend's "可用于" badges and the Default-config runtime filter
-    read ``compatible_protocols`` to decide which runtime each row
-    belongs to. System providers only declare one protocol, so the list
-    has a single entry mirroring ``effective_protocol``.
+    Catalog rows are system-managed: no editable base_url, no connection test.
+    Used by ``get_provider`` so the edit dialog opens read-only on a row that
+    has no ``valuz_provider`` table entry.
     """
-    mapping = {
-        "anthropic": "anthropic",
-        "openai_completion": "openai-completion",
-        "openai_response": "openai-response",
-        "gemini": "gemini",
-    }
-    mapped = mapping.get(api_protocol, "openai-completion")
-    return [mapped]
-
-
-async def _resolve_descriptor_model_options(d: SystemLLMProvider) -> list[str]:
-    """Resolve a descriptor's model list, preferring the dynamic ``list_models``
-    callable over the static ``model_options`` (ADR-007 Phase 2).
-
-    ``list_models`` may be sync or async. Any failure / empty result falls back
-    to the static ``model_options`` so a flaky dynamic source never blanks the
-    picker.
-    """
-    import inspect
-
-    if d.list_models is None:
-        return list(d.model_options)
-    try:
-        result = d.list_models()
-        if inspect.isawaitable(result):
-            result = await result
-        models = list(result) if result else []
-        return models or list(d.model_options)
-    except Exception:  # noqa: BLE001 — dynamic source must never break the list
-        return list(d.model_options)
-
-
-async def _resolve_descriptor_model_labels(d: SystemLLMProvider) -> dict[str, str]:
-    """Resolve a descriptor's ``{model_id: human_label}`` map.
-
-    Returns ``{}`` when the descriptor doesn't supply a label resolver, when the
-    resolver returns an empty / non-dict value, or when it raises — labels are a
-    UI nicety and must never break the picker. Callers pass the resulting dict
-    through to ``ProviderListItem.model_labels``; the frontend renders
-    ``labels.get(id, id)``, so missing entries naturally fall back to the id.
-    """
-    import inspect
-
-    if d.list_model_labels is None:
-        return {}
-    try:
-        result = d.list_model_labels()
-        if inspect.isawaitable(result):
-            result = await result
-        return dict(result) if isinstance(result, dict) else {}
-    except Exception:  # noqa: BLE001 — labels are decorative; never break the picker
-        return {}
-
-
-def _descriptor_to_list_item(
-    d: SystemLLMProvider,
-    *,
-    model_options: list[str] | None = None,
-    model_labels: dict[str, str] | None = None,
-) -> ProviderListItem:
-    """Project a registry descriptor onto the ``ProviderListItem`` shape.
-
-    System providers reuse the existing schema so the UI renders them
-    next to user providers; ``source="system"`` + ``deletable=False``
-    tell the renderer to hide edit/delete and show an availability
-    badge instead.
-
-    ``model_options`` overrides the descriptor's static list when the caller
-    has resolved a dynamic ``list_models`` (see ``_resolve_descriptor_model_options``).
-    ``model_labels`` carries the resolved ``{id: human_label}`` map (see
-    ``_resolve_descriptor_model_labels``); empty when the descriptor doesn't
-    supply labels.
-    """
-    protocols = _system_compatible_protocols(d.api_protocol)
-    opts = model_options if model_options is not None else list(d.model_options)
-    labels = dict(model_labels) if model_labels else {}
-    return ProviderListItem(
-        id=d.id,
-        name=d.name,
-        provider_kind=d.provider_kind,
-        source="system",
-        enabled=d.enabled(),
-        is_default=False,
-        deletable=False,
-        default_model=d.default_model,
-        test_status="never",
-        credential_source="system_managed",
-        auth_type="oauth",
-        protocol=protocols[0],
-        effective_protocol=protocols[0],
-        compatible_protocols=protocols,
-        model_options=opts,
-        model_labels=labels,
-        unavailable_reason=d.unavailable_reason() if not d.enabled() else None,
-    )
-
-
-def _descriptor_to_detail(
-    d: SystemLLMProvider,
-    *,
-    model_options: list[str] | None = None,
-    model_labels: dict[str, str] | None = None,
-) -> ProviderDetail:
-    item = _descriptor_to_list_item(d, model_options=model_options, model_labels=model_labels)
-    return ProviderDetail(
-        id=item.id,
-        name=item.name,
-        provider_kind=item.provider_kind,
-        source=item.source,
-        enabled=item.enabled,
-        is_default=item.is_default,
-        deletable=item.deletable,
-        default_model=item.default_model,
-        test_status=item.test_status,
-        credential_source=item.credential_source,
-        auth_type=item.auth_type,
-        protocol=item.protocol,
-        effective_protocol=item.effective_protocol,
-        compatible_protocols=item.compatible_protocols,
-        model_options=item.model_options,
-        model_labels=item.model_labels,
-        unavailable_reason=item.unavailable_reason,
-        base_url=d.api_base,
+    return LLMChannelDetail(
+        id=it.id,
+        name=it.name,
+        provider_kind=it.provider_kind,
+        source=it.source,
+        enabled=it.enabled,
+        is_default=it.is_default,
+        deletable=it.deletable,
+        default_model=it.default_model,
+        test_status=it.test_status,
+        credential_source=it.credential_source,
+        auth_type=it.auth_type,
+        protocol=it.protocol,
+        effective_protocol=it.effective_protocol,
+        compatible_protocols=it.compatible_protocols,
+        group=it.group,
+        group_rank=it.group_rank,
+        models=it.models,
+        unavailable_reason=it.unavailable_reason,
+        base_url=None,
         supports_custom_base_url=False,
         supports_connection_test=False,
     )
 
 
-def _row_to_detail(row: ProviderRow) -> ProviderDetail:
+def _row_to_detail(row: ProviderRow) -> LLMChannelDetail:
     provider = _PROVIDER_MAP.get(row.provider_kind)
-    model_options = _resolve_model_options(row)
-    return ProviderDetail(
+    compatible = _derive_compatible_protocols(row)
+    group = _group_for(row.source, row.auth_type)
+    return LLMChannelDetail(
         id=row.id,
         name=row.name,
         provider_kind=row.provider_kind,
@@ -721,9 +698,14 @@ def _row_to_detail(row: ProviderRow) -> ProviderDetail:
         credential_source=row.credential_source,
         auth_type=row.auth_type,
         protocol=row.protocol,
-        effective_protocol=_derive_effective_protocol(row),
-        compatible_protocols=_derive_compatible_protocols(row),
-        model_options=model_options,
+        effective_protocol=compatible[0],
+        compatible_protocols=compatible,
+        # models leave runtimes unset (None) → the picker derives them.
+        group=group,
+        group_rank=_GROUP_RANK[group],
+        models=_models_for(
+            _resolve_model_options(row), provider.model_labels if provider else None
+        ),
         base_url=row.base_url,
         supports_custom_base_url=provider.supports_custom_base_url if provider else False,
         supports_connection_test=(
@@ -763,6 +745,233 @@ def _resolve_discovery_protocol(row: ProviderRow) -> str:
     return "openai"
 
 
+def _builtin_subscription_row(entry: Any) -> ProviderRow | None:
+    """Transient (unpersisted) ``ProviderRow`` for a built-in OAuth subscription
+    catalog entry, or ``None`` when the entry isn't an OAuth kind.
+
+    Shared by the list (``_builtin_subscription_template_items``) and the detail
+    (``_virtual_builtin_subscription_detail``) so the virtual template a user
+    sees in the list opens identically in the edit dialog. ``model_ids=None``
+    keeps the picker tracking the live recommended subscription catalog.
+
+    The template carries its full recommended model list here; whether those
+    models are actually surfaced is decided later by ``_gate_subscription_login``
+    (stripped when the CLI keychain isn't logged in).
+    """
+    descriptor = _PROVIDER_MAP.get(entry.provider_kind)
+    if descriptor is None or descriptor.auth_type != "oauth":
+        return None
+    return ProviderRow(
+        id=entry.id,
+        name=entry.name,
+        provider_kind=entry.provider_kind,
+        source="builtin",
+        credential_source="none",
+        base_url=descriptor.default_base_url or None,
+        default_model=descriptor.default_model or None,
+        model_ids=None,
+        account_provider_id=None,
+        enabled=True,
+        is_default=False,
+        deletable=False,
+        test_status="never",
+        auth_type="oauth",
+    )
+
+
+def _builtin_subscription_template_items(configured_kinds: set[str]) -> list[LLMChannel]:
+    """Virtual list entries for OSS CLI-subscription channels (Claude Pro·Max,
+    Codex) the caller hasn't configured yet.
+
+    These are NOT persisted. Built-ins are no longer seeded as rows (seeding bred
+    rows owned by an identity that may never authenticate — the device-local id
+    under single-tenant, no one under a multi-user overlay — plus a well-known-id
+    primary-key collision when the same channel is configured by multiple users).
+    A real ``valuz_provider`` row is materialized only on login
+    (``ProviderService._materialize_builtin_subscription``). A kind already in
+    ``configured_kinds`` (a prior login, or a legacy seeded row) is skipped so the
+    configured row shows instead of a duplicate template.
+
+    Only OAuth subscription kinds are virtualized here — api_key built-ins are
+    discovered through the "add provider" dialog (``GET /v1/providers/config``)
+    and materialized by ``create_provider``. Gated by
+    ``settings.subscription_login_enabled`` (off on a shared multi-user server
+    with no local CLI keychain).
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.seeds._io import load_provider_seeds
+
+    if not settings.subscription_login_enabled:
+        return []
+    items: list[LLMChannel] = []
+    for entry in load_provider_seeds().providers:
+        if entry.provider_kind in configured_kinds:
+            continue
+        row = _builtin_subscription_row(entry)
+        if row is None:
+            continue
+        items.append(_row_to_list_item(row))
+    return items
+
+
+def _virtual_builtin_subscription_detail(provider_id: str) -> LLMChannelDetail | None:
+    """Detail for an unconfigured built-in OAuth subscription template.
+
+    No DB row exists for a virtual template until the user logs in, so the edit
+    dialog's ``GET /v1/providers/{id}`` would 404. Mirror what
+    ``_builtin_subscription_template_items`` surfaces in the list so the dialog
+    opens on the same data. ``None`` when ``provider_id`` isn't a built-in OAuth
+    catalog id or subscription login is disabled for this deployment.
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.seeds._io import load_provider_seeds
+
+    if not settings.subscription_login_enabled:
+        return None
+    entry = next((e for e in load_provider_seeds().providers if e.id == provider_id), None)
+    if entry is None:
+        return None
+    row = _builtin_subscription_row(entry)
+    if row is None:
+        return None
+    return _row_to_detail(row)
+
+
+def subscription_catalog_kind(provider_id: str) -> str | None:
+    """Return the ``provider_kind`` when ``provider_id`` is a built-in OAuth
+    subscription catalog id (e.g. ``ch-codex-subscription``), else ``None``.
+
+    Lets the session-resolution boundary tell a not-yet-materialized subscription
+    template apart from any other unknown id, so it can raise an actionable
+    "log in to Codex" error instead of a raw "provider not found".
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.seeds._io import load_provider_seeds
+
+    if not settings.subscription_login_enabled:
+        return None
+    entry = next((e for e in load_provider_seeds().providers if e.id == provider_id), None)
+    if entry is None:
+        return None
+    descriptor = _PROVIDER_MAP.get(entry.provider_kind)
+    if descriptor is None or descriptor.auth_type != "oauth":
+        return None
+    return entry.provider_kind
+
+
+async def materialize_subscription(
+    ds: ProviderDatastore,
+    user_id: str,
+    provider_id: str,
+    *,
+    require_login: bool,
+) -> ProviderRow | None:
+    """Create (or reuse) the real ``valuz_provider`` row for a built-in OAuth
+    subscription catalog id (e.g. ``ch-codex-subscription``).
+
+    A logged-in subscription is a *real* channel, not a virtual template: it must
+    own a row so it resolves at session time (the virtual ``ch-*`` id owns none →
+    400 "provider not found") and so "可用" genuinely means "configurable for an
+    agent". Materialization is bound to *availability*, not to an in-app login
+    click — the frontend auto-enables a kind the moment it detects the CLI is
+    logged in (onboarding ConnectStep / Settings model page); this is the shared
+    core both that path and the session-resolution backstop call.
+
+    ``require_login=True`` first probes the CLI keychain and returns ``None`` when
+    not logged in (the backstop must not conjure a usable channel out of a
+    logged-out CLI). ``require_login=False`` materializes unconditionally — the
+    explicit ``enable_provider`` / ``set_default`` path, where the caller already
+    proved login.
+
+    Idempotent by *kind*: an existing row of the same kind (a prior login or a
+    legacy seeded row) is enabled, marked CLI-backed, and — importantly —
+    normalized to ``deletable=True`` so a legacy ``deletable=False`` seed doesn't
+    leave the channel stuck without its management affordance. Returns ``None``
+    for a non-subscription id or when subscription login is disabled here.
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.seeds._io import load_provider_seeds
+
+    if not settings.subscription_login_enabled:
+        return None
+    entry = next((e for e in load_provider_seeds().providers if e.id == provider_id), None)
+    if entry is None:
+        return None
+    descriptor = _PROVIDER_MAP.get(entry.provider_kind)
+    if descriptor is None or descriptor.auth_type != "oauth":
+        return None
+    if require_login:
+        tool = _SUBSCRIPTION_KIND_TO_TOOL.get(entry.provider_kind)
+        if tool is None or not await detect_cli_login(tool):
+            return None
+
+    # Idempotency by kind — reuse an existing row (prior login / legacy seed),
+    # normalizing it to the canonical CLI-backed + deletable state.
+    for existing in await ds.list_providers(user_id):
+        if existing.provider_kind == entry.provider_kind:
+            if not (
+                existing.enabled
+                and existing.credential_source == "cli_keychain"
+                and existing.deletable
+            ):
+                existing.enabled = True
+                existing.credential_source = "cli_keychain"
+                existing.deletable = True
+                existing.updated_at = now_ms()
+                await ds.update(existing)
+            return existing
+
+    row = ProviderRow(
+        name=entry.name,
+        provider_kind=entry.provider_kind,
+        source="user",
+        credential_source="cli_keychain",
+        base_url=descriptor.default_base_url or None,
+        default_model=descriptor.default_model or None,
+        model_ids=None,
+        enabled=True,
+        is_default=False,
+        deletable=True,
+        test_status="never",
+        auth_type="oauth",
+    )
+    await ds.create(user_id, row)
+    return row
+
+
+async def materialize_logged_in_subscription(
+    ds: ProviderDatastore, user_id: str, provider_id: str
+) -> ProviderRow | None:
+    """Session-resolution backstop: materialize a built-in subscription catalog
+    id into its real row **iff** its CLI is logged in.
+
+    Login-gated wrapper over :func:`materialize_subscription`. Returns the row
+    (real uuid id) a stale ``ch-*`` reference should switch onto, or ``None`` when
+    the id isn't a subscription template or its CLI isn't logged in.
+    """
+    return await materialize_subscription(ds, user_id, provider_id, require_login=True)
+
+
+def subscription_login_hint(provider_id: str) -> str | None:
+    """A localized, actionable hint for a subscription whose CLI isn't logged in,
+    or ``None`` when ``provider_id`` isn't a subscription template.
+
+    The session-resolution backstop surfaces this verbatim instead of the raw
+    "provider not found" so the user knows exactly how to make the channel usable
+    (log the CLI in, or connect it from Settings → Models).
+    """
+    kind = subscription_catalog_kind(provider_id)
+    if kind is None:
+        return None
+    descriptor = _PROVIDER_MAP.get(kind)
+    name = descriptor.display_name if descriptor else kind
+    command = (descriptor.oauth_login_command if descriptor else "") or ""
+    return t(
+        "settings.model.subscriptionLoginRequired",
+        params={"name": name, "command": command},
+    )
+
+
 class ProviderService:
     def __init__(
         self,
@@ -776,11 +985,9 @@ class ProviderService:
 
     # ── Queries ──────────────────────────────────────────────────
 
-    async def list_providers(self) -> list[ProviderListItem]:
-        from valuz_agent.ports.provider_policy import get_provider_policy
-
-        rows = await self._ds.list_providers()
-        policy = get_provider_policy()
+    async def list_providers(self, user_id: str) -> list[LLMChannel]:
+        rows = await self._ds.list_providers(user_id)
+        policy = ext.policy
         # When the caller's org locks custom models, hide their own
         # (``source="user"``) providers so they can't be selected — the
         # "禁止使用" half of the lock. Managed/system rows are unaffected.
@@ -790,26 +997,19 @@ class ProviderService:
             for r in rows
             if r.enabled and not (hide_user and r.source == "user")
         ]
-        # Prepend overlay-contributed system providers (ADR-007). System
-        # providers are the "platform-provided, no setup needed" option
-        # and belong at the top of the picker so users see them first.
-        # Each descriptor's ``enabled()`` is evaluated lazily so the UI
-        # can show "未登录" badges for SaaS users who haven't signed in.
-        #
-        # A descriptor whose resolved model list is empty is hidden: a
-        # system card with no selectable models is noise (e.g. a dynamic
-        # ``list_models`` source — like the commercial 组织模型 card — that
-        # has no model of that protocol for the current org).
-        system_items = []
-        for d in get_llm_registry().all():
-            opts = await _resolve_descriptor_model_options(d)
-            if not opts:
-                continue
-            labels = await _resolve_descriptor_model_labels(d)
-            system_items.append(
-                _descriptor_to_list_item(d, model_options=opts, model_labels=labels)
-            )
-        combined = system_items + user_items
+        # Prepend overlay-contributed rows (ADR-011). The single
+        # ``ext.llm_provider`` returns already-judged, key-free
+        # ``LLMChannel`` rows (e.g. the commercial "Valuz 系统模型" +
+        # "组织模型" channels). OSS makes zero judgement on them — pure
+        # append. A contributed row with no selectable models is dropped: a
+        # card with nothing to pick is noise (e.g. the 组织模型 card when the
+        # org has no model of that protocol).
+        extra_items = [it for it in await ext.llm_provider.list() if it.models]
+        # Virtual CLI-subscription templates for kinds not yet configured (no DB
+        # row exists until the user logs in — see ``_materialize_builtin_subscription``).
+        configured_kinds = {r.provider_kind for r in rows}
+        template_items = _builtin_subscription_template_items(configured_kinds)
+        combined = extra_items + user_items + template_items
         # Richer visibility filter (overlay-bound policy): hide whole provider
         # ids the caller isn't allowed to see — e.g. builtin personal channels
         # (Claude Pro/Max, Codex) when the platform disables member-configured
@@ -818,31 +1018,51 @@ class ProviderService:
         hidden = await policy.hidden_provider_ids(combined)
         if hidden:
             combined = [it for it in combined if it.id not in hidden]
+        # NB: subscription-login gating is applied in ``get_provider`` (the
+        # per-channel detail the composer fetches), NOT here. The list feeds
+        # ``GET /v1/settings/model-options`` (onboarding ConnectStep + Settings
+        # default-model picker), which already gate subscription rows client-side
+        # on the CLI keychain probe (``status="client_resolved"`` +
+        # ``isModelProviderUsable``). Stripping models here would drop the channel
+        # from model-options entirely and break the onboarding login card.
         return combined
 
-    async def get_provider(self, provider_id: str) -> ProviderDetail:
-        descriptor = get_llm_registry().get(provider_id)
-        if descriptor is not None:
-            return _descriptor_to_detail(
-                descriptor,
-                model_options=await _resolve_descriptor_model_options(descriptor),
-                model_labels=await _resolve_descriptor_model_labels(descriptor),
-            )
-        row = await self._ds.get_by_id(provider_id)
-        if not row:
-            raise ProviderNotFound(f"Provider {provider_id!r} not found")
-        return _row_to_detail(row)
+    async def get_provider(self, user_id: str, provider_id: str) -> LLMChannelDetail:
+        row = await self._ds.get_by_id(user_id, provider_id)
+        if row is not None:
+            detail = _row_to_detail(row)
+            # Same login gate as ``list_providers`` — the composer fetches the
+            # per-channel detail, so a logged-out subscription row must hide its
+            # models here too.
+            await _gate_subscription_login([detail])
+            return detail
+        # Not a user row — maybe an overlay-contributed (catalog) channel
+        # (ADR-011). Catalog ids don't collide with user UUIDs, so checking
+        # the user table first is safe.
+        for it in await ext.llm_provider.list():
+            if it.id == provider_id:
+                return _list_item_to_detail(it)
+        # Still nothing: the id may be an unconfigured built-in subscription
+        # template (virtualized in ``list_providers``) — resolve it so the edit
+        # dialog opens instead of erroring with "获取模型详情失败".
+        virtual = _virtual_builtin_subscription_detail(provider_id)
+        if virtual is not None:
+            await _gate_subscription_login([virtual])
+            return virtual
+        raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
-    @staticmethod
-    def _guard_not_system(provider_id: str) -> None:
-        """Raise ``SystemProviderImmutable`` if id is registry-backed.
+    async def _guard_not_system(self, provider_id: str) -> None:
+        """Raise ``SystemProviderImmutable`` if id is a non-deletable
+        contributed (catalog) row.
 
-        Used by every write operation so overlay-contributed system
-        providers can't be edited / deleted / tested via the user CRUD
-        path. The route layer maps this to HTTP 409.
+        Used by every write operation so overlay-contributed channels can't be
+        edited / deleted / tested via the user CRUD path. The judgement is the
+        row's ``deletable`` flag, not its source (ADR-011 治理). The route layer
+        maps this to HTTP 409.
         """
-        if get_llm_registry().get(provider_id) is not None:
-            raise SystemProviderImmutable(provider_id)
+        for it in await ext.llm_provider.list():
+            if it.id == provider_id and not it.deletable:
+                raise SystemProviderImmutable(provider_id)
 
     def list_provider_descriptors(self) -> list[ProviderDescriptor]:
         return list(BUILTIN_PROVIDERS)
@@ -902,7 +1122,7 @@ class ProviderService:
 
         return {"models": models, "suggested_default": suggested}
 
-    async def read_stored_api_key(self, provider_id: str) -> str | None:
+    async def read_stored_api_key(self, user_id: str, provider_id: str) -> str | None:
         """Pull the persisted api_key out of secret_store for a row.
 
         Used by the ping endpoint to support edit-mode flows where the
@@ -912,12 +1132,12 @@ class ProviderService:
         was never saved). Raises ``ProviderNotFound`` if the row itself
         doesn't exist.
         """
-        row = await self._ds.get_by_id(provider_id)
+        row = await self._ds.get_by_id(user_id, provider_id)
         if row is None:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
         if not row.secret_ref:
             return None
-        return self._secrets.get(row.secret_ref)
+        return self._secrets.get(user_id, row.secret_ref)
 
     async def ping_compatible_batch(
         self,
@@ -999,6 +1219,7 @@ class ProviderService:
 
     async def create_provider(
         self,
+        user_id: str,
         name: str,
         provider_kind: str,
         base_url: str | None = None,
@@ -1006,7 +1227,7 @@ class ProviderService:
         default_model: str | None = None,
         protocol: str | None = None,
         models: list[str] | None = None,
-    ) -> ProviderDetail:
+    ) -> LLMChannelDetail:
         provider = get_provider(provider_kind)
 
         effective_base_url = base_url or provider.default_base_url
@@ -1032,7 +1253,14 @@ class ProviderService:
         # channel they can't use. Built-ins go through /v1/models
         # discovery (also hydrates ``model_ids``); custom channels go
         # through ``ping_credentials`` (validates auth + endpoint + model).
-        model_ids_list: list[str] = list(user_models) if is_custom else list(fallback_models)
+        # OAuth subscription kinds never snapshot the recommended list —
+        # ``model_ids`` stays NULL so the row tracks the live descriptor
+        # (mirrors ``seeds/providers.py``; the empty list also keeps the
+        # default_model chain below on the descriptor default).
+        if provider.auth_type == "oauth":
+            model_ids_list: list[str] = []
+        else:
+            model_ids_list = list(user_models) if is_custom else list(fallback_models)
         if api_key:
             stripped_key = api_key.strip()
             # HTTP Authorization is latin-1 only; non-ASCII (e.g. user
@@ -1112,7 +1340,7 @@ class ProviderService:
         secret_ref: str | None = None
         if api_key:
             secret_ref = f"channel/{uuid4().hex[:12]}"
-            self._secrets.put(secret_ref, api_key.strip())
+            self._secrets.put(user_id, secret_ref, api_key.strip())
 
         row = ProviderRow(
             name=name.strip(),
@@ -1131,16 +1359,17 @@ class ProviderService:
             test_status="success" if api_key else "never",
             protocol=protocol,
         )
-        await self._ds.create(row)
+        await self._ds.create(user_id, row)
 
-        if len([c for c in await self._ds.list_providers() if c.enabled]) == 1:
-            await self._set_default_internal(row.id)
+        if len([c for c in await self._ds.list_providers(user_id) if c.enabled]) == 1:
+            await self._set_default_internal(user_id, row.id)
 
         self._bus.publish("provider.created", provider_id=row.id)
         return _row_to_detail(row)
 
     async def update_provider(
         self,
+        user_id: str,
         provider_id: str,
         name: str | None = None,
         base_url: str | None = None,
@@ -1149,10 +1378,23 @@ class ProviderService:
         protocol: str | None = None,
         auth_type: str | None = None,
         models: list[str] | None = None,
-    ) -> ProviderDetail:
-        self._guard_not_system(provider_id)
-        row = await self._ds.get_by_id(provider_id)
+    ) -> LLMChannelDetail:
+        await self._guard_not_system(provider_id)
+        row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
+            # Edit dialog on an unconfigured built-in subscription template: no
+            # row exists until login. The OAuth dialog persists nothing (api key
+            # / endpoint / models are all hidden), so an empty save is a harmless
+            # no-op — return the virtual detail rather than 404, matching the
+            # pre-virtualization seeded-row behaviour. A patch that DOES carry a
+            # change still 404s: log the channel in first so a real row exists.
+            no_changes = not any(
+                (name, base_url, api_key, default_model, protocol, auth_type, models is not None)
+            )
+            if no_changes:
+                virtual = _virtual_builtin_subscription_detail(provider_id)
+                if virtual is not None:
+                    return virtual
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
         if row.source == "managed":
@@ -1188,7 +1430,7 @@ class ProviderService:
             # currently-stored key out of secret_store.
             stripped_new_key = (api_key or "").strip() if api_key else None
             effective_key = stripped_new_key or (
-                self._secrets.get(row.secret_ref) if row.secret_ref else None
+                self._secrets.get(user_id, row.secret_ref) if row.secret_ref else None
             )
             effective_url = (base_url or row.base_url or "").strip()
             effective_proto = protocol or row.protocol
@@ -1212,10 +1454,10 @@ class ProviderService:
                 row.default_model = cleaned[0]
         if api_key:
             if row.secret_ref:
-                self._secrets.put(row.secret_ref, api_key.strip())
+                self._secrets.put(user_id, row.secret_ref, api_key.strip())
             else:
                 row.secret_ref = f"channel/{uuid4().hex[:12]}"
-                self._secrets.put(row.secret_ref, api_key.strip())
+                self._secrets.put(user_id, row.secret_ref, api_key.strip())
                 row.credential_source = "secret_ref"
             row.test_status = "never"
             # Setting an api_key explicitly opts the provider into the api_key
@@ -1240,7 +1482,7 @@ class ProviderService:
         self._bus.publish("provider.updated", provider_id=row.id)
         return _row_to_detail(row)
 
-    async def discover_models(self, provider_id: str) -> dict[str, Any]:
+    async def discover_models(self, user_id: str, provider_id: str) -> dict[str, Any]:
         """Probe the provider's upstream for the available model list.
 
         System providers reject this (registry-backed; no upstream to
@@ -1256,8 +1498,8 @@ class ProviderService:
         ``ModelDiscoveryError`` and translated to 502 by the router.
         ``ProviderNotFound`` becomes 404.
         """
-        self._guard_not_system(provider_id)
-        row = await self._ds.get_by_id(provider_id)
+        await self._guard_not_system(provider_id)
+        row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
@@ -1267,7 +1509,7 @@ class ProviderService:
                 "add models manually instead"
             )
 
-        api_key = self._secrets.get(row.secret_ref)
+        api_key = self._secrets.get(user_id, row.secret_ref)
         if not api_key:
             raise ModelDiscoveryError("provider's API key is missing from secret store")
 
@@ -1304,28 +1546,28 @@ class ProviderService:
             "merged": merged,
         }
 
-    async def delete_provider(self, provider_id: str) -> None:
-        self._guard_not_system(provider_id)
-        row = await self._ds.get_by_id(provider_id)
+    async def delete_provider(self, user_id: str, provider_id: str) -> None:
+        await self._guard_not_system(provider_id)
+        row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
         if row.source != "user" or not row.deletable:
             raise ProviderNotDeletable(f"Provider {provider_id!r} cannot be deleted")
 
         if row.secret_ref:
-            self._secrets.delete(row.secret_ref)
+            self._secrets.delete(user_id, row.secret_ref)
 
         was_default = row.is_default
-        await self._ds.delete(provider_id)
+        await self._ds.delete(user_id, provider_id)
 
         if was_default:
-            fallback = await self._ds.get_default() or await self._first_enabled()
+            fallback = await self._ds.get_default(user_id) or await self._first_enabled(user_id)
             if fallback:
-                await self._set_default_internal(fallback.id)
+                await self._set_default_internal(user_id, fallback.id)
 
         self._bus.publish("provider.deleted", provider_id=provider_id)
 
-    async def enable_provider(self, provider_id: str) -> ProviderDetail:
+    async def enable_provider(self, user_id: str, provider_id: str) -> LLMChannelDetail:
         """Mark an OAuth/subscription provider as enabled.
 
         For ``auth_type="oauth"`` providers (e.g. ``ch-claude-subscription``
@@ -1335,12 +1577,25 @@ class ProviderService:
         signal that the user has completed the out-of-band login.  Calling
         this on an already-enabled row is a no-op (idempotent).
 
+        Built-ins aren't seeded, so a subscription login is the FIRST time a row
+        exists. When no row matches ``provider_id``, treat it as a built-in
+        catalog id (e.g. ``ch-claude-subscription``) and materialize a row on
+        demand (``_materialize_builtin_subscription``); a non-builtin id still
+        404s.
+
         System-managed providers are immutable (403 via ``SystemProviderImmutable``).
         """
-        self._guard_not_system(provider_id)
-        row = await self._ds.get_by_id(provider_id)
+        await self._guard_not_system(provider_id)
+        row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
-            raise ProviderNotFound(f"Provider {provider_id!r} not found")
+            materialized = await self._materialize_builtin_subscription(user_id, provider_id)
+            if materialized is None:
+                raise ProviderNotFound(f"Provider {provider_id!r} not found")
+            # The frontend calls enable right after detecting a fresh CLI login —
+            # drop the cached logged-out state so the new models surface at once.
+            _invalidate_login_cache(materialized.provider_kind)
+            self._bus.publish("provider.updated", provider_id=materialized.id)
+            return _row_to_detail(materialized)
 
         if row.enabled and row.credential_source == "cli_keychain":
             # Already in the desired state — idempotent, return current detail.
@@ -1351,25 +1606,55 @@ class ProviderService:
             row.credential_source = "cli_keychain"
         row.updated_at = now_ms()
         await self._ds.update(row)
+        _invalidate_login_cache(row.provider_kind)
         self._bus.publish("provider.updated", provider_id=row.id)
         return _row_to_detail(row)
 
-    async def set_default(self, provider_id: str, *, default_model: str | None = None) -> None:
+    async def _materialize_builtin_subscription(
+        self, user_id: str, provider_id: str
+    ) -> ProviderRow | None:
+        """Create (or reuse) the row for a built-in OAuth subscription channel.
+
+        The explicit-login path (``enable_provider`` / ``set_default``): the
+        caller already proved the CLI login, so materialize unconditionally. The
+        materialized row carries a fresh uuid id, not the ``ch-*`` catalog id, so
+        dedupe is by *kind*. Returns ``None`` when ``provider_id`` isn't a known
+        OAuth built-in or subscription login is disabled for this deployment — the
+        caller maps that to ``ProviderNotFound``.
+
+        Shared logic lives in :func:`materialize_subscription` (also used by the
+        session-resolution backstop ``materialize_logged_in_subscription``).
+        """
+        return await materialize_subscription(self._ds, user_id, provider_id, require_login=False)
+
+    async def set_default(
+        self, user_id: str, provider_id: str, *, default_model: str | None = None
+    ) -> None:
         # System providers can't carry the ``is_default`` flag on the
         # providers table (no row exists). Users pin a system provider
         # as default through the settings-preferences path
         # (``PATCH /v1/settings/model-defaults``) instead.
-        self._guard_not_system(provider_id)
-        row = await self._ds.get_by_id(provider_id)
+        await self._guard_not_system(provider_id)
+        row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
-            raise ProviderNotFound(f"Provider {provider_id!r} not found")
+            # Built-in CLI-subscription channels (claude/codex ``/login``) have
+            # no DB row until first use — they're surfaced as virtual templates
+            # keyed by their catalog id, so selecting one as the default would
+            # otherwise 404. Materialize it on demand (mirrors enable_provider).
+            # The materialized row carries a fresh uuid id, NOT the catalog id,
+            # so every write below keys off ``row.id`` rather than the
+            # ``provider_id`` argument.
+            row = await self._materialize_builtin_subscription(user_id, provider_id)
+            if row is None:
+                raise ProviderNotFound(f"Provider {provider_id!r} not found")
         if not row.enabled:
             raise NoAvailableProvider(f"Provider {provider_id!r} is disabled")
-        await self._set_default_internal(provider_id)
+        resolved_id = row.id
+        await self._set_default_internal(user_id, resolved_id)
 
         # Optionally update the provider row's default_model.
         if default_model is not None:
-            updated_row = await self._ds.get_by_id(provider_id)
+            updated_row = await self._ds.get_by_id(user_id, resolved_id)
             if updated_row:
                 updated_row.default_model = default_model
                 updated_row.updated_at = now_ms()
@@ -1386,25 +1671,25 @@ class ProviderService:
         )
 
         db = self._ds._db  # noqa: SLF001 — sanctioned cross-module db reuse (mirrors resolve_infer_config)
-        await set_default_provider_id(db, provider_id)
+        await set_default_provider_id(db, resolved_id)
         effective_model = default_model if default_model is not None else row.default_model
         if effective_model:
             await set_default_model(db, effective_model)
 
-        self._bus.publish("provider.default.changed", provider_id=provider_id)
+        self._bus.publish("provider.default.changed", provider_id=resolved_id)
 
     # ── Resolution ───────────────────────────────────────────────
 
-    async def resolve_default_provider(self) -> ProviderRow:
-        row = await self._ds.get_default()
+    async def resolve_default_provider(self, user_id: str) -> ProviderRow:
+        row = await self._ds.get_default(user_id)
         if row:
             return row
-        row = await self._first_enabled()
+        row = await self._first_enabled(user_id)
         if row:
             return row
         raise NoAvailableProvider("No available model provider configured")
 
-    async def resolve_provider_for_model(self, model_id: str) -> ProviderRow | None:
+    async def resolve_provider_for_model(self, user_id: str, model_id: str) -> ProviderRow | None:
         """Find the configured provider that should host ``model_id``.
 
         Deterministic resolution — no fallback walk. Picks the first enabled,
@@ -1432,7 +1717,7 @@ class ProviderService:
                 return True
             return row.auth_type == "oauth"
 
-        rows = list(await self._ds.list_providers())
+        rows = list(await self._ds.list_providers(user_id))
         # 1) Exact default_model match wins (the provider's primary model).
         for row in rows:
             if not row.enabled:
@@ -1443,38 +1728,36 @@ class ProviderService:
                 continue
             return row
         # 2) Otherwise the first enabled provider that lists the model id in
-        #    its options AND has credentials.
+        #    its options AND has credentials. Goes through
+        #    ``_resolve_model_options`` (same resolution as the list/detail
+        #    endpoints) so rows with ``model_ids IS NULL`` — notably the
+        #    OAuth subscription rows, which never snapshot their recommended
+        #    list — fall back to the live descriptor instead of becoming
+        #    unresolvable: whatever the picker shows must bind here too.
         for row in rows:
             if not row.enabled or not _has_creds(row):
                 continue
-            options: list[str] = []
-            if row.model_ids:
-                try:
-                    parsed = json.loads(row.model_ids)
-                    if isinstance(parsed, list):
-                        options = [str(o) for o in parsed]
-                except json.JSONDecodeError:
-                    options = []
-            if model_id in options:
+            if model_id in _resolve_model_options(row):
                 return row
         return None
 
     async def resolve_infer_config(
         self,
+        user_id: str,
         provider_id: str | None = None,
         locked_model_id: str | None = None,
     ) -> InferConfig:
         if provider_id:
-            row = await self._ds.get_by_id(provider_id)
+            row = await self._ds.get_by_id(user_id, provider_id)
             if not row:
                 raise ProviderNotFound(f"Provider {provider_id!r} not found")
         else:
-            row = await self.resolve_default_provider()
+            row = await self.resolve_default_provider(user_id)
 
         api_key: str | None = None
         auth_type = "none"
         if row.credential_source == "secret_ref" and row.secret_ref:
-            api_key = self._secrets.get(row.secret_ref)
+            api_key = self._secrets.get(user_id, row.secret_ref)
             auth_type = "api_key"
 
         # Protocol override drives the wire shape used during connection
@@ -1502,9 +1785,9 @@ class ProviderService:
 
     # ── Connection Test ──────────────────────────────────────────
 
-    async def test_provider(self, provider_id: str) -> ConnectionTestResult:
-        self._guard_not_system(provider_id)
-        row = await self._ds.get_by_id(provider_id)
+    async def test_provider(self, user_id: str, provider_id: str) -> ConnectionTestResult:
+        await self._guard_not_system(provider_id)
+        row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
         if row.auth_type == "oauth":
@@ -1517,7 +1800,7 @@ class ProviderService:
                 "connection test is not applicable"
             )
 
-        infer = await self.resolve_infer_config(provider_id=provider_id)
+        infer = await self.resolve_infer_config(user_id, provider_id=provider_id)
         provider = _PROVIDER_MAP.get(row.provider_kind)
 
         start = time.monotonic()
@@ -1540,6 +1823,7 @@ class ProviderService:
 
     async def validate_credentials(
         self,
+        user_id: str,
         provider_kind: str,
         api_key: str | None = None,
         base_url: str | None = None,
@@ -1582,16 +1866,16 @@ class ProviderService:
 
     # ── Internal ─────────────────────────────────────────────────
 
-    async def _set_default_internal(self, provider_id: str) -> None:
-        await self._ds.clear_default()
-        row = await self._ds.get_by_id(provider_id)
+    async def _set_default_internal(self, user_id: str, provider_id: str) -> None:
+        await self._ds.clear_default(user_id)
+        row = await self._ds.get_by_id(user_id, provider_id)
         if row:
             row.is_default = True
             row.updated_at = now_ms()
             await self._ds.update(row)
 
-    async def _first_enabled(self) -> ProviderRow | None:
-        for row in await self._ds.list_providers():
+    async def _first_enabled(self, user_id: str) -> ProviderRow | None:
+        for row in await self._ds.list_providers(user_id):
             if row.enabled:
                 return row
         return None

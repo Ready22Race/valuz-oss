@@ -8,23 +8,22 @@ from pydantic import BaseModel, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from valuz_agent.adapters import kernel_store
+from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.event_sse_adapter import iter_events_sse
-from valuz_agent.api.deps import get_current_user, get_session_service
+from valuz_agent.api.deps import get_session_service, require_current_user_id
 from valuz_agent.infra.db import get_async_session
-from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
+    QueuedInputList,
     SessionDetail,
     SessionEventEnvelope,
     SessionListItem,
     SessionRunResponse,
 )
+from valuz_agent.modules.sessions.errors import BudgetExceeded
 from valuz_agent.modules.sessions.models import SessionAttachmentRow
 from valuz_agent.modules.sessions.schemas import SessionEffortRequest, SessionModelSelection
 from valuz_agent.modules.sessions.service import SessionService
-from valuz_agent.ports.billing import get_billing_port
-from valuz_agent.ports.identity import UserIdentity
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,7 @@ class SessionCreateRequest(SessionModelSelection):
     live-reconcilable (kernel V5+bba3014) via dedicated PATCH routes.
     """
 
-    workspace_id: str
+    project_id: str
     title: str | None = None
     # Slugs of MCP data sources to enable for this session (e.g. ["reportify"]).
     # The frontend's data-source picker provides them; ``adapters.mcp_resolver``
@@ -182,20 +181,20 @@ class SessionEventWindowResponse(BaseModel):
 
 
 @router.get("")
-def list_sessions(
-    workspace_id: str | None = None,
+async def list_sessions(
+    project_id: str | None = None,
     q: str | None = None,
     svc: SessionService = Depends(get_session_service),
 ) -> dict[str, list[SessionListItem]]:
-    return {"sessions": svc.list_sessions(workspace_id=workspace_id, query=q)}
+    return {"sessions": await svc.list_sessions(project_id=project_id, query=q)}
 
 
 @router.get("/{session_id}")
-def get_session(
+async def get_session(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.get_session(session_id)
+    return await svc.get_session(session_id)
 
 
 @router.post("", status_code=201)
@@ -204,7 +203,7 @@ async def create_session(
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
     return await svc.create_session(
-        body.workspace_id,
+        body.project_id,
         title=body.title,
         model_id=body.model_id,
         provider_id=body.provider_id,
@@ -217,17 +216,17 @@ async def create_session(
 
 
 @router.get("/{session_id}/events")
-def list_events(
+async def list_events(
     session_id: str,
     after_seq: int = 0,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionEventsResponse:
-    items = svc.list_events(session_id, after_seq=after_seq)
+    items = await svc.list_events(session_id, after_seq=after_seq)
     return SessionEventsResponse(session_id=session_id, items=items)
 
 
 @router.get("/{session_id}/events/window")
-def list_events_window(
+async def list_events_window(
     session_id: str,
     before_seq: int | None = None,
     turn_limit: int = 20,
@@ -242,7 +241,7 @@ def list_events_window(
     ``before_seq=items[0].seq, turn_limit=N`` → server returns the next
     older N turns. Loop terminates when ``has_more=false``.
     """
-    items, has_more = svc.list_events_window(
+    items, has_more = await svc.list_events_window(
         session_id,
         before_seq=before_seq,
         turn_limit=turn_limit,
@@ -288,16 +287,30 @@ async def send_message(
     session_id: str,
     body: SessionMessageRequest,
     svc: SessionService = Depends(get_session_service),
-    user: UserIdentity = Depends(get_current_user),
 ) -> SessionDetail:
     """Start agent execution in background. Returns immediately with running status."""
-    billing = get_billing_port()
-    budget = billing.check_budget(user.user_id, estimated_cost=0.0)
-    if not budget.allowed:
-        raise HTTPException(status_code=402, detail=budget.reason or "Budget exceeded")
-    return svc.send_message(
-        session_id, body.prompt, provider_id=body.provider_id, model_id=body.model_id
-    )
+    from valuz_agent.infra.auth_context import get_current_user_id
+
+    if get_current_user_id() is None:
+        raise HTTPException(status_code=401, detail="Unauthenticated")
+    try:
+        return await svc.send_message(
+            session_id, body.prompt, provider_id=body.provider_id, model_id=body.model_id
+        )
+    except BudgetExceeded as exc:
+        # The session service runs a channel-aware wallet pre-check before the
+        # turn. Surface its rejection as a 402 carrying the overlay's i18n
+        # ``key`` (+ ``params``) for the client to render; ``message`` is the
+        # no-translation fallback. (The global ValuzError handler returns 400
+        # and drops ``message_key``, so map it explicitly here.)
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "message_key": exc.message_key,
+                "message_params": exc.message_params,
+                "message": exc.message or "Budget exceeded",
+            },
+        ) from exc
 
 
 @router.post("/{session_id}/messages/sync")
@@ -311,19 +324,92 @@ async def send_message_sync(
 
 
 @router.post("/{session_id}/interrupt")
-def interrupt(
+async def interrupt(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.interrupt(session_id)
+    return await svc.interrupt(session_id)
+
+
+class QueuedInputCreate(BaseModel):
+    prompt: str
+    provider_id: str | None = None
+    model_id: str | None = None
+
+
+class QueuedInputPatch(BaseModel):
+    prompt: str
+
+
+@router.get("/{session_id}/queue")
+async def list_session_queue(
+    session_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """List a session's queued follow-up inputs (FIFO) + paused flag."""
+    return await svc.list_queue(session_id)
+
+
+@router.post("/{session_id}/queue")
+async def enqueue_session_input(
+    session_id: str,
+    body: QueuedInputCreate,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """Enqueue a follow-up input. Drains immediately if idle, else after the
+    active turn (docs/design/session-input-queue.md)."""
+    return await svc.enqueue(
+        session_id,
+        body.prompt,
+        provider_id=body.provider_id,
+        model_id=body.model_id,
+    )
+
+
+@router.patch("/{session_id}/queue/{queue_id}")
+async def edit_session_queued_input(
+    session_id: str,
+    queue_id: str,
+    body: QueuedInputPatch,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    return await svc.edit_queued(session_id, queue_id, body.prompt)
+
+
+@router.delete("/{session_id}/queue/{queue_id}")
+async def delete_session_queued_input(
+    session_id: str,
+    queue_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    return await svc.delete_queued(session_id, queue_id)
+
+
+@router.post("/{session_id}/queue/resume")
+async def resume_session_queue(
+    session_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """Resume draining a queue paused by an interrupt."""
+    return await svc.resume_queue(session_id)
+
+
+@router.post("/{session_id}/queue/{queue_id}/steer")
+async def steer_session_queued_input(
+    session_id: str,
+    queue_id: str,
+    svc: SessionService = Depends(get_session_service),
+) -> QueuedInputList:
+    """Steer — send a queued input now, silently interrupting the active turn."""
+    return await svc.steer_queued(session_id, queue_id)
 
 
 @router.post("/{session_id}/cancel")
-def cancel(
+async def cancel(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.cancel(session_id)
+    return await svc.cancel(session_id)
 
 
 @router.post("/{session_id}/regenerate")
@@ -332,28 +418,28 @@ async def regenerate(
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
     """Regenerate re-sends the last user message. Returns immediately."""
-    return svc.regenerate(session_id)
+    return await svc.regenerate(session_id)
 
 
 @router.patch("/{session_id}")
-def rename_session(
+async def rename_session(
     session_id: str,
     name: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return svc.rename_session(session_id, name)
+    return await svc.rename_session(session_id, name)
 
 
 @router.delete("/{session_id}", status_code=204)
-def delete_session(
+async def delete_session(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> None:
-    svc.delete_session(session_id)
+    await svc.delete_session(session_id)
 
 
 @router.patch("/{session_id}/permission-mode")
-def update_permission_mode(
+async def update_permission_mode(
     session_id: str,
     body: SessionPermissionModeRequest,
     svc: SessionService = Depends(get_session_service),
@@ -371,13 +457,13 @@ def update_permission_mode(
     only the Claude tier ships the LLM classifier today).
     """
     try:
-        return svc.set_permission_mode(session_id, body.permission_mode)
+        return await svc.set_permission_mode(session_id, body.permission_mode)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/{session_id}/effort")
-def update_session_effort(
+async def update_session_effort(
     session_id: str,
     body: SessionEffortRequest,
     svc: SessionService = Depends(get_session_service),
@@ -401,7 +487,7 @@ def update_session_effort(
     ``effort=null`` resets to the SDK default.
     """
     try:
-        return svc.set_session_effort(session_id, body.effort)
+        return await svc.set_session_effort(session_id, body.effort)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -430,20 +516,7 @@ async def submit_session_action(
         ``orchestrator.submit_action``; that error becomes a 400 here.
     """
 
-    # Import the kernel orchestrator's exception types here so the route
-    # file doesn't pull in kernel internals at module load (keeps the
-    # import surface narrow + matches existing patterns elsewhere).
-    from src.core.orchestrator import (  # type: ignore[import-not-found]
-        ApprovalNotImplementedError,
-        PendingActionConflictError,
-        PendingActionDecisionMismatchError,
-        PendingActionExpiredError,
-        PendingActionNotFoundError,
-        ProjectDeletedError,
-        ProjectNotFoundError,
-        RuntimeUnavailableError,
-        SessionNotFoundError,
-    )
+    from valuz_agent.adapters.kernel_client import KernelClientError
 
     try:
         result = await svc.submit_action(
@@ -454,52 +527,10 @@ async def submit_session_action(
             answers=body.answers,
             modified_input=body.modified_input,
         )
-    except SessionNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Session not found") from exc
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Project not found") from exc
-    except ProjectDeletedError as exc:
-        raise HTTPException(status_code=410, detail="Project deleted") from exc
-    except PendingActionNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Pending action {body.pending_id} not found",
-        ) from exc
-    except PendingActionDecisionMismatchError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Pending {exc.pending_id} subject={exc.subject!r} "
-                f"cannot accept decision={exc.decision!r}"
-            ),
-        ) from exc
-    except PendingActionConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Pending {exc.pending_id} already resolved as "
-                f"{exc.previous_decision}; cannot replace with "
-                f"{exc.requested_decision}"
-            ),
-        ) from exc
-    except PendingActionExpiredError as exc:
-        raise HTTPException(
-            status_code=410,
-            detail=f"Pending {exc.pending_id} already {exc.reason}; cannot decide",
-        ) from exc
-    except RuntimeUnavailableError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"No live runtime is awaiting decision for session {session_id}; "
-                "the turn has ended or the host restarted."
-            ),
-        ) from exc
-    except ApprovalNotImplementedError as exc:
-        raise HTTPException(
-            status_code=501,
-            detail=f"Runtime has not implemented the approval bridge: {exc}",
-        ) from exc
+    except KernelClientError as exc:
+        # The kernel seam already shaped the error HTTP-wise (the kernel
+        # route mapped its orchestrator exceptions); re-surface verbatim.
+        raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
     rule_id_raw = result.get("rule_id")
     return SessionActionResponse(
@@ -521,15 +552,15 @@ class SessionExtraSkillsResponse(BaseModel):
 
 
 @router.get("/{session_id}/skills")
-def get_session_extra_skills(
+async def get_session_extra_skills(
     session_id: str,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionExtraSkillsResponse:
-    return SessionExtraSkillsResponse(skill_ids=svc.get_extra_skills(session_id))
+    return SessionExtraSkillsResponse(skill_ids=await svc.get_extra_skills(session_id))
 
 
 @router.put("/{session_id}/skills")
-def set_session_extra_skills(
+async def set_session_extra_skills(
     session_id: str,
     body: SessionExtraSkillsRequest,
     svc: SessionService = Depends(get_session_service),
@@ -538,8 +569,8 @@ def set_session_extra_skills(
 
     skill-creator is always active and does not need to be listed here.
     """
-    svc.set_extra_skills(session_id, body.skill_ids)
-    return SessionExtraSkillsResponse(skill_ids=svc.get_extra_skills(session_id))
+    await svc.set_extra_skills(session_id, body.skill_ids)
+    return SessionExtraSkillsResponse(skill_ids=await svc.get_extra_skills(session_id))
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -611,6 +642,7 @@ def _row_to_item(row: SessionAttachmentRow) -> AttachmentItem:
 async def list_attachments(
     session_id: str,
     db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(require_current_user_id),
 ) -> AttachmentListResponse:
     """Return every attachment ever uploaded to ``session_id``.
 
@@ -620,9 +652,9 @@ async def list_attachments(
     client-side. The runtime path uses ``_load_pending_attachments``
     instead, which is pending-only.
     """
-    if await kernel_store.load_session(session_id) is None:
+    if await kernel_client.get_session(user_id, session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
-    rows = await SessionDatastore(db).list_attachments(session_id, include_consumed=True)
+    rows = await SessionDatastore(db).list_attachments(user_id, session_id, include_consumed=True)
     return AttachmentListResponse(items=[_row_to_item(r) for r in rows])
 
 
@@ -631,6 +663,7 @@ async def upload_attachment(
     session_id: str,
     file: UploadFile,
     db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(require_current_user_id),
 ) -> AttachmentItem:
     """Stream-write *file* into the session's attachment dir and persist a row.
 
@@ -641,13 +674,13 @@ async def upload_attachment(
     copies bytes — valuz holds the canonical store and the kernel only
     references it.
     """
-    if await kernel_store.load_session(session_id) is None:
+    if await kernel_client.get_session(user_id, session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
 
     # Session-wide attachment cap (local + KB-sourced counted together).
     from valuz_agent.infra.config import settings as _settings
 
-    current_count = len(await SessionDatastore(db).list_attachments(session_id))
+    current_count = len(await SessionDatastore(db).list_attachments(user_id, session_id))
     if current_count >= _settings.max_session_attachments:
         raise HTTPException(
             status_code=400,
@@ -658,27 +691,25 @@ async def upload_attachment(
             ),
         )
 
-    target_dir = fs_registry.attachment_dir(session_id)
+    from valuz_agent.ports.extensions import ext
+
     safe_name = (file.filename or "upload").replace("/", "_").replace("\\", "_")
     # Disambiguate if the same filename is uploaded twice. Don't try to be
     # clever about content hashing — the user can always rename later.
-    target = target_dir / safe_name
-    if target.exists():
-        stem = target.stem
-        suffix = target.suffix
+    name = safe_name
+    key = f"attachments/{session_id}/{name}"
+    if ext.asset_store.exists(user_id, key):
+        stem = Path(safe_name).stem
+        suffix = Path(safe_name).suffix
         i = 1
-        while target.exists():
-            target = target_dir / f"{stem}-{i}{suffix}"
+        while ext.asset_store.exists(user_id, key):
+            name = f"{stem}-{i}{suffix}"
+            key = f"attachments/{session_id}/{name}"
             i += 1
 
-    size = 0
-    with target.open("wb") as fh:
-        while True:
-            chunk = await file.read(64 * 1024)
-            if not chunk:
-                break
-            fh.write(chunk)
-            size += len(chunk)
+    data = await file.read()
+    size = len(data)
+    ext.asset_store.put(user_id, key, data)
 
     # Persist the row as ``parsing`` and kick the heavy parse off the event
     # loop in a background task. The parser (PyMuPDF / MarkItDown / RapidOCR)
@@ -691,53 +722,65 @@ async def upload_attachment(
     # additional-context builder).
     row = SessionAttachmentRow(
         session_id=session_id,
-        filename=file.filename or target.name,
-        stored_path=str(target),
+        filename=file.filename or name,
+        stored_path=key,
         parsed_path=None,
         parse_status="parsing",
         size_bytes=size,
         mime_type=file.content_type,
         source_kind="local",
     )
-    await SessionDatastore(db).create_attachment(row)
+    await SessionDatastore(db).create_attachment(user_id, row)
     await db.refresh(row)
-    _spawn_attachment_parse(row.id, str(target), target_dir, target.name)
+    _spawn_attachment_parse(row.id, key, session_id, name, user_id)
     return _row_to_item(row)
 
 
 def _write_parse_result(
-    result: Any, dest_dir: Path, base_name: str
-) -> tuple[str | None, str, str | None]:
+    result: Any, session_id: str, base_name: str, user_id: str
+) -> tuple[str | None, str, str | None, str | None]:
     """Write a ``ParseResult``'s markdown into ``dest_dir`` as
     ``{base_name}.parsed.md`` and classify the outcome.
 
-    Returns ``(parsed_path, parse_status, engine)``:
-    - ``("…/x.parsed.md", "ready", <plugin/engine>)`` when the parser produced
-      real markdown and reported no error.
-    - ``(None, "failed", <plugin/engine>)`` when there is no markdown OR the
-      result carries ``metadata["error"]`` (unsupported file, parser failure,
-      or a fallback-disabled cloud failure). Callers fall back to the raw
-      ``stored_path`` so the agent at least sees the original file.
+    Returns ``(parsed_path, parse_status, engine, error_message)``:
+    - ``("…/x.parsed.md", "ready", <plugin/engine>, None)`` when the parser
+      produced real markdown and reported no error.
+    - ``(None, "failed", <plugin/engine>, <reason>)`` when there is no markdown
+      OR the result carries ``metadata["error"]`` (unsupported file, parser
+      failure, or a fallback-disabled cloud failure). Callers fall back to the
+      raw ``stored_path`` so the agent at least sees the original file.
 
     ``engine`` records WHICH parser ran (``metadata["plugin_id"]`` — e.g.
     ``mineru`` / ``paddleocr`` / ``light_local`` — falling back to the
     per-format ``engine`` label) for provenance on the attachment row.
+
+    ``error_message`` carries the parser-reported reason on the failure path.
+    Parsers signal failure by RETURNING a ``ParseResult`` with
+    ``metadata["error"]`` (they don't raise — see ``ParserRouter`` /
+    ``LightLocalParser``), so without surfacing it here the real cause — e.g.
+    ``"model not found at …/magika/…"`` from a frozen build missing magika's
+    model data — was discarded with the markdown, leaving the attachment row's
+    ``error_message`` NULL and the failure undiagnosable from the DB.
     """
     meta = dict(getattr(result, "metadata", None) or {})
     engine = meta.get("plugin_id") or meta.get("engine")
     markdown = getattr(result, "markdown", "") or ""
-    if not markdown or meta.get("error"):
-        return None, "failed", engine
-    target = dest_dir / f"{base_name}.parsed.md"
+    error = meta.get("error")
+    if not markdown or error:
+        reason = str(error) if error else "parser produced no content"
+        return None, "failed", engine, reason[:2000]
+    from valuz_agent.ports.extensions import ext
+
+    parsed_key = f"attachments/{session_id}/{base_name}.parsed.md"
     i = 1
-    while target.exists():
-        target = dest_dir / f"{base_name}-{i}.parsed.md"
+    while ext.asset_store.exists(user_id, parsed_key):
+        parsed_key = f"attachments/{session_id}/{base_name}-{i}.parsed.md"
         i += 1
-    target.write_text(markdown, encoding="utf-8")
-    return str(target), "ready", engine
+    ext.asset_store.put(user_id, parsed_key, markdown.encode("utf-8"))
+    return parsed_key, "ready", engine, None
 
 
-async def _build_attachment_parser(db: Any) -> Any:
+async def _build_attachment_parser(db: Any, user_id: str) -> Any:
     """Build the configured ``ParserRouter`` for an attachment parse.
 
     Thin indirection over ``deps.build_parser_router`` so tests can monkeypatch
@@ -745,7 +788,7 @@ async def _build_attachment_parser(db: Any) -> Any:
     """
     from valuz_agent.api.deps import build_parser_router
 
-    return await build_parser_router(db)
+    return await build_parser_router(db, user_id)
 
 
 # Strong refs to in-flight parse tasks. ``asyncio`` only holds weak refs to
@@ -764,8 +807,25 @@ _PARSE_TASKS: set[asyncio.Task[None]] = set()
 _LOCAL_PARSE_SEMAPHORE = asyncio.Semaphore(2)
 
 
+# File types a vision-capable runtime can read directly. When the local parser
+# can't text-extract one of these (no OCR / enhanced model authorized), that is
+# NOT a failure — the raw file is handed to the runtime, which ingests it
+# natively. The parse is reclassified ``failed`` → ``native`` so the UI shows a
+# calm "model reads it" hint instead of a scary "Failed", and the turn still
+# ships the source file (``_attachment_specs`` always carries ``source_path``).
+_RUNTIME_NATIVE_EXTS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif"}
+)
+
+
+def _is_runtime_native(path: str) -> bool:
+    """True for files a vision runtime reads directly — a local-parse miss on
+    these is a passthrough (status ``native``), not a failure."""
+    return Path(path).suffix.lower() in _RUNTIME_NATIVE_EXTS
+
+
 def _spawn_attachment_parse(
-    attachment_id: str, source_path: str, dest_dir: Path, base_name: str
+    attachment_id: str, source: str, session_id: str, base_name: str, user_id: str
 ) -> None:
     """Parse ``source_path`` through the CONFIGURED parser and persist it.
 
@@ -803,19 +863,32 @@ def _spawn_attachment_parse(
             # Build the router in its OWN fresh session — the request's session
             # is closed by the time this background task runs.
             async with async_unit_of_work() as db:
-                router = await _build_attachment_parser(db)
-            if router.plugin_mode_for(source_path) == ParserPluginMode.ASYNC_POLL:
-                result = await router.parse(source_path)
+                router = await _build_attachment_parser(db, user_id)
+            from valuz_agent.modules.sessions.attachments import _resolve_asset_path
+
+            src_path = _resolve_asset_path(user_id, source)
+            if src_path is None:
+                raise FileNotFoundError(f"attachment source not found: {source}")
+            if router.plugin_mode_for(src_path) == ParserPluginMode.ASYNC_POLL:
+                result = await router.parse(src_path)
             else:
                 # Bound concurrent CPU-bound local parses (see semaphore note).
                 async with _LOCAL_PARSE_SEMAPHORE:
-                    result = await asyncio.to_thread(router.parse_sync, source_path)
-            parsed_path, parse_status, engine = _write_parse_result(
-                result, dest_dir, base_name
+                    result = await asyncio.to_thread(router.parse_sync, src_path)
+            parsed_path, parse_status, engine, error_message = _write_parse_result(
+                result, session_id, base_name, user_id
             )
         except Exception as exc:  # noqa: BLE001 — contain; never crash the loop
             logger.exception("Background parse failed for attachment %s", attachment_id)
             error_message = str(exc)
+        # Image (and other vision-readable) files the local parser couldn't
+        # text-extract are handed off to the runtime, which reads them
+        # natively — not a failure. ``parsed_path`` stays None (no text
+        # extract); only the original ships, which is exactly what the runtime
+        # needs.
+        if parse_status == "failed" and _is_runtime_native(base_name):
+            parse_status = "native"
+            error_message = None
         try:
             async with async_unit_of_work() as db:
                 await SessionDatastore(db).update_attachment_parse(
@@ -838,6 +911,7 @@ async def add_kb_attachments(
     session_id: str,
     body: AddKbAttachmentsRequest,
     db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(require_current_user_id),
 ) -> AttachmentListResponse:
     """Attach one or more KB documents to the session.
 
@@ -862,17 +936,17 @@ async def add_kb_attachments(
     docs return 400 with the offending id so the picker can surface
     the conflict instead of silently dropping the selection.
     """
-    if await kernel_store.load_session(session_id) is None:
+    if await kernel_client.get_session(user_id, session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     if not body.doc_ids:
         # Empty list is a no-op (picker confirmed with nothing
         # selected) — return the current attachment list instead of
         # erroring so the frontend doesn't need to special-case.
-        rows = await SessionDatastore(db).list_attachments(session_id)
+        rows = await SessionDatastore(db).list_attachments(user_id, session_id)
         return AttachmentListResponse(items=[_row_to_item(r) for r in rows])
 
     ds = SessionDatastore(db)
-    existing = await ds.list_attachments(session_id)
+    existing = await ds.list_attachments(user_id, session_id)
     already_attached = {r.source_kb_doc_id for r in existing if r.source_kind == "kb_doc"}
 
     from valuz_agent.infra.config import settings as _settings
@@ -894,11 +968,10 @@ async def add_kb_attachments(
         )
 
     doc_ds = DocumentDatastore(db)
-    target_dir = fs_registry.attachment_dir(session_id)
     for doc_id in body.doc_ids:
         if doc_id in already_attached:
             continue
-        doc = await doc_ds.get_by_id(doc_id)
+        doc = await doc_ds.get_by_id(user_id, doc_id)
         if doc is None:
             raise HTTPException(
                 status_code=400,
@@ -927,11 +1000,11 @@ async def add_kb_attachments(
             source_kb_id=doc.kb_id,
             source_kb_doc_id=doc.id,
         )
-        await ds.create_attachment(row)
+        await ds.create_attachment(user_id, row)
         await db.refresh(row)
-        _spawn_attachment_parse(row.id, doc.source_path, target_dir, safe_name)
+        _spawn_attachment_parse(row.id, doc.source_path, session_id, safe_name, user_id)
 
-    rows = await ds.list_attachments(session_id)
+    rows = await ds.list_attachments(user_id, session_id)
     return AttachmentListResponse(items=[_row_to_item(r) for r in rows])
 
 
@@ -940,6 +1013,7 @@ async def delete_attachment(
     session_id: str,
     attachment_id: str,
     db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(require_current_user_id),
 ) -> Response:
     """Remove a session attachment.
 
@@ -959,25 +1033,83 @@ async def delete_attachment(
     """
     import os
 
-    if await kernel_store.load_session(session_id) is None:
+    if await kernel_client.get_session(user_id, session_id) is None:
         raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
     ds = SessionDatastore(db)
-    row = await ds.get_attachment(attachment_id)
+    row = await ds.get_attachment(user_id, attachment_id)
     if row is None or row.session_id != session_id:
         raise HTTPException(status_code=404, detail=f"Attachment {attachment_id!r} not found")
     # Local rows own both paths; KB rows own only the parsed
     # derivative — their ``stored_path`` is a KB-owned source file.
+    from valuz_agent.ports.extensions import ext
+
     owned_paths = (
         (row.stored_path, row.parsed_path) if row.source_kind == "local" else (row.parsed_path,)
     )
-    for path in owned_paths:
-        if not path:
+    for ref in owned_paths:
+        if not ref:
             continue
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            logger.exception("Failed to unlink attachment file %s", path)
-    await ds.delete_attachment(attachment_id)
+        if os.path.isabs(ref):
+            # Legacy absolute path (or a kb_doc's KB-owned source, which never
+            # reaches here) — delete from the local filesystem as before.
+            try:
+                os.unlink(ref)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.exception("Failed to unlink attachment file %s", ref)
+        else:
+            ext.asset_store.delete(user_id, ref)
+    await ds.delete_attachment(user_id, attachment_id)
     return Response(status_code=204)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Artifacts (agent-delivered deliverables — the "生成文件" list)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class ArtifactItem(BaseModel):
+    id: str
+    session_id: str
+    file_path: str  # absolute path the agent wrote; the client opens this
+    file_name: str
+    file_size: int
+    mime_type: str | None = None
+    created_at: int
+
+
+class ArtifactListResponse(BaseModel):
+    items: list[ArtifactItem]
+
+
+@router.get("/{session_id}/artifacts")
+async def list_artifacts(
+    session_id: str,
+    db: AsyncSession = Depends(get_async_session),
+    user_id: str = Depends(require_current_user_id),
+) -> ArtifactListResponse:
+    """Return the files the agent delivered for ``session_id``.
+
+    These are recorded by the built-in ``deliver_artifacts`` MCP tool (the
+    inverse of the upload pipeline) and rendered in the session panel's
+    "生成文件" section. Durable — no per-turn staging — so the full set is
+    returned every time.
+    """
+    if await kernel_client.get_session(user_id, session_id) is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id!r} not found")
+    rows = await SessionDatastore(db).list_artifacts(user_id, session_id)
+    return ArtifactListResponse(
+        items=[
+            ArtifactItem(
+                id=r.id,
+                session_id=r.session_id,
+                file_path=r.file_path,
+                file_name=r.file_name,
+                file_size=r.file_size,
+                mime_type=r.mime_type,
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+    )

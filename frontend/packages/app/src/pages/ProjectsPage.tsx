@@ -1,49 +1,50 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
   Input,
   Textarea,
   ProjectCard,
   DirectoryPicker,
   DeleteConfirmDialog,
-  EmptyState,
   FormField,
   Button,
   PageLoader,
+  EmptyState,
+  FormDialog,
+  PageHeader,
 } from "@valuz/ui";
 import { toast } from "sonner";
 import { FolderKanban, Plus } from "lucide-react";
-import { workspacesApi, type WorkspaceListItem } from "@valuz/core";
+import { projectsApi, type ProjectListItem } from "@valuz/core";
 import { usePlatform } from "@valuz/app/platform";
 import { useTranslation } from "@valuz/core";
-import { useWorkspaceOutlet } from "@valuz/app/layout";
+import { useProjectOutlet } from "@valuz/app/layout";
+import { useAgentDeployPicker } from "../components/agent-deploy-picker";
+import { AgentCheckboxList } from "../components/AgentDeployField";
 
 export const ProjectsPage = () => {
   const { t } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const { selectDirectory } = usePlatform();
-  const { setHeader, setHeaderClassName } = useWorkspaceOutlet();
-  const [projects, setProjects] = useState<WorkspaceListItem[]>([]);
+  const { setHeader, setHeaderClassName } = useProjectOutlet();
+  const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [newRootPath, setNewRootPath] = useState("");
   const [createError, setCreateError] = useState("");
-  const [deleteTarget, setDeleteTarget] = useState<WorkspaceListItem | null>(
+  const [deleteTarget, setDeleteTarget] = useState<ProjectListItem | null>(
     null,
   );
+  const [busy, setBusy] = useState(false);
+  // Initial members for the create dialog (shared with the sidebar entry).
+  const memberPicker = useAgentDeployPicker();
 
   const fetchProjects = useCallback(async () => {
     try {
-      const data = await workspacesApi.list();
-      setProjects(data.workspaces.filter((w) => w.kind === "project"));
+      const data = await projectsApi.list();
+      setProjects(data.projects.filter((w) => w.kind === "project"));
     } catch {
       toast.error(t("project.loadFailed" as Parameters<typeof t>[0]));
     } finally {
@@ -66,25 +67,20 @@ export const ProjectsPage = () => {
 
   const pageHeader = useMemo(
     () => (
-      <div className="flex w-full items-center justify-between gap-4">
-        <div className="flex min-w-0 flex-col justify-center gap-1">
-          <span className="text-base font-semibold text-ink-heading">
-            {t("sidebar.projects" as Parameters<typeof t>[0])}
-          </span>
-          <span className="truncate text-xs text-ink-body">
-            {t("project.createDesc" as Parameters<typeof t>[0])}
-          </span>
-        </div>
-        <Button
-          variant="default"
-          size="sm"
-          className="shrink-0"
-          onClick={() => setCreateOpen(true)}
-        >
-          <Plus className="h-3.5 w-3.5" />
-          {t("project.create" as Parameters<typeof t>[0])}
-        </Button>
-      </div>
+      <PageHeader
+        title={t("sidebar.projects" as Parameters<typeof t>[0])}
+        description={t("project.createDesc" as Parameters<typeof t>[0])}
+        action={
+          <Button
+            variant="default"
+            size="sm"
+            onClick={() => setCreateOpen(true)}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {t("project.create" as Parameters<typeof t>[0])}
+          </Button>
+        }
+      />
     ),
     [t],
   );
@@ -111,14 +107,27 @@ export const ProjectsPage = () => {
     const trimmedPath = newRootPath.trim();
     if (!trimmedName || !trimmedPath) return;
     setCreateError("");
+    setBusy(true);
     try {
-      await workspacesApi.create({ name: trimmedName, root_path: trimmedPath });
+      const created = await projectsApi.create({
+        name: trimmedName,
+        root_path: trimmedPath,
+      });
+      const failed = await memberPicker.deploy(created.id);
+      if (failed > 0) {
+        toast.warning(
+          t("project.deployPartialFail" as Parameters<typeof t>[0], {
+            count: failed,
+          }),
+        );
+      }
       toast.success(
         t("project.created" as Parameters<typeof t>[0], { name: trimmedName }),
       );
       setNewName("");
       setNewDesc("");
       setNewRootPath("");
+      memberPicker.reset();
       setCreateOpen(false);
       void fetchProjects();
     } catch (err) {
@@ -131,13 +140,15 @@ export const ProjectsPage = () => {
       } else {
         setCreateError(message);
       }
+    } finally {
+      setBusy(false);
     }
   };
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
     try {
-      await workspacesApi.delete(deleteTarget.id);
+      await projectsApi.delete(deleteTarget.id);
       toast.success(
         t("project.deleted" as Parameters<typeof t>[0], {
           name: deleteTarget.name,
@@ -159,9 +170,10 @@ export const ProjectsPage = () => {
       return (
         <div className="flex flex-1 justify-center pt-[160px]">
           <EmptyState
-            icon={<FolderKanban />}
+            variant="plain"
             title={t("project.createTitle" as Parameters<typeof t>[0])}
-            message={t("project.emptyState" as Parameters<typeof t>[0])}
+            description={t("project.emptyState" as Parameters<typeof t>[0])}
+            icon={<FolderKanban className="h-5 w-5" />}
             action={
               <Button
                 variant="default"
@@ -200,70 +212,61 @@ export const ProjectsPage = () => {
       </div>
 
       {/* Create Project Dialog */}
-      <Dialog
+      <FormDialog
         open={createOpen}
         onOpenChange={(open) => {
           setCreateOpen(open);
-          if (!open) setCreateError("");
+          if (!open) {
+            setCreateError("");
+            memberPicker.reset();
+          }
         }}
+        title={t("common.create" as Parameters<typeof t>[0])}
+        description={t("project.instruction" as Parameters<typeof t>[0])}
+        onSubmit={() => void handleCreate()}
+        submitLabel={t("common.create" as Parameters<typeof t>[0])}
+        cancelLabel={t("common.cancel" as Parameters<typeof t>[0])}
+        loading={busy}
       >
-        <DialogContent className="gap-0 p-0">
-          <DialogHeader className="px-[18px] pt-[18px] pb-1">
-            <DialogTitle className="text-sm leading-5">
-              {t("common.create" as Parameters<typeof t>[0])}
-            </DialogTitle>
-            <DialogDescription>
-              {t("project.instruction" as Parameters<typeof t>[0])}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
-            <FormField label={t("common.name" as Parameters<typeof t>[0])}>
-              <Input
-                placeholder="my-project"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-              />
-            </FormField>
-            <FormField
-              label={t("project.fileTree" as Parameters<typeof t>[0])}
-              error={createError || undefined}
-            >
-              <DirectoryPicker
-                value={newRootPath}
-                placeholder={t(
-                  "knowledge.selectDir" as Parameters<typeof t>[0],
-                )}
-                onBrowse={() => void handleSelectDirectory()}
-              />
-              <p className="text-xs text-muted-foreground">
-                {t("project.fileTree" as Parameters<typeof t>[0])}
-              </p>
-            </FormField>
-            <FormField
-              label={t("common.description" as Parameters<typeof t>[0])}
-            >
-              <Textarea
-                placeholder={t(
-                  "project.instructionPlaceholder" as Parameters<typeof t>[0],
-                )}
-                value={newDesc}
-                onChange={(e) => setNewDesc(e.target.value)}
-              />
-            </FormField>
-          </div>
-          <DialogFooter className="px-[18px] pt-1 pb-4">
-            <Button variant="outline" onClick={() => setCreateOpen(false)}>
-              {t("common.cancel" as Parameters<typeof t>[0])}
-            </Button>
-            <Button
-              onClick={() => void handleCreate()}
-              disabled={!newName.trim() || !newRootPath.trim()}
-            >
-              {t("common.create" as Parameters<typeof t>[0])}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        <FormField label={t("common.name" as Parameters<typeof t>[0])}>
+          <Input
+            placeholder="my-project"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+          />
+        </FormField>
+        <FormField
+          label={t("project.fileTree" as Parameters<typeof t>[0])}
+          error={createError || undefined}
+        >
+          <DirectoryPicker
+            value={newRootPath}
+            placeholder={t(
+              "knowledge.selectDir" as Parameters<typeof t>[0],
+            )}
+            onBrowse={() => void handleSelectDirectory()}
+          />
+          <p className="text-xs text-muted-foreground">
+            {t("project.fileTree" as Parameters<typeof t>[0])}
+          </p>
+        </FormField>
+        <FormField
+          label={t("project.deployAgents" as Parameters<typeof t>[0])}
+        >
+          <AgentCheckboxList picker={memberPicker} />
+        </FormField>
+        <FormField
+          label={t("common.description" as Parameters<typeof t>[0])}
+        >
+          <Textarea
+            placeholder={t(
+              "project.instructionPlaceholder" as Parameters<typeof t>[0],
+            )}
+            value={newDesc}
+            onChange={(e) => setNewDesc(e.target.value)}
+          />
+        </FormField>
+      </FormDialog>
 
       {/* Delete Confirmation Dialog */}
       <DeleteConfirmDialog

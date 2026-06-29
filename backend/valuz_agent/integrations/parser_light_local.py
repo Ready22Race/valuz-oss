@@ -24,8 +24,8 @@ def _guess_mime(path: Path) -> str:
 
 
 def _build_rapidocr(rapidocr_cls: Any) -> Any:
-    """Construct ``RapidOCR`` preferring the user-authorized PP-OCRv5
-    bundle in ``~/.valuz/app/models/light_local/rapidocr/`` when the
+    """Construct ``RapidOCR`` preferring the user-authorized PP-OCRv6
+    bundle in ``~/.valuz-oss/models/light_local/rapidocr/`` when the
     READY marker is present. Falls back to the library's default
     behaviour (auto-download from ModelScope) when the marker is
     absent — that case only fires when the router's capability gate is
@@ -41,10 +41,10 @@ def _build_rapidocr(rapidocr_cls: Any) -> Any:
         target = fs_registry.parser_model_dir("light_local", "rapidocr")
         marker = target / "READY"
         if marker.exists():
-            det = target / "ch_PP-OCRv5_det_mobile.onnx"
-            cls = target / "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
-            rec = target / "ch_PP-OCRv5_rec_mobile.onnx"
-            keys = target / "ppocrv5_dict.txt"
+            det = target / "PP-OCRv6_medium_det.onnx"
+            cls = target / "PP-LCNet_x1_0_textline_ori.onnx"
+            rec = target / "PP-OCRv6_medium_rec.onnx"
+            keys = target / "ppocrv6_dict.txt"
             # ``cls`` is REQUIRED even though we disable it at inference:
             # rapidocr 3.x builds the Cls component (and loads its model) at
             # CONSTRUCTION time regardless of ``use_cls`` — a missing
@@ -58,8 +58,8 @@ def _build_rapidocr(rapidocr_cls: Any) -> Any:
                         "Rec.model_path": str(rec),
                         "Rec.rec_keys_path": str(keys),
                         # Disable the text-line orientation classifier at
-                        # INFERENCE. The bundled PP-OCRv5
-                        # ``..._textline_ori_cls_mobile.onnx`` has a FIXED input
+                        # INFERENCE. The bundled PaddlePaddle
+                        # ``PP-LCNet_x1_0_textline_ori.onnx`` has a FIXED input
                         # shape (80×160) that rapidocr 3.x's Cls preprocessing
                         # (48×192) doesn't match, so RUNNING it raises
                         # ``onnxruntime InvalidArgument: invalid dimensions for

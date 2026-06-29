@@ -32,7 +32,7 @@ Valuz OSS 是本地优先（local-first）的应用。Agent loop 和全部用户
         ▼                    ▼                      ▼
   ┌───────────┐      ┌───────────────┐      ┌──────────────┐
   │ SQLite    │      │ 本地文件系统    │      │ LLM 服务      │
-  │ (应用库)  │      │ (~/.valuz,     │      │ + 可选         │
+  │ (应用库)  │      │ (~/.valuz-oss, │      │ + 可选         │
   │           │      │  工作空间)      │      │ Reportify     │
   └───────────┘      └───────────────┘      └──────────────┘
 ```
@@ -114,12 +114,19 @@ OAuth 页面，以及对外的 HTTP 接口。宿主自有的表以 `valuz_*` 为
 
 ## 3. 数据层
 
-宿主与内核共享**同一个 SQLite 文件**，位于 `~/.valuz/app/valuz.db`。两层都完全运行在
-`aiosqlite` 之上的**异步**模式。WAL 日志加上 `busy_timeout` 保证宿主/内核并发访问安全。
+宿主与内核使用 `~/.valuz-oss/` 下的**两个独立 SQLite 文件**：宿主的 `valuz.db`
+（`valuz_*` 业务表）与内核自有的 `kernel.db`（`sessions` / `messages` / `events`、
+其 langgraph checkpoint 表，以及内核 `alembic_version`）。这一拆分让沙箱/远程内核独占
+自己的文件，并让进程内（`make dev`）与沙箱（`make dev-sandbox`）内核共享同一份 session
+历史；若显式设置 `database_url`（如共享 Postgres）则两层仍共置于同一存储。两层都完全运行
+在 `aiosqlite` 之上的**异步**模式，WAL 日志加上 `busy_timeout` 保证并发访问安全。
 
-- 宿主全部 DB 访问经由 `infra/db.py`（`async_unit_of_work` / `get_async_session`）。
+- 宿主全部 DB 访问经由 `infra/db.py`（`async_unit_of_work` / `get_async_session`）；宿主
+  绝不在自己的引擎上查询内核表——内核状态一律经 `KernelClient` seam 访问。
 - 同步 DB 调用绝不可运行在事件循环上——宿主已从同步引擎迁出，以消除事件循环死锁。
-- schema 在启动时创建并迁移：宿主迁移（Alembic + seed）与内核迁移（内核自有 Alembic）在 `boot/` 中运行。
+- schema 在启动时创建并迁移：宿主迁移（Alembic + seed）与内核迁移（内核自有 Alembic）在
+  `boot/` 中运行。一个一次性启动步骤（`boot/kernel_db_split.py`）会把旧版 `valuz.db` 中的
+  内核表迁移进 `kernel.db`（备份 → 拷贝 → 校验 → 删除），升级时保留既有历史。
 
 ---
 
@@ -169,7 +176,7 @@ member 把 manifest 同步返回到 lead 的工具调用中，lead 再审阅它�
 
 宿主自有的全部写入都流经 `valuz_agent.infra.fs_registry.FsRegistry`。
 在 `infra/config.py` 与注册表自身之外，禁止直接使用 `Path.home()` 或硬编码的 `~/.claude/...`。
-内核在每个 `project.cwd` 之下管理自己的子树；注册表通过 `workspace_cwd(...)` 把该 cwd 交给内核，
+内核在每个 `project.cwd` 之下管理自己的子树；注册表通过 `project_cwd(...)` 把该 cwd 交给内核，
 内核从那里接管。
 
 密钥（API Key、OAuth token）通过 secret store 存于操作系统钥匙串，绝不以明文落盘。

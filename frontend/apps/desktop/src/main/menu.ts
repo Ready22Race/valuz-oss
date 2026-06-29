@@ -23,48 +23,52 @@ export const buildAppMenu = ({
   checkForUpdates,
 }: BuildAppMenuOptions) => {
   const isMac = process.platform === "darwin";
+  // Localize role-based items via the app i18n so the submenus follow the
+  // in-app language — Electron would otherwise auto-label role items in the
+  // OS locale, leaving the expanded menus out of sync with the UI.
+  const tl = (key: string) => t(key as Parameters<typeof t>[0]);
 
   const appSubmenu: MenuItemConstructorOptions[] = [
-    { role: "about" },
+    { role: "about", label: tl("menu.about") },
     separator,
     {
-      label: "Check for Updates",
+      label: tl("menu.checkForUpdates"),
       click: () => {
         void checkForUpdates();
       },
     },
     separator,
-    { role: "services" },
+    { role: "services", label: tl("menu.services") },
     separator,
-    { role: "hide" },
-    { role: "hideOthers" },
-    { role: "unhide" },
+    { role: "hide", label: tl("menu.hide") },
+    { role: "hideOthers", label: tl("menu.hideOthers") },
+    { role: "unhide", label: tl("menu.unhide") },
     separator,
-    { role: "quit" },
+    { role: "quit", label: tl("menu.quit") },
   ];
 
   const editSubmenu: MenuItemConstructorOptions[] = isMac
     ? [
-        { role: "undo" },
-        { role: "redo" },
+        { role: "undo", label: tl("menu.undo") },
+        { role: "redo", label: tl("menu.redo") },
         separator,
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        { role: "pasteAndMatchStyle" },
-        { role: "delete" },
-        { role: "selectAll" },
+        { role: "cut", label: tl("menu.cut") },
+        { role: "copy", label: tl("menu.copy") },
+        { role: "paste", label: tl("menu.paste") },
+        { role: "pasteAndMatchStyle", label: tl("menu.pasteAndMatchStyle") },
+        { role: "delete", label: tl("menu.delete") },
+        { role: "selectAll", label: tl("menu.selectAll") },
       ]
     : [
-        { role: "undo" },
-        { role: "redo" },
+        { role: "undo", label: tl("menu.undo") },
+        { role: "redo", label: tl("menu.redo") },
         separator,
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        { role: "delete" },
+        { role: "cut", label: tl("menu.cut") },
+        { role: "copy", label: tl("menu.copy") },
+        { role: "paste", label: tl("menu.paste") },
+        { role: "delete", label: tl("menu.delete") },
         separator,
-        { role: "selectAll" },
+        { role: "selectAll", label: tl("menu.selectAll") },
       ];
 
   const template: MenuItemConstructorOptions[] = [];
@@ -78,42 +82,52 @@ export const buildAppMenu = ({
 
   template.push(
     {
-      label: "File",
+      label: t("menu.file" as Parameters<typeof t>[0]),
       submenu: [
         {
-          label: "Reload Window",
+          label: t("menu.reloadWindow" as Parameters<typeof t>[0]),
           accelerator: "CmdOrCtrl+R",
           click: () => {
             getMainWindow()?.reload();
           },
         },
         separator,
-        isMac ? { role: "close" } : { role: "quit" },
+        isMac
+          ? { role: "close", label: tl("menu.close") }
+          : { role: "quit", label: tl("menu.quit") },
       ],
     },
     {
-      label: "Edit",
+      label: t("menu.edit" as Parameters<typeof t>[0]),
       submenu: editSubmenu,
     },
     {
-      label: "View",
+      label: t("menu.view" as Parameters<typeof t>[0]),
       submenu: [
-        { role: "reload" },
-        { role: "forceReload" },
-        { role: "toggleDevTools" },
+        { role: "reload", label: tl("menu.reload") },
+        { role: "forceReload", label: tl("menu.forceReload") },
+        { role: "toggleDevTools", label: tl("menu.toggleDevTools") },
         separator,
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
+        { role: "resetZoom", label: tl("menu.resetZoom") },
+        { role: "zoomIn", label: tl("menu.zoomIn") },
+        { role: "zoomOut", label: tl("menu.zoomOut") },
         separator,
-        { role: "togglefullscreen" },
+        { role: "togglefullscreen", label: tl("menu.toggleFullScreen") },
       ],
     },
     {
-      label: "Window",
+      label: t("menu.window" as Parameters<typeof t>[0]),
       submenu: isMac
-        ? [{ role: "minimize" }, { role: "zoom" }, separator, { role: "front" }]
-        : [{ role: "minimize" }, { role: "close" }],
+        ? [
+            { role: "minimize", label: tl("menu.minimize") },
+            { role: "zoom", label: tl("menu.zoom") },
+            separator,
+            { role: "front", label: tl("menu.front") },
+          ]
+        : [
+            { role: "minimize", label: tl("menu.minimize") },
+            { role: "close", label: tl("menu.close") },
+          ],
     },
     {
       label: t("cli.menuLabel" as Parameters<typeof t>[0]),
@@ -134,11 +148,12 @@ export const buildAppMenu = ({
     },
     {
       role: "help",
+      label: tl("menu.help"),
       submenu: [
         {
-          label: "Valuz Website",
+          label: t("menu.website" as Parameters<typeof t>[0]),
           click: () => {
-            void shell.openExternal("https://valuz.ai");
+            void shell.openExternal("https://valuz.io");
           },
         },
       ],

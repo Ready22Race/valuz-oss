@@ -115,6 +115,14 @@ export const registerIpcHandlers = () => {
     }
   });
 
+  // Renderer asks for the runtime app version. In a packaged build this is
+  // the value electron-builder stamped from package.json (which build-desktop.sh
+  // overwrites with the git tag), so it's the single authoritative version the
+  // user is actually running — independent of the backend's pyproject version.
+  ipcMain.handle("app_get_version", async () => {
+    return app.getVersion();
+  });
+
   // Brand-logo dropdown's "关闭" item — quits the entire client and
   // every spawned sidecar. ``app.quit()`` triggers ``before-quit``,
   // which already calls ``desktopRuntime.stopAllServices()`` (see
@@ -146,6 +154,50 @@ export const registerIpcHandlers = () => {
       stdio: "ignore",
     });
     child.unref();
+  });
+
+  // Window control IPC — minimze, maximize/restore, close, and state query.
+  // Used by the custom WindowControls component in the renderer TopBar on
+  // Windows and Linux (macOS uses native traffic-light buttons instead).
+  ipcMain.handle("window_minimize", async () => {
+    getMainWindow()?.minimize();
+  });
+
+  ipcMain.handle("window_maximize", async () => {
+    const win = getMainWindow();
+    if (!win) return false;
+    if (win.isMaximized()) {
+      win.unmaximize();
+      return false;
+    }
+    win.maximize();
+    return true;
+  });
+
+  ipcMain.handle("window_close", async () => {
+    getMainWindow()?.close();
+  });
+
+  ipcMain.handle("window_is_maximized", async () => {
+    return getMainWindow()?.isMaximized() ?? false;
+  });
+
+  ipcMain.handle("window_reload", async () => {
+    getMainWindow()?.reload();
+  });
+
+  ipcMain.handle("window_toggle_devtools", async () => {
+    const win = getMainWindow();
+    if (win) {
+      win.webContents.toggleDevTools();
+    }
+  });
+
+  ipcMain.handle("window_toggle_fullscreen", async () => {
+    const win = getMainWindow();
+    if (win) {
+      win.setFullScreen(!win.isFullScreen());
+    }
   });
 
   ipcMain.handle(

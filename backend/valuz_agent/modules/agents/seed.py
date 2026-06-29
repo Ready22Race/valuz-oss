@@ -32,6 +32,12 @@ _SEED_PATH = Path(__file__).resolve().parent.parent.parent / "resources" / "agen
 # Editable, not deletable; its brain mirrors the Settings global model default.
 DEFAULT_ASSISTANT_SLUG = "default-assistant"
 
+# The onboarding-created general assistant (Valuz 小助手). OSS ships an empty
+# seed.json, so on real installs THIS is the de-facto default assistant; the
+# slug lives here (next to DEFAULT_ASSISTANT_SLUG) so every consumer that
+# needs "the default agent" resolves the same well-known candidates.
+VALUZ_HELPER_SLUG = "valuz-helper"
+
 
 def _load_agent_definitions() -> list[dict[str, Any]]:
     """Load official agent definitions from the bundled JSON seed file."""
@@ -43,6 +49,9 @@ _OFFICIAL_AGENTS: list[dict[str, Any]] = _load_agent_definitions()
 
 
 async def seed_official_agents(db: AsyncSession) -> None:
+    from valuz_agent.infra.local_identity import resolve_local_user_id
+
+    _owner = resolve_local_user_id()
     """Insert official Agent rows if absent.
 
     Insert-if-absent (not upsert): agents are now user-editable, so a boot
@@ -57,7 +66,7 @@ async def seed_official_agents(db: AsyncSession) -> None:
     ds = AgentDatastore(db)
     created = 0
     for defn in _OFFICIAL_AGENTS:
-        if await ds.get_agent(defn["slug"]) is not None:
+        if await ds.get_agent(_owner, defn["slug"]) is not None:
             continue
         row = AgentRow(
             slug=defn["slug"],
@@ -79,7 +88,7 @@ async def seed_official_agents(db: AsyncSession) -> None:
             readonly=defn.get("readonly", False),
             deletable=defn.get("deletable", True),
         )
-        await ds.create(row)
+        await ds.create(_owner, row)
         created += 1
 
     logger.info("seed_official_agents: inserted %d new official agent(s)", created)

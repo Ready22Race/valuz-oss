@@ -1,59 +1,28 @@
 from __future__ import annotations
 
+import logging
+import mimetypes
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
-from valuz_agent.adapters import kernel_store, kernel_sync
+from pydantic import BaseModel, ConfigDict, Field
+
+from valuz_agent.adapters import kernel_client
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
-from valuz_agent.infra.time_utils import now_ms
-from valuz_agent.integrations.tools_skill_creator import (
-    SUBMIT_SKILL_TOOL_DECLARATION,
-    SUBMIT_SKILL_TOOL_NAME,
-)
 from valuz_agent.modules.automations.datastore import AutomationDatastore
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
-from valuz_agent.modules.projects.datastore import WorkspaceDatastore
-from valuz_agent.modules.projects.models import WorkspaceContextRow, WorkspaceRow
+from valuz_agent.modules.projects.datastore import ProjectDatastore
+from valuz_agent.modules.projects.models import ProjectRow
+from valuz_agent.modules.sessions import project_index
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.skills.datastore import SkillDatastore
 
-
-def _ensure_submit_skill_declared(prior_tools: tuple) -> tuple:  # type: ignore[type-arg]
-    """Add the ``submit_skill`` declaration if the agent doesn't already
-    have one. Idempotent — re-mirrors leave the tuple unchanged."""
-    for tool in prior_tools:
-        if getattr(tool, "name", None) == SUBMIT_SKILL_TOOL_NAME:
-            return prior_tools
-    return tuple(prior_tools) + (SUBMIT_SKILL_TOOL_DECLARATION,)
-
-
-def _ensure_memory_tools_declared(prior_tools: tuple) -> tuple:  # type: ignore[type-arg]
-    """Declare memory_get / memory_write on the agent so the runtime surfaces
-    them to the model (handlers are attached from the registry at runtime).
-    Idempotent — only appends declarations the agent is missing."""
-    from valuz_agent.modules.memory.tools import MEMORY_TOOL_DECLARATIONS
-
-    have = {getattr(t, "name", None) for t in prior_tools}
-    missing = tuple(d for d in MEMORY_TOOL_DECLARATIONS if d.name not in have)
-    return tuple(prior_tools) + missing if missing else tuple(prior_tools)
-
-
-def _ensure_orchestration_declared(prior_tools: tuple) -> tuple:  # type: ignore[type-arg]
-    """Declare the task launcher/observability tools (create_task / list_tasks /
-    get_task) on the workspace synthetic agent so a PROJECT conversation can
-    spawn + track tasks (VALUZ-TASK / M10 附录 E). Gated to project workspaces at
-    call time by ``_check_orchestration_gate`` — harmless on chat-default
-    workspaces. Idempotent. (The per-task lead clone strips these — they are
-    conversation-only.)"""
-    from valuz_agent.modules.tasks.dispatch_mcp import ORCHESTRATION_TOOL_DECLARATIONS
-
-    have = {getattr(t, "name", None) for t in prior_tools}
-    missing = tuple(d for d in ORCHESTRATION_TOOL_DECLARATIONS if d.name not in have)
-    return tuple(prior_tools) + missing if missing else tuple(prior_tools)
-
+logger = logging.getLogger(__name__)
 
 # Kernel V5+1aae940 collapses ``permission_mode`` to a 3-value enum;
 # every legacy value (set on dev DBs by the previous host code) maps to
@@ -82,29 +51,76 @@ HIDDEN_NAMES = frozenset(
     }
 )
 
+TEXT_PREVIEW_LIMIT = 5 * 1024 * 1024
+DOCX_PARSE_PREVIEW_LIMIT = 20 * 1024 * 1024
+SPREADSHEET_PARSE_PREVIEW_LIMIT = 100 * 1024 * 1024
+IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "svg"})
+MEDIA_EXTENSIONS = frozenset({"mp3", "wav", "m4a", "ogg", "mp4", "webm", "mov"})
+MARKDOWN_EXTENSIONS = frozenset({"md", "markdown", "mdx"})
+CODE_EXTENSIONS = frozenset(
+    {
+        "py",
+        "ts",
+        "tsx",
+        "js",
+        "jsx",
+        "json",
+        "yml",
+        "yaml",
+        "xml",
+        "css",
+        "scss",
+        "sh",
+        "bash",
+        "zsh",
+        "toml",
+        "ini",
+        "cfg",
+        "sql",
+        "go",
+        "rs",
+        "java",
+        "c",
+        "cpp",
+        "h",
+        "rb",
+        "php",
+        "swift",
+        "kt",
+        "vue",
+        "svelte",
+        "astro",
+    }
+)
+PLAIN_EXTENSIONS = frozenset(
+    {"txt", "log", "env", "gitignore", "dockerignore", "editorconfig"}
+)
+HTML_EXTENSIONS = frozenset({"html", "htm"})
+DOCX_EXTENSIONS = frozenset({"docx"})
+SPREADSHEET_EXTENSIONS = frozenset({"csv", "xls", "xlsx"})
+
 
 @dataclass
-class WorkspaceListItem:
+class ProjectListItem:
     id: str
     name: str
     kind: str
     root_path: str | None
     icon: str | None
     # Resolved working directory the kernel runs sessions in. For project
-    # workspaces this equals ``root_path``; for chat workspaces it's the
-    # managed dir under ``data_dir/workspaces/{id}/``. Surfaced so the
+    # projects this equals ``root_path``; for chat projects it's the
+    # managed dir under ``data_dir/projects/{id}/``. Surfaced so the
     # UI can offer "Open in Finder" without a second detail fetch.
     cwd: str | None = None
 
 
 @dataclass
-class WorkspaceDetail(WorkspaceListItem):
+class ProjectDetail(ProjectListItem):
     instructions_md: str | None = None
-    memory_summary: str | None = None
 
 
 @dataclass
-class WorkspaceDeletePreview:
+class ProjectDeletePreview:
     session_count: int
     doc_binding_count: int
     schedule_count: int
@@ -120,8 +136,80 @@ class FileNode:
     children: list[FileNode] = field(default_factory=list)
 
 
-def _row_to_list_item(row: WorkspaceRow, cwd: str | None = None) -> WorkspaceListItem:
-    return WorkspaceListItem(
+class ArtifactCapabilities(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    can_preview: bool = Field(serialization_alias="canPreview")
+    can_edit: bool = Field(serialization_alias="canEdit")
+    can_open_external: bool = Field(serialization_alias="canOpenExternal")
+    can_copy_content: bool = Field(serialization_alias="canCopyContent")
+    can_download: bool = Field(serialization_alias="canDownload")
+
+
+class ArtifactDescriptor(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    kind: str
+    project_id: str = Field(serialization_alias="projectId")
+    path: str
+    name: str
+    preview_kind: str = Field(serialization_alias="previewKind")
+    capabilities: ArtifactCapabilities
+    mime_type: str | None = Field(default=None, serialization_alias="mimeType")
+    extension: str | None = None
+    size: int | None = None
+    modified_at: str | None = Field(default=None, serialization_alias="modifiedAt")
+
+
+class TextArtifactContent(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: str
+    encoding: str
+    content: str
+    truncated: bool
+    etag: str | None = None
+    modified_at: str | None = Field(default=None, serialization_alias="modifiedAt")
+
+
+class BinaryArtifactContent(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: str
+    open_url: str = Field(serialization_alias="openUrl")
+    mime_type: str = Field(serialization_alias="mimeType")
+    size: int | None = None
+    reason: str | None = None
+
+
+class ExternalArtifactContent(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: str
+    reason: str
+    open_url: str | None = Field(default=None, serialization_alias="openUrl")
+
+
+ArtifactContent = TextArtifactContent | BinaryArtifactContent | ExternalArtifactContent
+
+
+class ArtifactFileResponse(BaseModel):
+    artifact: ArtifactDescriptor
+    content: ArtifactContent
+
+
+@dataclass(frozen=True)
+class ProjectFileResource:
+    path: Path
+    rel_path: str
+    name: str
+    mime_type: str | None
+    size: int
+
+
+def _row_to_list_item(row: ProjectRow, cwd: str | None = None) -> ProjectListItem:
+    return ProjectListItem(
         id=row.id,
         name=row.name,
         kind=row.kind,
@@ -132,27 +220,42 @@ def _row_to_list_item(row: WorkspaceRow, cwd: str | None = None) -> WorkspaceLis
 
 
 def _row_to_detail(
-    row: WorkspaceRow,
+    row: ProjectRow,
     instructions_md: str | None = None,
-    memory_summary: str | None = None,
     cwd: str | None = None,
-) -> WorkspaceDetail:
-    return WorkspaceDetail(
+) -> ProjectDetail:
+    return ProjectDetail(
         id=row.id,
         name=row.name,
         kind=row.kind,
         root_path=row.root_path,
         icon=row.icon,
         instructions_md=instructions_md,
-        memory_summary=memory_summary,
         cwd=cwd,
     )
 
 
-class WorkspaceService:
+async def project_cwd_by_id(user_id: str, project_id: str) -> str | None:
+    """Resolve a project's session cwd by id — module-level so sibling
+    modules (memory scope, prompt context, skills staging) can call it
+    without wiring a ProjectService. Opens its own unit of work."""
+    if not project_id:
+        return None
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
+
+    async with async_unit_of_work(commit=False) as db:
+        row = await ProjectDatastore(db).get_by_id(user_id, project_id)
+    if row is None:
+        return None
+    kind = row.kind if row.kind in ("chat", "project") else "chat"
+    return str(fs_registry.project_cwd(row.id, kind, row.root_path))  # type: ignore[arg-type]
+
+
+class ProjectService:
     def __init__(
         self,
-        datastore: WorkspaceDatastore,
+        datastore: ProjectDatastore,
         event_bus: EventBus,
         session_datastore: SessionDatastore | None = None,
         document_datastore: DocumentDatastore | None = None,
@@ -164,7 +267,7 @@ class WorkspaceService:
         self._bus = event_bus
         self._sessions = session_datastore
         self._docs = document_datastore
-        # Automation count surfaces in the workspace delete-preview as the
+        # Automation count surfaces in the project delete-preview as the
         # ``schedule_count`` field — kept that name on the response model in
         # this slice for frontend compatibility; renamed to
         # ``automation_count`` in S5.
@@ -172,22 +275,20 @@ class WorkspaceService:
         self._skills = skill_datastore
         self._connectors = connector_datastore
 
-    async def ensure_chat_workspace(self) -> None:
-        existing = await self._ds.get_chat_workspace()
+    async def ensure_chat_project(self, user_id: str) -> None:
+        existing = await self._ds.get_chat_project(user_id)
         if existing:
-            self._ensure_kernel_mirror(existing, instructions_md=None)
             return
-        row = WorkspaceRow(name="Chat", kind="chat", sort_order=0)
-        await self._ds.create(row)
-        self._ensure_kernel_mirror(row, instructions_md=None)
+        row = ProjectRow(name="Chat", kind="chat", sort_order=0)
+        await self._ds.create(user_id, row)
 
-    async def create_chat_workspace_for_session(self, name: str = "Chat") -> WorkspaceRow:
-        """Materialize a fresh, ephemeral chat workspace for one chat-kind context.
+    async def create_chat_project_for_session(self, name: str = "Chat") -> ProjectRow:
+        """Materialize a fresh, ephemeral chat project for one chat-kind context.
 
-        Each call creates a NEW ``WorkspaceRow(kind="chat")`` and mirrors it
+        Each call creates a NEW ``ProjectRow(kind="chat")`` and mirrors it
         into a dedicated kernel project + agent (1:1 by id). The kernel
-        project gets its own cwd at ``data_dir/workspaces/{ws_id}/`` via
-        ``fs_registry.workspace_cwd``, so every chat session runs in an
+        project gets its own cwd at ``data_dir/projects/{ws_id}/`` via
+        ``fs_registry.project_cwd``, so every chat session runs in an
         isolated directory and can't trip over files written by sibling
         chats.
 
@@ -197,385 +298,184 @@ class WorkspaceService:
           automation name so the run list grouping reads naturally
           ("Chat: 每日新闻摘要") instead of N anonymous "Chat" groups.
 
-        The singleton chat workspace seeded by ``ensure_chat_workspace``
+        The singleton chat project seeded by ``ensure_chat_project``
         is left in place — it remains the scope key (``"chat-default"``)
         for chat-skills configuration, which is global across all chat
-        sessions, not bound to any single chat workspace's id.
+        sessions, not bound to any single chat project's id.
         """
-        row = WorkspaceRow(name=name, kind="chat", sort_order=100)
-        await self._ds.create(row)
-        self._ensure_kernel_mirror(row, instructions_md=None)
+        row = ProjectRow(name=name, kind="chat", sort_order=100)
+        await self._ds.create(require_current_user_id(), row)
         return row
 
-    async def ensure_all_kernel_mirrors(self) -> None:
-        """Reconcile every valuz workspace into the kernel project/agent tables.
+    async def list_projects(self, user_id: str) -> list[ProjectListItem]:
+        rows = await self._ds.list_projects(user_id)
+        return [_row_to_list_item(r, cwd=self.resolve_project_cwd(r)) for r in rows]
 
-        Idempotent boot-time safety net for two cases:
-
-        1. Pre-existing workspaces that were created before the kernel-mirror
-           code was wired in (e.g. the chat-default row in databases stamped
-           by an early build).
-        2. Workspaces whose kernel mirror was lost (manual DB editing, a kernel
-           migration that dropped/recreated tables, etc.).
-
-        Without this, ``orchestrator.run_turn`` raises ``ProjectNotFoundError``
-        on the first send into the affected workspace — manifests as quick
-        chat / skill-creator chat failing with category "ProjectNotFoundError".
-        """
-        # Always ensure the chat workspace exists first (creates the row if
-        # missing AND mirrors to kernel).
-        await self.ensure_chat_workspace()
-        # Then walk every other workspace and re-mirror.
-        for row in await self._ds.list_workspaces():
-            ctx = await self._ds.get_context(row.id)
-            self._ensure_kernel_mirror(row, instructions_md=ctx.instructions_md if ctx else None)
-
-    async def list_workspaces(self) -> list[WorkspaceListItem]:
-        rows = await self._ds.list_workspaces()
-        return [_row_to_list_item(r, cwd=self._resolve_kernel_cwd(r)) for r in rows]
-
-    async def get_workspace(self, workspace_id: str) -> WorkspaceDetail:
-        if workspace_id == "chat-default":
-            row = await self._ds.get_chat_workspace()
+    async def get_project(self, user_id: str, project_id: str) -> ProjectDetail:
+        if project_id == "chat-default":
+            row = await self._ds.get_chat_project(user_id)
             if not row:
-                await self.ensure_chat_workspace()
-                row = await self._ds.get_chat_workspace()
+                await self.ensure_chat_project(user_id)
+                row = await self._ds.get_chat_project(user_id)
             if row:
-                ctx = await self._ds.get_context(row.id)
                 return _row_to_detail(
                     row,
-                    instructions_md=ctx.instructions_md if ctx else None,
-                    memory_summary=ctx.memory_summary if ctx else None,
-                    cwd=self._resolve_kernel_cwd(row),
+                    instructions_md=row.instructions_md,
+                    cwd=self.resolve_project_cwd(row),
                 )
-        row = await self._ds.get_by_id(workspace_id)
+        row = await self._ds.get_by_id(user_id, project_id)
         if not row:
-            raise KeyError(workspace_id)
-        ctx = await self._ds.get_context(workspace_id)
+            raise KeyError(project_id)
         return _row_to_detail(
             row,
-            instructions_md=ctx.instructions_md if ctx else None,
-            memory_summary=ctx.memory_summary if ctx else None,
-            cwd=self._resolve_kernel_cwd(row),
+            instructions_md=row.instructions_md,
+            cwd=self.resolve_project_cwd(row),
         )
 
-    async def create_project(self, name: str, root_path: str) -> WorkspaceDetail:
+    async def create_project(self, user_id: str, name: str, root_path: str) -> ProjectDetail:
         abs_path = str(Path(root_path).resolve())
-        existing = await self._ds.get_by_root_path(abs_path)
+        existing = await self._ds.get_by_root_path(user_id, abs_path)
         if existing:
             raise ValueError(f"Directory already bound to project '{existing.name}'")
-        row = WorkspaceRow(name=name, kind="project", root_path=abs_path, sort_order=10)
-        await self._ds.create(row)
-        ctx = WorkspaceContextRow(
-            workspace_id=row.id,
-            instructions_md=None,
-            memory_summary=None,
-            memory_version=0,
-            updated_at=now_ms(),
-        )
-        await self._ds.upsert_context(ctx)
-        self._ensure_kernel_mirror(row, instructions_md=None)
-        return _row_to_detail(row, cwd=self._resolve_kernel_cwd(row))
+        row = ProjectRow(name=name, kind="project", root_path=abs_path, sort_order=10)
+        await self._ds.create(user_id, row)
+        return _row_to_detail(row, cwd=self.resolve_project_cwd(row))
 
-    async def rename_workspace(self, workspace_id: str, name: str) -> WorkspaceDetail:
-        row = await self._ds.get_by_id(workspace_id)
+    async def rename_project(self, user_id: str, project_id: str, name: str) -> ProjectDetail:
+        row = await self._ds.get_by_id(user_id, project_id)
         if not row:
-            raise KeyError(workspace_id)
+            raise KeyError(project_id)
         if row.kind == "chat":
-            raise ValueError("Chat workspace cannot be renamed")
+            raise ValueError("Chat project cannot be renamed")
         row.name = name
         await self._ds.update(row)
-        # Keep the kernel project's display name in lock-step. Pass the row we
-        # already loaded so the sync ``kernel_sync`` helper needs no host-DB read.
-        self._rename_kernel_mirror(workspace_id, name, row)
-        return _row_to_detail(row, cwd=self._resolve_kernel_cwd(row))
+        return _row_to_detail(row, cwd=self.resolve_project_cwd(row))
 
-    async def update_instructions(self, workspace_id: str, instructions_md: str) -> None:
-        row = await self._ds.get_by_id(workspace_id)
+    async def update_instructions(
+        self, user_id: str, project_id: str, instructions_md: str
+    ) -> None:
+        row = await self._ds.get_by_id(user_id, project_id)
         if not row:
-            raise KeyError(workspace_id)
-        ctx = await self._ds.get_context(workspace_id)
-        if ctx is None:
-            ctx = WorkspaceContextRow(
-                workspace_id=workspace_id,
-                memory_version=0,
-                updated_at=now_ms(),
-            )
-        normalized = (instructions_md or "").strip() or None
-        ctx.instructions_md = normalized
-        ctx.updated_at = now_ms()
-        await self._ds.upsert_context(ctx)
+            raise KeyError(project_id)
+        row.instructions_md = (instructions_md or "").strip() or None
+        await self._ds.update(row)
         # Per ADR-008: the runtime reads ``session.instructions`` (frozen at
         # session creation), not ``agent.instructions``. So edits here only
         # affect *future new sessions* — already-running sessions keep the
         # prompt they were created with. UI surfaces a hint to that effect.
 
-    async def get_connectors(self, workspace_id: str) -> list[str]:
-        row = await self._ds.get_by_id(workspace_id)
+    async def get_connectors(self, user_id: str, project_id: str) -> list[str]:
+        row = await self._ds.get_by_id(user_id, project_id)
         if not row or not row.root_path:
-            raise KeyError(workspace_id)
+            raise KeyError(project_id)
         if not self._connectors:
             return []
-        # Pure filesystem read (.claude/project-config.json) — stays sync.
-        return self._connectors.get_workspace_connectors(row)
+        return await self._connectors.get_project_connectors(user_id, project_id)
 
-    async def set_connectors(self, workspace_id: str, slugs: list[str]) -> None:
-        row = await self._ds.get_by_id(workspace_id)
+    async def set_connectors(self, user_id: str, project_id: str, slugs: list[str]) -> None:
+        row = await self._ds.get_by_id(user_id, project_id)
         if not row or not row.root_path:
-            raise KeyError(workspace_id)
+            raise KeyError(project_id)
         if not self._connectors:
             raise RuntimeError("connector_datastore not wired")
-        # Pure filesystem write (.claude/project-config.json) — stays sync.
-        self._connectors.set_workspace_connectors(row, slugs)
+        await self._connectors.set_project_connectors(user_id, project_id, slugs)
 
-    async def update_memory(
-        self,
-        workspace_id: str,
-        summary: str | None,
-        expected_version: int,
-    ) -> None:
-        row = await self._ds.get_by_id(workspace_id)
+    async def preview_delete(self, user_id: str, project_id: str) -> ProjectDeletePreview:
+        row = await self._ds.get_by_id(user_id, project_id)
         if not row:
-            raise KeyError(workspace_id)
-        ctx = await self._ds.get_context(workspace_id)
-        if ctx is None:
-            ctx = WorkspaceContextRow(
-                workspace_id=workspace_id,
-                memory_version=0,
-                updated_at=now_ms(),
-            )
-        if ctx.memory_version != expected_version:
-            raise ValueError("WORKSPACE_MEMORY_VERSION_CONFLICT")
-        ctx.memory_summary = summary
-        ctx.memory_version = expected_version + 1
-        ctx.updated_at = now_ms()
-        await self._ds.upsert_context(ctx)
-
-    async def preview_delete(self, workspace_id: str) -> WorkspaceDeletePreview:
-        row = await self._ds.get_by_id(workspace_id)
-        if not row:
-            raise KeyError(workspace_id)
+            raise KeyError(project_id)
         if row.kind == "chat":
-            raise ValueError("Chat workspace cannot be deleted")
+            raise ValueError("Chat project cannot be deleted")
 
-        # Session counts now come from the kernel store.
+        # Session counts come from the host project↔session index.
         try:
-            sessions = await kernel_store.list_sessions(project_id=workspace_id, limit=1000)
-            session_count = len(sessions)
+            session_count = await project_index.count_for_project(project_id)
         except Exception:  # noqa: BLE001
             session_count = 0
-        doc_binding_count = await self._docs.count_bindings(workspace_id) if self._docs else 0
+        doc_binding_count = (
+            await self._docs.count_bindings(user_id, project_id) if self._docs else 0
+        )
         schedule_count = (
-            await self._automations.count_by_workspace(workspace_id) if self._automations else 0
+            await self._automations.count_by_project(user_id, project_id)
+            if self._automations
+            else 0
         )
         skill_config_count = (
-            len(await self._skills.list_project_skills(workspace_id)) if self._skills else 0
+            len(await self._skills.list_project_skills(user_id, project_id)) if self._skills else 0
         )
 
-        return WorkspaceDeletePreview(
+        return ProjectDeletePreview(
             session_count=session_count,
             doc_binding_count=doc_binding_count,
             schedule_count=schedule_count,
             skill_config_count=skill_config_count,
         )
 
-    async def delete_workspace(self, workspace_id: str) -> None:
-        row = await self._ds.get_by_id(workspace_id)
+    async def delete_project(self, user_id: str, project_id: str) -> None:
+        row = await self._ds.get_by_id(user_id, project_id)
         if not row:
-            raise KeyError(workspace_id)
+            raise KeyError(project_id)
         if row.kind == "chat":
-            raise ValueError("Chat workspace cannot be deleted")
+            raise ValueError("Chat project cannot be deleted")
 
-        # Delete kernel sessions for this workspace (and their events).
+        # Delete kernel sessions for this project (and their events) — ids
+        # come from the host index, which is cleared in the same sweep.
         try:
-            sessions = await kernel_store.list_sessions(project_id=workspace_id, limit=1000)
-            for s in sessions:
-                await kernel_store.delete_session(s.id)
+            for sid in await project_index.remove_for_project(project_id):
+                await kernel_client.delete_session(require_current_user_id(), sid)
         except Exception:  # noqa: BLE001
             pass
         if self._docs:
-            self._docs.remove_all_bindings(workspace_id)
+            await self._docs.remove_all_bindings(user_id, project_id)
         if self._automations:
-            await self._automations.delete_all_for_workspace(workspace_id)
+            await self._automations.delete_all_for_project(user_id, project_id)
         if self._skills:
-            self._skills.set_project_skills(workspace_id, [])
-        # Soft-delete the matching kernel Project (and its Agent) so kernel
-        # listing endpoints stop showing this workspace. The kernel only soft-
-        # deletes by default; existing sessions remain readable for audit.
-        self._delete_kernel_mirror(workspace_id)
-        self._ds.delete(workspace_id)
+            await self._skills.set_project_skills(user_id, project_id, [])
+        await self._ds.delete(user_id, project_id)
+        # Source-driven forgetting (memory-system-design §11): a deleted project's
+        # centralized memory dir is Valuz-owned (never the user's bound repo), so
+        # it's safe to remove. Best-effort — never fail the delete on cleanup.
+        try:
+            from valuz_agent.modules.memory.service import memory_store
+
+            memory_store.drop_project(project_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("project memory cleanup skipped for %s", project_id, exc_info=True)
 
     # ------------------------------------------------------------------
-    # Kernel mirror — every valuz workspace must back a V5 kernel Project +
+    # Kernel mirror — every valuz project must back a V5 kernel Project +
     # Agent so sessions can be created against it. The id of the mirrored
-    # kernel rows equals the workspace id (1:1) and the agent id is derived
-    # deterministically from the workspace id, so re-running these helpers
+    # kernel rows equals the project id (1:1) and the agent id is derived
+    # deterministically from the project id, so re-running these helpers
     # is idempotent.
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _kernel_agent_id(workspace_id: str) -> str:
+    def _kernel_agent_id(project_id: str) -> str:
         # Deterministic so re-running ensure flows is idempotent without an
         # extra lookup. UUID-shaped to satisfy the kernel's ``String(36)``.
-        # ``agent-`` is 6 chars + workspace_id (32 hex) = 38; trim to 36.
-        return f"agent-{workspace_id}"[:36]
+        # ``agent-`` is 6 chars + project_id (32 hex) = 38; trim to 36.
+        return f"agent-{project_id}"[:36]
 
-    def _resolve_kernel_cwd(self, row: WorkspaceRow) -> str:
+    def resolve_project_cwd(self, row: ProjectRow) -> str:
+        """Absolute cwd a session in this project runs in — required at
+        session creation now that the kernel has no project to fall back to."""
         kind = row.kind if row.kind in ("chat", "project") else "chat"
-        return str(fs_registry.workspace_cwd(row.id, kind, row.root_path))  # type: ignore[arg-type]
-
-    def _ensure_kernel_mirror(self, row: WorkspaceRow, *, instructions_md: str | None) -> None:
-        """Create or reconcile the kernel Project + Agent for ``row``.
-
-        Idempotent: re-running updates the kernel rows in place.
-
-        Per ADR-008, the per-workspace synthetic agent only carries
-        identity/budget fields — instructions / skills / mcp_servers all
-        live on the *session*. The ``instructions_md`` argument is no
-        longer threaded into the agent here; the session-create path in
-        ``SessionService`` reads the latest ``instructions_md`` and writes
-        it into ``Session.instructions`` instead.
-        """
-        del instructions_md  # ADR-008: session is the source of truth
-        from src.core.agent_config import (
-            AgentConfig as KernelAgentConfig,  # type: ignore[import-not-found]
-        )
-        from src.core.project import Project as KernelProject  # type: ignore[import-not-found]
-
-        cwd = self._resolve_kernel_cwd(row)
-        agent_id = self._kernel_agent_id(row.id)
-
-        existing_agent = kernel_sync.load_agent_sync(agent_id)
-        # Ensure ``submit_skill`` is declared on the agent so the runtime
-        # advertises it to the model. Idempotent — re-mirroring an agent
-        # that already has the declaration leaves the tuple unchanged.
-        prior_tools = existing_agent.tools if existing_agent else ()
-        merged_tools = _ensure_orchestration_declared(
-            _ensure_memory_tools_declared(_ensure_submit_skill_declared(prior_tools))
-        )
-        agent = KernelAgentConfig(
-            id=agent_id,
-            name=row.name,
-            instructions="",  # ADR-008: session-level field is what the runtime reads
-            # Carry forward fields that may have been edited via the kernel
-            # API so a cwd refresh doesn't reset the agent's tuning.
-            model=existing_agent.model if existing_agent else "claude-sonnet-4-6",
-            tools=merged_tools,
-            callable_agents=existing_agent.callable_agents if existing_agent else (),
-            skills=existing_agent.skills if existing_agent else (),
-            mcp_servers=(),  # ADR-008: session-level via capability_resolver
-            # ``full_access`` is the agent-level default. The actual approval
-            # behaviour for any given turn is decided by ``session.permission_mode``
-            # (sunk in V5+1aae940 per ADR-008 successor), which the host stamps
-            # at session creation from the user's per-session selection.
-            # The synthetic per-workspace agent never surfaces in the UI, so
-            # its agent-level default just needs to be a valid value the new
-            # 3-value CHECK constraint accepts — pre-upgrade rows of the legacy
-            # ``bypass`` value get coerced to ``full_access`` by the kernel's
-            # ``807642401b71`` migration.
-            permission_mode=_coerce_permission_mode(
-                existing_agent.permission_mode if existing_agent else "full_access"
-            ),
-            max_turns=existing_agent.max_turns if existing_agent else 50,
-            max_cost_usd=existing_agent.max_cost_usd if existing_agent else 10.0,
-            effort=existing_agent.effort if existing_agent else None,
-            thinking=existing_agent.thinking if existing_agent else None,
-        )
-        kernel_sync.save_agent_sync(agent)
-
-        existing_project = kernel_sync.load_project_sync(row.id)
-        project = KernelProject(
-            id=row.id,
-            name=row.name,
-            cwd=cwd,
-            status="active",
-            metadata=existing_project.metadata if existing_project else {},
-        )
-        kernel_sync.save_project_sync(project)
-
-    def _rename_workspace_kernel_agent(
-        self, workspace_id: str, new_name: str, row: WorkspaceRow | None
-    ) -> None:
-        """Keep the synthetic agent's ``name`` in lock-step with the workspace.
-
-        Per ADR-008 the agent no longer carries the workspace's prompt;
-        the only field this method touches is ``name`` (so kernel listings
-        stay readable for ops). If the agent doesn't exist yet we bootstrap it
-        via ``_ensure_kernel_mirror`` — ``row`` is the already-fetched workspace
-        row threaded down from the async caller (so this stays a pure
-        ``kernel_sync`` helper with no host-DB access).
-        """
-        agent_id = self._kernel_agent_id(workspace_id)
-        existing = kernel_sync.load_agent_sync(agent_id)
-        if existing is None:
-            if row is not None:
-                self._ensure_kernel_mirror(row, instructions_md=None)
-            return
-
-        from src.core.agent_config import (
-            AgentConfig as KernelAgentConfig,  # type: ignore[import-not-found]
-        )
-
-        kernel_sync.save_agent_sync(
-            KernelAgentConfig(
-                id=existing.id,
-                name=new_name,
-                model=existing.model,
-                instructions=existing.instructions,
-                tools=_ensure_orchestration_declared(
-                    _ensure_memory_tools_declared(_ensure_submit_skill_declared(existing.tools))
-                ),
-                callable_agents=existing.callable_agents,
-                skills=existing.skills,
-                mcp_servers=existing.mcp_servers,
-                # Re-coerce on every save: a pre-upgrade dev DB whose
-                # cached agent row carries a legacy enum value would
-                # otherwise re-emit it under the new CHECK constraint.
-                permission_mode=_coerce_permission_mode(existing.permission_mode),
-                max_turns=existing.max_turns,
-                max_cost_usd=existing.max_cost_usd,
-                effort=existing.effort,
-                thinking=existing.thinking,
-            )
-        )
-
-    def _rename_kernel_mirror(
-        self, workspace_id: str, new_name: str, row: WorkspaceRow | None
-    ) -> None:
-        existing_project = kernel_sync.load_project_sync(workspace_id)
-        if existing_project is None:
-            return
-        from src.core.project import Project as KernelProject  # type: ignore[import-not-found]
-
-        kernel_sync.save_project_sync(
-            KernelProject(
-                id=existing_project.id,
-                name=new_name,
-                cwd=existing_project.cwd,
-                status=existing_project.status,
-                created_at=existing_project.created_at,
-                metadata=existing_project.metadata,
-            )
-        )
-        self._rename_workspace_kernel_agent(workspace_id, new_name, row)
-
-    def _delete_kernel_mirror(self, workspace_id: str) -> None:
-        # Kernel does soft-delete (status = "deleted"); the agent stays so
-        # historical sessions remain readable.
-        kernel_sync.delete_project_sync(workspace_id)
+        return str(fs_registry.project_cwd(row.id, kind, row.root_path))  # type: ignore[arg-type]
 
     async def list_files(
         self,
-        workspace_id: str,
+        user_id: str,
+        project_id: str,
         depth: int = 2,
         include_hidden: bool = False,
     ) -> list[dict[str, object]]:
-        row = await self._ds.get_by_id(workspace_id)
+        row = await self._ds.get_by_id(user_id, project_id)
         if not row:
-            raise KeyError(workspace_id)
-        # Project workspaces walk the user-supplied root_path.
-        # Chat workspaces walk their managed cwd under
-        # ``data_dir/workspaces/{id}/`` so any files the agent generates
+            raise KeyError(project_id)
+        # Projects walk the user-supplied root_path.
+        # Chat projects walk their managed cwd under
+        # ``data_dir/projects/{id}/`` so any files the agent generates
         # during the chat (excel exports, reports, scratch outputs, …)
         # show up in the right-rail "generated files" panel.
         if row.kind == "project":
@@ -583,11 +483,139 @@ class WorkspaceService:
                 return []
             root = Path(row.root_path)
         else:
-            root = fs_registry.workspace_cwd(workspace_id, "chat")
+            root = fs_registry.project_cwd(project_id, "chat")
         if not root.exists():
             return []
         nodes = _walk_dir(root, depth=depth, include_hidden=include_hidden)
         return [_node_to_dict(n) for n in nodes]
+
+    async def read_file(
+        self,
+        user_id: str,
+        project_id: str,
+        file_path: str,
+    ) -> ArtifactFileResponse:
+        row = await self._ds.get_by_id(user_id, project_id)
+        if not row:
+            raise KeyError(project_id)
+        root = _project_root(row, project_id)
+        target = _resolve_project_file(root, file_path)
+        stat = target.stat()
+        rel_path = target.relative_to(root).as_posix()
+        name = target.name
+        extension = _extension(name)
+        mime_type = mimetypes.guess_type(name)[0]
+        modified_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
+        preview_kind = _preview_kind(name, mime_type)
+        can_preview = preview_kind != "unsupported"
+        descriptor = ArtifactDescriptor(
+            id=f"project_file:{project_id}:{rel_path}",
+            kind="project_file",
+            project_id=project_id,
+            path=rel_path,
+            name=name,
+            mime_type=mime_type,
+            extension=extension or None,
+            size=stat.st_size,
+            modified_at=modified_at,
+            preview_kind=preview_kind,
+            capabilities=ArtifactCapabilities(
+                can_preview=can_preview,
+                can_edit=False,
+                can_open_external=True,
+                can_copy_content=preview_kind in {"markdown", "code", "html", "plain"},
+                can_download=False,
+            ),
+        )
+        content: ArtifactContent
+        if preview_kind in {"markdown", "code", "html", "plain"}:
+            raw = target.read_bytes()
+            truncated = len(raw) > TEXT_PREVIEW_LIMIT
+            if truncated:
+                raw = raw[:TEXT_PREVIEW_LIMIT]
+            content = TextArtifactContent(
+                kind="text",
+                encoding="utf-8",
+                content=raw.decode("utf-8", errors="replace"),
+                truncated=truncated,
+                etag=f"{int(stat.st_mtime)}-{stat.st_size}",
+                modified_at=modified_at,
+            )
+        elif preview_kind == "image":
+            resolved_mime = mime_type or "application/octet-stream"
+            encoded_path = quote(rel_path, safe="/")
+            content = BinaryArtifactContent(
+                kind="binary",
+                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
+                mime_type=resolved_mime,
+                size=stat.st_size,
+            )
+        elif preview_kind == "media":
+            resolved_mime = mime_type or "application/octet-stream"
+            encoded_path = quote(rel_path, safe="/")
+            content = BinaryArtifactContent(
+                kind="binary",
+                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
+                mime_type=resolved_mime,
+                size=stat.st_size,
+            )
+        elif preview_kind == "pdf":
+            resolved_mime = mime_type or "application/pdf"
+            encoded_path = quote(rel_path, safe="/")
+            content = BinaryArtifactContent(
+                kind="binary",
+                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
+                mime_type=resolved_mime,
+                size=stat.st_size,
+            )
+        elif preview_kind in {"docx", "spreadsheet"}:
+            resolved_mime = mime_type or "application/octet-stream"
+            parse_limit = (
+                SPREADSHEET_PARSE_PREVIEW_LIMIT
+                if preview_kind == "spreadsheet"
+                else DOCX_PARSE_PREVIEW_LIMIT
+            )
+            if stat.st_size <= parse_limit:
+                encoded_path = quote(rel_path, safe="/")
+                content = BinaryArtifactContent(
+                    kind="binary",
+                    open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
+                    mime_type=resolved_mime,
+                    size=stat.st_size,
+                )
+            else:
+                content = ExternalArtifactContent(
+                    kind="external",
+                    reason=(
+                        f"{preview_kind.upper()} is larger than the in-app parsing limit."
+                    ),
+                )
+        else:
+            content = ExternalArtifactContent(
+                kind="external",
+                reason="No in-app renderer is registered for this file type yet.",
+            )
+        return ArtifactFileResponse(artifact=descriptor, content=content)
+
+    async def resolve_file_resource(
+        self,
+        user_id: str,
+        project_id: str,
+        file_path: str,
+    ) -> ProjectFileResource:
+        row = await self._ds.get_by_id(user_id, project_id)
+        if not row:
+            raise KeyError(project_id)
+        root = _project_root(row, project_id)
+        target = _resolve_project_file(root, file_path)
+        stat = target.stat()
+        return ProjectFileResource(
+            path=target,
+            rel_path=target.relative_to(root).as_posix(),
+            name=target.name,
+            mime_type=mimetypes.guess_type(target.name)[0],
+            size=stat.st_size,
+        )
 
 
 def _walk_dir(
@@ -624,6 +652,61 @@ def _walk_dir(
                 modified = None
             items.append(FileNode(name=entry.name, type="file", size=size, modified=modified))
     return items
+
+
+def _project_root(row: ProjectRow, project_id: str) -> Path:
+    if row.kind == "project":
+        if not row.root_path:
+            raise ValueError("Project has no root path")
+        return Path(row.root_path).resolve()
+    return fs_registry.project_cwd(project_id, "chat").resolve()
+
+
+def _resolve_project_file(root: Path, file_path: str) -> Path:
+    relative = Path(file_path)
+    if relative.is_absolute():
+        raise ValueError("Absolute paths are not allowed")
+    if any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError("Invalid file path")
+    if any(part in HIDDEN_NAMES or part.startswith(".") for part in relative.parts):
+        raise PermissionError("Hidden files are not previewable")
+    target = (root / relative).resolve()
+    if root != target and root not in target.parents:
+        raise ValueError("File path escapes project root")
+    if not target.exists() or not target.is_file():
+        raise FileNotFoundError(file_path)
+    return target
+
+
+def _extension(name: str) -> str:
+    if name.startswith(".") and name.count(".") == 1:
+        return name[1:].lower()
+    return name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+
+def _preview_kind(name: str, mime_type: str | None) -> str:
+    ext = _extension(name)
+    if ext in MARKDOWN_EXTENSIONS:
+        return "markdown"
+    if ext in CODE_EXTENSIONS:
+        return "code"
+    if ext in HTML_EXTENSIONS or mime_type == "text/html":
+        return "html"
+    if ext in DOCX_EXTENSIONS:
+        return "docx"
+    if ext in SPREADSHEET_EXTENSIONS:
+        return "spreadsheet"
+    if ext in PLAIN_EXTENSIONS or (mime_type and mime_type.startswith("text/")):
+        return "plain"
+    if ext in IMAGE_EXTENSIONS or (mime_type and mime_type.startswith("image/")):
+        return "image"
+    if ext in MEDIA_EXTENSIONS or (
+        mime_type and (mime_type.startswith("audio/") or mime_type.startswith("video/"))
+    ):
+        return "media"
+    if ext == "pdf" or mime_type == "application/pdf":
+        return "pdf"
+    return "unsupported"
 
 
 def _node_to_dict(node: FileNode) -> dict[str, object]:

@@ -1,17 +1,27 @@
 """initial schema
 
+The baseline of the host alembic chain — it creates the whole host schema from
+empty. The chain is incremental: this baseline creates the schema and later
+revisions ALTER it (``alembic upgrade head`` migrates a DB forward in place,
+data-preserving). ``boot.schema.drop_stale_host_tables`` only drops + rebuilds a
+DB whose stamp is unknown/foreign, or whose tables carry no stamp at all — a
+DB on any known revision is never wiped.
+
+The ``revision`` id is ``"0002"`` while the filename keeps the ``0001`` prefix:
+released DBs carry the ``0002`` stamp, so the id must not change. It folds in
+the formerly separate 0002 (``valuz_project_session`` index table), 0003
+(member ``source_agent_slug`` backfill) and 0004 (drop of the dangling
+``kernel_agent_id`` columns; ``valuz_agent.id`` is the only identity now).
+
 Every business table carries a required ``user_id`` (the owner id) plus a
 matching ``ix_<table>_user_id`` index. The column is stamped from the
-request-scoped owner ContextVar (``infra.owner_context``); in OSS that resolves
-to the device-derived local install id, under the commercial overlay to the
-logged-in user. Regenerated as a single baseline (folds in the former
-``0002_add_skill_origin``); existing dev DBs are wiped + rebuilt by
-``boot.schema.drop_stale_host_tables`` per the dev-stage no-data-preservation
-policy.
+request-scoped owner ContextVar (``infra.owner_context``); in OSS that
+resolves to the device-derived local install id, under the commercial overlay
+to the logged-in user.
 
-Revision ID: 0001
+Revision ID: 0002
 Revises:
-Create Date: 2026-06-09 02:48:34.560156
+Create Date: 2026-06-10
 
 """
 
@@ -22,7 +32,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0001"
+revision: str = "0002"
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -46,7 +56,6 @@ def upgrade() -> None:
         sa.Column("readonly", sa.Boolean(), nullable=False),
         sa.Column("deletable", sa.Boolean(), nullable=False),
         sa.Column("avatar", sa.String(length=128), nullable=True),
-        sa.Column("kernel_agent_id", sa.String(length=36), nullable=True),
         sa.Column("id", sa.String(length=36), nullable=False),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
@@ -63,7 +72,7 @@ def upgrade() -> None:
         sa.Column("value_json", sa.Text(), nullable=False),
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
         sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.PrimaryKeyConstraint("key"),
+        sa.PrimaryKeyConstraint("key", "user_id"),
     )
     with op.batch_alter_table("valuz_app_setting", schema=None) as batch_op:
         batch_op.create_index(batch_op.f("ix_valuz_app_setting_user_id"), ["user_id"], unique=False)
@@ -73,7 +82,7 @@ def upgrade() -> None:
         sa.Column("name", sa.String(length=256), nullable=False),
         sa.Column("agent_kind", sa.String(length=32), nullable=False),
         sa.Column("agent_slug", sa.String(length=128), nullable=False),
-        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("prompt_template", sa.Text(), nullable=False),
         sa.Column("action_kind", sa.String(length=16), nullable=False),
         sa.Column("trigger_kind", sa.String(length=32), nullable=False),
@@ -106,15 +115,15 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     with op.batch_alter_table("valuz_automation", schema=None) as batch_op:
-        batch_op.create_index(batch_op.f("ix_valuz_automation_user_id"), ["user_id"], unique=False)
         batch_op.create_index(
-            batch_op.f("ix_valuz_automation_workspace_id"), ["workspace_id"], unique=False
+            batch_op.f("ix_valuz_automation_project_id"), ["project_id"], unique=False
         )
+        batch_op.create_index(batch_op.f("ix_valuz_automation_user_id"), ["user_id"], unique=False)
 
     op.create_table(
         "valuz_automation_run",
         sa.Column("automation_id", sa.String(length=36), nullable=False),
-        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("trigger_type", sa.String(length=32), nullable=False),
         sa.Column("status", sa.String(length=32), nullable=False),
         sa.Column("triggered_at", sa.BigInteger(), nullable=False),
@@ -186,7 +195,7 @@ def upgrade() -> None:
         sa.Column("total_items", sa.Integer(), nullable=False),
         sa.Column("processed_items", sa.Integer(), nullable=False),
         sa.Column("failed_items", sa.Integer(), nullable=False),
-        sa.Column("workspace_id", sa.String(length=36), nullable=True),
+        sa.Column("project_id", sa.String(length=36), nullable=True),
         sa.Column("errors_json", sa.Text(), nullable=True),
         sa.Column("id", sa.String(length=36), nullable=False),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
@@ -281,7 +290,7 @@ def upgrade() -> None:
         sa.Column("completed_at", sa.BigInteger(), nullable=True),
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
         sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.PrimaryKeyConstraint("step_id"),
+        sa.PrimaryKeyConstraint("step_id", "user_id"),
     )
     with op.batch_alter_table("valuz_onboarding_state", schema=None) as batch_op:
         batch_op.create_index(
@@ -315,48 +324,89 @@ def upgrade() -> None:
         )
 
     op.create_table(
+        "valuz_project",
+        sa.Column("name", sa.String(length=256), nullable=False),
+        sa.Column("kind", sa.String(length=32), nullable=False),
+        sa.Column("root_path", sa.Text(), nullable=True),
+        sa.Column("icon", sa.String(length=16), nullable=True),
+        sa.Column("sort_order", sa.Integer(), nullable=False),
+        sa.Column("instructions_md", sa.Text(), nullable=True),
+        sa.Column("memory_summary", sa.Text(), nullable=True),
+        sa.Column("memory_version", sa.Integer(), nullable=False),
+        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("created_at", sa.BigInteger(), nullable=False),
+        sa.Column("updated_at", sa.BigInteger(), nullable=False),
+        sa.Column("user_id", sa.String(length=64), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    with op.batch_alter_table("valuz_project", schema=None) as batch_op:
+        batch_op.create_index(batch_op.f("ix_valuz_project_user_id"), ["user_id"], unique=False)
+
+    op.create_table(
         "valuz_project_kb_binding",
-        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("binding_kind", sa.String(length=16), nullable=False),
         sa.Column("target_id", sa.String(length=36), nullable=False),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
         sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.PrimaryKeyConstraint("workspace_id", "binding_kind", "target_id"),
+        sa.PrimaryKeyConstraint("project_id", "binding_kind", "target_id"),
     )
     with op.batch_alter_table("valuz_project_kb_binding", schema=None) as batch_op:
-        batch_op.create_index("ix_binding_workspace", ["workspace_id"], unique=False)
+        batch_op.create_index("ix_binding_project", ["project_id"], unique=False)
         batch_op.create_index(
             batch_op.f("ix_valuz_project_kb_binding_user_id"), ["user_id"], unique=False
         )
 
     op.create_table(
         "valuz_project_member",
-        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("agent_slug", sa.String(length=128), nullable=False),
-        sa.Column("kernel_agent_id", sa.String(length=36), nullable=False),
         sa.Column("source_agent_slug", sa.String(length=128), nullable=True),
         sa.Column("id", sa.String(length=36), nullable=False),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
         sa.Column("user_id", sa.String(length=64), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("workspace_id", "agent_slug", name="uq_project_member_ws_slug"),
+        sa.UniqueConstraint("project_id", "agent_slug", name="uq_project_member_ws_slug"),
     )
     with op.batch_alter_table("valuz_project_member", schema=None) as batch_op:
         batch_op.create_index(
-            batch_op.f("ix_valuz_project_member_user_id"), ["user_id"], unique=False
+            batch_op.f("ix_valuz_project_member_project_id"), ["project_id"], unique=False
         )
         batch_op.create_index(
-            batch_op.f("ix_valuz_project_member_workspace_id"), ["workspace_id"], unique=False
+            batch_op.f("ix_valuz_project_member_user_id"), ["user_id"], unique=False
+        )
+
+    op.create_table(
+        "valuz_project_session",
+        sa.Column("project_id", sa.String(length=36), nullable=False),
+        sa.Column("session_id", sa.String(length=36), nullable=False),
+        sa.Column("kind", sa.String(length=16), nullable=False),
+        sa.Column("origin", sa.String(length=32), nullable=False),
+        sa.Column("id", sa.String(length=36), nullable=False),
+        sa.Column("created_at", sa.BigInteger(), nullable=False),
+        sa.Column("updated_at", sa.BigInteger(), nullable=False),
+        sa.Column("user_id", sa.String(length=64), nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+    )
+    with op.batch_alter_table("valuz_project_session", schema=None) as batch_op:
+        batch_op.create_index(
+            batch_op.f("ix_valuz_project_session_project_id"), ["project_id"], unique=False
+        )
+        batch_op.create_index(
+            batch_op.f("ix_valuz_project_session_session_id"), ["session_id"], unique=True
+        )
+        batch_op.create_index(
+            batch_op.f("ix_valuz_project_session_user_id"), ["user_id"], unique=False
         )
 
     op.create_table(
         "valuz_project_skill_config",
-        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("skill_path", sa.Text(), nullable=False),
         sa.Column("added_at", sa.BigInteger(), nullable=False),
         sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.PrimaryKeyConstraint("workspace_id", "skill_path"),
+        sa.PrimaryKeyConstraint("project_id", "skill_path"),
     )
     with op.batch_alter_table("valuz_project_skill_config", schema=None) as batch_op:
         batch_op.create_index(
@@ -433,7 +483,7 @@ def upgrade() -> None:
         sa.Column("completed_at", sa.BigInteger(), nullable=True),
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
         sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.PrimaryKeyConstraint("setup_id"),
+        sa.PrimaryKeyConstraint("setup_id", "user_id"),
     )
     with op.batch_alter_table("valuz_setup_job", schema=None) as batch_op:
         batch_op.create_index(batch_op.f("ix_valuz_setup_job_user_id"), ["user_id"], unique=False)
@@ -446,7 +496,7 @@ def upgrade() -> None:
         sa.Column("is_custom", sa.Boolean(), nullable=False),
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
         sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.PrimaryKeyConstraint("action_id"),
+        sa.PrimaryKeyConstraint("action_id", "user_id"),
     )
     with op.batch_alter_table("valuz_shortcut_binding", schema=None) as batch_op:
         batch_op.create_index(
@@ -485,7 +535,7 @@ def upgrade() -> None:
 
     op.create_table(
         "valuz_task",
-        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("file_path", sa.Text(), nullable=False),
         sa.Column("title", sa.String(length=256), nullable=False),
         sa.Column("goal", sa.Text(), nullable=False),
@@ -504,14 +554,12 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     with op.batch_alter_table("valuz_task", schema=None) as batch_op:
+        batch_op.create_index(batch_op.f("ix_valuz_task_project_id"), ["project_id"], unique=False)
         batch_op.create_index(batch_op.f("ix_valuz_task_user_id"), ["user_id"], unique=False)
-        batch_op.create_index(
-            batch_op.f("ix_valuz_task_workspace_id"), ["workspace_id"], unique=False
-        )
 
     op.create_table(
         "valuz_task_event",
-        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("task_id", sa.String(length=36), nullable=False),
         sa.Column("sequence", sa.Integer(), nullable=False),
         sa.Column("type", sa.String(length=32), nullable=False),
@@ -523,20 +571,18 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
         sa.Column("user_id", sa.String(length=64), nullable=False),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint(
-            "workspace_id", "task_id", "sequence", name="uq_task_event_ws_task_seq"
-        ),
+        sa.UniqueConstraint("project_id", "task_id", "sequence", name="uq_task_event_ws_task_seq"),
     )
     with op.batch_alter_table("valuz_task_event", schema=None) as batch_op:
+        batch_op.create_index(
+            batch_op.f("ix_valuz_task_event_project_id"), ["project_id"], unique=False
+        )
         batch_op.create_index(batch_op.f("ix_valuz_task_event_task_id"), ["task_id"], unique=False)
         batch_op.create_index(batch_op.f("ix_valuz_task_event_user_id"), ["user_id"], unique=False)
-        batch_op.create_index(
-            batch_op.f("ix_valuz_task_event_workspace_id"), ["workspace_id"], unique=False
-        )
 
     op.create_table(
         "valuz_task_session",
-        sa.Column("workspace_id", sa.String(length=36), nullable=False),
+        sa.Column("project_id", sa.String(length=36), nullable=False),
         sa.Column("task_id", sa.String(length=36), nullable=True),
         sa.Column("session_id", sa.String(length=36), nullable=False),
         sa.Column("agent_slug", sa.String(length=128), nullable=False),
@@ -547,7 +593,7 @@ def upgrade() -> None:
         sa.Column("label", sa.String(length=128), nullable=True),
         sa.Column("goal", sa.Text(), nullable=True),
         sa.Column("dispatched_by", sa.String(length=36), nullable=True),
-        sa.Column("workspace_mode", sa.String(length=16), nullable=False),
+        sa.Column("project_mode", sa.String(length=16), nullable=False),
         sa.Column("run_dir", sa.Text(), nullable=True),
         sa.Column("result_manifest", sa.JSON(), nullable=True),
         sa.Column("ended_at", sa.BigInteger(), nullable=True),
@@ -559,6 +605,9 @@ def upgrade() -> None:
     )
     with op.batch_alter_table("valuz_task_session", schema=None) as batch_op:
         batch_op.create_index(
+            batch_op.f("ix_valuz_task_session_project_id"), ["project_id"], unique=False
+        )
+        batch_op.create_index(
             batch_op.f("ix_valuz_task_session_session_id"), ["session_id"], unique=False
         )
         batch_op.create_index(
@@ -567,70 +616,28 @@ def upgrade() -> None:
         batch_op.create_index(
             batch_op.f("ix_valuz_task_session_user_id"), ["user_id"], unique=False
         )
-        batch_op.create_index(
-            batch_op.f("ix_valuz_task_session_workspace_id"), ["workspace_id"], unique=False
-        )
-
-    op.create_table(
-        "valuz_workspace",
-        sa.Column("name", sa.String(length=256), nullable=False),
-        sa.Column("kind", sa.String(length=32), nullable=False),
-        sa.Column("root_path", sa.Text(), nullable=True),
-        sa.Column("icon", sa.String(length=16), nullable=True),
-        sa.Column("sort_order", sa.Integer(), nullable=False),
-        sa.Column("id", sa.String(length=36), nullable=False),
-        sa.Column("created_at", sa.BigInteger(), nullable=False),
-        sa.Column("updated_at", sa.BigInteger(), nullable=False),
-        sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    with op.batch_alter_table("valuz_workspace", schema=None) as batch_op:
-        batch_op.create_index(batch_op.f("ix_valuz_workspace_user_id"), ["user_id"], unique=False)
-
-    op.create_table(
-        "valuz_workspace_context",
-        sa.Column("workspace_id", sa.String(length=36), nullable=False),
-        sa.Column("instructions_md", sa.Text(), nullable=True),
-        sa.Column("memory_summary", sa.Text(), nullable=True),
-        sa.Column("memory_version", sa.Integer(), nullable=False),
-        sa.Column("updated_at", sa.BigInteger(), nullable=False),
-        sa.Column("user_id", sa.String(length=64), nullable=False),
-        sa.PrimaryKeyConstraint("workspace_id"),
-    )
-    with op.batch_alter_table("valuz_workspace_context", schema=None) as batch_op:
-        batch_op.create_index(
-            batch_op.f("ix_valuz_workspace_context_user_id"), ["user_id"], unique=False
-        )
 
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
-    with op.batch_alter_table("valuz_workspace_context", schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f("ix_valuz_workspace_context_user_id"))
-
-    op.drop_table("valuz_workspace_context")
-    with op.batch_alter_table("valuz_workspace", schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f("ix_valuz_workspace_user_id"))
-
-    op.drop_table("valuz_workspace")
     with op.batch_alter_table("valuz_task_session", schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f("ix_valuz_task_session_workspace_id"))
         batch_op.drop_index(batch_op.f("ix_valuz_task_session_user_id"))
         batch_op.drop_index(batch_op.f("ix_valuz_task_session_task_id"))
         batch_op.drop_index(batch_op.f("ix_valuz_task_session_session_id"))
+        batch_op.drop_index(batch_op.f("ix_valuz_task_session_project_id"))
 
     op.drop_table("valuz_task_session")
     with op.batch_alter_table("valuz_task_event", schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f("ix_valuz_task_event_workspace_id"))
         batch_op.drop_index(batch_op.f("ix_valuz_task_event_user_id"))
         batch_op.drop_index(batch_op.f("ix_valuz_task_event_task_id"))
+        batch_op.drop_index(batch_op.f("ix_valuz_task_event_project_id"))
 
     op.drop_table("valuz_task_event")
     with op.batch_alter_table("valuz_task", schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f("ix_valuz_task_workspace_id"))
         batch_op.drop_index(batch_op.f("ix_valuz_task_user_id"))
+        batch_op.drop_index(batch_op.f("ix_valuz_task_project_id"))
 
     op.drop_table("valuz_task")
     with op.batch_alter_table("valuz_skill_index", schema=None) as batch_op:
@@ -658,16 +665,26 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f("ix_valuz_project_skill_config_user_id"))
 
     op.drop_table("valuz_project_skill_config")
+    with op.batch_alter_table("valuz_project_session", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_valuz_project_session_user_id"))
+        batch_op.drop_index(batch_op.f("ix_valuz_project_session_session_id"))
+        batch_op.drop_index(batch_op.f("ix_valuz_project_session_project_id"))
+
+    op.drop_table("valuz_project_session")
     with op.batch_alter_table("valuz_project_member", schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f("ix_valuz_project_member_workspace_id"))
         batch_op.drop_index(batch_op.f("ix_valuz_project_member_user_id"))
+        batch_op.drop_index(batch_op.f("ix_valuz_project_member_project_id"))
 
     op.drop_table("valuz_project_member")
     with op.batch_alter_table("valuz_project_kb_binding", schema=None) as batch_op:
         batch_op.drop_index(batch_op.f("ix_valuz_project_kb_binding_user_id"))
-        batch_op.drop_index("ix_binding_workspace")
+        batch_op.drop_index("ix_binding_project")
 
     op.drop_table("valuz_project_kb_binding")
+    with op.batch_alter_table("valuz_project", schema=None) as batch_op:
+        batch_op.drop_index(batch_op.f("ix_valuz_project_user_id"))
+
+    op.drop_table("valuz_project")
     with op.batch_alter_table("valuz_polling_task", schema=None) as batch_op:
         batch_op.drop_index(batch_op.f("ix_valuz_polling_task_user_id"))
         batch_op.drop_index(batch_op.f("ix_valuz_polling_task_status"))
@@ -712,8 +729,8 @@ def downgrade() -> None:
 
     op.drop_table("valuz_automation_run")
     with op.batch_alter_table("valuz_automation", schema=None) as batch_op:
-        batch_op.drop_index(batch_op.f("ix_valuz_automation_workspace_id"))
         batch_op.drop_index(batch_op.f("ix_valuz_automation_user_id"))
+        batch_op.drop_index(batch_op.f("ix_valuz_automation_project_id"))
 
     op.drop_table("valuz_automation")
     with op.batch_alter_table("valuz_app_setting", schema=None) as batch_op:

@@ -60,7 +60,6 @@ from openai_codex.generated.v2_all import (
     UserInput,
 )
 from pydantic import RootModel
-
 from src.core.agent_config import AgentConfig
 from src.core.approval_rule_matcher import ExactArgsRuleMatcher, RuntimeApprovalRuleMatcher
 from src.core.events import AVAILABLE_DECISIONS_V1_WITH_SESSION, Event, EventSink
@@ -96,6 +95,7 @@ from src.runtimes.codex.event_mapper import (
     extract_turn_completed,
     map_notification,
 )
+from src.runtimes.interruption import describe_exception, is_runtime_interruption
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +260,18 @@ class CodexRuntime:
             await self._ensure_thread(session)
             assert self._thread is not None
 
+            # ``/compact`` sent as a normal turn IS a real codex compaction:
+            # the app-server reads the full context and summarizes it (the turn
+            # reports the pre-compaction token count as ``input_tokens`` and
+            # replies "Compacted."). We keep that real execution and only
+            # re-label the output to match ClaudeAgentRuntime: suppress the
+            # "Compacted." assistant text and emit a ``compaction`` event
+            # instead, then let the real ``usage_update`` flow through. (Do NOT
+            # call ``AsyncThread.compact()`` here — that only fires
+            # ``thread/compact/start`` and returns before the work happens; see
+            # ``_is_compact_command``.)
+            is_compact = _is_compact_command(user_message)
+
             # Slice 6 follow-up of session-modes: user-initiated goal
             # exit. Codex's slice-6 listener catches the
             # ``thread/goal/cleared`` notification when the model
@@ -357,6 +369,13 @@ class CodexRuntime:
                         break
 
                     for event in map_notification(notification):
+                        # On a ``/compact`` turn, swallow the model's
+                        # "Compacted." text — it's re-surfaced as a single
+                        # ``compaction`` event after the turn (parity with the
+                        # Claude runtime, which emits no assistant bubble for
+                        # ``/compact``).
+                        if is_compact and event.type in ("text_delta", "assistant_message"):
+                            continue
                         await self.event_sink.emit(event)
 
                     mcp_status = extract_mcp_server_status(notification)
@@ -448,9 +467,27 @@ class CodexRuntime:
             elif completed is not None:
                 session.status = "idle"
                 session.stop_reason = _stop_reason_from_turn(completed)
+                # Turn-level failures (codex reports them as a *completed*
+                # turn with ``TurnStatus.failed``) must surface as a
+                # ``session_error`` event like the other two error paths —
+                # without it the failure lives only in ``stop_reason`` and
+                # clients render a silent idle (no error card, nothing on
+                # replay).
+                await self._emit_session_error_for_stop(session.stop_reason)
             else:
                 session.status = "idle"
                 session.stop_reason = EndTurn()
+
+            # ``/compact`` turn: re-surface the (suppressed) "Compacted." as a
+            # ``compaction`` event before the usage update, matching the Claude
+            # runtime's ordering (compaction -> usage_update). Codex's turn
+            # carries no compaction metadata of its own (unlike Claude's
+            # ``compact_metadata``), so the marker is empty — we don't
+            # synthesize trigger/pre_tokens. The real token counts are already
+            # in the ``usage_update`` that follows; the upper layer can read
+            # them there if it wants.
+            if is_compact and completed is not None:
+                await self.event_sink.emit(Event(type="compaction", data={}))
 
             if usage_payload is not None:
                 await self.event_sink.emit(Event(type="usage_update", data=usage_payload))
@@ -470,13 +507,32 @@ class CodexRuntime:
                     retry_status="terminal",
                     message="cancelled",
                 )
+            elif is_runtime_interruption(exc):
+                # Graceful host stop tore down the codex subprocess mid-turn
+                # ("closed stdout" / broken pipe). This is NOT a task failure:
+                # leave it resumable (``interrupted``) so boot recovery
+                # re-drives the turn — the same outcome a hard kill gets via
+                # ``scan_orphan_runs`` — and suppress the scary session_error.
+                session.stop_reason = Error(
+                    category="interrupted",
+                    retry_status="terminal",
+                    message="runtime process interrupted",
+                )
             else:
+                # See ``describe_exception``: a wrapped ``ExceptionGroup`` would
+                # otherwise reach the user as the opaque "unhandled errors in a
+                # TaskGroup" — unwrap to the leaf and log the traceback (this
+                # branch previously logged nothing).
+                cause = describe_exception(exc)
+                logger.exception(
+                    "codex: turn failed for session %s: %s", session.id, cause
+                )
                 session.stop_reason = Error(
                     category="execution_error",
                     retry_status="exhausted",
-                    message=str(exc),
+                    message=cause,
                 )
-                await self.event_sink.emit(Event(type="session_error", data={"message": str(exc)}))
+                await self.event_sink.emit(Event(type="session_error", data={"message": cause}))
                 if self.config.hooks:
                     await self.config.hooks.fire("on_error", error=exc, session_id=session.id)
         finally:
@@ -631,6 +687,24 @@ class CodexRuntime:
             ) from exc
         sync_client._approval_handler = self._approval_handler
 
+    async def _emit_session_error_for_stop(self, stop_reason: StopReason | None) -> None:
+        """Emit ``session_error`` for an execution-error stop reason.
+
+        Companion to the stream-error and runtime-exception paths, which
+        emit inline — this covers turns codex reports as *completed* with
+        ``TurnStatus.failed``. No-op for clean/interrupt/budget stops.
+        """
+        if isinstance(stop_reason, Error) and stop_reason.category == "execution_error":
+            await self.event_sink.emit(
+                Event(
+                    type="session_error",
+                    data={
+                        "category": "execution_error",
+                        "message": stop_reason.message,
+                    },
+                )
+            )
+
     def _register_toolkit_if_eligible(self, session: Session) -> bool:
         """Register the session toolkit on the MCP router.
 
@@ -656,8 +730,6 @@ class CodexRuntime:
             ExecContext(
                 workspace=self.workspace_root,
                 session_id=session.id,
-                agent_id=session.agent_id,
-                project_id=session.project_id,
             ),
         )
         self._registered_session_id = session.id
@@ -1088,6 +1160,20 @@ class CodexRuntime:
         prepare_codex_skills(self.workspace_root, list(session.skills))
 
 
+def _is_compact_command(user_message: UserMessage) -> bool:
+    """True iff the user turn is the bare ``/compact`` slash command.
+
+    Codex has no native ``/compact`` interception in its turn input, so the
+    runtime detects it here and runs it as an ordinary turn: the app-server
+    reads the full context and summarizes it (replying "Compacted."). The
+    caller suppresses that reply and re-labels it as a ``compaction`` event —
+    parity with the Claude runtime. We deliberately do NOT route to
+    ``AsyncThread.compact()``: that fire-and-ack only starts the work and
+    returns before it happens, with no observable completion.
+    """
+    return (user_message.text or "").strip() == "/compact"
+
+
 def _resolve_codex_bin() -> str | None:
     """Return the codex binary path, or ``None`` to let the SDK resolve it.
 
@@ -1290,6 +1376,14 @@ def _build_codex_env(
     merged: dict[str, str] = dict(os.environ)
     if provider.base_url is not None:
         merged[_HARNESS_PROVIDER_ENV_KEY] = provider.api_key
+        # Present as the CLI's originator (``codex_exec``) rather than the SDK's
+        # default (``codex_python_sdk``). Some third-party OpenAI-compatible
+        # gateways (e.g. Volcengine/Doubao) whitelist codex's proprietary tool
+        # types (``namespace``…) + ``client_metadata`` only for the CLI
+        # originator and 400 ("unknown tool type: namespace") for the SDK one —
+        # even though the request body is byte-identical. Same App Server, so
+        # spoofing the originator makes the SDK path match the working CLI path.
+        merged["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] = "codex_exec"
     else:
         merged["OPENAI_API_KEY"] = provider.api_key
     return merged

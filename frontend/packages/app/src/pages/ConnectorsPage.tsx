@@ -16,7 +16,10 @@ import {
 } from "@valuz/ui";
 import { ResourceActionSlot } from "../components/ResourceActionSlot";
 import {
+  acknowledgeConnectorAlert,
   connectorsApi,
+  invalidateConnectorTools,
+  useConnectorTools,
   usePanelStore,
   useResourceCategories,
   useTranslation,
@@ -24,16 +27,29 @@ import {
   type CatalogEntry,
   type ConnectorItem,
   type CreateConnectorRequest,
-  type ToolInfo,
 } from "@valuz/core";
 import { t as _t } from "@valuz/shared/i18n";
 import type { ResourceCategory } from "@valuz/shared";
-import { useWorkspaceOutlet } from "@valuz/app/layout";
+import { useProjectOutlet } from "@valuz/app/layout";
 import {
   ConnectorAddDialog,
   ConnectorConnectDialog,
 } from "@valuz/app/components";
 import type { ConnectorAddMode } from "@valuz/app/components";
+import { reauthorizePayload, shouldReauthorize } from "./connector-reconnect";
+
+/* ── Status labels ──────────────────────────────────────────────── */
+
+// Connector status → i18n key for the colored list-row pill. The two
+// "configured but not connected" states (pending_auth / unknown) read as
+// "未连接"; "disabled" stays unlabeled (the user turned it off on purpose).
+const STATUS_LABEL_KEY: Record<string, Parameters<typeof _t>[0]> = {
+  connected: "connector.statusConnected",
+  connecting: "connector.statusConnecting",
+  error: "connector.statusError",
+  pending_auth: "connector.statusNotConnected",
+  unknown: "connector.statusNotConnected",
+};
 
 /* ── Catalog flattening ─────────────────────────────────────────── */
 
@@ -107,32 +123,21 @@ const entryKey = (e: ConnectorListEntry): string =>
 function buildConnectorCategories(
   t: ReturnType<typeof useTranslation>["t"],
 ): ResourceCategory<ConnectorListEntry>[] {
+  // Two buckets only: everything the user has added (any connector_type) vs
+  // catalog entries not yet installed. Live connection state is shown per-row
+  // by the status pill, so the left grouping stays about install state — no
+  // more type-based "已连接" group that ignored real status.
   return [
     {
-      id: "builtin",
-      label: t("connector.groupOfficial" as Parameters<typeof t>[0]),
+      id: "installed",
+      label: t("connector.groupInstalled" as Parameters<typeof t>[0]),
       order: 0,
-      filter: (e: ConnectorListEntry) =>
-        e.kind === "installed" && e.item.connector_type === "builtin",
-    },
-    {
-      id: "custom",
-      label: t("connector.groupCustom" as Parameters<typeof t>[0]),
-      order: 1,
-      filter: (e: ConnectorListEntry) =>
-        e.kind === "installed" && e.item.connector_type === "custom",
-    },
-    {
-      id: "connected",
-      label: t("connector.groupConnected" as Parameters<typeof t>[0]),
-      order: 2,
-      filter: (e: ConnectorListEntry) =>
-        e.kind === "installed" && e.item.connector_type === "recommended",
+      filter: (e: ConnectorListEntry) => e.kind === "installed",
     },
     {
       id: "available",
       label: t("connector.groupAvailable" as Parameters<typeof t>[0]),
-      order: 3,
+      order: 1,
       filter: (e: ConnectorListEntry) => e.kind === "available",
       defaultCollapsed: false,
     },
@@ -149,7 +154,7 @@ export const ConnectorsPage = () => {
     setRightPanel,
     setAsideClassName,
     setMainClassName,
-  } = useWorkspaceOutlet();
+  } = useProjectOutlet();
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
 
   const [connectors, setConnectors] = useState<ConnectorItem[]>([]);
@@ -164,16 +169,6 @@ export const ConnectorsPage = () => {
   const [connectEntry, setConnectEntry] = useState<CatalogConnector | null>(
     null,
   );
-
-  // Connected-view tool probe result, keyed by connector id so the value
-  // can be derived during render (tools for any *other* id read as
-  // "loading"). Keying avoids a synchronous reset-setState in the probe
-  // effect — the effect only writes inside its async callbacks.
-  const [toolsState, setToolsState] = useState<{
-    id: string;
-    tools: ToolInfo[];
-    error: string | null;
-  } | null>(null);
 
   // In-flight connect/disconnect target (drives button spinners).
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -196,6 +191,9 @@ export const ConnectorsPage = () => {
       if (!mountedRef.current) return;
       setConnectors(listRes.connectors);
       setCatalog(flattenCatalog(dirRes.items));
+      // Viewing the page clears the connector nav dot for whatever is failing
+      // right now (acknowledge against this freshly-loaded list).
+      acknowledgeConnectorAlert(listRes.connectors);
     } catch (err) {
       if (mountedRef.current) {
         console.error("[Connectors] load error", err);
@@ -341,45 +339,12 @@ export const ConnectorsPage = () => {
     !!activeInstalled && activeInstalled.status === "connected";
   const activeInstalledId = activeInstalled?.id ?? null;
 
-  useEffect(() => {
-    if (!activeInstalledId || !activeIsConnected) return;
-    let cancelled = false;
-    connectorsApi
-      .test(activeInstalledId)
-      .then((res) => {
-        if (cancelled) return;
-        setToolsState({
-          id: activeInstalledId,
-          tools: res.ok ? (res.tool_details ?? []) : [],
-          error: res.ok
-            ? null
-            : (res.error ?? _t("settings.connectors.testFailed")),
-        });
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setToolsState({
-          id: activeInstalledId,
-          tools: [],
-          error: err instanceof Error ? err.message : "unknown",
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeInstalledId, activeIsConnected]);
-
-  // Derive the active connector's tools during render: a probe result only
-  // counts when it matches the current connector id; otherwise it reads as
-  // ``undefined`` (loading) — no reset-setState needed on connector switch.
-  const activeTools: ToolInfo[] | undefined =
-    activeIsConnected && toolsState && toolsState.id === activeInstalledId
-      ? toolsState.tools
-      : undefined;
-  const activeToolsError: string | null =
-    activeIsConnected && toolsState && toolsState.id === activeInstalledId
-      ? toolsState.error
-      : null;
+  // Probed once per client session and cached at module level, so re-selecting
+  // a connector — or leaving the page and coming back — never reconnects again.
+  const { tools: activeTools, error: activeToolsError } = useConnectorTools(
+    activeInstalledId,
+    activeIsConnected,
+  );
 
   /* ── Connect / disconnect ────────────────────────────────────── */
 
@@ -387,6 +352,10 @@ export const ConnectorsPage = () => {
     (connectorId: string, timeoutMs = 30_000) => {
       if (pollRef.current) clearTimeout(pollRef.current);
       const deadline = Date.now() + timeoutMs;
+      // A connect rarely settles in <1s, and the OAuth flow already has a
+      // postMessage fast-path, so this fallback polls calmly (5s) rather than
+      // hammering once a status switch is imminent.
+      const intervalMs = 5_000;
       const poll = async () => {
         if (Date.now() > deadline) {
           toast.error(_t("settings.connectors.connectTimeout"));
@@ -417,9 +386,9 @@ export const ConnectorsPage = () => {
         } catch {
           // transient — keep polling
         }
-        pollRef.current = setTimeout(() => void poll(), 2000);
+        pollRef.current = setTimeout(() => void poll(), intervalMs);
       };
-      pollRef.current = setTimeout(() => void poll(), 2000);
+      pollRef.current = setTimeout(() => void poll(), intervalMs);
     },
     [loadAll],
   );
@@ -429,6 +398,7 @@ export const ConnectorsPage = () => {
   const runConnect = useCallback(
     async (payload: CreateConnectorRequest) => {
       const res = await connectorsApi.create(payload);
+      invalidateConnectorTools(res.id); // fresh connection → re-probe its tools
       await loadAll();
       if (res.needs_auth && res.authorization_url) {
         window.open(res.authorization_url, "_blank");
@@ -481,16 +451,27 @@ export const ConnectorsPage = () => {
     [runConnect],
   );
 
-  // Re-probe an already-added connector that isn't currently connected.
+  // Reconnect an already-added connector that isn't currently connected.
+  // Test first — the probe now self-heals an expired OAuth token server-side
+  // (refresh + retry). Only a still-failing OAuth connector escalates to full
+  // re-authorization (browser re-consent); see ``connector-reconnect``.
   const handleReconnectInstalled = useCallback(
     (connector: ConnectorItem) => {
       setBusyKey(`installed:${connector.id}`);
+      // Tools may have changed on a fresh connect — drop the cached probe.
+      invalidateConnectorTools(connector.id);
       void (async () => {
         try {
           const res = await connectorsApi.test(connector.id);
-          if (!res.ok) {
-            toast.error(res.error || _t("settings.connectors.connectFailed"));
+          if (res.ok) {
+            await loadAll();
+            return;
           }
+          if (shouldReauthorize(connector)) {
+            await runConnect(reauthorizePayload(connector));
+            return;
+          }
+          toast.error(res.error || _t("settings.connectors.connectFailed"));
           await loadAll();
         } catch (err) {
           toast.error(
@@ -503,7 +484,7 @@ export const ConnectorsPage = () => {
         }
       })();
     },
-    [loadAll],
+    [loadAll, runConnect],
   );
 
   const handleDisconnect = useCallback(async () => {
@@ -653,18 +634,11 @@ export const ConnectorsPage = () => {
                     <ConnectorListItem
                       name={c.display_name}
                       iconUrl={entry.iconUrl}
-                      badge={
-                        c.status === "connected"
-                          ? t(
-                              "connector.statusConnected" as Parameters<
-                                typeof t
-                              >[0],
-                            )
-                          : c.status === "connecting"
-                            ? t("connector.statusConnecting")
-                            : c.status === "error"
-                              ? t("connector.statusError")
-                              : null
+                      status={c.status}
+                      statusLabel={
+                        STATUS_LABEL_KEY[c.status]
+                          ? t(STATUS_LABEL_KEY[c.status])
+                          : null
                       }
                       active={isSelected}
                       onClick={() => setActiveKey(`installed:${c.id}`)}

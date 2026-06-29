@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "last_updated": "2026-06-02",
-  "_comment": "Recommended model lists for OAuth subscription channels. Updating these does not require a Python code change — bump last_updated and edit the arrays. API-key channels are NOT covered here; their models come from /v1/models auto-discovery + user manual entry on channel edit.",
+  "last_updated": "2026-06-18",
+  "_comment": "Recommended model lists for OAuth subscription channels. LIVE contract: this file is read into the provider descriptors at every boot, and subscription rows keep model_ids NULL so they always track it — editing the arrays (+ bumping last_updated) reaches every install at next boot, no migration needed (unlike seeds/providers.json, whose row updates go through alembic). Each model is either a bare id or {\"id\", \"label\"}; labels are server-authoritative display names (the backend, not the frontend, owns subscription model names). API-key channels are NOT covered here; their models come from /v1/models auto-discovery + user manual entry on channel edit.",
   "_sources": {
     "claude-subscription": "https://code.claude.com/docs/en/model-config",
     "codex-subscription": "https://developers.openai.com/codex/models"
@@ -10,22 +10,23 @@
     "claude-subscription": {
       "default_model": "claude-sonnet-4-6",
       "models": [
-        "claude-opus-4-8",
-        "claude-opus-4-7",
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5"
+        { "id": "claude-fable-5", "label": "Fable 5" },
+        { "id": "claude-opus-4-8", "label": "Opus 4.8" },
+        { "id": "claude-opus-4-7", "label": "Opus 4.7" },
+        { "id": "claude-opus-4-6", "label": "Opus 4.6" },
+        { "id": "claude-sonnet-4-6", "label": "Sonnet 4.6" },
+        { "id": "claude-haiku-4-5", "label": "Haiku 4.5" }
       ]
     },
     "codex-subscription": {
       "default_model": "gpt-5.5",
       "models": [
-        "gpt-5.5",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-        "gpt-5.3-codex",
-        "gpt-5.3-codex-spark",
-        "gpt-5.2"
+        { "id": "gpt-5.5", "label": "GPT 5.5" },
+        { "id": "gpt-5.4", "label": "GPT 5.4" },
+        { "id": "gpt-5.4-mini", "label": "GPT 5.4 Mini" },
+        { "id": "gpt-5.3-codex", "label": "GPT 5.3 Codex" },
+        { "id": "gpt-5.3-codex-spark", "label": "GPT 5.3 Codex Spark" },
+        { "id": "gpt-5.2", "label": "GPT 5.2" }
       ]
     }
   }

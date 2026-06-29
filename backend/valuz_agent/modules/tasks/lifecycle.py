@@ -42,8 +42,15 @@ from pathlib import Path
 from typing import Any, Literal, cast
 from uuid import uuid4
 
-from valuz_agent.adapters import kernel_store, kernel_sync
-from valuz_agent.adapters.agent_resolver import build_member_session
+from valuz_agent.adapters import kernel_client
+from valuz_agent.modules.sessions import project_index
+from valuz_agent.adapters.agent_resolver import (
+    _member_agent_config,
+    build_member_session,
+    embed_agent_config,
+    spill_goal_brief_if_too_long,
+)
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
@@ -68,8 +75,21 @@ from valuz_agent.modules.tasks.datastore import (
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
+from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_task_memory(task_id: str) -> None:
+    """Fire the task-finish memory extraction (memory-system-design §7.1): graduate
+    a completed task's multi-agent lessons + project progress into project memory.
+    Best-effort, non-blocking, fully isolated — never affects task finalization."""
+    try:
+        from valuz_agent.modules.memory.scheduler import task_finish_scheduler
+
+        task_finish_scheduler.notify_finished(task_id, require_current_user_id())
+    except Exception:  # noqa: BLE001 — never let the memory hook break finalize
+        logger.debug("task-finish memory trigger skipped for %s", task_id, exc_info=True)
 
 
 class LifecycleService:
@@ -102,7 +122,7 @@ class LifecycleService:
 
     async def kickoff(
         self,
-        workspace_id: str,
+        project_id: str,
         goal: str,
         lead_agent_slug: str,
         refs: list[str] | None = None,
@@ -110,6 +130,8 @@ class LifecycleService:
         title: str | None = None,
         dispatch_mode: Literal["sync", "async"] = "async",
         originating_session_id: str | None = None,
+        trigger_type: str | None = None,
+        trigger_automation_id: str | None = None,
     ) -> TaskRow:
         """Create a task and start its lead session in the background.
 
@@ -122,31 +144,25 @@ class LifecycleService:
 
         Returns the newly created TaskRow.
 
-        Raises ``BriefTooLongError`` (subclass of ValueError) when ``goal``
-        exceeds the goal-mode payload cap — surfaced here BEFORE any DB write
-        so the user gets a clean error in chat instead of a mid-turn crash.
+        An over-long ``goal`` is no longer rejected: the lead brief is *spilled*
+        to a doc and the lead receives a short pointer to read (see
+        ``spill_goal_brief_if_too_long``), so a long goal never crashes the
+        ``/goal`` payload mid-turn.
         """
-        # Goal-mode brief cap. ``build_member_session`` enforces this too as
-        # defense-in-depth, but checking here means failures surface before
-        # we write any rows / spin up sessions.
-        from valuz_agent.adapters.agent_resolver import assert_goal_brief_length
-
-        assert_goal_brief_length(goal)
-
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            # Resolve workspace cwd
-            from valuz_agent.modules.projects.datastore import WorkspaceDatastore
+            # Resolve project cwd
+            from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-            ws_ds = WorkspaceDatastore(db)
-            ws_row = await ws_ds.get_by_id(workspace_id)
+            ws_ds = ProjectDatastore(db)
+            ws_row = await ws_ds.get_by_id(require_current_user_id(), project_id)
             if ws_row is None:
-                raise ValueError(f"workspace {workspace_id!r} not found")
-            project_cwd = fs_registry.workspace_cwd(
+                raise ValueError(f"project {project_id!r} not found")
+            project_cwd = fs_registry.project_cwd(
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -166,11 +182,21 @@ class LifecycleService:
             # decision (M10 附录 D); only repo-worktree opt-in isolates.
             lead_cwd = str(project_cwd)
 
+            # Classify what spawned this task (user / chat / agent / automation)
+            # so the task list can show "由 … 触发" and the reverse "spawned by"
+            # query has indexed source ids.
+            prov = await resolve_trigger_provenance(
+                db,
+                originating_session_id=originating_session_id,
+                trigger_type=trigger_type,
+                trigger_automation_id=trigger_automation_id,
+            )
+
             # Persist TaskRow
             task_title = title or goal[:100]
             task_row = TaskRow(
                 id=task_id,
-                workspace_id=workspace_id,
+                project_id=project_id,
                 file_path=file_path,
                 title=task_title,
                 goal=goal,
@@ -178,6 +204,10 @@ class LifecycleService:
                 created_by=created_by,
                 lead_agent_slug=lead_agent_slug,
                 current_holder=lead_agent_slug,
+                trigger_type=prov.trigger_type,
+                trigger_task_id=prov.trigger_task_id,
+                trigger_agent_slug=prov.trigger_agent_slug,
+                trigger_automation_id=prov.trigger_automation_id,
                 metadata_={
                     "dispatch_mode": dispatch_mode,
                     # v3: when a project conversation spawns this task via the
@@ -190,20 +220,22 @@ class LifecycleService:
                     ),
                 },
             )
-            await task_ds.create_task(task_row)
+            await task_ds.create_task(require_current_user_id(), task_row)
 
             # Resolve lead agent and materialize a per-task lead clone that
             # carries the dispatch tools (base agent stays clean — see
             # _materialize_lead_agent). The lead session points at the clone.
-            lead_member = await member_ds.get(workspace_id, lead_agent_slug)
+            lead_member = await member_ds.get(
+                require_current_user_id(), project_id, lead_agent_slug
+            )
             if lead_member is None:
                 raise ValueError(
-                    f"lead agent {lead_agent_slug!r} is not a member of workspace {workspace_id!r}"
+                    f"lead agent {lead_agent_slug!r} is not a member of project {project_id!r}"
                 )
-            lead_agent = await kernel_store.load_agent(lead_member.kernel_agent_id)
-            lead_clone_id: str | None = None
+            lead_agent = await _member_agent_config(lead_member, member_ds)
+            lead_clone = None
             if lead_agent is not None:
-                lead_clone_id = self._materialize_lead_agent(
+                lead_clone = await self._materialize_lead_agent(
                     lead_agent, dispatch_mode=dispatch_mode
                 )
 
@@ -216,24 +248,34 @@ class LifecycleService:
             # context. (deepagents fallback sends the brief unwrapped, where a
             # bare goal + refs is still clear.)
             lead_brief = goal + (f"\n\n## References\n\n{refs_text}" if refs_text else "")
+            # Fence the goal-mode payload: if the lead brief is over the ``/goal``
+            # cap, spill it to a doc and pass the lead a short pointer instead
+            # (used both as the embedded brief and the initial ``/goal`` prompt).
+            lead_brief = spill_goal_brief_if_too_long(
+                lead_brief,
+                run_dir=lead_cwd,
+                task_id=task_id,
+                label=lead_agent_slug,
+                is_lead=True,
+            )
 
-            # Fetch workspace instructions for system prompt
-            from valuz_agent.modules.projects.datastore import WorkspaceDatastore as WsDs
+            # Fetch project instructions for system prompt
+            from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
 
             ws_ds2 = WsDs(db)
-            ws_ctx = await ws_ds2.get_context(workspace_id)
-            workspace_instructions_md = ws_ctx.instructions_md if ws_ctx else None
+            ws_ctx = await ws_ds2.get_context(require_current_user_id(), project_id)
+            project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
 
             lead_session = await build_member_session(
-                workspace_id=workspace_id,
+                project_id=project_id,
                 agent_slug=lead_agent_slug,
                 members=member_ds,
                 is_lead=True,
                 task_id=task_id,
                 run_dir=lead_cwd,
                 brief=lead_brief,
-                workspace_name=ws_row.name,
-                workspace_instructions_md=workspace_instructions_md,
+                project_name=ws_row.name,
+                project_instructions_md=project_instructions_md,
                 dispatch_mode=dispatch_mode,
                 # Lead runs the whole task in goal mode: the kernel auto-loops
                 # until the task goal is met. ``finish_task`` remains the
@@ -244,22 +286,21 @@ class LifecycleService:
             if lead_session is None:
                 raise ValueError(f"could not build lead session for {lead_agent_slug!r}")
 
-            # Point the lead session at the per-task lead clone so the runtime
-            # surfaces the dispatch tools (build_member_session set agent_id to
-            # the base agent; everything else on the session — instructions /
-            # skills / model / provider — already came from the base).
-            if lead_clone_id is not None:
-                from dataclasses import replace as _replace
-
-                lead_session = _replace(lead_session, agent_id=lead_clone_id)
+            # Swap the embedded snapshot for the per-task lead clone so the
+            # runtime surfaces the dispatch tools (build_member_session
+            # embedded the base agent; everything else on the session —
+            # instructions / skills / model / provider — already came from it).
+            if lead_clone is not None:
+                lead_session = embed_agent_config(lead_session, lead_clone)
 
             # Fail fast: don't spawn a lead that has no usable credentials —
             # it would only fail mid-turn with a cryptic "Not logged in".
             gap = await _credential_gap(lead_session, lead_agent_slug, db=db)
             if gap is not None:
-                await task_ds.update_task_status(task_id, "failed")
+                await task_ds.update_task_status(require_current_user_id(), task_id, "failed")
                 await event_ds.append_event(
-                    workspace_id=workspace_id,
+                    require_current_user_id(),
+                    project_id=project_id,
                     task_id=task_id,
                     type="kickoff_failed",
                     actor=created_by,
@@ -268,11 +309,12 @@ class LifecycleService:
                 )
                 raise ValueError(gap)
 
-            await kernel_store.save_session(lead_session)
+            await kernel_client.create_session(require_current_user_id(), lead_session)
+            await project_index.record(project_id, lead_session.id, kind="task_lead", origin="task")
 
             # Record the lead run in valuz_task_session
             lead_run = TaskSessionRow(
-                workspace_id=workspace_id,
+                project_id=project_id,
                 task_id=task_id,
                 session_id=lead_session.id,
                 agent_slug=lead_agent_slug,
@@ -281,14 +323,15 @@ class LifecycleService:
                 status="active",
                 label="Kickoff",
                 goal=goal,
-                workspace_mode="shared",
+                project_mode="shared",
                 run_dir=lead_cwd,
             )
-            await run_ds.create_run(lead_run)
+            await run_ds.create_run(require_current_user_id(), lead_run)
 
             # Append kickoff event
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="kickoff",
                 actor=created_by,
@@ -314,7 +357,7 @@ class LifecycleService:
                     initial_prompt=lead_brief,
                     role="lead",
                     task_id=task_id,
-                    workspace_id=workspace_id,
+                    project_id=project_id,
                 )
             )
         else:
@@ -335,7 +378,7 @@ class LifecycleService:
                     await self._auto_finalize_lead_task(
                         lead_session_id=lead_session.id,
                         task_id=task_id,
-                        workspace_id=workspace_id,
+                        project_id=project_id,
                         final_status=final_status,
                     )
                 except Exception:  # noqa: BLE001
@@ -352,7 +395,7 @@ class LifecycleService:
     async def draft_task(
         self,
         *,
-        workspace_id: str,
+        project_id: str,
         goal: str,
         lead_agent_slug: str,
         originating_session_id: str,
@@ -367,36 +410,32 @@ class LifecycleService:
         to follow up with ``plan_task`` (lifting plan_version to 1) before
         committing.
 
-        Raises ``ValueError`` if the workspace doesn't exist or the agent isn't
-        a member of it (same validations as ``kickoff``). Raises
-        ``BriefTooLongError`` (subclass of ValueError) when ``goal`` exceeds
-        the goal-mode payload cap — fails before any DB write so the chat
-        user sees a clean error before the draft row is created.
+        Raises ``ValueError`` if the project doesn't exist or the agent isn't
+        a member of it (same validations as ``kickoff``). An over-long ``goal``
+        is accepted as-is: the draft only stores the goal text — when
+        ``commit_task`` builds the lead session it spills an over-cap brief to a
+        doc and passes a pointer (see ``spill_goal_brief_if_too_long``).
         """
-        # Same goal-mode brief cap as ``kickoff``. Catching it here means a
-        # draft with an over-long goal never enters the DB at all.
-        from valuz_agent.adapters.agent_resolver import assert_goal_brief_length
-
-        assert_goal_brief_length(goal)
-
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            from valuz_agent.modules.projects.datastore import WorkspaceDatastore
+            from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-            ws_ds = WorkspaceDatastore(db)
-            ws_row = await ws_ds.get_by_id(workspace_id)
+            ws_ds = ProjectDatastore(db)
+            ws_row = await ws_ds.get_by_id(require_current_user_id(), project_id)
             if ws_row is None:
-                raise ValueError(f"workspace {workspace_id!r} not found")
-            lead_member = await member_ds.get(workspace_id, lead_agent_slug)
+                raise ValueError(f"project {project_id!r} not found")
+            lead_member = await member_ds.get(
+                require_current_user_id(), project_id, lead_agent_slug
+            )
             if lead_member is None:
                 raise ValueError(
-                    f"lead agent {lead_agent_slug!r} is not a member of workspace {workspace_id!r}"
+                    f"lead agent {lead_agent_slug!r} is not a member of project {project_id!r}"
                 )
 
-            project_cwd = fs_registry.workspace_cwd(
+            project_cwd = fs_registry.project_cwd(
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -419,7 +458,7 @@ class LifecycleService:
 
             task_row = TaskRow(
                 id=task_id,
-                workspace_id=workspace_id,
+                project_id=project_id,
                 file_path=file_path,
                 title=task_title,
                 goal=goal,
@@ -429,16 +468,17 @@ class LifecycleService:
                 # Draft-period holder = originating chat (logically); we still
                 # record the lead agent slug for UI clarity. The actual plan
                 # writer gate uses metadata.originating_session_id +
-                # workspace match (see dispatch_mcp._check_plan_writer_gate).
+                # project match (see dispatch_mcp._check_plan_writer_gate).
                 current_holder=lead_agent_slug,
                 metadata_=metadata,
                 plan_version=0,
                 committed_at=None,
             )
-            await task_ds.create_task(task_row)
+            await task_ds.create_task(require_current_user_id(), task_row)
 
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="task_drafted",
                 actor=originating_session_id,
@@ -455,7 +495,7 @@ class LifecycleService:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         caller_session_id: str,
         lead_agent_slug_override: str | None = None,
     ) -> dict[str, Any]:
@@ -481,7 +521,9 @@ class LifecycleService:
             run_ds = TaskSessionDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            task_row = await task_ds.get_task_by_workspace(workspace_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -498,21 +540,19 @@ class LifecycleService:
                 return {"error": "commit_task: plan has no work to do (all nodes already done)"}
 
             lead_slug = lead_agent_slug_override or task_row.lead_agent_slug
-            lead_member = await member_ds.get(workspace_id, lead_slug)
+            lead_member = await member_ds.get(require_current_user_id(), project_id, lead_slug)
             if lead_member is None:
                 return {
-                    "error": (
-                        f"lead agent {lead_slug!r} is not a member of workspace {workspace_id!r}"
-                    )
+                    "error": (f"lead agent {lead_slug!r} is not a member of project {project_id!r}")
                 }
 
-            from valuz_agent.modules.projects.datastore import WorkspaceDatastore
+            from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-            ws_ds = WorkspaceDatastore(db)
-            ws_row = await ws_ds.get_by_id(workspace_id)
+            ws_ds = ProjectDatastore(db)
+            ws_row = await ws_ds.get_by_id(require_current_user_id(), project_id)
             if ws_row is None:
-                return {"error": f"workspace {workspace_id!r} not found"}
-            project_cwd = fs_registry.workspace_cwd(
+                return {"error": f"project {project_id!r} not found"}
+            project_cwd = fs_registry.project_cwd(
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -522,10 +562,10 @@ class LifecycleService:
             )
             lead_cwd = str(project_cwd)
 
-            lead_agent = await kernel_store.load_agent(lead_member.kernel_agent_id)
-            lead_clone_id: str | None = None
+            lead_agent = await _member_agent_config(lead_member, member_ds)
+            lead_clone = None
             if lead_agent is not None:
-                lead_clone_id = self._materialize_lead_agent(lead_agent, dispatch_mode="async")
+                lead_clone = await self._materialize_lead_agent(lead_agent, dispatch_mode="async")
 
             refs = (task_row.metadata_ or {}).get("refs") or []
             refs_text = "\n".join(f"- {r}" for r in refs) if refs else ""
@@ -538,23 +578,33 @@ class LifecycleService:
                 f"{plan_summary_lines}\n"
                 + (f"\n## References\n\n{refs_text}\n" if refs_text else "")
             )
+            # Fence the goal-mode payload: spill an over-cap committed brief to a
+            # doc and hand the lead a short pointer (used as both the embedded
+            # brief and the initial ``/goal`` prompt below).
+            lead_brief = spill_goal_brief_if_too_long(
+                lead_brief,
+                run_dir=lead_cwd,
+                task_id=task_id,
+                label=lead_slug,
+                is_lead=True,
+            )
 
-            from valuz_agent.modules.projects.datastore import WorkspaceDatastore as WsDs
+            from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
 
             ws_ds2 = WsDs(db)
-            ws_ctx = await ws_ds2.get_context(workspace_id)
-            workspace_instructions_md = ws_ctx.instructions_md if ws_ctx else None
+            ws_ctx = await ws_ds2.get_context(require_current_user_id(), project_id)
+            project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
 
             lead_session = await build_member_session(
-                workspace_id=workspace_id,
+                project_id=project_id,
                 agent_slug=lead_slug,
                 members=member_ds,
                 is_lead=True,
                 task_id=task_id,
                 run_dir=lead_cwd,
                 brief=lead_brief,
-                workspace_name=ws_row.name,
-                workspace_instructions_md=workspace_instructions_md,
+                project_name=ws_row.name,
+                project_instructions_md=project_instructions_md,
                 dispatch_mode="async",
                 goal_mode=True,
                 plan_pre_committed=True,  # ← key flag (VALUZ-CHATPLAN D10)
@@ -562,20 +612,19 @@ class LifecycleService:
             )
             if lead_session is None:
                 return {"error": f"could not build lead session for {lead_slug!r}"}
-            if lead_clone_id is not None:
-                from dataclasses import replace as _replace
-
-                lead_session = _replace(lead_session, agent_id=lead_clone_id)
+            if lead_clone is not None:
+                lead_session = embed_agent_config(lead_session, lead_clone)
 
             gap = await _credential_gap(lead_session, lead_slug, db=db)
             if gap is not None:
                 return {"error": f"commit_task: {gap}"}
 
-            await kernel_store.save_session(lead_session)
+            await kernel_client.create_session(require_current_user_id(), lead_session)
+            await project_index.record(project_id, lead_session.id, kind="task_lead", origin="task")
 
             # DB writes: create lead run row + flip task status + append event
             lead_run = TaskSessionRow(
-                workspace_id=workspace_id,
+                project_id=project_id,
                 task_id=task_id,
                 session_id=lead_session.id,
                 agent_slug=lead_slug,
@@ -584,10 +633,10 @@ class LifecycleService:
                 status="active",
                 label="Committed",
                 goal=task_row.goal,
-                workspace_mode="shared",
+                project_mode="shared",
                 run_dir=lead_cwd,
             )
-            await run_ds.create_run(lead_run)
+            await run_ds.create_run(require_current_user_id(), lead_run)
 
             committed_at = now_ms()
             task_row.status = "active"
@@ -603,7 +652,8 @@ class LifecycleService:
             await task_ds.update_task(task_row)
 
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="committed",
                 actor=caller_session_id,
@@ -627,7 +677,7 @@ class LifecycleService:
                 initial_prompt=lead_brief,
                 role="lead",
                 task_id=task_id,
-                workspace_id=workspace_id,
+                project_id=project_id,
             )
         )
 
@@ -642,7 +692,7 @@ class LifecycleService:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         caller_session_id: str,
         reason: str = "",
     ) -> dict[str, Any]:
@@ -655,7 +705,9 @@ class LifecycleService:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
 
-            task_row = await task_ds.get_task_by_workspace(workspace_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -669,7 +721,8 @@ class LifecycleService:
             task_row.status = "abandoned"
             await task_ds.update_task(task_row)
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="abandoned",
                 actor=caller_session_id,
@@ -683,10 +736,12 @@ class LifecycleService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _last_assistant_summary(session_id: str) -> str:
+    async def _last_assistant_summary(session_id: str) -> str:
         """Best-effort last assistant-message text, for an auto-finalize summary."""
         try:
-            events = kernel_sync.get_events_sync(session_id, limit=200)
+            events = await kernel_client.get_events(
+                require_current_user_id(), session_id, limit=200
+            )
             for event in reversed(events):
                 payload = event.data if hasattr(event, "data") else {}
                 if event.type in ("assistant_message", "text_delta", "content_block"):
@@ -702,7 +757,7 @@ class LifecycleService:
         *,
         lead_session_id: str,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         final_status: str,
     ) -> None:
         """Close a task when its lead actor-loop ends without an explicit
@@ -727,7 +782,7 @@ class LifecycleService:
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
 
-            task = await task_ds.get_task_by_workspace(workspace_id, task_id)
+            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
             if task is None or task.status != "active":
                 return  # already closed by finish_task / stop / intervene
             if self._members.has_live_members(task_id):
@@ -744,71 +799,73 @@ class LifecycleService:
                 unresolved = []
 
             # A turn can ERROR yet still leave session.status == "idle" — the
-            # failure lives in stop_reason (e.g. a skill-materialization crash
-            # reports stop_reason.type=="error" with status idle and 0 assistant
-            # output). So check the driver's final_status AND the session's
-            # stop_reason; never mark an errored turn "completed".
+            # failure lives in stop_reason (e.g. a skill-materialization crash,
+            # or an API transport error like ECONNRESET / a dropped socket that
+            # the SDK surfaces as ResultMessage(is_error=True) — both report
+            # stop_reason.type=="error" with status idle and ~0 assistant
+            # output). Always consult stop_reason (it carries the ``category``
+            # needed below) and fall back to final_status; never mark an errored
+            # turn "completed".
             error_msg: str | None = None
-            if final_status in ("terminated", "error"):
+            error_category: str | None = None
+            try:
+                sess = await kernel_client.get_session(require_current_user_id(), lead_session_id)
+                sr = getattr(sess, "stop_reason", None) if sess is not None else None
+                if sr:
+                    typ = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
+                    if typ == "error" or (isinstance(typ, str) and "error" in typ):
+                        msg = (
+                            sr.get("message")
+                            if isinstance(sr, dict)
+                            else getattr(sr, "message", None)
+                        )
+                        error_msg = str(msg or "lead turn errored")
+                        error_category = (
+                            sr.get("category")
+                            if isinstance(sr, dict)
+                            else getattr(sr, "category", None)
+                        )
+            except Exception:  # noqa: BLE001
+                logger.debug("auto-finalize: stop_reason check failed for %s", lead_session_id)
+            if error_msg is None and final_status in ("terminated", "error"):
+                # Driver flagged a failure with no stop_reason to read (e.g. a
+                # raised exception). Treat as a genuine failure (category stays
+                # None → not a user cancellation).
                 error_msg = f"lead turn ended with status={final_status}"
-            else:
-                try:
-                    sess = await kernel_store.load_session(lead_session_id)
-                    sr = getattr(sess, "stop_reason", None) if sess is not None else None
-                    if sr:
-                        typ = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
-                        if typ == "error" or (isinstance(typ, str) and "error" in typ):
-                            msg = (
-                                sr.get("message")
-                                if isinstance(sr, dict)
-                                else getattr(sr, "message", None)
-                            )
-                            error_msg = str(msg or "lead turn errored")
-                except Exception:  # noqa: BLE001
-                    logger.debug("auto-finalize: stop_reason check failed for %s", lead_session_id)
-
-            if error_msg and not unresolved:
-                # Lead turn errored BEFORE producing any plan nodes — there's
-                # no in-flight or half-done work the ``blocked`` state would
-                # protect, so locking the task here forces an
-                # unnecessary ``resume_task`` ceremony for what is effectively
-                # still a fresh kickoff. Common trigger from a real bug
-                # report (2026-05-29): an automation-fired lead session
-                # entered Claude Agent SDK's ``EnterPlanMode`` + spawned a
-                # nested ``Agent`` subagent that hung; the SDK cancelled the
-                # turn ~3.5 minutes later (``stop_reason.type='error',
-                # category='user_interrupt', message='cancelled'``); plan was
-                # still empty. With the old logic this immediately blocked
-                # the task and the lead's next turn (driven by the user
-                # opening the conversation to ask "why didn't you plan?")
-                # hit ``plan is read-only`` on the very first plan_task call.
-                #
-                # New behaviour: keep task ``active`` so the next driver
-                # (user message → kernel send_message → fresh turn; OR the
-                # next automation fire → fresh lead session) picks it up
-                # cleanly. The turn error is still surfaced via logger so
-                # backend.log retains the audit trail; no ``task_blocked``
-                # event is emitted because the task isn't actually blocked
-                # (no work pending, status unchanged).
-                logger.warning(
-                    "auto-finalize: task %s lead turn errored with empty plan "
-                    "(%s) — staying active for next driver",
-                    task_id,
-                    error_msg,
-                )
-                return
 
             if error_msg:
-                # Lead turn errored out mid-task. Per task_state.py: task-level
-                # ``failed`` is intentionally not in the enum — this scenario
-                # maps to ``blocked`` (recoverable; the lead crashed but the
-                # plan is intact, user can resume by re-engaging chat or
-                # creating a new lead session). The ``reason`` payload tags
-                # this as a lead-turn-error to distinguish from the
-                # unresolved-subtasks-no-error blocked case below.
-                await task_ds.update_task_status(task_id, "blocked")
+                if error_category in ("user_interrupt", "interrupted") and not unresolved:
+                    # User/host-driven cancellation BEFORE any plan node exists —
+                    # there's no in-flight or half-done work to protect, so locking
+                    # the task forces an unnecessary ``resume_task`` ceremony for
+                    # what is effectively still a fresh kickoff. Real bug report
+                    # (2026-05-29): an automation-fired lead entered the Claude
+                    # Agent SDK's ``EnterPlanMode`` + a nested ``Agent`` that hung;
+                    # the SDK cancelled the turn ~3.5 min later
+                    # (``category='user_interrupt'``); plan still empty. Keep the
+                    # task ``active`` so the next driver (user message → fresh turn;
+                    # or the next automation fire) picks it up cleanly. Logged for
+                    # the audit trail; no ``task_blocked`` event (nothing pending).
+                    logger.warning(
+                        "auto-finalize: task %s lead turn cancelled with empty plan "
+                        "(%s) — staying active for next driver",
+                        task_id,
+                        error_msg,
+                    )
+                    return
+
+                # Genuine failure (API/network/exec error, or a raised exception),
+                # OR a cancellation that left pending work. Per task_state.py:
+                # task-level ``failed`` is intentionally not in the enum — this
+                # maps to ``blocked`` (recoverable; the plan is intact, the user
+                # resumes via the detail page's retry/继续 entry → resume_task
+                # rebuilds the lead). The ``reason`` payload tags this as a
+                # lead-turn-error to distinguish from the unresolved-subtasks
+                # blocked case below.
+                await task_ds.update_task_status(require_current_user_id(), task_id, "blocked")
                 await event_ds.append_event(
-                    workspace_id=workspace_id,
+                    require_current_user_id(),
+                    project_id=project_id,
                     task_id=task_id,
                     type="task_blocked",
                     actor=lead_session_id,
@@ -816,19 +873,24 @@ class LifecycleService:
                     payload={
                         "reason": "lead_turn_error",
                         "error": error_msg,
+                        "category": error_category,
                         "pending_subtasks": unresolved,
                     },
                 )
                 logger.warning(
-                    "auto-finalize: task %s -> blocked (lead turn error: %s)", task_id, error_msg
+                    "auto-finalize: task %s -> blocked (lead turn error: %s, category=%s)",
+                    task_id,
+                    error_msg,
+                    error_category,
                 )
                 return
             if unresolved:
                 # Lead stopped with planned work undispatched — surface as blocked
                 # (not a hard error, but not done either).
-                await task_ds.update_task_status(task_id, "blocked")
+                await task_ds.update_task_status(require_current_user_id(), task_id, "blocked")
                 await event_ds.append_event(
-                    workspace_id=workspace_id,
+                    require_current_user_id(),
+                    project_id=project_id,
                     task_id=task_id,
                     type="task_blocked",
                     actor=lead_session_id,
@@ -843,18 +905,19 @@ class LifecycleService:
                 )
                 return
 
-            summary = self._last_assistant_summary(lead_session_id) or (
+            summary = await self._last_assistant_summary(lead_session_id) or (
                 "(auto-finalized) Lead ended its turn with no pending subtasks; "
                 "task closed automatically."
             )
-            await task_ds.update_task_status(task_id, "completed")
+            await task_ds.update_task_status(require_current_user_id(), task_id, "completed")
             await run_ds.update_run_by_session(
                 session_id=lead_session_id,
                 status="completed",
                 ended_at=now_ms(),
             )
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="task_completed",
                 actor=lead_session_id,
@@ -865,6 +928,7 @@ class LifecycleService:
                 "auto-finalize: task %s completed (lead natural end, no explicit finish_task)",
                 task_id,
             )
+            _notify_task_memory(task_id)
 
     # ------------------------------------------------------------------
     # _finalize_actor — the run_actor_loop finally callback
@@ -878,7 +942,8 @@ class LifecycleService:
         final_status: str,
         role: Literal["lead", "subtask"],
         task_id: str,
-        workspace_id: str,
+        project_id: str,
+        via_shutdown: bool = False,
     ) -> None:
         """Finalize a session once its actor loop ends; record member result.
 
@@ -891,19 +956,37 @@ class LifecycleService:
         """
         from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
 
+        from valuz_agent.adapters.kernel_client import KernelUnavailableError
+
         try:
             await _finalize_session(session_id, last_content, final_status)
+        except KernelUnavailableError:
+            # The backend is shutting down — the kernel store is already torn
+            # down (the actor loop was cancelled mid-flight and runs this
+            # finalize in its ``finally``). Finalize is pointless now: the
+            # session is left ``running`` and ``recover_running_sessions`` /
+            # ``recover_active_tasks`` reconcile it on the next boot. Skip
+            # quietly instead of spamming a "Dependencies not initialized"
+            # traceback for every in-flight session at shutdown.
+            logger.debug(
+                "_finalize_actor: kernel unavailable (shutdown) — deferring "
+                "finalize of %s to boot recovery",
+                session_id,
+            )
         except Exception:  # noqa: BLE001
             logger.exception("_finalize_actor: finalize failed for %s", session_id)
 
-        try:
-            from valuz_agent.adapters.broadcast_sink import cleanup_session
-
-            await cleanup_session(session_id)
-        except Exception:  # noqa: BLE001
-            pass
-
         if role == "lead":
+            # A ``shutdown``-triggered exit (pause / stop / finish_task
+            # broadcast) is externally managed: stop_task already set the task
+            # paused/stopped, finish_task set it terminal. Running auto-finalize
+            # here would race a concurrent resume (a rapid pause→resume flips the
+            # task back to ``active`` before this old loop's finalize runs, and
+            # auto-finalize then wrongly ``blocked``s the freshly-resumed task).
+            # Only NATURAL exits (idle-TTL / end_turn / terminal status) should
+            # auto-close the task.
+            if via_shutdown:
+                return
             # Host-side terminal fallback: a lead loop can end (goal auto-exit
             # to default, idle-TTL, normal end_turn) WITHOUT the model calling
             # finish_task — common when a goal-mode lead satisfies a simple goal
@@ -913,7 +996,7 @@ class LifecycleService:
             await self._auto_finalize_lead_task(
                 lead_session_id=session_id,
                 task_id=task_id,
-                workspace_id=workspace_id,
+                project_id=project_id,
                 final_status=final_status,
             )
             return
@@ -931,7 +1014,7 @@ class LifecycleService:
 
                 # Manifest is best-effort — never let it block the terminal write.
                 try:
-                    manifest = collect_manifest(
+                    manifest = await collect_manifest(
                         session_id, run_dir, final_status, since_epoch=since
                     )
                 except Exception:  # noqa: BLE001
@@ -948,31 +1031,48 @@ class LifecycleService:
                 )
                 # Review model (VALUZ-TASK §6.1): the actor loop ending is NOT
                 # subtask completion — the lead decides that via review_subtask. We
-                # only surface a terminal *failure* (terminated/error) here, and
-                # mark the plan node failed so the lead/panel sees it. A clean loop
-                # exit (idle-TTL / finish_task shutdown) emits no completion event;
-                # the node's status was already set by review / _mark_in_review.
+                # only surface a terminal *failure* (terminated/error) here. The
+                # node goes to ``rework`` (NOT ``failed``): a member run dying —
+                # including an API/socket drop that Layer-1 stamps as an
+                # ``Error(api_error)`` and ``_resolve_turn_status`` elevates to
+                # ``terminated`` — is recoverable. ``rework`` is dispatchable by
+                # the gate (planned/rework) and is the bucket both a live lead and
+                # a resumed lead re-dispatch, matching ``reconcile()`` /
+                # ``stop_member``. ``failed`` would strand it (excluded from
+                # ready_keys + non-dispatchable), so a blocked→resume could never
+                # relaunch it. The error rides along as ``review_feedback`` so the
+                # retry brief explains why; the ``subtask_failed`` event below
+                # still records the failed attempt on the timeline.
                 if not ok:
                     key = run.subtask_key if run else None
                     if key:
                         task_ds = TaskDatastore(db)
-                        task_row = await task_ds.get_task_by_workspace(workspace_id, task_id)
+                        task_row = await task_ds.get_task_by_project(
+                            require_current_user_id(), project_id, task_id
+                        )
                         if task_row is not None:
                             plan = TaskPlan.from_dict(task_row.plan)
                             if plan.get(key) is not None:
-                                plan.update_node(key, status="failed")
+                                plan.update_node(
+                                    key,
+                                    status="rework",
+                                    review_feedback=(
+                                        manifest.get("summary") or "上次运行因错误中断,请重试。"
+                                    ),
+                                )
                                 task_row.plan = plan.to_dict()
                                 await task_ds.update_task(task_row)
                                 await planning.emit_plan_update(
                                     event_ds,
-                                    workspace_id=workspace_id,
+                                    project_id=project_id,
                                     task_id=task_id,
                                     plan=plan,
                                     actor=agent_slug,
                                     session_id=session_id,
                                 )
                     await event_ds.append_event(
-                        workspace_id=workspace_id,
+                        require_current_user_id(),
+                        project_id=project_id,
                         task_id=task_id,
                         type="subtask_failed",
                         actor=agent_slug,
@@ -990,7 +1090,7 @@ class LifecycleService:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         lead_session_id: str,
         summary: str,
         artifacts: list[str] | None = None,
@@ -1037,7 +1137,9 @@ class LifecycleService:
 
             # Guard: don't let a "completed" finish leave planned work behind.
             if final_status == "completed":
-                task_row = await task_ds.get_task_by_workspace(workspace_id, task_id)
+                task_row = await task_ds.get_task_by_project(
+                    require_current_user_id(), project_id, task_id
+                )
                 if task_row is not None:
                     plan = TaskPlan.from_dict(task_row.plan)
                     unresolved = [
@@ -1060,7 +1162,7 @@ class LifecycleService:
                         }
 
             if rejected is None:
-                await task_ds.update_task_status(task_id, final_status)
+                await task_ds.update_task_status(require_current_user_id(), task_id, final_status)
 
                 # Mark lead run as completed
                 await run_ds.update_run_by_session(
@@ -1070,7 +1172,8 @@ class LifecycleService:
                 )
 
                 await event_ds.append_event(
-                    workspace_id=workspace_id,
+                    require_current_user_id(),
+                    project_id=project_id,
                     task_id=task_id,
                     type=event_type,
                     actor=lead_session_id,
@@ -1084,6 +1187,11 @@ class LifecycleService:
         if rejected is not None:
             return rejected
 
+        # Graduate the finished task's multi-agent lessons into project memory
+        # (only on a real completion, not a user-requested 'stopped').
+        if final_status == "completed":
+            _notify_task_memory(task_id)
+
         # Session-modes reconciliation (task-goal-mode.md §Key decisions):
         # ``finish_task`` is the authoritative terminal. Force the lead
         # session's mode back to ``default`` so the kernel's goal evaluator
@@ -1091,10 +1199,9 @@ class LifecycleService:
         # and so a re-opened conversation on this session isn't stuck in
         # goal mode. Best-effort — a missing session is not fatal here.
         try:
-            lead_sess = await kernel_store.load_session(lead_session_id)
+            lead_sess = await kernel_client.get_session(require_current_user_id(), lead_session_id)
             if lead_sess is not None and getattr(lead_sess, "mode", "default") != "default":
-                lead_sess.mode = "default"
-                await kernel_store.save_session(lead_sess)
+                await kernel_client.set_mode(require_current_user_id(), lead_session_id, "default")
         except Exception:  # noqa: BLE001 — terminal bookkeeping, never block close
             logger.warning(
                 "finish_task: could not reset lead session %s mode to default",
@@ -1114,9 +1221,9 @@ class LifecycleService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _materialize_lead_agent(
+    async def _materialize_lead_agent(
         self, base_agent: Any, dispatch_mode: Literal["sync", "async"] = "sync"
-    ) -> str:  # returns the lead-clone AgentConfig id
+    ) -> Any:  # returns the lead-clone AgentConfig
         """Materialize a per-task **lead clone** of *base_agent* and return its id.
 
         Tools live only on ``AgentConfig`` (the kernel has no per-session tool
@@ -1134,45 +1241,17 @@ class LifecycleService:
         """
         from dataclasses import replace
 
-        from valuz_agent.modules.tasks.dispatch_mcp import (
-            DISPATCH_TOOL_DECLARATIONS,
-            LEAD_ONLY_TOOL_NAMES,
-            ORCHESTRATION_TOOL_NAMES,
-        )
-
-        # sync/async share one lead toolset (non-blocking dispatch +
-        # await_members + plan/review/finish); the modes differ only in the
-        # session driver (one-shot run_session_to_idle vs persistent actor loop).
-        declarations = DISPATCH_TOOL_DECLARATIONS
-        # Start from the base tools minus any dispatch/launcher tools, then add
-        # exactly this mode's dispatch declarations — so the clone never carries
-        # stale dispatch tools or the conversation-only launcher/observability
-        # tools (create_task / list_tasks / get_task / draft_task / commit_task /
-        # abandon_task).
-        #
-        # VALUZ-CHATPLAN S2: plan_task / modify_plan / get_plan are now also
-        # advertised on chat agents (via ORCHESTRATION_TOOL_DECLARATIONS) so a
-        # base chat agent might carry them. They are NOT in ``drop`` (they
-        # legitimately belong on the lead), so we'd duplicate them when we add
-        # DISPATCH_TOOL_DECLARATIONS. Also dedupe against the upcoming
-        # declarations' names so the clone advertises each tool exactly once.
-        decl_names = {getattr(d, "name", None) for d in declarations}
-        drop = LEAD_ONLY_TOOL_NAMES | ORCHESTRATION_TOOL_NAMES | decl_names
-        base_tools = tuple(
-            t for t in (base_agent.tools or ()) if getattr(t, "name", None) not in drop
-        )
-        # Lead sessions must also carry the always-on in-process baseline tools
-        # (memory + submit_skill). The base member agent normally already has
-        # them via _prepare_conversation_tools, but a base created before they
-        # landed would be missing them — ensure them on the clone too.
-        from valuz_agent.modules.agents.service import _ensure_global_tools_declared
-
+        # Tool surfaces ride the session's ``harness`` MCP entry now
+        # (``build_member_session(is_lead=True)`` points it at the ``lead``
+        # toolset of the host toolkit MCP server) — the clone carries no
+        # tool declarations of its own. It survives as an identity stamp:
+        # the ``__lead__{mode}`` id marks the embedded snapshot as a lead
+        # clone for queries/diagnostics.
         clone_id = f"{base_agent.id}__lead__{dispatch_mode}"
-        clone = _ensure_global_tools_declared(
-            replace(base_agent, id=clone_id, tools=base_tools + tuple(declarations))
-        )
-        kernel_sync.save_agent_sync(clone)
-        return clone_id
+        clone = replace(base_agent, id=clone_id, tools=())
+        # The clone exists only as the lead session's embedded snapshot —
+        # the kernel has no agents table to materialize it into.
+        return clone
 
 
 __all__ = ["LifecycleService"]

@@ -1,6 +1,6 @@
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, String, event
+from sqlalchemy import BigInteger, NullPool, String, event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -14,7 +14,6 @@ from sqlalchemy.orm import (
 )
 
 from valuz_agent.infra.config import settings
-from valuz_agent.infra.owner_context import get_current_user_id
 from valuz_agent.infra.time_utils import now_ms
 
 
@@ -35,32 +34,33 @@ class TimestampMixin:
     )
 
 
-class OwnedMixin:
+class UserMixin:
     """Row ownership — every business table carries the owner's ``user_id``.
 
-    Required (``NOT NULL``) and stamped automatically from the request-scoped
-    ``current_user_id`` ContextVar (``infra.owner_context``), which resolves to
-    the local install id in OSS and the logged-in user's id under the commercial
-    overlay. Indexed because the commercial edition filters every query by owner.
+    Required (``NOT NULL``) and stamped **explicitly** by each datastore
+    ``create_*`` / facade write (which takes the caller's ``user_id`` as its
+    first argument). There is deliberately NO column ``default=`` reading the
+    request ContextVar: an insert that forgets to stamp fails loudly with a
+    ``NOT NULL`` violation rather than being silently attributed to whatever
+    owner happens to sit in context. Indexed because every owner-scoped query
+    filters on it.
     """
 
-    user_id: Mapped[str] = mapped_column(
-        String(64), nullable=False, index=True, default=get_current_user_id
-    )
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
 
 # The host is fully async: ONE aiosqlite engine for ALL data access. There is no
 # synchronous *data* engine — every session/ORM path goes through
-# ``AsyncSessionLocal`` / ``async_unit_of_work`` (ADR-020). Host Alembic
-# migrations + the pre-v2 wipe also run async (``host_bootstrap``; the host
-# ``alembic/env.py`` mirrors the kernel's async env).
+# ``AsyncSessionLocal`` / ``async_unit_of_work`` (ADR-020). Both alembic chains
+# (host + kernel) also run async, each on a dedicated thread off the event loop
+# (their ``alembic/env.py`` files call ``asyncio.run``).
 #
-# The ONLY remaining synchronous SQLite touch is ``kernel_bootstrap.
-# drop_stale_kernel_tables`` — a boot-time kernel-table-drift DDL probe that runs
-# OFF the event loop in a dedicated thread (so it carries no deadlock risk; the
-# ADR-020 hazard is sync-on-loop). It owns no session and reads no business data;
-# it's a sanctioned sync island alongside the kernel's own alembic, not a host
-# data-access engine.
+# The only synchronous SQLite touch is the pair of boot-time self-heal probes
+# (``boot.schema.ensure_host_schema_migratable`` / ``boot.kernel.ensure_kernel_schema_migratable``):
+# both run OFF the event loop in a dedicated thread (no deadlock risk; the
+# ADR-020 hazard is sync-on-loop), own no session, and read no business data.
+# They are data-preserving — a DB on a known alembic revision is migrated
+# forward in place; only an unknown/foreign/corrupt stamp is dropped + rebuilt.
 async_engine: AsyncEngine = create_async_engine(settings.db_url_async, echo=settings.debug)
 
 if settings.is_sqlite:
@@ -71,9 +71,12 @@ if settings.is_sqlite:
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA synchronous=NORMAL")
-        # busy_timeout: wait-and-retry on write contention instead of raising
-        # "database is locked" immediately (host + kernel async engines share
-        # the file).
+        # busy_timeout: wait on write contention instead of raising "database
+        # is locked" immediately. Within one process the main-loop connection
+        # pool and the background daemon threads each open their own connection
+        # to this file and compete for the single write slot. (busy_timeout
+        # can't cover the WAL read-snapshot→write deadlock — that path is
+        # handled by async_commit_with_retry in infra/db.py.)
         cursor.execute("PRAGMA busy_timeout=15000")
         cursor.close()
 
@@ -81,3 +84,19 @@ if settings.is_sqlite:
 AsyncSessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     bind=async_engine, expire_on_commit=False
 )
+
+
+def new_background_sessionmaker() -> tuple[AsyncEngine, async_sessionmaker[AsyncSession]]:
+    """A throwaway engine + sessionmaker for code running on a FOREIGN event
+    loop — a background-thread ``asyncio.run`` (KB auto-discovery, docs
+    reindex/rescan). asyncpg connections are bound to the loop that created
+    them, so driving the shared ``async_engine`` pool from another loop raises
+    ``InterfaceError: another operation is in progress`` (and corrupts the
+    on-loop pool users). Each foreign loop gets its OWN ``NullPool`` engine — no
+    pooling, since the loop is short-lived — which the caller disposes when the
+    loop ends (see ``infra.db.background_db_scope``). SQLite is loop-agnostic
+    (aiosqlite proxies each connection through its own thread), so callers skip
+    this for sqlite and keep using the shared ``AsyncSessionLocal``.
+    """
+    engine = create_async_engine(settings.db_url_async, echo=settings.debug, poolclass=NullPool)
+    return engine, async_sessionmaker(bind=engine, expire_on_commit=False)

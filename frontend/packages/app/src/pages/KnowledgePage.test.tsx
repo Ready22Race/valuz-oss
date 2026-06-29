@@ -38,6 +38,7 @@ const platform: PlatformCapabilities = {
   quitApp: vi.fn(),
   openNewWindow: vi.fn(),
   isElectron: false,
+  isMac: false,
 };
 
 function renderKnowledgePage() {

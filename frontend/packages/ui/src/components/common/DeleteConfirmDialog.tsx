@@ -40,7 +40,10 @@ export const DeleteConfirmDialog: FC<DeleteConfirmDialogProps> = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      {/* Don't pull focus onto Cancel/Confirm when the dialog opens — leaving
+          focus off the buttons avoids an accidental Enter/Space confirming or
+          dismissing a destructive action. */}
+      <DialogContent onOpenAutoFocus={(e) => e.preventDefault()}>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <AlertTriangle className="h-5 w-5 text-error-text" />

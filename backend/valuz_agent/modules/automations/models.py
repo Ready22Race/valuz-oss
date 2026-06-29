@@ -21,10 +21,10 @@ but the DB guard is the last-line defence against direct-insert bugs.
 from sqlalchemy import BigInteger, CheckConstraint, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from valuz_agent.infra.database import Base, OwnedMixin, PrimaryKeyMixin, TimestampMixin
+from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
 
 
-class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
+class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     __tablename__ = "valuz_automation"
     __table_args__ = (
         CheckConstraint(
@@ -53,15 +53,15 @@ class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
     name: Mapped[str] = mapped_column(String(256))
 
     # ── Action (执行什么) ─────────────────────────────────────────────
-    # ``project_member`` rows reference (workspace_id, agent_slug) in
+    # ``project_member`` rows reference (project_id, agent_slug) in
     # ``valuz_project_member``; ``library_agent`` rows reference
     # AgentRow.slug. In storage these distinctions matter mainly for
     # display / ownership semantics — runner resolves either kind through
     # the same project_member lookup (library agents are instantiated
-    # into the bound chat workspace at create time; see ADR-021 §4).
+    # into the bound chat project at create time; see ADR-021 §4).
     agent_kind: Mapped[str] = mapped_column(String(32))
     agent_slug: Mapped[str] = mapped_column(String(128))
-    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
     prompt_template: Mapped[str] = mapped_column(Text)
     # Execution mode at fire time:
     # ``chat`` — single agent run (``create_session + send_message_sync``).
@@ -70,7 +70,7 @@ class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
     # ``task`` — kick off a full project task with the bound agent as Lead
     #   (``task_orchestrator.kickoff``). The prompt becomes the task goal;
     #   the lead plans + dispatches sub-members per the project task
-    #   protocol. Only valid for project workspaces — chat workspaces don't
+    #   protocol. Only valid for projects — chat projects don't
     #   have the multi-member context the task protocol needs.
     action_kind: Mapped[str] = mapped_column(String(16), default="chat")
 
@@ -82,6 +82,14 @@ class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
     timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # ── Provenance ────────────────────────────────────────────────────
+    # Kernel ``tool_use`` id of the ``automation create`` call that proposed
+    # this row, stamped when the user confirms the proposal card. NULL for
+    # rows created from the UI (no proposing tool call). Indexed so a session
+    # reload can map historical proposing tool-calls → their created rows and
+    # show "already added" instead of a fresh Confirm button.
+    origin_tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+
     # ── Schedule state ────────────────────────────────────────────────
     status: Mapped[str] = mapped_column(String(32), default="enabled")
     # Cron / interval write a concrete next-fire instant; manual leaves it
@@ -90,13 +98,15 @@ class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
     last_run_at: Mapped[int | None] = mapped_column(BigInteger)
 
 
-class AutomationRunRow(Base, PrimaryKeyMixin, OwnedMixin):
+class AutomationRunRow(Base, PrimaryKeyMixin, UserMixin):
     __tablename__ = "valuz_automation_run"
 
     automation_id: Mapped[str] = mapped_column(String(36), index=True)
-    workspace_id: Mapped[str] = mapped_column(String(36))
-    # ``cron`` / ``interval`` / ``manual`` / ``recovered_skip`` today;
-    # ``webhook`` enum value reserved for the follow-up ADR.
+    project_id: Mapped[str] = mapped_column(String(36))
+    # ``cron`` / ``interval`` (scheduled) · ``manual`` (human "Run now")
+    # · ``agent`` (agent fired it via the ``automation`` MCP tool) ·
+    # ``recovered_skip`` / ``system`` (bookkeeping) today; ``webhook`` enum
+    # value reserved for the follow-up ADR.
     trigger_type: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), default="queued")
     triggered_at: Mapped[int] = mapped_column(BigInteger)
@@ -105,6 +115,14 @@ class AutomationRunRow(Base, PrimaryKeyMixin, OwnedMixin):
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     result_summary: Mapped[str | None] = mapped_column(Text)
     error_code: Mapped[str | None] = mapped_column(String(64))
+    # Optional i18n key for a friendly failure message (e.g. billing
+    # rejection); the client prefers it over error_code / error_message.
+    error_message_key: Mapped[str | None] = mapped_column(String(64))
     error_message: Mapped[str | None] = mapped_column(Text)
     session_id: Mapped[str | None] = mapped_column(String(36))
     created_files: Mapped[str | None] = mapped_column(Text)
+    # The session that asked for this run, when an AGENT invoked the automation
+    # via the MCP tool (trigger_type="agent"). Lets a task spawned by this run
+    # chain its provenance back to the originating task (transitive
+    # task→automation→task nesting). NULL for cron/interval/manual runs.
+    invoked_by_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)

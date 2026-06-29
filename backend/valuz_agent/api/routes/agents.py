@@ -3,11 +3,11 @@
 Endpoints:
   GET  /v1/agents                        — list all official agents
   GET  /v1/agents/{slug}                 — get single agent
-  GET  /v1/workspaces/{id}/agents                  — list workspace members
-  POST /v1/workspaces/{id}/agents                  — create blank agent
-  POST /v1/workspaces/{id}/agents:deploy            — 派驻 (live-reference) a library agent
-  PATCH /v1/workspaces/{id}/agents/{slug}          — update member agent
-  DELETE /v1/workspaces/{id}/agents/{slug}         — delete member + kernel agent
+  GET  /v1/projects/{id}/agents                  — list project members
+  POST /v1/projects/{id}/agents                  — create blank agent
+  POST /v1/projects/{id}/agents:deploy            — 派驻 (live-reference) a library agent
+  PATCH /v1/projects/{id}/agents/{slug}          — update member agent
+  DELETE /v1/projects/{id}/agents/{slug}         — delete member + kernel agent
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from valuz_agent.api.deps import require_current_user_id
 from valuz_agent.infra.db import get_async_session
 from valuz_agent.modules.agents.service import (
     AgentNotDeletableError,
@@ -49,12 +50,11 @@ async def _get_agent_service(
     The ConnectorService is injected so AgentService delegates connector→MCP
     resolution instead of touching the secret store directly.
     """
-    from valuz_agent.infra.config import settings
-    from valuz_agent.infra.secret_store import FileSecretStore
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
     from valuz_agent.modules.connectors.service import ConnectorService
+    from valuz_agent.ports.extensions import ext
 
-    connector_svc = ConnectorService(ConnectorDatastore(db), FileSecretStore(settings.secrets_dir))
+    connector_svc = ConnectorService(ConnectorDatastore(db), ext.secret_store)
     return AgentService(db, connector_service=connector_svc)
 
 
@@ -82,8 +82,6 @@ class AgentResponse(BaseModel):
     avatar: str | None = None
     # Shared kernel AgentConfig id (v2 live-reference). null until first deploy
     # (built lazily). Surfaced so the frontend can map a project member back to
-    # its library agent (member.kernel_agent_id == agent.kernel_agent_id).
-    kernel_agent_id: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -114,15 +112,14 @@ class DeployAgentRequest(BaseModel):
 
     source_agent_slug: str
     # Optional: backend derives from the source agent's name when omitted,
-    # unique within the target workspace (VALUZ-AGENT-SLUG).
+    # unique within the target project (VALUZ-AGENT-SLUG).
     agent_slug: str | None = None
 
 
 class ProjectMemberResponse(BaseModel):
     id: str
-    workspace_id: str
+    project_id: str
     agent_slug: str
-    kernel_agent_id: str
     source_agent_slug: str | None
 
     model_config = {"from_attributes": True}
@@ -182,25 +179,27 @@ def _member_with_agent(row: dict[str, Any]) -> MemberWithAgentResponse:
 @router.get("/v1/agents")
 async def list_agents(
     source: str | None = None,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> dict:
     """List agents, optionally filtered by source (official|custom)."""
-    from valuz_agent.ports.resource_enhancer import get_resource_enhancer
+    from valuz_agent.ports.extensions import ext
 
-    rows = await svc.list_agents(source=source)
+    rows = await svc.list_agents(user_id, source=source)
     items = [AgentResponse.model_validate(r).model_dump() for r in rows]
-    items = get_resource_enhancer().enhance("agent", items)
+    items = await ext.resource_list_hook.apply("agent", items)
     return {"agents": items}
 
 
 @router.get("/v1/agents/{slug}", response_model=AgentResponse)
 async def get_agent(
     slug: str,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> AgentResponse:
     """Get a single agent by slug."""
     try:
-        row = await svc.get_agent(slug)
+        row = await svc.get_agent(user_id, slug)
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Agent not found: {slug}") from exc
     return AgentResponse.model_validate(row)
@@ -209,14 +208,15 @@ async def get_agent(
 @router.get("/v1/agents/{slug}/deployments")
 async def list_agent_deployments(
     slug: str,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> dict:
-    """List the projects (workspaces) this agent is派驻'd into (live-reference).
+    """List the projects (projects) this agent is派驻'd into (live-reference).
 
     Powers the agent detail「派驻于 N 个项目」panel + delete-guard UX.
     """
     try:
-        deployments = await svc.list_deployments(slug)
+        deployments = await svc.list_deployments(user_id, slug)
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Agent not found: {slug}") from exc
     return {"deployments": deployments, "count": len(deployments)}
@@ -254,11 +254,12 @@ class UpdateAgentRequest(BaseModel):
 @router.post("/v1/agents", status_code=201, response_model=AgentResponse)
 async def create_agent(
     payload: CreateAgentRequest,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> AgentResponse:
     """Create a user-defined agent."""
     try:
-        row = await svc.create_agent(payload.model_dump())
+        row = await svc.create_agent(user_id, payload.model_dump())
     except MemberAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return AgentResponse.model_validate(row)
@@ -268,11 +269,12 @@ async def create_agent(
 async def update_agent(
     slug: str,
     payload: UpdateAgentRequest,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> AgentResponse:
     """Patch an agent (official or custom)."""
     try:
-        row = await svc.update_agent(slug, payload.model_dump(exclude_none=True))
+        row = await svc.update_agent(user_id, slug, payload.model_dump(exclude_none=True))
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Agent not found: {slug}") from exc
     return AgentResponse.model_validate(row)
@@ -281,11 +283,18 @@ async def update_agent(
 @router.delete("/v1/agents/{slug}", status_code=204)
 async def delete_agent(
     slug: str,
+    cascade: bool = False,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> None:
-    """Delete an agent."""
+    """Delete an agent.
+
+    ``cascade=true`` first 解除 every 派驻 (project membership) the agent has,
+    then deletes it — the confirmed-delete path. Without it, an agent still
+    deployed to a project returns 409 (the caller must 解除派驻 first).
+    """
     try:
-        await svc.delete_agent(slug)
+        await svc.delete_agent(user_id, slug, cascade=cascade)
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Agent not found: {slug}") from exc
     except (AgentStillDeployedError, AgentNotDeletableError) as exc:
@@ -293,40 +302,43 @@ async def delete_agent(
 
 
 # ---------------------------------------------------------------------------
-# Workspace member routes
+# Project member routes
 # ---------------------------------------------------------------------------
 
 
 @router.get(
-    "/v1/workspaces/{workspace_id}/agents",
+    "/v1/projects/{project_id}/agents",
     response_model=dict[str, list[MemberWithAgentResponse]],
 )
 async def list_members(
-    workspace_id: str,
+    project_id: str,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> dict[str, list[MemberWithAgentResponse]]:
-    """List all agent members in a workspace."""
-    rows = await svc.list_members(workspace_id)
+    """List all agent members in a project."""
+    rows = await svc.list_members(user_id, project_id)
     return {"agents": [_member_with_agent(r) for r in rows]}
 
 
 @router.post(
-    "/v1/workspaces/{workspace_id}/agents",
+    "/v1/projects/{project_id}/agents",
     status_code=201,
     response_model=MemberWithAgentResponse,
 )
 async def create_blank_agent(
-    workspace_id: str,
+    project_id: str,
     payload: CreateBlankAgentRequest,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> MemberWithAgentResponse:
-    """Create a blank (source-agent-free) agent in a workspace."""
+    """Create a blank (source-agent-free) agent in a project."""
     bindings = (
         [b.model_dump() for b in payload.connector_bindings] if payload.connector_bindings else None
     )
     try:
         result = await svc.create_blank_agent(
-            workspace_id=workspace_id,
+            user_id,
+            project_id=project_id,
             agent_slug=payload.agent_slug,
             name=payload.name,
             instructions=payload.instructions,
@@ -343,19 +355,21 @@ async def create_blank_agent(
 
 
 @router.post(
-    "/v1/workspaces/{workspace_id}/agents:deploy",
+    "/v1/projects/{project_id}/agents:deploy",
     status_code=201,
     response_model=MemberWithAgentResponse,
 )
 async def deploy_agent(
-    workspace_id: str,
+    project_id: str,
     payload: DeployAgentRequest,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> MemberWithAgentResponse:
-    """派驻: deploy (live-reference) a library agent into a project workspace."""
+    """派驻: deploy (live-reference) a library agent into a project."""
     try:
         result = await svc.deploy_agent(
-            workspace_id=workspace_id,
+            user_id,
+            project_id=project_id,
             source_agent_slug=payload.source_agent_slug,
             agent_slug=payload.agent_slug,
         )
@@ -368,17 +382,151 @@ async def deploy_agent(
     return _member_with_agent(result)
 
 
+# ---------------------------------------------------------------------------
+# Natural-language agent proposal (confirm)
+# ---------------------------------------------------------------------------
+
+
+class ProposeAgentConfirmRequest(BaseModel):
+    """Spec of an agent the user is confirming after the assistant proposed it
+    via the ``propose_agent`` tool. Backend derives a unique slug from ``name``."""
+
+    name: str
+    instructions: str
+    description: str = ""
+    runtime: str = "claude_agent"
+    model: str = "claude-sonnet-4-6"
+    effort: EffortLevel | None = None
+    skills: list[str] = []
+    connectors: list[str] = []
+    avatar: str | None = None
+
+
+class ProposeAgentConfirmResponse(BaseModel):
+    agent: AgentSummary
+    member: ProjectMemberResponse | None = None
+    deployed: bool
+    project_id: str | None = None
+
+
+async def _resolve_session_project_id(
+    user_id: str, session_id: str, db: AsyncSession
+) -> str | None:
+    """REAL project id for the calling session, or None.
+
+    A session always carries ``metadata.valuz.project_id`` — but a quick
+    chat / 新对话 binds to an *ephemeral* ``ProjectRow(kind="chat")``, which
+    must NOT be treated as a deployable project. So we resolve the id from
+    metadata and then confirm the project is ``kind == "project"``; a chat /
+    temp project (or a missing one) resolves to None, so confirm creates the
+    library agent only (no派驻)."""
+    from valuz_agent.adapters import kernel_client
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
+
+    sess = await kernel_client.get_session(user_id, session_id)
+    if sess is None:
+        return None
+    project_id = ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or None
+    if not project_id:
+        return None
+    row = await ProjectDatastore(db).get_by_id(user_id, project_id)
+    return project_id if (row is not None and row.kind == "project") else None
+
+
+@router.post(
+    "/v1/agents/proposals/{session_id}/confirm",
+    status_code=201,
+    response_model=ProposeAgentConfirmResponse,
+)
+async def confirm_agent_proposal(
+    session_id: str,
+    payload: ProposeAgentConfirmRequest,
+    user_id: str = Depends(require_current_user_id),
+    svc: AgentService = Depends(_get_agent_service),
+    db: AsyncSession = Depends(get_async_session),
+) -> ProposeAgentConfirmResponse:
+    """Create the proposed agent in the library and, when the session is bound
+    to a project, deploy it into that project as a member.
+
+    Skill slugs that aren't indexed are dropped defensively (they'd bind to
+    nothing at session build anyway); connector slugs map to ``connector_types``.
+    """
+    from valuz_agent.modules.skills.datastore import SkillDatastore
+
+    # Bind only skill slugs that actually resolve in the index — an unindexed
+    # slug would be silently dropped at session build, so storing it is a lie.
+    indexed = {r.slug for r in await SkillDatastore(db).list_skills(user_id)}
+    skills = [s for s in payload.skills if s in indexed]
+    dropped = [s for s in payload.skills if s not in indexed]
+    if dropped:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "confirm_agent_proposal: dropping unindexed skill slugs %s", dropped
+        )
+
+    project_id = await _resolve_session_project_id(user_id, session_id, db)
+    bindings = [{"type": s} for s in payload.connectors]
+
+    try:
+        if project_id:
+            result = await svc.create_blank_agent(
+                user_id,
+                project_id=project_id,
+                agent_slug=None,
+                name=payload.name,
+                instructions=payload.instructions,
+                description=payload.description,
+                runtime=payload.runtime,
+                model=payload.model,
+                connector_bindings=bindings or None,
+                skills=skills,
+                effort=payload.effort,
+            )
+            return ProposeAgentConfirmResponse(
+                agent=_agent_to_summary(result["agent"]),
+                member=ProjectMemberResponse.model_validate(result["member"]),
+                deployed=True,
+                project_id=project_id,
+            )
+        # No project on the session → create the library agent only.
+        row = await svc.create_agent(
+            user_id,
+            {
+                "name": payload.name,
+                "description": payload.description,
+                "instructions": payload.instructions,
+                "runtime": payload.runtime,
+                "model": payload.model,
+                "skills": skills,
+                "connector_types": payload.connectors,
+                "effort": payload.effort,
+                "avatar": payload.avatar,
+            },
+        )
+        agent = await svc.build_agent_config(row)
+        return ProposeAgentConfirmResponse(
+            agent=_agent_to_summary(agent),
+            member=None,
+            deployed=False,
+            project_id=None,
+        )
+    except MemberAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.delete(
-    "/v1/workspaces/{workspace_id}/agents/{agent_slug}",
+    "/v1/projects/{project_id}/agents/{agent_slug}",
     status_code=204,
 )
 async def delete_member(
-    workspace_id: str,
+    project_id: str,
     agent_slug: str,
+    user_id: str = Depends(require_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> None:
-    """Delete a workspace agent and its kernel AgentConfig."""
+    """Delete a project agent and its kernel AgentConfig."""
     try:
-        await svc.delete_member(workspace_id, agent_slug)
+        await svc.delete_member(user_id, project_id, agent_slug)
     except MemberNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Agent not found: {agent_slug}") from exc

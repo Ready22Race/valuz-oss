@@ -2,8 +2,6 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.modules.resources.guard import check_resource_guard
-
 
 class ResourceFacade:
     """Unified coordination layer for built-in resource guard + remote sync.
@@ -21,26 +19,29 @@ class ResourceFacade:
 
     async def delete_resource(self, resource_id: str, resource_type: str) -> None:
         if resource_type == "agent":
+            from valuz_agent.infra.auth_context import require_current_user_id
             from valuz_agent.modules.agents.service import AgentService
 
             agent_svc = AgentService(self._db)  # type: ignore[arg-type]
-            await agent_svc.delete_agent(resource_id)
+            await agent_svc.delete_agent(require_current_user_id(), resource_id)
         elif resource_type == "connector":
             from valuz_agent.modules.connectors.datastore import ConnectorDatastore
             from valuz_agent.modules.connectors.service import ConnectorService
-            from valuz_agent.infra.config import settings
-            from valuz_agent.infra.secret_store import FileSecretStore
+            from valuz_agent.ports.extensions import ext
 
             conn_svc = ConnectorService(
                 ConnectorDatastore(self._db),
-                FileSecretStore(settings.secrets_dir),
+                ext.secret_store,
             )
-            await conn_svc.delete_connector(resource_id)
+            from valuz_agent.infra.auth_context import require_current_user_id
+
+            await conn_svc.delete_connector(require_current_user_id(), resource_id)
         elif resource_type == "skill":
+            from valuz_agent.infra.auth_context import require_current_user_id
             from valuz_agent.modules.skills.datastore import SkillDatastore
 
             ds = SkillDatastore(self._db)
-            await ds.delete(resource_id)
+            await ds.delete(require_current_user_id(), resource_id)
         else:
             raise ValueError(f"Unknown resource type: {resource_type}")
 

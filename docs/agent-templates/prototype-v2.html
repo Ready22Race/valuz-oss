@@ -1,0 +1,605 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Valuz · 场景库 + Agent 导入导出 — 高保真原型 v2</title>
+<!-- 真实 icon:lucide(与产品 agent-icons.ts 同款)。打开需联网加载 CDN。 -->
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  /* ── Valuz 真实 design tokens(抽自 packages/ui/src/styles/workspace.css)── */
+  :root{
+    --bg:#f8f9fb; --surface:#ffffff; --surface-soft:#f7f8fa; --surface-muted:#f3f4f6;
+    --border:#e6e7e9; --border-hover:#dbdbdb;
+    --ink-heading:#131313; --ink-body:#6e7481; --ink-meta:#6e7481; --ink-muted:#b6b7bc;
+    --brand:#6d5cff; --brand-hover:#5b4be0; --brand-light:#ede9ff; --brand-700:#3b27b0;
+    --success:#16a34a; --success-light:#dcfce7; --success-text:#166534;
+    --shadow-card:0 1px 2px rgba(19,19,19,.04);
+    --shadow-pop:0 12px 40px -8px rgba(19,19,19,.18),0 0 0 1px rgba(19,19,19,.04);
+    --font:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:var(--font);background:#eceef2;color:var(--ink-heading);
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;display:flex;align-items:center;justify-content:center;
+    min-height:100vh;padding:32px;line-height:1.5;
+  }
+  svg.lucide{stroke-width:1.9;display:block}
+  .win{
+    width:1200px;height:780px;background:var(--surface);border-radius:14px;overflow:hidden;
+    box-shadow:0 30px 80px -20px rgba(19,19,19,.4),0 0 0 1px rgba(19,19,19,.06);
+    display:flex;flex-direction:column;position:relative;
+  }
+  .titlebar{height:38px;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--border);background:var(--surface)}
+  .traffic{width:12px;height:12px;border-radius:50%}
+  .traffic.r{background:#ff5f57}.traffic.y{background:#febc2e}.traffic.g{background:#28c840}
+  .titlebar .t{margin-left:8px;font-size:12px;color:var(--ink-muted)}
+  .body{flex:1;display:flex;min-height:0}
+
+  .nav{width:56px;flex:none;background:var(--surface-soft);border-right:1px solid var(--border);
+    display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:4px}
+  .nav .item{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+    color:var(--ink-meta);cursor:default}
+  .nav .item svg{width:19px;height:19px}
+  .nav .item.active{background:var(--surface);color:var(--brand);box-shadow:var(--shadow-card)}
+  .nav .sp{flex:1}
+
+  .listcol{width:345px;flex:none;border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+  .listhdr{height:48px;flex:none;display:flex;align-items:center;gap:4px;padding:0 12px 0 16px}
+  .listhdr .title{font-size:16px;font-weight:600;color:var(--ink-heading);white-space:nowrap}
+  .listhdr .spacer{flex:1}
+  .btn-ghost{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:8px;
+    font-size:12px;color:var(--ink-meta);background:transparent;border:none;cursor:pointer;transition:.15s}
+  .btn-ghost svg{width:14px;height:14px}
+  .btn-ghost:hover{background:var(--surface-soft);color:var(--ink-heading)}
+  .icon-btn{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+    color:var(--ink-meta);background:transparent;border:none;cursor:pointer;transition:.15s}
+  .icon-btn svg{width:16px;height:16px}
+  .icon-btn:hover{background:var(--surface-soft);color:var(--ink-heading)}
+  .listbody{flex:1;overflow-y:auto;padding:8px 12px 16px}
+  .grouplabel{font-size:11px;color:var(--ink-muted);font-weight:500;padding:10px 8px 4px}
+  .row{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:9px;cursor:default;transition:.12s;user-select:none;position:relative}
+  .row:hover{background:color-mix(in srgb,var(--surface-soft) 60%,transparent)}
+  .row.sel{background:var(--surface-soft)}
+  .av{width:28px;height:28px;flex:none;border-radius:9px;background:var(--surface-soft);
+    display:flex;align-items:center;justify-content:center;color:var(--ink-body)}
+  .av svg{width:15px;height:15px}
+  .row .meta{min-width:0;flex:1}
+  .row .nm{font-size:14px;color:var(--ink-heading);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .ds{font-size:12px;color:var(--ink-meta);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+  .row .rowexport{opacity:0;transition:.12s;color:var(--ink-meta);display:flex;border:none;background:none;cursor:pointer;padding:2px}
+  .row .rowexport svg{width:15px;height:15px}
+  .row:hover .rowexport{opacity:1}
+  .row .rowexport:hover{color:var(--brand)}
+  .row.fresh{animation:rowIn .35s ease both}
+  @keyframes rowIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  .row .ckbox{width:18px;height:18px;border-radius:6px;border:1.5px solid var(--border-hover);flex:none;display:none;align-items:center;justify-content:center;color:#fff}
+  .row .ckbox svg{width:12px;height:12px}
+  .listcol.selecting .row .ckbox{display:flex}
+  .listcol.selecting .row.checked .ckbox{background:var(--brand);border-color:var(--brand)}
+  .listcol.selecting .row .rowexport{display:none}
+
+  .detail{flex:1;min-width:0;display:flex;flex-direction:column;overflow-y:auto}
+  .dhead{padding:20px 24px 16px;border-bottom:1px solid var(--border)}
+  .dtop{display:flex;align-items:center;gap:12px}
+  .dav{width:40px;height:40px;border-radius:11px;background:var(--surface-soft);display:flex;align-items:center;justify-content:center;color:var(--ink-body)}
+  .dav svg{width:20px;height:20px}
+  .dname{font-size:17px;font-weight:600}
+  .dsub{font-size:12px;color:var(--ink-body);margin-top:2px}
+  .dheadact{margin-left:auto;display:flex;gap:6px}
+  .dtabs{display:flex;gap:18px;padding:14px 24px 0;border-bottom:1px solid var(--border)}
+  .dtab{font-size:13px;color:var(--ink-meta);padding-bottom:10px;border-bottom:2px solid transparent;cursor:default}
+  .dtab.on{color:var(--ink-heading);border-color:var(--ink-heading);font-weight:500}
+  .dbody{padding:20px 24px;font-size:13px;color:var(--ink-body);line-height:1.7}
+  .dbody .lbl{font-size:11px;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.04em;margin:18px 0 6px}
+  .chip{display:inline-flex;align-items:center;gap:5px;font-size:12px;padding:3px 9px;border-radius:7px;background:var(--surface-soft);color:var(--ink-body);margin:0 6px 6px 0;border:1px solid var(--border)}
+  .chip svg{width:12px;height:12px}
+
+  .overlay{position:absolute;inset:0;background:rgba(19,19,19,.32);backdrop-filter:blur(2px);
+    display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:.18s;z-index:40}
+  .overlay.show{opacity:1;pointer-events:auto}
+  .dialog{width:660px;max-height:700px;background:var(--surface);border-radius:16px;box-shadow:var(--shadow-pop);
+    display:flex;flex-direction:column;transform:translateY(8px) scale(.98);transition:.2s;overflow:hidden}
+  .overlay.show .dialog{transform:none}
+  .dialog.sm{width:480px}
+  .dlghdr{padding:22px 24px 16px;border-bottom:1px solid var(--border);position:relative}
+  .dlgtitle{font-size:17px;font-weight:600;display:flex;align-items:center;gap:8px}
+  .dlgsub{font-size:13px;color:var(--ink-meta);margin-top:4px}
+  .dlgclose{position:absolute;top:18px;right:18px;width:28px;height:28px;border-radius:8px;border:none;background:transparent;
+    color:var(--ink-meta);cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .dlgclose svg{width:16px;height:16px}
+  .dlgclose:hover{background:var(--surface-soft);color:var(--ink-heading)}
+  .dlgback{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:8px;border:none;
+    background:transparent;color:var(--ink-meta);cursor:pointer;flex:none}
+  .dlgback svg{width:16px;height:16px}
+  .dlgback:hover{background:var(--surface-soft);color:var(--ink-heading)}
+  .dlgbody{overflow-y:auto;padding:8px 24px 24px}
+  .dlgfoot{padding:14px 24px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px}
+  .dlgfoot .hint{font-size:12px;color:var(--ink-muted);margin-right:auto}
+
+  .scenelbl{font-size:12px;font-weight:600;color:var(--ink-body);padding:18px 2px 10px}
+  .tplcard{border:1px solid var(--border);border-radius:14px;padding:16px;display:flex;align-items:center;gap:14px;
+    background:var(--surface);transition:.15s;margin-bottom:10px;cursor:pointer}
+  .tplcard:hover{border-color:var(--border-hover);box-shadow:var(--shadow-card)}
+  .tplicon{width:46px;height:46px;flex:none;border-radius:12px;background:var(--surface-soft);
+    display:flex;align-items:center;justify-content:center;color:var(--ink-heading)}
+  .tplicon svg{width:21px;height:21px}
+  .tplmeta{flex:1;min-width:0}
+  .tplname{font-size:15px;font-weight:600;color:var(--ink-heading)}
+  .tpltag{font-size:12.5px;color:var(--ink-body);margin-top:2px;line-height:1.45}
+  .tplmembers{display:flex;align-items:center;gap:8px;margin-top:9px}
+  .stack{display:flex}
+  .stack .m{width:24px;height:24px;border-radius:50%;background:var(--surface-soft);border:1.5px solid var(--surface);
+    display:flex;align-items:center;justify-content:center;color:var(--ink-body);margin-left:-6px}
+  .stack .m svg{width:12px;height:12px}
+  .stack .m:first-child{margin-left:0}
+  .stack .m.more{font-size:10px;font-weight:600;color:var(--ink-muted)}
+  .mcount{font-size:11px;color:var(--ink-muted)}
+  .tplaction{flex:none;display:flex;align-items:center;gap:6px}
+  .tplchevron{color:var(--ink-muted);display:flex}
+  .tplchevron svg{width:16px;height:16px}
+  .btn-primary{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;border-radius:9px;
+    font-size:13px;font-weight:500;color:#fff;background:var(--brand);border:none;cursor:pointer;transition:.15s;white-space:nowrap}
+  .btn-primary svg{width:14px;height:14px}
+  .btn-primary:hover{background:var(--brand-hover)}
+  .btn-primary[disabled]{opacity:.65;cursor:default}
+  .btn-line{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;border-radius:9px;
+    font-size:13px;font-weight:500;color:var(--ink-heading);background:var(--surface);border:1px solid var(--border-hover);cursor:pointer;transition:.15s}
+  .btn-line svg{width:14px;height:14px}
+  .btn-line:hover{background:var(--surface-soft)}
+  .btn-added{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;border-radius:9px;
+    font-size:13px;font-weight:500;color:var(--success-text);background:var(--success-light);border:none;cursor:default;white-space:nowrap}
+  .btn-added svg{width:14px;height:14px}
+  .spin{width:14px;height:14px;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:sp .6s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* 团队详情:角色卡 */
+  .teamhead{display:flex;align-items:center;gap:13px;padding:16px 14px;background:var(--surface-soft);border-radius:13px;margin-top:8px}
+  .teamhead .ic{width:46px;height:46px;border-radius:12px;background:var(--surface);display:flex;align-items:center;justify-content:center;color:var(--ink-heading);box-shadow:var(--shadow-card);flex:none}
+  .teamhead .ic svg{width:22px;height:22px}
+  .teamhead .nm{font-size:15px;font-weight:600}
+  .teamhead .ds{font-size:12.5px;color:var(--ink-body);margin-top:2px;line-height:1.45}
+  .pipeline{display:flex;align-items:center;gap:4px;margin:14px 2px 4px;flex-wrap:wrap;font-size:11.5px;color:var(--ink-muted)}
+  .pipeline .stepname{color:var(--ink-body);font-weight:500}
+  .pipeline svg{width:12px;height:12px;color:var(--ink-muted)}
+  .rolecard{border:1px solid var(--border);border-radius:13px;padding:14px;margin-top:10px}
+  .rolecard .rhead{display:flex;align-items:center;gap:11px}
+  .rolecard .ra{width:34px;height:34px;border-radius:10px;background:var(--surface-soft);display:flex;align-items:center;justify-content:center;color:var(--ink-body);flex:none}
+  .rolecard .ra svg{width:17px;height:17px}
+  .rolecard .rn{font-size:14px;font-weight:600;color:var(--ink-heading)}
+  .rolecard .rd{font-size:12px;color:var(--ink-body);margin-top:1px}
+  .effort{margin-left:auto;font-size:10.5px;font-weight:600;letter-spacing:.03em;padding:2px 8px;border-radius:6px;background:var(--surface-soft);color:var(--ink-muted);border:1px solid var(--border);flex:none}
+  .rtbadge{font-size:10.5px;font-weight:600;letter-spacing:.03em;padding:2px 8px;border-radius:6px;border:1px solid transparent;flex:none;margin-left:auto}
+  .rtbadge.rt-claude{background:var(--brand-light);color:var(--brand-700)}
+  .rtbadge.rt-codex{background:#e0f2fe;color:#0369a1}
+  .rtbadge.rt-gpt{background:#dcfce7;color:#166534}
+  .rtbadge+.effort{margin-left:6px}
+  .rolecard .req{display:flex;flex-wrap:wrap;gap:0;margin-top:10px}
+  .tag-mini{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 8px;border-radius:6px;background:var(--surface-soft);color:var(--ink-body);border:1px solid var(--border);margin:0 5px 5px 0}
+  .tag-mini svg{width:11px;height:11px}
+  .tag-mini.mcp{background:var(--brand-light);color:var(--brand-700);border-color:transparent}
+
+  .dropzone{border:1.6px dashed var(--border-hover);border-radius:14px;padding:32px 20px;text-align:center;cursor:pointer;transition:.15s;margin-top:6px;color:var(--ink-muted)}
+  .dropzone:hover{border-color:var(--brand);background:var(--brand-light)}
+  .dropzone .big{display:flex;justify-content:center;color:var(--ink-muted)}
+  .dropzone .big svg{width:30px;height:30px}
+  .dropzone:hover .big{color:var(--brand)}
+  .dropzone .t{font-size:14px;font-weight:600;color:var(--ink-heading);margin-top:10px}
+  .dropzone .s{font-size:12.5px;color:var(--ink-muted);margin-top:4px}
+  .pvlbl{font-size:11px;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.04em;margin:16px 0 8px}
+  .callout{display:flex;gap:10px;padding:12px 14px;border-radius:11px;font-size:12.5px;line-height:1.55;margin-top:16px;background:var(--surface-soft);color:var(--ink-body)}
+  .callout .ci{flex:none;display:flex;padding-top:1px;color:var(--ink-muted)}
+  .callout .ci svg{width:15px;height:15px}
+
+  .field{margin-bottom:4px}
+  .field label{display:block;font-size:12px;color:var(--ink-body);font-weight:500;margin-bottom:6px}
+  .field input{width:100%;height:38px;padding:0 12px;border:1px solid var(--border-hover);border-radius:9px;
+    font-size:14px;font-family:inherit;color:var(--ink-heading);outline:none;transition:.15s}
+  .field input:focus{border-color:var(--brand)}
+
+  .toast{position:absolute;left:50%;bottom:26px;transform:translate(-50%,12px);background:var(--surface);
+    border:1px solid var(--border);box-shadow:var(--shadow-pop);border-radius:11px;padding:11px 16px;
+    display:flex;align-items:center;gap:9px;font-size:13px;color:var(--ink-heading);
+    opacity:0;pointer-events:none;transition:.22s;z-index:60}
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+  .toast .tk{display:flex;color:var(--success)}
+  .toast .tk svg{width:16px;height:16px}
+  .selbar{position:absolute;left:50%;bottom:26px;transform:translate(-50%,12px);background:var(--ink-heading);color:#fff;
+    border-radius:12px;padding:9px 10px 9px 16px;display:flex;align-items:center;gap:14px;font-size:13px;
+    box-shadow:var(--shadow-pop);opacity:0;pointer-events:none;transition:.22s;z-index:55}
+  .selbar.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+  .selbar .sc{font-weight:600}
+  .selbar .bp{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 13px;border-radius:8px;background:#fff;color:var(--ink-heading);font-size:12.5px;font-weight:600;border:none;cursor:pointer}
+  .selbar .bp svg{width:13px;height:13px}
+  .selbar .cx{color:rgba(255,255,255,.7);cursor:pointer;font-size:12.5px;border:none;background:none}
+  .selbar .cx:hover{color:#fff}
+
+  .anno{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);font-size:12px;color:#9aa0ab;text-align:center}
+</style>
+</head>
+<body>
+  <div class="win">
+    <div class="titlebar">
+      <span class="traffic r"></span><span class="traffic y"></span><span class="traffic g"></span>
+      <span class="t">Valuz</span>
+    </div>
+    <div class="body">
+      <div class="nav">
+        <div class="item"><i data-lucide="message-square"></i></div>
+        <div class="item"><i data-lucide="folder"></i></div>
+        <div class="item active"><i data-lucide="bot"></i></div>
+        <div class="item"><i data-lucide="book-open"></i></div>
+        <div class="sp"></div>
+        <div class="item"><i data-lucide="settings"></i></div>
+      </div>
+
+      <div class="listcol" id="listcol">
+        <div class="listhdr">
+          <span class="title">智能体</span>
+          <span class="spacer"></span>
+          <button class="btn-ghost" onclick="openTpl()"><i data-lucide="layout-grid"></i> 场景库</button>
+          <button class="icon-btn" title="导入" onclick="openImport()"><i data-lucide="download"></i></button>
+          <button class="icon-btn" title="导出多个" onclick="toggleSelect()"><i data-lucide="upload"></i></button>
+          <button class="icon-btn" title="新建"><i data-lucide="plus"></i></button>
+        </div>
+        <div class="listbody" id="listbody"></div>
+      </div>
+
+      <!-- agent 详情:投研 Team · 行业分析师(真实配置) -->
+      <div class="detail">
+        <div class="dhead">
+          <div class="dtop">
+            <div class="dav"><i data-lucide="bar-chart-3"></i></div>
+            <div>
+              <div class="dname">行业分析师</div>
+              <div class="dsub">投研 Team · claude-sonnet-4-6 · effort: high</div>
+            </div>
+            <div class="dheadact">
+              <button class="btn-ghost" onclick="exportOne('行业分析师')"><i data-lucide="upload"></i> 导出</button>
+            </div>
+          </div>
+        </div>
+        <div class="dtabs">
+          <div class="dtab on">概览</div><div class="dtab">指令</div><div class="dtab">技能</div><div class="dtab">连接器</div>
+        </div>
+        <div class="dbody">
+          行业全景、竞争格局、可比公司、标的池——一条龙的全球股票行业研究(美股/港股/A 股为主,兼顾其他市场)。给一个行业/主题和一句话角度,产出结构化研究纪要。
+          <div class="lbl">技能(移植自 claude-for-financial-services-cn,已全球化改写)</div>
+          <span class="chip"><i data-lucide="file-search"></i> 行业综述</span><span class="chip"><i data-lucide="file-search"></i> 竞争格局</span><span class="chip"><i data-lucide="file-search"></i> 可比估值</span><span class="chip"><i data-lucide="file-search"></i> 标的筛选</span>
+          <div class="lbl">连接器(Valuz 自有 MCP)</div>
+          <span class="chip"><i data-lucide="plug"></i> Valuz · 搜索</span><span class="chip"><i data-lucide="plug"></i> Valuz · 行情</span>
+          <div class="lbl">派驻</div>
+          尚未派驻到任何项目
+        </div>
+      </div>
+    </div>
+
+    <!-- 场景库面板(列表 ⇄ 团队详情 两级) -->
+    <div class="overlay" id="tplOverlay" onclick="if(event.target===this)closeTpl()">
+      <div class="dialog">
+        <div class="dlghdr">
+          <div class="dlgtitle" id="tplTitle">场景库</div>
+          <div class="dlgsub" id="tplSub">选一套配好的团队,一键添加进你的库;派进同一个项目即组成团队。</div>
+          <button class="dlgclose" onclick="closeTpl()"><i data-lucide="x"></i></button>
+        </div>
+        <div class="dlgbody" id="tplBody"></div>
+        <div class="dlgfoot" id="tplFoot" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- 导入面板 -->
+    <div class="overlay" id="impOverlay" onclick="if(event.target===this)closeImport()">
+      <div class="dialog">
+        <div class="dlghdr">
+          <div class="dlgtitle" id="impTitle">导入 Agent</div>
+          <div class="dlgsub" id="impSub">导入一个 .valuz-agent 文件,单个或一组 agent 都支持。</div>
+          <button class="dlgclose" onclick="closeImport()"><i data-lucide="x"></i></button>
+        </div>
+        <div class="dlgbody">
+          <div id="impStep1">
+            <div class="dropzone" onclick="pickFile()">
+              <div class="big"><i data-lucide="package"></i></div>
+              <div class="t">拖入或点击选择 <code>.valuz-agent</code> 文件</div>
+              <div class="s">从他人分享、或你自己导出的 agent / 团队包</div>
+            </div>
+          </div>
+          <div id="impStep2" style="display:none"></div>
+        </div>
+        <div class="dlgfoot" id="impFoot1">
+          <span class="hint">导入后成套进库,已存在的 agent 自动跳过</span>
+          <button class="btn-line" onclick="closeImport()">取消</button>
+        </div>
+        <div class="dlgfoot" id="impFoot2" style="display:none">
+          <span class="hint" id="impHint"></span>
+          <button class="btn-line" onclick="resetImport()">重选</button>
+          <button class="btn-primary" onclick="doImport()">确认导入</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 导出命名面板 -->
+    <div class="overlay" id="expOverlay" onclick="if(event.target===this)closeExport()">
+      <div class="dialog sm">
+        <div class="dlghdr">
+          <div class="dlgtitle">导出为一个文件</div>
+          <div class="dlgsub">打包成 .valuz-agent,可分享或发到内容平台供他人一键导入。</div>
+          <button class="dlgclose" onclick="closeExport()"><i data-lucide="x"></i></button>
+        </div>
+        <div class="dlgbody">
+          <div class="field">
+            <label>这一组的名字</label>
+            <input id="expName" value="我的投研班底" />
+          </div>
+          <div class="pvlbl">将打包 <span id="expCnt">1</span> 个 agent</div>
+          <div style="font-size:12.5px;color:var(--ink-body);line-height:1.6">
+            自包含这些 agent 的<b>指令与技能</b>;连接器只带配置、<b>不带任何密钥</b>。
+          </div>
+        </div>
+        <div class="dlgfoot">
+          <span class="hint"></span>
+          <button class="btn-line" onclick="closeExport()">取消</button>
+          <button class="btn-primary" onclick="doExport()"><i data-lucide="upload"></i> 导出文件</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"><span class="tk"><i data-lucide="check-circle-2"></i></span><span id="toastmsg"></span></div>
+    <div class="selbar" id="selbar">
+      <span class="sc"><span id="selCnt">0</span> 个 agent</span>
+      <button class="bp" onclick="openExportTeam()"><i data-lucide="upload"></i> 导出为一个文件</button>
+      <button class="cx" onclick="toggleSelect()">取消</button>
+    </div>
+  </div>
+  <div class="anno">高保真原型 v2 · 数据与 docs/agent-templates/teams.md 一致 · 流程:场景库 → 团队详情 → 添加 → 进库;导入预览;导出(单个/多选)</div>
+
+<script>
+  // ══ 数据(与 teams.md 一致)══
+  const MCP = {
+    valuzSearch:{n:"Valuz · 搜索",free:true}, valuzStock:{n:"Valuz · 行情",free:true},
+    xhs:{n:"小红书检索",free:true}, websearch:{n:"网络搜索",free:true},
+  };
+  const teams = [
+    { id:"investment", scene:"投研 / 金融", icon:"gem", name:"投研 Team",
+      tag:"行业 + 建模 + 跟踪 + 成稿,全球股票投研完整班底(美股/港股/A 股为主)",
+      pipeline:["行业研究","财务建模","业绩跟踪","研报成稿"],
+      roles:[
+        { s:"inv-industry-analyst", a:"bar-chart-3", n:"行业分析师", d:"行业全景、竞争格局、可比公司、标的池", effort:"high",
+          skills:["行业综述","竞争格局","可比估值","标的筛选"], mcp:["valuzSearch","valuzStock"] },
+        { s:"inv-model-builder", a:"calculator", n:"财务建模师", d:"DCF / 三表 / 可比,直接出 Excel 模型", effort:"high",
+          skills:["DCF 估值","三表模型","可比估值","模型审计"], mcp:["valuzSearch","valuzStock"] },
+        { s:"inv-earnings-tracker", a:"activity", n:"业绩跟踪员", d:"财报季:读财报 → 差异分析 → 更新模型 → 点评", effort:"high",
+          skills:["业绩点评","财报前瞻","模型更新"], mcp:["valuzSearch","valuzStock"] },
+        { s:"inv-report-writer", a:"presentation", n:"研报撰写人", d:"首次覆盖报告、晨会纪要、路演 PPT", effort:"medium",
+          skills:["首次覆盖","晨会纪要","PPT 生成"], mcp:["valuzSearch","valuzStock"] },
+      ]},
+    { id:"xhs-content", scene:"内容创作", icon:"sparkles", name:"小红书内容创作 Team",
+      tag:"选题 → 文案 → 配图 → 发布,图文笔记生产线",
+      pipeline:["选题","文案","配图","发布"],
+      roles:[
+        { s:"xhs-topic-planner", a:"lightbulb", n:"选题策划", d:"拆对标爆款、跟热点、维护选题库", effort:"medium",
+          skills:["小红书选题"], mcp:["xhs"] },
+        { s:"xhs-note-writer", a:"pen-tool", n:"种草写手", d:"标题 + 种草正文,首行抓人、结尾引动作", effort:"medium",
+          skills:["小红书笔记写作"], mcp:[] },
+        { s:"xhs-visual-designer", a:"palette", n:"配图设计", d:"封面方案 + 配图清单,模型直接出图", effort:"medium",
+          skills:["小红书视觉"], mcp:[] },
+        { s:"xhs-publisher", a:"megaphone", n:"发布运营", d:"标签金字塔 + 发布时机,复制即发", effort:"low",
+          skills:["小红书发布"], mcp:["xhs"] },
+      ]},
+    { id:"worldcup-forecast", scene:"体育 / 预测", icon:"trophy", name:"世界杯预测 Team",
+      tag:"双路情报 → 统一结论 → 预测海报,Claude × Codex × GPT-5.5(2026 限时)",
+      pipeline:["双路情报(平行)","统一结论","海报"],
+      roles:[
+        { s:"wc-scout-claude", a:"globe-2", n:"情报研究员(Claude)", d:"深度检索新闻、发布会、伤停与战意", effort:"high", rt:"Claude",
+          skills:["赛前情报方法"], mcp:["websearch"] },
+        { s:"wc-scout-codex", a:"code-2", n:"情报研究员(Codex)", d:"平行搜集同一场,擅长代码抓结构化赛事数据", effort:"high", rt:"Codex",
+          skills:["赛前情报方法"], mcp:["websearch"] },
+        { s:"wc-chief", a:"brain-circuit", n:"首席预测官", d:"对照两路情报、裁决冲突,统一拍板预测卡", effort:"high", rt:"Claude",
+          skills:["预测合成与校准"], mcp:[] },
+        { s:"wc-poster", a:"image", n:"海报设计", d:"预测卡变海报,GPT-5.5 直接生图", effort:"medium", rt:"GPT-5.5",
+          skills:["预测海报设计"], mcp:[] },
+      ]},
+    { id:"general", scene:"通用", icon:"boxes", name:"通用 Team",
+      tag:"研究 → 写作 → 评审,通用知识工作的兜底班底",
+      pipeline:["研究","写作","评审","归档"],
+      roles:[
+        { s:"researcher", a:"search", n:"研究员", d:"抓取信息、做全景梳理", effort:"medium", skills:["资料研究"], mcp:[] },
+        { s:"writer", a:"pen-tool", n:"撰写者", d:"把研究结论写成成稿", effort:"medium", skills:["成稿写作"], mcp:[] },
+        { s:"reviewer", a:"file-search", n:"审稿员", d:"定稿前的最后一道关", effort:"medium", skills:["审校清单"], mcp:[] },
+        { s:"archivist", a:"briefcase-business", n:"整理员", d:"归档、建索引、留痕", effort:"low", skills:["归档方法"], mcp:[] },
+      ]},
+  ];
+
+  // 个人库:通用 Team 已添加(演示「已添加」态)
+  let myAgents = [
+    { s:"valuz-helper", a:"sparkles", n:"Valuz 小助手", d:"教你怎么用 Valuz,随手问", src:"custom" },
+    ...teams[2].roles.map(r=>({...r, src:"custom", team:"general"})),
+  ];
+  const officialAgents = [{ s:"skill-creator", a:"sparkles", n:"技能创建器", d:"创建与优化 skill" }];
+
+  let selecting = false;
+  const checked = new Set();
+  const ic = (n)=>`<i data-lucide="${n}"></i>`;
+  const mcpTag = (k)=>`<span class="tag-mini mcp">${ic('plug')} ${MCP[k].n}${MCP[k].free?'':' ·付费'}</span>`;
+  const skillTag = (s)=>`<span class="tag-mini">${ic('file-search')} ${s}</span>`;
+  const rtBadge = (r)=>r.rt?`<span class="rtbadge rt-${r.rt.toLowerCase().startsWith('gpt')?'gpt':r.rt.toLowerCase()}">${r.rt}</span>`:"";
+
+  // ══ 左侧库列表 ══
+  function renderList(freshSlugs){
+    freshSlugs = freshSlugs || [];
+    const custom = myAgents.filter(a=>a.src==="custom");
+    const rows = (arr)=>arr.map(a=>{
+      const fresh = freshSlugs.includes(a.s) ? " fresh":"";
+      const sel = a.s==="inv-industry-analyst" && !selecting ? " sel":"";
+      const ck = checked.has(a.s) ? " checked":"";
+      return `<div class="row${sel}${fresh}${ck}" onclick="rowClick('${a.s}')">
+        <span class="ckbox">${ic('check')}</span>
+        <span class="av">${ic(a.a)}</span>
+        <div class="meta"><div class="nm">${a.n}</div><div class="ds">${a.d||""}</div></div>
+        <button class="rowexport" title="导出" onclick="event.stopPropagation();exportOne('${a.n}')">${ic('upload')}</button>
+      </div>`;
+    }).join("");
+    document.getElementById("listbody").innerHTML =
+      `<div class="grouplabel">自定义 · ${custom.length}</div>${rows(custom)}
+       <div class="grouplabel">官方 · ${officialAgents.length}</div>${rows(officialAgents)}`;
+    lucide.createIcons();
+  }
+  function rowClick(slug){
+    if(!selecting) return;
+    if(checked.has(slug)) checked.delete(slug); else checked.add(slug);
+    document.getElementById("selCnt").textContent = checked.size;
+    document.getElementById("selbar").classList.toggle("show", checked.size>0);
+    renderList();
+  }
+  function toggleSelect(){
+    selecting=!selecting; checked.clear();
+    document.getElementById("listcol").classList.toggle("selecting", selecting);
+    document.getElementById("selbar").classList.remove("show");
+    renderList();
+    if(selecting) toast("勾选要一起导出的 agent");
+  }
+
+  // ══ 场景库:列表视图 ══
+  const have = ()=>new Set(myAgents.map(a=>a.s));
+  function hasTeam(t){ const h=have(); return t.roles.every(r=>h.has(r.s)); }
+  function renderTplList(){
+    document.getElementById("tplTitle").innerHTML = "场景库";
+    document.getElementById("tplSub").textContent = "选一套配好的团队,一键添加进你的库;派进同一个项目即组成团队。";
+    document.getElementById("tplFoot").style.display = "none";
+    let html="",last=null;
+    teams.forEach(t=>{
+      if(t.scene!==last){ html+=`<div class="scenelbl">${t.scene}</div>`; last=t.scene; }
+      const added=hasTeam(t);
+      const stack=t.roles.slice(0,5).map(r=>`<span class="m">${ic(r.a)}</span>`).join("");
+      const more=t.roles.length>5?`<span class="m more">+${t.roles.length-5}</span>`:"";
+      const action=added
+        ?`<button class="btn-added">${ic('check')} 已添加</button>`
+        :`<button class="btn-primary" onclick="event.stopPropagation();addTeam('${t.id}',this)">添加到我的库</button>`;
+      html+=`<div class="tplcard" onclick="openTeamDetail('${t.id}')">
+        <div class="tplicon">${ic(t.icon)}</div>
+        <div class="tplmeta"><div class="tplname">${t.name}</div><div class="tpltag">${t.tag}</div>
+        <div class="tplmembers"><div class="stack">${stack}${more}</div><span class="mcount">${t.roles.length} 个角色</span></div></div>
+        <div class="tplaction">${action}<span class="tplchevron">${ic('chevron-right')}</span></div></div>`;
+    });
+    document.getElementById("tplBody").innerHTML=html;
+    lucide.createIcons();
+  }
+
+  // ══ 场景库:团队详情视图 ══
+  function openTeamDetail(id){
+    const t=teams.find(x=>x.id===id);
+    document.getElementById("tplTitle").innerHTML =
+      `<button class="dlgback" onclick="renderTplList()">${ic('arrow-left')}</button> ${t.name}`;
+    document.getElementById("tplSub").textContent = t.tag;
+    const pipe = t.pipeline.map((p,i)=>
+      `<span class="stepname">${p}</span>${i<t.pipeline.length-1?ic('arrow-right'):''}`).join("");
+    const h=have();
+    const cards = t.roles.map(r=>{
+      const owned = h.has(r.s) ? `<span class="tag-mini" style="color:var(--success-text);background:var(--success-light);border-color:transparent">${ic('check')} 已在库</span>` : "";
+      return `<div class="rolecard">
+        <div class="rhead">
+          <span class="ra">${ic(r.a)}</span>
+          <div><div class="rn">${r.n}</div><div class="rd">${r.d}</div></div>
+          ${rtBadge(r)}<span class="effort">${r.effort}</span>
+        </div>
+        <div class="req">${r.skills.map(skillTag).join("")}${r.mcp.map(mcpTag).join("")}${owned}</div>
+      </div>`;
+    }).join("");
+    document.getElementById("tplBody").innerHTML =
+      `<div class="teamhead"><div class="ic">${ic(t.icon)}</div>
+        <div><div class="nm">${t.name}</div><div class="ds">${t.tag}</div></div></div>
+       <div class="pipeline">协作流水线:${pipe}</div>${cards}`;
+    const foot=document.getElementById("tplFoot");
+    foot.style.display="flex";
+    const added=hasTeam(t);
+    const missing=t.roles.filter(r=>!h.has(r.s)).length;
+    foot.innerHTML = added
+      ? `<span class="hint">这套团队的 ${t.roles.length} 个角色都已在你的库中</span><button class="btn-added">${ic('check')} 已添加</button>`
+      : `<span class="hint">添加后进入你的库;已存在的自动跳过(本次将新增 ${missing} 个)</span>
+         <button class="btn-primary" onclick="addTeam('${t.id}',this)">${ic('plus')} 添加到我的库</button>`;
+    lucide.createIcons();
+  }
+
+  function openTpl(){ renderTplList(); document.getElementById("tplOverlay").classList.add("show"); }
+  function closeTpl(){ document.getElementById("tplOverlay").classList.remove("show"); }
+  function addTeam(id,btn){
+    const t=teams.find(x=>x.id===id);
+    btn.disabled=true; btn.innerHTML=`<span class="spin"></span>添加中`;
+    setTimeout(()=>{
+      const h=have();
+      const fresh=t.roles.filter(r=>!h.has(r.s));
+      fresh.forEach(r=>myAgents.push({...r,src:"custom",team:t.id}));
+      renderList(fresh.map(r=>r.s));
+      // 留在当前视图并刷新(详情或列表)
+      if(document.getElementById("tplFoot").style.display==="flex") openTeamDetail(id); else renderTplList();
+      toast(`已添加 ${fresh.length} 个 Agent · ${t.name}`);
+    },850);
+  }
+
+  // ══ 导入 ══
+  function importPreviewHtml(){
+    const t=teams[0]; // 演示:导入一份「投研 Team」分享包
+    const h=have();
+    const rows=t.roles.map(r=>{
+      const dup=h.has(r.s)?`<span class="tag-mini">已存在 · 跳过</span>`:"";
+      return `<div class="rolecard" style="margin-top:8px">
+        <div class="rhead"><span class="ra">${ic(r.a)}</span>
+        <div><div class="rn">${r.n}</div><div class="rd">${r.d}</div></div>${rtBadge(r)}<span class="effort">${r.effort}</span></div>
+        <div class="req">${r.skills.slice(0,4).map(skillTag).join("")}${r.mcp.map(mcpTag).join("")}${dup}</div></div>`;
+    }).join("");
+    return `<div class="teamhead"><div class="ic">${ic(t.icon)}</div>
+      <div><div class="nm">投研 Team.valuz-agent</div><div class="ds">一组 4 个 agent · 含 13 个技能 · 来自他人分享</div></div></div>
+      <div class="pvlbl">包含的 Agent</div>${rows}
+      <div class="callout"><span class="ci">${ic('key-round')}</span>
+      <div>这组 agent 用到 <b>Valuz · 搜索 / Valuz · 行情</b> 2 个连接器,包内<b>不含密钥</b>。
+      均为 Valuz 自有 MCP,OAuth 登录后即可使用。</div></div>`;
+  }
+  function openImport(){ resetImport(); document.getElementById("impOverlay").classList.add("show"); lucide.createIcons(); }
+  function closeImport(){ document.getElementById("impOverlay").classList.remove("show"); }
+  function pickFile(){
+    const missing=teams[0].roles.filter(r=>!have().has(r.s)).length;
+    document.getElementById("impStep1").style.display="none";
+    const s2=document.getElementById("impStep2");
+    s2.style.display="block"; s2.innerHTML=importPreviewHtml();
+    document.getElementById("impFoot1").style.display="none";
+    document.getElementById("impFoot2").style.display="flex";
+    document.getElementById("impHint").textContent=`将新增 ${missing} 个 agent 到你的库`;
+    document.getElementById("impTitle").textContent="导入预览";
+    document.getElementById("impSub").textContent="确认这一组的内容,再导入进你的库。";
+    lucide.createIcons();
+  }
+  function resetImport(){
+    document.getElementById("impStep1").style.display="block";
+    document.getElementById("impStep2").style.display="none";
+    document.getElementById("impFoot1").style.display="flex";
+    document.getElementById("impFoot2").style.display="none";
+    document.getElementById("impTitle").textContent="导入 Agent";
+    document.getElementById("impSub").textContent="导入一个 .valuz-agent 文件,单个或一组 agent 都支持。";
+  }
+  function doImport(){
+    const t=teams[0], h=have();
+    const fresh=t.roles.filter(r=>!h.has(r.s));
+    fresh.forEach(r=>myAgents.push({...r,src:"custom",team:t.id}));
+    closeImport(); renderList(fresh.map(r=>r.s));
+    toast(`已导入「投研 Team」· 新增 ${fresh.length} 个、跳过 ${t.roles.length-fresh.length} 个已存在`);
+  }
+
+  // ══ 导出 ══
+  function exportOne(name){ document.getElementById("expName").value=name; document.getElementById("expCnt").textContent="1"; document.getElementById("expOverlay").classList.add("show"); lucide.createIcons(); }
+  function openExportTeam(){ document.getElementById("expCnt").textContent=checked.size; document.getElementById("expName").value="我的班底"; document.getElementById("expOverlay").classList.add("show"); lucide.createIcons(); }
+  function closeExport(){ document.getElementById("expOverlay").classList.remove("show"); }
+  function doExport(){ closeExport(); toast("已导出 .valuz-agent 文件,可分享给他人"); if(selecting) toggleSelect(); }
+
+  let toastTimer;
+  function toast(msg){
+    const el=document.getElementById("toast");
+    document.getElementById("toastmsg").textContent=msg;
+    el.classList.add("show"); clearTimeout(toastTimer);
+    toastTimer=setTimeout(()=>el.classList.remove("show"),2600);
+  }
+
+  renderList();
+  lucide.createIcons();
+</script>
+</body>
+</html>

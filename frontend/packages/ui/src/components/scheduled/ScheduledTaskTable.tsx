@@ -2,10 +2,11 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  FilePenLine,
   MoreHorizontal,
+  Pause,
   Play,
   Power,
-  PowerOff,
   Trash2,
 } from "lucide-react";
 import { Button } from "../ui/button";
@@ -15,6 +16,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 import { StatusDot } from "./StatusDot";
@@ -47,11 +49,13 @@ const ScheduledTaskActionMenu = ({
   onToggle,
   onDelete,
   onRunNow,
+  onRowClick,
 }: {
   task: ScheduledTaskTableProps["tasks"][number];
   onToggle?: (id: string) => void;
   onDelete?: (id: string) => void;
   onRunNow?: (id: string) => void;
+  onRowClick?: (id: string) => void;
 }) => {
   const { t } = useI18n();
   const canTest = Boolean(onRunNow && task.status === "on");
@@ -62,38 +66,39 @@ const ScheduledTaskActionMenu = ({
         <Button
           type="button"
           variant="ghost"
-          size="icon"
-          className="hover:bg-[color:var(--fg-1)] hover:text-inherit data-[state=open]:bg-[color:var(--fg-1)]"
+          size="icon-sm"
+          className="h-8 w-8 hover:bg-[#f3f4f6] hover:text-inherit dark:hover:bg-surface-muted"
           aria-label={t("cron.actionColumn")}
         >
           <MoreHorizontal className="h-3.5 w-3.5" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[128px]">
+      <DropdownMenuContent align="end" className="min-w-[140px]">
+        {onRowClick && (
+          <DropdownMenuItem onSelect={() => onRowClick(task.id)}>
+            <FilePenLine />
+            {t("common.edit")}
+          </DropdownMenuItem>
+        )}
+        <DropdownMenuItem onSelect={() => onToggle?.(task.id)}>
+          {task.status === "on" ? <Pause /> : <Power />}
+          {task.status === "on" ? t("cron.pause") : t("cron.enable")}
+        </DropdownMenuItem>
         <DropdownMenuItem
           disabled={!canTest}
           onSelect={() => {
             if (canTest) onRunNow?.(task.id);
           }}
         >
-          <Play className="h-3.5 w-3.5" />
-          运行测试
+          <Play />
+          {t("cron.runNow")}
         </DropdownMenuItem>
+        <DropdownMenuSeparator />
         <DropdownMenuItem
-          onSelect={() => onToggle?.(task.id)}
-        >
-          {task.status === "on" ? (
-            <PowerOff className="h-3.5 w-3.5" />
-          ) : (
-            <Power className="h-3.5 w-3.5" />
-          )}
-          {task.status === "on" ? t("cron.pause") : "执行"}
-        </DropdownMenuItem>
-        <DropdownMenuItem
+          variant="destructive"
           onSelect={() => onDelete?.(task.id)}
-          className="text-error-text focus:bg-[color:var(--fg-1)] focus:text-error-text [&_svg]:text-error-text"
         >
-          <Trash2 className="h-3.5 w-3.5 text-error-text" />
+          <Trash2 />
           {t("common.delete")}
         </DropdownMenuItem>
       </DropdownMenuContent>
@@ -119,7 +124,7 @@ export const ScheduledTaskTable = ({
     status === "on" ? t("cron.enable") : t("cron.paused");
 
   return (
-    <Card className="gap-0 overflow-hidden border-surface-border py-0 shadow-none">
+    <Card className="gap-0 overflow-hidden py-0">
       <CardContent className="px-0 py-0">
         {title && (
           <button
@@ -145,146 +150,148 @@ export const ScheduledTaskTable = ({
 
         {collapsed ? null : (
           <>
-        {/* Header row — hidden on mobile */}
-        <div className="hidden border-b border-[#f7f8fa] px-5 py-2 text-[12px] font-medium text-[#6E7481] md:grid md:grid-cols-[2fr_1.1fr_1.1fr_0.8fr_0.7fr_72px] dark:border-surface-border dark:text-ink-body">
-          <div>{t("cron.taskColumn")}</div>
-          <div className="text-center">{t("cron.triggerColumn")}</div>
-          <div className="text-center">{t("cron.timezoneColumn")}</div>
-          <div className="text-center">{t("cron.lastRunColumn")}</div>
-          <div className="text-center">{t("cron.statusColumn")}</div>
-          <div className="text-center">{t("cron.actionColumn")}</div>
-        </div>
+            {/* Header row — hidden on mobile */}
+            <div className="hidden border-b border-[#f7f8fa] px-5 py-2 text-[12px] font-medium text-[#6E7481] md:grid md:grid-cols-[2fr_1.1fr_1.1fr_0.8fr_0.7fr_72px] dark:border-surface-border dark:text-ink-body">
+              <div>{t("cron.taskColumn")}</div>
+              <div className="text-center">{t("cron.triggerColumn")}</div>
+              <div className="text-center">{t("cron.timezoneColumn")}</div>
+              <div className="text-center">{t("cron.lastRunColumn")}</div>
+              <div className="text-center">{t("cron.statusColumn")}</div>
+              <div className="text-center">{t("cron.actionColumn")}</div>
+            </div>
 
-        {tasks.map((task) => (
-          <div key={task.id}>
-            {/* Desktop row */}
-            <div className="hidden items-center px-5 py-4 md:grid md:grid-cols-[2fr_1.1fr_1.1fr_0.8fr_0.7fr_72px]">
-              <div className="flex min-w-0 items-start gap-2">
-                <Clock
-                  className={cn(
-                    "mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-meta",
-                    task.status === "off" && "opacity-50",
-                  )}
-                />
-                <div className="min-w-0">
-                  <button
-                    type="button"
-                    onClick={() => onRowClick?.(task.id)}
-                    className={cn(
-                      "block truncate text-left text-sm font-medium text-ink-heading transition-colors hover:text-brand",
-                      task.status === "off" && "opacity-50",
-                    )}
-                  >
-                    {task.name}
-                  </button>
+            {tasks.map((task) => (
+              <div key={task.id}>
+                {/* Desktop row */}
+                <div className="hidden items-center px-5 py-4 md:grid md:grid-cols-[2fr_1.1fr_1.1fr_0.8fr_0.7fr_72px]">
+                  <div className="flex min-w-0 items-start gap-2">
+                    <Clock
+                      className={cn(
+                        "mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-meta",
+                        task.status === "off" && "opacity-50",
+                      )}
+                    />
+                    <div className="min-w-0">
+                      <button
+                        type="button"
+                        onClick={() => onRowClick?.(task.id)}
+                        className={cn(
+                          "block truncate text-left text-sm font-medium text-ink-heading transition-colors hover:text-brand",
+                          task.status === "off" && "opacity-50",
+                        )}
+                      >
+                        {task.name}
+                      </button>
+                      <div
+                        className={cn(
+                          "mt-1 truncate text-xs text-ink-body",
+                          task.status === "off" && "opacity-50",
+                        )}
+                      >
+                        {task.prompt}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="text-center font-mono text-xs text-ink-label">
+                    {task.trigger}
+                  </div>
+                  <div className="truncate text-center font-mono text-xs text-ink-meta">
+                    {task.triggerTimezone || "—"}
+                  </div>
+                  <div className="text-center text-xs text-ink-body">
+                    {task.last}
+                  </div>
+                  <div className="flex justify-center">
+                    <span
+                      className={
+                        task.status === "on"
+                          ? "inline-flex items-center gap-1.5 rounded-full bg-[#53cb76]/10 px-2 py-0.5 text-[11px] font-medium text-[#53cb76]"
+                          : "inline-flex items-center gap-1.5 rounded-full bg-surface-soft px-2 py-0.5 text-[11px] font-medium text-ink-meta"
+                      }
+                    >
+                      <StatusDot
+                        status={task.status}
+                        className={task.status === "on" ? "bg-[#53cb76]" : ""}
+                      />
+                      {statusLabel(task.status)}
+                    </span>
+                  </div>
+                  <div className="flex justify-center">
+                    <ScheduledTaskActionMenu
+                      task={task}
+                      onToggle={onToggle}
+                      onRunNow={onRunNow}
+                      onDelete={onDelete}
+                      onRowClick={onRowClick}
+                    />
+                  </div>
+                </div>
+
+                {/* Mobile card */}
+                <div className="px-5 py-4 md:hidden">
+                  <div className="flex items-center justify-between">
+                    <div className="flex min-w-0 items-start gap-2">
+                      <Clock
+                        className={cn(
+                          "h-3.5 w-3.5 shrink-0 text-ink-meta",
+                          task.status === "off" && "opacity-50",
+                        )}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => onRowClick?.(task.id)}
+                        className={cn(
+                          "block truncate text-left text-sm font-medium text-ink-heading transition-colors hover:text-brand",
+                          task.status === "off" && "opacity-50",
+                        )}
+                      >
+                        {task.name}
+                      </button>
+                    </div>
+                    <span
+                      className={
+                        task.status === "on"
+                          ? "inline-flex items-center gap-1.5 rounded-full bg-[#53cb76]/10 px-2 py-0.5 text-[11px] font-medium text-[#53cb76]"
+                          : "inline-flex items-center gap-1.5 rounded-full bg-surface-soft px-2 py-0.5 text-[11px] font-medium text-ink-meta"
+                      }
+                    >
+                      <StatusDot
+                        status={task.status}
+                        className={task.status === "on" ? "bg-[#53cb76]" : ""}
+                      />
+                      {statusLabel(task.status)}
+                    </span>
+                  </div>
                   <div
                     className={cn(
-                      "mt-1 truncate text-xs text-ink-body",
+                      "mt-1 ml-[22px] truncate text-xs text-ink-body",
                       task.status === "off" && "opacity-50",
                     )}
                   >
                     {task.prompt}
                   </div>
-                </div>
-              </div>
-              <div className="text-center font-mono text-xs text-ink-label">
-                {task.trigger}
-              </div>
-              <div className="truncate text-center font-mono text-xs text-ink-meta">
-                {task.triggerTimezone || "—"}
-              </div>
-              <div className="text-center text-xs text-ink-body">
-                {task.last}
-              </div>
-              <div className="flex justify-center">
-                <span
-                  className={
-                    task.status === "on"
-                      ? "inline-flex items-center gap-1.5 rounded-full bg-success-light px-2 py-0.5 text-[11px] font-medium text-success-text"
-                      : "inline-flex items-center gap-1.5 rounded-full bg-surface-soft px-2 py-0.5 text-[11px] font-medium text-ink-meta"
-                  }
-                >
-                  <StatusDot
-                    status={task.status}
-                    className={task.status === "on" ? "bg-success" : ""}
-                  />
-                  {statusLabel(task.status)}
-                </span>
-              </div>
-              <div className="flex justify-center">
-                <ScheduledTaskActionMenu
-                  task={task}
-                  onToggle={onToggle}
-                  onRunNow={onRunNow}
-                  onDelete={onDelete}
-                />
-              </div>
-            </div>
-
-            {/* Mobile card */}
-            <div className="px-5 py-4 md:hidden">
-              <div className="flex items-center justify-between">
-                <div className="flex min-w-0 items-start gap-2">
-                  <Clock
-                    className={cn(
-                      "h-3.5 w-3.5 shrink-0 text-ink-meta",
-                      task.status === "off" && "opacity-50",
-                    )}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => onRowClick?.(task.id)}
-                    className={cn(
-                      "block truncate text-left text-sm font-medium text-ink-heading transition-colors hover:text-brand",
-                      task.status === "off" && "opacity-50",
-                    )}
-                  >
-                    {task.name}
-                  </button>
-                </div>
-                <span
-                  className={
-                    task.status === "on"
-                      ? "inline-flex items-center gap-1.5 rounded-full bg-success-light px-2 py-0.5 text-[11px] font-medium text-success-text"
-                      : "inline-flex items-center gap-1.5 rounded-full bg-surface-soft px-2 py-0.5 text-[11px] font-medium text-ink-meta"
-                  }
-                >
-                  <StatusDot
-                    status={task.status}
-                    className={task.status === "on" ? "bg-success" : ""}
-                  />
-                  {statusLabel(task.status)}
-                </span>
-              </div>
-              <div
-                className={cn(
-                  "mt-1 ml-[22px] truncate text-xs text-ink-body",
-                  task.status === "off" && "opacity-50",
-                )}
-              >
-                {task.prompt}
-              </div>
-              <div className="mt-2 flex items-center justify-between">
-                <span className="font-mono text-xs text-ink-label">
-                  {task.trigger}
-                  {task.triggerTimezone && (
-                    <span className="ml-1.5 text-ink-meta">
-                      · {task.triggerTimezone}
+                  <div className="mt-2 flex items-center justify-between">
+                    <span className="font-mono text-xs text-ink-label">
+                      {task.trigger}
+                      {task.triggerTimezone && (
+                        <span className="ml-1.5 text-ink-meta">
+                          · {task.triggerTimezone}
+                        </span>
+                      )}
                     </span>
-                  )}
-                </span>
-                <div className="flex justify-center">
-                  <ScheduledTaskActionMenu
-                    task={task}
-                    onToggle={onToggle}
-                    onRunNow={onRunNow}
-                    onDelete={onDelete}
-                  />
+                    <div className="flex justify-center">
+                      <ScheduledTaskActionMenu
+                        task={task}
+                        onToggle={onToggle}
+                        onRunNow={onRunNow}
+                        onDelete={onDelete}
+                        onRowClick={onRowClick}
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
-          </div>
-        ))}
+            ))}
           </>
         )}
       </CardContent>

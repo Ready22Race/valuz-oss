@@ -11,8 +11,16 @@ export const DESKTOP_CHANNELS = {
   unregisterServiceDescriptor: "unregister_service_descriptor",
   selectDirectory: "select_directory",
   openExternalUrl: "open_external_url",
+  appGetVersion: "app_get_version",
   appQuit: "app_quit",
   windowOpenNew: "window_open_new",
+  windowMinimize: "window_minimize",
+  windowMaximize: "window_maximize",
+  windowClose: "window_close",
+  windowIsMaximized: "window_is_maximized",
+  windowReload: "window_reload",
+  windowToggleDevTools: "window_toggle_devtools",
+  windowToggleFullscreen: "window_toggle_fullscreen",
   cliLoginStatus: "cli_login_status",
   cliLoginLaunch: "cli_login_launch",
   cliInstallStatus: "cli_install_status",
@@ -23,6 +31,7 @@ export const DESKTOP_CHANNELS = {
   updaterQuitAndInstall: "updater:quit-and-install",
   updaterShowWindow: "updater:show-window",
   updaterGetState: "updater:get-state",
+  setMenuLocale: "set_menu_locale",
 } as const;
 
 export const DESKTOP_EVENTS = {

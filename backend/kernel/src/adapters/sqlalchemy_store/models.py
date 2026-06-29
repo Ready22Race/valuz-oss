@@ -11,7 +11,6 @@ from typing import Any
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
-    Float,
     Index,
     Integer,
     String,
@@ -19,7 +18,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
-from src.core.owner_context import get_owner_id
 from src.core.time_utils import now_ms
 
 
@@ -30,67 +28,13 @@ class Base(DeclarativeBase):
 def _owner_column() -> Mapped[str]:
     """Owner id column shared by every kernel table.
 
-    Required (``NOT NULL``) and stamped from ``owner_context`` (host-seeded at
-    boot). Indexed because the commercial overlay filters by owner.
+    Required (``NOT NULL``) and stamped **explicitly** by the store's converters
+    from the caller's ``user_id`` — there is no column ``default``: the owner is
+    always threaded in (host → kernel_client → route → store), mirroring the
+    host's ``valuz_*`` tables. Indexed because every owner-scoped query filters
+    on it.
     """
-    return mapped_column(String(64), nullable=False, index=True, default=get_owner_id)
-
-
-class ProjectModel(Base):
-    __tablename__ = "projects"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    user_id: Mapped[str] = _owner_column()
-    name: Mapped[str] = mapped_column(String(255), default="")
-    cwd: Mapped[str] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(20), default="active")
-    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
-    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
-
-    __table_args__ = (
-        CheckConstraint(
-            "status IN ('active', 'deleted')",
-            name="ck_projects_status",
-        ),
-        Index("ix_projects_created_at", "created_at"),
-        Index("ix_projects_status", "status"),
-    )
-
-
-class AgentModel(Base):
-    __tablename__ = "agents"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    user_id: Mapped[str] = _owner_column()
-    name: Mapped[str] = mapped_column(String(255), default="")
-    model: Mapped[str] = mapped_column(String(100), default="claude-sonnet-4-6")
-    runtime_provider: Mapped[str] = mapped_column(String(20), default="claude_agent")
-    instructions: Mapped[str] = mapped_column(Text, default="")
-    tools: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    callable_agents: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    skills: Mapped[list[str]] = mapped_column(JSON, default=list)
-    mcp_servers: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
-    permission_mode: Mapped[str] = mapped_column(String(20), default="default")
-    max_turns: Mapped[int] = mapped_column(Integer, default=50)
-    max_cost_usd: Mapped[float] = mapped_column(Float, default=10.0)
-    effort: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    thinking: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="active")
-    metadata_: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, default=dict)
-    created_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
-
-    __table_args__ = (
-        CheckConstraint(
-            "permission_mode IN ('default', 'auto_review', 'full_access')",
-            name="ck_agents_permission_mode",
-        ),
-        CheckConstraint(
-            "status IN ('active', 'deleted')",
-            name="ck_agents_status",
-        ),
-        Index("ix_agents_created_at", "created_at"),
-        Index("ix_agents_status", "status"),
-    )
+    return mapped_column(String(64), nullable=False, index=True)
 
 
 class SessionModel(Base):
@@ -98,10 +42,10 @@ class SessionModel(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     user_id: Mapped[str] = _owner_column()
-    project_id: Mapped[str] = mapped_column(String(36))
-    agent_id: Mapped[str] = mapped_column(String(36))
-    # Per-session cwd override; "" = fall back to project.cwd.
-    cwd: Mapped[str] = mapped_column(Text, default="")
+    # Embedded AgentConfig snapshot — the agent this session runs as.
+    agent_config: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # Absolute working directory for this session's runtime (required).
+    cwd: Mapped[str] = mapped_column(Text, nullable=False)
     runtime_provider: Mapped[str] = mapped_column(String(20))
     model: Mapped[str] = mapped_column(String(100), default="")
     instructions: Mapped[str] = mapped_column(Text, default="")
@@ -137,8 +81,6 @@ class SessionModel(Base):
         ),
         Index("ix_sessions_status", "status"),
         Index("ix_sessions_created_at", "created_at"),
-        Index("ix_sessions_project_id", "project_id"),
-        Index("ix_sessions_agent_id", "agent_id"),
     )
 
 

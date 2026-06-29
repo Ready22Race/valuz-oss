@@ -19,6 +19,13 @@ OutboundEventType = Literal[
     "session_idle",
     "session_error",
     "session_update",
+    # Context compaction marker, emitted by both runtimes when the context
+    # window is summarized. ``data`` is passed through raw, not normalized:
+    # Claude forwards the CLI's ``compact_boundary`` ``compact_metadata`` dict
+    # verbatim (e.g. ``{trigger, pre_tokens}``); codex runs ``/compact`` as a
+    # real turn but has no metadata of its own, so its marker is ``{}`` (the
+    # real token counts ride the following ``usage_update``). The upper layer
+    # decides how/whether to render it.
     "compaction",
     "usage_update",
     "todo_update",
@@ -127,3 +134,13 @@ class EventSink(Protocol):
     """Outbound event push — shared by all Runtimes."""
 
     async def emit(self, event: Event) -> None: ...
+
+
+class GlobalEventTap(Protocol):
+    """Process-wide observer of every session's live event stream.
+
+    Registered via ``SessionOrchestrator.attach_global_tap``; receives the
+    session id alongside each event so subscribers don't re-derive routing.
+    """
+
+    async def emit_session(self, session_id: str, event: Event) -> None: ...

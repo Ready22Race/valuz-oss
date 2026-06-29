@@ -1,4 +1,4 @@
-"""Build a kernel-shaped ``instructions`` string from valuz workspace context.
+"""Build a kernel-shaped ``instructions`` string from valuz project context.
 
 The kernel's V5 ClaudeAgentRuntime uses ``SystemPromptPreset`` with a
 preset of ``claude_code`` and an optional ``append`` string. Per ADR-008
@@ -16,20 +16,20 @@ session rows.
 from __future__ import annotations
 
 
-def build_workspace_system_prompt(
+def build_project_system_prompt(
     *,
-    workspace_name: str,
+    project_name: str,
     instructions_md: str | None,
 ) -> str:
-    """Compose the session's ``instructions`` string from workspace metadata.
+    """Compose the session's ``instructions`` string from project metadata.
 
-    Returns the workspace's ``instructions_md`` verbatim (trimmed). Returns
-    an empty string when the workspace has no instructions — the kernel's
+    Returns the project's ``instructions_md`` verbatim (trimmed). Returns
+    an empty string when the project has no instructions — the kernel's
     runtime treats an empty append the same as omitting it.
 
-    No ``# Workspace: <name>`` header is prepended: the kernel writes a
-    project ``CLAUDE.md`` with the workspace name as H1 (see
-    ``src.core.workspace.bootstrap_project_workspace``) and the runtime
+    No ``# Project: <name>`` header is prepended: the kernel writes a
+    project ``CLAUDE.md`` with the project name as H1 (see
+    ``src.core.workspace.bootstrap_session_workspace``) and the runtime
     surfaces ``cwd`` to the model independently, so a synthetic header
     here would be redundant. It would also create a visible mismatch in
     the frontend session panel, which renders ``session.instructions``
@@ -37,8 +37,27 @@ def build_workspace_system_prompt(
     ``instructions_md`` — users would see different text in two places
     that should be identical.
     """
-    del workspace_name  # kept in signature for API stability; see docstring
+    del project_name  # kept in signature for API stability; see docstring
     return (instructions_md or "").strip()
 
 
-__all__ = ["build_workspace_system_prompt"]
+def assemble_session_instructions(sections: list[tuple[str, str]]) -> str:
+    """Join the session system-prompt blocks, each wrapped in an XML tag.
+
+    ``sections`` is an ordered list of ``(tag, text)``. Empty / whitespace-only
+    blocks are skipped; the rest are emitted as ``<tag>\\n{text}\\n</tag>`` and
+    joined with blank lines. The tags delineate the distinct kinds of guidance
+    that used to be concatenated into one undelimited blob — the agent's own
+    instructions, the project's instructions, the task playbook, etc. — so both
+    the model and a human reading the session panel can tell them apart. This is
+    the single chokepoint for that assembly (chat/project + task paths both call
+    it), keeping the structure identical everywhere.
+    """
+    out: list[str] = []
+    for tag, text in sections:
+        if text and text.strip():
+            out.append(f"<{tag}>\n{text.strip()}\n</{tag}>")
+    return "\n\n".join(out)
+
+
+__all__ = ["assemble_session_instructions", "build_project_system_prompt"]

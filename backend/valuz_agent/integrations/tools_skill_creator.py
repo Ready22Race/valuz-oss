@@ -13,9 +13,7 @@ The kernel records a ``tool_use`` event the moment any tool fires; the
 frontend SSE subscriber for that session already knows ``session_id`` (it
 owns the page). Pairing the event payload (``slug``, ``summary``,
 ``change_kind``, ``files_touched``) with the session id at the UI layer
-gives us everything the confirm/dismiss endpoints need without smuggling
-``session_id`` through the kernel ``ExecContext`` (which only exposes
-``workspace`` and is shared across sessions in the same project).
+gives us everything the confirm/dismiss endpoints need.
 
 Why this lives in valuz, not the kernel
 ---------------------------------------
@@ -28,8 +26,7 @@ from __future__ import annotations
 
 import logging
 
-from src.core.tool_registry import register_tool  # type: ignore[import-not-found]
-from src.core.tools import ExecContext, ToolDef, ToolResult  # type: ignore[import-not-found]
+from src.core.tools import ExecContext, ToolDef, ToolResult
 
 # Side-effect import — surfaces ``src.core...`` on sys.path. Without this,
 # the kernel package fails to resolve when this module is imported during
@@ -93,7 +90,7 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -
     """Acknowledge the submission, but only if the slug is actually staged.
 
     Validates that the agent wrote ``SKILL.md`` to
-    ``{workspace}/.skill-staging/{slug}/`` before greenlighting the
+    ``{project}/.skill-staging/{slug}/`` before greenlighting the
     submission card. If the file isn't there, returns
     ``is_error=True`` with the exact expected path so the agent's next
     turn can ``mv`` the files into place and call ``submit_skill``
@@ -112,22 +109,34 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -
     files = args.get("files_touched") or []
     file_count = len(files) if isinstance(files, list) else 0
 
-    workspace_root = (context.workspace or "").strip()
-    if not workspace_root:
-        # Defensive: kernel should always set workspace_root, but if it
-        # doesn't, surface a clear error rather than silently passing.
+    # Resolve the staging directory through the host's single authoritative
+    # resolver — the SAME one ``scan_staging`` and the confirm endpoint use —
+    # keyed off the session id (which is always set on the toolkit MCP path;
+    # ``ExecContext.workspace`` is not). ``staging_dir_for_session`` maps the
+    # session to ``{project_cwd}/.skill-staging/`` for project/chat sessions
+    # (including the temporary scratch cwd a skill-creator session runs in),
+    # with a legacy session-keyed fallback. Reconstructing the path from
+    # ``context.workspace`` instead left submit-validation blind whenever the
+    # workspace wasn't populated and could diverge from where confirm later
+    # looks — both failure modes this avoids.
+    session_id = (getattr(context, "session_id", "") or "").strip()
+    if not session_id:
+        # Defensive: the MCP wrapper always carries the session id on a
+        # header, but if it's missing we can't resolve staging at all.
         return ToolResult(
             content=(
-                "Error: workspace root is empty in ExecContext — cannot "
-                "validate staging location. Ask the user to retry the "
+                "Error: session id is empty in ExecContext — cannot "
+                "resolve the staging location. Ask the user to retry the "
                 "session."
             ),
             is_error=True,
         )
 
-    from pathlib import Path
+    from valuz_agent.modules.skills.staging import staging_dir_for_session
 
-    expected_dir = Path(workspace_root) / ".skill-staging" / str(slug)
+    staging_base = await staging_dir_for_session(session_id)
+    expected_dir = staging_base / str(slug)
+    project_root = str(staging_base.parent)
     skill_md = expected_dir / "SKILL.md"
     if not skill_md.is_file():
         # Most common cause: the agent wrote to ``/tmp/{slug}/`` or some
@@ -144,7 +153,7 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -
                 f"path:\n\n  {expected_dir}/SKILL.md\n\n"
                 f"Move every file for slug '{slug}' into "
                 f"``./.skill-staging/{slug}/`` (relative to your "
-                f"current working directory `{workspace_root}`), then "
+                f"current working directory `{project_root}`), then "
                 f"call ``submit_skill`` again. Do not write skill files "
                 f"to ``/tmp``, ``~/.agents/skills/``, or any other "
                 f"location — staging files MUST live under "
@@ -193,19 +202,15 @@ SUBMIT_SKILL_TOOL_DECLARATION = ToolDef(
 )
 
 
-def register_submit_skill_tool() -> None:
-    """Wire the executable handler into the kernel's global tool registry.
-
-    Idempotent — re-registering replaces the existing entry under the
-    same name. Safe to call from app startup.
-    """
-    register_tool(SUBMIT_SKILL_TOOL_DEF)
-    logger.info("Registered tool: %s", SUBMIT_SKILL_TOOL_NAME)
+def build_submit_skill_tool_defs() -> tuple[ToolDef, ...]:
+    """Return the submit_skill def (live handler) for the host toolkit
+    MCP server."""
+    return (SUBMIT_SKILL_TOOL_DEF,)
 
 
 __all__ = [
     "SUBMIT_SKILL_TOOL_NAME",
     "SUBMIT_SKILL_TOOL_DEF",
     "SUBMIT_SKILL_TOOL_DECLARATION",
-    "register_submit_skill_tool",
+    "build_submit_skill_tool_defs",
 ]

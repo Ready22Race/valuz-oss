@@ -1,27 +1,26 @@
 """Tests for SkillLibraryService — Phase 5 coverage."""
 
-import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
 
 import pytest
 
-from valuz_agent.modules.skills.contracts import RuntimeContext, SkillManifest, WorkspaceRef
+from valuz_agent.infra.eventbus import EventBus
+from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
+from valuz_agent.modules.skills.contracts import ProjectRef, RuntimeContext, SkillManifest
 from valuz_agent.modules.skills.errors import PreviewExpired, SourceReadonly
 from valuz_agent.modules.skills.models import (
+    SessionSkillImportConfirmRequest,
     SkillCreateRequest,
     SkillFileAction,
     SkillUpdateRequest,
 )
 from valuz_agent.modules.skills.service import SkillLibraryService
-from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
-
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
-class FakeWorkspace:
+class FakeProject:
     def __init__(
         self, id: str = "ws-1", kind: str = "chat", root_path: str | None = None, name: str = "test"
     ):
@@ -33,23 +32,18 @@ class FakeWorkspace:
         self.memory_summary = None
 
 
-class FakeWorkspaceService:
-    def __init__(self, workspaces: list | None = None):
-        self._workspaces = workspaces or [FakeWorkspace(), FakeWorkspace(id="chat-default")]
+class FakeProjectService:
+    def __init__(self, projects: list | None = None):
+        self._projects = projects or [FakeProject(), FakeProject(id="chat-default")]
 
-    async def get_workspace(self, workspace_id: str):
-        for ws in self._workspaces:
-            if ws.id == workspace_id:
+    async def get_project(self, user_id: str, project_id: str):
+        for ws in self._projects:
+            if ws.id == project_id:
                 return ws
-        raise KeyError(workspace_id)
+        raise KeyError(project_id)
 
-    async def list_workspaces(self):
-        return self._workspaces
-
-
-class FakeSessionDatastore:
-    async def list_events(self, session_id: str):
-        return []
+    async def list_projects(self, user_id: str):
+        return self._projects
 
 
 class FakeSkillDatastore:
@@ -57,54 +51,54 @@ class FakeSkillDatastore:
         self._enabled: dict[str, set[str]] = {}
         self._rows: dict[str, object] = {}
 
-    def list_workspace_skills(self, workspace, source):
+    def list_project_skill_manifests(self, project, source):
         ctx = RuntimeContext(
-            workspace=WorkspaceRef(
-                id=workspace.id,
-                slug=workspace.id,
-                kind=workspace.kind,
-                root_path=workspace.root_path,
+            project=ProjectRef(
+                id=project.id,
+                slug=project.id,
+                kind=project.kind,
+                root_path=project.root_path,
             ),
         )
         manifests = source.list_skills(ctx)
-        enabled = self._enabled.get(workspace.id, set())
+        enabled = self._enabled.get(project.id, set())
         result = []
         for m in manifests:
-            is_enabled = workspace.kind == "chat" or m.path in enabled
+            is_enabled = project.kind == "chat" or m.path in enabled
             result.append(m.model_copy(update={"enabled": is_enabled}))
         return result
 
-    def enabled_skill_paths(self, workspace):
-        return self._enabled.get(workspace.id, set())
+    def enabled_skill_paths(self, project):
+        return self._enabled.get(project.id, set())
 
-    def set_skill_enabled(self, workspace, skill_path, enabled):
-        paths = self._enabled.setdefault(workspace.id, set())
+    def set_skill_enabled(self, project, skill_path, enabled):
+        paths = self._enabled.setdefault(project.id, set())
         if enabled:
             paths.add(str(Path(skill_path).expanduser().resolve(strict=False)))
         else:
             paths.discard(str(Path(skill_path).expanduser().resolve(strict=False)))
         return paths
 
-    def overwrite_enabled_skill_paths(self, workspace, skill_paths):
-        self._enabled[workspace.id] = set(skill_paths)
-        return self._enabled[workspace.id]
+    def overwrite_enabled_skill_paths(self, project, skill_paths):
+        self._enabled[project.id] = set(skill_paths)
+        return self._enabled[project.id]
 
-    def remove_skill_path_from_workspace(self, workspace, skill_path):
-        paths = self._enabled.get(workspace.id, set())
+    def remove_skill_path_from_project(self, project, skill_path):
+        paths = self._enabled.get(project.id, set())
         paths.discard(str(Path(skill_path).expanduser().resolve(strict=False)))
 
-    def scan(self, workspace, source):
-        return len(self.list_workspace_skills(workspace, source))
+    def scan(self, project, source):
+        return len(self.list_project_skill_manifests(project, source))
 
-    async def get_by_id(self, skill_id):
+    async def get_by_id(self, user_id, skill_id):
         return self._rows.get(skill_id)
 
-    async def set_creation_origin(self, skill_id, origin):
+    async def set_creation_origin(self, user_id, skill_id, origin):
         row = self._rows.get(skill_id)
         if row is not None:
             row.creation_origin = origin
 
-    async def create(self, row):
+    async def create(self, user_id, row):
         self._rows[row.id] = row
         return row
 
@@ -112,8 +106,19 @@ class FakeSkillDatastore:
         self._rows[row.id] = row
         return row
 
-    async def list_skills(self):
+    async def list_skills(self, user_id):
         return list(self._rows.values())
+
+    async def list_library_disabled_ids(self, user_id):
+        return set(getattr(self, "_library_disabled", set()))
+
+    async def set_library_enabled(self, user_id, skill_id, enabled):
+        disabled = getattr(self, "_library_disabled", set())
+        if enabled:
+            disabled.discard(skill_id)
+        else:
+            disabled.add(skill_id)
+        self._library_disabled = disabled
 
     def add_ignore(self, skill_id, content_hash=None):
         pass
@@ -121,8 +126,8 @@ class FakeSkillDatastore:
     def is_ignored(self, skill_id, content_hash=None):
         return False
 
-    def set_project_skills(self, workspace_id, rows):
-        self._enabled[workspace_id] = set()
+    def set_project_skills(self, user_id, project_id, rows):
+        self._enabled[project_id] = set()
 
 
 def _make_skill_dir(root: Path, name: str, body: str = "Test skill.") -> Path:
@@ -148,13 +153,49 @@ def svc(skill_root, monkeypatch):
     return SkillLibraryService(
         datastore=FakeSkillDatastore(),
         skill_source=FilesystemSkillSource(),
-        workspace_service=FakeWorkspaceService(),
-        session_datastore=FakeSessionDatastore(),
+        project_service=FakeProjectService(),
         event_bus=bus,
     ), bus
 
 
 # ── Tests ────────────────────────────────────────────────────────────
+
+
+class TestIndexOfficialSkills:
+    """``index_official_skills`` deterministically upserts the bundled official
+    skills into the index, independent of the best-effort ``startup_scan``."""
+
+    async def test_should_upsert_official_skills_into_index(self, svc, tmp_path):
+        service, _bus = svc
+        from valuz_agent.integrations.skills_official import OfficialSkillSource
+
+        official_dir = tmp_path / "official"
+        _make_skill_dir(official_dir, "sector-overview")
+        _make_skill_dir(official_dir, "comps")
+        service._extra_sources = [OfficialSkillSource(official_dir=official_dir)]
+
+        count = await service.index_official_skills()
+
+        assert count == 2
+        rows = await service._ds.list_skills("u")
+        slugs = {r.slug for r in rows}
+        assert {"sector-overview", "comps"} <= slugs
+        assert all(r.scope == "official" for r in rows if r.slug in {"sector-overview", "comps"})
+        assert all(r.status == "available" for r in rows)
+
+    async def test_should_be_idempotent(self, svc, tmp_path):
+        service, _bus = svc
+        from valuz_agent.integrations.skills_official import OfficialSkillSource
+
+        official_dir = tmp_path / "official"
+        _make_skill_dir(official_dir, "dcf")
+        service._extra_sources = [OfficialSkillSource(official_dir=official_dir)]
+
+        await service.index_official_skills()
+        await service.index_official_skills()  # second pass updates, no duplicate row
+
+        rows = await service._ds.list_skills("u")
+        assert len([r for r in rows if r.slug == "dcf"]) == 1
 
 
 class TestListCatalog:
@@ -231,7 +272,6 @@ class TestListCatalog:
         # Fake a manifest entry with None timestamp by monkeypatching the
         # source. Easier: add an "extra source" returning a manifest with
         # folder_created_at=None. SkillLibraryService exposes that knob.
-        from valuz_agent.modules.skills.contracts import SkillManifest
 
         class _NullTimeSource:
             name = "null-time"
@@ -256,6 +296,74 @@ class TestListCatalog:
         # zzz-legacy has no birthtime → must be after the real ones
         # regardless of its alphabetical-last name.
         assert slugs[-1] == "zzz-legacy"
+
+
+class TestLibraryState:
+    """Global library on/off switch — the field the new-conversation ``/``
+    picker filters on. Default on; only an explicit off is stored."""
+
+    async def test_catalog_overlays_disabled_row(self, svc, skill_root):
+        service, _ = svc
+        _make_skill_dir(skill_root, "alpha")
+        _make_skill_dir(skill_root, "beta")
+        # Turn alpha off by its catalog row id; beta left at the default (on).
+        cat0 = await service.list_catalog("ws-1")
+        alpha_id = next(s for s in cat0.skills if s.slug == "alpha").id
+        await service._ds.set_library_enabled("u", alpha_id, False)
+
+        catalog = await service.list_catalog("ws-1")
+        by_slug = {s.slug: s for s in catalog.skills}
+
+        assert by_slug["alpha"].library_enabled is False
+        assert by_slug["beta"].library_enabled is True
+
+    async def test_builtin_skill_cannot_be_disabled(self, svc, skill_root):
+        service, _ = svc
+        # A built-in skill (``origin-label: Built-in`` frontmatter). Even with its
+        # row turned off, the catalog must keep it enabled — built-ins ship with
+        # the client and aren't toggleable.
+        d = skill_root / "skill-creator"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            '---\nname: "skill-creator"\ndescription: "x"\norigin-label: "Built-in"\n---\n\nbody\n',
+            encoding="utf-8",
+        )
+        cat0 = await service.list_catalog("ws-1")
+        sc_id = next(s for s in cat0.skills if s.slug == "skill-creator").id
+        await service._ds.set_library_enabled("u", sc_id, False)
+
+        catalog = await service.list_catalog("ws-1")
+        sc = next(s for s in catalog.skills if s.slug == "skill-creator")
+        assert sc.origin_label == "Built-in"
+        assert sc.library_enabled is True
+
+    async def test_toggle_returns_updated_and_persists(self, svc, skill_root):
+        from valuz_agent.modules.skills.models import SkillIndexRow
+
+        service, _ = svc
+        _make_skill_dir(skill_root, "gamma")
+        cat = await service.list_catalog("ws-1")
+        gamma = next(s for s in cat.skills if s.slug == "gamma")
+        assert gamma.library_enabled is True
+        # Seed the index row so the service can resolve id → slug.
+        service._ds._rows[gamma.id] = SkillIndexRow(
+            id=gamma.id,
+            slug="gamma",
+            name="gamma",
+            description="",
+            scope="user",
+            source="filesystem",
+            source_path=gamma.path,
+            user_id="u",
+        )
+
+        updated = await service.set_library_enabled(gamma.id, False)
+        assert updated.library_enabled is False
+
+        cat2 = await service.list_catalog("ws-1")
+        assert (
+            next(s for s in cat2.skills if s.slug == "gamma").library_enabled is False
+        )
 
 
 class TestCreateSkill:
@@ -426,3 +534,54 @@ class TestTags:
         tags = await service.list_all_tags()
         assert "test" in tags
         assert len(tags) == len(set(tags))
+
+
+class TestImportFromSessionConfirm:
+    """Regression: this path used to call ``SessionDatastore.list_events`` —
+    a method that does not exist (events live in the kernel ``events``
+    table) — so the confirm endpoint raised AttributeError at runtime. It
+    now fetches events through ``adapters.kernel_store.get_events``."""
+
+    @staticmethod
+    def _patch_events(monkeypatch, events):
+        from valuz_agent.adapters import kernel_client
+
+        seen: list[str] = []
+
+        async def fake_get_events(_user_id, session_id, **kwargs):
+            seen.append(session_id)
+            return events
+
+        monkeypatch.setattr(kernel_client, "get_events", fake_get_events)
+        return seen
+
+    async def test_should_build_skill_body_from_persisted_assistant_events(self, svc, monkeypatch):
+        service, _ = svc
+        seen = self._patch_events(
+            monkeypatch,
+            [
+                SimpleNamespace(type="user_message", data={"message": "teach me"}),
+                SimpleNamespace(type="assistant_message", data={"text": "First answer."}),
+                SimpleNamespace(type="tool_result", data={"output": "tool noise"}),
+                SimpleNamespace(type="assistant_message", data={"content": "Second answer."}),
+            ],
+        )
+        result = await service.import_from_session_confirm(
+            SessionSkillImportConfirmRequest(session_id="sess-1", name="from-session")
+        )
+        assert seen == ["sess-1"]
+        body = (Path(result.path) / "SKILL.md").read_text(encoding="utf-8")
+        assert "First answer." in body
+        assert "Second answer." in body
+        assert "tool noise" not in body
+
+    async def test_should_fall_back_to_description_when_no_assistant_text(self, svc, monkeypatch):
+        service, _ = svc
+        self._patch_events(monkeypatch, [])
+        result = await service.import_from_session_confirm(
+            SessionSkillImportConfirmRequest(
+                session_id="sess-2", name="empty-session", description="Fallback body."
+            )
+        )
+        body = (Path(result.path) / "SKILL.md").read_text(encoding="utf-8")
+        assert "Fallback body." in body

@@ -20,7 +20,7 @@ from typing import Any
 
 import valuz_agent.boot.kernel  # noqa: F401
 
-from src.core import ToolDef  # type: ignore[import-not-found]
+from src.core import ToolDef
 
 # ---------------------------------------------------------------------------
 # Tool names (surfaced by the kernel as mcp__harness__<name>)
@@ -58,6 +58,10 @@ RESUME_TASK_TOOL_NAME = "resume_task"
 # misdirected / stuck member without resorting to ``finish_task`` on the
 # whole task.
 STOP_SUBTASK_TOOL_NAME = "stop_subtask"
+# Lead-only: after the task is completed, the lead may refresh the
+# deliverable card (summary + artifacts) during follow-up chat. Appends a
+# ``deliverable_updated`` event; does not change task status.
+UPDATE_DELIVERABLE_TOOL_NAME = "update_deliverable"
 
 DISPATCH_TOOL_NAMES = (
     DISPATCH_TOOL_NAME,
@@ -78,6 +82,7 @@ DISPATCH_TOOL_NAMES = (
     INJECT_INTO_TASK_TOOL_NAME,
     RESUME_TASK_TOOL_NAME,
     STOP_SUBTASK_TOOL_NAME,
+    UPDATE_DELIVERABLE_TOOL_NAME,
 )
 
 # Strict-lead-only dispatch tools — must NOT be on a plain conversation agent
@@ -107,6 +112,7 @@ LEAD_ONLY_TOOL_NAMES = frozenset(
         FINISH_TASK_TOOL_NAME,
         REVIEW_SUBTASK_TOOL_NAME,
         STOP_SUBTASK_TOOL_NAME,
+        UPDATE_DELIVERABLE_TOOL_NAME,
     }
 )
 
@@ -155,7 +161,7 @@ _DISPATCH_PARAMETERS: dict[str, Any] = {
             "description": "Optional list of file paths or references relevant to the subtask.",
             "default": [],
         },
-        "workspace_mode": {
+        "project_mode": {
             "type": "string",
             "enum": ["shared", "repo-worktree"],
             "description": (
@@ -163,7 +169,7 @@ _DISPATCH_PARAMETERS: dict[str, Any] = {
                 "'shared' (default) = the project directory itself, so the "
                 "member reads/writes project files natively. "
                 "'repo-worktree' = an isolated git worktree (only when the "
-                "workspace is a git repo; for parallel code changes)."
+                "project is a git repo; for parallel code changes)."
             ),
         },
     },
@@ -237,7 +243,7 @@ _CREATE_TASK_PARAMETERS: dict[str, Any] = {
         "lead_agent": {
             "type": "string",
             "description": (
-                "Workspace-local agent slug to lead the task. Defaults to the "
+                "Project-local agent slug to lead the task. Defaults to the "
                 "agent of the current conversation."
             ),
         },
@@ -337,7 +343,7 @@ _SUBTASK_NODE_SCHEMA: dict[str, Any] = {
         "key": {"type": "string", "description": "Stable, task-unique node key."},
         "title": {"type": "string", "description": "Short label for the subtask."},
         "goal": {"type": "string", "description": "The scoped goal/brief for the member."},
-        "agent": {"type": "string", "description": "Workspace-local agent slug to run it."},
+        "agent": {"type": "string", "description": "Project-local agent slug to run it."},
         "review_criteria": {
             "type": "string",
             "description": (
@@ -448,7 +454,7 @@ _DRAFT_TASK_PARAMETERS: dict[str, Any] = {
         },
         "lead_agent_slug": {
             "type": "string",
-            "description": "Which workspace agent will become the lead at commit time.",
+            "description": "Which project agent will become the lead at commit time.",
         },
         "title": {
             "type": "string",
@@ -578,6 +584,30 @@ _STOP_SUBTASK_PARAMETERS: dict[str, Any] = {
     },
 }
 
+_UPDATE_DELIVERABLE_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "required": ["summary"],
+    "properties": {
+        "summary": {
+            "type": "string",
+            "description": (
+                "The refreshed deliverable summary shown on the task's deliverable "
+                "card. Reflect whatever you just changed."
+            ),
+        },
+        "artifacts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "The COMPLETE list of deliverable file paths (relative to the "
+                "project working dir). This REPLACES the previous list — always "
+                "pass every current deliverable file, not just the ones you "
+                "changed. Omitting it clears the displayed artifacts."
+            ),
+        },
+    },
+}
+
 # ---------------------------------------------------------------------------
 # ToolDef declarations (handler=None) — placed on lead agent AgentConfig.tools
 # so the runtime advertises these tools to the model. The actual handlers
@@ -681,7 +711,7 @@ STOP_SUBTASK_TOOL_DECLARATION = ToolDef(
 LIST_MEMBERS_TOOL_DECLARATION = ToolDef(
     name=LIST_MEMBERS_TOOL_NAME,
     description=(
-        "List the workspace members available for dispatch. Each item has "
+        "List the project members available for dispatch. Each item has "
         "slug, name, runtime, source_agent_slug, and role_summary (the member's "
         "role/capabilities) — use role_summary to route each subtask to the "
         "best-fit member."
@@ -699,6 +729,19 @@ FINISH_TASK_TOOL_DECLARATION = ToolDef(
         "via inject or the goal has become unreachable."
     ),
     parameters=_FINISH_TASK_PARAMETERS,
+    handler=None,
+)
+
+UPDATE_DELIVERABLE_TOOL_DECLARATION = ToolDef(
+    name=UPDATE_DELIVERABLE_TOOL_NAME,
+    description=(
+        "Refresh the task's deliverable card after the task is COMPLETED. "
+        "Call this when, during post-completion follow-up chat, you edited "
+        "a deliverable file and want the card's summary/artifacts to reflect "
+        "the latest state. Only valid on a completed task; it does NOT "
+        "reopen the task, re-plan, or dispatch members."
+    ),
+    parameters=_UPDATE_DELIVERABLE_PARAMETERS,
     handler=None,
 )
 
@@ -748,6 +791,7 @@ DISPATCH_TOOL_DECLARATIONS: tuple[ToolDef, ...] = (
     SEND_TOOL_DECLARATION,
     LIST_MEMBERS_TOOL_DECLARATION,
     FINISH_TASK_TOOL_DECLARATION,
+    UPDATE_DELIVERABLE_TOOL_DECLARATION,
     STOP_SUBTASK_TOOL_DECLARATION,
 ) + PLAN_REVIEW_TOOL_DECLARATIONS
 
@@ -789,9 +833,9 @@ DRAFT_TASK_TOOL_DECLARATION = ToolDef(
         "Returns task_id; status=draft. Use this when the user wants to review "
         "the task breakdown before committing to spending tokens on execution. "
         "IMPORTANT: ALWAYS call list_members FIRST to see which member agents "
-        "exist in this workspace (their slugs, runtimes, role_summary). Pick "
+        "exist in this project (their slugs, runtimes, role_summary). Pick "
         "lead_agent_slug from that list — do NOT make up an agent name (it will "
-        "be rejected with 'agent <slug> is not a member of workspace'). Frame "
+        "be rejected with 'agent <slug> is not a member of project'). Frame "
         "the goal around delegating to the members that exist."
     ),
     parameters=_DRAFT_TASK_PARAMETERS,
@@ -875,7 +919,7 @@ RESUME_TASK_TOOL_DECLARATION = ToolDef(
 #
 # plan_task / modify_plan / get_plan are advertised here (VALUZ-CHATPLAN D4
 # tool reuse): chat agents call them on draft tasks; handler-level
-# ``_check_plan_writer_gate`` enforces "draft writer = originator/workspace;
+# ``_check_plan_writer_gate`` enforces "draft writer = originator/project;
 # active writer = lead-only" semantics.
 ORCHESTRATION_TOOL_DECLARATIONS: tuple[ToolDef, ...] = (
     LIST_MEMBERS_TOOL_DECLARATION,

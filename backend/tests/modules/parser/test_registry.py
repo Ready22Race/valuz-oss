@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
+import valuz_agent.modules.parser.registry as registry_mod
 from valuz_agent.modules.parser.registry import (
     LIGHT_LOCAL_PLUGIN_ID,
     ParserPluginRegistry,
@@ -16,6 +19,25 @@ class TestBuildDefaultRegistry:
     def test_default_registry_contains_light_local(self) -> None:
         registry = build_default_registry()
         assert LIGHT_LOCAL_PLUGIN_ID in registry
+
+    def test_missing_light_local_logs_actionable_root_cause(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Simulate the packaged-build failure (``plugins.parser`` not bundled →
+        # ``ModuleNotFoundError`` → discovery returns nothing): no built-in
+        # plugins load, so ``light_local`` (the universal fallback) is absent.
+        # The registry must surface the ROOT CAUSE as a single ERROR rather than
+        # leaving the router to raise cryptic ``UnknownPluginError``s downstream
+        # (the "rescan: failed to snapshot routing for kinds" symptom).
+        monkeypatch.setattr(registry_mod, "_discover_builtin_subpackages", lambda: [])
+        monkeypatch.setattr(registry_mod, "_discover_entry_point_plugins", lambda: [])
+        with caplog.at_level(logging.ERROR, logger="valuz_agent.modules.parser.registry"):
+            registry = build_default_registry()
+        assert LIGHT_LOCAL_PLUGIN_ID not in registry
+        assert any(
+            rec.levelno == logging.ERROR and "UNAVAILABLE" in rec.getMessage()
+            for rec in caplog.records
+        )
 
     def test_default_registry_without_scheduler_excludes_cloud_plugins(self) -> None:
         # Without a scheduler reference we get only LightLocal + Valuz

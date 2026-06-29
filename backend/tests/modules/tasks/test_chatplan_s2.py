@@ -40,7 +40,7 @@ def db_factory(tmp_path, monkeypatch):
     return sessionmaker(bind=sync_engine, expire_on_commit=False)
 
 
-def _events(db_factory, workspace_id="w1", task_id="t1") -> list[str]:
+def _events(db_factory, project_id="w1", task_id="t1") -> list[str]:
     db = db_factory()
     try:
         return [
@@ -65,8 +65,9 @@ def _make_draft(db_factory, tmp_path, *, task_id="t1", originator="chat-session-
     db = db_factory()
     try:
         row = TaskRow(
+            user_id="local-test-owner",
             id=task_id,
-            workspace_id="w1",
+            project_id="w1",
             file_path=str(tmp_path / f"{task_id}.md"),
             title="T",
             goal="do it",
@@ -94,7 +95,7 @@ def test_plan_task_bumps_plan_version_from_zero_to_one(db_factory, tmp_path):
     result = asyncio.run(
         planning.plan_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "Step A", "goal": "g"}],
         )
@@ -109,7 +110,7 @@ def test_plan_task_response_includes_current_version(db_factory, tmp_path):
     result = asyncio.run(
         planning.plan_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -122,7 +123,7 @@ def test_plan_task_response_includes_current_version(db_factory, tmp_path):
 
 def test_get_plan_returns_current_version_zero_for_unwritten_plan(db_factory, tmp_path):
     _make_draft(db_factory, tmp_path)
-    snap = asyncio.run(planning.get_plan(task_id="t1", workspace_id="w1"))
+    snap = asyncio.run(planning.get_plan(task_id="t1", project_id="w1"))
     assert snap["current_version"] == 0
     assert snap["subtasks"] == []
 
@@ -132,12 +133,12 @@ def test_get_plan_returns_current_version_after_plan_task(db_factory, tmp_path):
     asyncio.run(
         planning.plan_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
     )
-    snap = asyncio.run(planning.get_plan(task_id="t1", workspace_id="w1"))
+    snap = asyncio.run(planning.get_plan(task_id="t1", project_id="w1"))
     assert snap["current_version"] == 1
 
 
@@ -149,7 +150,7 @@ def test_modify_plan_with_matching_expected_version_succeeds(db_factory, tmp_pat
     asyncio.run(
         planning.plan_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -158,7 +159,7 @@ def test_modify_plan_with_matching_expected_version_succeeds(db_factory, tmp_pat
     result = asyncio.run(
         planning.modify_plan(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
             expected_version=1,
@@ -173,7 +174,7 @@ def test_modify_plan_with_stale_expected_version_returns_cas_conflict(db_factory
     asyncio.run(
         planning.plan_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -182,7 +183,7 @@ def test_modify_plan_with_stale_expected_version_returns_cas_conflict(db_factory
     asyncio.run(
         planning.modify_plan(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
         )
@@ -190,7 +191,7 @@ def test_modify_plan_with_stale_expected_version_returns_cas_conflict(db_factory
     result = asyncio.run(
         planning.modify_plan(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             update=[{"key": "a", "title": "A new"}],
             expected_version=1,  # stale — actual is 2
@@ -208,7 +209,7 @@ def test_modify_plan_without_expected_version_skips_cas_check(db_factory, tmp_pa
     asyncio.run(
         planning.plan_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -216,7 +217,7 @@ def test_modify_plan_without_expected_version_skips_cas_check(db_factory, tmp_pa
     asyncio.run(
         planning.modify_plan(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
         )
@@ -224,7 +225,7 @@ def test_modify_plan_without_expected_version_skips_cas_check(db_factory, tmp_pa
     result = asyncio.run(
         planning.modify_plan(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             update=[{"key": "a", "title": "A2"}],
             # No expected_version — should succeed regardless.
@@ -239,7 +240,7 @@ def test_modify_plan_bumps_plan_version_on_success(db_factory, tmp_path):
     asyncio.run(
         planning.plan_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -247,7 +248,7 @@ def test_modify_plan_bumps_plan_version_on_success(db_factory, tmp_path):
     asyncio.run(
         planning.modify_plan(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
             expected_version=1,
@@ -265,7 +266,7 @@ def test_abandon_task_flips_draft_to_abandoned(db_factory, tmp_path):
     result = asyncio.run(
         orch.abandon_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             caller_session_id="chat-session-1",
             reason="user changed their mind",
         )
@@ -280,7 +281,7 @@ def test_abandon_task_appends_abandoned_event(db_factory, tmp_path):
     asyncio.run(
         orch.abandon_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             caller_session_id="chat-session-1",
         )
     )
@@ -300,7 +301,7 @@ def test_abandon_task_rejects_non_draft(db_factory, tmp_path):
     result = asyncio.run(
         orch.abandon_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             caller_session_id="chat-session-1",
         )
     )
@@ -314,7 +315,7 @@ def test_abandon_task_returns_error_for_missing_task(db_factory, tmp_path):
     result = asyncio.run(
         orch.abandon_task(
             task_id="nope",
-            workspace_id="w1",
+            project_id="w1",
             caller_session_id="chat-session-1",
         )
     )
@@ -331,7 +332,7 @@ def test_commit_task_rejects_empty_plan(db_factory, tmp_path):
     result = asyncio.run(
         orch.commit_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             caller_session_id="chat-session-1",
         )
     )
@@ -350,7 +351,7 @@ def test_commit_task_rejects_non_draft(db_factory, tmp_path):
     result = asyncio.run(
         orch.commit_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             caller_session_id="chat-session-1",
         )
     )
@@ -363,7 +364,7 @@ def test_commit_task_returns_error_for_missing_task(db_factory, tmp_path):
     result = asyncio.run(
         orch.commit_task(
             task_id="nope",
-            workspace_id="w1",
+            project_id="w1",
             caller_session_id="chat-session-1",
         )
     )
@@ -382,7 +383,7 @@ def test_plan_version_monotonic_across_plan_task_then_modify(db_factory, tmp_pat
     asyncio.run(
         planning.plan_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -391,7 +392,7 @@ def test_plan_version_monotonic_across_plan_task_then_modify(db_factory, tmp_pat
     asyncio.run(
         planning.modify_plan(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
         )
@@ -400,7 +401,7 @@ def test_plan_version_monotonic_across_plan_task_then_modify(db_factory, tmp_pat
     asyncio.run(
         planning.modify_plan(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             update=[{"key": "a", "title": "A2"}],
         )
@@ -414,7 +415,7 @@ def test_failed_cas_does_not_bump_plan_version(db_factory, tmp_path):
     asyncio.run(
         planning.plan_task(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -423,7 +424,7 @@ def test_failed_cas_does_not_bump_plan_version(db_factory, tmp_path):
     result = asyncio.run(
         planning.modify_plan(
             task_id="t1",
-            workspace_id="w1",
+            project_id="w1",
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
             expected_version=99,

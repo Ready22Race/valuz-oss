@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -13,8 +14,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from valuz_agent.api.deps import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.models import AuthType, ConnectorRow, TransportType
@@ -27,10 +28,16 @@ from valuz_agent.modules.connectors.service import (
     build_overrides,
     merge_params_into_url,
 )
+from valuz_agent.ports.extensions import ext
 
 router = APIRouter(prefix="/v1/connectors", tags=["connectors"])
 
 logger = logging.getLogger(__name__)
+
+
+def _pkce_cache_key(state: str) -> str:
+    """Namespaced ``ext.cache`` key for a connector OAuth PKCE handoff."""
+    return f"connector:oauth_pkce:{state}"
 
 
 # RFC 7230 token charset — also a safe (conservative) query-param name set.
@@ -284,12 +291,7 @@ class CreateConnectorResponse(BaseModel):
 async def _get_service(
     db: AsyncSession = Depends(get_async_session),
 ) -> ConnectorService:
-    from valuz_agent.infra.config import settings
-
-    return ConnectorService(
-        datastore=ConnectorDatastore(db),
-        secrets=FileSecretStore(settings.secrets_dir),
-    )
+    return ConnectorService(datastore=ConnectorDatastore(db))
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +301,7 @@ async def _get_service(
 
 @router.get("")
 async def list_connectors(
+    user_id: str = Depends(require_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> dict:
@@ -310,17 +313,18 @@ async def list_connectors(
     UI locale wouldn't re-localize already-installed connectors. Custom
     connectors keep the user-supplied display_name/description.
     """
-    from valuz_agent.ports.resource_enhancer import get_resource_enhancer
+    from valuz_agent.ports.extensions import ext
 
     locale = _parse_accept_language(accept_language)
-    items = [_view_to_item(v, locale).model_dump() for v in await svc.list_connectors()]
-    items = get_resource_enhancer().enhance("connector", items)
+    items = [_view_to_item(v, locale).model_dump() for v in await svc.list_connectors(user_id)]
+    items = await ext.resource_list_hook.apply("connector", items)
     return {"connectors": items}
 
 
 @router.post("")
 async def create_connector(
     body: CreateConnectorRequest,
+    user_id: str = Depends(require_current_user_id),
     svc: ConnectorService = Depends(_get_service),
 ) -> CreateConnectorResponse:
     """Add a custom or recommended MCP connector.
@@ -350,6 +354,20 @@ async def create_connector(
         _discover = OAuthDiscoverHelper(body.url)
         try:
             _discovered = await _discover.get_oauth_metadata()
+            # Discoverable OAuth metadata is NOT proof that OAuth is mandatory:
+            # freemium servers (e.g. Firecrawl) advertise
+            # ``/.well-known/oauth-protected-resource`` so signed-in users get
+            # per-account attribution, yet still serve fully anonymous calls.
+            # Only force the OAuth flow when the server actually rejects an
+            # unauthenticated ``initialize`` — otherwise keep ``auth_type=none``
+            # so the connector connects with no login the user never asked for.
+            if _discovered is not None and await _discover.server_allows_anonymous():
+                logger.info(
+                    "connector create: %s advertises OAuth but serves anonymous; "
+                    "keeping auth_type=none",
+                    body.url,
+                )
+                _discovered = None
         except Exception:
             _discovered = None
         finally:
@@ -431,7 +449,7 @@ async def create_connector(
             registration_endpoint=oauth_meta.registration_endpoint,
         )
 
-        existing = await svc._ds.get_by_slug(slug)
+        existing = await svc._ds.get_by_slug(user_id, slug)
         saved_client_id: str | None = None
         saved_client_secret: str | None = None
         if existing and existing.oauth_client_info_json:
@@ -499,33 +517,38 @@ async def create_connector(
                 transport=body.transport if body.transport in ("http", "sse") else "http",
                 url=server_url,
                 auth_type="oauth",
-                oauth_metadata_json=oauth_meta.model_dump_json(),
+                oauth_metadata=oauth_meta.model_dump_json(),
                 oauth_client_info_json=client_info_json,
                 enabled=False,
                 status="pending_auth",
             )
-            saved_row = await svc._ds.create(row)
+            saved_row = await svc._ds.create(user_id, row)
         else:
             existing.status = "pending_auth"
-            existing.oauth_metadata_json = oauth_meta.model_dump_json()
+            existing.oauth_metadata = oauth_meta.model_dump_json()
             if client_info_json is not None:
                 existing.oauth_client_info_json = client_info_json
             existing.updated_at = now_ms()
             saved_row = await svc._ds.update(existing)
 
-        connector_id = saved_row.id
-        secrets = FileSecretStore(_settings.secrets_dir)
-        pkce_payload = json.dumps(
-            {
-                "connector_id": connector_id,
-                "code_verifier": code_verifier,
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "server_url": server_url,
-                "redirect_uri": redirect_uri,
-            }
+        # Stash the transient PKCE handoff in the ephemeral state store (a file
+        # store locally, Redis on the shared backend), keyed by the unguessable
+        # ``state`` and expiring after a few minutes.
+        await ext.cache.set(
+            _pkce_cache_key(state),
+            json.dumps(
+                {
+                    "connector_id": saved_row.id,
+                    "user_id": user_id,
+                    "code_verifier": code_verifier,
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "server_url": server_url,
+                    "redirect_uri": redirect_uri,
+                }
+            ),
+            ttl_seconds=600,
         )
-        secrets.put(f"connector/oauth_state/{state}", pkce_payload)
 
         return CreateConnectorResponse(
             id=saved_row.id,
@@ -549,6 +572,7 @@ async def create_connector(
         )
 
     view = await svc.create_connector(
+        user_id,
         slug=body.slug,
         display_name=body.display_name,
         transport=body.transport,
@@ -570,11 +594,8 @@ async def create_connector(
     async def _background_probe() -> None:
         try:
             async with _async_unit_of_work() as db:
-                bg_svc = ConnectorService(
-                    datastore=ConnectorDatastore(db),
-                    secrets=FileSecretStore(_settings.secrets_dir),
-                )
-                await _probe_connector(connector_id_nonauth, bg_svc)
+                bg_svc = ConnectorService(datastore=ConnectorDatastore(db))
+                await _probe_connector(connector_id_nonauth, bg_svc, user_id)
         except Exception as exc:
             logger.warning("Background probe failed for %s: %s", connector_id_nonauth, exc)
 
@@ -627,6 +648,12 @@ async def discover_connector(body: DiscoverConnectorRequest) -> DiscoverConnecto
     discover = OAuthDiscoverHelper(body.url)
     try:
         meta = await discover.get_oauth_metadata()
+        # Discoverable OAuth ≠ mandatory OAuth: a server that also serves
+        # anonymous calls (e.g. Firecrawl) should report auth_type="none" so the
+        # UI never forces a login the user does not need. See
+        # ``OAuthDiscoverHelper.server_allows_anonymous``.
+        if meta is not None and await discover.server_allows_anonymous():
+            meta = None
     except Exception:
         meta = None
     finally:
@@ -701,6 +728,7 @@ def _localize(value: object, locale: str) -> str | None:
 
 @router.get("/recommended")
 async def list_recommended(
+    user_id: str = Depends(require_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> CatalogListResponse:
@@ -712,7 +740,7 @@ async def list_recommended(
     the ``Accept-Language`` header set by the desktop client.
     """
     locale = _parse_accept_language(accept_language)
-    installed_slugs = {v.slug for v in await svc.list_connectors()}
+    installed_slugs = {v.slug for v in await svc.list_connectors(user_id)}
     items: list[CatalogGroup | CatalogItem] = []
     for entry in CATALOG_ITEMS:
         if entry["_kind"] == "group":
@@ -796,7 +824,7 @@ async def oauth_callback(
     The browser is redirected here by the authorization server after the
     user grants access. This endpoint:
 
-    1. Looks up the PKCE state blob from FileSecretStore.
+    1. Looks up the PKCE handoff in the ephemeral state store, keyed by ``state``.
     2. Exchanges the code for an ``OAuthToken``.
     3. Stores the token JSON at ``connector/{id}/oauth_token``.
     4. Sets the connector status to ``connected`` + ``enabled=True``.
@@ -804,22 +832,18 @@ async def oauth_callback(
     6. Returns a tiny HTML page that signals success to the Electron shell
        (or shows an error).
     """
-    from valuz_agent.infra.config import settings as _settings
-    from valuz_agent.integrations.connector_oauth import McpOauthHelper
+    from valuz_agent.integrations.connector_oauth import McpOauthHelper, persist_oauth_token
 
-    secrets = FileSecretStore(_settings.secrets_dir)
-    state_key = f"connector/oauth_state/{state}"
-    pkce_json = secrets.get(state_key)
-
+    pkce_json = await ext.cache.get(_pkce_cache_key(state))
     if not pkce_json:
         return _oauth_html_result(ok=False, error="OAuth state not found or expired")
-
     try:
         pkce = json.loads(pkce_json)
     except json.JSONDecodeError:
         return _oauth_html_result(ok=False, error="Malformed OAuth state")
 
     connector_id: str = pkce["connector_id"]
+    user_id: str = pkce.get("user_id", "")
     code_verifier: str = pkce["code_verifier"]
     server_url: str = pkce["server_url"]
     redirect_uri: str = pkce["redirect_uri"]
@@ -828,11 +852,11 @@ async def oauth_callback(
 
     async with async_unit_of_work() as db:
         ds = ConnectorDatastore(db)
-        row = await ds.get_by_id(connector_id)
+        row = await ds.get_by_id(user_id, connector_id)
         if row is None:
             return _oauth_html_result(ok=False, error="Connector not found")
 
-        oauth_meta_json = row.oauth_metadata_json
+        oauth_meta_json = row.oauth_metadata
         if not oauth_meta_json:
             return _oauth_html_result(ok=False, error="OAuth metadata missing on connector row")
 
@@ -866,13 +890,15 @@ async def oauth_callback(
             row.error_message = str(exc)
             row.updated_at = now_ms()
             await ds.update(row)
+            await ext.cache.delete(_pkce_cache_key(state))
             return _oauth_html_result(ok=False, error=str(exc))
         finally:
             await helper.close()
 
-        token_ref = f"connector/{connector_id}/oauth_token"
-        secrets.put(token_ref, token.model_dump_json())
-        secrets.delete(state_key)
+        # Persist the token onto the row (with its absolute expiry); the final
+        # ds.update below commits it with the connected status.
+        persist_oauth_token(row, token, now_ms())
+        await ext.cache.delete(_pkce_cache_key(state))
 
         # Probe tools BEFORE writing status=connected so that tool_count and
         # status land in the DB together — no race with the frontend poller.
@@ -1117,11 +1143,12 @@ def _view_to_item(view: ConnectorView, locale: str = "zh-CN") -> ConnectorItem:
 @router.get("/{connector_id}")
 async def get_connector(
     connector_id: str,
+    user_id: str = Depends(require_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> ConnectorItem:
     """Get a single connector by ID."""
-    view = await svc.get_connector(connector_id)
+    view = await svc.get_connector(user_id, connector_id)
     if view is None:
         raise HTTPException(status_code=404, detail="Connector not found")
     return _view_to_item(view, _parse_accept_language(accept_language))
@@ -1131,11 +1158,12 @@ async def get_connector(
 async def update_connector(
     connector_id: str,
     body: UpdateConnectorRequest,
+    user_id: str = Depends(require_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> ConnectorItem:
     """Update a connector's configuration."""
-    _existing = await svc.get_connector(connector_id)
+    _existing = await svc.get_connector(user_id, connector_id)
     if _existing is None:
         raise HTTPException(status_code=404, detail="Connector not found")
     # Recommended stdio connectors are catalog-owned: command/args/working_dir
@@ -1167,6 +1195,7 @@ async def update_connector(
                 ),
             )
     view = await svc.update_connector(
+        user_id,
         connector_id,
         display_name=body.display_name,
         description=body.description,
@@ -1186,18 +1215,13 @@ async def update_connector(
 
     # Re-probe if connection params changed (status was reset to "connecting")
     if view.status == "connecting":
-        from valuz_agent.infra.config import settings as _settings
-
         _cid = view.id
 
         async def _background_probe() -> None:
             try:
                 async with async_unit_of_work() as db:
-                    bg_svc = ConnectorService(
-                        datastore=ConnectorDatastore(db),
-                        secrets=FileSecretStore(_settings.secrets_dir),
-                    )
-                    await _probe_connector(_cid, bg_svc)
+                    bg_svc = ConnectorService(datastore=ConnectorDatastore(db))
+                    await _probe_connector(_cid, bg_svc, user_id)
             except Exception as exc:
                 logger.warning("Background probe failed for %s: %s", _cid, exc)
 
@@ -1209,10 +1233,11 @@ async def update_connector(
 @router.delete("/{connector_id}")
 async def delete_connector(
     connector_id: str,
+    user_id: str = Depends(require_current_user_id),
     svc: ConnectorService = Depends(_get_service),
 ) -> dict[str, bool]:
     """Delete a custom or directory connector."""
-    ok = await svc.delete_connector(connector_id)
+    ok = await svc.delete_connector(user_id, connector_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Connector not found or cannot be deleted")
     return {"ok": True}
@@ -1221,11 +1246,12 @@ async def delete_connector(
 @router.post("/{connector_id}/enable")
 async def enable_connector(
     connector_id: str,
+    user_id: str = Depends(require_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> ConnectorItem:
     """Enable a connector."""
-    view = await svc.set_enabled(connector_id, enabled=True)
+    view = await svc.set_enabled(user_id, connector_id, enabled=True)
     if view is None:
         raise HTTPException(status_code=404, detail="Connector not found")
     return _view_to_item(view, _parse_accept_language(accept_language))
@@ -1234,11 +1260,12 @@ async def enable_connector(
 @router.post("/{connector_id}/disable")
 async def disable_connector(
     connector_id: str,
+    user_id: str = Depends(require_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> ConnectorItem:
     """Disable a connector."""
-    view = await svc.set_enabled(connector_id, enabled=False)
+    view = await svc.set_enabled(user_id, connector_id, enabled=False)
     if view is None:
         raise HTTPException(status_code=404, detail="Connector not found")
     return _view_to_item(view, _parse_accept_language(accept_language))
@@ -1247,13 +1274,14 @@ async def disable_connector(
 @router.post("/{connector_id}/test")
 async def test_connector(
     connector_id: str,
+    user_id: str = Depends(require_current_user_id),
     svc: ConnectorService = Depends(_get_service),
 ) -> TestConnectorResponse:
     """Test an MCP connector (HTTP, SSE, or stdio) using the MCP client library."""
-    view = await svc.get_connector(connector_id)
+    view = await svc.get_connector(user_id, connector_id)
     if view is None:
         raise HTTPException(status_code=404, detail="Connector not found")
-    return await _probe_connector(connector_id, svc)
+    return await _probe_connector(connector_id, svc, user_id)
 
 
 def _tools_to_info(mcp_tools: object) -> list[ToolInfo]:
@@ -1272,7 +1300,47 @@ def _tools_to_info(mcp_tools: object) -> list[ToolInfo]:
     return result
 
 
-async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConnectorResponse:
+async def _retry_async[T](
+    fn: Callable[[], Awaitable[T]],
+    *,
+    retry_if: Callable[[BaseException], bool],
+    delays: tuple[float, ...],
+) -> T:
+    """Await ``fn``; if it raises an exception matching ``retry_if``, back off and
+    retry — one extra attempt per entry in ``delays``. Re-raises the last error
+    once the retries are exhausted or the error doesn't match.
+    """
+    attempt = 0
+    while True:
+        try:
+            return await fn()
+        except BaseException as exc:
+            if attempt >= len(delays) or not retry_if(exc):
+                raise
+            await asyncio.sleep(delays[attempt])
+            attempt += 1
+
+
+def _is_unauthorized(exc: BaseException) -> bool:
+    """Detect a 401 from the MCP/httpx stack — i.e. an expired access token.
+
+    The MCP client may wrap the underlying error in an ``ExceptionGroup``; unwrap
+    to the leaf, prefer the typed ``HTTPStatusError`` status, and fall back to a
+    string match for transports that surface the 401 only in the message.
+    """
+    import httpx
+
+    inner: BaseException = exc
+    while isinstance(inner, BaseExceptionGroup) and inner.exceptions:
+        inner = inner.exceptions[0]
+    if isinstance(inner, httpx.HTTPStatusError):
+        return inner.response.status_code == 401
+    return "401" in str(inner)
+
+
+async def _probe_connector(
+    connector_id: str, svc: ConnectorService, user_id: str
+) -> TestConnectorResponse:
     """Run the MCP probe for a connector and persist the result. Never raises."""
     import os
     import shlex
@@ -1284,7 +1352,7 @@ async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConn
 
     from valuz_agent.infra.config import settings as _settings
 
-    view = await svc.get_connector(connector_id)
+    view = await svc.get_connector(user_id, connector_id)
     if view is None:
         return TestConnectorResponse(ok=False, error="Connector not found")
 
@@ -1301,7 +1369,7 @@ async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConn
                 ok=False, error="Stdio connector has no command configured"
             )
 
-        row = await svc._ds.get_by_id(connector_id)
+        row = await svc._ds.get_by_id(user_id, connector_id)
         env: dict[str, str] | None = None
         if row and row.env_json:
             try:
@@ -1338,7 +1406,13 @@ async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConn
                 _detect_shell_path, os.environ.get("PATH", "")
             )
 
-            raw_command = view.command
+            # Bundled stdio connectors reference their entry point with the
+            # ``{mcp_dir}`` placeholder; expand it the same way the runtime
+            # resolver does, or the probe spawns ``python {mcp_dir}/...`` as a
+            # literal path and the server exits with "Connection closed".
+            from valuz_agent.adapters.mcp_resolver import expand_mcp_dir
+
+            raw_command = expand_mcp_dir(view.command)
             extra_args: list[str] = []
             if " " in raw_command:
                 parts = shlex.split(raw_command)
@@ -1346,7 +1420,7 @@ async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConn
                 extra_args = parts[1:]
 
             resolved_command = shutil.which(raw_command, path=shell_path_str) or raw_command
-            probe_args = extra_args + (view.args or [])
+            probe_args = extra_args + [expand_mcp_dir(str(a)) for a in (view.args or [])]
             probe_env: dict[str, str] = os.environ.copy()
             probe_env["PATH"] = shell_path_str
             if env:
@@ -1360,7 +1434,7 @@ async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConn
                     await session.initialize()
                     result = await session.list_tools()
                     tool_infos = _tools_to_info(result.tools)
-            await svc.record_test_result(connector_id, ok=True, tool_count=len(tool_infos))
+            await svc.record_test_result(user_id, connector_id, ok=True, tool_count=len(tool_infos))
             return TestConnectorResponse(
                 ok=True,
                 tool_count=len(tool_infos),
@@ -1370,7 +1444,7 @@ async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConn
         except BaseException as exc:
             error_msg = str(_unwrap(exc))
             logger.warning("Stdio connector test failed for %s: %s", connector_id, error_msg)
-            await svc.record_test_result(connector_id, ok=False, error_message=error_msg)
+            await svc.record_test_result(user_id, connector_id, ok=False, error_message=error_msg)
             return TestConnectorResponse(ok=False, error=error_msg)
 
     # ── HTTP / SSE probe ─────────────────────────────────────────────────────
@@ -1378,18 +1452,16 @@ async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConn
         return TestConnectorResponse(ok=False, error="Connector has no URL configured")
 
     # Same injection truth as the runtime resolver (Acceptance #8).
-    row2 = await svc._ds.get_by_id(connector_id)
+    row2 = await svc._ds.get_by_id(user_id, connector_id)
     if row2 is None:
         ov_headers: dict[str, str] = {}
         ov_params: dict[str, str] = {}
     else:
-        ov_headers, ov_params = build_overrides(row2, FileSecretStore(_settings.secrets_dir))
+        ov_headers, ov_params = build_overrides(row2)
 
     if view.auth_type == "oauth":
         # OAuth layers on AFTER build_overrides — mirrors the resolver.
-        token_json = FileSecretStore(_settings.secrets_dir).get(
-            f"connector/{connector_id}/oauth_token"
-        )
+        token_json = row2.oauth_token_json if row2 is not None else None
         if token_json:
             try:
                 from mcp.shared.auth import OAuthToken
@@ -1423,18 +1495,53 @@ async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConn
                         await s.initialize()
                         return _tools_to_info((await s.list_tools()).tools)
 
-    try:
+    async def _attempt() -> list[ToolInfo]:
         primary = view.transport if view.transport in ("http", "sse") else "http"
         fallback = "sse" if primary == "http" else "http"
         try:
-            tool_infos = await _http_probe(primary)
+            return await _http_probe(primary)
         except BaseException as first_exc:
             try:
-                tool_infos = await _http_probe(fallback)
+                return await _http_probe(fallback)
             except BaseException:
                 raise _unwrap(first_exc) from None
 
-        await svc.record_test_result(connector_id, ok=True, tool_count=len(tool_infos))
+    try:
+        try:
+            # A no-auth connector answering 401 is anomalous — almost always a
+            # transient rate-limit on a free anonymous tier (e.g. Firecrawl
+            # throttles bursts), which is why the auto-probe sometimes fails
+            # while a manual reconnect a moment later succeeds. Retry with a
+            # short backoff so the default probe self-heals. OAuth 401s are real
+            # (token) and handled by the refresh path below — never retried here.
+            tool_infos = await _retry_async(
+                _attempt,
+                retry_if=lambda e: view.auth_type != "oauth" and _is_unauthorized(e),
+                delays=(1.5, 3.0),
+            )
+        except BaseException as exc:
+            # An OAuth connector whose access token expired answers 401. Try a
+            # silent refresh with the stored refresh_token, then retry once with
+            # the fresh token before giving up (a hard failure leaves the caller
+            # to re-authorize).
+            if view.auth_type == "oauth" and row2 is not None and _is_unauthorized(exc):
+                from valuz_agent.integrations.connector_oauth import try_refresh_connector_token
+
+                new_access = await try_refresh_connector_token(
+                    row2,
+                    redirect_uri=f"{_settings.backend_base_url}/v1/connectors/oauth/callback",
+                    now_ms=now_ms(),
+                )
+                if not new_access:
+                    raise
+                # Persist the refreshed token columns before retrying the probe.
+                await svc._ds.update(row2)
+                ov_headers["Authorization"] = f"Bearer {new_access}"
+                tool_infos = await _attempt()
+            else:
+                raise
+
+        await svc.record_test_result(user_id, connector_id, ok=True, tool_count=len(tool_infos))
         return TestConnectorResponse(
             ok=True,
             tool_count=len(tool_infos),
@@ -1444,7 +1551,7 @@ async def _probe_connector(connector_id: str, svc: ConnectorService) -> TestConn
     except BaseException as exc:
         error_msg = str(_unwrap(exc))
         logger.warning("Connector test failed for %s: %s", connector_id, error_msg)
-        await svc.record_test_result(connector_id, ok=False, error_message=error_msg)
+        await svc.record_test_result(user_id, connector_id, ok=False, error_message=error_msg)
         return TestConnectorResponse(ok=False, error=error_msg)
 
 

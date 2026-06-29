@@ -60,7 +60,6 @@ from claude_agent_sdk.types import (
 from claude_agent_sdk.types import (
     McpStdioServerConfig as SdkMcpStdioServerConfig,
 )
-
 from src.core.agent_config import AgentConfig
 from src.core.approval_rule_matcher import (
     ClaudePermissionUpdateRuleMatcher,
@@ -101,6 +100,7 @@ from src.runtimes.claude_agent.approval_bridge import (
     _build_pending_payload,
     _classify_subject,
 )
+from src.runtimes.interruption import describe_exception, is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
@@ -115,6 +115,19 @@ logger = logging.getLogger(__name__)
 # stderr stream. 40 lines is enough for a typical Rust / node panic
 # trace without flooding event payloads.
 _STDERR_TAIL_LINES: int = 40
+
+
+# The Claude Agent SDK buffers the CLI's stdout into a single JSON message whose
+# ceiling is ``ClaudeAgentOptions.max_buffer_size`` (SDK default: 1 MB). One
+# message over that cap raises ``SDKJSONDecodeError``, which kills the SDK's
+# message reader ("Fatal error in message reader") and tears down the turn even
+# though the CLI process is healthy. A full ``tool_result`` arrives as one JSON
+# line, and big file reads, large MCP/connector responses, web fetches and
+# base64 images routinely exceed 1 MB (``include_partial_messages`` only streams
+# deltas, not these canonical messages). Raise the ceiling well above the SDK
+# default so a large result can't crash the session.
+# See https://github.com/valuz-ai/valuz-oss/issues/74.
+_MAX_BUFFER_SIZE: int = 32 * 1024 * 1024  # 32 MB
 
 
 # Workflows contributor to ``_build_settings``. Dynamic workflows /
@@ -319,8 +332,6 @@ class ClaudeAgentRuntime:
         # Identity of the session currently being run — exposed to
         # custom-tool handlers through ExecContext.
         self._cur_session_id: str = ""
-        self._cur_agent_id: str = ""
-        self._cur_project_id: str = ""
         # The task running ``run()``. Cancelled by ``interrupt()`` so the
         # iterator unblocks even when ``receive_response().__anext__`` is
         # waiting on the SDK subprocess for the next chunk.
@@ -462,8 +473,6 @@ class ClaudeAgentRuntime:
         self._workflow_pollers = []
         self._active_workflows = []
         self._cur_session_id = session.id
-        self._cur_agent_id = session.agent_id
-        self._cur_project_id = session.project_id
         self._cancelled = False
         # Reset stderr buffer so any ``session_error`` from this turn
         # carries only this turn's CLI output, not noise from prior
@@ -547,6 +556,20 @@ class ClaudeAgentRuntime:
                     retry_status="terminal",
                     message="cancelled",
                 )
+            elif is_runtime_interruption(exc):
+                # Graceful host stop tore down the claude CLI subprocess
+                # mid-turn ("closed stdout" / broken pipe). This is NOT a
+                # task failure: leave it resumable (``interrupted``) so boot
+                # recovery re-drives the turn — the same outcome a hard kill
+                # gets via ``scan_orphan_runs`` — and suppress the scary
+                # session_error + the on_error hook. Drop buffered stderr so a
+                # resumed turn starts fresh.
+                session.stop_reason = Error(
+                    category="interrupted",
+                    retry_status="terminal",
+                    message="runtime process interrupted",
+                )
+                self._stderr_buffer.clear()
             else:
                 # B2a (`docs/design/cross-runtime-approval-contract.md`
                 # §11 R3): for ``auto_review`` sessions, the most common
@@ -578,16 +601,29 @@ class ClaudeAgentRuntime:
                         )
                     )
                 else:
+                    # ``describe_exception`` sees through an ``ExceptionGroup``
+                    # (the SDK runs its transport/MCP over an anyio task group,
+                    # so a genuine error can arrive wrapped) — otherwise the
+                    # user sees only the opaque "unhandled errors in a TaskGroup
+                    # (1 sub-exception)" with the real reason lost. Log the full
+                    # traceback too: this branch had no logging, so historic
+                    # failures left nothing to diagnose.
+                    cause = describe_exception(exc)
+                    logger.exception(
+                        "claude_agent: turn failed for session %s: %s",
+                        session.id,
+                        cause,
+                    )
                     session.stop_reason = Error(
                         category="execution_error",
                         retry_status="exhausted",
-                        message=str(exc),
+                        message=cause,
                     )
                     await self.event_sink.emit(
                         Event(
                             type="session_error",
                             data={
-                                "message": str(exc),
+                                "message": cause,
                                 "stderr_tail": stderr_tail,
                             },
                         )
@@ -663,11 +699,20 @@ class ClaudeAgentRuntime:
         last_sig: tuple[Any, ...] | None = None
         try:
             while True:
-                final = self._read_workflow_state(state_path)
+                final = await asyncio.to_thread(self._read_workflow_state, state_path)
                 if final is not None:
-                    await self._emit_workflow_state(tool_use_id, run_id, final)
+                    await self._emit_workflow_state(
+                        tool_use_id,
+                        run_id,
+                        self._normalize_terminal_state(final, run_id, summary, state_path),
+                    )
                     return
-                state = self._derive_live_state(run_id, summary, self._read_journal(journal_path))
+                # Read+parse journal.jsonl OFF the loop: it is re-read in full
+                # every poll tick and grows with the run, so a sync read here
+                # would block the kernel asyncio loop proportional to journal
+                # size (tens-to-hundreds of ms on a large fan-out).
+                journal = await asyncio.to_thread(self._read_journal, journal_path)
+                state = self._derive_live_state(run_id, summary, journal)
                 sig = (state["agentCount"], state["agentsDone"])
                 if sig != last_sig:
                     last_sig = sig
@@ -780,6 +825,73 @@ class ClaudeAgentRuntime:
             return None
         return data if isinstance(data, dict) else None
 
+    @staticmethod
+    def _normalize_terminal_state(
+        raw: dict[str, Any], run_id: str, summary: str, state_path: str
+    ) -> dict[str, Any]:
+        """Fold the runtime's raw end-of-run ``wf_<id>.json`` onto the SAME
+        snapshot shape the live poller emits, so the UI consumes one contract.
+
+        The result file is a far richer (and heavier) document than a live
+        snapshot: it carries the full ``script``, ``logs``, per-agent
+        ``promptPreview`` / ``resultPreview`` blobs, folds ``workflow_phase``
+        rows into ``workflowProgress`` alongside the ``workflow_agent`` rows,
+        and — crucially — has NO top-level ``agentsDone``. Emitting it raw made
+        the terminal frame a *different shape* from every live frame: the UI
+        read ``agentsDone`` as 0 and the run looked unfinished (stuck at
+        "running"). We project it down to the live keys here.
+
+        We also surface the run's *output* so a finished card isn't a dead end:
+        ``resultQuestion`` / ``resultSummary`` (the workflow's returned
+        ``result.question`` / ``result.summary`` — the actual answer, NOT the
+        top-level meta ``summary``) for inline display, plus ``statePath`` so
+        the UI can link to the full result file for details.
+        """
+        progress = raw.get("workflowProgress")
+        agents = (
+            [p for p in progress if isinstance(p, dict) and isinstance(p.get("agentId"), str)]
+            if isinstance(progress, list)
+            else []
+        )
+        done = sum(1 for a in agents if a.get("state") == "done")
+        raw_status = raw.get("status")
+        # The run is over once its result file exists. A missing or still-
+        # "running"/"active" status means the runtime never stamped a terminal
+        # verb, so call it ``completed``; an explicit terminal verb (completed /
+        # killed / failed / aborted) is preserved so the UI can reflect it.
+        status = (
+            raw_status
+            if isinstance(raw_status, str) and raw_status not in ("running", "active")
+            else "completed"
+        )
+        agent_count = raw.get("agentCount")
+        if not isinstance(agent_count, int):
+            agent_count = len(agents)
+        # The workflow's returned value lives under ``result`` (e.g. the
+        # deep-research report's ``question`` / ``summary``). It's ``null`` for
+        # a run that didn't finish (killed/aborted) — surface what's there.
+        result = raw.get("result")
+        result_question = result.get("question") if isinstance(result, dict) else None
+        result_summary = result.get("summary") if isinstance(result, dict) else None
+        return {
+            "runId": raw.get("runId") or run_id,
+            "workflowName": raw.get("workflowName") or summary or None,
+            "status": status,
+            "agentCount": agent_count,
+            "agentsDone": done,
+            "workflowProgress": [
+                {
+                    "type": "workflow_agent",
+                    "agentId": a["agentId"],
+                    "state": "done" if a.get("state") == "done" else "progress",
+                }
+                for a in agents
+            ],
+            "statePath": state_path,
+            "resultQuestion": result_question if isinstance(result_question, str) else None,
+            "resultSummary": result_summary if isinstance(result_summary, str) else None,
+        }
+
     async def _stop_workflow_pollers(self) -> None:
         """Cancel pollers, then emit a final snapshot per active run — the result
         file may land just as the turn ends, after the poller's last tick. If it
@@ -795,12 +907,21 @@ class ClaudeAgentRuntime:
             await asyncio.gather(*pollers, return_exceptions=True)
         for wf in active:
             try:
-                final = self._read_workflow_state(wf["state_path"])
-                if final is None:
-                    final = self._derive_live_state(
-                        wf["run_id"], wf["summary"], self._read_journal(wf["journal_path"])
-                    )
+                raw = await asyncio.to_thread(self._read_workflow_state, wf["state_path"])
+                if raw is None:
+                    # No result file — the run ended without writing one (e.g.
+                    # interrupted). Synthesize a terminal snapshot from the
+                    # journal so the UI doesn't stay stuck on "running".
+                    journal = await asyncio.to_thread(self._read_journal, wf["journal_path"])
+                    final = self._derive_live_state(wf["run_id"], wf["summary"], journal)
                     final["status"] = "completed"
+                else:
+                    # Result file present — fold it onto the live snapshot shape
+                    # (correct status + agentsDone) rather than emitting the raw
+                    # document, which the UI can't read as finished.
+                    final = self._normalize_terminal_state(
+                        raw, wf["run_id"], wf["summary"], wf["state_path"]
+                    )
                 await self._emit_workflow_state(wf["tool_use_id"], wf["run_id"], final)
             except Exception:
                 logger.debug("claude_agent: final workflow snapshot failed", exc_info=True)
@@ -1230,6 +1351,10 @@ class ClaudeAgentRuntime:
             # full ``assistant_message`` / ``thinking`` events from the
             # AssistantMessage stream remain the canonical record.
             include_partial_messages=True,
+            # Raise the SDK's 1 MB stdout read cap so a large tool_result (big
+            # file read, MCP payload, base64 image) can't crash the message
+            # reader mid-turn. See ``_MAX_BUFFER_SIZE``.
+            max_buffer_size=_MAX_BUFFER_SIZE,
             sandbox=self._build_sandbox_settings(),
         )
         # gate the ``model`` kwarg on a truthy ``self.model``, NOT on whether
@@ -1327,6 +1452,10 @@ class ClaudeAgentRuntime:
           one. ``base_url is None`` (first-party Anthropic) wipes any
           stale parent-env value so the SDK falls back to its baked-in
           ``api.anthropic.com``.
+        * ``CLAUDE_CODE_DISABLE_ADVISOR_TOOL`` — forced ``"1"`` whenever a
+          custom ``base_url`` is set (the advisor is Anthropic-API-only and
+          may be unavailable behind a gateway); cleared on the first-party
+          path so it keeps the default.
         * ``ANTHROPIC_AUTH_TOKEN`` — the per-session api_key.
         * Non-Claude model aliases additionally rewrite the SDK's
           ``ANTHROPIC_DEFAULT_*_MODEL`` family so the CLI doesn't
@@ -1339,12 +1468,27 @@ class ClaudeAgentRuntime:
         merged: dict[str, str] = dict(os.environ)
         if self.model_provider.base_url is not None:
             merged["ANTHROPIC_BASE_URL"] = self.model_provider.base_url
+            # The advisor is a server-executed, Anthropic-API-only tool. It
+            # is not available on Bedrock/Vertex/Foundry, and through an LLM
+            # gateway its availability depends on whether the gateway
+            # forwards the request intact to the Anthropic API — which we
+            # can't know for a user-supplied ``base_url``. When it's
+            # unavailable the CLI surfaces an error on every turn, so we
+            # default it off for any custom gateway; losing an optional
+            # enhancement beats a recurring user-facing failure. Direct
+            # first-party Anthropic (``base_url is None``) keeps it on.
+            # https://code.claude.com/docs/en/advisor.md
+            merged["CLAUDE_CODE_DISABLE_ADVISOR_TOOL"] = "1"
         else:
             # If a previous env carried a stale base_url (e.g. parent
             # shell exported one for an unrelated workflow), wipe it so
             # the SDK actually falls back to its default rather than
             # silently inheriting the parent's pointer.
             merged.pop("ANTHROPIC_BASE_URL", None)
+            # Symmetric with the base_url wipe above: drop any inherited
+            # advisor-off flag so the first-party path gets the default
+            # (advisor on) rather than silently honoring a parent export.
+            merged.pop("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", None)
         merged["ANTHROPIC_AUTH_TOKEN"] = self.model_provider.api_key
         if "claude" not in self.model:
             merged["ANTHROPIC_MODEL"] = self.model
@@ -1413,8 +1557,6 @@ class ClaudeAgentRuntime:
                 ExecContext(
                     workspace=self.workspace_root,
                     session_id=self._cur_session_id,
-                    agent_id=self._cur_agent_id,
-                    project_id=self._cur_project_id,
                 ),
             )
             return {
@@ -1995,7 +2137,15 @@ class ClaudeAgentRuntime:
                 if sdk_session_id:
                     session.runtime_session_id = str(sdk_session_id)
             elif message.subtype == "compact_boundary":
-                await self.event_sink.emit(Event(type="compaction", data={}))
+                # Forward the SDK's ``compact_metadata`` verbatim (e.g.
+                # ``{trigger, pre_tokens}``) — no reshaping. The upper layer
+                # decides how to render it; we only surface the raw signal.
+                meta = (
+                    message.data.get("compact_metadata")
+                    or message.data.get("compactMetadata")
+                    or {}
+                )
+                await self.event_sink.emit(Event(type="compaction", data=dict(meta)))
 
         elif isinstance(message, AssistantMessage):
             for block in message.content:
@@ -2075,8 +2225,23 @@ class ClaudeAgentRuntime:
                 )
             else:
                 match message.subtype:
+                    # ``subtype`` alone is NOT authoritative: the CLI returns
+                    # ``subtype="success"`` with ``is_error=True`` when an API
+                    # call failed after it exhausted its own retries (transient
+                    # 429/500/529, connection drop). So branch on ``is_error``
+                    # inside the success case — only a clean success is a real
+                    # EndTurn; a flagged one is a swallowed API/network failure
+                    # (``api_error_status`` holds the HTTP code, ``errors`` the
+                    # detail) and must surface as an error, not a silent EndTurn.
                     case "success":
-                        session.stop_reason = EndTurn()
+                        if message.is_error:
+                            session.stop_reason = Error(
+                                category="api_error",
+                                retry_status="exhausted",
+                                message=_result_error_message(message),
+                            )
+                        else:
+                            session.stop_reason = EndTurn()
                     case "error_max_turns":
                         session.stop_reason = BudgetExhausted(reason="max_turns")
                     case "error_max_budget_usd":
@@ -2085,13 +2250,13 @@ class ClaudeAgentRuntime:
                         session.stop_reason = Error(
                             category="execution_error",
                             retry_status="exhausted",
-                            message=message.result or "",
+                            message=_result_error_message(message),
                         )
                     case _:
                         session.stop_reason = Error(
                             category=message.subtype,
                             retry_status="exhausted",
-                            message=message.result or "",
+                            message=_result_error_message(message),
                         )
 
             usage_payload = _build_usage_payload(self.model, message)
@@ -2107,6 +2272,38 @@ class ClaudeAgentRuntime:
                     },
                 )
             )
+
+
+def _result_error_message(message: Any) -> str:
+    """Compose a human-readable error string from a failing ``ResultMessage``.
+
+    Several fields carry diagnostic detail when the conversation ends on an
+    error (per the SDK ``ResultMessage`` docs), and no single one is always
+    populated, so we combine the most specific available:
+
+    - ``api_error_status`` — HTTP status (e.g. 429/500/529) of the failing API
+      call when the CLI surfaced a transient failure as ``subtype="success"``;
+    - ``errors`` — a list of error strings the CLI collected;
+    - ``result`` — the model-facing result text;
+    - ``stop_reason`` — the SDK's own stop-reason string (last-resort hint).
+
+    Falls back to a generic line so the message is never empty.
+    """
+    parts: list[str] = []
+    status = getattr(message, "api_error_status", None)
+    if status is not None:
+        parts.append(f"API error (HTTP {status})")
+    errors = getattr(message, "errors", None)
+    if errors:
+        parts.append("; ".join(str(e) for e in errors))
+    result = getattr(message, "result", None)
+    if result:
+        parts.append(str(result))
+    if not parts:
+        sdk_stop = getattr(message, "stop_reason", None)
+        if sdk_stop:
+            parts.append(f"stop_reason={sdk_stop}")
+    return " — ".join(parts) if parts else "agent ended on an error"
 
 
 def _stop_reason_to_dict(reason: Any) -> dict[str, Any]:

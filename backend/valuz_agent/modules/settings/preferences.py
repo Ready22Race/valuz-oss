@@ -18,6 +18,7 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.settings.datastore import SettingsDatastore
 from valuz_agent.modules.settings.models import AppSettingRow
@@ -40,6 +41,22 @@ KEY_DEFAULT_PROVIDER_ID = "model.default_provider_id"
 KEY_DEFAULT_MODEL = "model.default_model"
 KEY_THEME = "ui.theme"
 KEY_FONT_SIZE = "ui.font_size"
+# Memory system toggles (memory-system-design §11). ``memory.enabled`` is the
+# product master switch (gates injection, the foreground tool, and the
+# background extractor); ``memory.auto_extract`` gates ONLY the background
+# extractor, so a user can keep manual/agent memory while turning off the
+# automatic (LLM-spending) review. Both default ON.
+KEY_MEMORY_ENABLED = "memory.enabled"
+KEY_MEMORY_AUTO_EXTRACT = "memory.auto_extract"
+# Global, user-authored guidance appended to the background reviewer prompt
+# (memory-system-design §7.4). It refines "what to save/skip" and OVERRIDES the
+# default soft heuristics (so e.g. "remember key conclusions" can beat the
+# default "skip transcript-derivable facts" rule); the hard rules (secret
+# redaction, KB dedup, JSON contract) are not overridable. Empty = disabled.
+# Stored as a preference like the toggles; only the background extractor reads
+# it (never injected into normal turns). Capped to keep the review prompt bounded.
+KEY_MEMORY_CUSTOM_INSTRUCTIONS = "memory.custom_instructions"
+MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS = 1500
 
 FALLBACK_TIMEZONE = "UTC"
 FALLBACK_LOCALE = "zh-CN"
@@ -78,7 +95,7 @@ ALLOWED_FONT_SIZES = {"compact", "default", "comfortable"}
 
 
 async def _read(db: AsyncSession, key: str) -> str | None:
-    row = await SettingsDatastore(db).get_setting(key)
+    row = await SettingsDatastore(db).get_setting(require_current_user_id(), key)
     if row is None:
         return None
     try:
@@ -93,11 +110,12 @@ async def _read(db: AsyncSession, key: str) -> str | None:
 
 async def _write(db: AsyncSession, key: str, value: str) -> None:
     await SettingsDatastore(db).upsert_setting(
+        require_current_user_id(),
         AppSettingRow(
             key=key,
             value_json=json.dumps({"value": value}),
             updated_at=now_ms(),
-        )
+        ),
     )
 
 
@@ -280,6 +298,49 @@ async def set_font_size(db: AsyncSession, value: str) -> None:
     await _write(db, KEY_FONT_SIZE, value)
 
 
+async def _read_bool(db: AsyncSession, key: str, default: bool) -> bool:
+    raw = await _read(db, key)
+    if raw is None:
+        return default
+    return raw == "true"
+
+
+async def get_memory_enabled(db: AsyncSession) -> bool:
+    """Memory master switch (default ON). Gates injection + tool + extractor."""
+    return await _read_bool(db, KEY_MEMORY_ENABLED, True)
+
+
+async def set_memory_enabled(db: AsyncSession, value: bool) -> None:
+    await _write(db, KEY_MEMORY_ENABLED, "true" if value else "false")
+
+
+async def get_memory_auto_extract(db: AsyncSession) -> bool:
+    """Background-extractor switch (default ON). Independent of the foreground
+    tool: turning this off keeps manual/agent memory but stops the automatic
+    (LLM-spending) review."""
+    return await _read_bool(db, KEY_MEMORY_AUTO_EXTRACT, True)
+
+
+async def set_memory_auto_extract(db: AsyncSession, value: bool) -> None:
+    await _write(db, KEY_MEMORY_AUTO_EXTRACT, "true" if value else "false")
+
+
+async def get_memory_custom_instructions(db: AsyncSession) -> str:
+    """Global reviewer guidance (default empty = off). See
+    ``KEY_MEMORY_CUSTOM_INSTRUCTIONS``."""
+    return (await _read(db, KEY_MEMORY_CUSTOM_INSTRUCTIONS)) or ""
+
+
+async def set_memory_custom_instructions(db: AsyncSession, value: str) -> None:
+    """Persist global reviewer guidance, trimmed and hard-capped to
+    ``MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS`` so the review prompt stays bounded."""
+    await _write(
+        db,
+        KEY_MEMORY_CUSTOM_INSTRUCTIONS,
+        value.strip()[:MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS],
+    )
+
+
 def detect_system_timezone() -> str:
     """Best-effort detection of the user's local timezone.
 
@@ -296,7 +357,28 @@ def detect_system_timezone() -> str:
     persist it — auto-detection is a UX nicety, not a contract.
     """
     import os
+    import sys
     from pathlib import Path
+
+    if sys.platform == "win32":
+        # /etc/localtime does not exist on Windows. Try TZ env var first,
+        # then fall back to datetime-based detection.
+        tz_env = os.environ.get("TZ", "").strip()
+        if tz_env:
+            try:
+                from zoneinfo import ZoneInfo
+
+                ZoneInfo(tz_env)
+                return tz_env
+            except Exception:
+                pass
+        try:
+            name = datetime.now().astimezone().tzname()
+            if name:
+                return name
+        except Exception:
+            pass
+        return FALLBACK_TIMEZONE
 
     local = Path("/etc/localtime")
     if local.is_symlink():

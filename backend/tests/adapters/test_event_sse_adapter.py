@@ -138,3 +138,77 @@ def test_should_attach_db_row_message_id_before_translating_persisted_event():
     assert legacy_type == "message.user"
     assert payload["text"] == "hi"
     assert payload["message_id"] == "msg-from-row"
+
+
+def test_should_translate_tool_input_delta_to_build_card_signal():
+    # Live, non-persisted partial tool-call input. Carries the tool_use_id
+    # (``id``) the started/completed events also key on, the tool name (so
+    # the card renders its title before the canonical tool_use lands), and
+    # the partial-JSON chunk as ``text``.
+    result = _translate_kernel_event(
+        "tool_input_delta",
+        {"id": "tool-1", "name": "Write", "text": '{"file_path":"/a', "message_id": "msg-w"},
+    )
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "tool.call.input_delta"
+    assert payload["tool_use_id"] == "tool-1"
+    assert payload["name"] == "Write"
+    assert payload["text"] == '{"file_path":"/a'
+    assert payload["message_id"] == "msg-w"
+
+
+def test_should_translate_tool_output_delta_with_stream_discriminator():
+    result = _translate_kernel_event(
+        "tool_output_delta",
+        {"id": "tool-2", "stream": "patch", "text": "+ added line", "message_id": "msg-o"},
+    )
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "tool.call.output_delta"
+    assert payload["tool_use_id"] == "tool-2"
+    assert payload["stream"] == "patch"
+    assert payload["text"] == "+ added line"
+    assert payload["message_id"] == "msg-o"
+
+
+def test_should_translate_workflow_progress_with_nested_state():
+    # Claude dynamic-workflow live progress. ``id`` is the Workflow tool_use_id
+    # the frontend attaches the progress card to; ``state`` is the nested
+    # snapshot, JSON-stringified to honour the legacy ``Record<str,str>`` SSE
+    # contract. Before this case existed, the adapter returned ``None`` and the
+    # whole feature was invisible on the wire even though the kernel emitted it.
+    state = {
+        "runId": "wf_abc123",
+        "workflowName": "deep-research",
+        "status": "running",
+        "agentCount": 3,
+        "agentsDone": 1,
+        "workflowProgress": [
+            {"type": "workflow_agent", "agentId": "agent-1", "state": "done"},
+            {"type": "workflow_agent", "agentId": "agent-2", "state": "progress"},
+        ],
+    }
+    result = _translate_kernel_event(
+        "workflow_progress",
+        {"id": "tool-wf", "run_id": "wf_abc123", "state": state, "message_id": "msg-wf"},
+    )
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "session.workflow_progress"
+    assert payload["id"] == "tool-wf"
+    assert payload["run_id"] == "wf_abc123"
+    # ``state`` round-trips through JSON so the frontend re-parses it whole.
+    assert json.loads(payload["state"]) == state
+    assert payload["message_id"] == "msg-wf"
+
+
+def test_should_translate_workflow_progress_with_empty_state_default():
+    # Defensive: a malformed snapshot (no ``state``) still produces a valid
+    # frame rather than crashing the SSE stream — the frontend treats an empty
+    # object as "no progress yet" and keeps the prior snapshot.
+    result = _translate_kernel_event("workflow_progress", {"id": "tool-wf", "run_id": "wf_x"})
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "session.workflow_progress"
+    assert json.loads(payload["state"]) == {}

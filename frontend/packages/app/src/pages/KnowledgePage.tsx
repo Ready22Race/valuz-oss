@@ -59,7 +59,7 @@ import type {
   KbListItem,
   KbTreeNode,
 } from "@valuz/core";
-import { useWorkspaceOutlet } from "@valuz/app/layout";
+import { useProjectOutlet } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
 import { useTranslation } from "@valuz/core";
 import { CreateKbDialog } from "../components";
@@ -263,7 +263,7 @@ export const KnowledgePage = () => {
     setHeader,
     setHeaderClassName,
     setContentInnerClassName,
-  } = useWorkspaceOutlet();
+  } = useProjectOutlet();
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
 
   useEffect(() => {
@@ -759,11 +759,10 @@ export const KnowledgePage = () => {
           ) : isEmpty ? (
             <div className="flex flex-1 justify-center pt-[160px]">
               <EmptyState
-                icon={<FolderPlus />}
+                variant="plain"
                 title={t("knowledge.createNew" as Parameters<typeof t>[0])}
-                message={t(
-                  "knowledge.supportedFormats" as Parameters<typeof t>[0],
-                )}
+                description={t("knowledge.supportedFormats" as Parameters<typeof t>[0])}
+                icon={<FolderPlus className="h-5 w-5" />}
                 action={
                   <Button
                     size="sm"
@@ -881,8 +880,8 @@ export const KnowledgePage = () => {
         ) : filteredRootNodes.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <EmptyState
-              icon={<FolderOpen />}
-              title={
+              icon={<FolderOpen className="h-10 w-10 text-ink-muted" />}
+              message={
                 searchQuery
                   ? t("knowledge.noMatchDocs" as Parameters<typeof t>[0])
                   : t("knowledge.noDocs" as Parameters<typeof t>[0])
@@ -942,7 +941,7 @@ export const KnowledgePage = () => {
               variant="outline"
               size="sm"
               aria-label={t("common.delete" as Parameters<typeof t>[0])}
-              className="h-8 w-8 p-0 text-ink-meta hover:bg-error-light hover:text-error-text"
+              className="h-8 w-8 p-0 text-ink-meta hover:text-[#f54b4b]"
               onClick={() => setDeleteKbOpen(true)}
             >
               <Trash2 className="h-3.5 w-3.5" />

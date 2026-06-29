@@ -1,26 +1,28 @@
-"""SessionOrchestrator — manages Runtime lifecycle around a Project's cwd.
+"""SessionOrchestrator — manages Runtime lifecycle around each session's cwd.
 
 Transport-agnostic orchestration layer. WebSocket, REST, and CLI all delegate
 to this class for runtime caching, turn execution, interrupt handling, and
 cleanup.
 
-Sessions belong to a Project. The project owns the host-side cwd that the
-runtime uses as its workspace root; this orchestrator does not create or own
-that directory.
+Sessions are self-sufficient: each carries its own working directory
+(``session.cwd``) and embedded agent snapshot (``session.agent_config``);
+this orchestrator does not create or own the directory beyond seeding the
+``.claude/CLAUDE.md`` stub.
 """
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from src.core.agent_config import AgentConfig
-from src.core.events import Event, EventSink
-from src.core.project import Project
+from src.core.events import Event, EventSink, GlobalEventTap
 from src.core.prompt_builder import wrap_for_mode
 from src.core.runtime_port import RuntimePort
 from src.core.session_approval_cache import SessionApprovalCache, SessionRule
@@ -28,6 +30,7 @@ from src.core.session_bus import SessionEventBus
 from src.core.store_port import StorePort
 from src.core.time_utils import now_ms
 from src.core.types import Error, Message, Session, UserMessage
+from src.core.workspace import bootstrap_session_workspace
 
 # Per-session callable injected into runtimes that wire ``approve_for_session``.
 # Closes over (session_id, cache, runtime.approval_rule_matcher) so the
@@ -41,18 +44,6 @@ logger = logging.getLogger(__name__)
 
 class SessionNotFoundError(Exception):
     """Raised when a session ID does not exist in the store."""
-
-
-class AgentNotFoundError(Exception):
-    """Raised when a session's agent_id does not resolve."""
-
-
-class ProjectNotFoundError(Exception):
-    """Raised when a session's project_id does not resolve."""
-
-
-class ProjectDeletedError(Exception):
-    """Raised when a session's project has been soft-deleted."""
 
 
 class PendingActionNotFoundError(Exception):
@@ -127,6 +118,27 @@ class SubmitActionResult:
     # Set when ``decision == "approve_for_session"`` — the UUID assigned to
     # the rule the user just attached. ``None`` for every other verb.
     rule_id: str | None = None
+
+
+class _GlobalForwardTap:
+    """Per-bus tap fanning every emit out to the orchestrator's global taps.
+
+    Holds the orchestrator's tap list *by reference*, so taps registered
+    after this bus was created still receive its events. A failing global
+    tap is logged and skipped — never detached here, since the same tap
+    object is shared across every session's forwarder.
+    """
+
+    def __init__(self, session_id: str, taps: list[GlobalEventTap]) -> None:
+        self._session_id = session_id
+        self._taps = taps
+
+    async def emit(self, event: Event) -> None:
+        for tap in list(self._taps):
+            try:
+                await tap.emit_session(self._session_id, event)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Global event tap failed for %s: %s", self._session_id, exc)
 
 
 class _MessageIdStampSink:
@@ -224,22 +236,62 @@ class _MessageObserverSink:
 
 
 class SessionOrchestrator:
-    """Manages Runtime lifecycle for sessions inside a Project.
+    """Manages Runtime lifecycle for sessions.
 
     Responsibilities:
-    1. Load Project + AgentConfig from session bindings
+    1. Bind the runtime to the session's embedded AgentConfig snapshot
     2. Runtime caching per session (config changes take effect on new sessions)
     3. Active runtime tracking (interrupt support)
     4. Per-run Message lifecycle (one row per call to run_turn)
 
-    Sessions in the same Project may run concurrently. They share the
-    project's cwd, so the user is responsible for any workspace contention
-    that arises (e.g. two sessions editing the same file).
+    Sessions sharing a cwd may run concurrently; the user is responsible for
+    any workspace contention that arises (e.g. two sessions editing the same
+    file).
     """
 
-    def __init__(self, store: StorePort) -> None:
+    # Warm-runtime eviction defaults. Each cached runtime holds a live CLI
+    # subprocess (claude / codex) for the life of the cache entry, so an
+    # unbounded ``_runtimes`` leaks one OS process per session touched —
+    # they only die when the host exits (the SDKs' atexit reaper). These two
+    # knobs bound that: a hard LRU ceiling on concurrent warm runtimes and an
+    # idle TTL after which an untouched runtime is closed. ``<= 0`` disables
+    # the corresponding policy. Overridable per-instance (composition root
+    # reads env in ``app.dependencies``); see docs/design or the eviction
+    # helpers below.
+    DEFAULT_MAX_WARM_RUNTIMES: int = 6
+    DEFAULT_RUNTIME_IDLE_TTL_S: float = 300.0  # 5 min
+    DEFAULT_SWEEP_INTERVAL_S: float = 60.0  # 1 min
+
+    def __init__(
+        self,
+        store: StorePort,
+        *,
+        max_warm_runtimes: int | None = None,
+        runtime_idle_ttl_s: float | None = None,
+        sweep_interval_s: float | None = None,
+    ) -> None:
         self._store = store
         self._runtimes: dict[str, RuntimePort] = {}
+        # session_id -> monotonic timestamp of the last turn START/END on that
+        # cached runtime. Drives idle-TTL + LRU eviction. Mirrors the lifetime
+        # of ``_runtimes`` exactly (added on create, dropped on evict/cleanup).
+        self._runtime_last_used: dict[str, float] = {}
+        self._max_warm_runtimes = (
+            self.DEFAULT_MAX_WARM_RUNTIMES if max_warm_runtimes is None else max_warm_runtimes
+        )
+        self._runtime_idle_ttl_s = (
+            self.DEFAULT_RUNTIME_IDLE_TTL_S if runtime_idle_ttl_s is None else runtime_idle_ttl_s
+        )
+        self._sweep_interval_s = (
+            self.DEFAULT_SWEEP_INTERVAL_S if sweep_interval_s is None else sweep_interval_s
+        )
+        # Background idle-sweeper task. Started by ``start()`` (composition
+        # root, has a running loop), cancelled by ``shutdown()``. ``None`` when
+        # not running — the lazy sweep in ``_ensure_runtime`` still enforces
+        # both policies on every turn, so eviction is correct even if the timer
+        # was never started (e.g. unit tests driving ``_ensure_runtime``).
+        self._sweeper_task: asyncio.Task[None] | None = None
+        self._closing = False
         self._active: dict[str, RuntimePort] = {}
         self._active_message: dict[str, Message] = {}
         # Per-session outbound bus. Lifecycle is independent of any
@@ -252,6 +304,12 @@ class SessionOrchestrator:
         # runtimes — see ``docs/design/approve-for-session.md`` §4.1.
         # Cleared on ``cleanup(session_id)``; not persisted to DB in v2.
         self._session_approval_cache = SessionApprovalCache()
+        # Process-wide event taps: each receives ``(session_id, event)``
+        # for every event emitted on ANY session bus. The list object is
+        # shared by reference with the per-bus forwarders created in
+        # ``_get_or_create_bus``, so registration is effective for buses
+        # created both before and after the tap was added.
+        self._global_taps: list[GlobalEventTap] = []
 
     @property
     def active_sessions(self) -> set[str]:
@@ -263,11 +321,51 @@ class SessionOrchestrator:
     def _get_or_create_bus(self, session_id: str) -> SessionEventBus:
         bus = self._buses.get(session_id)
         if bus is None:
-            bus = SessionEventBus()
+            bus = SessionEventBus(taps=[_GlobalForwardTap(session_id, self._global_taps)])
             self._buses[session_id] = bus
         return bus
 
-    async def emit_session_event(self, session_id: str, event: Event) -> None:
+    async def attach_session_tap(
+        self, user_id: str, session_id: str, sink: EventSink, *, replay: bool = False
+    ) -> None:
+        """Register a passive multi-subscriber tap on a session's live stream.
+
+        Unlike :meth:`attach_session_sink` (the single client slot used by
+        the WS run channel), taps coexist: any number of observers — SSE
+        streams, host aggregators — can tap one session without displacing
+        the client or each other. ``replay=True`` first delivers the events
+        of the in-progress message so a mid-turn tap sees a coherent view.
+        """
+        bus = self._get_or_create_bus(session_id)
+        replay_events = await self._build_replay(user_id, session_id) if replay else []
+        await bus.add_tap(sink, replay=replay_events)
+
+    async def detach_session_tap(self, session_id: str, sink: EventSink) -> None:
+        """Unregister a tap added via :meth:`attach_session_tap`."""
+        bus = self._buses.get(session_id)
+        if bus is not None:
+            await bus.remove_tap(sink)
+
+    def attach_global_tap(self, tap: GlobalEventTap) -> None:
+        """Register a process-wide tap receiving ``(session_id, event)``
+        for every event on every session bus.
+
+        Intended for singleton host-level aggregators (decision inbox,
+        remote event streams). Synchronous on purpose — registration is a
+        list append on the shared tap list, effective immediately for all
+        existing and future buses.
+        """
+        self._global_taps.append(tap)
+
+    def detach_global_tap(self, tap: GlobalEventTap) -> None:
+        try:
+            self._global_taps.remove(tap)
+        except ValueError:
+            pass
+
+    async def emit_session_event(
+        self, session_id: str, event: Event, *, create_bus: bool = False
+    ) -> None:
         """Emit an event onto a session's bus from outside a turn.
 
         Used by the API layer for session-state notifications that are not
@@ -278,13 +376,21 @@ class SessionOrchestrator:
         is purely a live-notification channel for currently-attached
         clients. No DB persistence — by design (see
         ``docs/design/session-modes.md`` §Events).
+
+        ``create_bus=True`` forces bus creation so the event reaches
+        global taps (and any tap registered between turns) even when no
+        client has ever attached — used for synthetic notifications like
+        the interrupt-fallback ``session_error``.
         """
-        bus = self._buses.get(session_id)
+        if create_bus:
+            bus: SessionEventBus | None = self._get_or_create_bus(session_id)
+        else:
+            bus = self._buses.get(session_id)
         if bus is None:
             return
         await bus.emit(event)
 
-    async def attach_session_sink(self, session_id: str, sink: EventSink) -> None:
+    async def attach_session_sink(self, user_id: str, session_id: str, sink: EventSink) -> None:
         """Subscribe ``sink`` to this session's live event stream.
 
         If a turn is currently in flight, replays the events of the
@@ -292,7 +398,7 @@ class SessionOrchestrator:
         view of the run-so-far. Subsequent live emits arrive in order.
         """
         bus = self._get_or_create_bus(session_id)
-        replay = await self._build_replay(session_id)
+        replay = await self._build_replay(user_id, session_id)
         await bus.attach(sink, replay=replay)
 
     async def detach_session_sink(self, session_id: str, sink: EventSink) -> None:
@@ -301,7 +407,7 @@ class SessionOrchestrator:
         if bus is not None:
             await bus.detach(sink)
 
-    async def _build_replay(self, session_id: str) -> list[Event]:
+    async def _build_replay(self, user_id: str, session_id: str) -> list[Event]:
         """Replay = events of any message still in ``running`` status.
 
         We don't replay finalized history — REST handles that via
@@ -316,7 +422,7 @@ class SessionOrchestrator:
         active_message = self._active_message.get(session_id)
         if active_message is None:
             return []
-        raw_events = await self._store.get_events_for_message(active_message.id)
+        raw_events = await self._store.get_events_for_message(user_id, active_message.id)
         message_id = active_message.id
         return [
             Event(
@@ -329,6 +435,7 @@ class SessionOrchestrator:
 
     async def run_turn(
         self,
+        user_id: str,
         session_id: str,
         user_message: UserMessage,
     ) -> Message:
@@ -346,11 +453,11 @@ class SessionOrchestrator:
         every event is persisted regardless of client state — this is
         what makes reconnect-with-replay correct.
         """
-        from src.adapters.composite_sink import CompositeEventSink
         from src.adapters.database_sink import DatabaseEventSink
+        from src.adapters.persist_then_broadcast_sink import PersistThenBroadcastSink
         from src.adapters.delta_coalescing_sink import DeltaCoalescingSink
 
-        session, project, agent = await self._load_bindings(session_id)
+        session, agent = await self._load_session(user_id, session_id)
 
         # Slice 3 of session-modes (broadened in slice 6 simplification):
         # both Claude and Codex process ``/plan <text>`` / ``/goal <text>``
@@ -374,7 +481,7 @@ class SessionOrchestrator:
             started_at=now_ms(),
             status="running",
         )
-        await self._store.save_message(message)
+        await self._store.save_message(user_id, message)
         self._active_message[session_id] = message
 
         # Persist ``session.status = "running"`` so the DB row reflects
@@ -394,23 +501,31 @@ class SessionOrchestrator:
 
         bus = self._get_or_create_bus(session_id)
         bus_sink: EventSink = _MessageIdStampSink(bus, message.id)
-        db_sink: EventSink = DatabaseEventSink(self._store, session_id, message.id)
-        composite: EventSink = CompositeEventSink([bus_sink, db_sink])
-        # Coalesce per-token deltas into ~30ms batches before fanning out
-        # to bus + DB. Reduces WS frame count and DB row count without
-        # changing the canonical assistant_message/thinking record.
-        coalesced: EventSink = DeltaCoalescingSink(composite)
+        db_sink = DatabaseEventSink(self._store, user_id, session_id, message.id)
+        # Persist FIRST, then broadcast with the row id stamped into
+        # ``data["seq"]`` — live frames of persisted events carry stable
+        # storage coordinates so stream consumers can deduplicate the
+        # backfill/live boundary exactly. Live-only delta types skip the
+        # DB and flow straight through (no added latency on the token
+        # streaming path).
+        persist_then_live: EventSink = PersistThenBroadcastSink(db_sink, bus_sink)
+        # Coalesce per-token deltas into ~30ms batches before the
+        # persist→broadcast pipeline. Reduces WS frame count and DB row
+        # count without changing the canonical assistant_message/thinking
+        # record.
+        coalesced: EventSink = DeltaCoalescingSink(persist_then_live)
         observer = _MessageObserverSink(coalesced)
 
-        # Per-session cwd override (session.cwd) wins over the project cwd;
-        # empty falls back to project.cwd. Lets a host isolate each session's
-        # working directory without minting a project per session.
+        # Sessions are self-sufficient: ``session.cwd`` is required at
+        # creation. Seed the workspace stub lazily (idempotent, one stat on
+        # the hot path) — there is no project-creation moment to hook.
+        bootstrap_session_workspace(session.cwd, agent.name or None)
         runtime = await self._ensure_runtime(
             session_id,
             agent,
             session,
             observer,
-            session.cwd or project.cwd,
+            session.cwd,
         )
         self._active[session_id] = runtime
 
@@ -449,11 +564,11 @@ class SessionOrchestrator:
             # (``status``, ``stop_reason``, ``runtime_session_id``,
             # ``todos``) keep their in-memory values as before.
             if observer.runtime_mode_change is None:
-                fresh = await self._store.load_session(session_id)
+                fresh = await self._store.load_session(user_id, session_id)
                 if fresh is not None and fresh.mode != session.mode:
                     session.mode = fresh.mode
             await self._store.save_session(session)
-            await self._store.save_message(message)
+            await self._store.save_message(user_id, message)
             await observer.emit(
                 Event(
                     type="session_update",
@@ -464,6 +579,12 @@ class SessionOrchestrator:
         finally:
             self._active.pop(session_id, None)
             self._active_message.pop(session_id, None)
+            # Mark the runtime freshly-used at turn END too, not just at entry.
+            # A long-running turn (in ``_active``, so never swept) could finish
+            # well past the idle TTL measured from its start; without this bump
+            # the very next sweep would evict a runtime that just went idle.
+            if session_id in self._runtimes:
+                self._runtime_last_used[session_id] = time.monotonic()
             # Defensive: if ``run()`` returned (or raised) without
             # resetting ``session.status``, force it back to ``"idle"``
             # so the DB doesn't carry a phantom ``running`` row from a
@@ -534,28 +655,20 @@ class SessionOrchestrator:
         # ``docs/design/approve-for-session.md`` §8.
         self._session_approval_cache.clear(session_id)
         runtime = self._runtimes.pop(session_id, None)
+        self._runtime_last_used.pop(session_id, None)
         if runtime is not None:
             try:
                 await runtime.close()
             except Exception:
                 logger.debug("Error closing runtime for session %s", session_id, exc_info=True)
 
-    async def _load_bindings(self, session_id: str) -> tuple[Any, Project, AgentConfig]:
-        session = await self._store.load_session(session_id)
+    async def _load_session(self, user_id: str, session_id: str) -> tuple[Any, AgentConfig]:
+        session = await self._store.load_session(user_id, session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
-
-        project = await self._store.load_project(session.project_id)
-        if project is None:
-            raise ProjectNotFoundError(session.project_id)
-        if project.status == "deleted":
-            raise ProjectDeletedError(session.project_id)
-
-        agent = await self._store.load_agent(session.agent_id)
-        if agent is None:
-            raise AgentNotFoundError(f"Agent {session.agent_id} not found for session {session_id}")
-
-        return session, project, agent
+        # The embedded snapshot IS the agent for this session — the kernel
+        # holds no agents table to consult.
+        return session, session.agent_config
 
     async def _ensure_runtime(
         self,
@@ -567,9 +680,16 @@ class SessionOrchestrator:
     ) -> RuntimePort:
         from src.runtimes.factory import create_runtime
 
+        # Opportunistic eviction on every turn entry: close runtimes idle past
+        # the TTL (skipping the one we're about to touch / any active turn).
+        # This is the lazy half of the policy — the background sweeper covers
+        # the zero-activity case; together they bound the live subprocess set.
+        await self._sweep_idle_runtimes(exclude=session_id)
+
         cached = self._runtimes.get(session_id)
         if cached is not None:
             cached.update_sink(sink)
+            self._runtime_last_used[session_id] = time.monotonic()
             return cached
 
         runtime = create_runtime(agent, session, sink, workspace_root=workspace_root)
@@ -584,7 +704,114 @@ class SessionOrchestrator:
         if callable(setter):
             setter(self._build_session_rule_finder(session_id, runtime))
         self._runtimes[session_id] = runtime
+        self._runtime_last_used[session_id] = time.monotonic()
+        # Enforce the hard LRU ceiling after admitting the new runtime. This is
+        # the guaranteed bound on concurrent warm subprocesses, independent of
+        # the TTL: no matter how many sessions are touched, at most
+        # ``_max_warm_runtimes`` claude/codex processes stay alive at once.
+        await self._enforce_runtime_cap(exclude=session_id)
         return runtime
+
+    # ── Warm-runtime eviction (idle TTL + LRU cap) ─────────────────────────
+
+    def start(self) -> None:
+        """Start the background idle-sweeper. Idempotent; requires a running
+        event loop (call from the composition root's async init). Eviction is
+        still correct without it — the lazy sweep in ``_ensure_runtime`` runs
+        on every turn — this just covers sessions that go idle with no further
+        activity anywhere. No-op when the idle TTL is disabled (``<= 0``)."""
+        if self._runtime_idle_ttl_s <= 0 or self._sweep_interval_s <= 0:
+            return
+        if self._sweeper_task is not None and not self._sweeper_task.done():
+            return
+        self._closing = False
+        self._sweeper_task = asyncio.create_task(self._run_sweeper())
+
+    async def shutdown(self) -> None:
+        """Cancel the sweeper and close every cached runtime — i.e. terminate
+        all live claude/codex subprocesses deterministically on host shutdown,
+        rather than relying on the SDKs' atexit reaper. Called from
+        ``app.dependencies.shutdown_dependencies``."""
+        self._closing = True
+        task = self._sweeper_task
+        self._sweeper_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        for session_id in list(self._runtimes):
+            await self._evict_runtime(session_id)
+
+    async def _run_sweeper(self) -> None:
+        """Periodic idle sweep loop. Resilient: a failing sweep is logged and
+        the loop continues; cancellation (shutdown) propagates."""
+        try:
+            while not self._closing:
+                await asyncio.sleep(self._sweep_interval_s)
+                if self._closing:
+                    break
+                try:
+                    await self._sweep_idle_runtimes()
+                except Exception:  # noqa: BLE001 — a bad sweep must not kill the loop
+                    logger.debug("runtime idle sweep failed", exc_info=True)
+        except asyncio.CancelledError:
+            raise
+
+    async def _sweep_idle_runtimes(self, *, exclude: str | None = None) -> None:
+        """Close every cached runtime untouched for longer than the idle TTL.
+        Never evicts an active turn (``_active``) — a parked approval keeps the
+        session active because ``runtime.run()`` is still awaiting, so this also
+        protects sessions waiting on a user decision."""
+        if self._runtime_idle_ttl_s <= 0:
+            return
+        now = time.monotonic()
+        stale = [
+            sid
+            for sid, ts in list(self._runtime_last_used.items())
+            if sid != exclude
+            and sid not in self._active
+            and (now - ts) >= self._runtime_idle_ttl_s
+        ]
+        for sid in stale:
+            await self._evict_runtime(sid)
+
+    async def _enforce_runtime_cap(self, *, exclude: str | None = None) -> None:
+        """Evict least-recently-used runtimes until the warm set is within the
+        cap. Skips active turns; if every over-cap entry is active, the cap is
+        briefly exceeded rather than tearing down a running subprocess."""
+        if self._max_warm_runtimes <= 0:
+            return
+        if len(self._runtimes) <= self._max_warm_runtimes:
+            return
+        evictable = sorted(
+            (sid for sid in self._runtimes if sid != exclude and sid not in self._active),
+            key=lambda s: self._runtime_last_used.get(s, 0.0),
+        )
+        for sid in evictable:
+            if len(self._runtimes) <= self._max_warm_runtimes:
+                break
+            await self._evict_runtime(sid)
+
+    async def _evict_runtime(self, session_id: str) -> None:
+        """Drop a runtime from the warm cache and close it (kills its CLI
+        subprocess). Keeps the session's event bus so an attached client keeps
+        streaming and the next turn rebuilds the runtime (resuming via the
+        persisted ``runtime_session_id``) — a cold reload, hence the approval
+        cache is cleared to match ``cleanup`` semantics. Use ``cleanup`` (not
+        this) when the session itself is going away."""
+        runtime = self._runtimes.pop(session_id, None)
+        self._runtime_last_used.pop(session_id, None)
+        self._session_approval_cache.clear(session_id)
+        if runtime is None:
+            return
+        try:
+            await runtime.close()
+        except Exception:  # noqa: BLE001
+            logger.debug("Error evicting runtime for session %s", session_id, exc_info=True)
+        else:
+            logger.info("Evicted warm runtime for idle/over-cap session %s", session_id)
 
     def _build_session_rule_finder(
         self,
@@ -612,6 +839,7 @@ class SessionOrchestrator:
 
     async def submit_action(
         self,
+        user_id: str,
         session_id: str,
         pending_id: str,
         decision: Literal[
@@ -625,7 +853,6 @@ class SessionOrchestrator:
 
         Validation order (raises one of the typed errors below):
           1. Session loadable (else SessionNotFoundError)
-          2. Project not soft-deleted (else ProjectDeletedError)
           3. ``pending_id`` matches a ``requires_action`` event
              (else PendingActionNotFoundError)
           4. Decision matches the pending's subject and the pending's
@@ -665,16 +892,11 @@ class SessionOrchestrator:
              when ``decision == "approve_for_session"`` so reconnects
              can replay the complete decision.
         """
-        session = await self._store.load_session(session_id)
+        session = await self._store.load_session(user_id, session_id)
         if session is None:
             raise SessionNotFoundError(session_id)
-        project = await self._store.load_project(session.project_id)
-        if project is None:
-            raise ProjectNotFoundError(session.project_id)
-        if project.status == "deleted":
-            raise ProjectDeletedError(session.project_id)
 
-        pending_event, resolved_event = await self._derive_pending(session_id, pending_id)
+        pending_event, resolved_event = await self._derive_pending(user_id, session_id, pending_id)
         if pending_event is None:
             raise PendingActionNotFoundError(pending_id)
 
@@ -789,7 +1011,7 @@ class SessionOrchestrator:
         if committed_rule is not None:
             resolved_data["rule_id"] = committed_rule.rule_id
         resolved = Event(type="action_resolved", data=resolved_data)
-        await self._store.append_event(session_id, message_id, resolved)
+        await self._store.append_event(user_id, session_id, message_id, resolved)
         bus = self._get_or_create_bus(session_id)
         await bus.emit(
             Event(
@@ -816,7 +1038,7 @@ class SessionOrchestrator:
         return self._session_approval_cache
 
     async def _derive_pending(
-        self, session_id: str, pending_id: str
+        self, user_id: str, session_id: str, pending_id: str
     ) -> tuple[Event | None, Event | None]:
         """Return ``(requires_action, action_resolved)`` for ``pending_id``.
 
@@ -827,7 +1049,7 @@ class SessionOrchestrator:
         """
         pending: Event | None = None
         resolved: Event | None = None
-        events = await self._store.get_events(session_id, limit=1000, offset=0)
+        events = await self._store.get_events(user_id, session_id, limit=1000, offset=0)
         for ev in events:
             if ev.data.get("pending_id") != pending_id:
                 continue
@@ -847,9 +1069,11 @@ class SessionOrchestrator:
         do better. Returns the number of synthetic resolutions emitted.
         """
         sealed = 0
-        sessions = await self._store.list_sessions(status="running", limit=500)
+        # Cross-owner startup sweep: ``user_id=None`` spans every owner; each
+        # session's follow-up reads/writes use its own ``session.user_id``.
+        sessions = await self._store.list_sessions(None, status="running", limit=500)
         for session in sessions:
-            events = await self._store.get_events(session.id, limit=1000, offset=0)
+            events = await self._store.get_events(session.user_id, session.id, limit=1000, offset=0)
             open_pendings: dict[str, str] = {}  # pending_id → message_id
             for ev in events:
                 pid = ev.data.get("pending_id")
@@ -863,6 +1087,7 @@ class SessionOrchestrator:
                     open_pendings.pop(pid, None)
             for pid, msg_id in open_pendings.items():
                 await self._store.append_event(
+                    session.user_id,
                     session.id,
                     msg_id,
                     Event(
@@ -905,7 +1130,8 @@ class SessionOrchestrator:
         Returns the number of sessions reset.
         """
         reset = 0
-        sessions = await self._store.list_sessions(status="running", limit=500)
+        # Cross-owner startup sweep (see scan_orphan_pendings).
+        sessions = await self._store.list_sessions(None, status="running", limit=500)
         for session in sessions:
             session.status = "idle"
             session.stop_reason = Error(
@@ -914,7 +1140,7 @@ class SessionOrchestrator:
                 message="host process restarted while turn was in flight",
             )
             await self._store.save_session(session)
-            messages = await self._store.list_messages_for_session(session.id)
+            messages = await self._store.list_messages_for_session(session.user_id, session.id)
             now = now_ms()
             for m in messages:
                 if m.status != "running":
@@ -925,6 +1151,6 @@ class SessionOrchestrator:
                     "message": "host process restarted while message was in flight",
                 }
                 m.ended_at = now
-                await self._store.save_message(m)
+                await self._store.save_message(session.user_id, m)
             reset += 1
         return reset

@@ -44,8 +44,19 @@ from uuid import uuid4
 
 import valuz_agent.boot.kernel  # noqa: F401
 
-from valuz_agent.adapters import kernel_store, kernel_sync
-from valuz_agent.adapters.agent_resolver import build_member_session
+from valuz_agent.adapters import kernel_client
+from valuz_agent.modules.sessions import project_index
+from valuz_agent.adapters.agent_resolver import (
+    _member_agent_config,
+    build_member_session,
+    embed_agent_config,
+    spill_goal_brief_if_too_long,
+)
+from valuz_agent.infra.auth_context import (
+    require_current_user_id,
+    reset_current_user_id,
+    set_current_user_id,
+)
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus, event_bus as _global_bus
 from valuz_agent.infra.fs_registry import fs_registry
@@ -72,7 +83,8 @@ from valuz_agent.modules.tasks.lifecycle import LifecycleService
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks import planning
-from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
+from valuz_agent.modules.tasks.plan import TaskPlan
+from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
 from valuz_agent.modules.tasks.recovery import RecoveryService
 
 
@@ -178,7 +190,7 @@ class TaskOrchestrator:
 
     async def kickoff(
         self,
-        workspace_id: str,
+        project_id: str,
         goal: str,
         lead_agent_slug: str,
         refs: list[str] | None = None,
@@ -186,6 +198,8 @@ class TaskOrchestrator:
         title: str | None = None,
         dispatch_mode: Literal["sync", "async"] = "async",
         originating_session_id: str | None = None,
+        trigger_type: str | None = None,
+        trigger_automation_id: str | None = None,
     ) -> TaskRow:
         """Create a task and start its lead session in the background.
 
@@ -198,9 +212,9 @@ class TaskOrchestrator:
 
         Returns the newly created TaskRow.
 
-        Raises ``BriefTooLongError`` (subclass of ValueError) when ``goal``
-        exceeds the goal-mode payload cap — surfaced here BEFORE any DB write
-        so the user gets a clean error in chat instead of a mid-turn crash.
+        An over-long ``goal`` is spilled to a doc and the lead receives a short
+        pointer to read (see ``spill_goal_brief_if_too_long``) rather than
+        crashing the ``/goal`` payload mid-turn.
 
         Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
         Kept on the orchestrator so its existing callers (REST routes,
@@ -208,7 +222,7 @@ class TaskOrchestrator:
         invoking ``task_orchestrator.kickoff``.
         """
         return await self._lifecycle.kickoff(
-            workspace_id=workspace_id,
+            project_id=project_id,
             goal=goal,
             lead_agent_slug=lead_agent_slug,
             refs=refs,
@@ -216,6 +230,8 @@ class TaskOrchestrator:
             title=title,
             dispatch_mode=dispatch_mode,
             originating_session_id=originating_session_id,
+            trigger_type=trigger_type,
+            trigger_automation_id=trigger_automation_id,
         )
 
     # ------------------------------------------------------------------
@@ -225,7 +241,7 @@ class TaskOrchestrator:
     async def draft_task(
         self,
         *,
-        workspace_id: str,
+        project_id: str,
         goal: str,
         lead_agent_slug: str,
         originating_session_id: str,
@@ -240,36 +256,32 @@ class TaskOrchestrator:
         to follow up with ``plan_task`` (lifting plan_version to 1) before
         committing.
 
-        Raises ``ValueError`` if the workspace doesn't exist or the agent isn't
-        a member of it (same validations as ``kickoff``). Raises
-        ``BriefTooLongError`` (subclass of ValueError) when ``goal`` exceeds
-        the goal-mode payload cap — fails before any DB write so the chat
-        user sees a clean error before the draft row is created.
+        Raises ``ValueError`` if the project doesn't exist or the agent isn't
+        a member of it (same validations as ``kickoff``). An over-long ``goal``
+        is accepted as-is: the draft only stores the goal text — when
+        ``commit_task`` builds the lead session it spills an over-cap brief to a
+        doc and passes a pointer (see ``spill_goal_brief_if_too_long``).
         """
-        # Same goal-mode brief cap as ``kickoff``. Catching it here means a
-        # draft with an over-long goal never enters the DB at all.
-        from valuz_agent.adapters.agent_resolver import assert_goal_brief_length
-
-        assert_goal_brief_length(goal)
-
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            from valuz_agent.modules.projects.datastore import WorkspaceDatastore
+            from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-            ws_ds = WorkspaceDatastore(db)
-            ws_row = await ws_ds.get_by_id(workspace_id)
+            ws_ds = ProjectDatastore(db)
+            ws_row = await ws_ds.get_by_id(require_current_user_id(), project_id)
             if ws_row is None:
-                raise ValueError(f"workspace {workspace_id!r} not found")
-            lead_member = await member_ds.get(workspace_id, lead_agent_slug)
+                raise ValueError(f"project {project_id!r} not found")
+            lead_member = await member_ds.get(
+                require_current_user_id(), project_id, lead_agent_slug
+            )
             if lead_member is None:
                 raise ValueError(
-                    f"lead agent {lead_agent_slug!r} is not a member of workspace {workspace_id!r}"
+                    f"lead agent {lead_agent_slug!r} is not a member of project {project_id!r}"
                 )
 
-            project_cwd = fs_registry.workspace_cwd(
+            project_cwd = fs_registry.project_cwd(
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -290,9 +302,16 @@ class TaskOrchestrator:
             if refs:
                 metadata["refs"] = list(refs)
 
+            # Classify the trigger source (chat, or agent when drafted from
+            # within another task) so the task list shows "由 … 触发" even for
+            # drafts that haven't been committed yet.
+            prov = await resolve_trigger_provenance(
+                db, originating_session_id=originating_session_id
+            )
+
             task_row = TaskRow(
                 id=task_id,
-                workspace_id=workspace_id,
+                project_id=project_id,
                 file_path=file_path,
                 title=task_title,
                 goal=goal,
@@ -302,16 +321,21 @@ class TaskOrchestrator:
                 # Draft-period holder = originating chat (logically); we still
                 # record the lead agent slug for UI clarity. The actual plan
                 # writer gate uses metadata.originating_session_id +
-                # workspace match (see dispatch_mcp._check_plan_writer_gate).
+                # project match (see dispatch_mcp._check_plan_writer_gate).
                 current_holder=lead_agent_slug,
+                trigger_type=prov.trigger_type,
+                trigger_task_id=prov.trigger_task_id,
+                trigger_agent_slug=prov.trigger_agent_slug,
+                trigger_automation_id=prov.trigger_automation_id,
                 metadata_=metadata,
                 plan_version=0,
                 committed_at=None,
             )
-            await task_ds.create_task(task_row)
+            await task_ds.create_task(require_current_user_id(), task_row)
 
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="task_drafted",
                 actor=originating_session_id,
@@ -328,7 +352,7 @@ class TaskOrchestrator:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         caller_session_id: str,
         lead_agent_slug_override: str | None = None,
     ) -> dict[str, Any]:
@@ -354,7 +378,9 @@ class TaskOrchestrator:
             run_ds = TaskSessionDatastore(db)
             member_ds = ProjectMemberDatastore(db)
 
-            task_row = await task_ds.get_task_by_workspace(workspace_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -371,21 +397,19 @@ class TaskOrchestrator:
                 return {"error": "commit_task: plan has no work to do (all nodes already done)"}
 
             lead_slug = lead_agent_slug_override or task_row.lead_agent_slug
-            lead_member = await member_ds.get(workspace_id, lead_slug)
+            lead_member = await member_ds.get(require_current_user_id(), project_id, lead_slug)
             if lead_member is None:
                 return {
-                    "error": (
-                        f"lead agent {lead_slug!r} is not a member of workspace {workspace_id!r}"
-                    )
+                    "error": (f"lead agent {lead_slug!r} is not a member of project {project_id!r}")
                 }
 
-            from valuz_agent.modules.projects.datastore import WorkspaceDatastore
+            from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-            ws_ds = WorkspaceDatastore(db)
-            ws_row = await ws_ds.get_by_id(workspace_id)
+            ws_ds = ProjectDatastore(db)
+            ws_row = await ws_ds.get_by_id(require_current_user_id(), project_id)
             if ws_row is None:
-                return {"error": f"workspace {workspace_id!r} not found"}
-            project_cwd = fs_registry.workspace_cwd(
+                return {"error": f"project {project_id!r} not found"}
+            project_cwd = fs_registry.project_cwd(
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -395,10 +419,10 @@ class TaskOrchestrator:
             )
             lead_cwd = str(project_cwd)
 
-            lead_agent = await kernel_store.load_agent(lead_member.kernel_agent_id)
-            lead_clone_id: str | None = None
+            lead_agent = await _member_agent_config(lead_member, member_ds)
+            lead_clone = None
             if lead_agent is not None:
-                lead_clone_id = self._materialize_lead_agent(lead_agent, dispatch_mode="async")
+                lead_clone = await self._materialize_lead_agent(lead_agent, dispatch_mode="async")
 
             refs = (task_row.metadata_ or {}).get("refs") or []
             refs_text = "\n".join(f"- {r}" for r in refs) if refs else ""
@@ -411,23 +435,33 @@ class TaskOrchestrator:
                 f"{plan_summary_lines}\n"
                 + (f"\n## References\n\n{refs_text}\n" if refs_text else "")
             )
+            # Fence the goal-mode payload: spill an over-cap committed brief to a
+            # doc and hand the lead a short pointer (used as both the embedded
+            # brief and the initial ``/goal`` prompt below).
+            lead_brief = spill_goal_brief_if_too_long(
+                lead_brief,
+                run_dir=lead_cwd,
+                task_id=task_id,
+                label=lead_slug,
+                is_lead=True,
+            )
 
-            from valuz_agent.modules.projects.datastore import WorkspaceDatastore as WsDs
+            from valuz_agent.modules.projects.datastore import ProjectDatastore as WsDs
 
             ws_ds2 = WsDs(db)
-            ws_ctx = await ws_ds2.get_context(workspace_id)
-            workspace_instructions_md = ws_ctx.instructions_md if ws_ctx else None
+            ws_ctx = await ws_ds2.get_context(require_current_user_id(), project_id)
+            project_instructions_md = ws_ctx.instructions_md if ws_ctx else None
 
             lead_session = await build_member_session(
-                workspace_id=workspace_id,
+                project_id=project_id,
                 agent_slug=lead_slug,
                 members=member_ds,
                 is_lead=True,
                 task_id=task_id,
                 run_dir=lead_cwd,
                 brief=lead_brief,
-                workspace_name=ws_row.name,
-                workspace_instructions_md=workspace_instructions_md,
+                project_name=ws_row.name,
+                project_instructions_md=project_instructions_md,
                 dispatch_mode="async",
                 goal_mode=True,
                 plan_pre_committed=True,  # ← key flag (VALUZ-CHATPLAN D10)
@@ -435,20 +469,19 @@ class TaskOrchestrator:
             )
             if lead_session is None:
                 return {"error": f"could not build lead session for {lead_slug!r}"}
-            if lead_clone_id is not None:
-                from dataclasses import replace as _replace
-
-                lead_session = _replace(lead_session, agent_id=lead_clone_id)
+            if lead_clone is not None:
+                lead_session = embed_agent_config(lead_session, lead_clone)
 
             gap = await _credential_gap(lead_session, lead_slug, db=db)
             if gap is not None:
                 return {"error": f"commit_task: {gap}"}
 
-            await kernel_store.save_session(lead_session)
+            await kernel_client.create_session(require_current_user_id(), lead_session)
+            await project_index.record(project_id, lead_session.id, kind="task_lead", origin="task")
 
             # DB writes: create lead run row + flip task status + append event
             lead_run = TaskSessionRow(
-                workspace_id=workspace_id,
+                project_id=project_id,
                 task_id=task_id,
                 session_id=lead_session.id,
                 agent_slug=lead_slug,
@@ -457,10 +490,10 @@ class TaskOrchestrator:
                 status="active",
                 label="Committed",
                 goal=task_row.goal,
-                workspace_mode="shared",
+                project_mode="shared",
                 run_dir=lead_cwd,
             )
-            await run_ds.create_run(lead_run)
+            await run_ds.create_run(require_current_user_id(), lead_run)
 
             committed_at = now_ms()
             task_row.status = "active"
@@ -476,7 +509,8 @@ class TaskOrchestrator:
             await task_ds.update_task(task_row)
 
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="committed",
                 actor=caller_session_id,
@@ -500,7 +534,7 @@ class TaskOrchestrator:
                 initial_prompt=lead_brief,
                 role="lead",
                 task_id=task_id,
-                workspace_id=workspace_id,
+                project_id=project_id,
             )
         )
 
@@ -515,7 +549,7 @@ class TaskOrchestrator:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         caller_session_id: str,
         reason: str = "",
     ) -> dict[str, Any]:
@@ -528,7 +562,9 @@ class TaskOrchestrator:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
 
-            task_row = await task_ds.get_task_by_workspace(workspace_id, task_id)
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found"}
             if task_row.status != "draft":
@@ -542,7 +578,8 @@ class TaskOrchestrator:
             task_row.status = "abandoned"
             await task_ds.update_task(task_row)
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="abandoned",
                 actor=caller_session_id,
@@ -559,13 +596,13 @@ class TaskOrchestrator:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         lead_session_id: str,
         subtask_key: str,
         agent: str | None = None,
         goal: str | None = None,
         refs: list[str] | None = None,
-        workspace_mode: str | None = None,
+        project_mode: str | None = None,
     ) -> dict[str, Any]:
         """Dispatch one planned subtask (by key) and await its completion.
 
@@ -578,13 +615,13 @@ class TaskOrchestrator:
         """
         return await self._dispatcher.dispatch(
             task_id=task_id,
-            workspace_id=workspace_id,
+            project_id=project_id,
             lead_session_id=lead_session_id,
             subtask_key=subtask_key,
             agent=agent,
             goal=goal,
             refs=refs,
-            workspace_mode=workspace_mode,
+            project_mode=project_mode,
         )
 
     # ------------------------------------------------------------------
@@ -595,7 +632,7 @@ class TaskOrchestrator:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         lead_session_id: str,
         keys: list[str],
     ) -> list[dict[str, Any]]:
@@ -610,7 +647,7 @@ class TaskOrchestrator:
         """
         return await self._dispatcher.dispatch_batch(
             task_id=task_id,
-            workspace_id=workspace_id,
+            project_id=project_id,
             lead_session_id=lead_session_id,
             keys=keys,
         )
@@ -635,7 +672,7 @@ class TaskOrchestrator:
         initial_prompt: str,
         role: Literal["lead", "subtask"],
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         idle_ttl: float | None = None,
     ) -> None:
         """Persistent actor loop: run turn → idle → await mailbox → repeat.
@@ -650,7 +687,7 @@ class TaskOrchestrator:
             initial_prompt=initial_prompt,
             role=role,
             task_id=task_id,
-            workspace_id=workspace_id,
+            project_id=project_id,
             idle_ttl=idle_ttl,
         )
 
@@ -668,198 +705,32 @@ class TaskOrchestrator:
         """
         await self._coordination._notify_lead_member_idle(session_id, status)
 
-    async def _lead_idle_with_no_pending(self, task_id: str, workspace_id: str) -> bool:
+    async def _lead_idle_with_no_pending(self, task_id: str, project_id: str) -> bool:
         """True when a lead has nothing left to wait for after a turn.
 
         Thin delegator onto :class:`CoordinationService` (ADR-023 Step 3b).
         Kept as a method so the actor loop drives it via the bound host (and
         tests can stub ``orch._lead_idle_with_no_pending``).
         """
-        return await self._coordination._lead_idle_with_no_pending(task_id, workspace_id)
-
-    @staticmethod
-    def _last_assistant_summary(session_id: str) -> str:
-        """Best-effort last assistant-message text, for an auto-finalize summary."""
-        try:
-            events = kernel_sync.get_events_sync(session_id, limit=200)
-            for event in reversed(events):
-                payload = event.data if hasattr(event, "data") else {}
-                if event.type in ("assistant_message", "text_delta", "content_block"):
-                    text = payload.get("text") or payload.get("content") or ""
-                    if text:
-                        return str(text)[:2000]
-        except Exception:  # noqa: BLE001
-            logger.debug("auto-finalize: summary extract failed for %s", session_id)
-        return ""
+        return await self._coordination._lead_idle_with_no_pending(task_id, project_id)
 
     async def _auto_finalize_lead_task(
         self,
         *,
         lead_session_id: str,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         final_status: str,
     ) -> None:
-        """Close a task when its lead actor-loop ends without an explicit
-        ``finish_task`` call.
-
-        ``finish_task`` is the authoritative terminal, but a goal-mode lead
-        often satisfies a simple goal inline (does the work itself), the goal
-        evaluator auto-exits to default, and the loop ends at idle-TTL — never
-        calling finish_task. Without this the task is orphaned ``active``
-        forever. Restores the original §7.3 intent ("lead session naturally
-        ends → task_completed"). Disposition:
-          - status != active   → no-op (finish_task / stop / intervene won);
-          - members in flight   → no-op (defensive; not the terminal moment);
-          - turn errored (final_status terminated/error OR session.stop_reason
-            is an error — an errored turn can still leave status "idle") →
-            ``failed`` (never "completed"!);
-          - plan has unresolved nodes (no error) → ``blocked``;
-          - else → ``completed`` (summary = lead's last assistant message).
-        """
-        async with async_unit_of_work() as db:
-            task_ds = TaskDatastore(db)
-            event_ds = TaskEventDatastore(db)
-            run_ds = TaskSessionDatastore(db)
-
-            task = await task_ds.get_task_by_workspace(workspace_id, task_id)
-            if task is None or task.status != "active":
-                return  # already closed by finish_task / stop / intervene
-            if self._members.has_live_members(task_id):
-                return  # members still running — not the lead's terminal moment
-
-            try:
-                plan = TaskPlan.from_dict(task.plan)
-                unresolved = [
-                    n.key
-                    for n in plan.nodes
-                    if n.status in ("planned", "in_progress", "in_review", "rework")
-                ]
-            except PlanError:
-                unresolved = []
-
-            # A turn can ERROR yet still leave session.status == "idle" — the
-            # failure lives in stop_reason (e.g. a skill-materialization crash
-            # reports stop_reason.type=="error" with status idle and 0 assistant
-            # output). So check the driver's final_status AND the session's
-            # stop_reason; never mark an errored turn "completed".
-            error_msg: str | None = None
-            if final_status in ("terminated", "error"):
-                error_msg = f"lead turn ended with status={final_status}"
-            else:
-                try:
-                    sess = await kernel_store.load_session(lead_session_id)
-                    sr = getattr(sess, "stop_reason", None) if sess is not None else None
-                    if sr:
-                        typ = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
-                        if typ == "error" or (isinstance(typ, str) and "error" in typ):
-                            msg = (
-                                sr.get("message")
-                                if isinstance(sr, dict)
-                                else getattr(sr, "message", None)
-                            )
-                            error_msg = str(msg or "lead turn errored")
-                except Exception:  # noqa: BLE001
-                    logger.debug("auto-finalize: stop_reason check failed for %s", lead_session_id)
-
-            if error_msg and not unresolved:
-                # Lead turn errored BEFORE producing any plan nodes — there's
-                # no in-flight or half-done work the ``blocked`` state would
-                # protect, so locking the task here forces an
-                # unnecessary ``resume_task`` ceremony for what is effectively
-                # still a fresh kickoff. Common trigger from a real bug
-                # report (2026-05-29): an automation-fired lead session
-                # entered Claude Agent SDK's ``EnterPlanMode`` + spawned a
-                # nested ``Agent`` subagent that hung; the SDK cancelled the
-                # turn ~3.5 minutes later (``stop_reason.type='error',
-                # category='user_interrupt', message='cancelled'``); plan was
-                # still empty. With the old logic this immediately blocked
-                # the task and the lead's next turn (driven by the user
-                # opening the conversation to ask "why didn't you plan?")
-                # hit ``plan is read-only`` on the very first plan_task call.
-                #
-                # New behaviour: keep task ``active`` so the next driver
-                # (user message → kernel send_message → fresh turn; OR the
-                # next automation fire → fresh lead session) picks it up
-                # cleanly. The turn error is still surfaced via logger so
-                # backend.log retains the audit trail; no ``task_blocked``
-                # event is emitted because the task isn't actually blocked
-                # (no work pending, status unchanged).
-                logger.warning(
-                    "auto-finalize: task %s lead turn errored with empty plan "
-                    "(%s) — staying active for next driver",
-                    task_id,
-                    error_msg,
-                )
-                return
-
-            if error_msg:
-                # Lead turn errored out mid-task. Per task_state.py: task-level
-                # ``failed`` is intentionally not in the enum — this scenario
-                # maps to ``blocked`` (recoverable; the lead crashed but the
-                # plan is intact, user can resume by re-engaging chat or
-                # creating a new lead session). The ``reason`` payload tags
-                # this as a lead-turn-error to distinguish from the
-                # unresolved-subtasks-no-error blocked case below.
-                await task_ds.update_task_status(task_id, "blocked")
-                await event_ds.append_event(
-                    workspace_id=workspace_id,
-                    task_id=task_id,
-                    type="task_blocked",
-                    actor=lead_session_id,
-                    session_id=lead_session_id,
-                    payload={
-                        "reason": "lead_turn_error",
-                        "error": error_msg,
-                        "pending_subtasks": unresolved,
-                    },
-                )
-                logger.warning(
-                    "auto-finalize: task %s -> blocked (lead turn error: %s)", task_id, error_msg
-                )
-                return
-            if unresolved:
-                # Lead stopped with planned work undispatched — surface as blocked
-                # (not a hard error, but not done either).
-                await task_ds.update_task_status(task_id, "blocked")
-                await event_ds.append_event(
-                    workspace_id=workspace_id,
-                    task_id=task_id,
-                    type="task_blocked",
-                    actor=lead_session_id,
-                    session_id=lead_session_id,
-                    payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
-                )
-                logger.warning(
-                    "auto-finalize: task %s -> blocked (unresolved=%s); lead ended without "
-                    "finish_task",
-                    task_id,
-                    unresolved,
-                )
-                return
-
-            summary = self._last_assistant_summary(lead_session_id) or (
-                "(auto-finalized) Lead ended its turn with no pending subtasks; "
-                "task closed automatically."
-            )
-            await task_ds.update_task_status(task_id, "completed")
-            await run_ds.update_run_by_session(
-                session_id=lead_session_id,
-                status="completed",
-                ended_at=now_ms(),
-            )
-            await event_ds.append_event(
-                workspace_id=workspace_id,
-                task_id=task_id,
-                type="task_completed",
-                actor=lead_session_id,
-                session_id=lead_session_id,
-                payload={"summary": summary, "artifacts": [], "auto_finalized": True},
-            )
-            logger.info(
-                "auto-finalize: task %s completed (lead natural end, no explicit finish_task)",
-                task_id,
-            )
+        """Host-side terminal fallback when a lead loop ends without finish_task
+        (ADR-023 Step 3c). Thin delegator onto :class:`LifecycleService` (kept as
+        a method so the loop seam + tests can drive ``orch._auto_finalize_lead_task``)."""
+        await self._lifecycle._auto_finalize_lead_task(
+            lead_session_id=lead_session_id,
+            task_id=task_id,
+            project_id=project_id,
+            final_status=final_status,
+        )
 
     # ------------------------------------------------------------------
     # Stop / resume (VALUZ-RESUME)
@@ -874,21 +745,29 @@ class TaskOrchestrator:
         Best-effort + idempotent (re-running converges on current run/node state).
         """
         async with async_unit_of_work(commit=False) as db:
-            task_ids = [(t.id, t.workspace_id) for t in await TaskDatastore(db).list_active()]
+            # Cross-owner boot sweep: capture each task's owner so per-task
+            # recovery runs under that owner (downstream reads are owner-scoped
+            # via require_current_user_id()).
+            active = [
+                (t.id, t.project_id, t.user_id) for t in await TaskDatastore(db).list_active()
+            ]
         recovered = 0
-        for task_id, workspace_id in task_ids:
+        for task_id, project_id, user_id in active:
+            token = set_current_user_id(user_id)
             try:
-                if await self._recover_one_task(task_id, workspace_id):
+                if await self._recover_one_task(task_id, project_id):
                     recovered += 1
             except Exception:  # noqa: BLE001
                 logger.exception("recover_active_tasks: failed for task %s", task_id)
+            finally:
+                reset_current_user_id(token)
         if recovered:
             logger.warning(
                 "recover_active_tasks: reconciled + re-drove %d active task(s)", recovered
             )
         return recovered
 
-    async def _recover_one_task(self, task_id: str, workspace_id: str) -> bool:
+    async def _recover_one_task(self, task_id: str, project_id: str) -> bool:
         """Reconcile one active task's members + re-drive its lead.
 
         Used by both Layer 1 (startup) and Layer 2 (user 'resume'). Returns False
@@ -898,7 +777,10 @@ class TaskOrchestrator:
         from valuz_agent.modules.tasks.recovery import reconcile
 
         member_done: list[tuple[str, dict[str, Any]]] = []
-        resume_members: list[tuple[str, str]] = []  # (session_id, brief)
+        # (session_id, brief, run_dir, agent_slug, subtask_key) — run_dir + slug
+        # + key let us spill an over-cap resume brief to a doc before re-injecting
+        # it into the member's goal-mode session.
+        resume_members: list[tuple[str, str, str, str, str]] = []
         summary: list[str] = []
         lead_session_id: str | None = None
 
@@ -906,10 +788,10 @@ class TaskOrchestrator:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)
             event_ds = TaskEventDatastore(db)
-            task = await task_ds.get_task_by_workspace(workspace_id, task_id)
+            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
             if task is None or task.status not in ("active", "paused"):
                 return False
-            runs = await run_ds.list_runs(task_id)
+            runs = await run_ds.list_runs(require_current_user_id(), task_id)
             lead_run = next((r for r in runs if r.kind == "lead"), None)
             if lead_run is None:
                 return False
@@ -920,7 +802,7 @@ class TaskOrchestrator:
             for run in runs:
                 if run.kind != "subtask" or run.status not in ("active", "paused"):
                     continue
-                ks = await kernel_store.load_session(run.session_id)
+                ks = await kernel_client.get_session(require_current_user_id(), run.session_id)
                 node = plan.get(run.subtask_key) if run.subtask_key else None
                 rec = reconcile(
                     getattr(ks, "status", None) if ks is not None else None,
@@ -930,7 +812,7 @@ class TaskOrchestrator:
                 manifest: dict[str, Any] | None = None
                 if rec.disposition == "completed":
                     try:
-                        manifest = collect_manifest(
+                        manifest = await collect_manifest(
                             run.session_id, Path(run.run_dir) if run.run_dir else Path(), "idle"
                         )
                     except Exception:  # noqa: BLE001
@@ -955,7 +837,15 @@ class TaskOrchestrator:
                 if rec.deliver_member_done and manifest is not None:
                     member_done.append((run.session_id, manifest))
                 if rec.resume:
-                    resume_members.append((run.session_id, run.goal or ""))
+                    resume_members.append(
+                        (
+                            run.session_id,
+                            run.goal or "",
+                            run.run_dir or "",
+                            run.agent_slug or "",
+                            run.subtask_key or "",
+                        )
+                    )
                 summary.append(f"- {run.subtask_key}({run.agent_slug}): {rec.disposition}")
 
             if plan_dirty:
@@ -963,7 +853,7 @@ class TaskOrchestrator:
                 await task_ds.update_task(task)
                 await planning.emit_plan_update(
                     event_ds,
-                    workspace_id=workspace_id,
+                    project_id=project_id,
                     task_id=task_id,
                     plan=plan,
                     actor="system",
@@ -983,11 +873,7 @@ class TaskOrchestrator:
         # the cache is empty so it's a harmless no-op.
         async def _evict_runtime(sid: str) -> None:
             try:
-                from app.dependencies import (  # type: ignore[import-not-found]
-                    get_orchestrator,
-                )
-
-                await get_orchestrator().cleanup(sid)
+                await kernel_client.cleanup_runtime(sid)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1000,16 +886,28 @@ class TaskOrchestrator:
                 lead_session_id,
                 InboxMsg(kind="member_done", from_session=member_sid, payload=manifest),
             )
-        for member_sid, brief in resume_members:
+        for member_sid, brief, m_run_dir, m_slug, m_key in resume_members:
             await _evict_runtime(member_sid)
             self._members.add_member(task_id, member_sid)
+            resume_prompt = brief or "继续完成你的子任务,完成后会汇报给 lead。"
+            # Fence the goal-mode re-injection: an over-cap subtask goal would
+            # blow the ``/goal`` payload again on resume — spill it to a doc and
+            # re-inject a short pointer instead (same fence as first dispatch).
+            if brief and m_run_dir:
+                resume_prompt = spill_goal_brief_if_too_long(
+                    brief,
+                    run_dir=m_run_dir,
+                    task_id=task_id,
+                    label=f"{m_slug}-{m_key}",
+                    is_lead=False,
+                )
             asyncio.create_task(
                 self.run_actor_loop(
                     session_id=member_sid,
-                    initial_prompt=brief or "继续完成你的子任务,完成后会汇报给 lead。",
+                    initial_prompt=resume_prompt,
                     role="subtask",
                     task_id=task_id,
-                    workspace_id=workspace_id,
+                    project_id=project_id,
                 )
             )
         await _evict_runtime(lead_session_id)
@@ -1025,7 +923,7 @@ class TaskOrchestrator:
                 initial_prompt=lead_brief,
                 role="lead",
                 task_id=task_id,
-                workspace_id=workspace_id,
+                project_id=project_id,
             )
         )
         return True
@@ -1042,14 +940,12 @@ class TaskOrchestrator:
         ``shutdown`` mailbox message is what stops its actor loop instead.
         """
         try:
-            from app.dependencies import get_orchestrator  # type: ignore[import-not-found]
-
-            await get_orchestrator().interrupt(session_id)
+            await kernel_client.interrupt(require_current_user_id(), session_id)
         except Exception:  # noqa: BLE001
             logger.warning("interrupt failed for session %s", session_id, exc_info=True)
 
     async def stop_task(
-        self, task_id: str, workspace_id: str, *, target_status: str = "paused"
+        self, task_id: str, project_id: str, *, target_status: str = "paused"
     ) -> bool:
         """User-initiated cascade halt → ``paused`` (pause) or ``stopped`` (stop).
 
@@ -1073,14 +969,14 @@ class TaskOrchestrator:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)
             event_ds = TaskEventDatastore(db)
-            task = await task_ds.get_task_by_workspace(workspace_id, task_id)
+            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
             if task is None:
                 return False
             # pause: only an active task. stop: an active OR already-paused task.
             allowed_from = ("active",) if target_status == "paused" else ("active", "paused")
             if task.status not in allowed_from:
                 return False
-            runs = await run_ds.list_runs(task_id)
+            runs = await run_ds.list_runs(require_current_user_id(), task_id)
             lead_session_id: str | None = next(
                 (r.session_id for r in runs if r.kind == "lead"), None
             )
@@ -1110,14 +1006,15 @@ class TaskOrchestrator:
             if parked:
                 await planning.emit_plan_update(
                     event_ds,
-                    workspace_id=workspace_id,
+                    project_id=project_id,
                     task_id=task_id,
                     plan=plan,
                     actor="user",
                     session_id=lead_session_id,
                 )
             await event_ds.append_event(
-                workspace_id,
+                require_current_user_id(),
+                project_id,
                 task_id,
                 target_status,  # "paused" | "stopped" — drives UI status + timer
                 actor="user",
@@ -1139,7 +1036,7 @@ class TaskOrchestrator:
     async def resume_task(
         self,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         *,
         actor: str = "user",
     ) -> dict[str, Any]:
@@ -1186,7 +1083,7 @@ class TaskOrchestrator:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
-            task = await task_ds.get_task_by_workspace(workspace_id, task_id)
+            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
             if task is None:
                 return {"ok": False, "error": f"task {task_id!r} not found", "prior_status": None}
             prior_status = task.status
@@ -1207,14 +1104,14 @@ class TaskOrchestrator:
             # Belt-and-suspenders: confirm the transition the state machine
             # accepts. paused/blocked/stopped/completed → active are all legal.
             assert_transition(prior_status, "active")
-            await task_ds.update_task_status(task_id, "active")
+            await task_ds.update_task_status(require_current_user_id(), task_id, "active")
             # When reviving a stopped OR completed task: finish_task previously
             # marked the lead run as "completed" and broadcast shutdown to
             # members. _recover_one_task respawns the lead unconditionally, but
             # the run row still showing "completed" would lie about reality —
             # fix it so listings + UI reflect the live state.
             if prior_status in ("stopped", "completed"):
-                runs = await run_ds.list_runs(task_id)
+                runs = await run_ds.list_runs(require_current_user_id(), task_id)
                 lead_run = next((r for r in runs if r.kind == "lead"), None)
                 if lead_run is not None and lead_run.status != "active":
                     await run_ds.update_run_by_session(
@@ -1223,9 +1120,14 @@ class TaskOrchestrator:
                         ended_at=None,
                     )
             await event_ds.append_event(
-                workspace_id, task_id, "resumed", actor=actor, payload={"from": prior_status}
+                require_current_user_id(),
+                project_id,
+                task_id,
+                "resumed",
+                actor=actor,
+                payload={"from": prior_status},
             )
-        ok = await self._recover_one_task(task_id, workspace_id)
+        ok = await self._recover_one_task(task_id, project_id)
         return {"ok": ok, "prior_status": prior_status, "resumed": ok}
 
     async def stop_member(self, session_id: str) -> bool:
@@ -1246,13 +1148,15 @@ class TaskOrchestrator:
             if run is None or run.kind != "subtask":
                 return False
             task_id = run.task_id or ""
-            workspace_id = run.workspace_id
+            project_id = run.project_id
             lead_session_id = run.dispatched_by or ""
             subtask_key = run.subtask_key
             agent_slug = run.agent_slug
             await run_ds.update_run_by_session(session_id=session_id, status="rejected")
             if subtask_key:
-                task = await task_ds.get_task_by_workspace(workspace_id, task_id)
+                task = await task_ds.get_task_by_project(
+                    require_current_user_id(), project_id, task_id
+                )
                 if task is not None:
                     plan = TaskPlan.from_dict(task.plan)
                     if plan.get(subtask_key) is not None:
@@ -1265,14 +1169,15 @@ class TaskOrchestrator:
                         await task_ds.update_task(task)
                         await planning.emit_plan_update(
                             event_ds,
-                            workspace_id=workspace_id,
+                            project_id=project_id,
                             task_id=task_id,
                             plan=plan,
                             actor="user",
                             session_id=lead_session_id or None,
                         )
             await event_ds.append_event(
-                workspace_id,
+                require_current_user_id(),
+                project_id,
                 task_id,
                 "subtask_stopped",
                 actor="user",
@@ -1306,132 +1211,37 @@ class TaskOrchestrator:
         final_status: str,
         role: Literal["lead", "subtask"],
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         via_shutdown: bool = False,
     ) -> None:
-        """Finalize a session once its actor loop ends; record member result.
+        """Finalize a session once its actor loop ends (ADR-023 Step 3c).
 
-        Each step is independent and best-effort: a slow/failed kernel finalize
-        or manifest scan must never prevent the terminal run record from being
-        written, otherwise a member is left stuck "active". The terminal write
-        is the last and most important step. Concurrent member completions
-        (from a finish_task shutdown burst) re-sequence safely inside
-        ``append_event`` (retry on the sequence unique-constraint collision).
+        Thin delegator onto :class:`LifecycleService`, which owns the single
+        implementation. Kept as a method so the ActorRunner can drive it via the
+        bound host (``run_actor_loop``'s ``finally`` resolves ``_finalize_actor``
+        onto this orchestrator).
         """
-        from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
-
-        try:
-            await _finalize_session(session_id, last_content, final_status)
-        except Exception:  # noqa: BLE001
-            logger.exception("_finalize_actor: finalize failed for %s", session_id)
-
-        try:
-            from valuz_agent.adapters.broadcast_sink import cleanup_session
-
-            await cleanup_session(session_id)
-        except Exception:  # noqa: BLE001
-            pass
-
-        if role == "lead":
-            # A ``shutdown``-triggered exit (pause / stop / finish_task
-            # broadcast) is externally managed: stop_task already set the task
-            # paused/stopped, finish_task set it terminal. Running auto-finalize
-            # here would race a concurrent resume (a rapid pause→resume flips the
-            # task back to ``active`` before this old loop's finalize runs, and
-            # auto-finalize then wrongly ``blocked``s the freshly-resumed task).
-            # Only NATURAL exits (idle-TTL / end_turn / terminal status) should
-            # auto-close the task.
-            if via_shutdown:
-                return
-            # Host-side terminal fallback: a lead loop can end (goal auto-exit
-            # to default, idle-TTL, normal end_turn) WITHOUT the model calling
-            # finish_task — common when a goal-mode lead satisfies a simple goal
-            # inline. finish_task is the only thing that closes the task, so
-            # without this the task is orphaned "active" forever (see the live
-            # 美湖/news-reporter case). Close it here based on the plan state.
-            await self._auto_finalize_lead_task(
-                lead_session_id=session_id,
-                task_id=task_id,
-                workspace_id=workspace_id,
-                final_status=final_status,
-            )
-            return
-
-        # Drop from the live-member set and write the terminal run record.
-        self._members.discard_member(task_id, session_id)
-        since = self._members.pop_dispatch_started(session_id)
-        try:
-            async with async_unit_of_work() as db:
-                run_ds = TaskSessionDatastore(db)
-                event_ds = TaskEventDatastore(db)
-                run = await run_ds.get_run(session_id)
-                run_dir = Path(run.run_dir) if run and run.run_dir else Path()
-                agent_slug = run.agent_slug if run else ""
-
-                # Manifest is best-effort — never let it block the terminal write.
-                try:
-                    manifest = collect_manifest(
-                        session_id, run_dir, final_status, since_epoch=since
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception("_finalize_actor: manifest failed for %s", session_id)
-                    manifest = {"session_id": session_id, "status": final_status, "summary": ""}
-                manifest["agent"] = agent_slug
-
-                ok = final_status not in ("terminated", "error")
-                await run_ds.update_run_by_session(
-                    session_id=session_id,
-                    status="completed" if ok else "archived",
-                    result_manifest=manifest,
-                    ended_at=now_ms(),
-                )
-                # Review model (VALUZ-TASK §6.1): the actor loop ending is NOT
-                # subtask completion — the lead decides that via review_subtask. We
-                # only surface a terminal *failure* (terminated/error) here, and
-                # mark the plan node failed so the lead/panel sees it. A clean loop
-                # exit (idle-TTL / finish_task shutdown) emits no completion event;
-                # the node's status was already set by review / _mark_in_review.
-                if not ok:
-                    key = run.subtask_key if run else None
-                    if key:
-                        task_ds = TaskDatastore(db)
-                        task_row = await task_ds.get_task_by_workspace(workspace_id, task_id)
-                        if task_row is not None:
-                            plan = TaskPlan.from_dict(task_row.plan)
-                            if plan.get(key) is not None:
-                                plan.update_node(key, status="failed")
-                                task_row.plan = plan.to_dict()
-                                await task_ds.update_task(task_row)
-                                await planning.emit_plan_update(
-                                    event_ds,
-                                    workspace_id=workspace_id,
-                                    task_id=task_id,
-                                    plan=plan,
-                                    actor=agent_slug,
-                                    session_id=session_id,
-                                )
-                    await event_ds.append_event(
-                        workspace_id=workspace_id,
-                        task_id=task_id,
-                        type="subtask_failed",
-                        actor=agent_slug,
-                        session_id=session_id,
-                        payload={**manifest, **({"subtask_key": key} if key else {})},
-                    )
-        except Exception:  # noqa: BLE001
-            logger.exception("_finalize_actor: failed to record terminal run for %s", session_id)
+        await self._lifecycle._finalize_actor(
+            session_id=session_id,
+            last_content=last_content,
+            final_status=final_status,
+            role=role,
+            task_id=task_id,
+            project_id=project_id,
+            via_shutdown=via_shutdown,
+        )
 
     async def dispatch_async(
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         lead_session_id: str,
         subtask_key: str,
         agent: str | None = None,
         goal: str | None = None,
         refs: list[str] | None = None,
-        workspace_mode: str | None = None,
+        project_mode: str | None = None,
     ) -> dict[str, Any]:
         """Start a planned subtask's member actor (non-blocking); return its handle.
 
@@ -1444,13 +1254,13 @@ class TaskOrchestrator:
         """
         return await self._dispatcher.dispatch_async(
             task_id=task_id,
-            workspace_id=workspace_id,
+            project_id=project_id,
             lead_session_id=lead_session_id,
             subtask_key=subtask_key,
             agent=agent,
             goal=goal,
             refs=refs,
-            workspace_mode=workspace_mode,
+            project_mode=project_mode,
         )
 
     # send_to_member / inject_into_task implementations live in
@@ -1464,7 +1274,7 @@ class TaskOrchestrator:
         self,
         *,
         lead_session_id: str,
-        workspace_id: str,
+        project_id: str,
         task_id: str,
         keys: list[str] | None = None,
         mode: str = "all",
@@ -1479,7 +1289,7 @@ class TaskOrchestrator:
         """
         return await self._coordination.await_member_results(
             lead_session_id=lead_session_id,
-            workspace_id=workspace_id,
+            project_id=project_id,
             task_id=task_id,
             keys=keys,
             mode=mode,
@@ -1490,7 +1300,7 @@ class TaskOrchestrator:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         pending_keys: set[str],
     ) -> dict[str, dict[str, Any]]:
         """Backstop for bad-case #3 (VALUZ-RESUME §5.4): a member whose kernel
@@ -1502,7 +1312,7 @@ class TaskOrchestrator:
         """
         return await self._coordination._heartbeat_pending(
             task_id=task_id,
-            workspace_id=workspace_id,
+            project_id=project_id,
             pending_keys=pending_keys,
         )
 
@@ -1523,7 +1333,7 @@ class TaskOrchestrator:
         self,
         *,
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         lead_session_id: str,
         summary: str,
         artifacts: list[str] | None = None,
@@ -1570,7 +1380,9 @@ class TaskOrchestrator:
 
             # Guard: don't let a "completed" finish leave planned work behind.
             if final_status == "completed":
-                task_row = await task_ds.get_task_by_workspace(workspace_id, task_id)
+                task_row = await task_ds.get_task_by_project(
+                    require_current_user_id(), project_id, task_id
+                )
                 if task_row is not None:
                     plan = TaskPlan.from_dict(task_row.plan)
                     unresolved = [
@@ -1593,7 +1405,7 @@ class TaskOrchestrator:
                         }
 
             if rejected is None:
-                await task_ds.update_task_status(task_id, final_status)
+                await task_ds.update_task_status(require_current_user_id(), task_id, final_status)
 
                 # Mark lead run as completed
                 await run_ds.update_run_by_session(
@@ -1603,7 +1415,8 @@ class TaskOrchestrator:
                 )
 
                 await event_ds.append_event(
-                    workspace_id=workspace_id,
+                    require_current_user_id(),
+                    project_id=project_id,
                     task_id=task_id,
                     type=event_type,
                     actor=lead_session_id,
@@ -1624,10 +1437,9 @@ class TaskOrchestrator:
         # and so a re-opened conversation on this session isn't stuck in
         # goal mode. Best-effort — a missing session is not fatal here.
         try:
-            lead_sess = await kernel_store.load_session(lead_session_id)
+            lead_sess = await kernel_client.get_session(require_current_user_id(), lead_session_id)
             if lead_sess is not None and getattr(lead_sess, "mode", "default") != "default":
-                lead_sess.mode = "default"
-                await kernel_store.save_session(lead_sess)
+                await kernel_client.set_mode(require_current_user_id(), lead_session_id, "default")
         except Exception:  # noqa: BLE001 — terminal bookkeeping, never block close
             logger.warning(
                 "finish_task: could not reset lead session %s mode to default",
@@ -1644,6 +1456,68 @@ class TaskOrchestrator:
         return {"ok": True, "status": final_status}
 
     # ------------------------------------------------------------------
+    # update_deliverable — refresh the deliverable card after the task is
+    # completed (post-completion follow-up chat). Append-only: emits a
+    # ``deliverable_updated`` event the detail page reads as the latest
+    # deliverable, without mutating the original ``task_completed`` event.
+    # Does NOT touch task status / plan / runs — the task stays completed.
+    # ------------------------------------------------------------------
+
+    async def update_deliverable(
+        self,
+        *,
+        task_id: str,
+        project_id: str,
+        lead_session_id: str,
+        summary: str,
+        artifacts: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Refresh the deliverable card on a completed task (follow-up chat).
+
+        Append-only: emits a ``deliverable_updated`` event carrying the latest
+        ``summary`` / ``artifacts`` without mutating the original
+        ``task_completed`` event or the task's status / plan / runs — the task
+        stays ``completed``. The caller is the lead session. Returns a result
+        dict (``status`` ``"updated"`` or ``"rejected"``) rather than raising,
+        mirroring the sibling ``finish_task`` tool-facing method.
+        """
+        async with async_unit_of_work() as db:
+            task_ds = TaskDatastore(db)
+            event_ds = TaskEventDatastore(db)
+
+            task_row = await task_ds.get_task_by_project(
+                require_current_user_id(), project_id, task_id
+            )
+            if task_row is None:
+                return {
+                    "ok": False,
+                    "error": f"update_deliverable: task {task_id!r} not found",
+                    "status": "rejected",
+                }
+            if task_row.status != "completed":
+                return {
+                    "ok": False,
+                    "error": (
+                        "update_deliverable: task is "
+                        f"{task_row.status!r}; only a 'completed' task can "
+                        "refresh its deliverable card."
+                    ),
+                    "status": "rejected",
+                }
+
+            await event_ds.append_event(
+                require_current_user_id(),
+                project_id=project_id,
+                task_id=task_id,
+                type="deliverable_updated",
+                actor=lead_session_id,
+                session_id=lead_session_id,
+                payload={"summary": summary, "artifacts": artifacts or []},
+            )
+
+        return {"ok": True, "status": "updated"}
+
+    # ------------------------------------------------------------------
     # Plan / review — lead orchestration (VALUZ-TASK)
     # ------------------------------------------------------------------
 
@@ -1656,9 +1530,9 @@ class TaskOrchestrator:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _materialize_lead_agent(
+    async def _materialize_lead_agent(
         self, base_agent: Any, dispatch_mode: Literal["sync", "async"] = "sync"
-    ) -> str:  # returns the lead-clone AgentConfig id
+    ) -> Any:  # returns the lead-clone AgentConfig
         """Materialize a per-task **lead clone** of *base_agent* and return its id.
 
         Tools live only on ``AgentConfig`` (the kernel has no per-session tool
@@ -1676,45 +1550,17 @@ class TaskOrchestrator:
         """
         from dataclasses import replace
 
-        from valuz_agent.modules.tasks.dispatch_mcp import (
-            DISPATCH_TOOL_DECLARATIONS,
-            LEAD_ONLY_TOOL_NAMES,
-            ORCHESTRATION_TOOL_NAMES,
-        )
-
-        # sync/async share one lead toolset (non-blocking dispatch +
-        # await_members + plan/review/finish); the modes differ only in the
-        # session driver (one-shot run_session_to_idle vs persistent actor loop).
-        declarations = DISPATCH_TOOL_DECLARATIONS
-        # Start from the base tools minus any dispatch/launcher tools, then add
-        # exactly this mode's dispatch declarations — so the clone never carries
-        # stale dispatch tools or the conversation-only launcher/observability
-        # tools (create_task / list_tasks / get_task / draft_task / commit_task /
-        # abandon_task).
-        #
-        # VALUZ-CHATPLAN S2: plan_task / modify_plan / get_plan are now also
-        # advertised on chat agents (via ORCHESTRATION_TOOL_DECLARATIONS) so a
-        # base chat agent might carry them. They are NOT in ``drop`` (they
-        # legitimately belong on the lead), so we'd duplicate them when we add
-        # DISPATCH_TOOL_DECLARATIONS. Also dedupe against the upcoming
-        # declarations' names so the clone advertises each tool exactly once.
-        decl_names = {getattr(d, "name", None) for d in declarations}
-        drop = LEAD_ONLY_TOOL_NAMES | ORCHESTRATION_TOOL_NAMES | decl_names
-        base_tools = tuple(
-            t for t in (base_agent.tools or ()) if getattr(t, "name", None) not in drop
-        )
-        # Lead sessions must also carry the always-on in-process baseline tools
-        # (memory + submit_skill). The base member agent normally already has
-        # them via _prepare_conversation_tools, but a base created before they
-        # landed would be missing them — ensure them on the clone too.
-        from valuz_agent.modules.agents.service import _ensure_global_tools_declared
-
+        # Tool surfaces ride the session's ``harness`` MCP entry now
+        # (``build_member_session(is_lead=True)`` points it at the ``lead``
+        # toolset of the host toolkit MCP server) — the clone carries no
+        # tool declarations of its own. It survives as an identity stamp:
+        # the ``__lead__{mode}`` id marks the embedded snapshot as a lead
+        # clone for queries/diagnostics.
         clone_id = f"{base_agent.id}__lead__{dispatch_mode}"
-        clone = _ensure_global_tools_declared(
-            replace(base_agent, id=clone_id, tools=base_tools + tuple(declarations))
-        )
-        kernel_sync.save_agent_sync(clone)
-        return clone_id
+        clone = replace(base_agent, id=clone_id, tools=())
+        # The clone exists only as the lead session's embedded snapshot —
+        # the kernel has no agents table to materialize it into.
+        return clone
 
 
 # ---------------------------------------------------------------------------

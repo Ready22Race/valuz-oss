@@ -1,13 +1,17 @@
 """Datastores for the Task, TaskEvent, and TaskSession tables.
 
-Naming mirrors modules/schedules/datastore.py:
-  list_*  → returns list
-  get_*   → returns Optional[Row]
-  create_*→ adds + commits, returns Row
-  update_*→ merge + commit, returns Row
+Owner model: user-facing list/get reads take the caller's ``user_id`` first and
+filter on it; writes stamp the owner explicitly. A few methods stay cross-owner
+on purpose:
 
-append_event() assigns a monotonic sequence per (workspace_id, task_id)
-by selecting MAX(sequence) + 1 within the task scope.
+- ``TaskDatastore.list_active`` — startup recovery resumes every owner's active
+  tasks (it threads each row's ``user_id`` downstream).
+- ``TaskSessionDatastore.get_run`` / ``update_run_by_session`` /
+  ``next_sequence`` — keyed on the globally-unique kernel ``session_id`` / run
+  id / per-task sequence; used by the runner + kernel-event finalization, not
+  user queries.
+
+``append_event`` assigns a monotonic sequence per (project_id, task_id).
 """
 
 from __future__ import annotations
@@ -27,10 +31,6 @@ from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionR
 
 logger = logging.getLogger(__name__)
 
-# Lock-contention retry budget. Under real parallel dispatch the host competes
-# with the kernel's high-frequency event-stream writes for SQLite's single
-# write slot. Exponential backoff + jitter over more attempts widens the window
-# AND de-correlates competing host writers so they stop losing in lock-step.
 _LOCK_RETRY_ATTEMPTS = 12
 
 
@@ -46,12 +46,12 @@ class TaskDatastore:
 
     # -- Queries --
 
-    async def list_tasks(self, workspace_id: str) -> list[TaskRow]:
+    async def list_tasks(self, user_id: str, project_id: str) -> list[TaskRow]:
         return list(
             (
                 await self._db.execute(
                     select(TaskRow)
-                    .filter_by(workspace_id=workspace_id)
+                    .where(TaskRow.project_id == project_id, TaskRow.user_id == user_id)
                     .order_by(TaskRow.created_at.desc())
                 )
             )
@@ -59,48 +59,71 @@ class TaskDatastore:
             .all()
         )
 
-    async def get_task(self, task_id: str) -> TaskRow | None:
-        return await self._db.get(TaskRow, task_id)
-
-    async def get_task_by_workspace(self, workspace_id: str, task_id: str) -> TaskRow | None:
+    async def get_task(self, user_id: str, task_id: str) -> TaskRow | None:
         return (
             (
                 await self._db.execute(
-                    select(TaskRow).filter_by(workspace_id=workspace_id, id=task_id)
+                    select(TaskRow).where(TaskRow.id == task_id, TaskRow.user_id == user_id)
                 )
             )
             .scalars()
             .first()
         )
 
-    async def list_all(self, limit: int | None = 50) -> list[TaskRow]:
-        """All tasks across every workspace, newest activity first.
+    async def get_titles_by_ids(self, user_id: str, task_ids: list[str]) -> dict[str, str]:
+        """Map task id → title for the given ids (used to label trigger provenance
+        — "由 任务《title》触发" — without N+1 lookups). Missing ids are omitted."""
+        if not task_ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(TaskRow.id, TaskRow.title).where(
+                    TaskRow.id.in_(task_ids), TaskRow.user_id == user_id
+                )
+            )
+        ).all()
+        return {tid: title for tid, title in rows}
 
-        Powers the sidebar TASKS section: a global, cross-project view of
-        "what's running / recently touched". ``limit`` matches the recents
-        rail cap (50) — older tasks stay reachable via per-project tabs.
-        Pass ``limit=None`` for the unbounded set (e.g. the activity overview,
-        which builds a lookup map keyed by task id and must resolve any task a
-        live session references).
+    async def get_task_by_project(
+        self, user_id: str, project_id: str, task_id: str
+    ) -> TaskRow | None:
+        return (
+            (
+                await self._db.execute(
+                    select(TaskRow).where(
+                        TaskRow.project_id == project_id,
+                        TaskRow.id == task_id,
+                        TaskRow.user_id == user_id,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
+    async def list_all(self, user_id: str, limit: int | None = 50) -> list[TaskRow]:
+        """The caller's tasks across all their projects, newest activity first.
+
+        Powers the sidebar TASKS section + activity overview. ``limit=None``
+        returns the unbounded set (activity builds a lookup map by task id).
         """
-        stmt = select(TaskRow).order_by(TaskRow.updated_at.desc())
+        stmt = select(TaskRow).where(TaskRow.user_id == user_id).order_by(TaskRow.updated_at.desc())
         if limit is not None:
             stmt = stmt.limit(limit)
         return list((await self._db.execute(stmt)).scalars().all())
 
     async def list_active(self) -> list[TaskRow]:
-        """All ``active`` tasks across every workspace (VALUZ-RESUME Layer 1).
-
-        Startup recovery only resumes ``active`` tasks — ``paused``/``stopped``
-        are intentional user stops, terminal states need no resume.
-        """
+        """SYSTEM SWEEP (cross-owner). All ``active`` tasks across every owner —
+        startup recovery (VALUZ-RESUME Layer 1) resumes each under its own owner
+        (the caller threads ``row.user_id``)."""
         return list(
             (await self._db.execute(select(TaskRow).filter_by(status="active"))).scalars().all()
         )
 
     # -- Commands --
 
-    async def create_task(self, row: TaskRow) -> TaskRow:
+    async def create_task(self, user_id: str, row: TaskRow) -> TaskRow:
+        row.user_id = user_id
         self._db.add(row)
         await async_commit_with_retry(self._db, where="TaskDatastore.create_task")
         return row
@@ -110,14 +133,12 @@ class TaskDatastore:
         await async_commit_with_retry(self._db, where="TaskDatastore.update_task")
         return row
 
-    async def update_task_status(
-        self,
-        task_id: str,
-        status: str,
-    ) -> bool:
+    async def update_task_status(self, user_id: str, task_id: str, status: str) -> bool:
         """Update task status. Returns True when the row was updated."""
         res = await self._db.execute(
-            update(TaskRow).where(TaskRow.id == task_id).values(status=status, updated_at=now_ms())
+            update(TaskRow)
+            .where(TaskRow.id == task_id, TaskRow.user_id == user_id)
+            .values(status=status, updated_at=now_ms())
         )
         await async_commit_with_retry(self._db, where="TaskDatastore.update_task_status")
         return bool(res.rowcount)
@@ -131,12 +152,16 @@ class TaskEventDatastore:
 
     # -- Queries --
 
-    async def list_events(self, workspace_id: str, task_id: str) -> list[TaskEventRow]:
+    async def list_events(self, user_id: str, project_id: str, task_id: str) -> list[TaskEventRow]:
         return list(
             (
                 await self._db.execute(
                     select(TaskEventRow)
-                    .filter_by(workspace_id=workspace_id, task_id=task_id)
+                    .where(
+                        TaskEventRow.project_id == project_id,
+                        TaskEventRow.task_id == task_id,
+                        TaskEventRow.user_id == user_id,
+                    )
                     .order_by(TaskEventRow.sequence)
                 )
             )
@@ -146,23 +171,22 @@ class TaskEventDatastore:
 
     async def list_events_after(
         self,
-        workspace_id: str,
+        user_id: str,
+        project_id: str,
         task_id: str,
         after_seq: int,
     ) -> list[TaskEventRow]:
-        """Return events strictly newer than ``after_seq``, ordered ascending.
-
-        Backing query for the ``GET /v1/tasks/{id}/events/stream`` SSE
-        endpoint — the iterator polls this on a tick and emits any
-        newly-arrived rows. Cursoring on ``sequence`` (monotonic per task)
-        is exact, no time-window gaps.
-        """
+        """Events strictly newer than ``after_seq`` (SSE cursor)."""
         return list(
             (
                 await self._db.execute(
                     select(TaskEventRow)
-                    .filter_by(workspace_id=workspace_id, task_id=task_id)
-                    .where(TaskEventRow.sequence > after_seq)
+                    .where(
+                        TaskEventRow.project_id == project_id,
+                        TaskEventRow.task_id == task_id,
+                        TaskEventRow.user_id == user_id,
+                        TaskEventRow.sequence > after_seq,
+                    )
                     .order_by(TaskEventRow.sequence)
                 )
             )
@@ -170,18 +194,25 @@ class TaskEventDatastore:
             .all()
         )
 
-    async def get_event(self, event_id: str) -> TaskEventRow | None:
-        return await self._db.get(TaskEventRow, event_id)
+    async def get_event(self, user_id: str, event_id: str) -> TaskEventRow | None:
+        return (
+            (
+                await self._db.execute(
+                    select(TaskEventRow).where(
+                        TaskEventRow.id == event_id, TaskEventRow.user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
 
-    async def latest_event(self, task_id: str) -> TaskEventRow | None:
-        """The most recent timeline event for a task (by sequence), across any
-        workspace. Powers the activity overview's per-task "last event" preview;
-        keyed on ``task_id`` alone since the caller has only that.
-        """
+    async def latest_event(self, user_id: str, task_id: str) -> TaskEventRow | None:
+        """The most recent timeline event for one of the caller's tasks."""
         return (
             await self._db.execute(
                 select(TaskEventRow)
-                .where(TaskEventRow.task_id == task_id)
+                .where(TaskEventRow.task_id == task_id, TaskEventRow.user_id == user_id)
                 .order_by(TaskEventRow.sequence.desc())
                 .limit(1)
             )
@@ -191,40 +222,32 @@ class TaskEventDatastore:
 
     async def append_event(
         self,
-        workspace_id: str,
+        user_id: str,
+        project_id: str,
         task_id: str,
         type: str,
         actor: str,
         session_id: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> TaskEventRow:
-        """Append an event with a monotonic sequence number per (workspace_id, task_id).
+        """Append an event with a monotonic sequence per (project_id, task_id).
 
-        The sequence is MAX(sequence)+1 within the task scope. This read-then-
-        write is NOT race-free: concurrent appends (e.g. a v2 lead firing two
-        ``dispatch_async`` calls in one turn) can compute the same next_seq and
-        collide on the ``(workspace_id, task_id, sequence)`` unique constraint.
-        We retry on that collision, recomputing the sequence each time, so a
-        loser re-sequences instead of failing (which previously orphaned the
-        caller's half-written row, e.g. a spawned run with no spawn event).
-
-        We ALSO retry on ``OperationalError: database is locked`` with a short
-        backoff. SQLite serializes writers; the sync host engine and the async
-        kernel engine share the file, and under concurrent dispatch a writer
-        can still time out past ``busy_timeout``.
+        Retries on the ``(project_id, task_id, sequence)`` unique-collision (a
+        loser re-sequences) and on SQLite ``database is locked``.
         """
         last_exc: Exception | None = None
         for attempt in range(_LOCK_RETRY_ATTEMPTS):
             max_seq = (
                 await self._db.execute(
                     select(func.max(TaskEventRow.sequence)).filter_by(
-                        workspace_id=workspace_id, task_id=task_id
+                        project_id=project_id, task_id=task_id
                     )
                 )
             ).scalar()
             next_seq = (max_seq or 0) + 1
             row = TaskEventRow(
-                workspace_id=workspace_id,
+                user_id=user_id,
+                project_id=project_id,
                 task_id=task_id,
                 sequence=next_seq,
                 type=type,
@@ -237,11 +260,9 @@ class TaskEventDatastore:
                 await self._db.commit()
                 return row
             except IntegrityError as exc:
-                # Sequence collision — recompute MAX(seq)+1 and retry.
                 await self._db.rollback()
                 last_exc = exc
             except OperationalError as exc:
-                # Write contention ("database is locked") — back off and retry.
                 await self._db.rollback()
                 last_exc = exc
                 if "locked" not in str(exc).lower():
@@ -267,12 +288,12 @@ class TaskSessionDatastore:
 
     # -- Queries --
 
-    async def list_runs(self, task_id: str) -> list[TaskSessionRow]:
+    async def list_runs(self, user_id: str, task_id: str) -> list[TaskSessionRow]:
         return list(
             (
                 await self._db.execute(
                     select(TaskSessionRow)
-                    .filter_by(task_id=task_id)
+                    .where(TaskSessionRow.task_id == task_id, TaskSessionRow.user_id == user_id)
                     .order_by(TaskSessionRow.sequence)
                 )
             )
@@ -280,28 +301,95 @@ class TaskSessionDatastore:
             .all()
         )
 
-    async def list_all(self) -> list[TaskSessionRow]:
-        """Every run index row across all tasks.
+    async def list_all(self, user_id: str) -> list[TaskSessionRow]:
+        """The caller's run-index rows across all tasks (activity overview)."""
+        return list(
+            (
+                await self._db.execute(
+                    select(TaskSessionRow).where(TaskSessionRow.user_id == user_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
 
-        Powers the activity overview, which keys runs by kernel ``session_id``
-        to classify each live session (lead vs. subtask) without a per-task
-        query.
+    async def get_task_status_by_session_ids(
+        self, user_id: str, session_ids: list[str]
+    ) -> dict[str, str]:
+        """Map run ``session_id`` → its owning task's current ``status``.
+
+        Batch join ``valuz_task_session`` → ``valuz_task`` for the given session
+        ids. Used by the automations activity log to surface a task automation's
+        *live* outcome (the lead task is still running long after the kickoff run
+        row was stamped ``success``). Sessions with no task row are omitted.
         """
-        return list((await self._db.execute(select(TaskSessionRow))).scalars().all())
+        if not session_ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(TaskSessionRow.session_id, TaskRow.status)
+                .join(TaskRow, TaskRow.id == TaskSessionRow.task_id)
+                .where(
+                    TaskSessionRow.session_id.in_(session_ids),
+                    TaskSessionRow.user_id == user_id,
+                )
+            )
+        ).all()
+        return {session_id: status for session_id, status in rows}
+
+    async def get_task_links_by_session_ids(
+        self, user_id: str, session_ids: list[str]
+    ) -> dict[str, tuple[str, str, str]]:
+        """Map run ``session_id`` → ``(task_id, title, status)`` of its owning task.
+
+        Superset of ``get_task_status_by_session_ids`` — adds the task id + title
+        so the automation activity log can deep-link to the spawned task (not only
+        show its live status). Sessions with no task row are omitted.
+        """
+        if not session_ids:
+            return {}
+        rows = (
+            await self._db.execute(
+                select(
+                    TaskSessionRow.session_id,
+                    TaskRow.id,
+                    TaskRow.title,
+                    TaskRow.status,
+                )
+                .join(TaskRow, TaskRow.id == TaskSessionRow.task_id)
+                .where(
+                    TaskSessionRow.session_id.in_(session_ids),
+                    TaskSessionRow.user_id == user_id,
+                )
+            )
+        ).all()
+        return {sid: (tid, title, status) for sid, tid, title, status in rows}
 
     async def get_run(self, session_id: str) -> TaskSessionRow | None:
-        """Look up a run by its kernel session id."""
+        """SYSTEM lookup by the globally-unique kernel ``session_id`` (runner +
+        kernel-event finalization). Not a user query — no owner filter."""
         return (
             (await self._db.execute(select(TaskSessionRow).filter_by(session_id=session_id)))
             .scalars()
             .first()
         )
 
-    async def get_run_by_id(self, run_id: str) -> TaskSessionRow | None:
-        return await self._db.get(TaskSessionRow, run_id)
+    async def get_run_by_id(self, user_id: str, run_id: str) -> TaskSessionRow | None:
+        return (
+            (
+                await self._db.execute(
+                    select(TaskSessionRow).where(
+                        TaskSessionRow.id == run_id, TaskSessionRow.user_id == user_id
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
 
     async def next_sequence(self, task_id: str) -> int:
-        """Return the next run sequence number for *task_id*."""
+        """Next run sequence for *task_id* (per-task counter; no owner filter —
+        ``task_id`` already scopes it and it returns a number, not rows)."""
         max_seq = (
             await self._db.execute(
                 select(func.max(TaskSessionRow.sequence)).filter_by(task_id=task_id)
@@ -311,7 +399,8 @@ class TaskSessionDatastore:
 
     # -- Commands --
 
-    async def create_run(self, row: TaskSessionRow) -> TaskSessionRow:
+    async def create_run(self, user_id: str, row: TaskSessionRow) -> TaskSessionRow:
+        row.user_id = user_id
         self._db.add(row)
         await async_commit_with_retry(self._db, where="TaskSessionDatastore.create_run")
         return row
@@ -328,7 +417,8 @@ class TaskSessionDatastore:
         result_manifest: dict[str, Any] | None = None,
         ended_at: int | None = None,
     ) -> bool:
-        """Update run status and optional manifest by kernel session id."""
+        """SYSTEM update by the globally-unique kernel ``session_id`` (kernel-
+        event finalization path); no owner filter."""
         updates: dict[str, Any] = {"status": status}
         if result_manifest is not None:
             updates["result_manifest"] = result_manifest

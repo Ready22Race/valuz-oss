@@ -8,7 +8,7 @@ Two handlers are installed on the root logger:
    don't change this so existing tooling keeps working.
 
 2. **Rotating JSON file handler** — writes structured JSON-line logs
-   to ``settings.log_file`` (``~/.valuz/app/logs/backend.log`` by
+   to ``settings.log_file`` (``~/.valuz-oss/logs/backend.log`` by
    default). Rotates at 10 MB, keeps 5 backups. The desktop ``服务``
    panel reads these lines for KV-aware rendering, and "open log file
    in editor" jumps to the same file.
@@ -179,6 +179,59 @@ class JsonLineFormatter(logging.Formatter):
 _HANDLER_TAG = "_valuz_handler"
 
 
+# uvicorn's ``uvicorn.access`` logger emits one INFO line per HTTP request,
+# parallel to — and independent of — valuz's own structured access log
+# (``api.middleware.TimingMiddleware``). A handful of endpoints are polled by
+# the desktop UI every few seconds and carry no signal:
+#
+#   - ``/v1/system/status`` (~every 5s) and ``/internal/mcp`` — ``TimingMiddleware``
+#     hard-skips these (logs *nothing*), so the uvicorn line is the only noise left.
+#   - ``/v1/runs`` (the activity overview, polled every few seconds) — demoted to
+#     DEBUG in ``TimingMiddleware``; uvicorn printing it at INFO defeats that choice.
+#   - ``/.well-known/oauth-...`` — MCP OAuth-discovery probes that 404 by design
+#     (our in-process MCP mounts carry no auth); ``TimingMiddleware`` skips them too.
+#
+# This filter brings the uvicorn access log in line with the noise-control
+# ``TimingMiddleware`` already documents, so the two streams don't disagree.
+# Keep this set in sync with that middleware's reasoning.
+_ACCESS_LOG_SILENCED_PREFIXES = (
+    "/v1/runs",
+    "/v1/system/status",
+    "/internal/mcp",
+    "/.well-known/oauth-authorization-server",
+    "/.well-known/oauth-protected-resource",
+)
+
+
+class _AccessLogPathFilter(logging.Filter):
+    """Drop ``uvicorn.access`` records for high-frequency poll endpoints.
+
+    uvicorn formats access records as ``'%s - "%s %s HTTP/%s" %s'`` with
+    ``record.args`` = (client_addr, method, request_target, http_version,
+    status). We read the request target (index 2), strip its query string, and
+    suppress any path under ``_ACCESS_LOG_SILENCED_PREFIXES``. Records in any
+    other shape pass through untouched.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) < 3:
+            return True
+        path = str(args[2]).split("?", 1)[0]
+        return not any(path == p or path.startswith(p + "/") for p in _ACCESS_LOG_SILENCED_PREFIXES)
+
+
+def _install_access_log_filter() -> None:
+    """Attach the poll-noise filter to ``uvicorn.access`` (idempotent).
+
+    Re-run safe: ``configure_logging`` is called again after uvicorn's own
+    ``dictConfig``, so the filter is re-asserted if uvicorn reset the logger.
+    """
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, _AccessLogPathFilter) for f in access_logger.filters):
+        access_logger.addFilter(_AccessLogPathFilter())
+
+
 def configure_logging(level: int = logging.INFO) -> None:
     """Install valuz's root-logger handlers. Safe to call multiple times.
 
@@ -280,6 +333,23 @@ def configure_logging(level: int = logging.INFO) -> None:
     for name, lg in list(logging.Logger.manager.loggerDict.items()):
         if isinstance(lg, logging.Logger) and lg.disabled and _under(name):
             lg.disabled = False
+
+    # The host mounts several in-process MCP servers (toolkit / docs /
+    # automations / connectors). Each session's MCP client runs one
+    # connect → OAuth-discovery → list-tools → terminate cycle against them,
+    # so ``mcp.server.*`` emits a steady stream of INFO with no signal
+    # ("Created new transport", "Terminating session", "Processing request of
+    # type ListToolsRequest"). Pin the server subtree to WARNING — real MCP
+    # warnings still surface, the per-connection churn drops. (The ``mcp``
+    # client subtree above stays at the app level: those logs ARE actionable
+    # when a remote connector misbehaves.)
+    logging.getLogger("mcp.server").setLevel(logging.WARNING)
+
+    # Silence uvicorn's parallel access log for chatty poll endpoints. Done
+    # here (not before ``uvicorn.run``) because uvicorn's ``dictConfig`` rebuilds
+    # the ``uvicorn.access`` logger at boot; ``configure_logging`` re-runs after
+    # that, so the filter survives. Idempotent.
+    _install_access_log_filter()
 
 
 __all__ = [

@@ -8,10 +8,24 @@ export const setTasksApiBase = (url: string): void => {
   _apiBase = url;
 };
 
+/** Resolved "who/what spawned this task" — drives the task-list "由 … 触发" line.
+ * The source_* ids let the UI deep-link to the parent task / automation /
+ * conversation; the resolved names spare a second lookup. */
+export interface TaskTrigger {
+  /** user | chat | agent | automation */
+  type: string;
+  source_task_id?: string | null;
+  source_task_title?: string | null;
+  source_agent_slug?: string | null;
+  source_automation_id?: string | null;
+  source_automation_name?: string | null;
+  source_session_id?: string | null;
+}
+
 /** Durable header for a lead-dispatch task. */
 export interface Task {
   id: string;
-  workspace_id: string;
+  project_id: string;
   title: string;
   goal: string;
   /** active | paused | stopped | completed | blocked */
@@ -25,6 +39,8 @@ export interface Task {
    * ("active just now" vs "completed yesterday"). */
   created_at: number;
   updated_at: number;
+  /** Trigger provenance, resolved server-side. ``null`` for legacy tasks. */
+  trigger?: TaskTrigger | null;
 }
 
 /** One kernel session that belongs to a task (lead or dispatched subtask). */
@@ -39,7 +55,7 @@ export interface TaskRun {
   label: string | null;
   goal: string | null;
   dispatched_by: string | null;
-  workspace_mode: string;
+  project_mode: string;
   run_dir: string | null;
   /** {summary, artifacts, status} — populated when the run completes. */
   result_manifest: Record<string, unknown> | null;
@@ -167,19 +183,25 @@ export interface PlanWritePayload {
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const tasksApi = {
-  kickoff(workspaceId: string, payload: KickoffTaskPayload): Promise<Task> {
-    return fetchJson(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/tasks`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      },
-    );
+  kickoff(projectId: string, payload: KickoffTaskPayload): Promise<Task> {
+    return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
   },
 
-  listTasks(workspaceId: string): Promise<{ tasks: Task[] }> {
-    return fetchJson(`/v1/workspaces/${encodeURIComponent(workspaceId)}/tasks`);
+  listTasks(
+    projectId: string,
+    init?: { signal?: AbortSignal },
+  ): Promise<{ tasks: Task[] }> {
+    // ``init`` (e.g. an ``AbortSignal`` for the project-detail auto-refresh
+    // poller) is forwarded to ``fetchJson`` → ``fetch``. Existing callers pass
+    // nothing, so their behaviour is unchanged.
+    return fetchJson(
+      `/v1/projects/${encodeURIComponent(projectId)}/tasks`,
+      init,
+    );
   },
 
   /** Global cross-project task list, newest activity first. Backs the
@@ -197,10 +219,10 @@ export const tasksApi = {
     return fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}/events`);
   },
 
-  /** SSE endpoint URL for a task's event timeline. Subscribers should
-   * connect with ``new EventSource(eventsStreamUrl(id, after_seq))`` and
-   * remember the last received ``id`` so a reconnect can resume from
-   * the cursor (cursor is monotonic per task — no gaps possible). */
+  /** SSE endpoint URL for a task's event timeline. Subscribers connect with
+   * ``fetchEventSource(() => eventsStreamUrl(id, lastSeq), …)`` and remember the
+   * last received ``sequence`` so a reconnect resumes from the cursor (cursor
+   * is monotonic per task — no gaps possible). */
   eventsStreamUrl(taskId: string, afterSeq = 0): string {
     const cursor = afterSeq > 0 ? `?after_seq=${afterSeq}` : "";
     return `${_apiBase}/v1/tasks/${encodeURIComponent(taskId)}/events/stream${cursor}`;
@@ -219,11 +241,11 @@ export const tasksApi = {
   /** Open a draft task (status=draft, plan_version=0). No lead session is
    * created; the originating chat session becomes the plan writer. */
   draft(
-    workspaceId: string,
+    projectId: string,
     payload: DraftTaskPayload,
   ): Promise<DraftTaskResponse> {
     return fetchJson(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/tasks:draft`,
+      `/v1/projects/${encodeURIComponent(projectId)}/tasks:draft`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

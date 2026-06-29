@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { FileText, Plus, Search, Sparkles, Upload, Zap } from "lucide-react";
+import {
+  FileText,
+  Plus,
+  RefreshCw,
+  Search,
+  Sparkles,
+  Upload,
+  Zap,
+} from "lucide-react";
 import {
   CategorizedList,
   Button,
@@ -14,6 +22,7 @@ import {
   PageLoader,
   SkillCard,
   SkillDetailPanel,
+  Switch,
 } from "@valuz/ui";
 import { ResourceActionSlot } from "../components/ResourceActionSlot";
 import {
@@ -25,11 +34,12 @@ import {
 } from "@valuz/core";
 import type {
   SkillView,
+  SkillCreationContext,
   SkillDeletePreview,
   SkillImportPreviewFile,
 } from "@valuz/core";
 import type { ResourceCategory } from "@valuz/shared";
-import { useWorkspaceOutlet } from "@valuz/app/layout";
+import { useProjectOutlet } from "@valuz/app/layout";
 import { SkillAddDialog, SkillEditDialog } from "@valuz/app/components";
 import { useTranslation } from "@valuz/core";
 
@@ -176,7 +186,7 @@ function badgeForCategory(
     }
     return undefined;
   }
-  if (categoryId === "codex") return undefined;
+  if (categoryId === "codex") return { label: "Codex", tone: "codex" };
   // categoryId === "claude" or "_other"
   return { label: "Claude", tone: "claude" };
 }
@@ -190,11 +200,23 @@ export const SkillsPage = () => {
     setRightPanel,
     setAsideClassName,
     setMainClassName,
-  } = useWorkspaceOutlet();
+  } = useProjectOutlet();
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
+  const [searchParams] = useSearchParams();
   const [skills, setSkills] = useState<SkillView[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
+  const [rescanning, setRescanning] = useState(false);
+  // Honor a ``?skill=<id>`` deep link (e.g. from an agent's 装备 list) as the
+  // initial selection; falls back to the first skill once the list loads if the
+  // id isn't found. Lazy initializer so there's no setState-in-effect.
+  const [activeSkillId, setActiveSkillId] = useState<string | null>(() =>
+    searchParams.get("skill"),
+  );
+  // The ``?skill=`` deep link only positions the list once: scroll the
+  // pre-selected card into view on first paint, then leave the scroll alone so
+  // ordinary clicks don't yank the viewport around.
+  const skillParam = searchParams.get("skill");
+  const scrolledToParamRef = useRef(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
 
@@ -225,22 +247,68 @@ export const SkillsPage = () => {
     }
   }, []);
 
-  const handleStartAiCreate = useCallback(async () => {
+  // Manual rescan: re-index the skill library on disk (the server also emits
+  // SKILL_CHANGED, so ``useSkillEvents(loadSkills)`` refreshes the list).
+  const handleRescan = useCallback(async () => {
+    if (rescanning) return;
+    setRescanning(true);
     try {
-      const start = await skillsApi.startCreate({
-        context: { kind: "skills_library" },
-      });
-      navigate(
-        `/conversation/${encodeURIComponent(start.session_id)}?mode=skill-creator`,
-      );
-    } catch (err) {
-      toast.error(
-        t("skill.startFailed" as Parameters<typeof t>[0], {
-          error: err instanceof Error ? err.message : "unknown",
+      const res = await skillsApi.rescan();
+      toast.success(
+        t("skill.rescanDone" as Parameters<typeof t>[0], {
+          count: res.indexed,
         }),
       );
+    } catch (err) {
+      console.error("[Skills] rescan error", err);
+      toast.error(t("skill.rescanFailed" as Parameters<typeof t>[0]));
+    } finally {
+      if (mountedRef.current) setRescanning(false);
     }
-  }, [navigate, t]);
+  }, [rescanning, t]);
+
+  // Global library on/off for a skill (slug-keyed on the backend). Optimistic:
+  // flip local state immediately, revert if the request fails. Off hides the
+  // skill from new (non-project) conversations' ``/`` picker.
+  const handleToggleLibrary = useCallback(
+    async (skill: SkillView, enabled: boolean) => {
+      setSkills((prev) =>
+        prev.map((s) =>
+          s.id === skill.id ? { ...s, library_enabled: enabled } : s,
+        ),
+      );
+      try {
+        await skillsApi.setLibraryState(skill.id, enabled);
+      } catch (err) {
+        console.error("[Skills] library toggle error", err);
+        setSkills((prev) =>
+          prev.map((s) =>
+            s.id === skill.id ? { ...s, library_enabled: !enabled } : s,
+          ),
+        );
+      }
+    },
+    [],
+  );
+
+  // Draft-first (no pre-created session): land on the same draft page as
+  // 新对话 so the composer's default-agent pick + agent switching work; the
+  // session is minted with the skill-creator context on the first send.
+  const skillCreatorDraftUrl = useCallback(
+    (context: SkillCreationContext) => {
+      const params = new URLSearchParams({ mode: "skill-creator" });
+      params.set("skill_kind", context.kind);
+      if (context.kind === "project" && context.project_id) {
+        params.set("skill_project", context.project_id);
+      }
+      return `/conversation/new?${params.toString()}`;
+    },
+    [],
+  );
+
+  const handleStartAiCreate = useCallback(() => {
+    navigate(skillCreatorDraftUrl({ kind: "skills_library" }));
+  }, [navigate, skillCreatorDraftUrl]);
 
   const openAddDialog = (mode: AddSkillDialogMode) => {
     setAddMode(mode);
@@ -348,12 +416,16 @@ export const SkillsPage = () => {
   // Pass the backend's nested tree through verbatim — the panel renders
   // directories + files recursively with depth-based indentation.
   const [activeFiles, setActiveFiles] = useState<
-    SkillImportPreviewFile[] | undefined
+    | {
+        skillId: string;
+        files: SkillImportPreviewFile[];
+      }
+    | undefined
   >(undefined);
 
   useEffect(() => {
     if (!currentSkill) {
-      setActiveFiles([]);
+      setActiveFiles(undefined);
       return;
     }
     let cancelled = false;
@@ -362,15 +434,22 @@ export const SkillsPage = () => {
       .listFiles(currentSkill.id)
       .then((res) => {
         if (cancelled) return;
-        setActiveFiles(res);
+        setActiveFiles({ skillId: currentSkill.id, files: res });
       })
       .catch(() => {
-        if (!cancelled) setActiveFiles([]);
+        if (!cancelled) {
+          setActiveFiles({ skillId: currentSkill.id, files: [] });
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [currentSkill?.id]);
+
+  const activeFilesForCurrentSkill =
+    activeFiles && currentSkill && activeFiles.skillId === currentSkill.id
+      ? activeFiles.files
+      : undefined;
 
   /* ── Handlers ──────────────────────────────────────────────── */
 
@@ -427,16 +506,16 @@ export const SkillsPage = () => {
   // Memoised on the skill so the right-panel effect's dep array stays
   // stable across re-renders. Without ``useMemo`` ``toCardSkill`` returns
   // a fresh object each render → effect re-runs → ``setRightPanel`` →
-  // workspace re-renders → effect re-runs → infinite loop.
+  // project re-renders → effect re-runs → infinite loop.
   const currentCardSkill = useMemo(
     () => (currentSkill ? toCardSkill(currentSkill) : null),
     [currentSkill],
   );
 
-  // Hand the SkillDetailPanel off to the workspace's right panel slot
+  // Hand the SkillDetailPanel off to the project's right panel slot
   // instead of rendering it inline. The page-level grid now has a
   // single column and the cards can fill the full main width; the
-  // panel sits in the workspace aside the same way the conversation
+  // panel sits in the project aside the same way the conversation
   // and project-detail pages do. Cleared on unmount so other routes
   // don't inherit a stale skill panel.
   useEffect(() => {
@@ -446,8 +525,9 @@ export const SkillsPage = () => {
     }
     setRightPanel(
       <SkillDetailPanel
+        key={currentSkill.id}
         skill={currentCardSkill}
-        files={activeFiles}
+        files={activeFilesForCurrentSkill}
         onLoadFile={async (path) => {
           const res = await skillsApi.getFileContent(currentSkill.id, path);
           return res.content;
@@ -475,7 +555,13 @@ export const SkillsPage = () => {
     return () => {
       setRightPanel(null);
     };
-  }, [currentSkill, currentCardSkill, activeFiles, navigate, setRightPanel]);
+  }, [
+    currentSkill,
+    currentCardSkill,
+    activeFilesForCurrentSkill,
+    navigate,
+    setRightPanel,
+  ]);
 
   return (
     <div className="flex h-full flex-col">
@@ -518,6 +604,18 @@ export const SkillsPage = () => {
           >
             <Search className="h-3.5 w-3.5" />
           </button>
+          <button
+            type="button"
+            aria-label={t("skill.rescan" as Parameters<typeof t>[0])}
+            title={t("skill.rescan" as Parameters<typeof t>[0])}
+            onClick={() => void handleRescan()}
+            disabled={rescanning}
+            className="flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body disabled:pointer-events-none disabled:opacity-50"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5${rescanning ? " animate-spin" : ""}`}
+            />
+          </button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -529,7 +627,7 @@ export const SkillsPage = () => {
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[160px]">
-              <DropdownMenuItem onSelect={() => void handleStartAiCreate()}>
+              <DropdownMenuItem onSelect={handleStartAiCreate}>
                 <Sparkles className="h-4 w-4" />
                 {t("skill.aiCreate" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
@@ -565,19 +663,70 @@ export const SkillsPage = () => {
                 // logic here for the badge lookup.
                 const cat = categories.find((c) => c.filter(skill));
                 const categoryId = cat?.id ?? "_other";
-                return (
+                // Scroll the deep-linked (``?skill=``) card into view once.
+                const scrollTarget =
+                  isSelected && !!skillParam && !scrolledToParamRef.current;
+                const card = (
                   <SkillCard
                     skill={toCardSkill(skill)}
                     originBadge={badgeForCategory(categoryId, skill, t)}
                     active={isSelected}
                     onClick={() => setActiveSkillId(skill.id)}
                     actions={
-                      <ResourceActionSlot
-                        resourceType="skill"
-                        resource={skill as unknown as Record<string, unknown>}
-                      />
+                      <div
+                        className="flex items-center gap-2"
+                        // The switch lives inside the card's click target; stop
+                        // propagation so toggling never opens the detail panel.
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {(() => {
+                          // Built-in skills ship with the client: always on and
+                          // not toggleable (the switch is checked + disabled).
+                          const isBuiltin = skill.origin_label === "Built-in";
+                          return (
+                            <Switch
+                              size="sm"
+                              checked={
+                                isBuiltin || skill.library_enabled !== false
+                              }
+                              disabled={isBuiltin}
+                              onCheckedChange={(v) =>
+                                void handleToggleLibrary(skill, v)
+                              }
+                              aria-label={t(
+                                (isBuiltin
+                                  ? "skill.builtinHint"
+                                  : skill.library_enabled !== false
+                                    ? "skill.libraryEnabledTip"
+                                    : "skill.libraryDisabledTip") as Parameters<
+                                  typeof t
+                                >[0],
+                              )}
+                            />
+                          );
+                        })()}
+                        <ResourceActionSlot
+                          resourceType="skill"
+                          resource={
+                            skill as unknown as Record<string, unknown>
+                          }
+                        />
+                      </div>
                     }
                   />
+                );
+                if (!scrollTarget) return card;
+                return (
+                  <div
+                    ref={(el) => {
+                      if (el) {
+                        el.scrollIntoView({ block: "center" });
+                        scrolledToParamRef.current = true;
+                      }
+                    }}
+                  >
+                    {card}
+                  </div>
                 );
               }}
               emptyState={
@@ -648,14 +797,9 @@ export const SkillsPage = () => {
         onComplete={() => void loadSkills()}
         onArchivePreview={(file) => skillsApi.importArchivePreview(file)}
         onArchiveConfirm={(data) => skillsApi.importArchiveConfirm(data)}
-        onStartAiCreate={(context) => skillsApi.startCreate({ context })}
+        onStartAiCreate={(context) => navigate(skillCreatorDraftUrl(context))}
         onLinkPreview={(url) => skillsApi.importUrlPreview(url)}
         onLinkConfirm={(data) => skillsApi.importUrlConfirm(data)}
-        onNavigateToSession={(sessionId) =>
-          navigate(
-            `/conversation/${encodeURIComponent(sessionId)}?mode=skill-creator`,
-          )
-        }
       />
 
       {/* ── Edit Skill Dialog ────────────────────────────────── */}

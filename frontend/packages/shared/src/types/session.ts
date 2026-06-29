@@ -27,10 +27,10 @@ export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface SessionListItem {
   id: string;
-  workspace_id: string;
+  project_id: string;
   name: string | null;
   status: "created" | "running" | "idle" | "failed" | "cancelled" | "archived";
-  origin: "user" | "schedule";
+  origin: "user" | "schedule" | "automation";
   last_user_message_text: string | null;
   locked_model_id: string | null;
   /**
@@ -38,7 +38,7 @@ export interface SessionListItem {
    * the list shape because the desktop sidebar's session list feeds the
    * composer's model selector — the selector matches on (providerId, modelId)
    * pairs, so without provider_id the locked model can't be displayed and
-   * falls back to the workspace default provider.
+   * falls back to the project default provider.
    */
   locked_provider_id: string | null;
   runtime_provider: string;
@@ -107,17 +107,17 @@ export interface SessionDetail extends SessionListItem {
   todos?: TodoItem[] | null;
   /**
    * Frozen system-prompt append captured at session creation from the
-   * workspace's then-current `instructions_md` (ADR-008). The runtime
-   * hands this verbatim to the model on every turn; workspace edits
-   * after creation do *not* mutate this field. `null` when the workspace
+   * project's then-current `instructions_md` (ADR-008). The runtime
+   * hands this verbatim to the model on every turn; project edits
+   * after creation do *not* mutate this field. `null` when the project
    * had no instructions at session-create time. Session panels should
-   * render this — NOT the live workspace `instructions_md` — so users
+   * render this — NOT the live project `instructions_md` — so users
    * see the prompt the running agent actually has.
    */
   instructions?: string | null;
   /**
-   * Workspace-local agent handle when the session was created from a named
-   * workspace agent (e.g. a Project Task lead/member). `null` for plain chat
+   * Project-local agent handle when the session was created from a named
+   * project agent (e.g. a Project Task lead/member). `null` for plain chat
    * sessions not bound to a named agent.
    */
   agent_slug?: string | null;
@@ -244,4 +244,69 @@ export interface ActionResolvedEvent {
    * strip even though there was no preceding ``requires_action``.
    */
   auto_resolved_by_rule_id: string | null;
+}
+
+/**
+ * One agent's slot in a Claude dynamic-workflow run. The kernel folds the
+ * run's ``journal.jsonl`` into one entry per agent: ``progress`` while the
+ * agent is running, ``done`` once its result lands. Extra fields (label /
+ * phase) may appear in the terminal ``wf_<id>.json`` snapshot, which the
+ * kernel forwards raw — so this type stays tolerant of unknown shapes.
+ */
+export interface WorkflowAgentProgress {
+  /** Always ``"workflow_agent"`` for the live snapshot; tolerated as a free
+   *  string so a richer terminal snapshot type flows through unchanged. */
+  type?: string;
+  agentId: string;
+  state: "progress" | "done" | (string & {});
+  /** Optional human label from the terminal snapshot (e.g. the agent's task). */
+  label?: string;
+  /** Optional phase grouping from the terminal snapshot. */
+  phase?: string;
+}
+
+/**
+ * A snapshot of a Claude dynamic-workflow (``Workflow`` tool) run, streamed
+ * live by the kernel while the background runtime executes. The live snapshot
+ * carries the fields below; the terminal ``wf_<id>.json`` result file is
+ * forwarded raw and may carry extras (consumed defensively by the renderer).
+ */
+export interface WorkflowState {
+  runId: string;
+  workflowName: string | null;
+  /** ``running`` during the run; ``completed`` / a terminal verb at the end. */
+  status: "running" | "completed" | (string & {});
+  agentCount: number;
+  agentsDone: number;
+  workflowProgress: WorkflowAgentProgress[];
+  /** Path to the run's script on disk (first snapshot only). */
+  scriptPath?: string;
+  /** The workflow script content (first snapshot only); ``null`` if unread. */
+  script?: string | null;
+  /**
+   * Path to the run's full result file (``wf_<id>.json``) — present on the
+   * terminal snapshot so the UI can link to the complete output.
+   */
+  statePath?: string;
+  /**
+   * The run's returned ``result.question`` — the actual research question the
+   * workflow answered (NOT the workflow's meta description). Terminal snapshot
+   * only; ``null`` for runs that ended without a result (killed/aborted).
+   */
+  resultQuestion?: string | null;
+  /** The run's returned ``result.summary`` — its answer. Terminal only. */
+  resultSummary?: string | null;
+}
+
+/**
+ * Decoded ``session.workflow_progress`` SSE frame. ``id`` is the ``Workflow``
+ * launch tool_use_id — the frontend keys progress by it so the card attaches
+ * to the matching tool call. The host JSON-stringifies ``state`` on the wire;
+ * ``parseWorkflowProgress`` re-parses it.
+ */
+export interface WorkflowProgressEvent {
+  id: string;
+  run_id: string;
+  state: WorkflowState;
+  message_id: string;
 }

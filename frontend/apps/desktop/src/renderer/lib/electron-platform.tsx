@@ -21,7 +21,19 @@ import {
   checkCliLogin,
   launchCliLogin,
   isElectron,
+  windowMinimize,
+  windowMaximize,
+  windowClose,
+  windowIsMaximized,
+  windowReload,
+  windowToggleDevTools,
+  windowToggleFullscreen,
+  cliInstallToPath,
+  cliUninstallFromPath,
+  cliInstallStatus,
 } from "./desktop-ipc";
+
+const isMac = navigator.platform.startsWith("Mac");
 
 const electronCapabilities: PlatformCapabilities = {
   selectDirectory,
@@ -31,8 +43,19 @@ const electronCapabilities: PlatformCapabilities = {
   quitApp,
   openNewWindow,
   isElectron: isElectron(),
+  isMac,
   checkCliLogin: (tool) => checkCliLogin(tool as "claude" | "codex"),
   launchCliLogin: (tool) => launchCliLogin(tool as "claude" | "codex"),
+  windowMinimize,
+  windowMaximize,
+  windowClose,
+  windowIsMaximized,
+  windowReload,
+  windowToggleDevTools,
+  windowToggleFullscreen,
+  cliInstallToPath,
+  cliUninstallFromPath,
+  cliInstallStatus,
 };
 
 export function ElectronPlatformProvider({

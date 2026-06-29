@@ -17,8 +17,8 @@ from __future__ import annotations
 from typing import Any
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel on sys.path
-from valuz_agent.adapters import kernel_store
-from valuz_agent.adapters.agent_resolver import summarize_role
+from valuz_agent.adapters.agent_resolver import _member_agent_config, summarize_role
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.tasks.datastore import (
@@ -29,14 +29,14 @@ from valuz_agent.modules.tasks.datastore import (
 from valuz_agent.modules.tasks.plan import TaskPlan
 
 
-async def list_members(workspace_id: str) -> list[dict[str, Any]]:
+async def list_members(project_id: str) -> list[dict[str, Any]]:
     """Return member descriptors for dispatch tool list_members()."""
     async with async_unit_of_work(commit=False) as db:
         member_ds = ProjectMemberDatastore(db)
-        rows = await member_ds.list_by_workspace(workspace_id)
+        rows = await member_ds.list_by_project(require_current_user_id(), project_id)
         result: list[dict[str, Any]] = []
         for row in rows:
-            agent_cfg = await kernel_store.load_agent(row.kernel_agent_id)
+            agent_cfg = await _member_agent_config(row, member_ds)
             runtime = agent_cfg.runtime_provider if agent_cfg else "unknown"
             name = agent_cfg.name if agent_cfg else row.agent_slug
             role_summary = summarize_role(agent_cfg.instructions) if agent_cfg else ""
@@ -55,13 +55,13 @@ async def list_members(workspace_id: str) -> list[dict[str, Any]]:
 
 
 async def list_tasks(
-    workspace_id: str,
+    project_id: str,
     *,
     status: str | None = None,
     mine_session_id: str | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Return task summaries for *workspace_id* (newest first).
+    """Return task summaries for *project_id* (newest first).
 
     ``status`` filters by task status (active/completed/failed). When
     ``mine_session_id`` is given, only tasks launched by that conversation
@@ -72,7 +72,7 @@ async def list_tasks(
     async with async_unit_of_work(commit=False) as db:
         task_ds = TaskDatastore(db)
         run_ds = TaskSessionDatastore(db)
-        rows = await task_ds.list_tasks(workspace_id)
+        rows = await task_ds.list_tasks(require_current_user_id(), project_id)
         result: list[dict[str, Any]] = []
         for row in rows:
             if status and row.status != status:
@@ -81,7 +81,7 @@ async def list_tasks(
             originated_by = meta.get("originating_session_id")
             if mine_session_id and originated_by != mine_session_id:
                 continue
-            runs = await run_ds.list_runs(row.id)
+            runs = await run_ds.list_runs(require_current_user_id(), row.id)
             done = sum(1 for r in runs if r.status in ("completed", "failed"))
             result.append(
                 {
@@ -103,10 +103,10 @@ async def list_tasks(
         return result
 
 
-async def get_task(task_id: str, workspace_id: str) -> dict[str, Any] | None:
+async def get_task(task_id: str, project_id: str) -> dict[str, Any] | None:
     """Return one task's status + per-run states + latest summary.
 
-    Scoped to *workspace_id* (cross-workspace lookups return ``None``).
+    Scoped to *project_id* (cross-project lookups return ``None``).
     ``latest_summary`` is the most recent ``task_completed`` /
     ``subtask_*`` event summary so the caller can report progress.
     """
@@ -114,12 +114,14 @@ async def get_task(task_id: str, workspace_id: str) -> dict[str, Any] | None:
         task_ds = TaskDatastore(db)
         run_ds = TaskSessionDatastore(db)
         event_ds = TaskEventDatastore(db)
-        row = await task_ds.get_task_by_workspace(workspace_id, task_id)
+        row = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
         if row is None:
             return None
-        runs = await run_ds.list_runs(task_id)
+        runs = await run_ds.list_runs(require_current_user_id(), task_id)
         latest_summary = ""
-        for ev in reversed(await event_ds.list_events(workspace_id, task_id)):
+        for ev in reversed(
+            await event_ds.list_events(require_current_user_id(), project_id, task_id)
+        ):
             summary = (ev.payload or {}).get("summary")
             if summary:
                 latest_summary = str(summary)

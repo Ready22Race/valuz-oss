@@ -135,13 +135,23 @@ paths:
           required: true
           schema:
             type: string
+        - name: cascade
+          in: query
+          required: false
+          description: >-
+            When true, first 解除 every 派驻 (project membership) the agent has,
+            then delete it — the confirmed-delete path. When false (default), an
+            agent still deployed to a project returns 409.
+          schema:
+            type: boolean
+            default: false
       responses:
         "204":
           description: Deleted
         "404":
           description: Agent not found
         "409":
-          description: Agent still deployed to one or more projects (解除派驻 first)
+          description: Agent still deployed to one or more projects (解除派驻 first; pass cascade=true to force)
   /v1/agents/{slug}/deployments:
     get:
       summary: List the projects an agent is deployed (派驻) into
@@ -167,28 +177,28 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [workspace_id, agent_slug]
+                      required: [project_id, agent_slug]
                       properties:
-                        workspace_id: {type: string}
+                        project_id: {type: string}
                         agent_slug:
                           type: string
                           description: Project-local member handle.
         "404":
           description: Agent not found
-  /v1/workspaces/{workspace_id}/agents:
+  /v1/projects/{project_id}/agents:
     get:
-      summary: List workspace member agents
-      operationId: listWorkspaceAgents
+      summary: List project member agents
+      operationId: listProjectAgents
       tags: [agents]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: path
           required: true
           schema:
             type: string
       responses:
         "200":
-          description: Workspace member agents
+          description: Project member agents
           content:
             application/json:
               schema:
@@ -200,11 +210,11 @@ paths:
                     items:
                       $ref: "#/components/schemas/MemberWithAgent"
     post:
-      summary: Create a blank (template-free) agent in a workspace
+      summary: Create a blank (template-free) agent in a project
       operationId: createBlankAgent
       tags: [agents]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: path
           required: true
           schema:
@@ -223,14 +233,14 @@ paths:
               schema:
                 $ref: "#/components/schemas/MemberWithAgent"
         "409":
-          description: Agent slug already exists in workspace
-  /v1/workspaces/{workspace_id}/agents:deploy:
+          description: Agent slug already exists in project
+  /v1/projects/{project_id}/agents:deploy:
     post:
       summary: Deploy (派驻, live-reference) a library agent into a project
       operationId: deployAgent
       tags: [agents]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: path
           required: true
           schema:
@@ -251,14 +261,14 @@ paths:
         "404":
           description: Source agent not found
         "409":
-          description: Agent slug already exists in workspace
-  /v1/workspaces/{workspace_id}/agents/{agent_slug}:
+          description: Agent slug already exists in project
+  /v1/projects/{project_id}/agents/{agent_slug}:
     delete:
-      summary: Delete a workspace agent and its kernel AgentConfig
-      operationId: deleteWorkspaceAgent
+      summary: Delete a project agent and its kernel AgentConfig
+      operationId: deleteProjectAgent
       tags: [agents]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: path
           required: true
           schema:
@@ -273,13 +283,47 @@ paths:
           description: Deleted
         "404":
           description: Agent not found
-  /v1/workspaces/{workspace_id}/tasks:
+  /v1/agents/proposals/{session_id}/confirm:
+    post:
+      summary: Confirm a proposed agent (create in the library + deploy into the session's project)
+      description: >-
+        User confirmation of an agent the assistant proposed via the
+        ``propose_agent`` tool. Creates a library agent and, when the session is
+        bound to a project, deploys it into that project as a member. The frontend
+        replays the agent spec from the originating ``tool_use`` event into the
+        request body.
+      operationId: confirmAgentProposal
+      tags: [agents]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProposeAgentConfirmRequest"
+      responses:
+        "201":
+          description: Agent created (and deployed when the session has a project)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProposeAgentConfirmResponse"
+        "404":
+          description: Session not found
+        "409":
+          description: Agent already exists
+  /v1/projects/{project_id}/tasks:
     post:
       summary: Kickoff a lead-dispatch task
       operationId: kickoffTask
       tags: [tasks]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: path
           required: true
           schema: {type: string}
@@ -297,13 +341,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/Task"
         "400":
-          description: Workspace or lead agent not found
+          description: Project or lead agent not found
     get:
-      summary: List workspace tasks
+      summary: List project tasks
       operationId: listTasks
       tags: [tasks]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: path
           required: true
           schema: {type: string}
@@ -320,9 +364,70 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Task"
+  /v1/projects/{project_id}/files/{file_path}:
+    get:
+      summary: Read a project file as an artifact preview
+      operationId: readProjectFileArtifact
+      tags: [projects]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: file_path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Relative project file path. May include slashes when URL-encoded by the client.
+      responses:
+        "200":
+          description: Artifact descriptor and preview content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactFileResponse"
+        "403":
+          description: File is blocked by preview policy
+        "404":
+          description: Project or file not found
+        "422":
+          description: Invalid file path
+  /v1/projects/{project_id}/raw-files/{file_path}:
+    get:
+      summary: Stream a project file for renderer use
+      operationId: readProjectRawFile
+      tags: [projects]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: file_path
+          in: path
+          required: true
+          schema: {type: string}
+          description: Relative project file path. May include slashes when URL-encoded by the client.
+      responses:
+        "200":
+          description: Raw file bytes
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "403":
+          description: File is blocked by preview policy
+        "404":
+          description: Project or file not found
+        "422":
+          description: Invalid file path
   /v1/tasks:
     get:
-      summary: List tasks across every workspace
+      summary: List tasks across every project
       description: |
         Global, cross-project task list ordered by updated_at desc. Powers the
         sidebar TASKS section so users can see what's running regardless of
@@ -508,6 +613,98 @@ paths:
                     items:
                       $ref: "#/components/schemas/RuntimeListItem"
 
+  # ── Memory (inspect / prune / toggle the agent memory system) ────────
+
+  /v1/memory:
+    get:
+      summary: View stored memory and the memory toggles
+      operationId: getMemory
+      tags: [memory]
+      description: |
+        Returns the on/off toggles plus current entries per scope: ``user``
+        and cross-project ``global`` always, plus ``project`` when a
+        ``project_id`` is supplied. Drives Settings → Memory and the project
+        Context Panel memory section.
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Memory view
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryView"
+
+  /v1/memory/settings:
+    patch:
+      summary: Toggle the memory system on/off
+      operationId: patchMemorySettings
+      tags: [memory]
+      description: |
+        ``enabled`` is the master switch (injection + background extractor);
+        ``auto_extract`` gates only the background extractor. Only sent keys
+        are updated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemorySettingsPatch"
+      responses:
+        "200":
+          description: Updated toggles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemorySettings"
+
+  /v1/memory/entry:
+    delete:
+      summary: Delete a single memory entry
+      operationId: deleteMemoryEntry
+      tags: [memory]
+      description: |
+        Removes the entry located by a unique substring (``old_text``) in the
+        given ``target``. Returns 404 when no entry matches.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryEntryDelete"
+      responses:
+        "200":
+          description: Memory view after deletion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryView"
+
+  /v1/memory/scope:
+    delete:
+      summary: Clear all entries in a memory scope
+      operationId: clearMemoryScope
+      tags: [memory]
+      description: |
+        Removes every entry in ``target`` (``user`` / ``global`` / ``project``).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryClear"
+      responses:
+        "200":
+          description: Memory view after clearing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryView"
+
   # ── System (backend status & log path discovery) ────────────────────
 
   /v1/system/status:
@@ -526,6 +723,59 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SystemStatusResponse"
+
+  # ── Browser (managed chrome-devtools daemon; Settings panel) ──────────
+
+  /v1/browser/status:
+    get:
+      summary: Managed-browser status & environment readiness
+      operationId: getBrowserStatus
+      tags: [browser]
+      description: |
+        Cheap, read-only snapshot for the Settings "Browser" panel: whether Node
+        is present, whether the chrome-devtools daemon is running, the active
+        mode, and any user-facing hints. Safe to poll.
+      responses:
+        "200":
+          description: Current managed-browser status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrowserStatus"
+
+  /v1/browser/open:
+    post:
+      summary: Start (or reuse) the managed browser
+      operationId: openBrowser
+      tags: [browser]
+      description: |
+        Login helper: launches (or reuses) the managed, visible Chrome on the
+        isolated profile so the user can sign into sites. Returns the active mode
+        and the CLI prefix. 422 when the environment isn't ready (e.g. Node
+        missing); the message is shown as a hint.
+      responses:
+        "200":
+          description: Browser started or already running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrowserStartResult"
+
+  /v1/browser/stop:
+    post:
+      summary: Stop the managed browser
+      operationId: stopBrowser
+      tags: [browser]
+      description: |
+        Stops the chrome-devtools daemon (best-effort). The isolated profile
+        persists, so login state survives; only the window/daemon closes.
+      responses:
+        "200":
+          description: Browser stopped
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BrowserStopResult"
 
   # ── Parser plugin setup (user-authorized model downloads) ──────────
 
@@ -811,9 +1061,9 @@ paths:
                   items:
                     type: string
                     format: binary
-                workspace_id:
+                project_id:
                   type: string
-                  description: Optional workspace to bind imported docs
+                  description: Optional project to bind imported docs
       responses:
         "200":
           description: Import task created
@@ -986,20 +1236,20 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
-  /v1/workspaces/{workspace_id}/docs:
+  /v1/projects/{project_id}/docs:
     get:
-      summary: List documents bound to a workspace
-      operationId: listWorkspaceDocs
+      summary: List documents bound to a project
+      operationId: listProjectDocs
       tags: [docs]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: path
           required: true
           schema:
             type: string
       responses:
         "200":
-          description: Workspace document list
+          description: Project document list
           content:
             application/json:
               schema:
@@ -1011,11 +1261,11 @@ paths:
                     items:
                       $ref: "#/components/schemas/DocumentListItem"
     put:
-      summary: Update workspace document bindings
-      operationId: updateWorkspaceBindings
+      summary: Update project document bindings
+      operationId: updateProjectBindings
       tags: [docs]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: path
           required: true
           schema:
@@ -1025,7 +1275,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/WorkspaceBindingsRequest"
+              $ref: "#/components/schemas/ProjectBindingsRequest"
       responses:
         "200":
           description: Bindings updated
@@ -1045,7 +1295,7 @@ paths:
       operationId: listSkills
       tags: [skills]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: query
           schema:
             type: string
@@ -1074,6 +1324,24 @@ paths:
               schema:
                 $ref: "#/components/schemas/SkillView"
 
+  /v1/skills/scan:
+    post:
+      summary: Rescan the skill library and re-index from disk
+      description: >
+        Re-discovers every skill on disk (user, official, project) and refreshes
+        the skill index so newly-added skills (e.g. a team's official skills)
+        resolve immediately, without a restart. Emits a skill-changed event so
+        open catalogs refresh.
+      operationId: rescanSkills
+      tags: [skills]
+      responses:
+        "200":
+          description: Rescan complete
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillRescanResponse"
+
   /v1/skills/import/session:
     post:
       summary: Import skill from session
@@ -1092,6 +1360,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SkillView"
+
+  /v1/skills/create/start:
+    post:
+      summary: Start an AI skill-authoring session (unified launcher)
+      description: |
+        Unified entry point for the skill-creator agent loop, consolidating
+        the three product entries (chat / project / skills_library) behind
+        one endpoint. Creates a session against the project appropriate for
+        `context.kind` and stamps `creation_context` onto session metadata so
+        the downstream `submit_skill` tool applies the right side-effects on
+        confirmation. The session binds `agent_slug` when given; otherwise the
+        backend picks the default assistant (seeded `default-assistant`, then
+        the onboarding-created `valuz-helper`), falling back to an agentless
+        session when neither exists yet.
+      operationId: startSkillCreate
+      tags: [skills]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillCreateStartRequest"
+      responses:
+        "201":
+          description: Authoring session ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillCreateStartResponse"
+        "422":
+          description: context.project_id missing for kind=project
 
   /v1/skills/create/chat/start:
     post:
@@ -1145,7 +1444,7 @@ paths:
         On `fork` an automatic `<slug>-vN` is suggested unless `new_slug` is
         provided. Default `target_scope=user` writes into the user skill
         library (controlled by VALUZ_USER_SKILLS_DIR); `target_scope=project`
-        requires `workspace_id`.
+        requires `project_id`.
       operationId: syncSkillStaging
       tags: [skills]
       parameters:
@@ -1171,7 +1470,7 @@ paths:
         "409":
           description: Fork target already exists
         "422":
-          description: Invalid target scope or workspace
+          description: Invalid target scope or project
 
   /v1/skills/staging/{session_id}/optimize:
     post:
@@ -1227,7 +1526,7 @@ paths:
                 target_scope:
                   type: string
                   default: user
-                workspace_id:
+                project_id:
                   type: string
       responses:
         "200":
@@ -1319,7 +1618,7 @@ paths:
       operationId: listSkillTags
       tags: [skills]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: query
           schema:
             type: string
@@ -1355,7 +1654,7 @@ paths:
           required: true
           schema:
             type: string
-        - name: workspace_id
+        - name: project_id
           in: query
           schema:
             type: string
@@ -1378,7 +1677,7 @@ paths:
           required: true
           schema:
             type: string
-        - name: workspace_id
+        - name: project_id
           in: query
           schema:
             type: string
@@ -1405,7 +1704,7 @@ paths:
           required: true
           schema:
             type: string
-        - name: workspace_id
+        - name: project_id
           in: query
           schema:
             type: string
@@ -1450,6 +1749,38 @@ paths:
               schema:
                 $ref: "#/components/schemas/SkillView"
 
+  /v1/skills/{skill_id}/library-state:
+    put:
+      summary: Set a skill's global library on/off switch
+      description: >
+        Toggle the global (user-scoped, slug-keyed) library switch for a skill.
+        Off removes it from the inline `/` picker in new (non-project)
+        conversations. Independent of per-project enablement. Emits a
+        skill-changed event so open catalogs refresh.
+      operationId: setSkillLibraryState
+      tags: [skills]
+      parameters:
+        - name: skill_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SkillLibraryStateRequest"
+      responses:
+        "200":
+          description: Updated skill
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SkillView"
+        "404":
+          description: Skill not found
+
   /v1/skills/{skill_id}/files:
     get:
       summary: List skill files
@@ -1461,7 +1792,7 @@ paths:
           required: true
           schema:
             type: string
-        - name: workspace_id
+        - name: project_id
           in: query
           schema:
             type: string
@@ -1484,7 +1815,7 @@ paths:
           required: true
           schema:
             type: string
-        - name: workspace_id
+        - name: project_id
           in: query
           schema:
             type: string
@@ -1518,7 +1849,7 @@ paths:
           required: true
           schema:
             type: string
-        - name: workspace_id
+        - name: project_id
           in: query
           schema:
             type: string
@@ -1530,25 +1861,25 @@ paths:
               schema:
                 $ref: "#/components/schemas/SkillFileContent"
 
-  /v1/workspaces/{workspace_id}/skills:
+  /v1/projects/{project_id}/skills:
     get:
-      summary: Workspace skills catalog
-      operationId: workspaceSkillsCatalog
+      summary: Project skills catalog
+      operationId: projectSkillsCatalog
       tags: [skills]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: path
           required: true
           schema:
             type: string
       responses:
         "200":
-          description: Skills catalog for workspace
+          description: Skills catalog for project
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SkillsCatalog"
-    # NOTE: workspace skill binding (PUT skills / scan / state) was removed —
+    # NOTE: project skill binding (PUT skills / scan / state) was removed —
     # skills bind on the Agent now (08-agents-module). GET stays: it still
     # feeds the conversation composer's skill-insert chips.
 
@@ -1560,7 +1891,7 @@ paths:
       operationId: listSessions
       tags: [sessions]
       parameters:
-        - name: workspace_id
+        - name: project_id
           in: query
           schema:
             type: string
@@ -1756,6 +2087,176 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SessionDetail"
+
+  /v1/sessions/{session_id}/queue:
+    get:
+      summary: List queued follow-up inputs for a session
+      description: |
+        Inputs submitted while a turn was running, awaiting FIFO drain after
+        the active turn completes. Returns ``queued`` + ``blocked`` items and
+        whether auto-drain is currently paused (after an interrupt).
+        See docs/design/session-input-queue.md.
+      operationId: listSessionQueue
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Queued inputs (FIFO) + paused flag
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session not found
+    post:
+      summary: Enqueue a follow-up input (runs after the active turn)
+      description: |
+        Append a user message to the session's input queue. If the session is
+        idle this drains immediately; if a turn is running it waits for FIFO
+        drain. Pending attachments are snapshotted and consumed at enqueue
+        time so they ride this item only. Returns the updated queue.
+      operationId: enqueueSessionInput
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueuedInputCreate"
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session not found
+        "409":
+          description: Queue is full (soft cap reached) or session not runnable
+
+  /v1/sessions/{session_id}/queue/{queue_id}:
+    patch:
+      summary: Edit a queued input (only while still queued)
+      operationId: editSessionQueuedInput
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: queue_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueuedInputPatch"
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session or queued input not found
+        "409":
+          description: Queued input is no longer editable (already dispatched)
+    delete:
+      summary: Delete a queued input
+      operationId: deleteSessionQueuedInput
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: queue_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session or queued input not found
+
+  /v1/sessions/{session_id}/queue/resume:
+    post:
+      summary: Resume draining a paused queue (after an interrupt)
+      operationId: resumeSessionQueue
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session not found
+
+  /v1/sessions/{session_id}/queue/{queue_id}/steer:
+    post:
+      summary: Steer — send a queued input now, interrupting the active turn
+      description: >
+        Promote this queued input to the head of the FIFO, clear any
+        interrupt soft-pause, and — if a turn is in flight — interrupt it
+        silently (no user_interrupt stamp) so the host drain dispatches this
+        item immediately. Lossy: the in-flight turn's partial progress is
+        discarded. The runtime-agnostic stand-in for Codex ``turn/steer``.
+        See docs/design/session-input-queue.md §11.
+      operationId: steerSessionQueuedInput
+      tags: [sessions]
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: queue_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Updated queue (FIFO)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueuedInputList"
+        "404":
+          description: Session or queued input not found
 
   /v1/sessions/{session_id}/cancel:
     post:
@@ -1978,7 +2479,7 @@ paths:
       tags: [onboarding]
       description: |
         One-shot endpoint called at the end of the onboarding flow.
-        Creates ~/Valuz/示例项目, binds it as a workspace, and deploys
+        Creates ~/Valuz/示例项目, binds it as a project, and deploys
         the four official agents for the selected preset team.
         Fully idempotent — safe to call again if the user re-runs onboarding.
       requestBody:
@@ -1989,13 +2490,13 @@ paths:
               $ref: "#/components/schemas/ExampleProjectRequest"
       responses:
         "200":
-          description: Workspace created or reused successfully
+          description: Project created or reused successfully
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExampleProjectResponse"
         "422":
-          description: Invalid team_id or workspace creation error
+          description: Invalid team_id or project creation error
           content:
             application/json:
               schema:
@@ -2027,19 +2528,317 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /v1/agent-templates:
+    get:
+      summary: List the official agent-team templates
+      operationId: listAgentTemplates
+      tags: [agent-templates]
+      description: |
+        Browse the bundled team templates (investment / Xiaohongshu / World Cup).
+        Each template is a ready-made set of roles; `:add` copies the missing
+        ones into the caller's library. Per-role `in_library` and per-template
+        `added` report library state so the UI can mark a fully-present
+        template as already added.
+      responses:
+        "200":
+          description: Templates listed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentTemplateList"
+
+  /v1/agent-templates/{template_id}:add:
+    post:
+      summary: Add a template's roles to the caller's agent library
+      operationId: addAgentTemplate
+      tags: [agent-templates]
+      description: |
+        Batch-create the template's roles as user-owned agents (source=custom)
+        using fixed per-role slugs for idempotent de-dup — roles already in the
+        library are skipped, only the missing ones are created. Runtime / model /
+        provider / effort follow the user's global defaults (same resolver as
+        onboarding). Returns 422 when no model channel is configured.
+      parameters:
+        - in: path
+          name: template_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Roles created and/or already present
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AddAgentTemplateResponse"
+        "404":
+          description: Unknown template_id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: No model channel configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/agent-packs/export:
+    post:
+      summary: Export library agents as a downloadable .valuzpack archive
+      operationId: exportAgentPack
+      tags: [agent-templates]
+      description: |
+        Build a portable .valuzpack (zip) for the chosen library agents — their
+        definitions (provider dropped, model demoted to a hint), embedded
+        user-authored skills, and connector definitions with all secrets
+        stripped. Bundled skills are referenced, not carried.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportPackRequest"
+      responses:
+        "200":
+          description: The .valuzpack archive
+          content:
+            application/zip:
+              schema: {type: string, format: binary}
+        "404":
+          description: Unknown agent slug
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/agent-packs/import:
+    post:
+      summary: Upload a .valuzpack and stage it for import (preview)
+      operationId: importAgentPack
+      tags: [agent-templates]
+      description: |
+        Parse + stage an uploaded .valuzpack. Returns a preview of what it
+        contains (agents, marking which already exist; skills; connectors,
+        marking which need a key / local setup) plus a preview_id to confirm.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        "200":
+          description: Import preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportPackPreviewResponse"
+        "400":
+          description: Malformed or oversized archive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/agent-packs/import/confirm:
+    post:
+      summary: Commit a staged .valuzpack import
+      operationId: confirmAgentPackImport
+      tags: [agent-templates]
+      description: |
+        Install the staged pack's skills, register its connectors, and create
+        its agents (runtime/model/provider follow the user's defaults). Returns
+        the created/skipped counts, the agents, and the connectors that still
+        need the user's attention (key / local setup).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportPackConfirmRequest"
+      responses:
+        "200":
+          description: Import committed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportPackConfirmResponse"
+        "400":
+          description: Preview expired or already used
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: No model channel configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
 components:
   schemas:
+    ArtifactCapabilities:
+      type: object
+      required: [canPreview, canEdit, canOpenExternal, canCopyContent, canDownload]
+      properties:
+        canPreview: {type: boolean}
+        canEdit: {type: boolean}
+        canOpenExternal: {type: boolean}
+        canCopyContent: {type: boolean}
+        canDownload: {type: boolean}
+    ArtifactDescriptor:
+      type: object
+      required: [id, kind, projectId, path, name, previewKind, capabilities]
+      properties:
+        id: {type: string}
+        kind:
+          type: string
+          enum: [project_file, session_output, document_artifact, slides_artifact, webpage_artifact]
+        projectId: {type: string}
+        path: {type: string}
+        name: {type: string}
+        mimeType: {type: string, nullable: true}
+        extension: {type: string, nullable: true}
+        size: {type: integer, nullable: true}
+        modifiedAt: {type: string, nullable: true}
+        previewKind:
+          type: string
+          enum: [markdown, code, image, pdf, html, docx, media, spreadsheet, plain, unsupported]
+        capabilities:
+          $ref: "#/components/schemas/ArtifactCapabilities"
+    TextArtifactContent:
+      type: object
+      required: [kind, encoding, content, truncated]
+      properties:
+        kind: {type: string, enum: [text]}
+        encoding: {type: string, enum: [utf-8]}
+        content: {type: string}
+        truncated: {type: boolean}
+        etag: {type: string, nullable: true}
+        modifiedAt: {type: string, nullable: true}
+    BinaryArtifactContent:
+      type: object
+      required: [kind, openUrl, mimeType]
+      properties:
+        kind: {type: string, enum: [binary]}
+        openUrl: {type: string}
+        mimeType: {type: string}
+        size: {type: integer, nullable: true}
+        reason: {type: string, nullable: true}
+    ExternalArtifactContent:
+      type: object
+      required: [kind, reason]
+      properties:
+        kind: {type: string, enum: [external]}
+        reason: {type: string}
+        openUrl: {type: string, nullable: true}
+    ArtifactContent:
+      oneOf:
+        - $ref: "#/components/schemas/TextArtifactContent"
+        - $ref: "#/components/schemas/BinaryArtifactContent"
+        - $ref: "#/components/schemas/ExternalArtifactContent"
+    ArtifactFileResponse:
+      type: object
+      required: [artifact, content]
+      properties:
+        artifact:
+          $ref: "#/components/schemas/ArtifactDescriptor"
+        content:
+          $ref: "#/components/schemas/ArtifactContent"
+    BrowserStatus:
+      type: object
+      required: [daemon_running, mode, node_ok, cli_prefix, hints]
+      properties:
+        daemon_running: {type: boolean}
+        mode: {type: string, enum: [managed, attach]}
+        node_ok: {type: boolean}
+        cli_prefix: {type: string}
+        pid: {type: integer, nullable: true}
+        hints:
+          type: array
+          items: {type: string}
+    BrowserStartResult:
+      type: object
+      required: [status, mode, cli_prefix]
+      properties:
+        status: {type: string}
+        mode: {type: string}
+        cli_prefix: {type: string}
+    BrowserStopResult:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string}
+    MemoryTarget:
+      type: string
+      enum: [user, global, project]
+    MemoryView:
+      type: object
+      required: [enabled, auto_extract, custom_instructions, entries]
+      properties:
+        enabled: {type: boolean}
+        auto_extract: {type: boolean}
+        custom_instructions:
+          type: string
+          description: >-
+            User-authored guidance appended to the background reviewer prompt
+            (global). Steers what the auto-extractor saves/skips and takes
+            precedence over the default soft heuristics; empty disables it.
+            Hard rules (secret redaction, knowledge-base dedup, output contract)
+            are not overridable.
+        entries:
+          type: object
+          additionalProperties:
+            type: array
+            items: {type: string}
+          description: Entries per scope, keyed by target (user / global / project).
+    MemorySettings:
+      type: object
+      required: [enabled, auto_extract, custom_instructions]
+      properties:
+        enabled: {type: boolean}
+        auto_extract: {type: boolean}
+        custom_instructions: {type: string}
+    MemorySettingsPatch:
+      type: object
+      properties:
+        enabled: {type: boolean}
+        auto_extract: {type: boolean}
+        custom_instructions:
+          type: string
+          description: Global reviewer guidance; capped server-side (1500 chars).
+    MemoryEntryDelete:
+      type: object
+      required: [target, old_text]
+      properties:
+        target: {$ref: "#/components/schemas/MemoryTarget"}
+        old_text: {type: string}
+        project_id: {type: string}
+    MemoryClear:
+      type: object
+      required: [target]
+      properties:
+        target: {$ref: "#/components/schemas/MemoryTarget"}
+        project_id: {type: string}
     RunSummary:
       type: object
-      required: [session_id, source_kind, workspace_id, title, status, updated_at]
+      required: [session_id, source_kind, project_id, title, status, updated_at]
       properties:
         session_id: {type: string}
         source_kind:
           type: string
           enum: [assistant, project_chat, task]
-        workspace_id: {type: string}
-        workspace_name: {type: string, nullable: true}
+        project_id: {type: string}
+        project_name: {type: string, nullable: true}
         task_id: {type: string, nullable: true}
+        origin:
+          type: string
+          description: "user | automation | task — who created the session."
         title: {type: string}
         status: {type: string}
         current_todo:
@@ -2063,6 +2862,161 @@ components:
         model: {type: string, nullable: true}
         runtime: {type: string, nullable: true}
         updated_at: {type: integer, format: int64, description: "Unix epoch milliseconds (UTC). Format via new Date(ms)."}
+    AgentTemplateRole:
+      type: object
+      required: [slug, name, description, instructions, avatar, skills, connector_types, runtime, in_library]
+      properties:
+        slug: {type: string, description: "Fixed slug used for idempotent de-dup."}
+        name: {type: string}
+        description: {type: string}
+        instructions: {type: string}
+        avatar: {type: string}
+        skills:
+          type: array
+          items: {type: string}
+        connector_types:
+          type: array
+          items: {type: string}
+        runtime:
+          type: string
+          description: >-
+            The role's recommended runtime (claude_agent / codex), shown as a
+            badge on the detail page. Display metadata — added agents follow the
+            user's default channel; this surfaces the design (e.g. the World Cup
+            team's dual-runtime split).
+        effort:
+          type: string
+          nullable: true
+          enum: [low, medium, high, xhigh, max]
+          description: "The role's recommended reasoning-effort budget (display badge)."
+        in_library:
+          type: boolean
+          description: "True if an agent with this slug already exists in the caller's library."
+    AgentTemplate:
+      type: object
+      required: [id, scenario, name, description, icon, roles, added]
+      properties:
+        id: {type: string}
+        scenario: {type: string, description: "Grouping label for the templates panel, e.g. 投研 / 内容创作."}
+        name: {type: string}
+        description: {type: string}
+        icon: {type: string, description: "Avatar preset key rendered on the team card."}
+        added:
+          type: boolean
+          description: "True when every role is already in the caller's library (card shows 已添加, disabled)."
+        roles:
+          type: array
+          items: {$ref: "#/components/schemas/AgentTemplateRole"}
+    AgentTemplateList:
+      type: object
+      required: [templates]
+      properties:
+        templates:
+          type: array
+          items: {$ref: "#/components/schemas/AgentTemplate"}
+    AddAgentTemplateResponse:
+      type: object
+      required: [template_id, created, skipped, roles]
+      properties:
+        template_id: {type: string}
+        created: {type: integer, description: "Number of roles newly created this call."}
+        skipped: {type: integer, description: "Number of roles already present (skipped)."}
+        roles:
+          type: array
+          description: "All of the template's role agents — newly created and pre-existing."
+          items: {$ref: "#/components/schemas/Agent"}
+    ExportCollection:
+      type: object
+      description: "Optional display header to brand the exported group."
+      properties:
+        name: {type: string, nullable: true}
+        description: {type: string, nullable: true}
+        scenario: {type: string, nullable: true}
+        icon: {type: string, nullable: true}
+    ExportPackRequest:
+      type: object
+      required: [agent_slugs]
+      properties:
+        agent_slugs:
+          type: array
+          items: {type: string}
+          description: "Library agent slugs to export (1..N)."
+        collection:
+          $ref: "#/components/schemas/ExportCollection"
+    ImportPreviewCollection:
+      type: object
+      required: [id, name, description, scenario, icon]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        description: {type: string}
+        scenario: {type: string}
+        icon: {type: string}
+    ImportPreviewAgent:
+      type: object
+      required: [slug, name, description, in_library]
+      properties:
+        slug: {type: string}
+        name: {type: string}
+        description: {type: string}
+        in_library: {type: boolean, description: "Already present in the user's library."}
+    ImportPreviewSkill:
+      type: object
+      required: [slug, source]
+      properties:
+        slug: {type: string}
+        source: {type: string, enum: [embedded, bundled]}
+    ImportPreviewConnector:
+      type: object
+      required: [slug, display_name, requires_credentials, requires_setup, already_present]
+      properties:
+        slug: {type: string}
+        display_name: {type: string}
+        requires_credentials: {type: boolean}
+        requires_setup: {type: boolean}
+        already_present: {type: boolean}
+    ImportPackPreviewResponse:
+      type: object
+      required: [preview_id, agents, skills, connectors]
+      properties:
+        preview_id: {type: string}
+        collection:
+          allOf: [{$ref: "#/components/schemas/ImportPreviewCollection"}]
+          nullable: true
+        agents:
+          type: array
+          items: {$ref: "#/components/schemas/ImportPreviewAgent"}
+        skills:
+          type: array
+          items: {$ref: "#/components/schemas/ImportPreviewSkill"}
+        connectors:
+          type: array
+          items: {$ref: "#/components/schemas/ImportPreviewConnector"}
+    ImportPackConfirmRequest:
+      type: object
+      required: [preview_id]
+      properties:
+        preview_id: {type: string}
+    ConnectorToConfigure:
+      type: object
+      required: [slug, display_name, requires_credentials, requires_setup]
+      properties:
+        slug: {type: string}
+        display_name: {type: string}
+        requires_credentials: {type: boolean}
+        requires_setup: {type: boolean}
+    ImportPackConfirmResponse:
+      type: object
+      required: [created, skipped, roles, connectors_to_configure]
+      properties:
+        created: {type: integer}
+        skipped: {type: integer}
+        roles:
+          type: array
+          items: {$ref: "#/components/schemas/Agent"}
+        connectors_to_configure:
+          type: array
+          items: {$ref: "#/components/schemas/ConnectorToConfigure"}
     Agent:
       type: object
       required: [id, slug, name, description, instructions, runtime, model, skills, connector_types, source]
@@ -2103,13 +3057,6 @@ components:
           description: >-
             Preset icon key or uploaded asset URL for the agent's avatar.
             v1 supports preset keys only. null = no avatar set.
-        kernel_agent_id:
-          type: string
-          nullable: true
-          description: >-
-            Shared kernel AgentConfig id (v2 live-reference). null until first
-            deploy (built lazily). Lets a project member map back to its
-            library agent (member.kernel_agent_id == agent.kernel_agent_id).
     CreateAgentRequest:
       type: object
       required: [name]
@@ -2161,7 +3108,7 @@ components:
       required: [name]
       properties:
         # Optional — backend derives from ``name``, unique within the
-        # workspace, when omitted (VALUZ-AGENT-SLUG).
+        # project, when omitted (VALUZ-AGENT-SLUG).
         agent_slug: {type: string, nullable: true}
         name: {type: string}
         instructions: {type: string, default: ""}
@@ -2188,16 +3135,15 @@ components:
       properties:
         source_agent_slug: {type: string}
         # Optional — backend derives from the source agent's name, unique
-        # within the target workspace, when omitted (VALUZ-AGENT-SLUG).
+        # within the target project, when omitted (VALUZ-AGENT-SLUG).
         agent_slug: {type: string, nullable: true}
     ProjectMember:
       type: object
-      required: [id, workspace_id, agent_slug, kernel_agent_id]
+      required: [id, project_id, agent_slug]
       properties:
         id: {type: string}
-        workspace_id: {type: string}
+        project_id: {type: string}
         agent_slug: {type: string}
-        kernel_agent_id: {type: string}
         source_agent_slug: {type: string, nullable: true}
     AgentSummary:
       type: object
@@ -2226,6 +3172,38 @@ components:
           oneOf:
             - $ref: "#/components/schemas/AgentSummary"
             - type: "null"
+    ProposeAgentConfirmRequest:
+      type: object
+      description: >-
+        Spec of an agent the user is confirming. Mirrors the ``propose_agent``
+        tool input; the backend derives a unique slug from ``name``.
+      required: [name, instructions]
+      properties:
+        name: {type: string}
+        instructions: {type: string}
+        description: {type: string, default: ""}
+        runtime: {type: string, default: claude_agent}
+        model: {type: string, default: claude-sonnet-4-6}
+        effort: {type: string, nullable: true, enum: [low, medium, high, xhigh, max]}
+        skills:
+          type: array
+          items: {type: string}
+        connectors:
+          type: array
+          items: {type: string}
+        avatar: {type: string, nullable: true}
+    ProposeAgentConfirmResponse:
+      type: object
+      required: [agent, deployed]
+      properties:
+        agent:
+          $ref: "#/components/schemas/AgentSummary"
+        member:
+          oneOf:
+            - $ref: "#/components/schemas/ProjectMember"
+            - type: "null"
+        deployed: {type: boolean}
+        project_id: {type: string, nullable: true}
     KickoffTaskRequest:
       type: object
       required: [goal, lead_agent_slug]
@@ -2252,10 +3230,10 @@ components:
             finalizes, with no re-drive.
     Task:
       type: object
-      required: [id, workspace_id, title, goal, status, created_by, lead_agent_slug, current_holder, file_path, created_at, updated_at]
+      required: [id, project_id, title, goal, status, created_by, lead_agent_slug, current_holder, file_path, created_at, updated_at]
       properties:
         id: {type: string}
-        workspace_id: {type: string}
+        project_id: {type: string}
         title: {type: string}
         goal: {type: string}
         status: {type: string}
@@ -2265,9 +3243,25 @@ components:
         file_path: {type: string}
         created_at: {type: integer, format: int64, description: "Unix epoch milliseconds (UTC). Format via new Date(ms)."}
         updated_at: {type: integer, format: int64, description: "Unix epoch milliseconds (UTC). Format via new Date(ms)."}
+        trigger:
+          allOf: [{$ref: "#/components/schemas/TaskTrigger"}]
+          nullable: true
+          description: "Resolved provenance — who/what spawned this task (drives the task-list '由 … 触发' line)."
+    TaskTrigger:
+      type: object
+      required: [type]
+      description: "Who/what spawned a task. The source_* ids deep-link to the parent task / automation / conversation."
+      properties:
+        type: {type: string, enum: [user, chat, agent, automation], description: "user = direct action; chat = a project conversation; agent = another task's lead/member; automation = a scheduled/agent-run automation."}
+        source_task_id: {type: string, nullable: true, description: "Parent task (type=agent)."}
+        source_task_title: {type: string, nullable: true}
+        source_agent_slug: {type: string, nullable: true, description: "Triggering agent (type=agent)."}
+        source_automation_id: {type: string, nullable: true, description: "Automation that fired it (type=automation)."}
+        source_automation_name: {type: string, nullable: true}
+        source_session_id: {type: string, nullable: true, description: "Originating conversation (type=chat)."}
     TaskRun:
       type: object
-      required: [id, session_id, agent_slug, sequence, kind, status, workspace_mode]
+      required: [id, session_id, agent_slug, sequence, kind, status, project_mode]
       properties:
         id: {type: string}
         session_id: {type: string}
@@ -2278,7 +3272,7 @@ components:
         label: {type: string, nullable: true}
         goal: {type: string, nullable: true}
         dispatched_by: {type: string, nullable: true}
-        workspace_mode: {type: string}
+        project_mode: {type: string}
         run_dir: {type: string, nullable: true}
         result_manifest:
           type: object
@@ -2456,7 +3450,7 @@ components:
           type: integer
         failed_items:
           type: integer
-        workspace_id:
+        project_id:
           type: string
           nullable: true
         created_at:
@@ -2466,11 +3460,11 @@ components:
 
     SearchRequest:
       type: object
-      required: [query, workspace_id]
+      required: [query, project_id]
       properties:
         query:
           type: string
-        workspace_id:
+        project_id:
           type: string
         top_k:
           type: integer
@@ -2520,11 +3514,11 @@ components:
       properties:
         folder_path:
           type: string
-        workspace_id:
+        project_id:
           type: string
           nullable: true
 
-    WorkspaceBindingsRequest:
+    ProjectBindingsRequest:
       type: object
       required: [document_ids]
       properties:
@@ -2555,6 +3549,19 @@ components:
         enabled:
           type: boolean
           default: false
+          description: |
+            Per-PROJECT enablement (whether this skill is turned on for the
+            project in the `project_id` query). Distinct from `library_enabled`,
+            which is the global library switch.
+        library_enabled:
+          type: boolean
+          default: true
+          description: |
+            Global library switch for this skill (user-scoped, keyed by slug),
+            independent of any project. Defaults to `true`; turning it off in
+            the Skills page removes the skill from the inline `/` picker of a
+            new (non-project) conversation. Project conversations are unaffected
+            (they surface the selected agent's bound skills directly).
         tags:
           type: array
           items:
@@ -2679,9 +3686,9 @@ components:
 
     SkillsCatalog:
       type: object
-      required: [workspace_id, skills]
+      required: [project_id, skills]
       properties:
-        workspace_id:
+        project_id:
           type: string
         skills:
           type: array
@@ -2694,6 +3701,14 @@ components:
       properties:
         discovered:
           type: integer
+
+    SkillRescanResponse:
+      type: object
+      required: [indexed]
+      properties:
+        indexed:
+          type: integer
+          description: Number of skills discovered and indexed by the rescan.
 
     SkillCreateRequest:
       type: object
@@ -2708,13 +3723,13 @@ components:
           type: string
           enum: [user, project, official, tenant]
           default: user
-        workspace_id:
+        project_id:
           type: string
           nullable: true
         instructions_markdown:
           type: string
           nullable: true
-        add_to_workspace:
+        add_to_project:
           type: boolean
           default: false
 
@@ -2737,10 +3752,10 @@ components:
       properties:
         new_name:
           type: string
-        workspace_id:
+        project_id:
           type: string
           nullable: true
-        add_to_workspace:
+        add_to_project:
           type: boolean
           default: false
 
@@ -2753,7 +3768,15 @@ components:
         enabled:
           type: boolean
 
-    WorkspaceSkillsUpdateRequest:
+    SkillLibraryStateRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+          description: Global library on/off for the skill (slug-keyed, user-scoped).
+
+    ProjectSkillsUpdateRequest:
       type: object
       properties:
         skills_enabled:
@@ -2776,20 +3799,62 @@ components:
           type: string
           enum: [user, project, official, tenant]
           default: user
-        workspace_id:
+        project_id:
           type: string
           nullable: true
-        add_to_workspace:
+        add_to_project:
           type: boolean
           default: false
 
-    SkillCreateChatStartResponse:
+    SkillCreationContext:
       type: object
-      required: [session_id, authoring_workspace_id]
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [chat, project, skills_library]
+        project_id:
+          type: string
+          nullable: true
+          description: Required when kind=project; the project to author in.
+
+    SkillCreateStartRequest:
+      type: object
+      required: [context]
+      properties:
+        context:
+          $ref: "#/components/schemas/SkillCreationContext"
+        agent_slug:
+          type: string
+          nullable: true
+          description: |
+            Agent to bind the authoring conversation to. Omit to let the
+            backend pick the default assistant.
+        model_id:
+          type: string
+          nullable: true
+        provider_id:
+          type: string
+          nullable: true
+
+    SkillCreateStartResponse:
+      type: object
+      required: [session_id, authoring_project_id, creation_context]
       properties:
         session_id:
           type: string
-        authoring_workspace_id:
+        authoring_project_id:
+          type: string
+        creation_context:
+          $ref: "#/components/schemas/SkillCreationContext"
+
+    SkillCreateChatStartResponse:
+      type: object
+      required: [session_id, authoring_project_id]
+      properties:
+        session_id:
+          type: string
+        authoring_project_id:
           type: string
 
     StagingFileNode:
@@ -2871,7 +3936,7 @@ components:
           type: string
           enum: [user, project, official, tenant]
           default: user
-        workspace_id:
+        project_id:
           type: string
           nullable: true
 
@@ -2943,9 +4008,9 @@ components:
 
     SkillDeleteAffectedProject:
       type: object
-      required: [workspace_id, name]
+      required: [project_id, name]
       properties:
-        workspace_id:
+        project_id:
           type: string
         name:
           type: string
@@ -3030,10 +4095,10 @@ components:
           type: string
           enum: [user, project, official, tenant]
           default: user
-        workspace_id:
+        project_id:
           type: string
           nullable: true
-        add_to_workspace:
+        add_to_project:
           type: boolean
           default: false
 
@@ -3047,7 +4112,7 @@ components:
           type: string
           enum: [user, project, official, tenant]
           default: user
-        workspace_id:
+        project_id:
           type: string
           nullable: true
 
@@ -3055,11 +4120,11 @@ components:
 
     SessionListItem:
       type: object
-      required: [id, workspace_id, status, origin, updated_at]
+      required: [id, project_id, status, origin, updated_at]
       properties:
         id:
           type: string
-        workspace_id:
+        project_id:
           type: string
         name:
           type: string
@@ -3084,7 +4149,7 @@ components:
             to SessionListItem so the desktop sidebar's session list can drive
             the composer's (providerId, modelId) model selector without an extra
             detail fetch — without this, the composer falls back to the
-            workspace default provider even though the session is wired to a
+            project default provider even though the session is wired to a
             different model end-to-end.
         updated_at:
           type: integer
@@ -3182,20 +4247,20 @@ components:
               nullable: true
               description: |
                 Frozen system-prompt append captured at session creation
-                from the workspace's then-current ``instructions_md``
+                from the project's then-current ``instructions_md``
                 (ADR-008). The runtime hands this verbatim to the model
-                on every turn; workspace edits after creation do *not*
-                mutate this field. null when the workspace had no
+                on every turn; project edits after creation do *not*
+                mutate this field. null when the project had no
                 instructions at session-create time. Frontend session
-                panels should render this — NOT the live workspace
+                panels should render this — NOT the live project
                 ``instructions_md`` — so users see the prompt the
                 running agent actually has.
             agent_slug:
               type: string
               nullable: true
               description: |
-                Workspace-local agent handle for this session when it was
-                created from a named workspace agent (e.g. a Project Task
+                Project-local agent handle for this session when it was
+                created from a named project agent (e.g. a Project Task
                 lead/member). null for plain chat sessions.
 
     RuntimeListItem:
@@ -3334,9 +4399,9 @@ components:
 
     SessionCreateRequest:
       type: object
-      required: [workspace_id]
+      required: [project_id]
       properties:
-        workspace_id:
+        project_id:
           type: string
         title:
           type: string
@@ -3346,7 +4411,7 @@ components:
           nullable: true
           description: |
             Optional explicit model id. ``null`` falls back to the bound
-            provider's default model, then the workspace default, then a
+            provider's default model, then the project default, then a
             global fallback (kernel V5 dropped MODEL_CATALOG so any
             string is forwarded verbatim to the SDK).
         provider_id:
@@ -3618,6 +4683,89 @@ components:
           items:
             $ref: "#/components/schemas/SessionEventEnvelope"
 
+    # ── Session input queue ────────────────────────────────────────
+
+    QueuedInput:
+      type: object
+      required: [id, status, position, text, attachment_count, created_at]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          description: "queued | blocked (dispatched/cancelled are not listed)"
+        position:
+          type: integer
+          description: FIFO order within the session (ascending).
+        text:
+          type: string
+        attachment_count:
+          type: integer
+          description: Attachments snapshotted from the pending set at enqueue time.
+        provider_id:
+          type: string
+          nullable: true
+        model_id:
+          type: string
+          nullable: true
+        error_message:
+          type: string
+          nullable: true
+          description: Why a ``blocked`` item could not run (e.g. budget).
+        created_at:
+          type: integer
+          format: int64
+        updated_at:
+          type: integer
+          format: int64
+          nullable: true
+
+    QueuedInputList:
+      type: object
+      required: [session_id, items, paused]
+      properties:
+        session_id:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QueuedInput"
+        paused:
+          type: boolean
+          description: >-
+            True when auto-drain is paused (after an interrupt) and awaiting an
+            explicit resume.
+        draining:
+          type: boolean
+          default: false
+          description: >-
+            True while a host drain chain is in flight. A dispatched (in-flight)
+            item is not present in ``items`` (only queued/blocked are listed), so
+            clients that re-subscribe per drained turn use this to keep following
+            until the last item finishes.
+
+    QueuedInputCreate:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+        provider_id:
+          type: string
+          nullable: true
+          description: Optional provider override mirrored from send-message semantics.
+        model_id:
+          type: string
+          nullable: true
+          description: Optional model override mirrored from send-message semantics.
+
+    QueuedInputPatch:
+      type: object
+      required: [prompt]
+      properties:
+        prompt:
+          type: string
+
     # ── Skills: File-level schemas ─────────────────────────────────
 
     SkillFileNode:
@@ -3686,7 +4834,7 @@ components:
           type: string
           enum: [user, project, official, tenant]
           default: user
-        workspace_id:
+        project_id:
           type: string
           nullable: true
 
@@ -3703,10 +4851,10 @@ components:
           type: string
           enum: [user, project, official, tenant]
           default: user
-        workspace_id:
+        project_id:
           type: string
           nullable: true
-        add_to_workspace:
+        add_to_project:
           type: boolean
           default: false
 

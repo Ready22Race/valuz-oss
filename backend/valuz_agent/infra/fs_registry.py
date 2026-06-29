@@ -21,7 +21,7 @@ outside this module and ``infra.config``.
 
 The kernel (``backend/kernel/``) is exempt from this rule — it owns its own
 materialization roots under ``project.cwd`` and we feed it a clean cwd path
-via ``workspace_cwd()``.
+via ``project_cwd()``.
 """
 
 from __future__ import annotations
@@ -31,8 +31,9 @@ from pathlib import Path
 from typing import Literal
 
 from valuz_agent.infra.config import settings
+from valuz_agent.ports.workspace import LocalWorkspaceHandle, WorkspaceHandle
 
-WorkspaceKind = Literal["chat", "project"]
+ProjectKind = Literal["chat", "project"]
 SkillSource = Literal["claude", "codex"]
 
 
@@ -56,30 +57,60 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    # ---- FS-3 — workspace cwd (project.cwd in V5 kernel terms) ----
+    def browser_profile_dir(self) -> Path:
+        """Dedicated, persistent Chrome ``--user-data-dir`` for the managed browser.
 
-    def workspace_cwd(
-        self, project_id: str, kind: WorkspaceKind, root_path: str | None = None
-    ) -> Path:
-        """Return the absolute cwd for a workspace.
+        An ISOLATED profile (never the user's everyday Chrome): a full-access
+        agent only ever sees the logins the user puts here, which contains the
+        blast radius. See docs/design/browser-feature.md §6 (security).
+        """
+        path = settings.browser_profile_dir
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def browser_bin_dir(self) -> Path:
+        """Host bin dir prepended to the agent shell's PATH so a friendly
+        ``chrome-devtools`` wrapper resolves (vs. the raw ``node <entry>`` /
+        ``npx`` invocation). See docs/design/browser-feature.md §8.
+        """
+        path = self.data_dir() / "bin"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # ---- FS-3 — project cwd (project.cwd in V5 kernel terms) ----
+
+    def project_cwd(self, project_id: str, kind: ProjectKind, root_path: str | None = None) -> Path:
+        """Return the absolute cwd for a project.
 
         - ``kind="project"``: caller-supplied ``root_path`` is used as-is. The
           path must already be absolute; it is not created.
         - ``kind="chat"``: a managed cwd is allocated under
-          ``data_dir/workspaces/{project_id}/`` and created on demand. This
+          ``data_dir/projects/{project_id}/`` and created on demand. This
           satisfies V5's invariant that ``project.cwd`` is always present.
         """
         if kind == "project":
             if not root_path:
-                raise ValueError("project workspace requires an explicit root_path")
+                raise ValueError("project requires an explicit root_path")
             path = Path(root_path).expanduser()
             if not path.is_absolute():
-                raise ValueError(f"workspace root_path must be absolute: {root_path}")
+                raise ValueError(f"project root_path must be absolute: {root_path}")
             return path
 
-        path = self.data_dir() / "workspaces" / project_id
+        path = self.data_dir() / "projects" / project_id
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def workspace_handle(
+        self, project_id: str, kind: ProjectKind, root_path: str | None = None
+    ) -> WorkspaceHandle:
+        """Return a ``WorkspaceHandle`` for the project's cwd.
+
+        The project-domain seam (see ``ports/workspace.py``): the local
+        form hands back a ``LocalWorkspaceHandle`` over the real cwd; a
+        future remote form would return a handle backed by the kernel
+        file API without changing call sites.
+        """
+        return LocalWorkspaceHandle(self.project_cwd(project_id, kind, root_path))
 
     # ---- FS-4 / FS-5 — doc assets and previews ----
 
@@ -100,12 +131,24 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    # ---- FS-7 — skill-creator staging (workspace-cwd-keyed) ----
+    def kb_root(self) -> Path:
+        """Return (and create) the knowledge-base root directory.
+
+        ``<data_dir>/kb`` — the single home for KB content, replacing the
+        legacy stray ``~/.valuz/kb`` path. Routed through the registry so KB
+        writes share the same audit / sandbox boundary as every other host
+        write. Created on demand.
+        """
+        path = self.data_dir() / "kb"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # ---- FS-7 — skill-creator staging (project-cwd-keyed) ----
     #
-    # Staging lives **inside the workspace cwd** under ``.skill-staging/``
+    # Staging lives **inside the project cwd** under ``.skill-staging/``
     # so the agent can write to it via a relative ``./`` path it computes
     # from ``$PWD`` (its actual working directory). No session_id appears
-    # in the path — concurrent sessions in the same workspace share this
+    # in the path — concurrent sessions in the same project share this
     # subdir and rely on slug uniqueness; ``submit_skill`` validates the
     # slug is present at the expected path before the user is shown a
     # confirmation card.
@@ -116,13 +159,13 @@ class FsRegistry:
     # staged content from before this refactor doesn't disappear.
     SKILL_STAGING_SUBDIR = ".skill-staging"
 
-    def skill_staging_root_for_workspace(self, workspace_cwd: str | Path) -> Path:
-        path = Path(workspace_cwd) / self.SKILL_STAGING_SUBDIR
+    def skill_staging_root_for_project(self, project_cwd: str | Path) -> Path:
+        path = Path(project_cwd) / self.SKILL_STAGING_SUBDIR
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def skill_staging_dir_for_workspace(self, workspace_cwd: str | Path, slug: str) -> Path:
-        path = self.skill_staging_root_for_workspace(workspace_cwd) / slug
+    def skill_staging_dir_for_project(self, project_cwd: str | Path, slug: str) -> Path:
+        path = self.skill_staging_root_for_project(project_cwd) / slug
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -169,7 +212,7 @@ class FsRegistry:
         """Return the canonical home for bundled / official skills.
 
         Defaults to ``<data_dir>/official-skills/`` (i.e.
-        ``~/.valuz/app/official-skills/``) so the host owns the location.
+        ``~/.valuz-oss/official-skills/``) so the host owns the location.
         ``$VALUZ_OFFICIAL_SKILLS_DIR`` overrides for tests / sandboxed
         runs. The directory is created lazily by
         ``sync_bundled_official_skills`` on first boot.
@@ -202,7 +245,7 @@ class FsRegistry:
     def project_skill_dir(self, project_cwd: str | Path, slug: str) -> Path:
         return self.project_skill_root(project_cwd) / slug
 
-    # ---- FS-11 — task workspace directories (lead-dispatch-mvp §S6) ----
+    # ---- FS-11 — task project directories (lead-dispatch-mvp §S6) ----
     #
     # Layout under project.cwd:
     #   tasks/<task_id>-<slug>.md       — task narrative file (file-as-truth)
@@ -233,6 +276,29 @@ class FsRegistry:
         parent = Path(project_cwd) / "tasks"
         parent.mkdir(parents=True, exist_ok=True)
         return parent / f"{task_id}-{ascii_slug}.md"
+
+    def task_brief_path(self, base_cwd: str | Path, task_id: str, label: str = "goal") -> Path:
+        """Return the path for a spilled (over-long) goal/brief doc.
+
+        ``<base_cwd>/tasks/_briefs/<task_id>-<ascii_label>.md``
+
+        Goal mode caps the ``/goal`` payload (bundled Claude CLI: 4000 chars); a
+        task goal / subtask brief over the cap is written here and referenced by
+        path instead (see ``agent_resolver.spill_goal_brief_if_too_long``).
+        ``base_cwd`` is the session's working dir — the project cwd for a lead /
+        shared member, or an isolated subrun dir for a repo-worktree member — so
+        the doc always sits inside the agent's readable tree, next to the task
+        narrative + run dirs. The parent dir is created; the file content is
+        written by the caller (the registry never writes content). ``label`` is
+        sanitized to ASCII like ``task_path`` so a CJK agent slug never leaks
+        into an on-disk path.
+        """
+        import re
+
+        ascii_label = re.sub(r"[^A-Za-z0-9-]+", "-", label).strip("-") or "goal"
+        parent = Path(base_cwd) / "tasks" / "_briefs"
+        parent.mkdir(parents=True, exist_ok=True)
+        return parent / f"{task_id}-{ascii_label}.md"
 
     def subrun_dir(
         self,
@@ -336,7 +402,7 @@ class FsRegistry:
     # ---- FS-10 — parser plugin local assets (model files, licenses) ----
     #
     # Each plugin gets its own subdirectory under ``data_dir/models/``.
-    # ``RapidOcrSetupJob`` writes PP-OCRv5 ONNX files + the Apache 2.0
+    # ``RapidOcrSetupJob`` writes PP-OCRv6 ONNX files + the Apache 2.0
     # ``LICENSE`` + a ``READY`` marker into ``models/light_local/rapidocr/``.
     # ``parser_light_local._build_rapidocr`` reads the same directory and
     # constructs ``rapidocr.RapidOCR`` with explicit ``params={"Det.model_path":
@@ -349,7 +415,7 @@ class FsRegistry:
 
         ``subkind`` namespaces multiple bundles within one plugin (e.g.
         ``parser_model_dir("light_local", "rapidocr")`` →
-        ``~/.valuz/app/models/light_local/rapidocr/``). Created on demand.
+        ``~/.valuz-oss/models/light_local/rapidocr/``). Created on demand.
         """
         if not plugin_id or "/" in plugin_id or ".." in plugin_id:
             raise ValueError(f"invalid plugin_id: {plugin_id!r}")
@@ -364,49 +430,45 @@ class FsRegistry:
     # ---- FS-13 — onboarding example project directory ----
     #
     # User-visible directory for the onboarding "示例项目".  Lives under
-    # ``user_workspace_root`` (default ``~/Valuz``) so it appears in the
+    # ``user_project_root`` (default ``~/Valuz``) so it appears in the
     # user's home folder rather than in the hidden ``~/.valuz`` data dir.
 
     def example_project_dir(self) -> Path:
         """Return (and create) the example-project directory.
 
-        ``<user_workspace_root>/示例项目`` — created on demand.
+        ``<user_project_root>/示例项目`` — created on demand.
         Used exclusively by the onboarding ``POST /v1/onboarding/example-project``
-        endpoint; the path is then handed to ``WorkspaceService.create_project``
+        endpoint; the path is then handed to ``ProjectService.create_project``
         as ``root_path``.
         """
-        path = settings.user_workspace_root / "示例项目"
+        path = settings.user_project_root / "示例项目"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    # ---- FS-12 — memory store directories (memory-system-design §2.1) ----
+    # ---- FS-12 — memory store directories (memory-system-design §3) ----
     #
-    #   global  → <data_dir>/memory/                       (cross-project, per-user)
-    #   project → <project_cwd>/.valuz/memory/             (workspace, cross-session+task)
-    #   task    → <project_cwd>/.valuz/memory/tasks/<id>/  (single task, lead+members)
+    #   global  → <data_dir>/memories/               (root IS the global namespace)
+    #   project → <data_dir>/memories/projects/<id>/ (per-project, keyed by project_id)
     #
-    # Each scope dir holds topic files ``<name>.md`` (frontmatter) + a single
-    # ``MEMORY.md`` index. Returns (and creates) the scope directory.
+    # Centralized under the valuz data dir (never inside a user's bound repo) and
+    # keyed by stable ``project_id`` (decoupled from ``project.cwd``). global holds
+    # the flat ``USER.md`` + ``MEMORY.md``; each project dir holds ``MEMORY.md``.
+    # Returns (and creates) the scope directory.
 
     def memory_dir(
         self,
-        scope: Literal["global", "project", "task"],
+        scope: Literal["global", "project"],
         *,
-        project_cwd: str | Path | None = None,
-        task_id: str | None = None,
+        project_id: str | None = None,
     ) -> Path:
         if scope == "global":
-            path = self.data_dir() / "memory"
+            path = self.data_dir() / "memories"
         elif scope == "project":
-            if not project_cwd:
-                raise ValueError("project memory requires project_cwd")
-            path = Path(project_cwd) / ".valuz" / "memory"
-        elif scope == "task":
-            if not project_cwd or not task_id:
-                raise ValueError("task memory requires project_cwd and task_id")
-            if "/" in task_id or ".." in task_id:
-                raise ValueError(f"invalid task_id: {task_id!r}")
-            path = Path(project_cwd) / ".valuz" / "memory" / "tasks" / task_id
+            if not project_id:
+                raise ValueError("project memory requires project_id")
+            if "/" in project_id or ".." in project_id:
+                raise ValueError(f"invalid project_id: {project_id!r}")
+            path = self.data_dir() / "memories" / "projects" / project_id
         else:  # pragma: no cover - guarded by Literal
             raise ValueError(f"unknown memory scope: {scope!r}")
         path.mkdir(parents=True, exist_ok=True)

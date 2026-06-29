@@ -8,7 +8,14 @@ import { UpdateWindowApp } from "./components/UpdateWindowApp";
 const storedLocale = localStorage.getItem("valuz-locale") as
   | LocaleCode
   | null;
-initI18n({ locale: storedLocale ?? "zh-CN", fallbackLocale: "zh-CN" });
+// First run follows the OS language (zh* → Chinese, otherwise English);
+// an explicit in-app choice (valuz-locale) always wins.
+const systemDefaultLocale = (): LocaleCode =>
+  (navigator.language || "").toLowerCase().startsWith("zh") ? "zh-CN" : "en-US";
+initI18n({
+  locale: storedLocale ?? systemDefaultLocale(),
+  fallbackLocale: "zh-CN",
+});
 
 ReactDOM.createRoot(
   document.getElementById("root") as HTMLElement,

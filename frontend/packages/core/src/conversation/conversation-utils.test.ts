@@ -450,3 +450,138 @@ describe("buildTurns — attachment names", () => {
     expect(turns[0]!.attachments).toEqual([{ name: "old", size: 0 }]);
   });
 });
+
+describe("buildTurns — compaction marker", () => {
+  it("appends a compaction block when a session.compaction event lands", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "/compact", message_id: "u1" }),
+      evt(2, "session.compaction", { message_id: "a1" }),
+    ]);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.blocks).toEqual([{ kind: "compaction", messageId: "a1" }]);
+  });
+
+  it("places the marker inline between assistant blocks (autocompact mid-turn)", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "go", message_id: "u1" }),
+      evt(2, "message.assistant.delta", { text: "before", message_id: "a1" }),
+      evt(3, "session.compaction", { message_id: "a1" }),
+      evt(4, "message.assistant.delta", { text: "after", message_id: "a2" }),
+    ]);
+
+    expect(turns[0]!.blocks).toEqual([
+      { kind: "assistant", text: "before", messageId: "a1", sealed: true },
+      { kind: "compaction", messageId: "a1" },
+      { kind: "assistant", text: "after", messageId: "a2", sealed: true },
+    ]);
+  });
+
+  it("dedups a compaction event delivered twice (live broadcast + persisted replay)", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "/compact", message_id: "u1" }),
+      // Live broadcast frame (seq 0) and its persisted replay carry the same
+      // stamped message_id — only one divider should result.
+      evt(0, "session.compaction", { message_id: "a1" }),
+      evt(2, "session.compaction", { message_id: "a1" }),
+    ]);
+
+    expect(turns[0]!.blocks).toEqual([{ kind: "compaction", messageId: "a1" }]);
+  });
+});
+
+describe("buildTurns — tool input/output streaming", () => {
+  const toolBlock = (turn: ReturnType<typeof buildTurns>[number]) =>
+    turn.blocks.find((b) => b.kind === "tool") as
+      | Extract<(typeof turn.blocks)[number], { kind: "tool" }>
+      | undefined;
+
+  it("builds a running card from the first input_delta, before tool.call.started", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "write a file", message_id: "u1" }),
+      evt(2, "tool.call.input_delta", {
+        tool_use_id: "t1",
+        name: "Write",
+        text: '{"file_path":"/a.txt",',
+        message_id: "a1",
+      }),
+      evt(3, "tool.call.input_delta", {
+        tool_use_id: "t1",
+        text: '"content":"hello"}',
+        message_id: "a1",
+      }),
+    ]);
+
+    const tool = toolBlock(turns[0]!);
+    expect(tool?.tool.title).toBe("Write");
+    expect(tool?.tool.status).toBe("running");
+    // Partial-JSON chunks accumulate onto the same card.
+    expect(tool?.tool.input).toBe('{"file_path":"/a.txt","content":"hello"}');
+    // Exactly one card — no duplicate block.
+    expect(turns[0]!.blocks.filter((b) => b.kind === "tool")).toHaveLength(1);
+  });
+
+  it("reconciles the streamed card with the canonical input on tool.call.started (no duplicate)", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "go", message_id: "u1" }),
+      evt(2, "tool.call.input_delta", {
+        tool_use_id: "t1",
+        name: "Write",
+        text: '{"file_pa',
+        message_id: "a1",
+      }),
+      evt(3, "tool.call.started", {
+        tool_use_id: "t1",
+        name: "Write",
+        input: '{"file_path":"/a.txt","content":"hello"}',
+        message_id: "a1",
+      }),
+      evt(4, "tool.call.completed", {
+        tool_use_id: "t1",
+        content: "wrote 1 file",
+      }),
+    ]);
+
+    expect(turns[0]!.blocks.filter((b) => b.kind === "tool")).toHaveLength(1);
+    const tool = toolBlock(turns[0]!);
+    expect(tool?.tool.status).toBe("success");
+    // Canonical full input replaced the partial-JSON preview.
+    expect(tool?.tool.input).toBe('{"file_path":"/a.txt","content":"hello"}');
+    expect(tool?.tool.output).toBe("wrote 1 file");
+  });
+
+  it("accumulates output_delta onto a running card between started and completed", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "run", message_id: "u1" }),
+      evt(2, "tool.call.started", {
+        tool_use_id: "t1",
+        name: "Bash",
+        input: '{"cmd":"echo hi"}',
+        message_id: "a1",
+      }),
+      evt(3, "tool.call.output_delta", { tool_use_id: "t1", text: "line 1\n" }),
+      evt(4, "tool.call.output_delta", { tool_use_id: "t1", text: "line 2\n" }),
+    ]);
+
+    const tool = toolBlock(turns[0]!);
+    expect(tool?.tool.status).toBe("running");
+    expect(tool?.tool.output).toBe("line 1\nline 2\n");
+  });
+
+  it("lets completed replace streamed output with the canonical aggregated output", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "run", message_id: "u1" }),
+      evt(2, "tool.call.started", {
+        tool_use_id: "t1",
+        name: "Bash",
+        message_id: "a1",
+      }),
+      evt(3, "tool.call.output_delta", { tool_use_id: "t1", text: "partial" }),
+      evt(4, "tool.call.completed", { tool_use_id: "t1", content: "full output" }),
+    ]);
+
+    const tool = toolBlock(turns[0]!);
+    expect(tool?.tool.status).toBe("success");
+    expect(tool?.tool.output).toBe("full output");
+  });
+});

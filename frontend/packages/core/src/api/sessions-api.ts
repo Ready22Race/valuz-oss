@@ -9,6 +9,9 @@ import type {
   SessionPermissionMode,
   SessionRulePreview,
   TodoItem,
+  WorkflowAgentProgress,
+  WorkflowProgressEvent,
+  WorkflowState,
 } from "@valuz/shared";
 
 export type {
@@ -22,6 +25,9 @@ export type {
   SessionPermissionMode,
   SessionRulePreview,
   TodoItem,
+  WorkflowAgentProgress,
+  WorkflowProgressEvent,
+  WorkflowState,
 };
 
 /** Wire event type the host emits for kernel ``todo_update`` events. */
@@ -37,6 +43,15 @@ export const SESSION_TODOS_UPDATE_EVENT = "session.todos.update" as const;
  */
 export const SESSION_REQUIRES_ACTION_EVENT = "session.requires_action" as const;
 export const SESSION_ACTION_RESOLVED_EVENT = "session.action_resolved" as const;
+
+/**
+ * Wire event type the host emits for kernel ``workflow_progress`` events —
+ * live progress of a Claude dynamic-workflow (``Workflow`` tool) run. The
+ * host JSON-stringifies the nested ``state`` snapshot to honour the legacy
+ * ``Record<string,string>`` SSE shape; ``parseWorkflowProgress`` decodes it.
+ */
+export const SESSION_WORKFLOW_PROGRESS_EVENT =
+  "session.workflow_progress" as const;
 
 const _safeJson = <T>(raw: unknown, fallback: T): T => {
   if (typeof raw !== "string" || !raw) return fallback;
@@ -175,6 +190,58 @@ export function parseTodosUpdate(event: SessionEventDTO): TodoItem[] | null {
   }
 }
 
+/**
+ * Pull a structured workflow-progress snapshot out of an SSE frame, or
+ * ``null`` if the frame isn't a ``session.workflow_progress``. The host
+ * JSON-stringifies the nested ``state`` blob; we re-parse it and normalize
+ * the well-known fields. Unknown extras on ``state`` (e.g. a richer terminal
+ * snapshot) are preserved. Parse failure / a missing ``id`` returns ``null``
+ * (silently dropped — the prior snapshot stays on screen).
+ */
+export function parseWorkflowProgress(
+  event: SessionEventDTO,
+): WorkflowProgressEvent | null {
+  if (event.event.event_type !== SESSION_WORKFLOW_PROGRESS_EVENT) return null;
+  const payload = event.event.payload;
+  const id = payload?.id;
+  if (!id || typeof id !== "string") return null;
+  const raw = _safeJson<Record<string, unknown>>(payload?.state, {});
+  const progressRaw = Array.isArray(raw.workflowProgress)
+    ? (raw.workflowProgress as unknown[])
+    : [];
+  const workflowProgress: WorkflowAgentProgress[] = progressRaw
+    .filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null)
+    .map((a) => ({
+      type: typeof a.type === "string" ? a.type : undefined,
+      agentId: typeof a.agentId === "string" ? a.agentId : "",
+      state: typeof a.state === "string" ? a.state : "progress",
+      label: typeof a.label === "string" ? a.label : undefined,
+      phase: typeof a.phase === "string" ? a.phase : undefined,
+    }))
+    .filter((a) => a.agentId.length > 0);
+  const state: WorkflowState = {
+    runId: typeof raw.runId === "string" ? raw.runId : (payload?.run_id ?? ""),
+    workflowName: typeof raw.workflowName === "string" ? raw.workflowName : null,
+    status: typeof raw.status === "string" ? raw.status : "running",
+    agentCount: typeof raw.agentCount === "number" ? raw.agentCount : 0,
+    agentsDone: typeof raw.agentsDone === "number" ? raw.agentsDone : 0,
+    workflowProgress,
+    scriptPath: typeof raw.scriptPath === "string" ? raw.scriptPath : undefined,
+    script: typeof raw.script === "string" ? raw.script : undefined,
+    statePath: typeof raw.statePath === "string" ? raw.statePath : undefined,
+    resultQuestion:
+      typeof raw.resultQuestion === "string" ? raw.resultQuestion : undefined,
+    resultSummary:
+      typeof raw.resultSummary === "string" ? raw.resultSummary : undefined,
+  };
+  return {
+    id,
+    run_id: payload?.run_id ?? state.runId,
+    state,
+    message_id: payload?.message_id ?? "",
+  };
+}
+
 import { createFetchJson } from "./fetch-json";
 
 let _apiBase =
@@ -215,7 +282,7 @@ export type { RuntimeId } from "@valuz/shared";
 import type { RuntimeId } from "@valuz/shared";
 
 export interface SessionCreateRequest {
-  workspace_id: string;
+  project_id: string;
   title?: string | null;
   // V5: ``model`` is locked at session creation. Either pass an explicit model
   // id, or pass a provider id and let the backend pick its default model.
@@ -324,7 +391,7 @@ export interface SessionAttachmentItem {
   created_at: number;
   /**
    * Origin of the attachment. ``local`` is a multipart upload the host
-   * owns under ``~/.valuz/app/attachments/{session_id}/``; ``kb_doc``
+   * owns under ``~/.valuz-oss/attachments/{session_id}/``; ``kb_doc``
    * is a live reference to a global knowledge-base document — the
    * row's ``stored_path``/``parsed_path`` reuse KB-owned paths
    * directly, no copy. Drives the panel icon + source label + delete
@@ -343,16 +410,38 @@ export interface SessionAttachmentItem {
   consumed_at?: number | null;
 }
 
+/**
+ * A file the **agent** delivered as a finished output via the built-in
+ * ``deliver_artifacts`` MCP tool — the inverse of {@link SessionAttachmentItem}
+ * (user uploads). Durable (no per-turn staging); rendered as the read-only
+ * "生成文件" panel list. ``file_path`` is an absolute path the client opens.
+ */
+export interface SessionArtifactItem {
+  id: string;
+  session_id: string;
+  file_path: string;
+  file_name: string;
+  file_size: number;
+  mime_type: string | null;
+  created_at: number;
+}
+
 const fetchJson = createFetchJson(() => _apiBase);
 
 export type SessionStreamCallback = (event: SessionEventDTO) => void;
 
 export const sessionsApi = {
-  list(workspaceId?: string): Promise<{ sessions: SessionListItem[] }> {
+  list(
+    projectId?: string,
+    init?: { signal?: AbortSignal },
+  ): Promise<{ sessions: SessionListItem[] }> {
     const qs = new URLSearchParams();
-    if (workspaceId) qs.set("workspace_id", workspaceId);
+    if (projectId) qs.set("project_id", projectId);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/sessions${suffix}`);
+    // ``init`` (e.g. an ``AbortSignal`` for the project-detail auto-refresh
+    // poller) is forwarded to ``fetchJson`` → ``fetch``. Existing callers pass
+    // nothing, so their behaviour is unchanged.
+    return fetchJson(`/v1/sessions${suffix}`, init);
   },
 
   get(sessionId: string): Promise<SessionDetail> {
@@ -583,6 +672,19 @@ export const sessionsApi = {
   ): Promise<{ items: SessionAttachmentItem[] }> {
     return fetchJson(
       `/v1/sessions/${encodeURIComponent(sessionId)}/attachments`,
+    );
+  },
+
+  /**
+   * List the files the agent delivered for ``sessionId`` (the "生成文件"
+   * panel list), recorded by the built-in ``deliver_artifacts`` MCP tool.
+   * Durable — the full set is returned every call.
+   */
+  listArtifacts(
+    sessionId: string,
+  ): Promise<{ items: SessionArtifactItem[] }> {
+    return fetchJson(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`,
     );
   },
 

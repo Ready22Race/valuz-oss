@@ -2,40 +2,54 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import uuid
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-
-from app._validators import validate_mcp_servers, validate_skills
-from app.dependencies import get_orchestrator, get_store
+from app._validators import validate_mcp_servers, validate_registered_tools, validate_skills
+from app.dependencies import get_orchestrator, get_owner_id, get_store
+from app.event_stream import QueueEventSink
 from app.schemas import (
+    AppendEventData,
+    AppendEventResponse,
     CreateSessionRequest,
     DataResponse,
-    EventData,
     EventListResponse,
-    McpHttpServerConfigSchema,
-    McpStdioServerConfigSchema,
+    EventPayload,
+    EventWindowData,
+    EventWindowResponse,
+    FinalizeSessionRequest,
     ModelProviderInputSchema,
-    ModelProviderResponseSchema,
     ModelProviderUpdateSchema,
     ModelSettingsSchema,
-    SessionData,
     SessionListResponse,
     SessionResponse,
     SetSessionModeRequest,
-    StopReasonSchema,
     SubmitActionData,
     SubmitActionRequest,
     SubmitActionResponse,
-    TodoItem,
     UpdateSessionRequest,
 )
+from app.serializers import (
+    agent_config_from_schema as _agent_config_from_schema,
+)
+from app.serializers import (
+    event_to_data as _event_to_data,
+)
+from app.serializers import (
+    live_event_to_data as _live_event_to_data,
+)
+from app.serializers import (
+    session_to_data as _session_to_data,
+)
+from app.serializers import (
+    stored_event_to_data as _stored_event_to_data,
+)
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from src.core import (
     Event,
-    McpServerConfig,
-    McpStdioServerConfig,
     ModelProvider,
     ModelSettings,
     Session,
@@ -47,102 +61,35 @@ from src.core.orchestrator import (
     PendingActionDecisionMismatchError,
     PendingActionExpiredError,
     PendingActionNotFoundError,
-    ProjectDeletedError,
-    ProjectNotFoundError,
     RuntimeUnavailableError,
     SessionNotFoundError,
     SessionOrchestrator,
 )
 from src.runtimes.factory import validate_api_protocol
+from sse_starlette.sse import EventSourceResponse
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 StoreDep = Annotated[StorePort, Depends(get_store)]
+OwnerDep = Annotated[str, Depends(get_owner_id)]
+
+# Idle keep-alive cadence for the events SSE stream.
+STREAM_HEARTBEAT_SECONDS = 15.0
 OrchestratorDep = Annotated[SessionOrchestrator, Depends(get_orchestrator)]
-
-
-def _mcp_to_schema(
-    cfg: McpServerConfig,
-) -> McpHttpServerConfigSchema | McpStdioServerConfigSchema:
-    if isinstance(cfg, McpStdioServerConfig):
-        return McpStdioServerConfigSchema(
-            name=cfg.name,
-            command=cfg.command,
-            args=list(cfg.args),
-            env=dict(cfg.env),
-            env_vars=list(cfg.env_vars),
-        )
-    return McpHttpServerConfigSchema(
-        name=cfg.name,
-        url=cfg.url,
-        transport=cfg.transport,
-        headers=dict(cfg.headers),
-    )
-
-
-def _session_to_data(session: Session) -> SessionData:
-    stop_reason = None
-    if session.stop_reason is not None:
-        sr_dict = dataclasses.asdict(session.stop_reason)
-        stop_reason = StopReasonSchema(**sr_dict)
-    return SessionData(
-        id=session.id,
-        project_id=session.project_id,
-        agent_id=session.agent_id,
-        runtime_provider=session.runtime_provider,
-        cwd=session.cwd,
-        model=session.model,
-        model_provider=(
-            ModelProviderResponseSchema(
-                base_url=session.model_provider.base_url,
-                api_protocol=session.model_provider.api_protocol,
-            )
-            if session.model_provider is not None
-            else None
-        ),
-        model_settings=(
-            ModelSettingsSchema(
-                temperature=session.model_settings.temperature,
-                max_tokens=session.model_settings.max_tokens,
-                effort=session.model_settings.effort,
-            )
-            if session.model_settings is not None
-            else None
-        ),
-        instructions=session.instructions,
-        skills=list(session.skills),
-        mcp_servers=[_mcp_to_schema(cfg) for cfg in session.mcp_servers],
-        permission_mode=session.permission_mode,
-        mode=session.mode,
-        status=session.status,
-        stop_reason=stop_reason,
-        created_at=session.created_at,
-        metadata=session.metadata,
-        runtime_session_id=session.runtime_session_id,
-        todos=[TodoItem(**t) for t in session.todos] if session.todos is not None else None,
-    )
-
-
-def _event_to_data(event: Event) -> EventData:
-    return EventData(type=event.type, data=event.data, timestamp=event.timestamp)
 
 
 @router.post("", status_code=201, response_model=SessionResponse)
 async def create_session(
     body: CreateSessionRequest,
     store: StoreDep,
+    owner: OwnerDep,
 ) -> dict[str, Any]:
-    project = await store.load_project(body.project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="Project not found")
-    if project.status == "deleted":
-        raise HTTPException(status_code=410, detail="Project deleted")
-
-    if not body.agent_id:
-        raise HTTPException(status_code=400, detail="agent_id is required.")
-    agent = await store.load_agent(body.agent_id)
-    if agent is None:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    if not body.cwd.strip():
+        raise HTTPException(status_code=400, detail="cwd is required and must be non-empty.")
+    if not body.agent_config.name.strip():
+        raise HTTPException(status_code=400, detail="agent_config.name must not be empty.")
+    agent = _agent_config_from_schema(body.agent_config)
+    validate_registered_tools(list(agent.tools))
 
     # DeepAgents needs an explicit langchain model client at runtime, so
     # both ``model`` and ``model_provider`` are required when chosen.
@@ -163,6 +110,8 @@ async def create_session(
     # ``permission_mode`` is sunk to the session per D9: agent holds the
     # default; createSession prefills from agent when the request omits the
     # field; runtime reads ``session.permission_mode`` thereafter.
+    # ``permission_mode`` is sunk to the session: the embedded snapshot
+    # holds the default; the request value wins when provided.
     permission_mode = body.permission_mode or agent.permission_mode
     if body.runtime_provider == "deepagents" and permission_mode == "auto_review":
         raise HTTPException(
@@ -190,9 +139,9 @@ async def create_session(
     mcp_configs = validate_mcp_servers(body.mcp_servers)
 
     session = Session(
-        id=str(uuid.uuid4()),
-        project_id=project.id,
-        agent_id=body.agent_id,
+        id=body.id or str(uuid.uuid4()),
+        user_id=owner,
+        agent_config=agent,
         runtime_provider=body.runtime_provider,
         cwd=body.cwd,
         model=body.model,
@@ -202,6 +151,7 @@ async def create_session(
         skills=tuple(body.skills),
         mcp_servers=tuple(mcp_configs),
         permission_mode=permission_mode,
+        mode=body.mode,
         metadata=body.metadata,
     )
     await store.save_session(session)
@@ -262,16 +212,17 @@ def _model_settings_from_schema(s: ModelSettingsSchema | None) -> ModelSettings 
 @router.get("", response_model=SessionListResponse)
 async def list_sessions(
     store: StoreDep,
-    project_id: Annotated[str | None, Query()] = None,
-    agent_id: Annotated[str | None, Query()] = None,
+    owner: OwnerDep,
     status: Annotated[str | None, Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    ids: Annotated[str | None, Query(description="comma-separated session id filter")] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, Any]:
+    id_list = [i for i in (ids.split(",") if ids else []) if i] if ids is not None else None
     sessions = await store.list_sessions(
-        project_id=project_id,
-        agent_id=agent_id,
+        owner,
         status=status,
+        ids=id_list,
         limit=limit,
         offset=offset,
     )
@@ -282,13 +233,11 @@ async def list_sessions(
 async def get_session(
     session_id: str,
     store: StoreDep,
+    owner: OwnerDep,
 ) -> dict[str, Any]:
-    session = await store.load_session(session_id)
+    session = await store.load_session(owner, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    project = await store.load_project(session.project_id)
-    if project is not None and project.status == "deleted":
-        raise HTTPException(status_code=410, detail="Project deleted")
     return {"data": _session_to_data(session)}
 
 
@@ -297,8 +246,9 @@ async def update_session(
     session_id: str,
     body: UpdateSessionRequest,
     store: StoreDep,
+    owner: OwnerDep,
 ) -> dict[str, Any]:
-    session = await store.load_session(session_id)
+    session = await store.load_session(owner, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     if body.instructions is not None:
@@ -343,6 +293,7 @@ async def set_session_mode(
     body: SetSessionModeRequest,
     store: StoreDep,
     orchestrator: OrchestratorDep,
+    owner: OwnerDep,
 ) -> dict[str, Any]:
     """Set the session's runtime mode (`default` / `plan` / `goal`).
 
@@ -364,7 +315,7 @@ async def set_session_mode(
     restore on Claude plan) runs in the same reconcile pass as entry
     of the new mode. Same-mode re-set is idempotent (no event).
     """
-    session = await store.load_session(session_id)
+    session = await store.load_session(owner, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -392,22 +343,227 @@ async def set_session_mode(
 async def delete_session(
     session_id: str,
     store: StoreDep,
+    owner: OwnerDep,
+    orchestrator: OrchestratorDep,
 ) -> dict[str, Any]:
-    deleted = await store.delete_session(session_id)
+    # Tear down any cached runtime BEFORE dropping the row, so the session's
+    # live claude/codex subprocess is actually terminated. ``store.delete``
+    # alone only removes the DB row — the warm runtime (and its OS process)
+    # would linger in the orchestrator's cache until host exit. This is also
+    # what makes the memory-curator path leak-free: it creates an ephemeral
+    # session, runs one turn (spawning a CLI subprocess), then deletes it here.
+    # Interrupt first if a turn is in flight so we don't yank the subprocess
+    # out from under a live iterator.
+    if session_id in orchestrator.active_sessions:
+        await orchestrator.interrupt(session_id)
+    await orchestrator.cleanup(session_id)
+    deleted = await store.delete_session(owner, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found")
     return {"data": None}
+
+
+@router.post("/{session_id}/events", status_code=201, response_model=AppendEventResponse)
+async def append_session_event(
+    session_id: str,
+    body: EventPayload,
+    store: StoreDep,
+    orchestrator: Annotated[Any, Depends(get_orchestrator)],
+    owner: OwnerDep,
+    live_only: Annotated[bool, Query()] = False,
+) -> dict[str, Any]:
+    """Append an out-of-band event onto the session's latest message.
+
+    For supervisors that aren't driving a turn (recovery, interrupt
+    fallback, after-the-fact detectors). ``persisted=false`` when the
+    session has no messages yet to anchor onto (the event is dropped).
+
+    ``live_only=true`` skips persistence entirely and emits the event
+    onto the session's live bus instead (taps + attached client), for
+    synthetic notifications like the interrupt-fallback ``session_error``.
+    """
+    session = await store.load_session(owner, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if live_only:
+        await orchestrator.emit_session_event(
+            session_id,
+            Event(type=body.type, data=body.data),  # type: ignore[arg-type]
+            create_bus=True,
+        )
+        return {"data": AppendEventData(persisted=False)}
+    messages = await store.list_messages_for_session(owner, session_id, limit=1)
+    if not messages:
+        return {"data": AppendEventData(persisted=False)}
+    await store.append_event(
+        owner,
+        session_id,
+        messages[0].id,
+        Event(type=body.type, data=body.data),  # type: ignore[arg-type]
+    )
+    return {"data": AppendEventData(persisted=True)}
+
+
+@router.post("/{session_id}/finalize", response_model=SessionResponse)
+async def finalize_session(
+    session_id: str,
+    body: FinalizeSessionRequest,
+    store: StoreDep,
+    owner: OwnerDep,
+) -> dict[str, Any]:
+    """Flip a session to ``idle``/``terminated`` from outside a turn.
+
+    The supervisor-facing alternative to PATCH (which deliberately cannot
+    touch ``status``): boot recovery clears crashed ``running`` rows, the
+    interrupt fallback parks a session as idle. Appends ``error_event``
+    after the flip when provided. Idempotent on the status flip.
+    """
+    session = await store.load_session(owner, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    from src.core.types import Error as ErrorStop  # type: ignore[import-not-found]
+    from src.core.types import UserInterrupt  # type: ignore[import-not-found]
+
+    stop_reason = session.stop_reason
+    if body.stop_reason_type == "user_interrupt":
+        stop_reason = UserInterrupt()
+    elif body.stop_reason_type == "error":
+        stop_reason = ErrorStop(message=body.stop_reason_message or "")
+
+    if (
+        session.status != body.status
+        or body.stop_reason_type is not None
+        or body.metadata is not None
+    ):
+        session = dataclasses.replace(
+            session,
+            status=body.status,
+            stop_reason=stop_reason,
+            metadata=body.metadata if body.metadata is not None else session.metadata,
+        )
+        await store.save_session(session)
+
+    if body.error_event is not None:
+        messages = await store.list_messages_for_session(owner, session_id, limit=1)
+        if messages:
+            await store.append_event(
+                owner,
+                session_id,
+                messages[0].id,
+                Event(type=body.error_event.type, data=body.error_event.data),  # type: ignore[arg-type]
+            )
+    return {"data": _session_to_data(session)}
 
 
 @router.get("/{session_id}/events", response_model=EventListResponse)
 async def get_session_events(
     session_id: str,
     store: StoreDep,
+    owner: OwnerDep,
     limit: Annotated[int, Query(ge=1, le=1000)] = 200,
     offset: Annotated[int, Query(ge=0)] = 0,
+    after_seq: Annotated[int | None, Query(ge=0)] = None,
 ) -> dict[str, Any]:
-    events = await store.get_events(session_id, limit=limit, offset=offset)
+    if after_seq is not None:
+        stored = await store.get_events_after(owner, session_id, after_seq=after_seq, limit=limit)
+        return {"data": [_stored_event_to_data(e) for e in stored]}
+    events = await store.get_events(owner, session_id, limit=limit, offset=offset)
     return {"data": [_event_to_data(e) for e in events]}
+
+
+@router.get("/{session_id}/events/window", response_model=EventWindowResponse)
+async def get_session_events_window(
+    session_id: str,
+    store: StoreDep,
+    owner: OwnerDep,
+    before_seq: Annotated[int | None, Query(ge=0)] = None,
+    turn_limit: Annotated[int, Query(ge=1, le=200)] = 20,
+) -> dict[str, Any]:
+    """Turn-aligned history page: the most recent ``turn_limit`` turns
+    strictly before ``before_seq`` (or session end), in full, ascending."""
+    items, has_more = await store.get_events_window(
+        owner, session_id, before_seq=before_seq, turn_limit=turn_limit
+    )
+    return {
+        "data": EventWindowData(
+            items=[_stored_event_to_data(e) for e in items],
+            has_more=has_more,
+        )
+    }
+
+
+@router.get("/{session_id}/events/stream")
+async def stream_session_events(
+    session_id: str,
+    request: Request,
+    store: StoreDep,
+    orchestrator: Annotated[Any, Depends(get_orchestrator)],
+    owner: OwnerDep,
+    after_seq: Annotated[int | None, Query(ge=0)] = None,
+) -> EventSourceResponse:
+    """Live event stream for one session, as Server-Sent Events.
+
+    With ``after_seq`` the stream first replays persisted events with id
+    greater than the cursor (frames carry ``seq``), then switches to the
+    live bus tap (frames carry ``seq: null`` — including delta types the
+    kernel never persists). Without it the stream is live-only.
+
+    This is the remote analog of the in-process
+    ``attach_session_tap`` — the subscription primitive behind the host's
+    SSE surface and a future HttpKernelClient.
+    """
+
+    async def _frames() -> AsyncIterator[dict[str, Any]]:
+        sink = QueueEventSink()
+        # Tap first, then backfill: an event persisted between the
+        # backfill read and the tap registration would be lost with the
+        # opposite order. The overlap window (an event that lands in BOTH
+        # the backfill and the live queue) is deduplicated exactly: live
+        # frames of persisted events carry their row id in ``seq`` (see
+        # ``PersistThenBroadcastSink``), so anything at or below the
+        # backfill cursor is skipped. Live-only delta frames have no
+        # ``seq`` and always flow.
+        await orchestrator.attach_session_tap(owner, session_id, sink)
+        try:
+            cursor = after_seq
+            if cursor is not None:
+                # INVARIANT the live-loop dedup below depends on: this
+                # backfill loop advances the SHARED ``cursor`` per row, so
+                # by the time the live loop runs, ``cursor`` == the last
+                # backfilled seq (not the caller's ``after_seq``).
+                while True:
+                    page = await store.get_events_after(
+                        owner, session_id, after_seq=cursor, limit=500
+                    )
+                    if not page:
+                        break
+                    for stored in page:
+                        yield {
+                            "event": "event",
+                            "data": _stored_event_to_data(stored).model_dump_json(),
+                        }
+                        cursor = stored.seq
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(
+                        sink.queue.get(), timeout=STREAM_HEARTBEAT_SECONDS
+                    )
+                except TimeoutError:
+                    yield {"event": "heartbeat", "data": "{}"}
+                    continue
+                frame = _live_event_to_data(event)
+                if frame.seq is not None:
+                    if cursor is not None and frame.seq <= cursor:
+                        continue  # already delivered by the backfill
+                    cursor = frame.seq
+                yield {"event": "event", "data": frame.model_dump_json()}
+        finally:
+            await orchestrator.detach_session_tap(session_id, sink)
+
+    return EventSourceResponse(_frames())
 
 
 @router.post("/{session_id}/actions", response_model=SubmitActionResponse)
@@ -415,6 +571,7 @@ async def submit_session_action(
     session_id: str,
     body: SubmitActionRequest,
     orchestrator: OrchestratorDep,
+    owner: OwnerDep,
 ) -> dict[str, Any]:
     """Resolve a pending ``requires_action`` event with a decision.
 
@@ -426,6 +583,7 @@ async def submit_session_action(
     """
     try:
         result = await orchestrator.submit_action(
+            owner,
             session_id,
             pending_id=body.pending_id,
             decision=body.decision,
@@ -435,10 +593,6 @@ async def submit_session_action(
         )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
-    except ProjectNotFoundError as exc:
-        raise HTTPException(status_code=404, detail="Project not found") from exc
-    except ProjectDeletedError as exc:
-        raise HTTPException(status_code=410, detail="Project deleted") from exc
     except PendingActionNotFoundError as exc:
         raise HTTPException(
             status_code=404, detail=f"Pending action {body.pending_id} not found"

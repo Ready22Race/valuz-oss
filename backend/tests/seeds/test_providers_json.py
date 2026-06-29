@@ -38,3 +38,42 @@ def test_seed_ids_are_unique() -> None:
     seed = load_provider_seeds()
     ids = [p.id for p in seed.providers]
     assert len(ids) == len(set(ids)), f"duplicate id in providers.json: {ids}"
+
+
+def test_oauth_subscription_rows_seed_null_model_ids() -> None:
+    """Subscription rows must NOT snapshot the recommended list.
+
+    ``model_ids IS NULL`` keeps ``_resolve_model_options`` falling back to
+    the live descriptor (hydrated from ``subscription_models.json`` each
+    boot), so a catalog bump reaches existing installs without a
+    migration. A snapshot here would freeze the picker at seed time —
+    the exact bug migration 0002 had to clean up.
+    """
+    from valuz_agent.seeds.providers import _row_for
+
+    seed = load_provider_seeds()
+    oauth_entries = [
+        p for p in seed.providers if _PROVIDER_MAP[p.provider_kind].auth_type == "oauth"
+    ]
+    assert oauth_entries, "expected at least one OAuth subscription seed entry"
+    for entry in oauth_entries:
+        row = _row_for(entry)
+        assert row.model_ids is None, (
+            f"{entry.id}: subscription rows must seed model_ids=NULL "
+            "(live recommended catalog), got a snapshot"
+        )
+
+
+def test_api_key_rows_still_seed_model_snapshot() -> None:
+    """api_key kinds keep the seed snapshot — for them ``model_ids`` is a
+    real cache that ``/v1/models`` discovery later replaces, and the
+    pre-key-entry placeholder list keeps the picker non-empty."""
+    from valuz_agent.seeds.providers import _row_for
+
+    seed = load_provider_seeds()
+    for entry in seed.providers:
+        descriptor = _PROVIDER_MAP[entry.provider_kind]
+        if descriptor.auth_type == "oauth" or not descriptor.model_options:
+            continue
+        row = _row_for(entry)
+        assert row.model_ids is not None, f"{entry.id}: api_key snapshot unexpectedly dropped"

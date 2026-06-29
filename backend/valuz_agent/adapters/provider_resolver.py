@@ -1,4 +1,4 @@
-"""Compose a kernel ``ModelProvider`` from a valuz provider row.
+"""Compose the kernel model-provider wire schema from a valuz provider row.
 
 Background
 ----------
@@ -66,14 +66,17 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
-from src.core.types import ModelProvider  # type: ignore[import-not-found]
+from app.schemas import (
+    ModelProviderInputSchema as ModelProvider,
+)
 
 # Side-effect import — surfaces ``src.core...`` on sys.path.
 import valuz_agent.boot.kernel  # noqa: F401
-from valuz_agent.infra.secret_store import FileSecretStore
+from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.models import ProviderRow
-from valuz_agent.ports.llm_provider import SystemLLMProvider, get_llm_registry
+from valuz_agent.ports.extensions import ext
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +133,7 @@ async def resolve_model_provider(
     provider_id: str,
     model_id: str,
     providers: ProviderDatastore,
-    secrets: FileSecretStore,
+    secrets: SecretStorePort,
     runtime_provider: RuntimeProvider | None = None,
 ) -> ModelProvider | None:
     """Translate a chosen provider + model id into a kernel ``ModelProvider``.
@@ -156,15 +159,28 @@ async def resolve_model_provider(
     ``base_url`` may be ``None`` in the returned ``ModelProvider`` (first-
     party SDK fallback). Only ``api_key`` is strictly required.
     """
-    # Overlay-contributed system providers (ADR-007) live in a
-    # process-level registry, not the user table. Check first so an
-    # overlay can shadow a colliding user id deterministically.
-    descriptor = get_llm_registry().get(provider_id)
-    if descriptor is not None:
-        return _resolve_system_provider(descriptor)
-
-    provider = await providers.get_by_id(provider_id)
+    provider = await providers.get_by_id(require_current_user_id(), provider_id)
     if provider is None:
+        # Not a user row — maybe an overlay-contributed channel (ADR-011). The
+        # catalog hands back a live credential, gated on its own long-lived key
+        # (so this also works in background automations with no request JWT).
+        # Returns None for ids it doesn't own.
+        cred = await ext.llm_provider.resolve(provider_id)
+        if cred is not None:
+            if cred.api_protocol not in {
+                "anthropic",
+                "openai_completion",
+                "openai_response",
+                "gemini",
+            }:
+                raise ProviderNotResolvable(
+                    f"provider {provider_id!r} resolved unknown api_protocol {cred.api_protocol!r}"
+                )
+            return ModelProvider(
+                base_url=cred.api_base or None,
+                api_key=cred.api_key,
+                api_protocol=cred.api_protocol,  # type: ignore[arg-type]
+            )
         raise ProviderNotResolvable(f"provider {provider_id!r} not found")
 
     if not provider.enabled:
@@ -193,49 +209,13 @@ async def resolve_model_provider(
     )
 
 
-def _resolve_system_provider(descriptor: SystemLLMProvider) -> ModelProvider:
-    """Translate a registry descriptor into a kernel ``ModelProvider``.
-
-    The descriptor owns its own credential lifecycle — the overlay's
-    ``headers()`` callable produces a per-resolve dict; we pull the
-    bearer token out for ``ModelProvider.api_key``. The gateway is
-    responsible for token validation, optional headers
-    (``Idempotency-Key`` etc.), and producing useful errors when the
-    JWT is missing/expired.
-    """
-    if not descriptor.enabled():
-        reason = descriptor.unavailable_reason() or "disabled"
-        raise ProviderNotResolvable(f"provider {descriptor.id!r} unavailable: {reason}")
-
-    headers = descriptor.headers()
-    authorization = headers.get("Authorization", "")
-    bearer = authorization.removeprefix("Bearer ").strip()
-    if not bearer:
-        raise ProviderNotResolvable(
-            f"provider {descriptor.id!r} has no bearer token — overlay headers() "
-            f"returned no Authorization header"
-        )
-
-    api_protocol = descriptor.api_protocol
-    if api_protocol not in {"anthropic", "openai_completion", "openai_response", "gemini"}:
-        raise ProviderNotResolvable(
-            f"provider {descriptor.id!r} declared unknown api_protocol {api_protocol!r}"
-        )
-
-    return ModelProvider(
-        base_url=descriptor.api_base or None,
-        api_key=bearer,
-        api_protocol=api_protocol,  # type: ignore[arg-type]
-    )
-
-
 def _resolve_api_key(
     provider: ProviderRow,
-    secrets: FileSecretStore,
+    secrets: SecretStorePort,
 ) -> str | None:
     """Pull the api_key from the provider's ``secret_ref`` credential source."""
     if provider.credential_source == "secret_ref" and provider.secret_ref:
-        return secrets.get(provider.secret_ref)
+        return secrets.get(provider.user_id, provider.secret_ref)
 
     return None
 
@@ -355,20 +335,23 @@ async def resolve_runtime_provider(
             )
         return request_runtime_id  # type: ignore[return-value]
 
-    # System provider (ADR-007): the overlay descriptor pins the runtime
-    # directly. Check the registry before the user table so a colliding
-    # id resolves consistently with ``resolve_model_provider``.
-    descriptor = get_llm_registry().get(provider_id)
-    if descriptor is not None:
-        if descriptor.runtime_provider not in _VALID_RUNTIME_PROVIDERS:
-            raise ProviderNotResolvable(
-                f"system provider {provider_id!r} declared unknown runtime "
-                f"{descriptor.runtime_provider!r}"
-            )
-        return descriptor.runtime_provider  # type: ignore[return-value]
-
-    provider = await providers.get_by_id(provider_id)
+    provider = await providers.get_by_id(require_current_user_id(), provider_id)
     if provider is None:
+        # Contributed (catalog) channel (ADR-011): runtime is NOT a provider
+        # field. Prefer the picked model's declared ``runtimes``; otherwise
+        # derive from the channel's protocols (same rule the picker uses).
+        # Falls back to deepagents.
+        from valuz_agent.modules.settings.model_options import runtimes_for
+
+        for it in await ext.llm_provider.list():
+            if it.id != provider_id:
+                continue
+            model = next((m for m in it.models if m.id == model_id), None)
+            if model is not None and model.runtimes is not None:
+                rts = list(model.runtimes)
+            else:
+                rts = runtimes_for(tuple(it.compatible_protocols), provider_kind=it.provider_kind)
+            return rts[0] if rts else "deepagents"  # type: ignore[return-value]
         return "deepagents"
 
     return _derive(provider.provider_kind)  # type: ignore[return-value]

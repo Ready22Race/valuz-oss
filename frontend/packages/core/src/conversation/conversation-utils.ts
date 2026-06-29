@@ -79,7 +79,7 @@ const toMetaToolCall = (
       id: `meta-compiled-${seq}`,
       kind: "kb",
       title: "runtime.context.compiled",
-      subtitle: `workspace ${payload.workspace_id || "none"} · model ${payload.model || "default"}`,
+      subtitle: `project ${payload.project_id || "none"} · model ${payload.model || "default"}`,
       status: "success",
       output: payloadToBlock(payload),
     };
@@ -221,6 +221,7 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       return `ts::${p.id || p.tool_use_id || p.call_id || ""}`;
     if (type === "tool.call.completed")
       return `tc::${p.id || p.tool_use_id || p.call_id || ""}`;
+    if (type === "session.compaction") return `cmp::${p.message_id ?? ""}`;
     return null;
   };
 
@@ -296,6 +297,16 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
 
     const turn = ensureTurn();
 
+    if (eventType === "session.compaction") {
+      // A context compaction happened in this turn (``/compact`` or
+      // autocompact). Push a single label-only marker block; the event's
+      // raw data is intentionally NOT parsed for display. For codex's
+      // ``/compact`` the "Compacted." reply is suppressed upstream, so this
+      // marker is the only visible artifact of the turn.
+      turn.blocks.push({ kind: "compaction", messageId: payload.message_id });
+      continue;
+    }
+
     if (eventType === "message.assistant.text_delta") {
       appendDelta(turn, "assistant", payload.text ?? "", payload.message_id);
       continue;
@@ -340,6 +351,54 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       continue;
     }
 
+    if (eventType === "tool.call.input_delta") {
+      // Live, non-persisted: partial tool-call input JSON streaming in
+      // before the canonical tool.call.started. The first chunk builds a
+      // provisional running card so a large file write shows immediate
+      // progress instead of a dead wait; later chunks accumulate onto it.
+      // started reconciles the card with the canonical full input.
+      const id = payload.tool_use_id || "";
+      if (!id) continue;
+      const text = payload.text ?? "";
+      const streaming = activeToolCalls.get(id);
+      if (streaming) {
+        streaming.input = (streaming.input ?? "") + text;
+        continue;
+      }
+      const title = payload.name || "tool";
+      const card: PrototypeToolCall = {
+        id,
+        kind: resolveToolKind(title.toLowerCase()),
+        title,
+        // Left empty while input streams — raw partial JSON would look
+        // noisy in the always-visible header; started fills in a proper
+        // summary and the expandable Input block shows the live content.
+        subtitle: "",
+        status: "running",
+        input: text,
+      };
+      activeToolCalls.set(id, card);
+      turn.blocks.push({
+        kind: "tool",
+        tool: card,
+        elapsedMs: elapsedSince(turn.userTimestamp, envelope.timestamp),
+      });
+      continue;
+    }
+
+    if (eventType === "tool.call.output_delta") {
+      // Live, non-persisted: streamed tool output between started and
+      // completed. The card already exists; accumulate onto it. completed
+      // later replaces it with the canonical aggregated output.
+      const id = payload.tool_use_id || "";
+      if (!id) continue;
+      const streaming = activeToolCalls.get(id);
+      if (streaming) {
+        streaming.output = (streaming.output ?? "") + (payload.text ?? "");
+      }
+      continue;
+    }
+
     if (eventType === "tool.call.started") {
       const title = payload.name || payload.tool_name || payload.tool || "tool";
       const id =
@@ -347,24 +406,47 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
         payload.call_id ||
         payload.tool_use_id ||
         `${title}-${envelope.seq}`;
+      // A preceding tool.call.input_delta may already have built a
+      // provisional running card for this id (streaming the partial input).
+      const streamed = activeToolCalls.get(id);
       const card: PrototypeToolCall = {
         id,
         kind: resolveToolKind(title.toLowerCase()),
         title,
-        subtitle: payload.summary || payload.input || payload.arguments || "",
+        subtitle:
+          payload.summary ||
+          payload.input ||
+          payload.arguments ||
+          streamed?.subtitle ||
+          "",
         status: "running",
-        input: payload.input || payload.arguments,
+        // Canonical full input replaces the partial-JSON preview; fall back
+        // to the streamed text if the started event omits the input.
+        input: payload.input || payload.arguments || streamed?.input,
       };
       activeToolCalls.set(id, card);
       const startedElapsedMs = elapsedSince(
         turn.userTimestamp,
         envelope.timestamp,
       );
-      turn.blocks.push({
-        kind: "tool",
-        tool: card,
-        elapsedMs: startedElapsedMs,
-      });
+      // Reconcile the provisional block in place when input_delta already
+      // pushed one, so started doesn't render a duplicate card.
+      const startedIdx = turn.blocks.findIndex(
+        (b) => b.kind === "tool" && b.tool.id === id,
+      );
+      if (startedIdx >= 0) {
+        turn.blocks[startedIdx] = {
+          kind: "tool",
+          tool: card,
+          elapsedMs: startedElapsedMs,
+        };
+      } else {
+        turn.blocks.push({
+          kind: "tool",
+          tool: card,
+          elapsedMs: startedElapsedMs,
+        });
+      }
       continue;
     }
 

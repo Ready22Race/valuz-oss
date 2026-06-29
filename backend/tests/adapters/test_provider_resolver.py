@@ -38,19 +38,19 @@ class _FakeProvider:
     account_provider_id: str | None = None
     protocol: str | None = None
     provider_kind: str = "compatible"
+    user_id: str = "local-test-owner"
 
 
 class _FakeProviderDatastore:
     def __init__(self, providers: list[_FakeProvider] | None = None) -> None:
         self._by_id = {c.id: c for c in (providers or [])}
 
-    async def get_by_id(self, provider_id: str) -> _FakeProvider | None:
+    async def get_by_id(self, user_id: str, provider_id: str) -> _FakeProvider | None:
         return self._by_id.get(provider_id)
 
 
-
 class _UnusedSecrets:
-    def get(self, _ref: str):  # type: ignore[no-untyped-def]
+    def get(self, _user_id: str, _ref: str):  # type: ignore[no-untyped-def]
         return None
 
 
@@ -156,7 +156,7 @@ async def test_api_key_provider_without_base_url_falls_through_to_first_party() 
     strictly required (no credentials still raises)."""
 
     class _Secrets:
-        def get(self, ref: str) -> str | None:
+        def get(self, user_id: str, ref: str) -> str | None:
             return "sk-test" if ref == "channel/broken" else None
 
     provider = _FakeProvider(
@@ -205,7 +205,7 @@ async def test_dual_protocol_builtin_follows_runtime_to_anthropic_endpoint() -> 
     """
 
     class _Secrets:
-        def get(self, ref: str) -> str | None:
+        def get(self, user_id: str, ref: str) -> str | None:
             return "sk-test" if ref == "channel/zhipu" else None
 
     provider = _FakeProvider(
@@ -231,7 +231,7 @@ async def test_dual_protocol_builtin_follows_runtime_to_openai_endpoint() -> Non
     """Same provider with deepagents runtime → openai endpoint."""
 
     class _Secrets:
-        def get(self, ref: str) -> str | None:
+        def get(self, user_id: str, ref: str) -> str | None:
             return "sk-test" if ref == "channel/zhipu" else None
 
     provider = _FakeProvider(
@@ -260,7 +260,7 @@ async def test_dual_protocol_builtin_fallback_synthesises_anthropic_path() -> No
     """
 
     class _Secrets:
-        def get(self, ref: str) -> str | None:
+        def get(self, user_id: str, ref: str) -> str | None:
             return "sk-test" if ref == "channel/ds" else None
 
     provider = _FakeProvider(
@@ -288,7 +288,7 @@ async def test_compatible_channel_trusts_row_base_url_under_either_runtime() -> 
     """
 
     class _Secrets:
-        def get(self, ref: str) -> str | None:
+        def get(self, user_id: str, ref: str) -> str | None:
             return "sk-test" if ref == "channel/custom" else None
 
     provider = _FakeProvider(
@@ -335,7 +335,7 @@ class _SecretRefSecrets:
     def __init__(self, ref: str, key: str = "sk-test") -> None:
         self._ref, self._key = ref, key
 
-    def get(self, ref: str) -> str | None:
+    def get(self, user_id: str, ref: str) -> str | None:
         return self._key if ref == self._ref else None
 
 

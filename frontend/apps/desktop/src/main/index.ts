@@ -8,6 +8,7 @@ import { DEEP_LINK_PROTOCOL, parseDeepLink } from "./deep-link-utils";
 import { desktopRuntime } from "./ipc/desktop";
 import { registerIpcHandlers } from "./ipc";
 import { buildAppMenu } from "./menu";
+import { setLocale as setMenuI18nLocale } from "@valuz/shared/i18n";
 import {
   registerSystemLogIpc,
   startLogTail,
@@ -36,14 +37,13 @@ const bootstrap = async () => {
   // the bundled binary). See ``services/system-logs.ts``.
   registerSystemLogIpc();
   startLogTail();
-  await createMainWindow();
 
   const updater = setupUpdater({ getMainWindow, getUpdateWindow: () => getUpdateWindow() });
   // Renderer-driven manual check + restart-to-install. setupUpdater()
   // also wires the periodic auto-check (see scheduleUpdateCheck below);
   // these handlers exist so the UI can drive it on demand.
   ipcMain.handle(DESKTOP_CHANNELS.updaterCheck, () =>
-    updater.checkForUpdates(),
+    updater.checkForUpdates('about'),
   );
   ipcMain.handle(DESKTOP_CHANNELS.updaterDownload, () =>
     updater.downloadUpdate(),
@@ -59,16 +59,38 @@ const bootstrap = async () => {
     closeUpdateWindow();
     updater.quitAndInstall();
   });
-  Menu.setApplicationMenu(
-    buildAppMenu({
-      getMainWindow,
-      checkForUpdates: updater.checkForUpdates,
-    }),
+  // The native menu is built in the main process, which can't read the
+  // renderer's localStorage — seed it from the OS language so it's not stuck
+  // on the i18n default, then let the renderer report the actual in-app
+  // locale over IPC (set_menu_locale) and rebuild.
+  setMenuI18nLocale(
+    app.getLocale().toLowerCase().startsWith("zh") ? "zh-CN" : "en-US",
   );
+  const applyAppMenu = () =>
+    Menu.setApplicationMenu(
+      buildAppMenu({
+        getMainWindow,
+        checkForUpdates: () => updater.checkForUpdates('menu'),
+      }),
+    );
+  applyAppMenu();
+  ipcMain.handle(DESKTOP_CHANNELS.setMenuLocale, (_event, payload) => {
+    const locale = (payload as { locale?: string } | undefined)?.locale;
+    if (locale === "en-US" || locale === "zh-CN") {
+      setMenuI18nLocale(locale);
+      applyAppMenu();
+    }
+  });
+
+  // Create the window LAST — once every ipcMain handler above is registered.
+  // The renderer invokes ``set_menu_locale`` as soon as it loads (and on each
+  // locale change); creating the window earlier raced that invoke against this
+  // handler's registration → "No handler registered for 'set_menu_locale'".
+  await createMainWindow();
 
   appTray = createAppTray({
     getMainWindow,
-    checkForUpdates: updater.checkForUpdates,
+    checkForUpdates: () => updater.checkForUpdates('menu'),
   });
 
   const deepLinkManager = setupDeepLinkManager({ getMainWindow });

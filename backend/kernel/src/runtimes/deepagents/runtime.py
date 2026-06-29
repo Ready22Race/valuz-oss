@@ -38,7 +38,6 @@ from deepagents import SubAgent, create_deep_agent
 from deepagents.backends import LocalShellBackend
 from langchain_core.tools import StructuredTool
 from langgraph.types import Command
-
 from src.core.agent_config import AgentConfig, SubAgentDef
 from src.core.approval_rule_matcher import ExactArgsRuleMatcher, RuntimeApprovalRuleMatcher
 from src.core.events import AVAILABLE_DECISIONS_EDITABLE_WITH_SESSION, Event, EventSink
@@ -55,14 +54,26 @@ from src.core.types import (
     StopReason,
     UserMessage,
 )
+from src.runtimes.deepagents._patches import (
+    MAIN_GRAPH_RECURSION_LIMIT,
+    apply_deepagents_patches,
+)
 from src.runtimes.deepagents.approval_bridge import (
     _build_pending_payload,
     _classify_subject,
 )
 from src.runtimes.deepagents.middleware import ToolErrorTolerantMiddleware
+from src.runtimes.interruption import describe_exception, is_runtime_interruption
 from src.runtimes.mcp_env import resolve_stdio_env
 
 logger = logging.getLogger(__name__)
+
+# Apply third-party deepagents shims once, before any graph is built. See
+# ``_patches`` — raises *subagents* above langgraph's default 25-step recursion
+# limit (which they otherwise never escape). The *main* graph's limit is fixed
+# separately, in ``stream_config`` below, because ``astream_events`` drops the
+# bound budget deepagents sets — see ``MAIN_GRAPH_RECURSION_LIMIT``.
+apply_deepagents_patches()
 
 
 # Default location for the deepagents-specific checkpoint store. Kept separate
@@ -107,8 +118,6 @@ class DeepAgentsRuntime:
         # Identity of the session currently being run — exposed to
         # custom-tool handlers through ExecContext.
         self._cur_session_id: str = ""
-        self._cur_agent_id: str = ""
-        self._cur_project_id: str = ""
 
         # Approval bridge state (Phase 3 of the cross-runtime approval
         # contract). ``_pending_futures`` maps pending_id → future that
@@ -208,8 +217,6 @@ class DeepAgentsRuntime:
         session.status = "running"
         self._cancelled = False
         self._cur_session_id = session.id
-        self._cur_agent_id = session.agent_id
-        self._cur_project_id = session.project_id
 
         try:
             # Reconcile live session-driven levers BEFORE ``_ensure_graph``
@@ -232,7 +239,15 @@ class DeepAgentsRuntime:
                 now=datetime.now().astimezone(),
             )
             stream_input: Any = {"messages": [{"role": "user", "content": prompt}]}
-            stream_config: dict[str, Any] = {"configurable": {"thread_id": str(thread_id)}}
+            # ``recursion_limit`` MUST be set here, in the call-time config:
+            # ``astream_events`` (below) ignores the budget deepagents binds onto
+            # the graph with ``.with_config``, so without this the main loop runs
+            # at langgraph's default of 25 and dies on any non-trivial turn. See
+            # ``_patches.MAIN_GRAPH_RECURSION_LIMIT``.
+            stream_config: dict[str, Any] = {
+                "configurable": {"thread_id": str(thread_id)},
+                "recursion_limit": MAIN_GRAPH_RECURSION_LIMIT,
+            }
 
             usage_totals = {
                 "input_tokens": 0,
@@ -424,14 +439,33 @@ class DeepAgentsRuntime:
             )
         except Exception as exc:
             session.status = "idle"
-            session.stop_reason = Error(
-                category="execution_error",
-                retry_status="exhausted",
-                message=str(exc),
-            )
-            await self.event_sink.emit(Event(type="session_error", data={"message": str(exc)}))
-            if self.config.hooks:
-                await self.config.hooks.fire("on_error", error=exc, session_id=session.id)
+            if is_runtime_interruption(exc):
+                # Graceful host stop tore down the runtime subprocess mid-turn —
+                # resumable ``interrupted``, not a task failure (see codex
+                # runtime for the full rationale). Suppress session_error.
+                session.stop_reason = Error(
+                    category="interrupted",
+                    retry_status="terminal",
+                    message="runtime process interrupted",
+                )
+            else:
+                # See ``describe_exception``: a langgraph / MCP ``ClientSession``
+                # failure can arrive wrapped in an ``ExceptionGroup`` whose
+                # ``str()`` is the opaque "unhandled errors in a TaskGroup" —
+                # unwrap to the leaf so the reason survives, and log the
+                # traceback (this branch previously logged nothing).
+                cause = describe_exception(exc)
+                logger.exception(
+                    "deepagents: turn failed for session %s: %s", session.id, cause
+                )
+                session.stop_reason = Error(
+                    category="execution_error",
+                    retry_status="exhausted",
+                    message=cause,
+                )
+                await self.event_sink.emit(Event(type="session_error", data={"message": cause}))
+                if self.config.hooks:
+                    await self.config.hooks.fire("on_error", error=exc, session_id=session.id)
         finally:
             self._active_task = None
             await self.event_sink.emit(
@@ -819,10 +853,15 @@ class DeepAgentsRuntime:
         if self._graph is not None:
             return self._graph
 
+        # inherit_env=True so the agent shell sees the host's PATH / HOME / etc.
+        # (parity with Claude/Codex, which inherit os.environ). Its default is an
+        # EMPTY env — no PATH — so anything outside the shell's compiled-in
+        # default path fails to resolve: the chrome-devtools wrapper, and in dev
+        # even npx/node (nvm). See docs/design/browser-feature.md §8.
         backend = (
-            LocalShellBackend(root_dir=self.workspace_root)
+            LocalShellBackend(root_dir=self.workspace_root, inherit_env=True)
             if self.workspace_root
-            else LocalShellBackend()
+            else LocalShellBackend(inherit_env=True)
         )
 
         tools = self._build_tools()
@@ -1120,8 +1159,6 @@ class DeepAgentsRuntime:
                 ExecContext(
                     workspace=captured_workspace,
                     session_id=self._cur_session_id,
-                    agent_id=self._cur_agent_id,
-                    project_id=self._cur_project_id,
                 ),
             )
             if captured_hooks and captured_hooks._handlers.get("after_tool"):

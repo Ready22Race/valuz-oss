@@ -38,6 +38,7 @@ import {
   SelectTrigger,
   SelectValue,
   cn,
+  IconBox,
 } from "@valuz/ui";
 import { useTranslation } from "@valuz/core";
 import { useSettingsStore } from "@valuz/core";
@@ -879,12 +880,12 @@ export const ConnectorsSection = () => {
                       >
                         <CardContent className="py-3">
                           <div className="flex items-start gap-3">
-                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-surface-border bg-surface-soft text-brand">
+                            <IconBox variant="outline" className="text-brand">
                               <ConnectorIcon
                                 iconUrl={connectorIcon}
                                 name={connector.display_name}
                               />
-                            </div>
+                            </IconBox>
                             <div className="min-w-0 flex-1">
                               <div className="flex items-center gap-1.5">
                                 <span className="text-sm font-medium text-ink-heading">
@@ -1004,12 +1005,12 @@ export const ConnectorsSection = () => {
                       className="border-b border-surface-border last:border-b-0"
                     >
                       <div className="flex items-center gap-3 py-3">
-                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-surface-border bg-surface-soft text-brand">
+                        <IconBox variant="outline" className="text-brand">
                           <ConnectorIcon
                             iconUrl={iconUrl}
                             name={connector.display_name}
                           />
-                        </div>
+                        </IconBox>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium text-ink-heading">

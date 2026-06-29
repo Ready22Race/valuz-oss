@@ -4,12 +4,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.api.deps import _secret_store, get_settings_service
+from valuz_agent.api.deps import _secret_store, get_settings_service, require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import NoAvailableProvider, ProviderNotFound
 from valuz_agent.modules.providers.service import ProviderService
+from valuz_agent.modules.settings.model_options import (
+    CurrentDefault,
+    ModelOptionsResponse,
+    build_model_options,
+    to_option_input,
+)
 from valuz_agent.modules.settings.preferences import (
     detect_system_timezone,
     get_default_effort,
@@ -35,7 +41,8 @@ from valuz_agent.modules.settings.service import (
     SettingsService,
     UpdateCheckResult,
 )
-from valuz_agent.ports.llm_provider import SystemProviderImmutable, get_llm_registry
+from valuz_agent.ports.extensions import ext
+from valuz_agent.ports.llm_provider import SystemProviderImmutable
 
 router = APIRouter(prefix="/v1/settings", tags=["settings"])
 
@@ -136,7 +143,9 @@ async def _read_model_defaults(db: AsyncSession) -> ModelDefaultsResponse:
     )
 
 
-async def _mirror_to_default_assistant(db: AsyncSession, defaults: ModelDefaultsResponse) -> None:
+async def _mirror_to_default_assistant(
+    user_id: str, db: AsyncSession, defaults: ModelDefaultsResponse
+) -> None:
     """09-assistant: the 默认助手 base agent's brain mirrors the global model
     default (Settings = source of truth). Keeps the always-present default
     conversation agent on the user's chosen runtime/model/effort. Re-syncs its
@@ -146,6 +155,7 @@ async def _mirror_to_default_assistant(db: AsyncSession, defaults: ModelDefaults
 
     try:
         await AgentService(db).update_agent(  # type: ignore[arg-type]
+            user_id,
             DEFAULT_ASSISTANT_SLUG,
             {
                 "runtime": defaults.default_runtime,
@@ -159,9 +169,9 @@ async def _mirror_to_default_assistant(db: AsyncSession, defaults: ModelDefaults
         pass
 
 
-async def _finish_model_defaults(db: AsyncSession) -> ModelDefaultsResponse:
+async def _finish_model_defaults(user_id: str, db: AsyncSession) -> ModelDefaultsResponse:
     defaults = await _read_model_defaults(db)
-    await _mirror_to_default_assistant(db, defaults)
+    await _mirror_to_default_assistant(user_id, db, defaults)
     return defaults
 
 
@@ -177,7 +187,10 @@ async def get_model_defaults() -> ModelDefaultsResponse:
 
 
 @router.patch("/model-defaults")
-async def patch_model_defaults(payload: ModelDefaultsPatchPayload) -> ModelDefaultsResponse:
+async def patch_model_defaults(
+    payload: ModelDefaultsPatchPayload,
+    user_id: str = Depends(require_current_user_id),
+) -> ModelDefaultsResponse:
     """Update the global model-default tuple.
 
     ``default_provider_id`` behaviour:
@@ -200,18 +213,21 @@ async def patch_model_defaults(payload: ModelDefaultsPatchPayload) -> ModelDefau
                 if payload.default_provider_id == "":
                     # Clear: wipe is_default on all rows + clear app-setting keys.
                     ds = ProviderDatastore(db)
-                    await ds.clear_default()
+                    await ds.clear_default(user_id)
                     await set_default_provider_id(db, None)
                     await set_default_model(db, None)
-                elif get_llm_registry().get(payload.default_provider_id) is not None:
-                    # System/registry-backed provider (e.g. the commercial
-                    # "Valuz 系统模型" channel). It has no providers-table row to
-                    # carry ``is_default``, so pin it via preferences only — NOT
-                    # through ProviderService.set_default, whose ``_guard_not_system``
-                    # correctly blocks editing system providers but over-blocks
-                    # selecting one as the default. Clear any builtin row's
-                    # ``is_default`` so model_resolver doesn't see two defaults.
-                    await ProviderDatastore(db).clear_default()
+                elif any(
+                    it.id == payload.default_provider_id for it in await ext.llm_provider.list()
+                ):
+                    # Contributed (catalog) channel (e.g. the commercial
+                    # "Valuz 系统模型" channel — ADR-011). It has no providers-table
+                    # row to carry ``is_default``, so pin it via preferences only —
+                    # NOT through ProviderService.set_default, whose
+                    # ``_guard_not_system`` correctly blocks editing system
+                    # providers but over-blocks selecting one as the default. Clear
+                    # any builtin row's ``is_default`` so model_resolver doesn't see
+                    # two defaults.
+                    await ProviderDatastore(db).clear_default(user_id)
                     await set_default_provider_id(db, payload.default_provider_id)
                     if payload.default_model is not None:
                         await set_default_model(db, payload.default_model or None)
@@ -224,12 +240,13 @@ async def patch_model_defaults(payload: ModelDefaultsPatchPayload) -> ModelDefau
                         event_bus=event_bus,
                     )
                     await svc.set_default(
+                        user_id,
                         payload.default_provider_id,
                         default_model=payload.default_model or None,
                     )
                     # default_model already synced inside set_default; skip the
                     # standalone write below so we don't double-write.
-                    return await _finish_model_defaults(db)
+                    return await _finish_model_defaults(user_id, db)
             elif payload.default_model is not None:
                 # Provider not being changed — still honour a standalone
                 # default_model update (e.g. user picks a different model
@@ -241,7 +258,7 @@ async def patch_model_defaults(payload: ModelDefaultsPatchPayload) -> ModelDefau
                 # by ``set_default_effort``; concrete values are
                 # validated against EFFORT_VALUES.
                 await set_default_effort(db, payload.default_effort or None)
-            return await _finish_model_defaults(db)
+            return await _finish_model_defaults(user_id, db)
     except SystemProviderImmutable as exc:
         raise HTTPException(
             status_code=409,
@@ -256,6 +273,46 @@ async def patch_model_defaults(payload: ModelDefaultsPatchPayload) -> ModelDefau
         raise HTTPException(status_code=422, detail={"reason": str(exc)}) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ── Model options (read model for the "pick a default model" pickers) ──
+
+
+@router.get("/model-options")
+async def get_model_options(
+    user_id: str = Depends(require_current_user_id),
+) -> ModelOptionsResponse:
+    """Return the grouped, fully-resolved model options for the default-model
+    pickers (onboarding's ConnectStep + Settings default-config card).
+
+    Distinct from ``GET /v1/providers`` (provider management): every model here
+    carries the ``runtimes`` it can run on + a preferred ``default_runtime``,
+    same-named models inside a provider are disambiguated, and a system channel
+    collapses to a single provider. The picker UIs render this verbatim — they
+    no longer derive a runtime client-side.
+
+    Subscription providers come back ``status="client_resolved"``: their CLI
+    login state lives in the local keychain (invisible to the server), so the
+    client fills availability in from its own ``checkCliLogin`` probe.
+    """
+    async with async_unit_of_work(commit=False) as db:
+        defaults = await _read_model_defaults(db)
+        svc = ProviderService(
+            datastore=ProviderDatastore(db),
+            secret_store=_secret_store(),
+            event_bus=event_bus,
+        )
+        items = await svc.list_providers(user_id)
+        # ADR-011: each model carries its declared ``runtimes`` (or None →
+        # derive from compatible_protocols); the builder reads them straight off,
+        # no per-source special-casing.
+        inputs = [to_option_input(it) for it in items]
+        current = CurrentDefault(
+            runtime=defaults.default_runtime,
+            provider_id=defaults.default_provider_id,
+            model=defaults.default_model,
+        )
+        return build_model_options(inputs, current)
 
 
 @router.get("")

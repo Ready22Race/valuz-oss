@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { providersApi } from "@valuz/core";
 import { StartupScreen } from "./components/StartupScreen";
 import { UpdaterListener } from "./components/UpdaterListener";
+import { UpdateToast } from "./components/UpdateToast";
 import { useDesktopStartup } from "./hooks/use-desktop-startup";
 import { ElectronPlatformProvider } from "./lib/electron-platform";
 import { AppRouter } from "./routes/router";
@@ -56,12 +57,14 @@ export const App = () => {
     };
   }, [ready]);
 
+  // The platform provider wraps EVERY branch — StartupScreen calls
+  // usePlatform() (frameless-window controls), so rendering it outside
+  // the provider crashes the renderer before the backend is ready.
+  let content = null;
   if (checking || (ready && !setupChecked)) {
-    return null;
-  }
-
-  if (!ready) {
-    return (
+    content = null;
+  } else if (!ready) {
+    content = (
       <StartupScreen
         services={services}
         logs={logs}
@@ -70,12 +73,15 @@ export const App = () => {
         onRetry={retry}
       />
     );
+  } else {
+    content = (
+      <>
+        <UpdaterListener />
+        <UpdateToast />
+        <AppRouter />
+      </>
+    );
   }
 
-  return (
-    <ElectronPlatformProvider>
-      <UpdaterListener />
-      <AppRouter />
-    </ElectronPlatformProvider>
-  );
+  return <ElectronPlatformProvider>{content}</ElectronPlatformProvider>;
 };

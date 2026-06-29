@@ -1,10 +1,10 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Boolean, String, Text
+from sqlalchemy import BigInteger, Boolean, String, Text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
-from valuz_agent.infra.database import Base, OwnedMixin, PrimaryKeyMixin, TimestampMixin
+from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
 from valuz_agent.infra.time_utils import now_ms
 
 # ---------------------------------------------------------------------------
@@ -12,7 +12,7 @@ from valuz_agent.infra.time_utils import now_ms
 # ---------------------------------------------------------------------------
 
 
-class SkillIndexRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
+class SkillIndexRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     __tablename__ = "valuz_skill_index"
 
     slug: Mapped[str] = mapped_column(String(256))
@@ -53,12 +53,21 @@ class SkillIndexRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
     # preserved across ``startup_scan`` rescans. Null for non-imported skills.
     origin_json: Mapped[str | None] = mapped_column(Text, default=None)
     deletable: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Global library on/off switch for THIS skill row (the row the Skills page
+    # shows — i.e. the dedup-winning representative for the slug). Default on;
+    # ``startup_scan`` preserves it across rescans (the upsert never rewrites
+    # it, like ``creation_origin``). Off hides the skill from a new (non-project)
+    # conversation's inline ``/`` picker; never affects runtime loading or an
+    # agent's own ``/`` (which read source paths, not this flag).
+    library_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
 
 
-class ProjectSkillConfigRow(Base, OwnedMixin):
+class ProjectSkillConfigRow(Base, UserMixin):
     __tablename__ = "valuz_project_skill_config"
 
-    workspace_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    project_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     skill_path: Mapped[str] = mapped_column(Text, primary_key=True)
     added_at: Mapped[int] = mapped_column(BigInteger, default=now_ms)
 
@@ -89,6 +98,10 @@ class SkillView(BaseModel):
     source: str
     path: str
     enabled: bool = False
+    # Global library switch (user-scoped, slug-keyed) — distinct from ``enabled``
+    # (per-project). Defaults on; turning it off in the Skills page hides the
+    # skill from a new (non-project) conversation's inline ``/`` picker.
+    library_enabled: bool = True
     tags: list[str] = Field(default_factory=list)
     slug: str = ""
     icon: str | None = None
@@ -128,7 +141,7 @@ class SkillDetail(SkillView):
 
 
 class SkillsCatalog(BaseModel):
-    workspace_id: str
+    project_id: str
     skills: list[SkillView]
 
 
@@ -141,7 +154,11 @@ class SkillStateRequest(BaseModel):
     enabled: bool
 
 
-class WorkspaceSkillsUpdateRequest(BaseModel):
+class SkillLibraryStateRequest(BaseModel):
+    enabled: bool
+
+
+class ProjectSkillsUpdateRequest(BaseModel):
     skills_enabled: list[str] = Field(default_factory=list)
 
 
@@ -153,9 +170,9 @@ class SkillCreateRequest(BaseModel):
     name: str
     description: str = ""
     target_scope: SkillTargetScope = "user"
-    workspace_id: str | None = None
+    project_id: str | None = None
     instructions_markdown: str | None = None
-    add_to_workspace: bool = False
+    add_to_project: bool = False
 
 
 class SkillUpdateRequest(BaseModel):
@@ -166,8 +183,8 @@ class SkillUpdateRequest(BaseModel):
 
 class SkillCopyRequest(BaseModel):
     new_name: str
-    workspace_id: str | None = None
-    add_to_workspace: bool = False
+    project_id: str | None = None
+    add_to_project: bool = False
 
 
 class SessionSkillImportConfirmRequest(BaseModel):
@@ -175,8 +192,8 @@ class SessionSkillImportConfirmRequest(BaseModel):
     name: str
     description: str = ""
     target_scope: SkillTargetScope = "user"
-    workspace_id: str | None = None
-    add_to_workspace: bool = False
+    project_id: str | None = None
+    add_to_project: bool = False
 
 
 class SkillCreateChatStartResponse(BaseModel):
@@ -187,7 +204,7 @@ class SkillCreateChatStartResponse(BaseModel):
     """
 
     session_id: str
-    authoring_workspace_id: str
+    authoring_project_id: str
 
 
 SkillCreationKind = Literal["chat", "project", "skills_library"]
@@ -200,13 +217,13 @@ class SkillCreationContext(BaseModel):
     metadata to apply the right side-effects on confirmation:
 
     - ``chat``: write to user library only.
-    - ``project``: write to user library + bind to the workspace.
+    - ``project``: write to user library + bind to the project.
     - ``skills_library``: write to user library only (entry from the
       skills page itself).
     """
 
     kind: SkillCreationKind
-    workspace_id: str | None = None  # required when kind == "project"
+    project_id: str | None = None  # required when kind == "project"
 
 
 class SkillCreateStartRequest(BaseModel):
@@ -215,19 +232,25 @@ class SkillCreateStartRequest(BaseModel):
     Replaces ``POST /v1/skills/create/chat/start`` (which is preserved as
     a thin shim) and consolidates the three product entry points (chat /
     project / skills_library) behind one endpoint. The session is created
-    against the workspace appropriate for the kind, and the
+    against the project appropriate for the kind, and the
     ``creation_context`` is stamped onto session metadata so the
     downstream ``submit_skill`` tool can apply the right side-effects.
     """
 
     context: SkillCreationContext
+    # Agent to bind the authoring conversation to. ``None`` lets the
+    # backend pick the default assistant (see
+    # ``routes.skills._default_assistant_slug_if_present``); the
+    # draft-first frontend passes the agent the user chose in the
+    # composer so the skill-creator chat behaves exactly like 新对话.
+    agent_slug: str | None = None
     model_id: str | None = None
     provider_id: str | None = None
 
 
 class SkillCreateStartResponse(BaseModel):
     session_id: str
-    authoring_workspace_id: str
+    authoring_project_id: str
     creation_context: SkillCreationContext
 
 
@@ -249,7 +272,7 @@ class SkillSubmissionConfirmRequest(BaseModel):
 class SkillSubmissionConfirmResponse(BaseModel):
     skill: SkillView
     creation_context: SkillCreationContext
-    bound_to_workspace_id: str | None = None
+    bound_to_project_id: str | None = None
 
 
 class SkillSubmissionDismissResponse(BaseModel):
@@ -259,7 +282,7 @@ class SkillSubmissionDismissResponse(BaseModel):
 
 
 class SkillDeleteAffectedProject(BaseModel):
-    workspace_id: str
+    project_id: str
     name: str
 
 
@@ -305,15 +328,15 @@ class SkillImportArchivePreview(BaseModel):
 class SkillImportDirectoryPreviewRequest(BaseModel):
     directory_path: str
     target_scope: SkillTargetScope = "user"
-    workspace_id: str | None = None
+    project_id: str | None = None
 
 
 class SkillImportArchiveConfirmRequest(BaseModel):
     preview_id: str
     name: str | None = None
     target_scope: SkillTargetScope = "user"
-    workspace_id: str | None = None
-    add_to_workspace: bool = False
+    project_id: str | None = None
+    add_to_project: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -391,7 +414,7 @@ class StagingSyncItem(BaseModel):
 class StagingSyncRequest(BaseModel):
     items: list[StagingSyncItem]
     target_scope: SkillTargetScope = "user"
-    workspace_id: str | None = None  # required for target_scope="project"
+    project_id: str | None = None  # required for target_scope="project"
 
 
 class StagingSyncItemResult(BaseModel):
@@ -425,12 +448,12 @@ class StagingOptimizeResponse(BaseModel):
 class SkillImportUrlPreviewRequest(BaseModel):
     url: str
     target_scope: SkillTargetScope = "user"
-    workspace_id: str | None = None
+    project_id: str | None = None
 
 
 class SkillImportUrlConfirmRequest(BaseModel):
     preview_id: str
     name: str | None = None
     target_scope: SkillTargetScope = "user"
-    workspace_id: str | None = None
-    add_to_workspace: bool = False
+    project_id: str | None = None
+    add_to_project: bool = False

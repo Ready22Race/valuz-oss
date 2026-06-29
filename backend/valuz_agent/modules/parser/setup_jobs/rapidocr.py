@@ -1,35 +1,47 @@
-"""User-authorized download of PP-OCRv5 ONNX models for RapidOCR.
+"""User-authorized download of PP-OCRv6 ONNX models for RapidOCR.
 
 What we download
 ----------------
-RapidOCR ships three ONNX files for a Chinese-capable pipeline:
+A Chinese/multilingual-capable RapidOCR pipeline needs three ONNX
+models plus the recognition character dictionary:
 
-- ``det``  — text detection
-- ``cls``  — orientation classifier
-- ``rec``  — recognition (Chinese + English)
+- ``det``  — text detection         (PP-OCRv6_medium, PaddlePaddle official ONNX)
+- ``rec``  — recognition            (PP-OCRv6_medium, PaddlePaddle official ONNX)
+- ``cls``  — orientation classifier (PP-LCNet_x1_0_textline_ori, PaddlePaddle official ONNX)
+- dict      — rec character map      (extracted from the rec ``inference.yml``)
 
-Plus the recognition character dictionary (``ppocrv5_dict.txt``). All
-files come from the RapidAI-maintained ModelScope mirror at
-``https://www.modelscope.cn/models/RapidAI/RapidOCR/``. The ONNX
-bundles are derived from PaddleOCR PP-OCRv5 (Apache 2.0) and may be
-redistributed.
+All three ONNX models come from PaddlePaddle's own exports on ModelScope
+(``PaddlePaddle/PP-OCRv6_medium_{det,rec}_onnx`` +
+``PaddlePaddle/PP-LCNet_x1_0_textline_ori_onnx``), each a single-model
+repo with a flat ``inference.onnx`` + ``inference.yml`` layout — so we no
+longer depend on the RapidAI mirror at all. Unlike PP-OCRv5, the rec
+dictionary is NOT shipped as a standalone file — it is embedded in the
+rec model's ``inference.yml`` under ``PostProcess.character_dict``
+(18,708 entries, 50 languages). We download that yaml and materialize
+``ppocrv6_dict.txt`` from it.
 
-Mobile variants are picked over server: ~20MB total vs ~100MB+, with
-acceptable accuracy for desktop-class CPU inference. Users who need
-server-grade accuracy can override via a future provider setting; that
-is out of scope for the bundled bootstrap.
+The orientation classifier is loaded at construction but never invoked at
+inference (its 80×160 fixed input shape doesn't match rapidocr's Cls
+preprocessing — see ``parser_light_local``); it is still downloaded
+because rapidocr loads ``Cls.model_path`` eagerly.
+
+Size note: PP-OCRv6 ``medium`` is the mid accuracy tier and is much
+heavier than the old PP-OCRv5 ``mobile`` bundle — det ~62MB + rec ~77MB
++ cls ~7MB ≈ ~145MB total (vs ~20MB before). The three sizes are summed
+independently for a single aggregate progress bar. The models are
+Apache 2.0 and may be redistributed.
 
 Where they land
 ---------------
-``~/.valuz/app/models/light_local/rapidocr/`` (resolved via
+``~/.valuz-oss/models/light_local/rapidocr/`` (resolved via
 ``fs_registry.parser_model_dir``). When the job succeeds it also writes:
 
 - ``LICENSE`` — Apache 2.0 license text (so the bundle is self-contained
   legally if a user inspects the directory)
 - ``READY`` — a small marker file holding the ISO-format completion
-  timestamp plus a ``model_version=PP-OCRv5`` line. ``is_complete()``
-  parses the marker so a previous v4 directory is treated as
-  "needs setup", forcing a re-download of the v5 bundle.
+  timestamp plus a ``model_version=PP-OCRv6`` line. ``is_complete()``
+  parses the marker so a previous v4/v5 directory is treated as
+  "needs setup", forcing a re-download of the v6 bundle.
 
 Authorization contract
 ----------------------
@@ -51,8 +63,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
+import yaml
 
 from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.modules.parser.setup_jobs._apache_license import APACHE_LICENSE_2_0
 from valuz_agent.modules.parser.setup_jobs.base import ProgressCallback
 
 logger = logging.getLogger(__name__)
@@ -72,74 +86,91 @@ class _ModelAsset:
     filename: str
 
 
-# Mirror: RapidAI/RapidOCR on ModelScope, pinned to git tag ``v3.8.0``
-# which matches rapidocr>=3.3 model URLs. ModelScope is generally
-# faster than HuggingFace from inside China; outside-China users can
-# still reach it. Pinning a stable tag (not ``master``) means a model
-# layout change upstream doesn't silently break our downloader.
-_MODELSCOPE_BASE = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0"
+# All three models are PaddlePaddle's own official ONNX exports on
+# ModelScope. These single-model repos carry no release tags, so we pin
+# ``master``; each has a flat ``inference.onnx`` + ``inference.yml``
+# layout. ModelScope is generally faster than HuggingFace from inside
+# China; outside-China users can still reach it.
+_PADDLE_BASE = "https://www.modelscope.cn/models/PaddlePaddle"
+_V6_DET_REPO = f"{_PADDLE_BASE}/PP-OCRv6_medium_det_onnx/resolve/master"
+_V6_REC_REPO = f"{_PADDLE_BASE}/PP-OCRv6_medium_rec_onnx/resolve/master"
+_CLS_REPO = f"{_PADDLE_BASE}/PP-LCNet_x1_0_textline_ori_onnx/resolve/master"
+
+_DET_FILENAME = "PP-OCRv6_medium_det.onnx"
+_REC_FILENAME = "PP-OCRv6_medium_rec.onnx"
+_CLS_FILENAME = "PP-LCNet_x1_0_textline_ori.onnx"
+_DICT_FILENAME = "ppocrv6_dict.txt"
 
 _ASSETS: tuple[_ModelAsset, ...] = (
     _ModelAsset(
-        url=f"{_MODELSCOPE_BASE}/onnx/PP-OCRv5/det/ch_PP-OCRv5_det_mobile.onnx",
-        filename="ch_PP-OCRv5_det_mobile.onnx",
+        url=f"{_V6_DET_REPO}/inference.onnx",
+        filename=_DET_FILENAME,
     ),
     _ModelAsset(
-        url=(
-            f"{_MODELSCOPE_BASE}/onnx/PP-OCRv5/cls/ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx"
-        ),
-        filename="ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx",
+        url=f"{_V6_REC_REPO}/inference.onnx",
+        filename=_REC_FILENAME,
     ),
     _ModelAsset(
-        url=f"{_MODELSCOPE_BASE}/onnx/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile.onnx",
-        filename="ch_PP-OCRv5_rec_mobile.onnx",
-    ),
-    _ModelAsset(
-        # rec dict lives under the ``paddle/`` tree (shared across
-        # paddle / onnx / torch backends — it's just the character
-        # mapping, not a model file).
-        url=(f"{_MODELSCOPE_BASE}/paddle/PP-OCRv5/rec/ch_PP-OCRv5_rec_mobile/ppocrv5_dict.txt"),
-        filename="ppocrv5_dict.txt",
+        url=f"{_CLS_REPO}/inference.onnx",
+        filename=_CLS_FILENAME,
     ),
 )
 
+# The rec dict is embedded in the rec model's ``inference.yml`` (PaddleOCR
+# stopped shipping a standalone dict file in v6). We fetch this yaml after
+# the binary downloads and write ``ppocrv6_dict.txt`` from
+# ``PostProcess.character_dict``.
+_REC_DICT_YML_URL = f"{_V6_REC_REPO}/inference.yml"
+
 _READY_MARKER = "READY"
-_MODEL_VERSION = "PP-OCRv5"
+_MODEL_VERSION = "PP-OCRv6"
 _LICENSE_FILE = "LICENSE"
-_LICENSE_TEXT = """Apache License 2.0
+# Attribution NOTICE prepended to the bundled Apache 2.0 text. Satisfies
+# Apache 2.0 §4(a) — the on-disk ``LICENSE`` carries the full license text
+# verbatim (not just a link), plus per-component copyright attribution.
+_LICENSE_NOTICE = """\
+THIRD-PARTY MODEL & ENGINE NOTICE
+=================================
 
-Models (PP-OCRv5): Copyright PaddlePaddle Authors. Licensed under
-Apache License 2.0. https://github.com/PaddlePaddle/PaddleOCR
+OCR models — text detection (PP-OCRv6_medium), recognition
+(PP-OCRv6_medium) and text-line orientation (PP-LCNet_x1_0_textline_ori):
+Copyright PaddlePaddle Authors. Licensed under Apache License 2.0.
+Redistributed unmodified as PaddlePaddle's official ONNX exports via
+ModelScope. https://github.com/PaddlePaddle/PaddleOCR
 
-Packaging / engineering (rapidocr, ONNX repackaging):
-Copyright RapidAI Maintainers. Licensed under Apache License 2.0.
+Inference engine — rapidocr (RapidAI): Copyright RapidAI Maintainers.
+Licensed under Apache License 2.0. Used as the runtime library only; the
+models above are PaddlePaddle's own ONNX exports, not RapidAI-repackaged.
 https://github.com/RapidAI/RapidOCR
 
-Full license text:
-https://www.apache.org/licenses/LICENSE-2.0.txt
+The complete Apache License 2.0 text under which all of the above are
+licensed follows below.
 """
+
+_LICENSE_TEXT = f"{_LICENSE_NOTICE}\n{'=' * 70}\n\n{APACHE_LICENSE_2_0}\n"
 
 
 class RapidOcrSetupJob:
-    """Sequentially streams the PP-OCRv5 ONNX bundle into the local
+    """Sequentially streams the PP-OCRv6 ONNX bundle into the local
     model directory, with progress updates and cooperative cancellation."""
 
     setup_id: str = RAPIDOCR_SETUP_ID
 
-    # PP-OCRv5 mobile bundle sizes (HEAD-measured against ModelScope
-    # v3.8.0): det ~5MB, cls ~0.6MB, rec ~14MB, dict ~0.05MB → ~20MB.
-    # Round up to 24MB for the authorization dialog so we don't
-    # under-promise; the real number lands via _compute_total_bytes.
-    declared_size_bytes: int = 24 * 1024 * 1024
+    # PP-OCRv6 medium bundle sizes (measured against ModelScope):
+    # det ~62MB, rec ~77MB, cls ~7MB → ~145MB. The rec dict is a tiny
+    # text file materialized from the rec yaml (not counted here). Round
+    # up to 150MB for the authorization dialog so we don't under-promise;
+    # the real number lands via _compute_total_bytes.
+    declared_size_bytes: int = 150 * 1024 * 1024
 
     def model_dir(self) -> Path:
         return fs_registry.parser_model_dir(PLUGIN_ID, SUBKIND)
 
     def is_complete(self) -> bool:
         """Return True iff the READY marker exists AND was written by a
-        v5 run. A stale v4 READY marker (no ``model_version=`` line, or
+        v6 run. A stale v4/v5 READY marker (no ``model_version=`` line, or
         a different version string) reads as "not complete" so the
-        first boot after the v4→v5 upgrade auto-prompts the user to
+        first boot after the upgrade auto-prompts the user to
         re-download.
         """
         marker = self.model_dir() / _READY_MARKER
@@ -162,13 +193,13 @@ class RapidOcrSetupJob:
         target_dir = self.model_dir()
         target_dir.mkdir(parents=True, exist_ok=True)
 
-        # One-time prune of v4 artefacts: if a stale READY marker
-        # without our v5 ``model_version`` line sits next to the v4
-        # filenames, wipe everything before downloading so we don't
-        # accumulate two model bundles. is_complete() returned False
-        # for this path (different marker content), so we're already
-        # on the re-download branch.
-        _prune_legacy_v4_files(target_dir)
+        # One-time prune of v4/v5 artefacts: if a stale READY marker
+        # without our v6 ``model_version`` line sits next to older
+        # filenames, drop them before downloading so we don't accumulate
+        # multiple model bundles. is_complete() returned False for this
+        # path (different marker content), so we're already on the
+        # re-download branch.
+        _prune_legacy_files(target_dir)
 
         # Phase 1: HEAD all files to compute the real total so the UI can
         # render a deterministic progress bar (vs. our conservative
@@ -194,6 +225,14 @@ class RapidOcrSetupJob:
             if cancel_event.is_set():
                 return
 
+            # Materialize the rec character dictionary from the rec
+            # model's inference.yml (v6 no longer ships a standalone dict
+            # file). Done after the binary downloads so a cancelled run
+            # never leaves a dict orphaned from its models.
+            _materialize_rec_dict(target_dir, cancel_event)
+            if cancel_event.is_set():
+                return
+
             # Commit license + ready marker last so a partial run never
             # leaves the directory looking "ready". READY content
             # embeds ``model_version=`` so is_complete() can tell a v5
@@ -211,20 +250,42 @@ class RapidOcrSetupJob:
 # ----- helpers --------------------------------------------------------
 
 
+def _asset_size(client: httpx.Client, url: str) -> int | None:
+    """Learn one asset's byte size. Prefer a cheap HEAD ``content-length``;
+    fall back to a 1-byte ranged GET and read the total from
+    ``content-range`` (``bytes 0-0/<total>``).
+
+    ModelScope's ``resolve`` endpoint answers HEAD with ``200`` but no
+    ``content-length``, so HEAD alone yields nothing for these repos — the
+    ranged-GET path is what actually produces a number."""
+    head = client.head(url)
+    head.raise_for_status()
+    size = head.headers.get("content-length")
+    if size is not None:
+        return int(size)
+
+    ranged = client.get(url, headers={"Range": "bytes=0-0"})
+    ranged.raise_for_status()
+    content_range = ranged.headers.get("content-range")  # "bytes 0-0/<total>"
+    if content_range and "/" in content_range:
+        tail = content_range.rsplit("/", 1)[1].strip()
+        if tail.isdigit():
+            return int(tail)
+    return None
+
+
 def _compute_total_bytes(assets: tuple[_ModelAsset, ...]) -> int | None:
-    """HEAD each asset to learn its size. Falls back to None on any
-    failure so the UI can render an indeterminate spinner instead of a
-    wrong number."""
+    """Sum each asset's size for a deterministic progress bar. Falls back
+    to None on any failure (or any single unknown size) so the UI renders
+    an indeterminate spinner instead of a wrong number."""
     total = 0
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
             for asset in assets:
-                resp = client.head(asset.url)
-                resp.raise_for_status()
-                size = resp.headers.get("content-length")
+                size = _asset_size(client, asset.url)
                 if size is None:
                     return None
-                total += int(size)
+                total += size
     except (httpx.HTTPError, ValueError):
         return None
     return total
@@ -281,6 +342,40 @@ def _iter_chunks(resp: httpx.Response, chunk_size: int = 64 * 1024) -> Iterator[
     yield from resp.iter_bytes(chunk_size=chunk_size)
 
 
+def _materialize_rec_dict(target_dir: Path, cancel_event: threading.Event) -> None:
+    """Download the rec model's ``inference.yml`` and write the embedded
+    character dictionary to ``ppocrv6_dict.txt`` (one token per line).
+
+    PP-OCRv6 dropped the standalone dict file; the 18,708-entry
+    multilingual dictionary lives under ``PostProcess.character_dict`` in
+    the rec model's yaml. rapidocr's ``Rec.rec_keys_path`` expects the
+    classic PaddleOCR dict format (one token per line), which is exactly
+    ``"\\n".join(character_dict)``.
+    """
+    if cancel_event.is_set():
+        return
+    final = target_dir / _DICT_FILENAME
+    partial = target_dir / f"{_DICT_FILENAME}.partial"
+    if partial.exists():
+        partial.unlink()
+
+    with httpx.Client(timeout=httpx.Timeout(60.0, connect=15.0), follow_redirects=True) as client:
+        resp = client.get(_REC_DICT_YML_URL)
+        resp.raise_for_status()
+        spec = yaml.safe_load(resp.text)
+
+    chars = (spec or {}).get("PostProcess", {}).get("character_dict")
+    if not isinstance(chars, list) or not chars:
+        raise ValueError(
+            f"rec inference.yml missing PostProcess.character_dict (got {type(chars).__name__})"
+        )
+    if any(not isinstance(tok, str) for tok in chars):
+        raise ValueError("rec character_dict contains a non-string token")
+
+    partial.write_text("\n".join(chars) + "\n", encoding="utf-8")
+    partial.rename(final)
+
+
 def _cleanup_partials(target_dir: Path) -> None:
     """Remove ``*.partial`` files left by a cancelled run. We deliberately
     leave fully-renamed files in place — they are useful on a future
@@ -303,38 +398,44 @@ def _cleanup_partials(target_dir: Path) -> None:
             pass
 
 
-_LEGACY_V4_FILENAMES: tuple[str, ...] = (
+_LEGACY_FILENAMES: tuple[str, ...] = (
+    # PP-OCRv4
     "ch_PP-OCRv4_det_infer.onnx",
     "ch_ppocr_mobile_v2.0_cls_infer.onnx",
     "ch_PP-OCRv4_rec_infer.onnx",
     "ppocr_keys_v1.txt",
+    # PP-OCRv5 — incl. the old RapidAI-mirror orientation classifier,
+    # now superseded by PaddlePaddle's PP-LCNet_x1_0_textline_ori.
+    "ch_PP-OCRv5_det_mobile.onnx",
+    "ch_PP-OCRv5_rec_mobile.onnx",
+    "ch_PP-LCNet_x0_25_textline_ori_cls_mobile.onnx",
+    "ppocrv5_dict.txt",
 )
 
 
-def _prune_legacy_v4_files(target_dir: Path) -> None:
-    """Delete leftover PP-OCRv4 files from a previous install so the
-    directory ends up with v5 artefacts only.
+def _prune_legacy_files(target_dir: Path) -> None:
+    """Delete leftover PP-OCRv4 / PP-OCRv5 model files from a previous
+    install so the directory ends up with v6 artefacts only.
 
-    The v5 filenames are entirely different from v4 (det / cls / rec
-    all changed; even the dict went from ``ppocr_keys_v1.txt`` to
-    ``ppocrv5_dict.txt``), so without this prune the directory would
-    accumulate ~16MB of dead v4 files. Safe to call on a fresh dir
-    (the legacy filenames just won't exist).
+    The det / rec / cls / dict filenames all changed for the PP-OCRv6
+    bundle, so without this prune the directory would accumulate dead
+    models. Safe to call on a fresh dir (the legacy filenames just won't
+    exist).
     """
     if not target_dir.exists():
         return
     pruned: list[str] = []
-    for name in _LEGACY_V4_FILENAMES:
+    for name in _LEGACY_FILENAMES:
         legacy = target_dir / name
         if legacy.exists():
             try:
                 legacy.unlink()
                 pruned.append(name)
             except OSError as exc:
-                logger.warning("failed to prune legacy v4 file %s: %s", legacy, exc)
+                logger.warning("failed to prune legacy file %s: %s", legacy, exc)
     if pruned:
         logger.info(
-            "rapidocr: pruned %d legacy PP-OCRv4 file(s) before v5 download: %s",
+            "rapidocr: pruned %d legacy PP-OCRv4/v5 file(s) before v6 download: %s",
             len(pruned),
             pruned,
         )

@@ -1,69 +1,86 @@
 {
   "automation": {
+    "spawnedTask": "任务「{title}」",
     "actionCreate": "创建自动化",
     "actionKindChat": "简单任务",
     "actionKindChatHint": "每次触发执行一次智能体对话。",
     "actionKindLabel": "执行模式",
     "actionKindTask": "Task 任务",
-    "actionKindTaskDisabledHint": "Task 模式需要在项目工作区下使用。",
+    "actionKindTaskDisabledHint": "Task 模式需要在项目下使用。",
     "actionKindTaskHint": "以该智能体作为 Lead 启动一个项目 Task。",
     "actionNew": "新建",
     "agentHint": "执行所用的模型 / 运行时跟随所选智能体。",
     "agentLabel": "智能体",
-    "timezoneLabel": "时区",
-    "nextRunPreview": "下次运行",
     "agentPlaceholderEmpty": "没有可用智能体 — 请先添加",
     "agentPlaceholderPick": "选择一个智能体",
+    "createFailed": "创建失败：{error}",
     "createSuccess": "已创建「{name}」",
-    "createFailed": "创建失败",
     "deleteConfirmDesc": "删除该自动化会同时清除其执行历史，且无法恢复。",
-    "deleteFailed": "删除失败",
+    "deleteFailed": "删除失败：{error}",
     "deleteSuccess": "已删除「{name}」",
     "deleteTitle": "删除自动化「{name}」？",
+    "detailTitle": "自动化任务详情",
     "dialogTitleChat": "新建 Chat 自动化",
     "dialogTitleEdit": "编辑自动化",
     "dialogTitleEditNamed": "编辑「{name}」",
     "dialogTitleNew": "新建自动化",
-    "dialogTitleProject": "在「{workspace}」新建自动化",
-    "updateFailed": "更新失败",
-    "updateSuccess": "已更新「{name}」",
+    "dialogTitleProject": "在「{project}」新建自动化",
     "emptyAction": "创建自动化",
     "emptyDesc": "让智能体按计划运行 — 日报、变更监控、分钟级轮询任务都适合。",
     "emptyTitle": "暂无自动化任务",
+    "execNoTask": "未关联任务",
+    "execStatusErr": "执行失败",
+    "execStatusOk": "执行成功",
+    "execStatusPending": "等待中",
+    "execStatusSkip": "已跳过",
+    "execTriggerAgent": "智能体",
+    "execTriggerCron": "定时",
+    "execTriggerInterval": "间隔",
+    "execTriggerManual": "手动",
+    "execTriggerRecoveredSkip": "恢复跳过",
     "groupCount": "{count} 个自动化",
     "groupCountPlural": "{count} 个自动化",
     "headerCount": "{count} 个自动化",
     "headerCountPlural": "{count} 个自动化",
     "headerEnabled": "已启用 {count}",
-    "intervalEvery": "每 {seconds} 秒触发一次。最小 {min} 秒（对齐 tick 间隔）。",
-    "intervalUnitSeconds": "秒",
-    "intervalUnitMinutes": "分钟",
-    "intervalUnitHours": "小时",
-    "intervalUnitDays": "天",
     "intervalBelowFloor": "低于 {min} 秒下限；提交时会向上取整。",
-    "loadFailed": "加载自动化失败",
-    "pauseFailed": "暂停失败",
-    "pauseSuccess": "已暂停「{name}」",
-    "pickWorkspaceFirst": "请先选择目标工作区",
-    "recentExecutions": "最近执行",
+    "intervalEvery": "每 {seconds} 秒触发一次。最小 {min} 秒（对齐 tick 间隔）。",
+    "intervalEveryHours": "每 {count} 小时",
+    "intervalEveryHoursMinutes": "每 {hours} 小时 {minutes} 分钟",
+    "intervalEveryMinutes": "每 {count} 分钟",
+    "intervalEveryMinutesSeconds": "每 {minutes} 分 {seconds} 秒",
+    "intervalEverySeconds": "每 {count} 秒",
+    "intervalUnitDays": "天",
+    "intervalUnitHours": "小时",
+    "intervalUnitMinutes": "分钟",
+    "intervalUnitSeconds": "秒",
+    "loadFailed": "加载自动化失败：{error}",
+    "nextRunPreview": "下次运行",
     "noExecutions": "暂无执行记录",
-    "execStatusOk": "执行成功",
-    "execStatusErr": "执行失败",
-    "execStatusPending": "等待中",
-    "execStatusSkip": "已跳过",
-    "execTriggerCron": "定时",
-    "execTriggerInterval": "间隔",
-    "execTriggerManual": "手动",
-    "execTriggerRecoveredSkip": "恢复跳过",
-    "execNoTask": "未关联任务",
+    "pauseFailed": "暂停失败：{error}",
+    "pauseSuccess": "已暂停「{name}」",
+    "pickProjectFirst": "请先选择目标项目",
+    "proposalCreated": "自动化已创建。",
+    "proposalDismissed": "已取消",
+    "proposalFailed": "无法生成这条自动化",
+    "proposalLead": "Lead",
+    "proposalNew": "新自动化",
+    "proposalUnnamed": "未命名自动化",
+    "recentExecutions": "最近执行",
     "resumeSuccess": "已恢复「{name}」",
-    "runFailed": "立即运行失败",
+    "runFailed": "立即运行失败：{error}",
     "runQueued": "已加入立即运行队列",
     "subtitle": "按计划触发的智能体任务（Cron 与 Interval 两种触发）。",
+    "targetChat": "快速对话",
+    "targetLabelTask": "所属项目",
+    "timezoneLabel": "时区",
     "title": "自动化",
-    "toggleFailed": "切换状态失败",
+    "toggleFailed": "切换状态失败：{error}",
     "triggerCron": "Cron",
-    "triggerInterval": "Interval"
+    "triggerInterval": "Interval",
+    "triggerManual": "手动",
+    "updateFailed": "更新失败：{error}",
+    "updateSuccess": "已更新「{name}」"
   },
   "backend": {
     "schedule": {
@@ -121,7 +138,7 @@
     "select": "选择",
     "skills": "技能",
     "uploadToKb": "上传文件到知识库",
-    "workspaces": "工作空间"
+    "projects": "项目"
   },
   "common": {
     "add": "添加",
@@ -164,6 +181,7 @@
     "previousStep": "上一步",
     "processing": "处理中",
     "refresh": "刷新",
+    "reload": "重新加载窗口",
     "remove": "移除",
     "rename": "重命名",
     "retry": "重试",
@@ -174,6 +192,11 @@
     "search": "搜索",
     "select": "选择",
     "send": "发送",
+    "queueSend": "排队",
+    "queueRunsAfter": "将在当前回合结束后运行",
+    "queueContinue": "继续",
+    "queueBlocked": "无法运行",
+    "queueSteer": "立即发送",
     "starting": "启动中",
     "stop": "停止",
     "success": "成功",
@@ -202,7 +225,7 @@
     "attachmentParsingBody": "有附件尚未解析完成。仍要提交吗？提交后智能体只能读取原始文件，无法使用解析结果或文档检索。",
     "attachmentParsingConfirm": "仍然提交",
     "attachmentParsingTitle": "附件尚未解析完成",
-    "selectAgentFirst": "请先选择一个智能体再上传附件",
+    "selectAgentFirst": "请先选择一个 Agent",
     "answer": "回答",
     "answered": "已回答",
     "askUserAnswerTitle": "您的回答",
@@ -215,6 +238,7 @@
     "cannotLoadKb": "无法加载知识库文档",
     "clickEditTitle": "点击编辑标题",
     "collapsePanel": "收起 Panel",
+    "contextCompacted": "上下文已压缩",
     "copy": "复制",
     "copyFailed": "复制失败",
     "copyLink": "复制链接",
@@ -233,10 +257,21 @@
     "fileTruncated": "\n… (文件过大，已截断)",
     "filesChanged": "{count} 个文件已更改",
     "fromKnowledgeBase": "从知识库选择",
+    "composerSkills": "技能",
+    "composerConnectors": "连接器",
+    "composerConnectorsLocked": "连接器在会话开始时已锁定,不可更改",
+    "composerPlusTooltip": "添加附件、技能和连接器",
+    "defaultBrain": "默认",
+    "composerSearchConnectors": "搜索连接器…",
+    "composerManageSkills": "管理技能",
+    "composerManageConnectors": "管理连接器",
+    "composerNoMatches": "无匹配项",
     "generatedFailed": "生成失败",
+    "files": "文件",
     "generatedFiles": "生成文件",
     "generatedFilesCount": "{count}个",
     "goToSettings": "前往设置",
+    "noGeneratedFiles": "暂无生成文件",
     "indexing": "索引中...",
     "inputPlaceholder": "输入指令... / 引用技能，@ 引用文档",
     "interruptFailed": "中断失败",
@@ -253,11 +288,10 @@
     "matchedPaths": "匹配了 {count} 个路径",
     "modelDefault": "默认",
     "modelLocked": "模型在会话创建时已锁定。需要换模型请新建对话。",
-    "selectAgent": "选择 Agent",
+    "selectAgent": "选择智能体",
     "noAgents": "暂无 Agent，去创建后再开始对话。",
-    "addAgent": "添加 Agent",
-    "selectAgentFirst": "请先选择一个 Agent",
-    "noAgentBanner": "你还没有可用的 Agent，先创建一个或完成引导配置",
+    "addAgent": "添加智能体",
+    "noAgentBanner": "你还没有配置模型，先配置模型或完成引导配置",
     "noAgentBannerCta": "去配置",
     "noChannelBanner": "当前没有可用的模型通道，先连接一个",
     "noChannelAndAgentBanner": "你还没有可用的模型通道和 Agent，先完成配置",
@@ -267,6 +301,19 @@
     "taskCreated": "已创建任务",
     "openTask": "查看任务",
     "backToTask": "返回任务",
+    "workflow": {
+      "title": "工作流",
+      "agentsDone": "{done}/{total} 个智能体",
+      "statusRunning": "执行中",
+      "statusCompleted": "已完成",
+      "statusStopped": "已停止",
+      "statusFailed": "已失败",
+      "stateDone": "完成",
+      "stateRunning": "进行中",
+      "question": "问题",
+      "summary": "摘要",
+      "viewDetails": "查看完整结果"
+    },
     "brainOverride": "仅本次对话覆盖",
     "pillDrafted": "已起草任务",
     "pillPlanned": "已制定计划 v{version}（{count} 个子任务）",
@@ -335,7 +382,7 @@
     "viewDetails": "查看详情",
     "viewSession": "查看完整 Session",
     "workDir": "对话工作目录",
-    "workspace": "工作区",
+    "project": "项目",
     "permissionReview": "默认权限",
     "permissionReviewHint": "工具调用前需用户确认 (安全优先)",
     "permissionAuto": "自动审查",
@@ -388,6 +435,7 @@
     "automationChatHelp2": "，比如创建、暂停、删除定时任务，或者立即触发一次执行。",
     "automationChatHint": "你也可以直接在聊天里说出来，例如：「每天 9 点提醒我看一下昨日报告」。",
     "automationIntro": "在该项目会话里创建的任务会自动归属到当前项目。",
+    "automationTaskLabel": "自动化任务",
     "backToList": "返回任务列表",
     "confirmDeleteTask": "确认删除任务？",
     "confirmDeleteTaskDesc": "删除「{name}」将停止并永久移除该定时任务。",
@@ -438,15 +486,17 @@
     "paused": "已暂停",
     "period": "执行周期",
     "recentExecutions": "最近执行",
-    "sat": "周六",
+    "runNow": "运行测试",
     "runtime": "运行时",
+    "sat": "周六",
     "selectModel": "选择模型",
     "selectNewModel": "选择新模型 →",
+    "selectProject": "请选择所属项目",
     "selectRuntime": "选择 Runtime",
-    "selectWorkspace": "请选择所属空间",
     "setModel": "设置模型 →",
     "simple": "简单",
     "statusColumn": "状态",
+    "statusOn": "已启用",
     "sun": "周日",
     "taskColumn": "任务",
     "taskCount": "{count} 任务",
@@ -455,9 +505,9 @@
     "taskNotExist": "任务不存在或加载失败",
     "taskUpdated": "任务已更新",
     "thu": "周四",
+    "timezoneColumn": "时区",
     "todayTime": "今天 {time}",
     "triggerColumn": "触发规则",
-    "timezoneColumn": "时区",
     "triggerFailed": "触发失败",
     "triggerSuccess": "「{name}」已触发",
     "triggered": "「{name}」已触发",
@@ -466,8 +516,7 @@
     "updateFailed": "更新失败",
     "wed": "周三",
     "weekdays": "工作日",
-    "yesterdayTime": "昨天 {time}",
-    "automationTaskLabel": "自动化任务"
+    "yesterdayTime": "昨天 {time}"
   },
   "decisionInbox": {
     "title": "待回答问题",
@@ -599,15 +648,14 @@
     "loadingTools": "正在加载工具…",
     "toolsError": "无法加载工具：{error}",
     "empty": "还没有连接器,点击 + 添加一个。",
-    "emptyTitle": "暂无连接器",
-    "emptyDesc": "连接外部工具和数据服务后，智能体就能调用对应能力。",
-    "emptyAction": "添加连接器",
     "noMatch": "没有匹配的连接器。",
     "disconnectConfirm": "断开 {name}?",
     "disconnectConfirmDesc": "这将移除该连接及已保存的凭据,你之后可以重新连接。",
     "statusConnecting": "连接中…",
     "statusConnected": "已连接",
     "statusError": "连接失败",
+    "statusNotConnected": "未连接",
+    "groupInstalled": "已添加",
     "groupOfficial": "官方",
     "groupBuiltin": "内置",
     "groupDirectory": "已连接",
@@ -637,6 +685,7 @@
     "earlier": "更早",
     "chatTag": "对话",
     "taskTag": "任务",
+    "automationTag": "自动化",
     "filterAll": "全部",
     "live": "实时",
     "waitingForEvents": "等待事件…",
@@ -707,6 +756,7 @@
     "connectStatusNoDefault": "连接一个通道并选个默认模型",
     "connectLoading": "正在读取可用的模型通道…",
     "sectionLocalSubscription": "本机订阅",
+    "sectionSystem": "系统模型",
     "sectionApiKey": "API Key 通道",
     "addApiKeyChannel": "添加 API Key 通道",
     "addApiKeyHint": "DeepSeek、OpenRouter 或任何兼容 API",
@@ -750,11 +800,6 @@
     "createAssistantFailed": "创建小助手失败，请重试。",
     "exampleProjectName": "示例项目",
     "teams": {
-      "general": {
-        "name": "通用 Team",
-        "tagline": "研究 → 写作 → 评审，通用知识工作的兜底班底",
-        "collab": "研究员 → 撰写者 → 审稿员，整理员随时归档"
-      },
       "investment": {
         "name": "投研 Team",
         "tagline": "行业 + 估值 + 跟踪 + 合规，投资研究深度班底",
@@ -768,85 +813,66 @@
       "custom": {
         "name": "暂时不需要 team",
         "tagline": "直接开始对话，先用起来"
+      },
+      "content": {
+        "name": "内容创作 Team",
+        "tagline": "选题 → 文案 → 配图 → 发布，小红书内容生产线",
+        "collab": "选题策划 → 种草写手 → 配图设计 → 发布运营"
       }
     },
     "roles": {
-      "general": {
-        "researcher": {
-          "name": "研究员",
-          "duty": "抓取信息、做全景梳理",
-          "description": "抓信息、做全景梳理、给出有出处的结论",
-          "instructions": "你是「研究员」，通用 Team 的 lead，给整支团队做信息地基。\n\n你的位置：\n- 用户的请求会先到你这里，由你拆解出\"要研究什么\"。\n- 研究完成后，把结论交给「撰写者」成稿；定稿前由「审稿员」把关；过程产物归档由「整理员」负责。\n\n工作流程：\n1. 收到任务先复述目标，确认范围和边界（\"是要做综述？还是某个具体问题的答案？\"）。\n2. 列出 3-5 个研究维度作为大纲，让用户/团队提前看到你的思路。\n3. 围绕大纲做检索、整理，每个结论必须能追溯到具体出处。\n4. 把研究结果用「结论 + 要点 + 出处」的结构汇总，交给撰写者。\n\n产出规范：\n- 先列要点再展开，避免长段落堆砌。\n- 每个事实/数据后面附信息来源（链接、文档名、页码或访谈编号）。\n- 不确定的地方直接标「待核实」，不要硬给结论。\n\n协作方式：\n- 收到模糊任务时，主动找用户澄清，不要自己猜。\n- 把大块研究拆给自己（一次只聚焦一个维度），用 todos 串起来。\n- 阶段性产出就交付，不要等\"全部完美\"——撰写者可以基于初稿继续推进。\n\n风格：客观、可追溯、不空泛。"
-        },
-        "writer": {
-          "name": "撰写者",
-          "duty": "把研究结论写成成稿",
-          "description": "把研究结论写成结构清晰、读者友好的成稿",
-          "instructions": "你是「撰写者」，通用 Team 的写手。你不做研究，你把研究员给你的结论变成读者真的会看下去的成稿。\n\n你的位置：\n- 你的上游是「研究员」，下游是「审稿员」。\n- 研究员给你「结论 + 要点 + 出处」，你的产出会被审稿员检查。\n\n工作流程：\n1. 收到研究素材后，先确认目标读者和篇幅（\"500 字摘要？2000 字深度稿？\"）。\n2. 用一段话写出本稿的\"核心论点\"，让上下游提前对齐方向。\n3. 按\"开头钩子 → 论点 → 支撑 → 收尾\"的结构写正稿。\n4. 完稿后交给审稿员，并主动指出你不确定的两三处表达。\n\n产出规范：\n- 一段一个意思，长句拆开。\n- 引用数据/事实时保留研究员给的出处链接。\n- 不臆造事实——找不到支撑的论断直接划掉，不要硬撑。\n\n协作方式：\n- 看到研究材料里有逻辑空隙，直接回去找研究员补，不要替他脑补。\n- 给审稿员留两三条「我也觉得这里可能有问题」的批注，帮他们聚焦。\n\n风格：清晰、有节奏、不油腻。"
-        },
-        "reviewer": {
-          "name": "审稿员",
-          "duty": "定稿前的最后一道关",
-          "description": "定稿前核事实、查逻辑、挑表达问题",
-          "instructions": "你是「审稿员」，通用 Team 的最后一道关。在稿子离开团队之前，你的工作是确保它经得起读者和事实的双重检查。\n\n你的位置：\n- 你的上游是「撰写者」，下游是发布。\n- 你不重写稿子；你提出问题、给出具体可执行的修改建议，让作者改。\n\n工作流程：\n1. 通读全文一遍，先做整体判断（\"论点立不立得住？结构有没有问题？\"）。\n2. 第二遍逐段精读，标出三类问题：事实错、逻辑断、表达模糊。\n3. 用编号清单的方式给修改建议，每条都要可执行（\"把第 3 段改成 X\" 比 \"这里要更清晰\" 强 10 倍）。\n4. 给撰写者改完的稿子做最后一次确认，然后放行或继续打回。\n\n产出规范：\n- 区分「必须改」和「建议改」，不要混在一起。\n- 引用具体段落/句子，不要泛泛而谈。\n- 表达问题给出至少一个改写示例。\n\n协作方式：\n- 事实存疑直接找研究员复核，不要自己上网查（那是研究员的活）。\n- 大改动先和撰写者对齐意图，再让对方动手。\n\n风格：严格、具体、不挑刺为目的。"
-        },
-        "archivist": {
-          "name": "整理员",
-          "duty": "归档、建索引、留痕",
-          "description": "归档、建索引、留痕，让团队产出可检索、可追溯",
-          "instructions": "你是「整理员」，通用 Team 的档案管理员。研究员、撰写者、审稿员产出的东西，最终都由你归档、建索引、留痕。\n\n你的位置：\n- 全流程旁观者：每个角色出活时你就跟着归档。\n- 你的产出让一个月后回来找资料的人能在一分钟内找到自己想要的东西。\n\n工作流程：\n1. 项目启动时先建立目录结构（按主题 + 时间双索引）。\n2. 每次有产出，归档原稿 + 加 metadata（作者、日期、关键词、关联任务 ID）。\n3. 阶段性给团队一份「索引快照」：本周/本月有哪些产出，分别在哪。\n4. 项目收尾时输出一份总索引，包含所有交付物的入口。\n\n产出规范：\n- 文件名规范：`YYYYMMDD-主题-作者.md`，关键词写在 frontmatter 里。\n- 索引文档用表格组织，每行一个交付物。\n- 不要私自重命名或删除别人的原稿。\n\n协作方式：\n- 看到团队产出但没归档的，主动问\"这个要不要存？放哪？\"\n- 索引有冲突时让创建人决定，自己不武断合并。\n\n风格：低调、可靠、不抢戏。"
-        }
-      },
       "investment": {
         "analyst": {
           "name": "行业分析师",
-          "duty": "统筹 · 行业地位 · 收尾",
-          "description": "统筹投研全流程、判断行业地位与格局、汇总各方输入并收口",
-          "instructions": "你是「行业分析师」，投研 Team 的 lead。你不是单纯一个分析师——你是整个研究的总指挥，决定研究怎么走、谁该出什么活、最后怎么收口。\n\n你的位置：\n- 用户把投研需求交给你，由你拆解给「财务建模师」「季度跟踪员」「合规审查员」。\n- 你也亲自做\"行业地位与格局判断\"这一块，不外包。\n- 最终收口、对外结论由你定。\n\n工作流程：\n1. 接到一个标的/行业研究需求，先输出研究框架：行业现状、竞争格局、核心驱动、估值与跟踪点、合规边界。\n2. 把任务派出去：财务建模师做估值，季度跟踪员做季度预测，合规审查员做风险审查。\n3. 自己同步做行业地位判断（市场规模、竞争结构、护城河、周期位置）。\n4. 收到子任务结果后，整合成完整研究报告。\n5. 给用户呈现时，先给一句话结论 + 主要分歧点，再展开细节。\n\n产出规范：\n- 每个判断都要给出对应假设和敏感性（\"如果 X 变 Y，结论变成 Z\"）。\n- 区分\"事实/数据\"与\"判断/观点\"。\n- 留出明确的\"预期差/反驳\"段落，不要自说自话。\n\n协作方式：\n- 派任务时要给清楚的输入（资料、时间窗、口径）和验收标准。\n- 子任务回来后做\"看一眼就懂\"的判断，不要事必躬亲重做一遍。\n\n风格：宏观视野、敢下判断、留得住分歧。"
+          "duty": "统筹 · 行业地位 · 收尾"
         },
         "modeler": {
           "name": "财务建模师",
-          "duty": "DCF + 可比估值",
-          "description": "搭建 DCF 与可比公司估值模型，给出关键假设与敏感性分析",
-          "instructions": "你是「财务建模师」，投研 Team 的估值担当。你负责把对一家公司的判断转化为可计算、可敏感性分析的数字模型。\n\n你的位置：\n- 行业分析师（lead）给你研究范围和关键假设。\n- 你产出 DCF + 可比公司估值，并给出关键敏感性。\n- 季度跟踪员的预测会直接喂进你的模型。\n\n工作流程：\n1. 收到标的后，先列出建模需要的输入：营收口径、利润率、资本开支、税率、贴现率等。\n2. 搭 DCF 模型（明确显式增长期、稳定期、终值）。\n3. 选 3-5 个可比公司，做估值倍数对比（PE / PB / EV/EBITDA）。\n4. 跑敏感性：每个关键假设上下 ±20%，看估值变化。\n5. 给 lead 一份估值结论：合理区间 + 主要驱动 + 主要风险点。\n\n产出规范：\n- 模型透明：所有假设可追溯到原始资料。\n- 估值给区间，不给一个孤立数字。\n- 明确标注模型的盲点（如非财务因素）。\n\n协作方式：\n- 假设和 lead 对齐过再下手，不要自己拍。\n- 季度跟踪员更新预测时，主动重跑模型。\n\n风格：严谨、谦虚、留余量。"
+          "duty": "DCF + 三表 + 可比估值"
         },
         "tracker": {
-          "name": "季度跟踪员",
-          "duty": "三情景预测 · 多标的并行",
-          "description": "跟踪标的季度经营、做多情景预测、及时标注预期差",
-          "instructions": "你是「季度跟踪员」，投研 Team 的实时观察员。你负责让团队的研究不\"停留在去年财报\"——每个季度的最新动向都由你捕捉、消化、转给团队。\n\n你的位置：\n- 财务建模师的预测以你为输入。\n- 行业分析师靠你判断\"研究结论是不是已经过时\"。\n\n工作流程：\n1. 锁定标的的季度披露节奏（业绩快报、正式财报、电话会议）。\n2. 数据出来后 24 小时内完成「业绩 vs 预期」对比，标注预期差。\n3. 给出三情景预测：乐观 / 中性 / 悲观，明确触发条件。\n4. 多个标的并行跟踪时，用统一表格对比横向格局变化。\n5. 看到行业拐点信号，主动找 lead 升级讨论。\n\n产出规范：\n- 数据要新、口径要稳、预期差要量化。\n- 三情景预测必须有触发条件，不能只是\"我觉得\"。\n- 表格优于文字段落（横向对比效率更高）。\n\n协作方式：\n- 看到模型假设和最新事实矛盾，直接让财务建模师重跑。\n- 跟踪节奏比深度优先：宁可每季度都更新一点，也不要积压。\n\n风格：及时、准确、不情绪化。"
+          "name": "业绩跟踪员",
+          "duty": "财报季全流程跟踪"
         },
-        "compliance": {
-          "name": "合规审查员",
-          "duty": "本地运行 · 数据不出门",
-          "description": "对结论做合规与风险提示把关，数据不出本机",
-          "instructions": "你是「合规审查员」，投研 Team 的风控底线。你的工作是确保团队的研究结论不会因为合规/数据问题被打回，也不会泄露用户数据。\n\n你的位置：\n- 所有外发结论都要经过你。\n- 你独立运行，数据不出本机。\n- 你不参与研究判断，只做风险把关。\n\n工作流程：\n1. 项目启动时审查数据源是否合规（公开/付费/内部）。\n2. 研究过程中跟踪：是否引用了未公开信息、内部材料是否被外发。\n3. 结论定稿前，做四项检查：信息来源合规、口径表述准确、风险提示完整、敏感数据脱敏。\n4. 通过就放行，不通过给出具体整改项。\n\n产出规范：\n- 风险提示用编号清单，每条对应一个具体来源/段落。\n- 不通过的稿子必须给\"如何改\"，不能只说\"不行\"。\n- 默认假设：数据不出本机，外发任何东西都要二次确认。\n\n协作方式：\n- 发现合规问题立即升级给 lead，不要等到收尾才说。\n- 不替团队做研究判断（合规和研究是两件事）。\n\n风格：保守、严谨、不变通。"
+        "reportWriter": {
+          "name": "研报撰写人",
+          "duty": "首次覆盖 · 晨报 · 路演 PPT"
         }
       },
       "product": {
         "pm": {
           "name": "产品经理",
-          "duty": "拆需求、定方案、排优先级",
-          "description": "把模糊目标拆成可执行的结构化规格，按优先级落地",
-          "instructions": "你是「产品经理」，产研 Team 的 lead。你不写代码、不画图，但整个团队朝什么方向走、做什么不做什么、什么先做，由你定。\n\n你的位置：\n- 用户的需求先到你这里，由你拆成可执行的功能/任务。\n- 你把方案分派给「设计师」做交互、「开发」做实现、「QA」做验证。\n- 最终的 release / decision 由你拍板。\n\n工作流程：\n1. 收到需求先反问 3 个问题：解决谁的什么问题？现在怎么解决的？做完后衡量标准是什么？\n2. 写一份\"一页 PRD\"：背景、目标、范围、核心交互流程、验收标准、依赖。\n3. 把交互细节交给设计师，技术方案交给开发讨论。\n4. 跟进进度，处理 blocker，必要时砍 scope 保发布。\n5. 上线前过一遍 QA 报告，决定 go / no-go。\n\n产出规范：\n- PRD 要短：能写一页绝不写两页。\n- 验收标准用\"用户能 X / 看到 Y\"描述，避免技术黑话。\n- 优先级用 P0 / P1 / P2 标，所有事情都 P0 等于没排序。\n\n协作方式：\n- 设计/技术问题先听专业意见，不要外行指挥内行。\n- 看到团队抢 scope，把不该这版做的删掉。\n\n风格：聚焦、果断、对结果负责。"
+          "duty": "拆需求、定方案、排优先级"
         },
         "designer": {
           "name": "设计师",
-          "duty": "UI / 交互设计、出稿",
-          "description": "产出工程师可直接实现的 UI / 交互设计稿与规范",
-          "instructions": "你是「设计师」，产研 Team 的体验把关人。你负责把产品经理的需求转化为用户真的会用得顺手的界面与交互。\n\n你的位置：\n- 上游是产品经理（拿需求），下游是开发（出稿）。\n- 你不只是画图——交互的合理性也由你负责。\n\n工作流程：\n1. 拿到 PRD 先复述：用户在什么场景下、用什么操作、达成什么。\n2. 画 3 个方向草稿，给 PM 选方向，避免一头扎进一个细节方案。\n3. 选定方向后做详稿：组件状态、空/异常/加载、响应式断点都要画。\n4. 给开发的设计稿要带 spec：间距、字号、颜色、组件名。\n5. 开发实现后做一次走查，调可控的细节，大改回到 PRD 讨论。\n\n产出规范：\n- 交互流程图先画再画 UI，避免 UI 漂亮但流程不通。\n- 所有状态都画（不只画 happy path）。\n- 标注引用项目设计系统的 token，不要自创色值。\n\n协作方式：\n- 看到 PRD 描述有歧义直接回去找 PM，不要自己脑补。\n- 实现走样时给开发具体修改项，不要\"差不多就行\"。\n\n风格：克制、系统化、不堆砌。"
+          "duty": "UI / 交互设计、出稿"
         },
         "engineer": {
           "name": "前后端开发",
-          "duty": "实现功能、写代码",
-          "description": "按产品需求实现前端界面与后端服务，代码清晰、可测试、带类型",
-          "instructions": "你是「前后端开发」，产研 Team 的实现担当。设计稿和需求最终能不能稳定跑起来，由你决定。\n\n你的位置：\n- 上游是产品经理（拿需求）+ 设计师（拿稿）。\n- 下游是 QA。\n- 技术方案上你有主导权，PM 和设计要尊重你的技术判断。\n\n工作流程：\n1. 拿到 PRD + 设计稿，先评估技术方案（API、数据模型、影响面）。\n2. 把方案写成 100-300 字技术说明，让 PM 和 QA 提前看到风险。\n3. 开发前先拆任务，让进度可见。\n4. 写代码：前后端契约先定、类型先齐、关键路径有日志。\n5. 自测后提交给 QA，并附上\"测试要点 + 已知 trade-off\"。\n\n产出规范：\n- 代码可测试、有类型、关键路径加日志。\n- API 契约改动先更新 OpenAPI，再改实现。\n- 不为\"未来可能用上\"过度抽象——三处重复才考虑抽。\n\n协作方式：\n- 看到需求会引入重大复杂度，主动给 PM 替代方案，不要默默扛。\n- QA 发现 bug 时，先定位再修，不要打补丁绕过。\n\n风格：稳、清晰、不炫技。"
+          "duty": "实现功能、写代码"
         },
         "qa": {
           "name": "QA",
-          "duty": "用例覆盖、回归验证",
-          "description": "写测试计划、覆盖关键用例、做回归验证，清晰复现并记录缺陷",
-          "instructions": "你是「QA」，产研 Team 的质量守门员。你的工作是让发布的每一版都经得起用户的真实使用。\n\n你的位置：\n- 你的上游是开发（拿提交），下游是 PM / 用户（出报告）。\n- 你不修代码，但你决定哪些 bug 必须修才能发版。\n\n工作流程：\n1. 拿到开发提交前，根据 PRD 写测试计划：核心流程、边界、异常、回归点。\n2. 执行测试：每个用例记录步骤、预期、实际、截图/日志。\n3. 发现的 bug 按严重程度分类：阻塞 / 严重 / 一般 / 优化建议。\n4. 把阻塞和严重 bug 反馈给开发，附上稳定复现步骤。\n5. 修复后做回归，确认没引入新问题。\n6. 发版前给 PM 出一份\"发布质量报告\"。\n\n产出规范：\n- bug 报告必须有稳定复现步骤；不能稳定复现的标注\"偶现\"+ 出现频率。\n- 每个 bug 必须有期望行为，不能只说\"不对\"。\n- 测试报告要分严重程度统计，让 PM 一眼判断 go/no-go。\n\n协作方式：\n- 找到 bug 先和开发对齐复现路径，再写正式报告。\n- 看到 PRD 漏了边界情况，主动找 PM 补充验收标准。\n\n风格：耐心、细致、不放水。"
+          "duty": "用例覆盖、回归验证"
+        }
+      },
+      "content": {
+        "topicPlanner": {
+          "name": "选题策划",
+          "duty": "挖选题、定钩子、排内容日历"
+        },
+        "noteWriter": {
+          "name": "种草写手",
+          "duty": "写出有种草力的小红书文案"
+        },
+        "visualDesigner": {
+          "name": "配图设计",
+          "duty": "出封面与配图方案"
+        },
+        "publisher": {
+          "name": "发布运营",
+          "duty": "排期发布、追数据复盘"
         }
       }
     },
@@ -874,7 +900,7 @@
     "valuzHelper": {
       "name": "Valuz 小助手",
       "description": "Valuz 使用助手。教你怎么用 Valuz、帮你理清任务怎么建、Agent 怎么配，随手问。",
-      "instructions": "你是「Valuz 小助手」，Valuz 自带的通用助手，也是这个产品的使用向导。\n你既处理用户的日常对话与问答，也特别擅长帮用户上手、用好 Valuz。\n\n你熟悉 Valuz 的核心概念：\n- 项目：一个 Agent 团队协作的工作区。把库里的 Agent「派驻」进项目即可参与工作。\n- Agent（智能体）：可配置的执行单元，有指令、技能(skills)、装备(MCP 连接器)、模型通道。\n- 临时对话：不绑定项目的快速对话，适合随手问、轻量任务。\n- 技能 / 装备：给 Agent 增强能力的可插拔模块。\n\n回答原则：\n- 你是通用助手：日常问答、写作、查询、闲聊等常规请求都正常回答，\n  别因为「我是产品助手」就推开用户的普通问题。\n- 先弄清用户想达成什么，再给最短可行路径；能一句话说清就不展开。\n- 涉及「Valuz 怎么用 / 怎么操作」的问题，发挥向导专长：\n  给具体步骤和入口（去哪个页面、点哪个按钮），引导用户自己完成。\n- 遇到需要深度产出的专业任务（投研、写作、产研等），\n  建议用户在项目里派一个更专业的 Agent，而不是自己硬扛。\n- 产品细节以你挂载的《Valuz 使用手册》技能为准；\n  手册里没有的，不要编造，老实说「这个我不确定」。\n- 友好、简洁、可执行，多用要点。"
+      "instructions": "你是「Valuz 小助手」，Valuz 自带的通用助手，也是这个产品的使用向导。\n你既处理用户的日常对话与问答，也特别擅长帮用户上手、用好 Valuz。\n\n你熟悉 Valuz 的核心概念：\n- 项目：一个 Agent 团队的协作空间。把库里的 Agent「派驻」进项目即可参与工作。\n- Agent（智能体）：可配置的执行单元，有指令、技能(skills)、装备(MCP 连接器)、模型通道。\n- 临时对话：不绑定项目的快速对话，适合随手问、轻量任务。\n- 技能 / 装备：给 Agent 增强能力的可插拔模块。\n\n回答原则：\n- 你是通用助手：日常问答、写作、查询、闲聊等常规请求都正常回答，\n  别因为「我是产品助手」就推开用户的普通问题。\n- 先弄清用户想达成什么，再给最短可行路径；能一句话说清就不展开。\n- 涉及「Valuz 怎么用 / 怎么操作」的问题，发挥向导专长：\n  给具体步骤和入口（去哪个页面、点哪个按钮），引导用户自己完成。\n- 遇到需要深度产出的专业任务（投研、写作、产研等），\n  建议用户在项目里派一个更专业的 Agent，而不是自己硬扛。\n- 产品细节以你挂载的《Valuz 使用手册》技能为准；\n  手册里没有的，不要编造，老实说「这个我不确定」。\n- 友好、简洁、可执行，多用要点。"
     }
   },
   "permission": {
@@ -906,11 +932,15 @@
     "basedOnContext": "基于项目上下文生成报告",
     "browse": "浏览",
     "create": "创建",
-    "createDesc": "输入项目名称并选择项目目录，创建一个新的工作空间。",
+    "createDesc": "输入项目名称并选择项目目录，创建一个新项目。",
     "createFailed": "创建失败",
     "createTitle": "创建新项目",
     "created": "项目「{name}」已创建",
     "deleteTask": "删除",
+    "deployAgents": "部署智能体",
+    "deployAgentsHint": "可多选，默认部署 Valuz 小助手；成员之后也能在项目里增减",
+    "deployPartialFail": "{count} 个智能体部署失败，可稍后在项目里重试",
+    "noAgentsToDeploy": "智能体库为空，可稍后在项目里添加成员",
     "dirAlreadyBound": "该目录已绑定到其他项目",
     "dirHint": "选择一个本地目录作为项目根目录，每个目录只能绑定一个项目。",
     "disable": "禁用",
@@ -939,6 +969,10 @@
     "parseFailed": "解析失败",
     "projectDir": "项目目录",
     "projectFiles": "项目文件",
+    "projectMemory": "项目记忆",
+    "memoryAuto": "自动",
+    "memoryClearConfirm": "确认清空?",
+    "memoryEmpty": "记忆会在对话静默后自动累积",
     "projectName": "项目名称",
     "refDocs": "引用文档",
     "refreshFiles": "刷新文件列表",
@@ -987,6 +1021,37 @@
     }
   },
   "settings": {
+    "browser": {
+      "statusLabel": "浏览器",
+      "connected": "已连接",
+      "disconnected": "未连接",
+      "modeManaged": "受管 Profile",
+      "modeAttach": "连接到我的 Chrome",
+      "open": "打开我的浏览器",
+      "stop": "停止",
+      "opened": "浏览器已就绪",
+      "loadFailed": "加载浏览器状态失败",
+      "openFailed": "打开浏览器失败",
+      "riskNote": "这是一个独立、隔离的浏览器实例;请只在其中登录必要的账户。页面内容应视为不可信。"
+    },
+    "memory": {
+      "enabledLabel": "启用记忆",
+      "enabledDesc": "总开关:控制记忆注入与后台自动生成",
+      "autoExtractLabel": "后台自动记忆",
+      "autoExtractDesc": "会话静默后自动提炼并保存(会调用模型)",
+      "customInstructionsLabel": "自定义记忆指令",
+      "customInstructionsDesc": "在内置记忆规则之上,补充你对后台自动记忆的偏好——想让它多关注或忽略哪些内容(留空则关闭)",
+      "customInstructionsPlaceholder": "例如:重点记录决策及其理由;忽略寒暄和临时调试细节",
+      "scopeUser": "关于你",
+      "scopeGlobal": "通用笔记",
+      "empty": "暂无记忆",
+      "clearScope": "清空",
+      "loading": "加载中…",
+      "deleted": "已删除",
+      "cleared": "已清空",
+      "loadFailed": "加载记忆失败",
+      "saveFailed": "操作失败"
+    },
     "onboarding": {
       "title": "新手引导",
       "rerunLabel": "重新运行引导",
@@ -1149,7 +1214,7 @@
         "desc": "管理你的身份、同步范围和订阅状态，让每台设备保持一致的研究上下文",
         "statLabel": "账号健康度",
         "statValue": "98%",
-        "title": "账号与工作区偏好"
+        "title": "账号与项目偏好"
       },
       "appearance": {
         "desc": "把桌面工作台调成你习惯的阅读节奏、信息密度和品牌样式",
@@ -1235,7 +1300,7 @@
       "modelChannel": "模型通道",
       "modelChannelDesc": "已配置的大模型服务商",
       "defaultConfig": "默认配置",
-      "defaultConfigDesc": "未指定工作区覆盖时，新对话使用的默认配置",
+      "defaultConfigDesc": "未指定项目覆盖时，新对话使用的默认配置",
       "discoveredModels": "待发现模型",
       "followSubscription": "跟随订阅",
       "agentEngine": "选择默认 Agent 引擎",
@@ -1247,6 +1312,7 @@
       "notInstalled": "未安装",
       "notLoggedIn": "未登录",
       "installCli": "安装 CLI",
+      "subscriptionLoginRequired": "{name} 渠道尚未登录：请在终端运行 {command}，或在「设置 → 模型」中连接后重试",
       "runtimeSwitchedReSelect": "已切换 Runtime — 请重新选择默认模型",
       "availableModelsList": "可用模型",
       "availableModelsHelp": "（逗号或换行分隔，至少 1 个）",
@@ -1278,7 +1344,7 @@
       "kindSpreadsheet": "Excel",
       "kindText": "纯文本 / Markdown",
       "kindWeb": "HTML 网页",
-      "loadFailed": "加载解析模型配置失败",
+      "loadFailed": "加载解析模型配置失败:{error}",
       "loadingConfig": "加载解析模型配置…",
       "localDownload": "本地能力下载",
       "localDownloadDesc": "部分本地能力(如图片 OCR)依赖外部模型文件，首次使用时需要你的明确授权才会下载",
@@ -1289,7 +1355,7 @@
       "primarySwitched": "主引擎已切换为{name}",
       "routingSection": "解析路由",
       "routingSectionDesc": "选择主引擎，能力不足的类型自动降级到本地解析",
-      "saveFailed": "保存失败",
+      "saveFailed": "保存失败:{error}",
       "setup": {
         "agreeAndDownload": "同意并下载",
         "agreement": "我已阅读并同意上述模型来源与许可证;允许在我的设备上下载这些文件。",
@@ -1315,15 +1381,15 @@
         "sourceAndLicense": "来源:{source} · 许可证:{license}",
         "startFailed": "启动失败:{error}"
       },
-      "switchFailed": "切换失败",
+      "switchFailed": "切换失败:{error}",
       "sync": "同步",
-      "testPluginFailed": "{name} 测试失败",
-      "testRequestFailed": "测试请求失败",
+      "testPluginFailed": "{name} 测试失败:{error}",
+      "testRequestFailed": "测试请求失败:{error}",
       "testNotConfigured": "请先在上方填写并保存 API Token,再进行测试。",
       "testHealthFailed": "API Token 可能无效,或服务暂不可达。",
       "title": "文档解析",
       "updateConfig": "更新配置",
-      "updateFailed": "更新失败",
+      "updateFailed": "更新失败:{error}",
       "getToken": "获取 Token",
       "getTokenLink": "获取 Token"
     },
@@ -1368,8 +1434,8 @@
       "seriesCount": "{count} 条序列",
       "title": "数据源",
       "valuzConnected": "已连接 Valuz",
-      "workspaceScoped": "Workspace scoped",
-      "workspaceScopedHint": "按工作区授予"
+      "projectScoped": "Project scoped",
+      "projectScopedHint": "按项目授予"
     },
     "systemLogs": {
       "copiedLines": "已复制 {count} 行",
@@ -1407,6 +1473,14 @@
       "general": {
         "desc": "外观、快捷键",
         "label": "通用"
+      },
+      "memory": {
+        "desc": "查看与控制记忆",
+        "label": "记忆"
+      },
+      "browser": {
+        "desc": "连接并管理受控浏览器",
+        "label": "浏览器"
       },
       "shortcuts": {
         "desc": "全局命令与输入",
@@ -1462,6 +1536,7 @@
     "tasks": "任务",
     "noTasks": "暂无任务",
     "sessions": "对话",
+    "chats": "对话",
     "taskStatus": {
       "active": "运行中",
       "paused": "已暂停",
@@ -1480,12 +1555,17 @@
   },
   "skill": {
     "addBtn": "添加",
+    "libraryEnabledTip": "新对话中可用",
+    "libraryDisabledTip": "新对话中隐藏",
+    "rescan": "扫描技能库",
+    "rescanDone": "已重新索引 {count} 个技能",
+    "rescanFailed": "扫描失败",
     "addSkill": "添加技能",
     "addSkillDesc": "选择要在此项目中启用的技能",
     "aiCreate": "AI 创建",
     "aiHint": "AI 写到正确位置后,卡片会自动刷新可点击保存。",
     "automationFailed": "自动化操作失败",
-    "boundToWorkspace": "· 已绑定到 {name}",
+    "boundToProject": "· 已绑定到 {name}",
     "builtin": "内置",
     "builtinHint": "随客户端分发 · 不可关闭",
     "cancelled": "已取消,未写入技能库",
@@ -1512,9 +1592,9 @@
     "fileStructure": "文件结构",
     "generatedSkills": "已生成的技能",
     "groupAgents": "Agents",
-    "groupClaude": ".claude",
+    "groupClaude": "Claude",
     "groupCodex": "Codex",
-    "groupOfficial": "官方",
+    "groupOfficial": "内置",
     "importFailed": "导入失败: {error}",
     "importName": "导入名称",
     "imported": "Skill「{name}」已导入",
@@ -1541,9 +1621,6 @@
     "newSkillLabel": "新建",
     "nextRun": "· 下次 {time}",
     "noAvailable": "暂无可用技能",
-    "emptyTitle": "暂无技能",
-    "emptyDesc": "添加或导入技能后，智能体可以复用这些工作方法和工具说明。",
-    "emptyAction": "添加技能",
     "noFiles": "无文件",
     "noGenerated": "还没有生成的技能。",
     "noGeneratedHint": "在左侧描述你想要的技能，AI 会写到 staging。",
@@ -1664,6 +1741,41 @@
     "failed": "失败",
     "running": "运行中"
   },
+  "menu": {
+    "about": "关于 Valuz",
+    "checkForUpdates": "检查更新",
+    "close": "关闭窗口",
+    "copy": "复制",
+    "cut": "剪切",
+    "delete": "删除",
+    "edit": "编辑",
+    "file": "文件",
+    "forceReload": "强制重新加载",
+    "front": "前置全部窗口",
+    "help": "帮助",
+    "hide": "隐藏 Valuz",
+    "hideOthers": "隐藏其他",
+    "minimize": "最小化",
+    "paste": "粘贴",
+    "pasteAndMatchStyle": "粘贴并匹配样式",
+    "quit": "退出 Valuz",
+    "redo": "重做",
+    "reload": "重新加载",
+    "reloadWindow": "重新加载窗口",
+    "resetZoom": "实际大小",
+    "selectAll": "全选",
+    "services": "服务",
+    "toggleDevTools": "开发者工具",
+    "toggleFullScreen": "切换全屏",
+    "undo": "撤销",
+    "unhide": "全部显示",
+    "view": "视图",
+    "website": "Valuz 官网",
+    "window": "窗口",
+    "zoom": "缩放",
+    "zoomIn": "放大",
+    "zoomOut": "缩小"
+  },
   "tray": {
     "checkUpdate": "检查更新",
     "hideWindow": "隐藏窗口",
@@ -1671,7 +1783,7 @@
     "showWindow": "显示窗口"
   },
   "updater": {
-    "availableDesc": "发现新版本，立即下载安装。",
+    "availableDesc": "下载完成后，重启应用即可完成更新。",
     "downloadedTitle": "新版本已就绪",
     "downloadedDesc": "更新已下载完成，重启后将自动安装。",
     "downloadNow": "下载更新",
@@ -1679,7 +1791,9 @@
     "downloadingDesc": "正在下载更新，请稍候...",
     "errorTitle": "更新失败",
     "errorUnknown": "未知错误",
+    "preparing": "正在准备安装…",
     "restartNow": "立即重启",
+    "restarting": "正在重启…",
     "updateAvailable": "发现新版本"
   },
   "ui": {
@@ -1755,6 +1869,16 @@
     }
   },
   "agent": {
+    "proposalNew": "新建智能体",
+    "proposalUnnamed": "未命名智能体",
+    "proposalBrain": "运行时和模型",
+    "proposalSkills": "技能",
+    "proposalConnectors": "连接器",
+    "proposalNone": "无",
+    "proposalCreate": "创建智能体",
+    "proposalCreated": "智能体已创建。",
+    "proposalCreatedDeployed": "已创建并部署到「{name}」。",
+    "proposalDismissed": "已取消",
     "title": "智能体",
     "subtitle": "可实例化到项目中的官方智能体。",
     "agentCount": "{count} 个智能体",
@@ -1843,7 +1967,7 @@
     "createAgent": "创建智能体",
     "deleteAgent": "删除智能体",
     "confirmDeleteAgent": "删除智能体？",
-    "agentSaved": "智能体已保存",
+    "agentSaved": "已保存",
     "agentCreated": "智能体已创建",
     "agentDeleted": "智能体已删除",
     "agentCopied": "智能体已复制",
@@ -1854,8 +1978,8 @@
     "descriptionPlaceholder": "点击添加描述…",
     "addSkill": "添加技能",
     "addConnector": "添加连接器",
-    "skillsSectionHint": "智能体在工作区内可调用的技能。本地运行时自带的技能始终生效。",
-    "connectorsSectionHint": "智能体在工作区内可调用的外部连接器。",
+    "skillsSectionHint": "智能体在项目内可调用的技能。本地运行时自带的技能始终生效。",
+    "connectorsSectionHint": "智能体在项目内可调用的外部连接器。",
     "instructionsPlaceholder": "用 1-2 段话写清这个智能体是谁、按什么方法做事、输出什么、不做什么。例如：\n\n角色定位：（你是谁，对什么结果负责）\n工作方法（按序）：1. … 2. …\n输出纪律：- …\n边界（不做）：- …",
     "effortLabel": "推理强度",
     "effortHint": "该智能体对话使用的思考预算。",
@@ -1868,6 +1992,9 @@
     "groupCustom": "自定义",
     "filterAll": "全部",
     "filterMine": "我的",
+    "viewByProject": "按项目",
+    "viewAll": "全部 Agent",
+    "unassigned": "未派驻",
     "avatarLabel": "头像",
     "startFrom": "起点",
     "startBlank": "从空白",
@@ -1892,9 +2019,69 @@
     "nextDeployDesc": "把它派驻进一个项目开始干活",
     "nextChatTitle": "去临时对话",
     "nextChatDesc": "用这个 Agent 立刻开聊",
-    "deployedToProject": "已派驻到「{project}」"
+    "deployedToProject": "已派驻到「{project}」",
+    "template": {
+      "browse": "浏览模板",
+      "title": "从模板添加",
+      "subtitle": "选一套配好的团队，一键添加进你的库",
+      "memberCount": "{count} 个角色",
+      "add": "添加到我的库",
+      "added": "已添加",
+      "adding": "添加中…",
+      "roleInLibrary": "已在库",
+      "addSuccess": "已添加 {count} 个 Agent · {name}",
+      "allExist": "「{name}」已全部在库中",
+      "addFailed": "添加失败，请重试",
+      "empty": "暂无可用模板",
+      "pipeline": "协作流水线",
+      "willAddHint": "添加后进入你的库，已存在的自动跳过（本次新增 {count} 个）",
+      "allInLibrary": "这套团队的 {count} 个角色都已在你的库中"
+    },
+    "deleteDeployedWarning": "该智能体已派驻到 {count} 个项目，删除会一并从这些项目移除。此操作不可撤销，删除后将无法恢复。",
+    "pack": {
+      "import": "导入",
+      "export": "导出",
+      "importTitle": "导入 Agent 包",
+      "importing": "导入中…",
+      "exporting": "导出中…",
+      "confirm": "确认导入",
+      "agentsSection": "包含 Agent",
+      "skillsSection": "技能",
+      "connectorsSection": "连接器",
+      "inLibrary": "已在库",
+      "willAdd": "将新增",
+      "needsKey": "需配置密钥",
+      "needsSetup": "需本机部署",
+      "alreadyHave": "已有",
+      "embedded": "随包",
+      "bundled": "内置",
+      "importDone": "导入完成 · 新增 {created}，跳过 {skipped}",
+      "toConfigure": "以下连接器需在「连接器」页补充配置后才能使用",
+      "importFailed": "导入失败，请确认文件是有效的 .valuzpack",
+      "exportFailed": "导出失败",
+      "exportDone": "已导出 {count} 个 Agent",
+      "pickFile": "选择 .valuzpack 文件",
+      "done": "完成",
+      "exportMulti": "打包导出",
+      "exportTitle": "导出为一个文件",
+      "exportSub": "打包成 .valuzpack，可分享或发到内容平台供他人一键导入。",
+      "groupName": "这一组的名字",
+      "willPack": "将打包 {count} 个 agent",
+      "exportNote": "自包含这些 agent 的指令与技能；连接器只带配置、不带任何密钥。",
+      "exportFile": "导出文件",
+      "selectHint": "勾选要一起导出的 agent",
+      "countAgents": "{count} 个 agent",
+      "defaultGroupName": "我的 Agent 组",
+      "cancelSelect": "取消",
+      "groupDesc": "描述（选填）",
+      "groupDescPlaceholder": "这组 agent 是做什么的"
+    }
   },
   "task": {
+    "triggeredByChat": "由对话触发",
+    "triggeredByTask": "由任务「{title}」· {agent} 触发",
+    "triggeredByTaskNoAgent": "由任务「{title}」触发",
+    "triggeredByAutomation": "由自动化「{name}」触发",
     "title": "任务",
     "untitled": "未命名任务",
     "subtitle": "在该项目中运行的 Lead 派发任务。",
@@ -1953,6 +2140,7 @@
     "retryWithLeadHint": "继承目标 + 上下文快照，换不同主 Agent 新开一个 Run（即将上线）",
     "pause": "暂停",
     "resume": "恢复",
+    "retry": "重试",
     "stop": "停止",
     "subnav": {
       "task": "任务",
@@ -1993,6 +2181,12 @@
       "failed": "失败",
       "paused": "已暂停"
     },
+    "followUp": {
+      "heading": "基于交付结果继续调整",
+      "placeholder": "跟 Lead 说要怎么调整…",
+      "runTimelineToggle": "执行过程",
+      "runTimelineExpand": "展开查看过程"
+    },
     "continueChat": "继续对话",
     "continueChatHint": "进入主 Agent 会话页继续",
     "deliverableTitle": "交付结果",
@@ -2026,6 +2220,7 @@
       "paused": "已暂停",
       "resumed": "已恢复",
       "stopped": "已停止",
+      "taskBlocked": "任务受阻",
       "taskCompleted": "任务完成",
       "taskFailed": "任务失败",
       "taskPlanned": "已规划任务",
@@ -2041,6 +2236,8 @@
       "subtaskReviewReworkNoFeedback": "⚠ 打回重做",
       "leadWorking": "Lead 正在执行…"
     },
-    "viewSession": "查看会话 →"
+    "viewSession": "查看会话 →",
+    "needsConfirm": "需要你确认",
+    "goConfirm": "去确认"
   }
 }

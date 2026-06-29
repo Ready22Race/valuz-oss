@@ -1,8 +1,9 @@
-"""Tests for system-provider resolution path (ADR-007).
+"""Tests for the contributed-channel resolution path (ADR-011).
 
-When a provider id is registered in the ``LLMProviderRegistry``, the
-resolver should skip the user table lookup and synthesise a kernel
-``ModelProvider`` from the descriptor.
+When a provider id isn't in the user table, the resolver consults
+``ext.llm_provider``: ``resolve`` synthesises a kernel ``ModelProvider``
+from the returned credential, and ``resolve_runtime_provider`` derives the
+runtime from the catalog row's protocols + ``serves_responses``.
 """
 
 from __future__ import annotations
@@ -17,17 +18,14 @@ from valuz_agent.adapters.provider_resolver import (
     resolve_model_provider,
     resolve_runtime_provider,
 )
-from valuz_agent.ports.llm_provider import (
-    SystemLLMProvider,
-    _InMemoryRegistry,
-    set_llm_registry,
-)
+from valuz_agent.modules.providers.schemas import LLMChannel, LLMModel
+from valuz_agent.ports.extensions import ext
+from valuz_agent.ports.llm_provider import NoopLLMProvider, ResolvedCredential
 
 
 class _NoProviders:
-    async def get_by_id(self, _: str):  # type: ignore[no-untyped-def]
+    async def get_by_id(self, _user_id: str, _: str):  # type: ignore[no-untyped-def]
         return None
-
 
 
 class _UnusedSecrets:
@@ -35,43 +33,63 @@ class _UnusedSecrets:
         return None
 
 
-def _descriptor(
-    *,
-    provider_id: str = "valuz-channel",
-    api_protocol: str = "anthropic",
-    api_base: str = "https://cloud.test/v1",
-    runtime_provider: str = "claude_agent",
-    enabled: bool = True,
-    unavailable_reason: str | None = None,
-    headers: dict[str, str] | None = None,
-) -> SystemLLMProvider:
-    return SystemLLMProvider(
-        id=provider_id,
-        name="Test System Channel",
-        provider_kind="system",
-        runtime_provider=runtime_provider,
-        api_protocol=api_protocol,
-        api_base=api_base,
-        model_options=("claude-sonnet-4-6",),
-        default_model="claude-sonnet-4-6",
-        headers=lambda: headers if headers is not None else {"Authorization": "Bearer abc"},
-        enabled=lambda: enabled,
-        unavailable_reason=lambda: unavailable_reason,
-    )
+class _FakeCatalog:
+    def __init__(
+        self,
+        rows: list[LLMChannel] | None = None,
+        creds: dict[str, ResolvedCredential] | None = None,
+    ) -> None:
+        self._rows = rows or []
+        self._creds = creds or {}
+
+    async def list(self) -> list[LLMChannel]:
+        return list(self._rows)
+
+    async def resolve(self, provider_id: str) -> ResolvedCredential | None:
+        return self._creds.get(provider_id)
 
 
 @pytest.fixture(autouse=True)
-def fresh_registry():
-    set_llm_registry(_InMemoryRegistry())
+def fresh_catalog():
+    ext.llm_provider = NoopLLMProvider()
     yield
-    set_llm_registry(_InMemoryRegistry())
+    ext.llm_provider = NoopLLMProvider()
 
 
-class TestResolveModelProviderSystem:
-    async def test_descriptor_resolves_with_bearer(self) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
+def _set(
+    rows: list[LLMChannel] | None = None,
+    creds: dict[str, ResolvedCredential] | None = None,
+) -> None:
+    ext.llm_provider = _FakeCatalog(rows, creds)
 
-        get_llm_registry().register(_descriptor())
+
+def _row(
+    *,
+    provider_id: str = "valuz-channel",
+    compatible: list[str],
+    model_runtimes: tuple[str, ...] | None = None,
+) -> LLMChannel:
+    return LLMChannel(
+        id=provider_id,
+        name="Test System Channel",
+        provider_kind="system",
+        source="system",
+        deletable=False,
+        is_default=False,
+        credential_source="system_managed",
+        auth_type="oauth",
+        compatible_protocols=compatible,
+        group="system",
+        group_rank=20,
+        models=[LLMModel(id="m", runtimes=model_runtimes)],
+    )
+
+
+class TestResolveModelProviderViaLLMProvider:
+    async def test_cred_resolves(self) -> None:
+        _set(
+            creds={"valuz-channel": ResolvedCredential("https://cloud.test/v1", "abc", "anthropic")}
+        )
         mp = await resolve_model_provider(
             provider_id="valuz-channel",
             model_id="claude-sonnet-4-6",
@@ -83,34 +101,14 @@ class TestResolveModelProviderSystem:
         assert mp.api_key == "abc"
         assert mp.api_protocol == "anthropic"
 
-    async def test_disabled_descriptor_raises(self) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor(enabled=False, unavailable_reason="未登录"))
-        with pytest.raises(ProviderNotResolvable, match="未登录"):
-            await resolve_model_provider(
-                provider_id="valuz-channel",
-                model_id="claude-sonnet-4-6",
-                providers=_NoProviders(),  # type: ignore[arg-type]
-                secrets=_UnusedSecrets(),  # type: ignore[arg-type]
-            )
-
-    async def test_missing_bearer_raises(self) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor(headers={}))
-        with pytest.raises(ProviderNotResolvable, match="no bearer token"):
-            await resolve_model_provider(
-                provider_id="valuz-channel",
-                model_id="claude-sonnet-4-6",
-                providers=_NoProviders(),  # type: ignore[arg-type]
-                secrets=_UnusedSecrets(),  # type: ignore[arg-type]
-            )
-
     async def test_invalid_api_protocol_raises(self) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor(api_protocol="not-a-protocol"))
+        _set(
+            creds={
+                "valuz-channel": ResolvedCredential(
+                    "https://cloud.test/v1", "abc", "not-a-protocol"
+                )
+            }
+        )
         with pytest.raises(ProviderNotResolvable, match="unknown api_protocol"):
             await resolve_model_provider(
                 provider_id="valuz-channel",
@@ -120,9 +118,7 @@ class TestResolveModelProviderSystem:
             )
 
     async def test_empty_api_base_becomes_none(self) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor(api_base=""))
+        _set(creds={"valuz-channel": ResolvedCredential("", "abc", "anthropic")})
         mp = await resolve_model_provider(
             provider_id="valuz-channel",
             model_id="m",
@@ -132,7 +128,8 @@ class TestResolveModelProviderSystem:
         assert mp is not None
         assert mp.base_url is None
 
-    async def test_unknown_id_falls_through_to_user_table(self) -> None:
+    async def test_unknown_id_raises_not_found(self) -> None:
+        # NoopLLMProvider resolves nothing + user table empty → not found.
         with pytest.raises(ProviderNotResolvable, match="not found"):
             await resolve_model_provider(
                 provider_id="unknown",
@@ -142,11 +139,11 @@ class TestResolveModelProviderSystem:
             )
 
 
-class TestResolveRuntimeProviderSystem:
-    async def test_descriptor_runtime_wins_over_user_table(self) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor(runtime_provider="deepagents"))
+class TestResolveRuntimeProviderViaLLMProvider:
+    async def test_runtime_derived_from_compatible_when_undeclared(self) -> None:
+        # model.runtimes None → derive from compatible (openai-completion →
+        # deepagents).
+        _set(rows=[_row(compatible=["openai-completion"])])
         rt = await resolve_runtime_provider(
             provider_id="valuz-channel",
             model_id="m",
@@ -154,10 +151,19 @@ class TestResolveRuntimeProviderSystem:
         )
         assert rt == "deepagents"
 
-    async def test_request_runtime_still_overrides_descriptor(self) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
+    async def test_declared_model_runtimes_win(self) -> None:
+        # The codex gateway declares codex on its model; the response wire alone
+        # wouldn't derive it.
+        _set(rows=[_row(compatible=["openai-response"], model_runtimes=("codex",))])
+        rt = await resolve_runtime_provider(
+            provider_id="valuz-channel",
+            model_id="m",
+            providers=_NoProviders(),  # type: ignore[arg-type]
+        )
+        assert rt == "codex"
 
-        get_llm_registry().register(_descriptor(runtime_provider="claude_agent"))
+    async def test_request_runtime_still_overrides(self) -> None:
+        _set(rows=[_row(compatible=["anthropic"])])
         rt = await resolve_runtime_provider(
             provider_id="valuz-channel",
             model_id="m",
@@ -166,13 +172,10 @@ class TestResolveRuntimeProviderSystem:
         )
         assert rt == "codex"
 
-    async def test_descriptor_invalid_runtime_raises(self) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor(runtime_provider="weird"))
-        with pytest.raises(ProviderNotResolvable, match="unknown runtime"):
-            await resolve_runtime_provider(
-                provider_id="valuz-channel",
-                model_id="m",
-                providers=_NoProviders(),  # type: ignore[arg-type]
-            )
+    async def test_unknown_id_defaults_to_deepagents(self) -> None:
+        rt = await resolve_runtime_provider(
+            provider_id="unknown",
+            model_id="m",
+            providers=_NoProviders(),  # type: ignore[arg-type]
+        )
+        assert rt == "deepagents"

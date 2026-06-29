@@ -23,7 +23,7 @@ Task (valuz_task):
 
 TaskEvent (valuz_task_event):
   Append-only event log scoped to a task. Monotonic ``sequence`` per
-  (workspace_id, task_id). Types: kickoff | subtask_spawned |
+  (project_id, task_id). Types: kickoff | subtask_spawned |
   subtask_completed | subtask_failed | user_note | goal_revised |
   paused | resumed | stopped | task_completed | task_drafted |
   committed | abandoned | user_inject | user_inject_dropped.
@@ -45,15 +45,15 @@ from typing import Any
 from sqlalchemy import JSON, BigInteger, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from valuz_agent.infra.database import Base, OwnedMixin, PrimaryKeyMixin, TimestampMixin
+from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
 
 
-class TaskRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
+class TaskRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     """Durable task header — one row per task kickoff."""
 
     __tablename__ = "valuz_task"
 
-    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
     # Relative path within project.cwd: tasks/<id>-<slug>.md
     file_path: Mapped[str] = mapped_column(Text)
     title: Mapped[str] = mapped_column(String(256))
@@ -92,19 +92,41 @@ class TaskRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
     # path. See module docstring for interpretation.
     committed_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 
+    # ── Trigger provenance (who/what spawned this task) ──────────────────────
+    # Resolved once at kickoff/draft and immutable thereafter. Surfaced in the
+    # task list ("由 … 触发") and enables reverse "spawned tasks" queries via the
+    # indexed source ids. ``trigger_session_id`` (the originating session, for
+    # the chat link) keeps living on ``metadata.originating_session_id`` — it is
+    # load-bearing for the plan-writer gate — so it is not duplicated here.
+    #   user      — direct user action (default; no source)
+    #   chat      — a project conversation spawned it (source = originating session)
+    #   agent     — a task lead/member spawned it (source = trigger_task_id + agent)
+    #   automation— a scheduled/agent-run automation fired it (source = automation)
+    trigger_type: Mapped[str] = mapped_column(
+        String(32), default="user", server_default="user", nullable=False
+    )
+    # Parent task whose lead/member triggered this one (trigger_type=agent).
+    # Indexed so "what did task X spawn?" is a cheap lookup.
+    trigger_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # The agent slug that triggered it (trigger_type=agent), for the label.
+    trigger_agent_slug: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Automation that fired this task (trigger_type=automation). Indexed so
+    # "what did automation X spawn?" is a cheap lookup.
+    trigger_automation_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
 
-class TaskEventRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
+
+class TaskEventRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     """Append-only event log for one task — timeline backbone."""
 
     __tablename__ = "valuz_task_event"
 
     __table_args__ = (
-        UniqueConstraint("workspace_id", "task_id", "sequence", name="uq_task_event_ws_task_seq"),
+        UniqueConstraint("project_id", "task_id", "sequence", name="uq_task_event_ws_task_seq"),
     )
 
-    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
     task_id: Mapped[str] = mapped_column(String(36), index=True)
-    # Monotonic per (workspace_id, task_id); host assigns on append
+    # Monotonic per (project_id, task_id); host assigns on append
     sequence: Mapped[int] = mapped_column(Integer)
     # kickoff | subtask_spawned | subtask_completed | subtask_failed |
     # user_note | goal_revised | paused | resumed | stopped | task_completed
@@ -117,12 +139,12 @@ class TaskEventRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
-class TaskSessionRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
+class TaskSessionRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     """Index of kernel sessions that belong to a task (runs)."""
 
     __tablename__ = "valuz_task_session"
 
-    workspace_id: Mapped[str] = mapped_column(String(36), index=True)
+    project_id: Mapped[str] = mapped_column(String(36), index=True)
     # NULL for independent sessions (not yet used; reserved for §3 isolation)
     task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # References kernel sessions.id — business key, NO FK constraint
@@ -145,7 +167,7 @@ class TaskSessionRow(Base, PrimaryKeyMixin, TimestampMixin, OwnedMixin):
     # session_id of the lead run that dispatched this subtask
     dispatched_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # isolated | repo-worktree
-    workspace_mode: Mapped[str] = mapped_column(String(16), default="isolated")
+    project_mode: Mapped[str] = mapped_column(String(16), default="isolated")
     # Absolute path to this run's working directory
     run_dir: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Populated when session completes: {summary, artifacts, status}

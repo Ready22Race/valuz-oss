@@ -15,7 +15,7 @@ export const LogoShimmer = ({ size = "sm" }: { size?: "sm" | "md" }) => {
   return (
     <div className={cn("relative select-none", dim)}>
       <img
-        src="/logo.png"
+        src="./logo.png"
         alt=""
         aria-hidden="true"
         className="h-full w-full"
@@ -24,11 +24,11 @@ export const LogoShimmer = ({ size = "sm" }: { size?: "sm" | "md" }) => {
       <div
         className="pointer-events-none absolute inset-0 overflow-hidden"
         style={{
-          maskImage: "url(/logo.png)",
+          maskImage: "url(./logo.png)",
           maskSize: "contain",
           maskRepeat: "no-repeat",
           maskPosition: "center",
-          WebkitMaskImage: "url(/logo.png)",
+          WebkitMaskImage: "url(./logo.png)",
           WebkitMaskSize: "contain",
           WebkitMaskRepeat: "no-repeat",
           WebkitMaskPosition: "center",

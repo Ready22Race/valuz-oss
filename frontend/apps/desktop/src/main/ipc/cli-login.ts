@@ -42,6 +42,12 @@ export interface CliLoginDeps {
   stat: (path: string) => Promise<StatLike>;
   homedir: () => string;
   platform: () => string;
+  /**
+   * Resolve a CLI binary bundled inside the backend's PyInstaller bundle.
+   * Injected so tests can exercise the bundled-fallback path without the
+   * real filesystem; ``defaultDeps`` wires it to the module-level resolver.
+   */
+  resolveBundled?: (tool: CliTool) => string | null;
 }
 
 export const defaultDeps: CliLoginDeps = {
@@ -50,8 +56,24 @@ export const defaultDeps: CliLoginDeps = {
     return { stdout: String(stdout), stderr: String(stderr) };
   },
   spawnDetached: (file, args) => {
-    const child = spawn(file, args, { detached: true, stdio: "ignore" });
+    // On Windows, `detached: true` translates to DETACHED_PROCESS, which
+    // spawns console apps (cmd.exe) WITHOUT a console window — they run
+    // invisibly. We skip it there; the caller wraps Windows launches in
+    // `cmd /c start` so a new window appears and parent-detachment still
+    // works. On Linux we keep detached so the terminal outlives Electron.
+    const isWindows = platform() === "win32";
+    const child = spawn(file, args, {
+      detached: !isWindows,
+      stdio: "ignore",
+      windowsHide: false,
+    });
     child.unref();
+    // spawn errors (ENOENT, EPERM) fire asynchronously — without a listener
+    // they vanish and we'd silently report success. Log so a failed launch
+    // is at least visible in `valuz logs`.
+    child.on("error", (err) => {
+      console.error(`[cli-login] spawn failed for ${file}:`, err);
+    });
   },
   stat: async (path) => {
     const s = await stat(path);
@@ -59,6 +81,7 @@ export const defaultDeps: CliLoginDeps = {
   },
   homedir,
   platform,
+  resolveBundled: (tool) => resolveBundled(tool),
 };
 
 // Strict markers we require in each CLI's status output before declaring a
@@ -147,6 +170,10 @@ function resolveBundledCodex(): string | null {
   return resolveBundledBinary(["codex_cli_bin", "bin", binaryName]);
 }
 
+function resolveBundled(tool: CliTool): string | null {
+  return tool === "claude" ? resolveBundledClaude() : resolveBundledCodex();
+}
+
 // Strict markers we require in each CLI's status output before declaring a
 // successful login. The previous heuristics (keychain entry exists / file
 // non-empty) returned true for stale or partially provisioned credentials
@@ -180,89 +207,69 @@ const LINUX_TERMINALS = [
 // both streams so the strict-marker check works regardless.
 const allOutput = (r: ExecResult): string => `${r.stdout}\n${r.stderr}`;
 
-export const detectCliPath = async (
+/**
+ * Resolve which binary to actually invoke for a CLI tool.
+ *
+ * Order:
+ *   1. Global install (``which``/``where``) — if the user has it on PATH, use it.
+ *   2. Bundled binary (PyInstaller bundle / dev venv) — fallback when there is
+ *      no global install. We must NOT spawn a bare ``claude``/``codex`` command
+ *      when the user hasn't installed one globally: that goes through PATH,
+ *      hits some unrelated stub or just ENOENTs, and the real bundled binary
+ *      never gets a chance. Resolve the path first, then execute that path.
+ */
+const resolveCliBinary = async (
   tool: CliTool,
   deps: CliLoginDeps = defaultDeps,
 ): Promise<string | null> => {
+  const plat = deps.platform();
+  const whichCmd = plat === "win32" ? "where" : "which";
+  const toolName = plat === "win32" ? `${tool}.exe` : tool;
+
   try {
-    const { stdout } = await deps.execFile("which", [tool]);
-    const path = stdout.trim();
+    const { stdout } = await deps.execFile(whichCmd, [toolName]);
+    // `where` returns multiple matches, one per line
+    const path = stdout.trim().split("\n")[0].trim();
     if (path.length > 0) return path;
   } catch {
-    // which failed — fall through
+    // which/where failed — fall through to bundled
   }
 
-  // Fallback: use the bundled CLI from the backend's PyInstaller bundle / dev
-  // venv when no global install is found.
-  if (tool === "claude") {
-    return resolveBundledClaude();
-  }
-  if (tool === "codex") {
-    return resolveBundledCodex();
-  }
-
-  return null;
+  return deps.resolveBundled ? deps.resolveBundled(tool) : null;
 };
+
+export const detectCliPath = async (
+  tool: CliTool,
+  deps: CliLoginDeps = defaultDeps,
+): Promise<string | null> => resolveCliBinary(tool, deps);
 
 export const detectLoginState = async (
   tool: CliTool,
   deps: CliLoginDeps = defaultDeps,
 ): Promise<LoginState> => {
-  const plat = deps.platform();
+  // Resolve the exact binary to invoke — global if installed, bundled
+  // otherwise — so we never spawn a bare ``claude``/``codex`` that relies on
+  // PATH when the user hasn't installed one globally.
+  const binary = await resolveCliBinary(tool, deps);
+  if (!binary) return "logged_out";
 
-  if (plat !== "darwin" && plat !== "linux") {
-    return "unsupported";
-  }
-
-  // Authoritative path for both CLIs: shell out to the tool's own status
-  // command and require strict marker text in the output. The CLI is the
-  // only thing that knows whether the auth artefact on disk / in keychain
-  // is actually usable — file presence + file mode were too permissive
-  // (stale tokens, half-provisioned files, wrong account types all read
-  // as "logged_in" before).
   if (tool === "claude") {
     try {
-      const result = await deps.execFile("claude", ["auth", "status"]);
+      const result = await deps.execFile(binary, ["auth", "status"]);
       const out = allOutput(result);
       const allPresent = CLAUDE_STATUS_MARKERS.every((m) => out.includes(m));
       return allPresent ? "logged_in" : "logged_out";
     } catch {
-      // Global claude failed — try the bundled claude from the backend
-      const bundled = resolveBundledClaude();
-      if (bundled) {
-        try {
-          const result = await deps.execFile(bundled, ["auth", "status"]);
-          const out = allOutput(result);
-          const allPresent = CLAUDE_STATUS_MARKERS.every((m) =>
-            out.includes(m),
-          );
-          return allPresent ? "logged_in" : "logged_out";
-        } catch {
-          return "logged_out";
-        }
-      }
       return "logged_out";
     }
   }
 
   // tool === 'codex'
   try {
-    const result = await deps.execFile("codex", ["login", "status"]);
+    const result = await deps.execFile(binary, ["login", "status"]);
     const out = allOutput(result);
     return out.includes(CODEX_STATUS_MARKER) ? "logged_in" : "logged_out";
   } catch {
-    // Global codex failed — try the bundled codex from the backend venv,
-    // mirroring the claude branch above.
-    const bundled = resolveBundledCodex();
-    if (bundled) {
-      try {
-        const result = await deps.execFile(bundled, ["login", "status"]);
-        const out = allOutput(result);
-        return out.includes(CODEX_STATUS_MARKER) ? "logged_in" : "logged_out";
-      } catch {
-        return "logged_out";
-      }
-    }
     return "logged_out";
   }
 };
@@ -294,11 +301,37 @@ const findLinuxTerminal = async (
 // Each CLI surfaces its login flow through a different invocation:
 //   - claude uses an in-REPL slash command (``claude /login``)
 //   - codex uses a regular subcommand (``codex login``)
-// Treat them as data, not as ``${tool} /login`` formatting, so adding new
-// tools later doesn't have to keep matching the wrong shape.
-const LOGIN_COMMAND: Record<CliTool, string> = {
-  claude: "claude /login",
-  codex: "codex login",
+// Only the args live here — the binary path is resolved per-launch (global →
+// bundled) so the terminal never depends on PATH. Splicing the path in at
+// call time is what makes the bundled binary reachable on machines with no
+// global install.
+const LOGIN_ARGS: Record<CliTool, string[]> = {
+  claude: ["/login"],
+  codex: ["login"],
+};
+
+/**
+ * Build the login command using an absolute binary path. The terminal must
+ * not rely on PATH: a bare ``claude``/``codex`` goes through PATH and
+ * silently ENOENTs when the user hasn't installed one globally, leaving the
+ * bundled binary unused. Quote the path only when it contains spaces —
+ * unnecessary quotes can confuse cmd's quirky parser, and typical install
+ * paths (``/usr/local/bin/claude``, ``%LOCALAPPDATA%\Programs\Valuz\…``)
+ * have none.
+ */
+const buildLoginCommand = (
+  plat: string,
+  binary: string,
+  args: string[],
+): string => {
+  const argStr = args.join(" ");
+  const needsQuote = /\s/.test(binary);
+  if (plat === "win32") {
+    const bin = needsQuote ? `"${binary}"` : binary;
+    return `${bin} ${argStr}`;
+  }
+  const bin = needsQuote ? `'${binary}'` : binary;
+  return `${bin} ${argStr}`;
 };
 
 export const launchTerminalWithCommand = async (
@@ -306,7 +339,18 @@ export const launchTerminalWithCommand = async (
   deps: CliLoginDeps = defaultDeps,
 ): Promise<LaunchResult> => {
   const plat = deps.platform();
-  const command = LOGIN_COMMAND[tool];
+
+  // Resolve the binary the SAME way status detection does — global first,
+  // bundled otherwise. Without this the terminal receives a bare
+  // ``claude``/``codex`` that goes through PATH; on machines with no global
+  // install that silently ENOENTs and the bundled binary never runs, even
+  // though ``getCliStatus`` just reported ``installed: true`` from the same
+  // bundled path.
+  const binary = await resolveCliBinary(tool, deps);
+  if (!binary) {
+    return { launched: false, error: "binary_not_found" };
+  }
+  const command = buildLoginCommand(plat, binary, LOGIN_ARGS[tool]);
 
   if (plat === "darwin") {
     try {
@@ -337,6 +381,36 @@ export const launchTerminalWithCommand = async (
       return {
         launched: false,
         error: err instanceof Error ? err.message : "spawn failed",
+      };
+    }
+  }
+
+  if (plat === "win32") {
+    // Wrap launches in `cmd /c start "" ...`. Two reasons:
+    //   1. `start` opens a NEW console window — without it, a console app
+    //      spawned from Electron (which has no console of its own) either
+    //      attaches nowhere or, with `detached: true`, is created with
+    //      DETACHED_PROCESS = no window at all (the previous bug: the
+    //      terminal never appeared).
+    //   2. `start` goes through ShellExecute, which resolves Microsoft Store
+    //      App Execution Aliases (wt.exe is one — a zero-byte reparse point
+    //      under %LOCALAPPDATA%\Microsoft\WindowsApps). Plain Node spawn
+    //      (CreateProcessW) can't launch those, so wt silently failed and,
+    //      because spawn doesn't throw, the cmd.exe fallback never ran.
+    const hasWt = await deps
+      .execFile("where", ["wt.exe"])
+      .then(() => true)
+      .catch(() => false);
+    const launchArgs = hasWt
+      ? ["/c", "start", '""', "wt.exe", "new-tab", "--", "cmd.exe", "/K", command]
+      : ["/c", "start", '""', "cmd.exe", "/K", command];
+    try {
+      deps.spawnDetached("cmd.exe", launchArgs);
+      return { launched: true };
+    } catch (err) {
+      return {
+        launched: false,
+        error: err instanceof Error ? err.message : "Failed to launch terminal",
       };
     }
   }

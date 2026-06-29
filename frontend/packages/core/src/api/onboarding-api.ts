@@ -15,11 +15,12 @@ export const setOnboardingApiBase = (url: string): void => {
   _apiBase = url;
 };
 
-/** The three preset teams that map to real seeded agent rosters. */
-export type OnboardingTeamId = "general" | "investment" | "product";
+/** The three recommended teams — each maps to a built-in Agent Pack imported
+ *  and deployed into the example project. */
+export type OnboardingTeamId = "content" | "investment" | "product";
 
 export interface ExampleProjectResponse {
-  workspace_id: string;
+  project_id: string;
   project_name: string;
 }
 

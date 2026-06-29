@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, BookOpen, Copy, Plug, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, BookOpen, Copy, Plug, Plus, Trash2, Upload } from "lucide-react";
 import {
   Button,
   DeleteConfirmDialog,
@@ -19,6 +19,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  StatusPill,
   Tabs,
   TabsContent,
   TabsList,
@@ -30,25 +31,67 @@ import {
   connectorsApi,
   skillsApi,
   useResourceGuard,
-  workspacesApi,
+  projectsApi,
   useTranslation,
   type Agent,
   type AgentDeployment,
+  type CatalogEntry,
   type ConnectorItem,
   type EffortLevel,
   type SkillView,
   type UpdateAgentPayload,
-  type WorkspaceListItem,
+  type ProjectListItem,
 } from "@valuz/core";
 import { modelLabel } from "@valuz/shared";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { CatalogPickerDialog } from "./CatalogPickerDialog";
+import { ExportPackDialog } from "./ExportPackDialog";
 import {
   AVATAR_PRESETS,
   AgentIconGlyph,
   getAvatarIcon,
   pickAgentIcon,
 } from "./agent-icons";
+
+// Connector status → i18n key for the colored status pill — mirrors the
+// Connectors page so the agent's connector list reads the same. The two
+// "configured but not connected" states (pending_auth / unknown) read as
+// "未连接"; a bound-but-not-installed connector is treated as pending_auth too.
+const STATUS_LABEL_KEY: Record<string, string> = {
+  connected: "connector.statusConnected",
+  connecting: "connector.statusConnecting",
+  error: "connector.statusError",
+  pending_auth: "connector.statusNotConnected",
+  unknown: "connector.statusNotConnected",
+};
+
+interface ConnectorMeta {
+  display_name: string;
+  description: string | null;
+}
+
+/** Flatten the connector directory (groups + standalone) into slug → meta, so
+ *  a mounted connector_type resolves to its name + description even when the
+ *  user hasn't configured it (e.g. template connectors like ``wind-mcp``). */
+function buildConnectorDir(items: CatalogEntry[]): Map<string, ConnectorMeta> {
+  const map = new Map<string, ConnectorMeta>();
+  for (const item of items) {
+    if (item.kind === "group") {
+      for (const c of item.connectors) {
+        map.set(c.slug, {
+          display_name: c.display_name,
+          description: c.description,
+        });
+      }
+    } else {
+      map.set(item.slug, {
+        display_name: item.display_name,
+        description: item.description,
+      });
+    }
+  }
+  return map;
+}
 
 export interface AgentDetailViewProps {
   /** Library agent slug to render. */
@@ -72,7 +115,7 @@ export const AgentDetailView = ({
   const { t } = useTranslation();
 
   const [agent, setAgent] = useState<Agent | null>(null);
-  const [projects, setProjects] = useState<WorkspaceListItem[]>([]);
+  const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [deployments, setDeployments] = useState<AgentDeployment[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -80,6 +123,7 @@ export const AgentDetailView = ({
   const [submitting, setSubmitting] = useState(false);
 
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [copyConfirmOpen, setCopyConfirmOpen] = useState(false);
   const [copyBusy, setCopyBusy] = useState(false);
   // Deferred save awaiting multi-project confirmation (see saveFields).
@@ -112,6 +156,18 @@ export const AgentDetailView = ({
   // Skill + connector catalogs for the 技能 / 装备 browse sub-tabs.
   const [skillCatalog, setSkillCatalog] = useState<SkillView[]>([]);
   const [connectorCatalog, setConnectorCatalog] = useState<ConnectorItem[]>([]);
+  // Full connector list (every status), so the connectors tab can show each
+  // bound connector's status pill — not just the connected ones.
+  const [allConnectors, setAllConnectors] = useState<ConnectorItem[]>([]);
+  // True once the connector list has loaded, so the connectors-tab dot doesn't
+  // flash a false positive before we know which connectors are connected.
+  const [connectorsLoaded, setConnectorsLoaded] = useState(false);
+  // Full connector directory (slug → name/description), so a mounted
+  // connector_type the user hasn't configured (e.g. a template's wind-mcp)
+  // still resolves to a readable name + description, not a bare slug.
+  const [connectorDir, setConnectorDir] = useState<Map<string, ConnectorMeta>>(
+    new Map(),
+  );
 
   const { canDelete } = useResourceGuard(agent ?? {});
 
@@ -119,11 +175,11 @@ export const AgentDetailView = ({
     try {
       const [tpl, wsRes, depRes] = await Promise.all([
         agentsApi.getAgent(slug),
-        workspacesApi.list(),
+        projectsApi.list(),
         agentsApi.listDeployments(slug),
       ]);
       setAgent(tpl);
-      setProjects(wsRes.workspaces.filter((w) => w.kind === "project"));
+      setProjects(wsRes.projects.filter((w) => w.kind === "project"));
       setDeployments(depRes.deployments);
     } catch {
       toast.error(t("common.error"));
@@ -189,19 +245,25 @@ export const AgentDetailView = ({
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [skillRes, connRes] = await Promise.all([
+      const [skillRes, connRes, dirRes] = await Promise.all([
         skillsApi
           .list()
-          .catch(() => ({ workspace_id: "", skills: [] as SkillView[] })),
+          .catch(() => ({ project_id: "", skills: [] as SkillView[] })),
         connectorsApi
           .list()
           .catch(() => ({ connectors: [] as ConnectorItem[] })),
+        connectorsApi
+          .listDirectory()
+          .catch(() => ({ items: [] as CatalogEntry[] })),
       ]);
       if (cancelled) return;
       setSkillCatalog(skillRes.skills);
       setConnectorCatalog(
         connRes.connectors.filter((c) => c.enabled && c.status === "connected"),
       );
+      setAllConnectors(connRes.connectors);
+      setConnectorDir(buildConnectorDir(dirRes.items));
+      setConnectorsLoaded(true);
     })();
     return () => {
       cancelled = true;
@@ -225,7 +287,7 @@ export const AgentDetailView = ({
   };
 
   // Member slug is backend-derived from the source agent's name, unique
-  // within the target workspace (VALUZ-AGENT-SLUG) — no client computation.
+  // within the target project (VALUZ-AGENT-SLUG) — no client computation.
 
   const openInstantiate = useCallback(() => {
     setTargetProject(projects[0]?.id ?? "");
@@ -282,7 +344,10 @@ export const AgentDetailView = ({
   const confirmDelete = async () => {
     if (!agent) return;
     try {
-      await agentsApi.deleteAgent(agent.slug);
+      // Confirmed delete cascades: 解除 every 派驻 first so the user doesn't have
+      // to undeploy from each project by hand. The dialog already warns when the
+      // agent is deployed (see deployments count below).
+      await agentsApi.deleteAgent(agent.slug, { cascade: true });
       // Close the confirm dialog before the host swaps in another agent — in
       // the master-detail panel (no onBack) the component is reused, so a
       // lingering open=true would re-surface the dialog on the next agent.
@@ -374,6 +439,16 @@ export const AgentDetailView = ({
       </div>
     );
   }
+
+  // Red dot on the 连接器 tab when a bound connector isn't connected — the same
+  // "needs attention" idea as the Connectors nav dot, scoped to this agent's
+  // own connector_types. ``connectorCatalog`` holds the connected connectors,
+  // so any bound slug missing from it (pending_auth / error / not installed) is
+  // "没有链接好的".
+  const connectedSlugs = new Set(connectorCatalog.map((c) => c.slug));
+  const hasUnconnectedConnector =
+    connectorsLoaded &&
+    agent.connector_types.some((slug) => !connectedSlugs.has(slug));
 
   return (
     <div className="mx-auto max-w-4xl pb-12">
@@ -522,6 +597,15 @@ export const AgentDetailView = ({
           <div className="flex shrink-0 items-center gap-0.5">
             <button
               type="button"
+              onClick={() => setExportOpen(true)}
+              title={t("agent.pack.export" as Parameters<typeof t>[0])}
+              aria-label={t("agent.pack.export" as Parameters<typeof t>[0])}
+              className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-body"
+            >
+              <Upload className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
               onClick={() => setCopyConfirmOpen(true)}
               title={t("agent.copyAgent" as Parameters<typeof t>[0])}
               aria-label={t("agent.copyAgent" as Parameters<typeof t>[0])}
@@ -535,7 +619,7 @@ export const AgentDetailView = ({
                 onClick={() => setDeleteOpen(true)}
                 title={t("common.delete")}
                 aria-label={t("common.delete")}
-                className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-error-light hover:text-error-text"
+                className="flex h-7 w-7 cursor-default items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-[#f54b4b]/10 hover:text-[#f54b4b]"
               >
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
@@ -618,11 +702,11 @@ export const AgentDetailView = ({
             <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
               {deployments.map((d, i) => {
                 const name =
-                  projects.find((p) => p.id === d.workspace_id)?.name ??
-                  d.workspace_id;
+                  projects.find((p) => p.id === d.project_id)?.name ??
+                  d.project_id;
                 return (
                   <span
-                    key={`${d.workspace_id}:${d.agent_slug}`}
+                    key={`${d.project_id}:${d.agent_slug}`}
                     className="flex items-center gap-1.5"
                   >
                     {i > 0 && <span className="text-ink-muted">·</span>}
@@ -630,7 +714,7 @@ export const AgentDetailView = ({
                       type="button"
                       onClick={() =>
                         navigate(
-                          `/projects/${encodeURIComponent(d.workspace_id)}`,
+                          `/projects/${encodeURIComponent(d.project_id)}`,
                         )
                       }
                       className="text-ink-body transition-colors hover:text-ink-heading"
@@ -651,10 +735,10 @@ export const AgentDetailView = ({
           black active underline), same as the Activity page. */}
       <div className="px-5 py-4">
         <Tabs defaultValue="model">
-          <div>
+          <div className="border-b border-surface-border">
             <TabsList
               variant="line"
-              className="h-auto justify-start"
+              className="h-9 justify-start gap-4 border-0 p-0"
             >
               <TabsTrigger value="model">{t("agent.tabModel")}</TabsTrigger>
               <TabsTrigger value="instructions">
@@ -662,7 +746,12 @@ export const AgentDetailView = ({
               </TabsTrigger>
               <TabsTrigger value="skills">{t("agent.tabSkills")}</TabsTrigger>
               <TabsTrigger value="connectors">
-                {t("agent.tabConnectors")}
+                <span className="relative inline-block">
+                  {t("agent.tabConnectors")}
+                  {hasUnconnectedConnector ? (
+                    <span className="absolute -right-2 -top-0.5 h-1.5 w-1.5 rounded-full bg-[#f54b4b]" />
+                  ) : null}
+                </span>
               </TabsTrigger>
             </TabsList>
           </div>
@@ -709,35 +798,66 @@ export const AgentDetailView = ({
             </div>
             <div className="mt-3 flex flex-col gap-2">
               {agent.skills.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
+                <div className="rounded-[14px] border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
                   {t("agent.noSkills")}
                 </div>
               ) : (
                 agent.skills.map((s) => {
-                  const meta = skillCatalog.find((x) => x.path === s);
+                  // Mounted skills are stored as a path (picker) or a slug
+                  // (templates) — match either, plus the catalog id, so the
+                  // name + description always resolve.
+                  const meta = skillCatalog.find(
+                    (x) => x.path === s || x.slug === s || x.id === s,
+                  );
+                  const name = meta?.name ?? skillName(s);
+                  const id = meta?.slug ?? skillName(s);
+                  const body = (
+                    <>
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate text-sm font-medium text-ink-heading">
+                          {name}
+                        </span>
+                      </div>
+                      {id !== name && (
+                        <div className="mt-0.5 truncate font-mono text-[11px] text-ink-meta">
+                          {id}
+                        </div>
+                      )}
+                      {meta?.description && (
+                        <div className="mt-0.5 line-clamp-2 text-xs text-ink-meta">
+                          {meta.description}
+                        </div>
+                      )}
+                    </>
+                  );
                   return (
                     <div
                       key={s}
-                      className="flex items-start gap-3 rounded-2xl border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
+                      className="flex items-start gap-3 rounded-[14px] border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
                     >
                       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
                         <BookOpen className="h-4 w-4" />
                       </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium text-ink-heading">
-                          {meta?.name ?? skillName(s)}
-                        </div>
-                        {meta?.description && (
-                          <div className="mt-0.5 line-clamp-1 text-xs text-ink-meta">
-                            {meta.description}
-                          </div>
-                        )}
-                      </div>
+                      {meta ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            // Open the skill in the 技能库 (master-detail panel),
+                            // not the standalone detail page.
+                            navigate(`/skills?skill=${encodeURIComponent(meta.id)}`)
+                          }
+                          className="min-w-0 flex-1 cursor-pointer text-left"
+                        >
+                          {body}
+                        </button>
+                      ) : (
+                        <div className="min-w-0 flex-1">{body}</div>
+                      )}
                       <button
                         type="button"
                         onClick={() => toggleSkill(s)}
                         aria-label={t("common.delete")}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-error-light hover:text-error-text"
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-surface-soft hover:text-[#f54b4b]"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -760,44 +880,82 @@ export const AgentDetailView = ({
             </div>
             <div className="mt-3 flex flex-col gap-2">
               {agent.connector_types.length === 0 ? (
-                <div className="rounded-2xl border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
+                <div className="rounded-[14px] border border-dashed border-surface-border bg-card px-4 py-6 text-center text-xs text-ink-meta">
                   {t("agent.noConnectors")}
                 </div>
               ) : (
                 agent.connector_types.map((c) => {
-                  const meta = connectorCatalog.find((x) => x.slug === c);
+                  // An installed connector resolves its name + status from the
+                  // full list; an uninstalled bound slug (a template's
+                  // unconfigured wind-mcp, etc.) still resolves its name from the
+                  // directory and counts as "not connected".
+                  const installed = allConnectors.find((x) => x.slug === c);
+                  const meta: ConnectorMeta | undefined = installed
+                    ? {
+                        display_name: installed.display_name,
+                        description: installed.description,
+                      }
+                    : connectorDir.get(c);
+                  const known = Boolean(meta);
+                  const status = installed?.status ?? "pending_auth";
+                  const statusKey = STATUS_LABEL_KEY[status];
+                  const body = (
+                    <>
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate text-sm font-medium text-ink-heading">
+                          {meta?.display_name ?? c}
+                        </span>
+                      </div>
+                      {(meta?.display_name ?? c) !== c && (
+                        <div className="mt-0.5 truncate font-mono text-[11px] text-ink-meta">
+                          {c}
+                        </div>
+                      )}
+                      {meta?.description && (
+                        <div className="mt-0.5 line-clamp-2 text-xs text-ink-meta">
+                          {meta.description}
+                        </div>
+                      )}
+                    </>
+                  );
                   return (
                     <div
                       key={c}
-                      className="flex items-start gap-3 rounded-2xl border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
+                      className="flex items-center gap-3 rounded-[14px] border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
                     >
                       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
                         <Plug className="h-4 w-4" />
                       </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate text-sm font-medium text-ink-heading">
-                            {meta?.display_name ?? c}
-                          </span>
-                          <span
-                            aria-hidden
-                            className="h-1.5 w-1.5 rounded-full bg-success"
+                      {known ? (
+                        <button
+                          type="button"
+                          onClick={() => navigate("/connectors")}
+                          className="min-w-0 flex-1 cursor-pointer text-left"
+                        >
+                          {body}
+                        </button>
+                      ) : (
+                        <div className="min-w-0 flex-1">{body}</div>
+                      )}
+                      {/* Pill + delete grouped tightly (gap-2.5) so they read
+                          together, matching the Connectors page list rows. */}
+                      <div className="flex shrink-0 items-center gap-2.5">
+                        {statusKey ? (
+                          <StatusPill
+                            status={status}
+                            label={t(statusKey as Parameters<typeof t>[0])}
+                            className="shrink-0 px-1.5 py-0 text-[10px] leading-4"
                           />
-                        </div>
-                        {meta?.description && (
-                          <div className="mt-0.5 line-clamp-1 text-xs text-ink-meta">
-                            {meta.description}
-                          </div>
-                        )}
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => toggleConnector(c)}
+                          aria-label={t("common.delete")}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-muted transition-colors hover:bg-surface-soft hover:text-[#f54b4b]"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => toggleConnector(c)}
-                        aria-label={t("common.delete")}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition-colors hover:bg-error-light hover:text-error-text"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
                     </div>
                   );
                 })
@@ -882,7 +1040,7 @@ export const AgentDetailView = ({
           <div className="flex flex-col gap-3">
             <DialogField label={t("agent.selectProject")} required>
               <Select value={targetProject} onValueChange={setTargetProject}>
-                <SelectTrigger className="w-full">
+                <SelectTrigger className="min-w-24">
                   <SelectValue
                     placeholder={t("agent.selectProjectPlaceholder")}
                   />
@@ -897,7 +1055,7 @@ export const AgentDetailView = ({
               </Select>
             </DialogField>
             {/* Member slug is derived on the backend from the source
-                agent's name, unique within the target workspace
+                agent's name, unique within the target project
                 (VALUZ-AGENT-SLUG). Users don't see or edit it. */}
           </div>
 
@@ -924,6 +1082,13 @@ export const AgentDetailView = ({
           open={deleteOpen}
           onOpenChange={setDeleteOpen}
           title={t("agent.confirmDeleteAgent" as Parameters<typeof t>[0])}
+          description={
+            deployments.length > 0
+              ? t("agent.deleteDeployedWarning" as Parameters<typeof t>[0], {
+                  count: deployments.length,
+                })
+              : undefined
+          }
           confirmLabel={t("common.delete")}
           onConfirm={confirmDelete}
         />
@@ -1013,6 +1178,17 @@ export const AgentDetailView = ({
           void doSave(tab, fields);
         }}
       />
+
+      {/* Export this agent — same naming dialog as the multi-select export, so
+          single and group exports stay consistent (a "group of one"). */}
+      {agent && (
+        <ExportPackDialog
+          open={exportOpen}
+          onOpenChange={setExportOpen}
+          agentSlugs={[agent.slug]}
+          defaultName={agent.name}
+        />
+      )}
     </div>
   );
 };

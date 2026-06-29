@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Valuz · 场景团队模板库 — 高保真原型</title>
+<style>
+  /* ── Valuz 真实 design tokens(抽自 packages/ui/src/styles/workspace.css)── */
+  :root{
+    --bg:#f8f9fb; --surface:#ffffff; --surface-soft:#f7f8fa; --surface-muted:#f3f4f6;
+    --border:#e6e7e9; --border-hover:#dbdbdb;
+    --ink-heading:#131313; --ink-body:#6e7481; --ink-meta:#6e7481; --ink-muted:#b6b7bc;
+    --brand:#6d5cff; --brand-hover:#5b4be0; --brand-light:#ede9ff; --brand-700:#3b27b0;
+    --success:#16a34a; --success-light:#dcfce7; --success-text:#166534;
+    --shadow-card:0 1px 2px rgba(19,19,19,.04);
+    --shadow-pop:0 12px 40px -8px rgba(19,19,19,.18),0 0 0 1px rgba(19,19,19,.04);
+    --font:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:var(--font);background:#eceef2;color:var(--ink-heading);
+    -webkit-font-smoothing:antialiased;display:flex;align-items:center;justify-content:center;
+    min-height:100vh;padding:32px;line-height:1.5;
+  }
+
+  /* ── macOS 窗口框 ── */
+  .win{
+    width:1200px;height:760px;background:var(--surface);border-radius:14px;overflow:hidden;
+    box-shadow:0 30px 80px -20px rgba(19,19,19,.4),0 0 0 1px rgba(19,19,19,.06);
+    display:flex;flex-direction:column;position:relative;
+  }
+  .titlebar{height:38px;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--border);background:var(--surface)}
+  .traffic{width:12px;height:12px;border-radius:50%}
+  .traffic.r{background:#ff5f57}.traffic.y{background:#febc2e}.traffic.g{background:#28c840}
+  .titlebar .t{margin-left:8px;font-size:12px;color:var(--ink-muted)}
+
+  .body{flex:1;display:flex;min-height:0}
+
+  /* ── app 级窄导航 ── */
+  .nav{width:56px;flex:none;background:var(--surface-soft);border-right:1px solid var(--border);
+    display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:4px}
+  .nav .item{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+    font-size:17px;color:var(--ink-meta);cursor:default}
+  .nav .item.active{background:var(--surface);color:var(--brand);box-shadow:var(--shadow-card)}
+  .nav .sp{flex:1}
+
+  /* ── 智能体库:列表区 ── */
+  .listcol{width:345px;flex:none;border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+  .listhdr{height:48px;flex:none;display:flex;align-items:center;gap:8px;padding:0 16px}
+  .listhdr .title{font-size:16px;font-weight:600;color:var(--ink-heading);white-space:nowrap}
+  .listhdr .spacer{flex:1}
+  .btn-ghost{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:8px;
+    font-size:12px;color:var(--ink-meta);background:transparent;border:none;cursor:pointer;transition:.15s}
+  .btn-ghost:hover{background:var(--surface-soft);color:var(--ink-heading)}
+  .icon-btn{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+    color:var(--ink-meta);background:transparent;border:none;cursor:pointer;transition:.15s;font-size:16px}
+  .icon-btn:hover{background:var(--surface-soft);color:var(--ink-heading)}
+  .listbody{flex:1;overflow-y:auto;padding:8px 12px 16px}
+  .grouplabel{font-size:11px;color:var(--ink-muted);font-weight:500;padding:10px 8px 4px}
+  .row{display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:9px;cursor:default;transition:.12s;user-select:none}
+  .row:hover{background:color-mix(in srgb,var(--surface-soft) 60%,transparent)}
+  .row.sel{background:var(--surface-soft)}
+  .av{width:28px;height:28px;flex:none;border-radius:9px;background:var(--surface-soft);
+    display:flex;align-items:center;justify-content:center;font-size:15px}
+  .row .meta{min-width:0;flex:1}
+  .row .nm{font-size:14px;color:var(--ink-heading);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .ds{font-size:12px;color:var(--ink-meta);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+  .row.fresh{animation:rowIn .35s ease both}
+  @keyframes rowIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+
+  /* ── 详情区(简化,衬托用)── */
+  .detail{flex:1;min-width:0;display:flex;flex-direction:column;overflow-y:auto}
+  .dhead{padding:20px 24px 16px;border-bottom:1px solid var(--border)}
+  .dtop{display:flex;align-items:center;gap:12px}
+  .dav{width:40px;height:40px;border-radius:11px;background:var(--surface-soft);display:flex;align-items:center;justify-content:center;font-size:20px}
+  .dname{font-size:17px;font-weight:600}
+  .dsub{font-size:12px;color:var(--ink-body);margin-top:2px}
+  .dtabs{display:flex;gap:18px;padding:14px 24px 0;border-bottom:1px solid var(--border)}
+  .dtab{font-size:13px;color:var(--ink-meta);padding-bottom:10px;border-bottom:2px solid transparent;cursor:default}
+  .dtab.on{color:var(--ink-heading);border-color:var(--ink-heading);font-weight:500}
+  .dbody{padding:20px 24px;font-size:13px;color:var(--ink-body);line-height:1.7}
+  .dbody .lbl{font-size:11px;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.04em;margin:18px 0 6px}
+  .chip{display:inline-block;font-size:12px;padding:3px 9px;border-radius:7px;background:var(--surface-soft);color:var(--ink-body);margin:0 6px 6px 0;border:1px solid var(--border)}
+
+  /* ── 模板面板(Dialog)── */
+  .overlay{position:absolute;inset:0;background:rgba(19,19,19,.32);backdrop-filter:blur(2px);
+    display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:.18s;z-index:40}
+  .overlay.show{opacity:1;pointer-events:auto}
+  .dialog{width:640px;max-height:680px;background:var(--surface);border-radius:16px;box-shadow:var(--shadow-pop);
+    display:flex;flex-direction:column;transform:translateY(8px) scale(.98);transition:.2s;overflow:hidden}
+  .overlay.show .dialog{transform:none}
+  .dlghdr{padding:22px 24px 16px;border-bottom:1px solid var(--border);position:relative}
+  .dlgtitle{font-size:17px;font-weight:600}
+  .dlgsub{font-size:13px;color:var(--ink-meta);margin-top:4px}
+  .dlgclose{position:absolute;top:18px;right:18px;width:28px;height:28px;border-radius:8px;border:none;background:transparent;
+    color:var(--ink-meta);font-size:17px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .dlgclose:hover{background:var(--surface-soft);color:var(--ink-heading)}
+  .dlgbody{overflow-y:auto;padding:8px 24px 24px}
+  .scenelbl{font-size:12px;font-weight:600;color:var(--ink-body);padding:18px 2px 10px}
+  .tplcard{border:1px solid var(--border);border-radius:14px;padding:16px;display:flex;align-items:center;gap:14px;
+    background:var(--surface);transition:.15s;margin-bottom:10px}
+  .tplcard:hover{border-color:var(--border-hover)}
+  .tplicon{width:46px;height:46px;flex:none;border-radius:12px;background:var(--surface-soft);
+    display:flex;align-items:center;justify-content:center;font-size:24px}
+  .tplmeta{flex:1;min-width:0}
+  .tplname{font-size:15px;font-weight:600;color:var(--ink-heading)}
+  .tpltag{font-size:12.5px;color:var(--ink-body);margin-top:2px;line-height:1.45}
+  .tplmembers{display:flex;align-items:center;gap:8px;margin-top:9px}
+  .stack{display:flex}
+  .stack .m{width:22px;height:22px;border-radius:50%;background:var(--surface-soft);border:1.5px solid var(--surface);
+    display:flex;align-items:center;justify-content:center;font-size:11px;margin-left:-6px}
+  .stack .m:first-child{margin-left:0}
+  .mcount{font-size:11px;color:var(--ink-muted)}
+  .tplaction{flex:none}
+  .btn-primary{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;border-radius:9px;
+    font-size:13px;font-weight:500;color:#fff;background:var(--brand);border:none;cursor:pointer;transition:.15s;white-space:nowrap}
+  .btn-primary:hover{background:var(--brand-hover)}
+  .btn-added{display:inline-flex;align-items:center;gap:6px;height:34px;padding:0 14px;border-radius:9px;
+    font-size:13px;font-weight:500;color:var(--success-text);background:var(--success-light);border:none;cursor:default;white-space:nowrap}
+  .btn-primary[disabled]{opacity:.65;cursor:default;background:var(--brand)}
+  .spin{width:14px;height:14px;border:2px solid rgba(255,255,255,.4);border-top-color:#fff;border-radius:50%;animation:sp .6s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+
+  /* ── toast ── */
+  .toast{position:absolute;left:50%;bottom:26px;transform:translate(-50%,12px);background:var(--surface);
+    border:1px solid var(--border);box-shadow:var(--shadow-pop);border-radius:11px;padding:11px 16px;
+    display:flex;align-items:center;gap:9px;font-size:13px;color:var(--ink-heading);
+    opacity:0;pointer-events:none;transition:.22s;z-index:60}
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+  .toast .dot{width:7px;height:7px;border-radius:50%;background:var(--success)}
+
+  .anno{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);font-size:12px;color:#9aa0ab}
+</style>
+</head>
+<body>
+  <div class="win">
+    <div class="titlebar">
+      <span class="traffic r"></span><span class="traffic y"></span><span class="traffic g"></span>
+      <span class="t">Valuz</span>
+    </div>
+    <div class="body">
+      <!-- app 级导航 -->
+      <div class="nav">
+        <div class="item">💬</div>
+        <div class="item">📁</div>
+        <div class="item active">🤖</div>
+        <div class="item">📚</div>
+        <div class="sp"></div>
+        <div class="item">⚙️</div>
+      </div>
+
+      <!-- 智能体库:列表 -->
+      <div class="listcol">
+        <div class="listhdr">
+          <span class="title">智能体</span>
+          <span class="spacer"></span>
+          <button class="btn-ghost" onclick="openTpl()">▦ 浏览模板</button>
+          <button class="icon-btn" title="新建">＋</button>
+        </div>
+        <div class="listbody" id="listbody"></div>
+      </div>
+
+      <!-- 详情(衬托) -->
+      <div class="detail">
+        <div class="dhead">
+          <div class="dtop">
+            <div class="dav">🤖</div>
+            <div>
+              <div class="dname">Valuz 小助手</div>
+              <div class="dsub">自定义 · claude-sonnet-4-6 · high</div>
+            </div>
+          </div>
+        </div>
+        <div class="dtabs">
+          <div class="dtab on">模型</div><div class="dtab">指令</div><div class="dtab">技能</div><div class="dtab">装备</div>
+        </div>
+        <div class="dbody">
+          Valuz 使用助手。教你怎么用 Valuz、帮你理清任务怎么建、Agent 怎么配，随手问。
+          <div class="lbl">技能</div>
+          <span class="chip">valuz-handbook</span>
+          <div class="lbl">派驻</div>
+          尚未派驻到任何项目
+        </div>
+      </div>
+    </div>
+
+    <!-- 模板面板 -->
+    <div class="overlay" id="overlay" onclick="if(event.target===this)closeTpl()">
+      <div class="dialog">
+        <div class="dlghdr">
+          <div class="dlgtitle">从模板添加</div>
+          <div class="dlgsub">选一套配好的角色，一键添加进你的库；派进同一个项目即组成团队。</div>
+          <button class="dlgclose" onclick="closeTpl()">✕</button>
+        </div>
+        <div class="dlgbody" id="dlgbody"></div>
+      </div>
+    </div>
+
+    <!-- toast -->
+    <div class="toast" id="toast"><span class="dot"></span><span id="toastmsg"></span></div>
+  </div>
+  <div class="anno">高保真原型 · 点「浏览模板」→ 选模板「添加到我的库」体验完整交互</div>
+
+<script>
+  // ── 数据 ──
+  const templates = [
+    { id:"general", scene:"通用", icon:"🧩", name:"通用 Team", tag:"研究 → 写作 → 评审，通用知识工作的兜底班底",
+      roles:[{s:"researcher",a:"🔎",n:"研究员",d:"抓取信息、做全景梳理"},{s:"writer",a:"✍️",n:"撰写者",d:"把研究结论写成成稿"},{s:"reviewer",a:"🔍",n:"审稿员",d:"定稿前的最后一道关"},{s:"archivist",a:"🗂️",n:"整理员",d:"归档、建索引、留痕"}] },
+    { id:"investment", scene:"投研 / 金融", icon:"💎", name:"投研 Team", tag:"行业 + 估值 + 跟踪 + 合规，投资研究深度班底",
+      roles:[{s:"analyst",a:"🧭",n:"行业分析师",d:"统筹 · 行业地位 · 收尾"},{s:"modeler",a:"📊",n:"财务建模师",d:"DCF + 可比估值"},{s:"tracker",a:"📈",n:"季度跟踪员",d:"三情景预测 · 多标的并行"},{s:"compliance",a:"📋",n:"合规审查员",d:"本地运行 · 数据不出门"}] },
+    { id:"product", scene:"产品研发", icon:"🛠️", name:"产研 Team", tag:"需求 → 设计 → 开发 → 测试，产品研发协作班底",
+      roles:[{s:"pm",a:"🧠",n:"产品经理",d:"拆需求、定方案、排优先级"},{s:"designer",a:"🎨",n:"设计师",d:"UI / 交互设计、出稿"},{s:"engineer",a:"💻",n:"前后端开发",d:"实现功能、写代码"},{s:"qa",a:"🧪",n:"QA",d:"用例覆盖、回归验证"}] },
+    { id:"video", scene:"内容创作", icon:"🎬", name:"视频二创团队", tag:"把混乱的二创变成一条可重复的内容生产线",
+      roles:[{s:"vr-researcher",a:"🔎",n:"研究员",d:"整理原视频、竞品、热门选题"},{s:"vr-planner",a:"🎯",n:"策划",d:"拆二创角度、判断平台适配"},{s:"vr-scriptwriter",a:"📝",n:"编剧",d:"口播稿、分镜稿、转场句"},{s:"vr-producer",a:"🎬",n:"制片助理",d:"素材清单、截图、补拍"},{s:"vr-designer",a:"🖼️",n:"设计助理",d:"封面、插图、流程图"},{s:"vr-operator",a:"📣",n:"运营",d:"标题、简介、标签、发布文案"},{s:"vr-analyst",a:"📊",n:"数据分析",d:"整理复盘表，找优化方向"}] },
+  ];
+
+  // 个人库初始内容(自定义组 + 官方组)。通用 Team 假设已添加过 → 演示「已添加」态
+  let myAgents = [
+    { s:"valuz-helper", a:"🤖", n:"Valuz 小助手", d:"教你怎么用 Valuz，随手问", src:"custom" },
+    { s:"xhs-writer", a:"✨", n:"小红书文案助手", d:"帮我写种草文案", src:"custom" },
+    // 通用 Team 已在库:
+    ...templates[0].roles.map(r=>({...r, src:"custom", team:"general"})),
+  ];
+  const officialAgents = [
+    { s:"skill-creator", a:"📦", n:"技能创建器", d:"创建与优化 skill" },
+  ];
+
+  // ── 渲染左侧库列表 ──
+  function renderList(freshSlugs){
+    freshSlugs = freshSlugs || [];
+    const custom = myAgents.filter(a=>a.src==="custom");
+    const rows = (arr)=>arr.map(a=>{
+      const fresh = freshSlugs.includes(a.s) ? " fresh":"";
+      const sel = a.s==="valuz-helper" ? " sel":"";
+      return `<div class="row${sel}${fresh}"><span class="av">${a.a}</span>
+        <div class="meta"><div class="nm">${a.n}</div><div class="ds">${a.d}</div></div></div>`;
+    }).join("");
+    document.getElementById("listbody").innerHTML =
+      `<div class="grouplabel">自定义 · ${custom.length}</div>${rows(custom)}
+       <div class="grouplabel">官方 · ${officialAgents.length}</div>${rows(officialAgents)}`;
+  }
+
+  // ── 渲染模板面板(按场景分组)──
+  function hasTemplate(t){ const have=new Set(myAgents.map(a=>a.s)); return t.roles.every(r=>have.has(r.s)); }
+  function renderTpl(){
+    const have = new Set(myAgents.map(a=>a.s));
+    let html = "";
+    let lastScene = null;
+    templates.forEach(t=>{
+      if(t.scene!==lastScene){ html += `<div class="scenelbl">${t.scene}</div>`; lastScene=t.scene; }
+      const added = hasTemplate(t);
+      const stack = t.roles.slice(0,5).map(r=>`<span class="m">${r.a}</span>`).join("");
+      const more = t.roles.length>5 ? `<span class="m">+${t.roles.length-5}</span>`:"";
+      const action = added
+        ? `<button class="btn-added">✓ 已添加</button>`
+        : `<button class="btn-primary" id="add-${t.id}" onclick="addTpl('${t.id}')">添加到我的库</button>`;
+      html += `<div class="tplcard">
+        <div class="tplicon">${t.icon}</div>
+        <div class="tplmeta">
+          <div class="tplname">${t.name}</div>
+          <div class="tpltag">${t.tag}</div>
+          <div class="tplmembers"><div class="stack">${stack}${more}</div><span class="mcount">${t.roles.length} 个角色</span></div>
+        </div>
+        <div class="tplaction">${action}</div>
+      </div>`;
+    });
+    document.getElementById("dlgbody").innerHTML = html;
+  }
+
+  // ── 交互 ──
+  function openTpl(){ renderTpl(); document.getElementById("overlay").classList.add("show"); }
+  function closeTpl(){ document.getElementById("overlay").classList.remove("show"); }
+
+  let toastTimer;
+  function toast(msg){
+    const el=document.getElementById("toast");
+    document.getElementById("toastmsg").textContent=msg;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer=setTimeout(()=>el.classList.remove("show"),2600);
+  }
+
+  function addTpl(id){
+    const t = templates.find(x=>x.id===id);
+    const btn = document.getElementById("add-"+id);
+    btn.disabled = true;
+    btn.innerHTML = `<span class="spin"></span>添加中`;
+    setTimeout(()=>{
+      // 补齐缺失:只添加库里没有的角色(幂等去重)
+      const have = new Set(myAgents.map(a=>a.s));
+      const fresh = t.roles.filter(r=>!have.has(r.s));
+      fresh.forEach(r=> myAgents.push({...r, src:"custom", team:t.id}));
+      renderList(fresh.map(r=>r.s));
+      renderTpl(); // 该卡转「已添加」
+      toast(`已添加 ${fresh.length} 个 Agent · ${t.name}`);
+    }, 850);
+  }
+
+  renderList();
+</script>
+</body>
+</html>

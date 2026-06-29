@@ -38,6 +38,13 @@ if sys.platform == "win32":
 else:
     exe_name = "valuz-server"
 
+# Never strip on Windows: PyInstaller shells out to whatever ``strip`` is on
+# PATH, and the GitHub windows runners expose GNU binutils strip (Strawberry
+# Perl / mingw64), which corrupts MSVC-built PE DLLs — the packaged app then
+# dies at launch with "[PYI-xxxxx:ERROR] Failed to load Python DLL …
+# LoadLibrary". Strip has no size benefit on Windows anyway.
+strip_binaries = sys.platform != "win32"
+
 # --- Source root (backend/) ---
 # This spec lives in ``backend/scripts/``, so ``SPECPATH`` is that dir; the
 # backend root (which holds ``valuz_agent`` / ``kernel`` / ``alembic``) is its
@@ -46,19 +53,77 @@ else:
 HERE = Path(SPECPATH).parent
 
 # --- Auto-collect all submodules for third-party packages ---
+# Pip package name → Python import name mapping.
+# collect_submodules handles the rest; if a package is not found, it falls
+# back to adding the bare name as a hidden import.
 _third_party_pkgs = [
+    # Web framework
     "fastapi", "starlette", "pydantic", "pydantic_settings",
     "uvicorn", "sse_starlette", "multipart",
+    # Database
     "sqlalchemy", "aiosqlite", "alembic",
-    "httpx",
+    # HTTP
+    "httpx", "httpcore", "httpx_sse", "h11", "httptools",
+    # LLM providers
+    "anthropic", "openai",
+    # Document parsing
     "markitdown", "pymupdf4llm", "pymupdf",
+    "html_to_markdown", "rapidocr", "mammoth",
+    "markdown_it", "markdownify",
+    "beautifulsoup4",
+    "lxml", "openpyxl", "et_xmlfile",
+    "filetype", "magika",
+    # OCR / ML
+    "onnxruntime", "flatbuffers", "numpy",
+    "opencv-python",
+    # Agent runtimes
     "deepagents", "claude_agent_sdk",
     "codex_cli_bin", "openai_codex",
+    # Token counting for the goal-mode length fence (agent_resolver). The
+    # ``tiktoken_ext`` namespace package holds the encoding constructors
+    # (o200k_base lives in ``tiktoken_ext.openai_public``); collect_submodules
+    # of the bare ``tiktoken`` package misses it, so it is listed explicitly —
+    # without it ``get_encoding`` raises and counting silently degrades to the
+    # char heuristic. The vocab blob itself is vendored (see the
+    # ``vendor/tiktoken`` data dir below); tiktoken ships no vocab data files.
+    "tiktoken", "tiktoken_ext", "tiktoken_ext.openai_public",
+    # LangChain ecosystem
+    "langchain", "langchain_core", "langchain_protocol",
     "langchain_openai", "langchain_mcp_adapters",
+    "langchain_anthropic", "langchain_google_genai",
+    "langgraph",
+    "langgraph.checkpoint",
+    "langgraph.checkpoint.sqlite",
+    "langgraph.prebuilt",
+    "langgraph_sdk", "langsmith",
+    # Google
+    "google.auth", "google.genai",
+    # MCP
     "mcp",
+    # Scheduling
     "croniter", "cron_descriptor", "pytz",
-    "jinja2",
-    "dotenv", "typer", "watchfiles",
+    # Data
+    "pandas", "orjson", "ormsgpack", "packaging",
+    # Crypto / security
+    "cryptography", "cffi", "defusedxml",
+    # Templating
+    "jinja2", "mako", "markupsafe",
+    # Config / env
+    "dotenv", "omegaconf",
+    # CLI / logging
+    "typer", "click", "colorlog", "watchfiles",
+    # Serialization
+    "jsonpatch", "jsonpointer", "jsonschema",
+    # Networking
+    "anyio", "certifi", "charset_normalizer", "idna",
+    # Async
+    "greenlet",
+    # Misc
+    "yaml", "networkx", "annotated_types",
+    "distro", "docstring_parser", "nh3",
+    "cobble", "colorama", "jiter",
+    "attr", "pathspec", "iniconfig",
+    "pathspec",
 ]
 _auto_hidden = []
 for _pkg in _third_party_pkgs:
@@ -76,6 +141,17 @@ _data_pkgs = [
     "codex_cli_bin",      # bin/codex CLI binary (~75MB)
     "pymupdf",            # libmupdf.dylib + ONNX layout models (~51MB)
     "cron_descriptor",    # locale/*.mo translation catalogs
+    # magika is MarkItDown's filetype detector — constructed eagerly in
+    # ``MarkItDown.__init__`` (``magika.Magika()``). It loads an ONNX model +
+    # config that live as PACKAGE DATA (``magika/models/standard_v3_3/model.onnx``,
+    # ``magika/config/content_types_kb.min.json``). ``collect_submodules`` only
+    # grabs .py, so without collecting these data files ``Magika()`` raises
+    # ``MagikaError: model not found`` in the frozen build — and since every
+    # office format (.docx/.xlsx/.pptx) goes through MarkItDown, ALL office
+    # parsing fails ("*Office parse error: model not found...*") while PDF
+    # (pymupdf) and plain text keep working. No pyinstaller-hooks-contrib hook
+    # covers magika, so this explicit entry is the only thing that bundles it.
+    "magika",
 ]
 _extra_datas = []
 for _dpkg in _data_pkgs:
@@ -97,14 +173,17 @@ if getattr(sys, 'frozen', False):
     if _internal not in sys.path:
         sys.path.insert(0, _internal)
 
-    # Ensure the bundled Claude CLI (from claude_agent_sdk/_bundled/) is
-    # discoverable by the SDK's subprocess transport.  The SDK's own
-    # ``_find_bundled_cli`` uses ``Path(__file__)`` which may not resolve
-    # correctly inside the PYZ archive — adding the directory to PATH lets
-    # ``shutil.which("claude")`` find it as a reliable fallback.
-    _bundled_dir = os.path.join(_internal, 'claude_agent_sdk', '_bundled')
-    if os.path.isfile(os.path.join(_bundled_dir, 'claude')):
-        os.environ['PATH'] = _bundled_dir + os.pathsep + os.environ.get('PATH', '')
+    _exe_suffix = '.exe' if sys.platform == 'win32' else ''
+
+    # Bundled Claude CLI (claude_agent_sdk/_bundled/claude[.exe])
+    _claude_dir = os.path.join(_internal, 'claude_agent_sdk', '_bundled')
+    if os.path.isfile(os.path.join(_claude_dir, 'claude' + _exe_suffix)):
+        os.environ['PATH'] = _claude_dir + os.pathsep + os.environ.get('PATH', '')
+
+    # Bundled Codex CLI (codex_cli_bin/bin/codex[.exe])
+    _codex_dir = os.path.join(_internal, 'codex_cli_bin', 'bin')
+    if os.path.isfile(os.path.join(_codex_dir, 'codex' + _exe_suffix)):
+        os.environ['PATH'] = _codex_dir + os.pathsep + os.environ.get('PATH', '')
 
 from valuz_agent.__main__ import main
 sys.exit(main())
@@ -120,12 +199,35 @@ a = Analysis(
         *_extra_datas,
         # valuz_agent package — raw .py files, loaded via sys.path
         (str(HERE / "valuz_agent"), "valuz_agent"),
+        # Built-in parser plugins — a sibling top-level ``plugins`` package
+        # (``plugins/parser/<id>/``) the registry discovers DYNAMICALLY via
+        # ``importlib.import_module("plugins.parser")`` + ``pkgutil.iter_modules``.
+        # PyInstaller's static analysis can't follow that string import, so
+        # without bundling the tree the frozen build raises
+        # ``ModuleNotFoundError: No module named 'plugins'`` and the registry
+        # comes up with ZERO parsers (every attachment/KB parse then fails).
+        # Same raw-.py-via-sys.path strategy as ``valuz_agent``; the plugins'
+        # own third-party deps (markitdown / pymupdf4llm / rapidocr / …) are
+        # already collected through ``_third_party_pkgs`` above.
+        (str(HERE / "plugins"), "plugins"),
         # Vendored kernel — same strategy; kernel/__init__.py injects its
         # own path for bare imports (src.*, app.*).
         (str(HERE / "kernel"), "kernel"),
+        # Vendored tiktoken vocab for the goal-mode length fence. tiktoken caches
+        # a vocab blob under ``$TIKTOKEN_CACHE_DIR/<sha1(blob_url)>`` and reads it
+        # before downloading; we ship that file so the offline packaged app counts
+        # tokens with no network. At runtime ``_vendored_tiktoken_cache_dir`` points
+        # ``TIKTOKEN_CACHE_DIR`` at this bundled dir (``_MEIPASS/vendor/tiktoken``).
+        # Refresh with ``scripts/download-tiktoken.sh``.
+        (str(HERE / "vendor" / "tiktoken"), "vendor/tiktoken"),
         # Alembic chains, moved out of the package trees to backend/alembic/
         # {host,kernel}; boot resolves them relative to backend/ (= _internal/).
         (str(HERE / "alembic"), "alembic"),
+        # Shared i18n locale catalogs (repo-root i18n/locales/, one level above
+        # backend/). The backend's t() loads these at runtime; without bundling
+        # them, any server-side t() in the packaged app raised "Cannot locate
+        # repo root" (i18n._locales_dir reads them from _internal/i18n/locales).
+        (str(HERE.parent / "i18n" / "locales"), "i18n/locales"),
     ],
     hiddenimports=[
         # Third-party dependencies — all submodules auto-collected
@@ -159,8 +261,8 @@ exe = EXE(
     name=exe_name,
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
-    upx=True,
+    strip=strip_binaries,
+    upx=False,
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -173,7 +275,7 @@ coll = COLLECT(
     exe,
     a.binaries,
     a.datas,
-    strip=True,
-    upx=True,
+    strip=strip_binaries,
+    upx=False,
     name="valuz-server",
 )

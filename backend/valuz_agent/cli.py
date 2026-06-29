@@ -72,11 +72,11 @@ def reset_providers_cmd(
     ),
 ) -> None:
     """Reset the provider table to a known-good state."""
+    from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.infra.database import async_engine
     from valuz_agent.infra.db import async_unit_of_work
-    from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.modules.providers.datastore import ProviderDatastore
-    from valuz_agent.modules.providers.service import ProviderListItem, reset_providers
+    from valuz_agent.modules.providers.service import LLMChannel, reset_providers
 
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     # Ensure the host schema exists via the SAME path as app startup — Alembic
@@ -85,11 +85,14 @@ def reset_providers_cmd(
     # ``alembic_version_host`` stamp, which the next ``serve`` boot would wipe.
     run_host_migrations()
 
-    async def _run() -> list[ProviderListItem]:
+    async def _run() -> list[LLMChannel]:
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
         async with async_unit_of_work() as db:
             ds = ProviderDatastore(db)
             return await reset_providers(
                 ds,
+                resolve_local_user_id(),
                 drop_table=drop_table,
                 engine=async_engine if drop_table else None,
             )
@@ -111,8 +114,8 @@ def cleanup_seed_agents_cmd() -> None:
     creation. Keeps the system ``default-assistant``; skips any agent still
     deployed into a project (``delete_agent`` raises for those). Safe to re-run.
     """
-    from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.boot.schema import run_host_migrations
+    from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.agents.service import AgentService
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
     from valuz_agent.modules.connectors.service import ConnectorService
@@ -123,19 +126,18 @@ def cleanup_seed_agents_cmd() -> None:
     keep = {"default-assistant"}
 
     async def _run() -> tuple[list[str], list[tuple[str, str]]]:
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
         deleted: list[str] = []
         skipped: list[tuple[str, str]] = []
         async with async_unit_of_work() as db:
-            connector_svc = ConnectorService(
-                datastore=ConnectorDatastore(db),
-                secrets=None,  # type: ignore[arg-type]
-            )
+            connector_svc = ConnectorService(datastore=ConnectorDatastore(db))
             svc = AgentService(db=db, connector_service=connector_svc)  # type: ignore[arg-type]
-            for row in await svc.list_agents(source="official"):
+            for row in await svc.list_agents(resolve_local_user_id(), source="official"):
                 if row.slug in keep:
                     continue
                 try:
-                    await svc.delete_agent(row.slug)
+                    await svc.delete_agent(resolve_local_user_id(), row.slug)
                     deleted.append(row.slug)
                 except Exception as exc:  # noqa: BLE001 — report + keep going
                     skipped.append((row.slug, type(exc).__name__))

@@ -358,8 +358,13 @@ export const SkillDetailPanel = ({
   };
 
   useEffect(() => {
-    if (!selectedPath || !onLoadFile) return;
+    if (!selectedPath || !onLoadFile) {
+      setContent("");
+      setContentLoading(false);
+      return;
+    }
     let cancelled = false;
+    setContent("");
     setContentLoading(true);
     onLoadFile(selectedPath)
       .then((c) => {
@@ -405,7 +410,7 @@ export const SkillDetailPanel = ({
   return (
     <aside
       className={cn(
-        // Render inside the workspace's own right-panel frame; this
+        // Render inside the project's own right-panel frame; this
         // wrapper is just a flex shell so the inline pieces (header /
         // file tree / preview) stack vertically. No border / radius /
         // shadow — the outer panel already provides them, doubling up
@@ -427,7 +432,7 @@ export const SkillDetailPanel = ({
           border-radius: 12px;
           border: 1px solid #F0F1F3;
           overflow: hidden;
-          /* Top offset = workspace TopBar height (36px). AppShell's
+          /* Top offset = project TopBar height (36px). AppShell's
              inner flex uses p-4 pt-0, so the main card sits flush
              under the topbar; matching that here puts the fullscreen
              card on the same baseline. Other sides match AppShell's

@@ -4,9 +4,10 @@ Runtime layer (ADR-023). Owns the agent-turn engine that drives a kernel
 session through one or more turns:
 
   * :func:`run_session_to_idle` — one-shot turn-to-idle (dispatch sync path,
-    sync-kickoff lead, chat ``send`` path). Attaches a BroadcastEventSink,
-    runs the turn, reads back the final status, finalizes, consumes
-    attachments, detaches, cleans up, publishes ``SESSION_FINISHED``.
+    sync-kickoff lead, chat ``send`` path). Runs the turn through the
+    kernel seam, reads back the final status, finalizes, consumes
+    attachments, publishes ``SESSION_FINISHED``. (Live events reach SSE
+    followers via the kernel's bus taps — no per-run sink to manage.)
   * :class:`ActorRunner` — the persistent v2 actor loop (``run_actor_loop``)
     plus its per-turn primitive (``_run_turn_with_sink``) and the member_done
     prompt renderer (``_format_member_done``).
@@ -34,15 +35,46 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-import valuz_agent.boot.kernel  # noqa: F401
-
-from src.core import UserMessage  # type: ignore[import-not-found]
-
-from valuz_agent.adapters import kernel_sync
+from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.infra.lifecycle import is_draining
 
 logger = logging.getLogger(__name__)
+
+
+async def _restamp_always_on_mcp(session_id: str) -> None:
+    """Refresh the always-on in-process MCP token before driving a turn.
+
+    A session re-driven after a backend restart — task **resume / recovery**,
+    the persistent actor loop, a sync kickoff — can carry *stale* always-on MCP
+    headers in its persisted ``mcp_servers``. The in-process MCP gate then 403s
+    every request and the runtime parks the ``harness`` server in ``needsAuth``,
+    hiding ALL its tools — both the base set (memory / submit_skill) and, for a
+    lead, the orchestration set (dispatch / review_subtask / finish_task /
+    await_members / send / get_plan). The symptom: a re-launched lead reports it
+    "has no orchestration tools" and only the runtime's built-ins remain.
+
+    ``internal_mcp_token`` is now DERIVED from the stable owner id so it no
+    longer rotates across restarts (the historical root cause); the re-stamp
+    stays to converge the other drift-prone header bits (``backend_base_url`` /
+    ``session_id``, an ``internal_mcp_token_override`` change).
+
+    The chat path already self-heals this in ``send_message`` /
+    ``send_message_sync``; the task/actor turn path had no equivalent. Re-stamp
+    here so every turn-driving primitive converges. Best-effort — the re-stamp
+    is idempotent (a no-op when the token already matches, keeping the prompt
+    cache warm) and must never block the turn.
+    """
+    try:
+        from valuz_agent.modules.sessions.capabilities import (
+            refresh_always_on_mcp_for_session,
+        )
+
+        await refresh_always_on_mcp_for_session(session_id)
+    except Exception:  # noqa: BLE001 — never block a turn on a re-stamp failure
+        logger.warning("always-on MCP re-stamp failed for session %s", session_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -51,11 +83,40 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _resolve_turn_status(session: Any) -> str:
+    """Map a turn's resolved kernel session onto the actor-loop ``final_status``.
+
+    The kernel leaves ``status="idle"`` even when a turn failed at the API
+    transport layer: the SDK surfaces e.g. ``ECONNRESET`` / a dropped socket /
+    5xx as a ``ResultMessage(is_error=True)`` rather than a raised exception, so
+    ``run_turn`` returns normally and the failure lives *only* in
+    ``stop_reason`` (an ``Error``). Without this an errored lead turn would be
+    read as a clean idle → auto-finalize ``completed``, and an errored member
+    turn → ``subtask`` marked done; the lead then spins in ``await_members``.
+
+    Elevate such a turn to ``"terminated"`` — the one valid persistable status
+    (``created|idle|running|terminated``) every consumer already treats as a
+    failure (loop break, ``_finalize_actor`` ``ok=False``, lead auto-finalize
+    error branch). ``finalize_session`` preserves the existing ``Error``
+    stop_reason when no ``stop_reason_type`` is passed, so the reason survives.
+    """
+    if session is None:
+        return "idle"
+    status = getattr(session, "status", "idle")
+    sr = getattr(session, "stop_reason", None)
+    sr_type = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
+    if status == "idle" and isinstance(sr_type, str) and "error" in sr_type:
+        return "terminated"
+    return status
+
+
 async def run_session_to_idle(
     session_id: str,
     content: str,
     event_bus: EventBus,
     on_message: Any | None = None,
+    *,
+    queued_attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     """Drive one agent turn to completion and return the final session status.
 
@@ -66,35 +127,34 @@ async def run_session_to_idle(
     Attaches a BroadcastEventSink so SSE clients following the session still
     receive live events. Cleans up the sink on exit (success or failure).
 
-    ``on_message`` is an optional sync callback invoked with the kernel
+    ``on_message`` is an optional async callback invoked with the kernel
     ``run_turn`` result message after a successful turn — the chat path uses
     it to meter billing; the task member/lead path leaves it ``None`` so its
     behaviour is byte-identical.
+
+    ``queued_attachments`` is set only by the session input-queue drain
+    (docs/design/session-input-queue.md): the per-item attachment snapshot
+    (``[{source_path, parsed_path}]``) frozen + consumed at enqueue time. When
+    provided the pending-set load and the post-turn consume are BOTH skipped —
+    the files already left the staging area at enqueue — and the additional
+    context announces these snapshotted files instead. ``None`` (the default)
+    keeps the existing pending-set behaviour byte-identical for task paths.
 
     Used by:
       - dispatch handler via asyncio.create_task (sibling task, not recursive)
       - TaskOrchestrator.kickoff for the lead session background turn
       - sessions/run_orchestrator._run_agent_background (chat path, with meter)
+      - sessions/run_orchestrator._drain_queue_after_turn (queue drain)
     """
     from valuz_agent.modules.sessions.events import SESSION_FINISHED
 
     final_status: str = "idle"
     encountered_error = False
+    turn_error: BaseException | None = None
 
-    sink = None
-    orchestrator = None
     consumed_attachment_ids: list[str] = []
 
     try:
-        from app.dependencies import get_orchestrator, get_store  # type: ignore[import-not-found]
-        from valuz_agent.adapters.broadcast_sink import BroadcastEventSink, broadcast
-
-        store = get_store()
-        orchestrator = get_orchestrator()
-
-        sink = BroadcastEventSink(session_id)
-        await orchestrator.attach_session_sink(session_id, sink)
-
         # Dispatch sessions have no pending attachments (they are built
         # fresh by build_member_session), so the pending attachment block
         # is a no-op for subtasks. Keep it for lead sessions started via
@@ -106,44 +166,75 @@ async def run_session_to_idle(
             )
             from valuz_agent.modules.sessions.context_builder import _build_additional_context
 
-            pending_attachments = await _load_pending_attachments(session_id)
-            consumed_attachment_ids = [row.id for row in pending_attachments]
-            attachment_specs = _attachment_specs(pending_attachments)
+            if queued_attachments is not None:
+                # Queue drain: rebuild minimal (detached) attachment rows from
+                # the per-item snapshot so the additional-context announcement
+                # works; skip the pending load + the post-turn consume (the
+                # rows were consumed at enqueue, see §8.6).
+                from valuz_agent.modules.sessions.models import SessionAttachmentRow
+
+                pending_attachments = [
+                    SessionAttachmentRow(
+                        session_id=session_id,
+                        filename=Path(str(a.get("source_path") or "")).name
+                        or str(a.get("source_path") or ""),
+                        stored_path=str(a.get("source_path") or ""),
+                        parsed_path=a.get("parsed_path"),
+                        parse_status="ready" if a.get("parsed_path") else "uploaded",
+                        source_kind="local",
+                    )
+                    for a in queued_attachments
+                ]
+                consumed_attachment_ids = []
+                attachment_specs = _attachment_specs(pending_attachments, require_current_user_id())
+            else:
+                pending_attachments = await _load_pending_attachments(session_id)
+                consumed_attachment_ids = [row.id for row in pending_attachments]
+                attachment_specs = _attachment_specs(pending_attachments, require_current_user_id())
         except Exception:  # noqa: BLE001
             pending_attachments = []
             consumed_attachment_ids = []
             attachment_specs = ()
 
-        loaded_session = await store.load_session(session_id)
+        loaded_session = await kernel_client.get_session(require_current_user_id(), session_id)
         # Kernel ``run_turn`` persists ``session.status="running"`` to the DB
         # before handing off to the runtime (agent-harness 3e742fc), so the
         # detail fetch returns ``running`` and the frontend live view engages
-        # on open. No host-side pre-persist needed.
-        workspace_id = str(loaded_session.project_id) if loaded_session else ""
+        # on open. No host-side pre-persist needed. Live events reach SSE
+        # followers through the kernel's bus taps — no per-run sink attach.
+        project_id = str(
+            (((loaded_session.metadata or {}).get("valuz", {}) or {}).get("project_id") or "")
+            if loaded_session
+            else ""
+        )
         try:
             additional_context = await _build_additional_context(
-                session_id, workspace_id, pending_attachments
+                session_id, project_id, pending_attachments
             )
         except Exception:  # noqa: BLE001
             additional_context = ""
 
-        from src.core.types import Attachment  # type: ignore[import-not-found]
-
-        user_msg = UserMessage(
-            text=content,
-            attachments=tuple(
-                Attachment(source_path=source, parsed_path=parsed)
-                for source, parsed in attachment_specs
-            ),
-            additional_context=additional_context,
-        )
+        # Heal a stale in-process MCP token (rotates per process) before the
+        # turn — see ``_restamp_always_on_mcp``. Load-bearing for task lead /
+        # member runs re-driven after a backend restart, which otherwise lose
+        # the whole ``harness`` toolset to a 403.
+        await _restamp_always_on_mcp(session_id)
 
         try:
-            message = await orchestrator.run_turn(session_id, user_msg)
-            after_run = await store.load_session(session_id)
-            final_status = after_run.status if after_run is not None else "idle"
+            message = await kernel_client.run_turn(
+                require_current_user_id(),
+                session_id,
+                content,
+                attachments=[
+                    {"source_path": source, "parsed_path": parsed}
+                    for source, parsed in attachment_specs
+                ],
+                additional_context=additional_context,
+            )
+            after_run = await kernel_client.get_session(require_current_user_id(), session_id)
+            final_status = _resolve_turn_status(after_run)
             if on_message is not None:
-                on_message(message, after_run)
+                await on_message(message, after_run)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "run_session_to_idle: agent turn failed for session %s: %s",
@@ -152,34 +243,53 @@ async def run_session_to_idle(
             )
             final_status = "terminated"
             encountered_error = True
+            turn_error = exc
             try:
-                from src.core.events import Event as KernelEvent  # type: ignore[import-not-found]
-
-                await broadcast(
+                await kernel_client.emit_live_event(
+                    require_current_user_id(),
                     session_id,
-                    KernelEvent(
-                        type="session_error",
-                        data={
-                            "category": type(exc).__name__,
-                            "message": str(exc) or "agent turn failed",
-                        },
-                    ),
+                    "session_error",
+                    {
+                        "category": type(exc).__name__,
+                        "message": str(exc) or "agent turn failed",
+                    },
                 )
             except Exception:  # noqa: BLE001
                 pass
 
-    except BaseException:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001
         logger.exception("run_session_to_idle: unexpected error for session %s", session_id)
         final_status = "terminated"
         encountered_error = True
+        turn_error = exc
 
-    # Finalise session metadata + status
-    try:
-        from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
+    # Finalise session metadata + status. Passing ``turn_error`` makes the
+    # failure durable: ``_finalize_session`` appends a ``session_error`` event in
+    # the same call so the reason survives reload (the ``emit_live_event`` above
+    # is live-only and is missed by any client not connected at failure time).
+    if is_draining():
+        # App shutting down — leave the session ``running`` for boot recovery
+        # rather than racing the kernel-store teardown. (The ``KernelUnavailable``
+        # catch below is the belt-and-suspenders for a finalize already in
+        # flight when draining flips.)
+        logger.debug("run_session_to_idle: draining, skipping finalize for %s", session_id)
+    else:
+        try:
+            from valuz_agent.adapters.kernel_client import KernelUnavailableError
+            from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
 
-        await _finalize_session(session_id, content, final_status)
-    except Exception:  # noqa: BLE001
-        logger.exception("run_session_to_idle: finalize failed for session %s", session_id)
+            try:
+                await _finalize_session(session_id, content, final_status, error=turn_error)
+            except KernelUnavailableError:
+                # Backend shutting down — kernel store already torn down. Finalize
+                # is pointless; boot recovery reconciles this session. Skip quietly
+                # rather than logging a shutdown-race traceback.
+                logger.debug(
+                    "run_session_to_idle: kernel unavailable (shutdown), skipping finalize for %s",
+                    session_id,
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("run_session_to_idle: finalize failed for session %s", session_id)
 
     # Mark attachments consumed
     if consumed_attachment_ids:
@@ -189,21 +299,6 @@ async def run_session_to_idle(
             await _mark_attachments_consumed(consumed_attachment_ids)
         except Exception:  # noqa: BLE001
             pass
-
-    # Detach broadcast sink
-    if orchestrator is not None and sink is not None:
-        try:
-            await orchestrator.detach_session_sink(session_id, sink)
-        except Exception:  # noqa: BLE001
-            pass
-
-    # Cleanup broadcast channel
-    try:
-        from valuz_agent.adapters.broadcast_sink import cleanup_session
-
-        await cleanup_session(session_id)
-    except Exception:  # noqa: BLE001
-        pass
 
     event_bus.publish(
         SESSION_FINISHED,
@@ -226,7 +321,7 @@ _ARTIFACT_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "dist", "build",
 _ARTIFACT_LIMIT = 200
 
 
-def collect_manifest(
+async def collect_manifest(
     session_id: str,
     run_dir: Path,
     status: str,
@@ -247,7 +342,7 @@ def collect_manifest(
     # Extract summary from the last assistant event
     summary = ""
     try:
-        events = kernel_sync.get_events_sync(session_id, limit=200)
+        events = await kernel_client.get_events(require_current_user_id(), session_id, limit=200)
         # Walk backwards: find last assistant_message text
         for event in reversed(events):
             payload = event.data if hasattr(event, "data") else {}
@@ -300,7 +395,7 @@ def _member_run_dir(project_cwd: Any, task_id: str, run_seq: int, mode: str) -> 
     Default ("shared"/legacy "isolated"): the **project cwd itself** — members
     read and write project files natively (skills are scoped via prompt, see
     build_member_session). ``repo-worktree``: an isolated git worktree (opt-in
-    hard isolation when the workspace is a git repo).
+    hard isolation when the project is a git repo).
     """
     if mode == "repo-worktree":
         return fs_registry.subrun_dir(project_cwd, task_id, run_seq, "repo-worktree")
@@ -341,9 +436,9 @@ class ActorRunner:
 
       * ``_run_turn_with_sink(session_id, content) -> str``
       * ``_finalize_actor(*, session_id, last_content, final_status, role,
-        task_id, workspace_id) -> None``
+        task_id, project_id) -> None``
       * ``_notify_lead_member_idle(session_id, status) -> None``
-      * ``_lead_idle_with_no_pending(task_id, workspace_id) -> bool``
+      * ``_lead_idle_with_no_pending(task_id, project_id) -> bool``
     """
 
     def __init__(self, host: Any | None = None) -> None:
@@ -357,30 +452,23 @@ class ActorRunner:
         """Run ONE turn on a persistent session and return its final status.
 
         Unlike :func:`run_session_to_idle`, this does NOT finalize or clean up
-        the session — the actor loop owns that, once, at loop exit. Attaches a
-        broadcast sink for the turn so SSE followers still see live events.
+        the session — the actor loop owns that, once, at loop exit. Live
+        events reach SSE followers through the kernel's bus taps.
         """
-        from app.dependencies import get_orchestrator, get_store
-        from valuz_agent.adapters.broadcast_sink import BroadcastEventSink
-
-        store = get_store()
-        orchestrator = get_orchestrator()
-        sink = BroadcastEventSink(session_id)
-        await orchestrator.attach_session_sink(session_id, sink)
+        # Heal a stale in-process MCP token before every actor-loop turn — this
+        # is the path a recovered / resumed lead+member loop runs on after a
+        # backend restart, where the persisted ``harness`` token is stale and
+        # would otherwise 403 (hiding dispatch / review_subtask / finish_task).
+        await _restamp_always_on_mcp(session_id)
         try:
             # Kernel ``run_turn`` persists ``status="running"`` to the DB
             # itself (agent-harness 3e742fc) — no host pre-persist needed.
-            await orchestrator.run_turn(session_id, UserMessage(text=content))
-            loaded = await store.load_session(session_id)
-            return loaded.status if loaded is not None else "idle"
+            await kernel_client.run_turn(require_current_user_id(), session_id, content)
+            loaded = await kernel_client.get_session(require_current_user_id(), session_id)
+            return _resolve_turn_status(loaded)
         except Exception as exc:  # noqa: BLE001
             logger.warning("actor turn failed for session %s: %s", session_id, exc)
             return "terminated"
-        finally:
-            try:
-                await orchestrator.detach_session_sink(session_id, sink)
-            except Exception:  # noqa: BLE001
-                pass
 
     async def run_actor_loop(
         self,
@@ -389,7 +477,7 @@ class ActorRunner:
         initial_prompt: str,
         role: Literal["lead", "subtask"],
         task_id: str,
-        workspace_id: str,
+        project_id: str,
         idle_ttl: float | None = None,
     ) -> None:
         """Persistent actor loop: run turn → idle → await mailbox → repeat.
@@ -420,6 +508,13 @@ class ActorRunner:
         exited_on_shutdown = False
         try:
             while True:
+                # App is shutting down — do NOT start a new turn (it would spawn
+                # a runtime against a process being torn down, e.g. a fresh codex
+                # turn that immediately hits a dead pipe). Break and let the
+                # ``finally`` leave the session for boot recovery.
+                if is_draining():
+                    exited_on_shutdown = True
+                    break
                 final_status = await host._run_turn_with_sink(session_id, prompt)
                 turns += 1
 
@@ -450,7 +545,7 @@ class ActorRunner:
                 if (
                     role == "lead"
                     and not mailbox_registry.has_pending(session_id)
-                    and await host._lead_idle_with_no_pending(task_id, workspace_id)
+                    and await host._lead_idle_with_no_pending(task_id, project_id)
                 ):
                     logger.info(
                         "actor loop %s (lead) idle with no in-flight members / unresolved "
@@ -474,7 +569,7 @@ class ActorRunner:
                     if role == "lead" and msg.from_session:
                         await planning.mark_in_review(
                             task_id=task_id,
-                            workspace_id=workspace_id,
+                            project_id=project_id,
                             member_session_id=msg.from_session,
                         )
                     prompt = self._format_member_done(msg)
@@ -482,15 +577,23 @@ class ActorRunner:
                     prompt = msg.text
         finally:
             mailbox_registry.unregister(session_id)
-            await host._finalize_actor(
-                session_id=session_id,
-                last_content=prompt,
-                final_status=final_status,
-                role=role,
-                task_id=task_id,
-                workspace_id=workspace_id,
-                via_shutdown=exited_on_shutdown,
-            )
+            # When draining, skip the ENTIRE finalize. ``_finalize_actor`` touches
+            # the kernel store (status flip) AND the host DB (lead auto-finalize /
+            # member run record), both being torn down right now; running it spams
+            # errors and would mark the task/member terminal — the opposite of what
+            # boot recovery wants. Leave the session ``running`` / the task
+            # ``active``; recovery resumes it. (A plain ``if`` — never ``return``
+            # from a ``finally``, which would swallow a propagating CancelledError.)
+            if not is_draining():
+                await host._finalize_actor(
+                    session_id=session_id,
+                    last_content=prompt,
+                    final_status=final_status,
+                    role=role,
+                    task_id=task_id,
+                    project_id=project_id,
+                    via_shutdown=exited_on_shutdown,
+                )
 
     @staticmethod
     def _format_member_done(msg: Any) -> str:

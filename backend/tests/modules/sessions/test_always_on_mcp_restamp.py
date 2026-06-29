@@ -10,39 +10,38 @@ re-stamps the trio every turn so the stale token self-heals.
 
 from __future__ import annotations
 
+from app.schemas import (  # type: ignore[import-not-found]
+    AgentConfigSchema,
+    McpHttpServerConfigSchema,
+    SessionData,
+)
+
 import valuz_agent.boot.kernel  # noqa: F401 — kernel sys.path side-effect
 from valuz_agent.infra.config import settings
 from valuz_agent.modules.sessions import capabilities
 
 
 def _make_session(*, mcp_servers):
-    from src.core.types import Session  # type: ignore[import-not-found]
-
-    return Session(
+    return SessionData(
         id="sess-1",
-        project_id="proj-1",
-        agent_id="agent-1",
+        agent_config=AgentConfigSchema(id="agent-1", name="a"),
+        cwd="/tmp/restamp-test",
         runtime_provider="claude_agent",
         model="claude-sonnet-4-6",
-        model_provider=None,
-        model_settings=None,
         instructions="",
-        skills=(),
-        mcp_servers=mcp_servers,
+        skills=[],
+        mcp_servers=list(mcp_servers),
         permission_mode="full_access",
         status="idle",
-        stop_reason=None,
         created_at=0,
         metadata={},
     )
 
 
 def _stale_trio(token: str):
-    from src.core.types import McpHttpServerConfig  # type: ignore[import-not-found]
-
     base = "http://127.0.0.1:8000/internal/mcp"
-    return tuple(
-        McpHttpServerConfig(
+    trio = tuple(
+        McpHttpServerConfigSchema(
             name=name,
             url=f"{base}/{slug}/mcp",
             transport="http",
@@ -54,52 +53,65 @@ def _stale_trio(token: str):
             ("valuz_connectors", "connectors"),
         )
     )
+    harness = McpHttpServerConfigSchema(
+        name="harness",
+        url=f"{base}/toolkit/base/mcp",
+        transport="http",
+        headers={"X-Valuz-Internal": token, "X-Valuz-Session-Id": "sess-1"},
+    )
+    return (*trio, harness)
 
 
-def test_restamps_stale_token_and_preserves_external(monkeypatch):
+def _patch_client(monkeypatch, session):
+    from valuz_agent.adapters import kernel_client
+
+    updates: list = []
+
+    async def _get(_user_id, _sid):
+        return session
+
+    async def _update(_user_id, sid, req):
+        updates.append((sid, req))
+        return session
+
+    monkeypatch.setattr(kernel_client, "get_session", _get)
+    monkeypatch.setattr(kernel_client, "update_session", _update)
+    return updates
+
+
+async def test_restamps_stale_token_and_preserves_external(monkeypatch):
     """A stale always-on token is rewritten to the current one; external MCP kept."""
-    from src.core.types import McpHttpServerConfig  # type: ignore[import-not-found]
-
     monkeypatch.setattr(settings, "internal_mcp_token_override", "NEWTOKEN")
 
-    external = McpHttpServerConfig(
+    external = McpHttpServerConfigSchema(
         name="valuz-search",
         url="https://mcp.reportify.cn/search/mcp",
         transport="http",
         headers={"Authorization": "Bearer xyz"},
     )
     session = _make_session(mcp_servers=(external, *_stale_trio("OLDTOKEN")))
+    updates = _patch_client(monkeypatch, session)
 
-    from valuz_agent.adapters import kernel_sync
-
-    saved: list = []
-    monkeypatch.setattr(kernel_sync, "load_session_sync", lambda _sid: session)
-    monkeypatch.setattr(kernel_sync, "save_session_sync", lambda s: saved.append(s))
-
-    changed = capabilities.refresh_always_on_mcp_for_session("sess-1")
+    changed = await capabilities.refresh_always_on_mcp_for_session("sess-1")
 
     assert changed is True
-    assert len(saved) == 1
-    by_name = {m.name: m for m in saved[0].mcp_servers}
-    # All three always-on entries now carry the live token.
-    for name in ("valuz_docs", "valuz_automations", "valuz_connectors"):
+    assert len(updates) == 1
+    _sid, req = updates[0]
+    by_name = {m.name: m for m in req.mcp_servers}
+    # Every always-on entry (incl. the harness toolkit) carries the live token.
+    for name in ("valuz_docs", "valuz_automations", "valuz_connectors", "harness"):
         assert by_name[name].headers["X-Valuz-Internal"] == "NEWTOKEN"
     # The user-attached external connector is untouched.
     assert by_name["valuz-search"].headers == {"Authorization": "Bearer xyz"}
 
 
-def test_noop_when_token_already_current(monkeypatch):
-    """No save (prompt cache stays warm) when the token already matches."""
+async def test_noop_when_token_already_current(monkeypatch):
+    """No PATCH (prompt cache stays warm) when the token already matches."""
     monkeypatch.setattr(settings, "internal_mcp_token_override", "CURRENT")
     session = _make_session(mcp_servers=_stale_trio("CURRENT"))
+    updates = _patch_client(monkeypatch, session)
 
-    from valuz_agent.adapters import kernel_sync
-
-    saved: list = []
-    monkeypatch.setattr(kernel_sync, "load_session_sync", lambda _sid: session)
-    monkeypatch.setattr(kernel_sync, "save_session_sync", lambda s: saved.append(s))
-
-    changed = capabilities.refresh_always_on_mcp_for_session("sess-1")
+    changed = await capabilities.refresh_always_on_mcp_for_session("sess-1")
 
     assert changed is False
-    assert saved == []
+    assert updates == []

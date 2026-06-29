@@ -24,3 +24,13 @@ class BudgetExceeded(BadRequestError):
 class NoChannelAvailable(BadRequestError):
     error_code = 400_403
     message = "No model channel available for this session"
+
+
+class QueueFull(ConflictError):
+    error_code = 409_402
+    message = "Input queue is full"
+
+
+class QueuedInputNotFound(NotFoundError):
+    error_code = 404_402
+    message = "Queued input not found"

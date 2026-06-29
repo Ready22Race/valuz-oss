@@ -72,13 +72,13 @@ export interface TaskContextPanelProps {
   /** All runs in the task (lead + sub-Runs). Lead is identified by
    *  ``run.kind === "lead"`` so callers don't pass it separately. */
   runs: TaskRun[];
-  /** Workspace members — used to surface ``agent.model`` next to each
+  /** Project members — used to surface ``agent.model`` next to each
    *  team row. Optional: if absent, rows fall back to run status only. */
   members?: MemberWithAgent[];
   /** The lead's subtask plan (from the latest ``task_plan_update`` event).
    *  Empty until the lead calls ``plan_task``. */
   plannedSubtasks?: PlannedSubtask[];
-  /** Project file tree for the workspace this task runs in. When
+  /** Project file tree for the project this task runs in. When
    *  provided, the panel switches into a tabbed shell with a "项目文件"
    *  tab alongside the context sections. Absent → tabs hide and we
    *  fall back to the legacy single-pane layout. */
@@ -90,9 +90,15 @@ export interface TaskContextPanelProps {
    *  project home rail uses (see ``FileRefreshButton``). Optional;
    *  hides the button when absent. */
   onRefreshFiles?: () => void;
-  /** Reveal the workspace cwd in the OS file manager. Optional; hides
+  /** Reveal the project cwd in the OS file manager. Optional; hides
    *  the button when absent. */
   onOpenInFinder?: () => void;
+  /** Preview a single project file in the host page's artifact surface.
+   *  Receives the node's project-relative path. */
+  onPreviewFile?: (relPath: string) => void;
+  /** Open a single project file in the OS / external app. Receives the node's
+   *  project-relative path. Optional; without it the context menu hides. */
+  onOpenFile?: (relPath: string) => void;
 }
 
 /**
@@ -104,9 +110,9 @@ export interface TaskContextPanelProps {
  *   3. 🏃 运行记录    — lead Run + sub-Runs, click → conversation
  *
  * Sits inside AppShell's right-panel slot via
- * ``useWorkspaceOutlet().setRightPanel(<TaskContextPanel … />)`` so it
- * inherits the standard rounded card shell and
- * the collapse toggle the rest of the workspace pages use.
+ * ``useProjectOutlet().setRightPanel(<TaskContextPanel … />)`` so it
+ * inherits the standard ``rounded-[14px] border bg-card`` card shell and
+ * the collapse toggle the rest of the project pages use.
  *
  * Deliberately removed in v30 (per PRD §3.5 v30 changelog):
  *   - Live stream views (Lead / Subtask)  — center timeline carries the
@@ -124,6 +130,8 @@ export const TaskContextPanel = ({
   rootPath,
   onRefreshFiles,
   onOpenInFinder,
+  onPreviewFile,
+  onOpenFile,
 }: TaskContextPanelProps) => {
   const { t } = useTranslation();
   const [planReviewOpen, setPlanReviewOpen] = useState(false);
@@ -173,13 +181,16 @@ export const TaskContextPanel = ({
   // the one on the project home / conversation page (same chrome,
   // chevron, count semantics).
   const contextSections = (
-    <div className="flex flex-col">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* 👥 Agent Team — lead pinned to the top, dispatched sub-agents follow. */}
       <AccordionSection
         title={t("task.panel.team" as Parameters<typeof t>[0])}
         icon={Users}
         count={team.length || undefined}
         defaultOpen
+        // Natural height (its list is already capped) — never grow/shrink so
+        // the Todo section below gets all the leftover height.
+        className="shrink-0"
         contentClassName="p-0"
       >
         {team.length === 0 ? (
@@ -187,7 +198,10 @@ export const TaskContextPanel = ({
             {t("task.panel.teamEmpty" as Parameters<typeof t>[0])}
           </div>
         ) : (
-          <ul className="py-3">
+          // Cap the team list so a large team doesn't push the sections below
+          // it out of view on a short window — it scrolls internally instead.
+          // ``vh`` keeps it window-relative (tall windows show the whole list).
+          <ul className="max-h-[25vh] overflow-y-auto py-3">
             {team.map(({ slug, isLead }) => {
               const agent = agentBySlug.get(slug);
               const modelText = agent?.model
@@ -243,7 +257,11 @@ export const TaskContextPanel = ({
         icon={ListTodo}
         count={plannedSubtasks.length || undefined}
         defaultOpen
-        contentClassName="p-0"
+        // Grow to fill the rail's remaining height; the list scrolls inside
+        // (instead of a fixed ``vh`` cap) so it reaches the container bottom.
+        className="flex min-h-0 flex-1 flex-col"
+        fill
+        contentClassName="flex h-full min-h-0 flex-col p-0"
         action={
           plannedSubtasks.length > 0 ? (
             <Sheet open={planReviewOpen} onOpenChange={setPlanReviewOpen}>
@@ -251,7 +269,7 @@ export const TaskContextPanel = ({
                 <button
                   type="button"
                   onClick={(e) => e.stopPropagation()}
-                  className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+                  className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
                   title={t(
                     "task.panel.planReviewTrigger" as Parameters<typeof t>[0],
                   )}
@@ -292,7 +310,7 @@ export const TaskContextPanel = ({
             {t("task.panel.todoEmpty" as Parameters<typeof t>[0])}
           </p>
         ) : (
-          <ol className="py-3">
+          <ol className="min-h-0 flex-1 overflow-y-auto py-3">
             {plannedSubtasks.map((task, idx) => (
               <li
                 key={task.key ?? task.label}
@@ -356,7 +374,9 @@ export const TaskContextPanel = ({
     // so the rail visual matches across pages.
     return (
       <div className="flex h-full min-h-0 flex-col bg-surface-base">
-        <div className="min-h-0 flex-1 overflow-y-auto px-2 pt-0">
+        {/* Flex column (not a single scroll): the Todo section is ``fill`` and
+            owns the leftover height, scrolling inside itself. */}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-2 pt-0">
           {contextSections}
         </div>
       </div>
@@ -380,8 +400,8 @@ export const TaskContextPanel = ({
         >
           <TabsTrigger value="context" className="after:!opacity-0">
             {/* Match the project home / conversation rail label
-                ("工作区" / "Workspace") — same surface, same word. */}
-            {t("conversation.workspace" as Parameters<typeof t>[0])}
+                ("工作区" / "Project") — same surface, same word. */}
+            {t("conversation.project" as Parameters<typeof t>[0])}
           </TabsTrigger>
           <TabsTrigger value="files" className="after:!opacity-0">
             {/* Reuse the project home / conversation key so the rail
@@ -392,7 +412,7 @@ export const TaskContextPanel = ({
       </header>
       <TabsContent
         value="context"
-        className="min-h-0 overflow-y-auto px-2 pt-0"
+        className="flex min-h-0 flex-1 flex-col overflow-hidden px-2 pt-0"
       >
         {contextSections}
       </TabsContent>
@@ -428,7 +448,7 @@ export const TaskContextPanel = ({
                   <button
                     type="button"
                     onClick={onOpenInFinder}
-                    className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+                    className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
                     title={t("project.inFinder" as Parameters<typeof t>[0])}
                   >
                     <FolderOpen className="h-3.5 w-3.5" />
@@ -448,6 +468,9 @@ export const TaskContextPanel = ({
                 tree={fileTree}
                 defaultOpenDepth={0}
                 hideRootRow
+                onFileClick={onPreviewFile}
+                onFileDoubleClick={onPreviewFile}
+                onOpenInSystem={onOpenFile}
               />
             )}
           </div>
@@ -459,10 +482,10 @@ export const TaskContextPanel = ({
 
 function StatusIcon({ status }: { status: string }) {
   if (status === "completed") {
-    return <CheckCircle2 className="h-3.5 w-3.5 text-success-text" />;
+    return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />;
   }
   if (status === "failed" || status === "stopped") {
-    return <XCircle className="h-3.5 w-3.5 text-error-text" />;
+    return <XCircle className="h-3.5 w-3.5 text-red-500" />;
   }
   if (status === "paused") {
     return <PauseCircle className="h-3.5 w-3.5 text-ink-meta" />;
@@ -479,11 +502,11 @@ function SubtaskStatusChip({ status }: { status: string }) {
   const { t } = useTranslation();
   const map: Record<string, { cls: string; key: string }> = {
     completed: {
-      cls: "bg-success-light text-success-text",
+      cls: "bg-emerald-500/10 text-emerald-600",
       key: "task.subtaskStatus.completed",
     },
     failed: {
-      cls: "bg-error-light text-error-text",
+      cls: "bg-red-500/10 text-red-600",
       key: "task.subtaskStatus.failed",
     },
     active: { cls: "bg-brand/10 text-brand", key: "task.subtaskStatus.active" },
@@ -492,7 +515,7 @@ function SubtaskStatusChip({ status }: { status: string }) {
       key: "task.subtaskStatus.pending",
     },
     paused: {
-      cls: "bg-warning-light text-warning-text",
+      cls: "bg-amber-500/10 text-amber-600",
       key: "task.subtaskStatus.paused",
     },
   };
@@ -544,7 +567,7 @@ function PlanReviewPopover({
           <button
             type="button"
             onClick={onClose}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-[color:var(--fg-1)] hover:text-ink-heading"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft hover:text-ink-heading"
             aria-label={t("common.close" as Parameters<typeof t>[0])}
           >
             <X className="h-3.5 w-3.5" />
@@ -581,7 +604,7 @@ function PlanReviewPopover({
                     </span>
                     <SubtaskStatusChip status={task.status} />
                     {task.attempts !== undefined && task.attempts > 1 && (
-                      <span className="rounded bg-warning-light px-1.5 py-0.5 text-2xs font-medium text-warning-text">
+                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-2xs font-medium text-amber-700">
                         {t(
                           "task.panel.planRowAttempts" as Parameters<
                             typeof t
@@ -648,8 +671,8 @@ function PlanReviewPopover({
                   </div>
                 )}
                 {task.review_feedback && (
-                  <div className="mt-2 rounded-md border border-error-border bg-error-light px-3 py-2">
-                    <p className="text-2xs font-semibold text-error-text">
+                  <div className="mt-2 rounded-md border border-red-500/30 bg-red-50 px-3 py-2 dark:bg-red-500/10">
+                    <p className="text-2xs font-semibold text-red-700 dark:text-red-400">
                       {t(
                         "task.panel.planRowFeedback" as Parameters<typeof t>[0],
                       )}

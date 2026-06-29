@@ -22,6 +22,11 @@ from valuz_agent.infra.database import Base
 from valuz_agent.modules.agents.datastore import AgentDatastore, ProjectMemberDatastore
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.agents.seed import DEFAULT_ASSISTANT_SLUG
+from valuz_agent.modules.connectors.models import (
+    ConnectorAttrRow,
+    ConnectorOAuthRow,
+    ConnectorRow,
+)
 from valuz_agent.modules.sessions import service as session_service
 from valuz_agent.modules.sessions.errors import SessionNotRunnable
 from valuz_agent.modules.sessions.service import SessionService
@@ -33,7 +38,13 @@ async def db(tmp_path) -> AsyncIterator:
     async with engine.begin() as conn:
         await conn.run_sync(
             Base.metadata.create_all,
-            tables=[AgentRow.__table__, ProjectMemberRow.__table__],
+            tables=[
+                AgentRow.__table__,
+                ProjectMemberRow.__table__,
+                ConnectorRow.__table__,
+                ConnectorAttrRow.__table__,
+                ConnectorOAuthRow.__table__,
+            ],
         )
     session = async_sessionmaker(bind=engine, expire_on_commit=False)()
     try:
@@ -60,58 +71,144 @@ def patch_uow(db, monkeypatch):
     monkeypatch.setattr(session_service, "async_unit_of_work", _fake_uow)
 
 
-async def _resolve(workspace_id: str, agent_slug: str) -> str:
+async def _resolve(project_id: str, agent_slug: str) -> str:
     # The resolver reads no instance state — a bare stand-in for ``self`` is fine.
-    return await SessionService._resolve_bound_kernel_agent_id(
-        SimpleNamespace(), workspace_id, agent_slug
+    kernel_agent_id, _config = await SessionService._resolve_bound_agent(
+        SimpleNamespace(), project_id, agent_slug
     )
+    return kernel_agent_id
 
 
 async def test_should_resolve_global_library_agent_when_not_a_project_member(db, patch_uow) -> None:
     await AgentDatastore(db).create(
+        "local-test-owner",
         AgentRow(
+            user_id="local-test-owner",
             slug=DEFAULT_ASSISTANT_SLUG,
             name="默认助手",
             source="official",
             deletable=False,
             runtime="claude_agent",
             model="claude-sonnet-4-6",
-            kernel_agent_id="ker-default-assistant",
-        )
+        ),
     )
 
-    # chat-default workspace has no members → falls back to the library agent.
+    # chat-default project has no members → falls back to the library agent.
     resolved = await _resolve("chat-default", DEFAULT_ASSISTANT_SLUG)
 
-    assert resolved == "ker-default-assistant"
+    assert resolved == "agent:default-assistant"
 
 
 async def test_should_prefer_project_member_over_library_agent(db, patch_uow) -> None:
     # Same slug exists both as a library agent AND as a project member; the
     # project-scoped member wins for project conversations.
     await AgentDatastore(db).create(
+        "local-test-owner",
         AgentRow(
+            user_id="local-test-owner",
             slug="architect",
             name="架构师",
             source="custom",
             runtime="claude_agent",
             model="claude-sonnet-4-6",
-            kernel_agent_id="ker-library",
-        )
+        ),
     )
     await ProjectMemberDatastore(db).create(
+        "local-test-owner",
         ProjectMemberRow(
-            workspace_id="ws-proj",
+            user_id="local-test-owner",
+            project_id="ws-proj",
             agent_slug="architect",
-            kernel_agent_id="ker-member",
-        )
+            source_agent_slug="architect",
+        ),
     )
 
     resolved = await _resolve("ws-proj", "architect")
 
-    assert resolved == "ker-member"
+    assert resolved == "agent:architect"
 
 
 async def test_should_raise_when_slug_is_neither_member_nor_library_agent(db, patch_uow) -> None:
     with pytest.raises(SessionNotRunnable):
         await _resolve("chat-default", "ghost-agent")
+
+
+async def test_member_resolution_builds_snapshot_from_library_row(db, patch_uow) -> None:
+    """Live-reference semantics: the member's config snapshot is built from
+    the CURRENT library row fields, keyed to the member's kernel id."""
+    await AgentDatastore(db).create(
+        "local-test-owner",
+        AgentRow(
+            user_id="local-test-owner",
+            slug="researcher",
+            name="研究员",
+            source="custom",
+            runtime="claude_agent",
+            model="claude-opus-4-8",
+            instructions="dig deep",
+        ),
+    )
+    await ProjectMemberDatastore(db).create(
+        "local-test-owner",
+        ProjectMemberRow(
+            user_id="local-test-owner",
+            project_id="ws-x",
+            agent_slug="researcher",
+            source_agent_slug="researcher",
+        ),
+    )
+
+    kernel_agent_id, config = await SessionService._resolve_bound_agent(
+        SimpleNamespace(), "ws-x", "researcher"
+    )
+
+    assert kernel_agent_id == "agent:researcher"
+    assert config.id == "agent:researcher"
+    assert config.name == "研究员"
+    assert config.model == "claude-opus-4-8"
+    assert config.instructions == "dig deep"
+    # Tool surfaces ride the session's ``harness`` MCP entry now — the
+    # snapshot carries no tool declarations.
+    assert tuple(config.tools or ()) == ()
+
+
+async def test_resolution_carries_connector_types_into_mcp_servers(db, patch_uow) -> None:
+    """Regression: the session-resolution path builds ``AgentService`` ad hoc
+    (no DI container), which used to leave it without a ConnectorService — so
+    the agent's ``connector_types`` were silently dropped and the session's
+    ``mcp_servers`` came out empty. The default-factory wiring must resolve
+    them into live MCP server configs."""
+    await db.merge(
+        ConnectorRow(
+            user_id="local-test-owner",
+            slug="my-search",
+            display_name="My Search",
+            connector_type="custom",
+            transport="http",
+            url="https://mcp.example.com/mcp",
+            auth_type="none",
+            enabled=True,
+        )
+    )
+    await db.commit()
+    await AgentDatastore(db).create(
+        "local-test-owner",
+        AgentRow(
+            user_id="local-test-owner",
+            slug="analyst",
+            name="分析师",
+            source="custom",
+            runtime="claude_agent",
+            model="claude-sonnet-4-6",
+            connector_types=["my-search"],
+        ),
+    )
+
+    _kernel_agent_id, config = await SessionService._resolve_bound_agent(
+        SimpleNamespace(), "chat-default", "analyst"
+    )
+
+    assert [m.name for m in config.mcp_servers] == ["my-search"]
+    assert config.mcp_servers[0].url == "https://mcp.example.com/mcp"
+    # The binding declaration also rides metadata for downstream adapters.
+    assert config.metadata["connector_bindings"] == [{"type": "my-search"}]

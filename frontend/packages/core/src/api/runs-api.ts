@@ -21,8 +21,10 @@ export interface RunTodoSnapshot {
 export interface RunSummary {
   session_id: string;
   source_kind: RunSourceKind;
-  workspace_id: string;
-  workspace_name: string | null;
+  /** user | automation | task — who created the session. */
+  origin: string;
+  project_id: string;
+  project_name: string | null;
   task_id: string | null;
   title: string;
   status: string;

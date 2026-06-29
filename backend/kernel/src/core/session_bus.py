@@ -27,17 +27,24 @@ logger = logging.getLogger(__name__)
 
 
 class SessionEventBus:
-    """Single-subscriber fanout with replay-on-attach.
+    """Single-subscriber fanout with replay-on-attach, plus passive taps.
 
-    Multiple concurrent attachers are not supported by design: in this
+    Multiple concurrent *attachers* are not supported by design: in this
     product a session has at most one live client. A new attach replaces
     the prior subscriber (used to swap sinks across reconnects); detach
     only fires if the caller's sink is the current subscriber, so a
     stale handler can't clobber a fresh one.
+
+    **Taps** are the multi-subscriber side channel: every emit is also
+    forwarded to each registered tap, and taps are never displaced by
+    ``attach``. They exist for observers — SSE streams, host-level
+    aggregators — that must not compete with the client slot. A tap that
+    raises is dropped (same policy as the subscriber).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, taps: Iterable[EventSink] = ()) -> None:
         self._subscriber: EventSink | None = None
+        self._taps: list[EventSink] = list(taps)
         self._lock = asyncio.Lock()
 
     @property
@@ -46,6 +53,15 @@ class SessionEventBus:
 
     async def emit(self, event: Event) -> None:
         async with self._lock:
+            dead_taps: list[EventSink] = []
+            for tap in self._taps:
+                try:
+                    await tap.emit(event)
+                except Exception as exc:
+                    logger.debug("Bus tap failed, dropping: %s", exc)
+                    dead_taps.append(tap)
+            for tap in dead_taps:
+                self._taps.remove(tap)
             sub = self._subscriber
             if sub is None:
                 return
@@ -57,6 +73,28 @@ class SessionEventBus:
                 # the next reconnect will re-attach.
                 logger.debug("Bus subscriber failed, detaching: %s", exc)
                 self._subscriber = None
+
+    async def add_tap(self, sink: EventSink, replay: Iterable[Event] = ()) -> None:
+        """Register a passive tap, optionally replaying events to it first.
+
+        Replay-then-live is serialized under the bus lock, mirroring
+        :meth:`attach`. A replay failure abandons the registration.
+        """
+        async with self._lock:
+            for ev in replay:
+                try:
+                    await sink.emit(ev)
+                except Exception as exc:
+                    logger.debug("Tap replay emit failed, not registering: %s", exc)
+                    return
+            self._taps.append(sink)
+
+    async def remove_tap(self, sink: EventSink) -> None:
+        async with self._lock:
+            try:
+                self._taps.remove(sink)
+            except ValueError:
+                pass
 
     async def attach(self, sink: EventSink, replay: Iterable[Event] = ()) -> None:
         """Atomically install ``sink`` and replay pending events to it.

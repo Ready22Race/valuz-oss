@@ -37,9 +37,10 @@ from typing import Any
 
 import valuz_agent.boot.kernel  # noqa: F401
 
-from src.core import Event, Session  # type: ignore[import-not-found]
+from app.schemas import EventData as Event
+from app.schemas import SessionData as Session
 
-from valuz_agent.adapters.broadcast_sink import subscribe_all, unsubscribe_all
+from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.decisions.schemas import (
     DecisionEntry,
@@ -90,7 +91,6 @@ class DecisionAggregator:
         self._subscribers: list[asyncio.Queue[DecisionStreamEvent]] = []
         self._lock = asyncio.Lock()
         self._sub_task: asyncio.Task[None] | None = None
-        self._sub_queue: asyncio.Queue[tuple[str, Event]] | None = None
         self._stopped = False
 
     # ---- Lifecycle --------------------------------------------------
@@ -103,7 +103,6 @@ class DecisionAggregator:
         if self._sub_task is not None:
             return
         await self._hydrate_from_history()
-        self._sub_queue = await subscribe_all()
         self._sub_task = asyncio.create_task(self._broadcast_loop(), name="decisions-aggregator")
         logger.info(
             "DecisionAggregator started; hydrated %d pending entries",
@@ -124,9 +123,6 @@ class DecisionAggregator:
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
-        if self._sub_queue is not None:
-            await unsubscribe_all(self._sub_queue)
-            self._sub_queue = None
         async with self._lock:
             # Signal any live subscribers to drain — they'll exit on the
             # sentinel and clean themselves up via unsubscribe().
@@ -184,18 +180,25 @@ class DecisionAggregator:
 
     async def _hydrate_from_history(self) -> None:
         """Rebuild the snapshot from kernel events at startup."""
-        try:
-            from app.dependencies import get_store  # type: ignore[import-not-found]
-        except ImportError:
-            logger.warning("decisions hydration skipped — kernel app.dependencies not importable")
-            return
+        from valuz_agent.adapters import kernel_client
 
-        store = get_store()
         # Scan all sessions (the kernel doesn't index by status; the
         # filter is cheap in-memory since active sessions are small in
         # the typical desktop deployment).
         try:
-            sessions = await store.list_sessions(limit=500)
+            # Cross-owner: the decision inbox aggregates every owner's
+            # task-driven sessions into one process-wide snapshot.
+            sessions = await kernel_client.list_all_sessions(limit=500)
+        except kernel_client.KernelNotImplementedError:
+            # Expected, not an error: the HTTP kernel transport (sandbox /
+            # remote kernel) is owner-scoped and exposes no cross-owner
+            # listing. Start empty — the inbox fills from live events as the
+            # aggregator subscribes; there's no startup backfill in this mode.
+            logger.info(
+                "decisions hydration: cross-owner listing unavailable on the http "
+                "kernel transport — starting with 0 hydrated entries"
+            )
+            return
         except Exception:  # noqa: BLE001
             logger.warning("decisions hydration: list_sessions failed", exc_info=True)
             return
@@ -206,7 +209,7 @@ class DecisionAggregator:
             if not is_task_driven(session):
                 continue
             try:
-                events = await store.get_events(session.id, limit=200)
+                events = await kernel_client.get_events(session.user_id, session.id, limit=200)
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "decisions hydration: get_events(%s) failed",
@@ -260,17 +263,13 @@ class DecisionAggregator:
     # ---- Internal: live broadcast loop ------------------------------
 
     async def _broadcast_loop(self) -> None:
-        assert self._sub_queue is not None
-        q = self._sub_queue
         try:
-            while not self._stopped:
-                try:
-                    item = await q.get()
-                except asyncio.CancelledError:
-                    raise
-                if item is None:
+            async for event in kernel_client.subscribe_all_events():
+                if self._stopped:
+                    break
+                session_id = event.session_id or ""
+                if not session_id:
                     continue
-                session_id, event = item
                 try:
                     await self._handle_event(session_id, event)
                 except Exception:  # noqa: BLE001 — broad-catch keeps loop alive
@@ -361,14 +360,15 @@ class DecisionAggregator:
     # ---- Helpers ----------------------------------------------------
 
     async def _load_session(self, session_id: str) -> Session | None:
+        from valuz_agent.adapters import kernel_client
+
         try:
-            from app.dependencies import get_store
-        except ImportError:
-            return None
-        try:
-            return await get_store().load_session(session_id)
+            # Cross-owner lookup by id (the live event carries no owner) — the
+            # inbox is a process-wide aggregator across every owner.
+            sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
+            return sessions[0] if sessions else None
         except Exception:  # noqa: BLE001
-            logger.warning("decisions: load_session(%s) failed", session_id, exc_info=True)
+            logger.warning("decisions: get_session(%s) failed", session_id, exc_info=True)
             return None
 
 

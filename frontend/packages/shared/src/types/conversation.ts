@@ -29,7 +29,12 @@ export type ConversationBlock =
       sealed?: boolean;
       elapsedMs?: number;
     }
-  | { kind: "tool"; tool: PrototypeToolCall; elapsedMs?: number };
+  | { kind: "tool"; tool: PrototypeToolCall; elapsedMs?: number }
+  // Context-compaction marker (``/compact`` or autocompact), for either
+  // runtime. Label-only — the kernel ``compaction`` event's raw data is
+  // intentionally not parsed for display; it just marks where the context
+  // window was summarized within the turn.
+  | { kind: "compaction"; messageId?: string };
 
 export interface ConversationTurnAttachment {
   name: string;

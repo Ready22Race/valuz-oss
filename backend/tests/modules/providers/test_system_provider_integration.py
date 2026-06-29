@@ -1,8 +1,10 @@
-"""Service-layer integration for overlay-contributed system providers (ADR-007).
+"""Service-layer integration for overlay-contributed channels (ADR-011).
 
-Covers: list merge, get fallback, write-op guards, projection fidelity.
-The provider table is exercised through the real datastore on an
-in-memory SQLite engine; the registry is exercised directly.
+Covers: list merge (catalog rows prepended), get fallback to the catalog,
+write-op guards by ``deletable``, empty-model rows dropped, user-row hiding.
+The provider table is exercised through the real datastore on an in-memory
+SQLite engine; contributed rows come from a fake ``LLMProvider`` bound to
+``ext.llm_provider``.
 """
 
 from __future__ import annotations
@@ -19,39 +21,50 @@ from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.models import Base, ProviderRow
+from valuz_agent.modules.providers.schemas import LLMChannel, LLMModel
 from valuz_agent.modules.providers.service import ProviderService
+from valuz_agent.ports.extensions import ext
 from valuz_agent.ports.llm_provider import (
-    SystemLLMProvider,
+    NoopLLMProvider,
+    ResolvedCredential,
     SystemProviderImmutable,
-    _InMemoryRegistry,
-    get_llm_registry,
-    set_llm_registry,
 )
 
 
 class _InMemorySecretStore(SecretStorePort):
     def __init__(self) -> None:
-        self._values: dict[str, str] = {}
+        self._values: dict[tuple[str, str], str] = {}
 
-    def get(self, key: str) -> str | None:
-        return self._values.get(key)
+    def get(self, user_id: str, key: str) -> str | None:
+        return self._values.get((user_id, key))
 
-    def put(self, key: str, value: str) -> None:
-        self._values[key] = value
+    def put(self, user_id: str, key: str, value: str) -> None:
+        self._values[(user_id, key)] = value
 
-    def delete(self, key: str) -> None:
-        self._values.pop(key, None)
+    def delete(self, user_id: str, key: str) -> None:
+        self._values.pop((user_id, key), None)
+
+
+class _FakeCatalog:
+    """A ``LLMProvider`` returning fixed rows + resolving fixed creds."""
+
+    def __init__(
+        self,
+        rows: list[LLMChannel],
+        creds: dict[str, ResolvedCredential] | None = None,
+    ) -> None:
+        self._rows = rows
+        self._creds = creds or {}
+
+    async def list(self) -> list[LLMChannel]:
+        return list(self._rows)
+
+    async def resolve(self, provider_id: str) -> ResolvedCredential | None:
+        return self._creds.get(provider_id)
 
 
 class _SvcHandle:
-    """A ProviderService bound to an async session, plus a sync sessionmaker.
-
-    The host is now fully async: ``ProviderDatastore`` takes an
-    ``AsyncSession`` and every service method is ``async``. We build BOTH a
-    sync engine (for the test seed helper) and an aiosqlite async engine over
-    the SAME sqlite file. The service drives the async session; tests seed
-    rows synchronously via ``sync_factory``.
-    """
+    """A ProviderService bound to an async session, plus a sync sessionmaker."""
 
     def __init__(
         self, service: ProviderService, sync_factory: sessionmaker, secrets: _InMemorySecretStore
@@ -92,35 +105,55 @@ async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
 
 
 @pytest.fixture(autouse=True)
-def fresh_registry() -> None:
-    set_llm_registry(_InMemoryRegistry())
+def fresh_catalog() -> None:
+    ext.llm_provider = NoopLLMProvider()
     yield
-    set_llm_registry(_InMemoryRegistry())
+    ext.llm_provider = NoopLLMProvider()
 
 
-def _descriptor(
+@pytest.fixture(autouse=True)
+def _no_subscription_templates(monkeypatch) -> None:
+    """These tests assert exact catalog/user list membership. Keep the virtual
+    CLI-subscription templates (added by ``list_providers``) out so the
+    assertions stay focused on the catalog-merge behaviour under test."""
+    from valuz_agent.infra.config import settings
+
+    monkeypatch.setattr(settings, "subscription_login_enabled", False)
+
+
+def _set_catalog(*rows: LLMChannel, creds: dict[str, ResolvedCredential] | None = None) -> None:
+    ext.llm_provider = _FakeCatalog(list(rows), creds)
+
+
+def _sys_row(
     *,
     provider_id: str = "valuz-channel",
     enabled: bool = True,
     unavailable_reason: str | None = None,
-) -> SystemLLMProvider:
-    return SystemLLMProvider(
+    models: list[LLMModel] | None = None,
+) -> LLMChannel:
+    return LLMChannel(
         id=provider_id,
         name="Valuz 系统模型",
         provider_kind="system",
-        runtime_provider="claude_agent",
-        api_protocol="anthropic",
-        api_base="https://cloud.test/v1",
-        model_options=("claude-sonnet-4-6",),
+        source="system",
+        deletable=False,
+        is_default=False,
+        credential_source="system_managed",
+        auth_type="oauth",
+        enabled=enabled,
+        unavailable_reason=unavailable_reason if not enabled else None,
+        compatible_protocols=["anthropic"],
+        group="system",
+        group_rank=20,
         default_model="claude-sonnet-4-6",
-        headers=lambda: {"Authorization": "Bearer jwt-xyz"},
-        enabled=lambda: enabled,
-        unavailable_reason=lambda: unavailable_reason,
+        models=models if models is not None else [LLMModel(id="claude-sonnet-4-6")],
     )
 
 
 def _seed_user_row(svc: _SvcHandle) -> ProviderRow:
     row = ProviderRow(
+        user_id="local-test-owner",
         id="user-1",
         name="My OpenAI",
         provider_kind="openai",
@@ -139,20 +172,18 @@ def _seed_user_row(svc: _SvcHandle) -> ProviderRow:
 
 
 class TestListMerge:
-    async def test_empty_registry_returns_user_rows_only(self, svc: _SvcHandle) -> None:
+    async def test_empty_catalog_returns_user_rows_only(self, svc: _SvcHandle) -> None:
         _seed_user_row(svc)
-        items = await svc.service.list_providers()
+        items = await svc.service.list_providers("local-test-owner")
         assert [i.id for i in items] == ["user-1"]
 
-    async def test_registry_prepended_before_user_rows(self, svc: _SvcHandle) -> None:
-        # System (registry) providers are prepended to the top of the picker —
-        # "platform-provided, no setup needed" belongs first (see
-        # ``list_providers``: ``return system_items + user_items``).
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
+    async def test_catalog_prepended_before_user_rows(self, svc: _SvcHandle) -> None:
+        # Contributed rows are prepended to the top of the picker —
+        # "platform-provided, no setup needed" belongs first
+        # (``list_providers``: ``extra_items + user_items``).
         _seed_user_row(svc)
-        get_llm_registry().register(_descriptor())
-        items = await svc.service.list_providers()
+        _set_catalog(_sys_row())
+        items = await svc.service.list_providers("local-test-owner")
         assert [i.id for i in items] == ["valuz-channel", "user-1"]
         sys_item = items[0]
         assert sys_item.source == "system"
@@ -161,119 +192,88 @@ class TestListMerge:
         assert sys_item.auth_type == "oauth"
         assert sys_item.enabled is True
         assert sys_item.compatible_protocols == ["anthropic"]
-        assert sys_item.model_options == ["claude-sonnet-4-6"]
+        assert [m.id for m in sys_item.models] == ["claude-sonnet-4-6"]
 
-    async def test_descriptor_disabled_reflected_in_enabled_flag(self, svc: _SvcHandle) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor(enabled=False, unavailable_reason="未登录"))
-        items = await svc.service.list_providers()
+    async def test_disabled_row_reflected_in_enabled_flag(self, svc: _SvcHandle) -> None:
+        _set_catalog(_sys_row(enabled=False, unavailable_reason="未登录"))
+        items = await svc.service.list_providers("local-test-owner")
         assert len(items) == 1
         assert items[0].enabled is False
 
 
 class TestGetProvider:
-    async def test_get_resolves_registry_id(self, svc: _SvcHandle) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor())
-        detail = await svc.service.get_provider("valuz-channel")
+    async def test_get_resolves_catalog_id(self, svc: _SvcHandle) -> None:
+        _set_catalog(_sys_row())
+        detail = await svc.service.get_provider("local-test-owner", "valuz-channel")
         assert detail.id == "valuz-channel"
         assert detail.source == "system"
-        assert detail.base_url == "https://cloud.test/v1"
+        # Contributed rows carry no editable base_url — creds live on resolve().
+        assert detail.base_url is None
         assert detail.supports_connection_test is False
         assert detail.supports_custom_base_url is False
 
     async def test_get_unknown_raises_not_found(self, svc: _SvcHandle) -> None:
         with pytest.raises(ProviderNotFound):
-            await svc.service.get_provider("nope")
+            await svc.service.get_provider("local-test-owner", "nope")
 
-    async def test_registry_id_takes_precedence_over_user_row(self, svc: _SvcHandle) -> None:
-        # Even if a user row somehow shared the id, registry wins —
-        # writes to that id are blocked, so this is the safer default.
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor(provider_id="user-1"))
+    async def test_user_row_takes_precedence_over_catalog_id(self, svc: _SvcHandle) -> None:
+        # ADR-011: catalog ids don't collide with user UUIDs, so get_provider
+        # checks the user table first. If a row somehow shares the id, the user
+        # row wins (it's the editable, owned one).
+        _set_catalog(_sys_row(provider_id="user-1"))
         _seed_user_row(svc)  # also id="user-1"
-        detail = await svc.service.get_provider("user-1")
-        assert detail.source == "system"
+        detail = await svc.service.get_provider("local-test-owner", "user-1")
+        assert detail.source == "user"
 
 
 class TestWriteGuards:
-    def setup_method(self) -> None:
-        from valuz_agent.ports.llm_provider import get_llm_registry
-
-        get_llm_registry().register(_descriptor())
+    """Writes targeting a non-deletable contributed row → 409 (ADR-011 治理)."""
 
     async def test_update_rejects_system_id(self, svc: _SvcHandle) -> None:
+        _set_catalog(_sys_row())
         with pytest.raises(SystemProviderImmutable):
-            await svc.service.update_provider("valuz-channel", name="renamed")
+            await svc.service.update_provider("local-test-owner", "valuz-channel", name="renamed")
 
     async def test_delete_rejects_system_id(self, svc: _SvcHandle) -> None:
+        _set_catalog(_sys_row())
         with pytest.raises(SystemProviderImmutable):
-            await svc.service.delete_provider("valuz-channel")
+            await svc.service.delete_provider("local-test-owner", "valuz-channel")
 
     async def test_test_provider_rejects_system_id(self, svc: _SvcHandle) -> None:
+        _set_catalog(_sys_row())
         with pytest.raises(SystemProviderImmutable):
-            await svc.service.test_provider("valuz-channel")
+            await svc.service.test_provider("local-test-owner", "valuz-channel")
 
     async def test_discover_models_rejects_system_id(self, svc: _SvcHandle) -> None:
+        _set_catalog(_sys_row())
         with pytest.raises(SystemProviderImmutable):
-            await svc.service.discover_models("valuz-channel")
+            await svc.service.discover_models("local-test-owner", "valuz-channel")
 
     async def test_set_default_rejects_system_id(self, svc: _SvcHandle) -> None:
+        _set_catalog(_sys_row())
         with pytest.raises(SystemProviderImmutable):
-            await svc.service.set_default("valuz-channel")
+            await svc.service.set_default("local-test-owner", "valuz-channel")
 
 
-class TestDynamicModelList:
-    """ADR-007 Phase 2: descriptors with a ``list_models`` callable surface a
-    dynamic catalog (used by the commercial org-model card)."""
+class TestCatalogRowVisibility:
+    """OSS drops contributed rows with no selectable models — a card with
+    nothing to pick is noise (e.g. the 组织模型 card when the org has no model
+    of that protocol). The dynamic catalog fetch itself is the overlay's job."""
 
-    @staticmethod
-    def _org_descriptor(list_models, *, model_options=()):  # type: ignore[no-untyped-def]
-        return SystemLLMProvider(
-            id="valuz-org",
-            name="组织模型",
-            provider_kind="system",
-            runtime_provider="claude_agent",
-            api_protocol="anthropic",
-            api_base="https://cloud.test/v1",
-            model_options=model_options,
-            default_model=None,
-            headers=lambda: {},
-            enabled=lambda: True,
-            unavailable_reason=lambda: None,
-            list_models=list_models,
+    async def test_row_with_models_appears(self, svc: _SvcHandle) -> None:
+        _set_catalog(
+            _sys_row(
+                provider_id="valuz-org",
+                models=[LLMModel(id="org-gpt-4o"), LLMModel(id="org-claude")],
+            )
         )
-
-    async def test_sync_list_models_overrides_static(self, svc: _SvcHandle) -> None:
-        get_llm_registry().register(self._org_descriptor(lambda: ["org-gpt-4o", "org-claude"]))
-        items = await svc.service.list_providers()
+        items = await svc.service.list_providers("local-test-owner")
         org = next(i for i in items if i.id == "valuz-org")
-        assert org.model_options == ["org-gpt-4o", "org-claude"]
+        assert [m.id for m in org.models] == ["org-gpt-4o", "org-claude"]
 
-    async def test_async_list_models_is_awaited(self, svc: _SvcHandle) -> None:
-        async def _alist() -> list[str]:
-            return ["m-async"]
-
-        get_llm_registry().register(self._org_descriptor(_alist))
-        items = await svc.service.list_providers()
-        assert next(i for i in items if i.id == "valuz-org").model_options == ["m-async"]
-
-    async def test_failure_falls_back_to_static(self, svc: _SvcHandle) -> None:
-        def _boom() -> list[str]:
-            raise RuntimeError("upstream down")
-
-        get_llm_registry().register(self._org_descriptor(_boom, model_options=("fallback-model",)))
-        items = await svc.service.list_providers()
-        assert next(i for i in items if i.id == "valuz-org").model_options == ["fallback-model"]
-
-    async def test_empty_list_models_hides_card(self, svc: _SvcHandle) -> None:
-        # A descriptor whose dynamic list resolves empty must NOT appear — no
-        # noise card for an org with no model of that protocol.
-        get_llm_registry().register(self._org_descriptor(lambda: []))
-        items = await svc.service.list_providers()
+    async def test_empty_models_row_hidden(self, svc: _SvcHandle) -> None:
+        _set_catalog(_sys_row(provider_id="valuz-org", models=[]))
+        items = await svc.service.list_providers("local-test-owner")
         assert all(i.id != "valuz-org" for i in items)
 
 
@@ -290,6 +290,9 @@ class TestUserProviderHiding:
         async def hide_user_providers(self) -> bool:
             return True
 
+        async def hidden_provider_ids(self, candidates):  # type: ignore[no-untyped-def]
+            return set()
+
     async def test_locked_hides_user_rows(self, svc: _SvcHandle) -> None:
         from valuz_agent.ports.provider_policy import (
             AllowAllProviderPolicy,
@@ -297,10 +300,10 @@ class TestUserProviderHiding:
         )
 
         _seed_user_row(svc)  # id="user-1", source="user"
-        get_llm_registry().register(_descriptor())  # a system card stays visible
+        _set_catalog(_sys_row())  # a system card stays visible
         set_provider_policy(self._LockedPolicy())
         try:
-            items = await svc.service.list_providers()
+            items = await svc.service.list_providers("local-test-owner")
             ids = [i.id for i in items]
             assert "user-1" not in ids  # personal provider hidden
             assert "valuz-channel" in ids  # system card unaffected
@@ -309,7 +312,6 @@ class TestUserProviderHiding:
             set_provider_policy(AllowAllProviderPolicy())
 
     async def test_unlocked_shows_user_rows(self, svc: _SvcHandle) -> None:
-        # Default AllowAll policy → user rows visible.
         _seed_user_row(svc)
-        items = await svc.service.list_providers()
+        items = await svc.service.list_providers("local-test-owner")
         assert "user-1" in [i.id for i in items]

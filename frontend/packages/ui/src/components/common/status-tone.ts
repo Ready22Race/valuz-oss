@@ -1,7 +1,7 @@
 /**
- * Unified run / session / task status → color tone. One color per semantic,
- * shared by the Activity pills, the sidebar dots, and the project/task status
- * tags. See docs/desktop/status-colors.md.
+ * Unified run / session / task / connector status → color tone. One color per
+ * semantic, shared by the Activity pills, the sidebar dots, the project/task
+ * status tags, and the connector list rows. See docs/desktop/status-colors.md.
  */
 
 type Tone =
@@ -34,6 +34,15 @@ const TONE: Record<string, Tone> = {
   stopped: "neutral",
   cancelled: "neutral",
   archived: "neutral",
+  // connector statuses (no key collision with the run/session/task set above):
+  // connected → green, connecting → brand pulse, error → red, and the two
+  // "configured but not connected" states (pending_auth / unknown) → amber.
+  connected: "success",
+  connecting: "brand",
+  error: "error",
+  pending_auth: "warning",
+  unknown: "warning",
+  disabled: "neutral",
 };
 
 const PILL_CLASS: Record<Tone, string> = {
@@ -56,7 +65,7 @@ const DOT_CLASS: Record<Tone, string> = {
   neutral: "bg-ink-meta",
 };
 
-const PULSE = new Set(["running", "active"]);
+const PULSE = new Set(["running", "active", "connecting"]);
 
 export const statusTone = (status: string): Tone => TONE[status] ?? "neutral";
 export const statusPillClass = (status: string): string =>

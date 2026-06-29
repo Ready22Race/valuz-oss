@@ -102,6 +102,10 @@ interface DialogState {
 export interface CliLoginFlowOptions {
   onAlreadyLoggedIn?: (tool: CliTool) => void;
   onProviderMarkedOAuth?: (tool: CliTool) => void;
+  /** Fired right after a login terminal is launched. The login completes
+   * asynchronously in an external terminal, so the caller uses this to start
+   * polling for completion (the app can't otherwise observe it). */
+  onLoginLaunched?: (tool: CliTool) => void;
 }
 
 export interface CliLoginFlowApi {
@@ -113,7 +117,7 @@ export const useCliLoginFlow = (
   options: CliLoginFlowOptions = {},
 ): CliLoginFlowApi => {
   const [dialogState, setDialogState] = useState<DialogState | null>(null);
-  const { onAlreadyLoggedIn, onProviderMarkedOAuth } = options;
+  const { onAlreadyLoggedIn, onProviderMarkedOAuth, onLoginLaunched } = options;
   const platform = usePlatform();
 
   const syncProviderOAuth = useCallback(
@@ -148,8 +152,9 @@ export const useCliLoginFlow = (
       }
       await launchAndToast(tool, platform.launchCliLogin!);
       await syncProviderOAuth(tool);
+      onLoginLaunched?.(tool);
     },
-    [syncProviderOAuth, platform],
+    [syncProviderOAuth, platform, onLoginLaunched],
   );
 
   const closeDialog = useCallback(() => setDialogState(null), []);
@@ -235,6 +240,7 @@ export const useCliLoginFlow = (
                     closeDialog();
                     await launchAndToast(tool, platform.launchCliLogin!);
                     await syncProviderOAuth(tool);
+                    onLoginLaunched?.(tool);
                   }}
                 >
                   {t("cliLogin.relogin" as Parameters<typeof t>[0])}

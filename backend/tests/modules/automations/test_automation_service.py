@@ -1,20 +1,20 @@
 """AutomationService unit tests.
 
-Service is exercised with an in-memory fake datastore + fake workspace and
-agent services so we cover the real workspace/agent resolution branching
+Service is exercised with an in-memory fake datastore + fake project and
+agent services so we cover the real project/agent resolution branching
 without standing up a DB. Mirrors the shape of the legacy
 ``test_schedule_service.py``.
 
 Covered:
 
-- Workspace + agent resolution for chat/project/library_agent/project_member
+- Project + agent resolution for chat/project/library_agent/project_member
   combinations from ADR-021 §4.
 - Trigger discriminator branching (cron / interval / manual) — only the
   create + update side; the evaluator's own behaviour is covered in
   ``test_trigger_evaluator.py``.
 - CRUD lifecycle (create → update → pause → resume → delete) including
   ``next_run_at`` recomputation on trigger change.
-- ``list_workspace_targets`` composition (chat sentinel + project rows).
+- ``list_project_targets`` composition (chat sentinel + project rows).
 - ``mark_missed_runs`` — recovered-skip on offline windows.
 """
 
@@ -29,13 +29,13 @@ import pytest
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.modules.automations.errors import (
     AgentNotFound,
-    AgentNotInWorkspace,
+    AgentNotInProject,
     AutomationAgentRequired,
     AutomationNameEmpty,
     AutomationNotFound,
+    AutomationProjectNotFound,
     AutomationPromptEmpty,
     AutomationTaskOnlyOnProject,
-    AutomationWorkspaceNotFound,
     InvalidCronExpression,
 )
 from valuz_agent.modules.automations.models import (
@@ -65,16 +65,18 @@ class FakeAutomationDatastore:
         self.rows: dict[str, AutomationRow] = {}
         self.runs: dict[str, AutomationRunRow] = {}
 
-    async def list_automations(self, workspace_id: str | None = None) -> list[AutomationRow]:
+    async def list_automations(
+        self, user_id: str, project_id: str | None = None
+    ) -> list[AutomationRow]:
         rows = list(self.rows.values())
-        if workspace_id is not None:
-            rows = [r for r in rows if r.workspace_id == workspace_id]
+        if project_id is not None:
+            rows = [r for r in rows if r.project_id == project_id]
         return sorted(rows, key=lambda r: r.created_at)
 
-    async def get_automation(self, automation_id: str) -> AutomationRow | None:
+    async def get_automation(self, user_id: str, automation_id: str) -> AutomationRow | None:
         return self.rows.get(automation_id)
 
-    async def create_automation(self, row: AutomationRow) -> AutomationRow:
+    async def create_automation(self, user_id: str, row: AutomationRow) -> AutomationRow:
         self.rows[row.id] = row
         return row
 
@@ -82,12 +84,12 @@ class FakeAutomationDatastore:
         self.rows[row.id] = row
         return row
 
-    async def delete_automation(self, automation_id: str) -> None:
+    async def delete_automation(self, user_id: str, automation_id: str) -> None:
         self.rows.pop(automation_id, None)
         for rid in [r.id for r in self.runs.values() if r.automation_id == automation_id]:
             self.runs.pop(rid, None)
 
-    async def create_run(self, row: AutomationRunRow) -> AutomationRunRow:
+    async def create_run(self, user_id: str, row: AutomationRunRow) -> AutomationRunRow:
         self.runs[row.id] = row
         return row
 
@@ -95,22 +97,22 @@ class FakeAutomationDatastore:
         self.runs[row.id] = row
         return row
 
-    async def last_run(self, automation_id: str) -> AutomationRunRow | None:
+    async def last_run(self, user_id: str, automation_id: str) -> AutomationRunRow | None:
         candidates = [r for r in self.runs.values() if r.automation_id == automation_id]
         if not candidates:
             return None
         return max(candidates, key=lambda r: r.triggered_at)
 
     async def list_runs(
-        self, automation_id: str, limit: int = 20, cursor: str | None = None
+        self, user_id: str, automation_id: str, limit: int = 20, cursor: str | None = None
     ) -> list[AutomationRunRow]:
         rows = [r for r in self.runs.values() if r.automation_id == automation_id]
         return sorted(rows, key=lambda r: r.triggered_at, reverse=True)[:limit]
 
-    async def count_runs(self, automation_id: str) -> int:
+    async def count_runs(self, user_id: str, automation_id: str) -> int:
         return sum(1 for r in self.runs.values() if r.automation_id == automation_id)
 
-    async def count_recent_failures(self, automation_id: str, limit: int = 20) -> int:
+    async def count_recent_failures(self, user_id: str, automation_id: str, limit: int = 20) -> int:
         recent = sorted(
             (r for r in self.runs.values() if r.automation_id == automation_id),
             key=lambda r: r.triggered_at,
@@ -128,60 +130,68 @@ class FakeAutomationDatastore:
     async def list_enabled(self) -> list[AutomationRow]:
         return [r for r in self.rows.values() if r.status == "enabled"]
 
+    async def list_by_origin_tool_call_ids(
+        self, user_id: str, tool_call_ids: list[str]
+    ) -> list[AutomationRow]:
+        if not tool_call_ids:
+            return []
+        wanted = set(tool_call_ids)
+        return [r for r in self.rows.values() if r.origin_tool_call_id in wanted]
 
-class FakeWorkspace:
+
+class FakeProject:
     def __init__(self, ws_id: str, name: str, kind: str) -> None:
         self.id = ws_id
         self.name = name
         self.kind = kind
 
 
-class FakeWorkspaceService:
-    def __init__(self, workspaces: dict[str, FakeWorkspace] | None = None) -> None:
-        if workspaces is None:
-            workspaces = {
-                "ws-proj": FakeWorkspace("ws-proj", "My Project", "project"),
-                "ws-chat-existing": FakeWorkspace("ws-chat-existing", "Existing Chat", "chat"),
+class FakeProjectService:
+    def __init__(self, projects: dict[str, FakeProject] | None = None) -> None:
+        if projects is None:
+            projects = {
+                "ws-proj": FakeProject("ws-proj", "My Project", "project"),
+                "ws-chat-existing": FakeProject("ws-chat-existing", "Existing Chat", "chat"),
             }
-        self._workspaces = workspaces
+        self._projects = projects
         self._counter = 0
 
-    async def get_workspace(self, workspace_id: str) -> FakeWorkspace:
-        if workspace_id not in self._workspaces:
-            raise KeyError(workspace_id)
-        return self._workspaces[workspace_id]
+    async def get_project(self, user_id: str, project_id: str) -> FakeProject:
+        if project_id not in self._projects:
+            raise KeyError(project_id)
+        return self._projects[project_id]
 
-    async def list_workspaces(self) -> list[FakeWorkspace]:
-        return list(self._workspaces.values())
+    async def list_projects(self, user_id: str) -> list[FakeProject]:
+        return list(self._projects.values())
 
-    async def create_chat_workspace_for_session(self, name: str = "Chat") -> FakeWorkspace:
+    async def create_chat_project_for_session(self, name: str = "Chat") -> FakeProject:
         self._counter += 1
         ws_id = f"chat-ws-{self._counter}"
-        ws = FakeWorkspace(ws_id, name, "chat")
-        self._workspaces[ws_id] = ws
+        ws = FakeProject(ws_id, name, "chat")
+        self._projects[ws_id] = ws
         return ws
 
 
 class FakeMember:
-    def __init__(self, kernel_agent_id: str = "kernel-agent-1") -> None:
-        self.kernel_agent_id = kernel_agent_id
+    def __init__(self, source_agent_slug: str = "demo-agent") -> None:
+        self.source_agent_slug = source_agent_slug
 
 
 class FakeMemberDatastore:
-    """Tracks (workspace_id, agent_slug) → FakeMember."""
+    """Tracks (project_id, agent_slug) → FakeMember."""
 
     def __init__(self) -> None:
         self.members: dict[tuple[str, str], FakeMember] = {}
 
-    async def get(self, workspace_id: str, agent_slug: str) -> FakeMember | None:
-        return self.members.get((workspace_id, agent_slug))
+    async def get(self, user_id: str, project_id: str, agent_slug: str) -> FakeMember | None:
+        return self.members.get((project_id, agent_slug))
 
 
 class FakeAgentDatastore:
     def __init__(self, slugs: set[str] | None = None) -> None:
         self.slugs = slugs if slugs is not None else {"qa-engineer"}
 
-    async def get_agent(self, slug: str) -> object | None:
+    async def get_agent(self, user_id: str, slug: str) -> object | None:
         # Return any non-None to signal "present". Service only checks
         # the truthiness on this path.
         return object() if slug in self.slugs else None
@@ -197,13 +207,14 @@ class FakeAgentService:
 
     async def deploy_agent(
         self,
-        workspace_id: str,
+        user_id: str,
+        project_id: str,
         source_agent_slug: str,
         agent_slug: str,
         dedupe: bool = True,
     ) -> dict[str, Any]:
-        self.instantiations.append((workspace_id, source_agent_slug, agent_slug))
-        self._members.members[(workspace_id, agent_slug)] = FakeMember()
+        self.instantiations.append((project_id, source_agent_slug, agent_slug))
+        self._members.members[(project_id, agent_slug)] = FakeMember()
         return {"member": FakeMember(), "agent": None}
 
 
@@ -224,8 +235,8 @@ def members() -> FakeMemberDatastore:
 
 
 @pytest.fixture
-def workspace_svc() -> FakeWorkspaceService:
-    return FakeWorkspaceService()
+def project_svc() -> FakeProjectService:
+    return FakeProjectService()
 
 
 @pytest.fixture
@@ -242,7 +253,7 @@ def bus() -> EventBus:
 def service(
     datastore: FakeAutomationDatastore,
     members: FakeMemberDatastore,
-    workspace_svc: FakeWorkspaceService,
+    project_svc: FakeProjectService,
     agent_svc: FakeAgentService,
     bus: EventBus,
 ) -> AutomationService:
@@ -261,7 +272,7 @@ def service(
     svc._members = members  # type: ignore[assignment]
     svc._agents = FakeAgentDatastore()  # type: ignore[assignment]
     svc._bus = bus
-    svc._ws = workspace_svc  # type: ignore[assignment]
+    svc._ws = project_svc  # type: ignore[assignment]
     svc._agent_svc = agent_svc  # type: ignore[assignment]
     from valuz_agent.modules.automations.cron_utils import CronInterpreter
     from valuz_agent.modules.automations.triggers import TriggerEvaluator
@@ -276,8 +287,8 @@ def service(
 def _project_payload(**overrides: Any) -> AutomationCreatePayload:
     base: dict[str, Any] = {
         "name": "Daily report",
-        "workspace_kind": "project",
-        "workspace_id": "ws-proj",
+        "project_kind": "project",
+        "project_id": "ws-proj",
         "agent_kind": "project_member",
         "agent_slug": "qa-engineer",
         "prompt_template": "Summarize yesterday",
@@ -290,8 +301,8 @@ def _project_payload(**overrides: Any) -> AutomationCreatePayload:
 def _chat_lib_payload(**overrides: Any) -> AutomationCreatePayload:
     base: dict[str, Any] = {
         "name": "Weekly digest",
-        "workspace_kind": "chat",
-        "workspace_id": None,
+        "project_kind": "chat",
+        "project_id": None,
         "agent_kind": "library_agent",
         "agent_slug": "qa-engineer",
         "prompt_template": "Summarize",
@@ -305,27 +316,23 @@ def _chat_lib_payload(**overrides: Any) -> AutomationCreatePayload:
 
 
 class TestProjectCreateResolution:
-    async def test_should_bind_to_project_workspace(self, service: AutomationService) -> None:
+    async def test_should_bind_to_project(self, service: AutomationService) -> None:
         detail = await service.create(_project_payload())
-        assert detail.workspace_id == "ws-proj"
+        assert detail.project_id == "ws-proj"
 
-    async def test_should_reject_missing_project_workspace(
+    async def test_should_reject_missing_project(self, service: AutomationService) -> None:
+        with pytest.raises(AutomationProjectNotFound):
+            await service.create(_project_payload(project_id="ghost"))
+
+    async def test_should_reject_when_project_id_omitted(self, service: AutomationService) -> None:
+        with pytest.raises(AutomationProjectNotFound):
+            await service.create(_project_payload(project_id=None))
+
+    async def test_should_reject_chat_project_under_project_kind(
         self, service: AutomationService
     ) -> None:
-        with pytest.raises(AutomationWorkspaceNotFound):
-            await service.create(_project_payload(workspace_id="ghost"))
-
-    async def test_should_reject_when_project_workspace_id_omitted(
-        self, service: AutomationService
-    ) -> None:
-        with pytest.raises(AutomationWorkspaceNotFound):
-            await service.create(_project_payload(workspace_id=None))
-
-    async def test_should_reject_chat_workspace_under_project_kind(
-        self, service: AutomationService
-    ) -> None:
-        with pytest.raises(AutomationWorkspaceNotFound):
-            await service.create(_project_payload(workspace_id="ws-chat-existing"))
+        with pytest.raises(AutomationProjectNotFound):
+            await service.create(_project_payload(project_id="ws-chat-existing"))
 
     async def test_should_reject_library_agent_under_project_kind(
         self, service: AutomationService
@@ -333,13 +340,13 @@ class TestProjectCreateResolution:
         # Project automations must reference an already-instantiated member.
         # Adding a library agent goes through the existing add-agent dialog
         # so the user can configure provider / model overrides per project.
-        with pytest.raises(AgentNotInWorkspace):
+        with pytest.raises(AgentNotInProject):
             await service.create(
                 _project_payload(agent_kind="library_agent", agent_slug="qa-engineer")
             )
 
     async def test_should_reject_unknown_agent_slug(self, service: AutomationService) -> None:
-        with pytest.raises(AgentNotInWorkspace):
+        with pytest.raises(AgentNotInProject):
             await service.create(_project_payload(agent_slug="ghost-agent"))
 
 
@@ -347,49 +354,49 @@ class TestProjectCreateResolution:
 
 
 class TestChatLibraryAgentCreate:
-    async def test_should_lazy_create_chat_workspace_when_no_calling_session(
+    async def test_should_lazy_create_chat_project_when_no_calling_session(
         self, service: AutomationService, agent_svc: FakeAgentService
     ) -> None:
         detail = await service.create(_chat_lib_payload())
-        assert detail.workspace_id.startswith("chat-ws-")
-        # Library agent was materialized into the lazy-created workspace.
+        assert detail.project_id.startswith("chat-ws-")
+        # Library agent was materialized into the lazy-created project.
         assert len(agent_svc.instantiations) == 1
         ws_id, source_slug, instance_slug = agent_svc.instantiations[0]
         assert source_slug == "qa-engineer"
-        assert ws_id == detail.workspace_id
+        assert ws_id == detail.project_id
         # Stored slug is the new member slug, not the library slug.
         assert detail.agent_slug == instance_slug
         assert detail.agent_slug != "qa-engineer"
 
-    async def test_should_use_calling_chat_workspace_when_provided(
+    async def test_should_use_calling_chat_project_when_provided(
         self,
         service: AutomationService,
         agent_svc: FakeAgentService,
-        workspace_svc: FakeWorkspaceService,
+        project_svc: FakeProjectService,
     ) -> None:
-        # Tool-from-chat path: calling session's workspace is reused.
+        # Tool-from-chat path: calling session's project is reused.
         detail = await service.create(
             _chat_lib_payload(),
-            calling_session_workspace_id="ws-chat-existing",
+            calling_session_project_id="ws-chat-existing",
         )
-        assert detail.workspace_id == "ws-chat-existing"
+        assert detail.project_id == "ws-chat-existing"
         # And the lazy-create counter wasn't incremented.
-        assert workspace_svc._counter == 0
-        # Library agent was instantiated into the EXISTING workspace.
+        assert project_svc._counter == 0
+        # Library agent was instantiated into the EXISTING project.
         assert agent_svc.instantiations[0][0] == "ws-chat-existing"
 
     async def test_should_lazy_create_when_calling_session_is_project(
         self,
         service: AutomationService,
-        workspace_svc: FakeWorkspaceService,
+        project_svc: FakeProjectService,
     ) -> None:
         # If the user is in a project session but requests kind=chat the
         # caller can't piggyback on the project ws — fall back to lazy.
         detail = await service.create(
             _chat_lib_payload(),
-            calling_session_workspace_id="ws-proj",
+            calling_session_project_id="ws-proj",
         )
-        assert detail.workspace_id.startswith("chat-ws-")
+        assert detail.project_id.startswith("chat-ws-")
 
     async def test_should_reject_unknown_library_agent_slug(
         self, service: AutomationService
@@ -397,18 +404,18 @@ class TestChatLibraryAgentCreate:
         with pytest.raises(AgentNotFound):
             await service.create(_chat_lib_payload(agent_slug="ghost-agent"))
 
-    async def test_should_bind_to_explicit_chat_workspace_when_set(
+    async def test_should_bind_to_explicit_chat_project_when_set(
         self,
         service: AutomationService,
     ) -> None:
-        detail = await service.create(_chat_lib_payload(workspace_id="ws-chat-existing"))
-        assert detail.workspace_id == "ws-chat-existing"
+        detail = await service.create(_chat_lib_payload(project_id="ws-chat-existing"))
+        assert detail.project_id == "ws-chat-existing"
 
-    async def test_should_reject_explicit_workspace_when_it_is_project_kind(
+    async def test_should_reject_explicit_project_when_it_is_project_kind(
         self, service: AutomationService
     ) -> None:
-        with pytest.raises(AutomationWorkspaceNotFound):
-            await service.create(_chat_lib_payload(workspace_id="ws-proj"))
+        with pytest.raises(AutomationProjectNotFound):
+            await service.create(_chat_lib_payload(project_id="ws-proj"))
 
 
 # ── Trigger validation ──────────────────────────────────────────────
@@ -457,8 +464,8 @@ class TestActionKind:
         assert detail.action_kind == "task"
 
     async def test_create_task_on_chat_should_reject(self, service: AutomationService) -> None:
-        # Chat workspaces don't support task mode — the project task
-        # protocol needs project context the chat workspace doesn't have.
+        # Chat projects don't support task mode — the project task
+        # protocol needs project context the chat project doesn't have.
         with pytest.raises(AutomationTaskOnlyOnProject):
             await service.create(_chat_lib_payload(action_kind="task"))
 
@@ -472,7 +479,7 @@ class TestActionKind:
         )
         assert updated.action_kind == "task"
 
-    async def test_update_to_task_should_reject_on_chat_workspace(
+    async def test_update_to_task_should_reject_on_chat_project(
         self,
         service: AutomationService,
     ) -> None:
@@ -532,7 +539,7 @@ class TestCRUDLifecycle:
         self, service: AutomationService
     ) -> None:
         detail = await service.create(_project_payload())
-        with pytest.raises(AgentNotInWorkspace):
+        with pytest.raises(AgentNotInProject):
             await service.update(
                 detail.automation_id,
                 AutomationUpdatePayload(agent_slug="ghost-agent"),
@@ -543,24 +550,24 @@ class TestCRUDLifecycle:
             await service.get_automation_detail("ghost-id")
 
 
-# ── Workspace target picker ─────────────────────────────────────────
+# ── Project target picker ─────────────────────────────────────────
 
 
-class TestWorkspaceTargets:
+class TestProjectTargets:
     async def test_should_put_chat_sentinel_first(self, service: AutomationService) -> None:
-        targets = await service.list_workspace_targets()
+        targets = await service.list_project_targets()
         assert targets[0].kind == "chat"
-        assert targets[0].workspace_id is None
+        assert targets[0].project_id is None
 
-    async def test_should_exclude_chat_kind_workspaces(self, service: AutomationService) -> None:
-        targets = await service.list_workspace_targets()
+    async def test_should_exclude_chat_kind_projects(self, service: AutomationService) -> None:
+        targets = await service.list_project_targets()
         chat_entries = [t for t in targets if t.kind == "chat"]
         # Only the sentinel — the seeded "ws-chat-existing" is excluded.
         assert len(chat_entries) == 1
 
-    async def test_should_include_project_workspaces(self, service: AutomationService) -> None:
-        targets = await service.list_workspace_targets()
-        project_ids = [t.workspace_id for t in targets if t.kind == "project"]
+    async def test_should_include_projects(self, service: AutomationService) -> None:
+        targets = await service.list_project_targets()
+        project_ids = [t.project_id for t in targets if t.kind == "project"]
         assert "ws-proj" in project_ids
 
 
@@ -575,11 +582,12 @@ class TestMarkMissedRuns:
     ) -> None:
         # Manually plant an overdue row (next_run_at in the past).
         row = AutomationRow(
+            user_id="local-test-owner",
             id=uuid4().hex,
             name="legacy",
             agent_kind="project_member",
             agent_slug="qa-engineer",
-            workspace_id="ws-proj",
+            project_id="ws-proj",
             prompt_template="x",
             trigger_kind="cron",
             cron_expr="0 9 * * *",
@@ -607,11 +615,12 @@ class TestMarkMissedRuns:
         # After the skip, next_run_at should be in the FUTURE so the runner
         # doesn't keep replaying the overdue path on every tick.
         row = AutomationRow(
+            user_id="local-test-owner",
             id=uuid4().hex,
             name="legacy",
             agent_kind="project_member",
             agent_slug="qa-engineer",
-            workspace_id="ws-proj",
+            project_id="ws-proj",
             prompt_template="x",
             trigger_kind="cron",
             cron_expr="0 9 * * *",
@@ -631,3 +640,105 @@ class TestMarkMissedRuns:
         fresh = datastore.rows[row.id]
         assert fresh.next_run_at is not None
         assert fresh.next_run_at > now
+
+
+# ── Propose / confirm plumbing (create → confirm card) ──────────────
+
+
+class TestProposeConfirmPlumbing:
+    async def test_preview_returns_spec_without_persisting(
+        self, service: AutomationService, datastore: FakeAutomationDatastore
+    ) -> None:
+        spec = await service.preview(_project_payload())
+        assert spec.name == "Daily report"
+        assert spec.action_kind == "chat"
+        assert spec.trigger.kind == "cron"
+        # Human-readable + first fire are computed off a transient row.
+        assert spec.trigger_human_readable
+        assert spec.next_run_at is not None
+        # Nothing was written — the user's confirm click does that.
+        assert datastore.rows == {}
+
+    async def test_preview_rejects_task_on_chat(self, service: AutomationService) -> None:
+        with pytest.raises(AutomationTaskOnlyOnProject):
+            await service.preview(_project_payload(project_kind="chat", action_kind="task"))
+
+    async def test_create_stamps_origin_tool_call_id(
+        self, service: AutomationService, datastore: FakeAutomationDatastore
+    ) -> None:
+        detail = await service.create(_project_payload(), origin_tool_call_id="tc-123")
+        row = datastore.rows[detail.automation_id]
+        assert row.origin_tool_call_id == "tc-123"
+
+    async def test_create_without_origin_leaves_it_null(
+        self, service: AutomationService, datastore: FakeAutomationDatastore
+    ) -> None:
+        detail = await service.create(_project_payload())
+        assert datastore.rows[detail.automation_id].origin_tool_call_id is None
+
+    async def test_confirmed_origin_map_maps_tool_call_to_automation(
+        self, service: AutomationService, datastore: FakeAutomationDatastore
+    ) -> None:
+        d1 = await service.create(_project_payload(), origin_tool_call_id="tc-a")
+        d2 = await service.create(_project_payload(), origin_tool_call_id="tc-b")
+        mapping = await service.confirmed_origin_map(["tc-a", "tc-b", "tc-missing"])
+        assert mapping == {"tc-a": d1.automation_id, "tc-b": d2.automation_id}
+
+    async def test_confirmed_origin_map_empty_input(self, service: AutomationService) -> None:
+        assert await service.confirmed_origin_map([]) == {}
+
+
+class TestBuildCreatePayload:
+    def test_chat_defaults_agent_slug_to_session_agent(self) -> None:
+        payload = AutomationService.build_create_payload(
+            name="Daily",
+            prompt_template="x",
+            trigger=CronTrigger(cron_expr="0 9 * * *"),
+            agent_slug=None,
+            action_kind="chat",
+            project_kind="chat",
+            project_id="ws-chat-1",
+            session_agent_slug="default-assistant",
+        )
+        assert payload.agent_kind == "library_agent"
+        assert payload.agent_slug == "default-assistant"
+
+    def test_project_derives_project_member_kind(self) -> None:
+        payload = AutomationService.build_create_payload(
+            name="Daily",
+            prompt_template="x",
+            trigger=CronTrigger(cron_expr="0 9 * * *"),
+            agent_slug="qa",
+            action_kind="chat",
+            project_kind="project",
+            project_id="ws-proj",
+            session_agent_slug=None,
+        )
+        assert payload.agent_kind == "project_member"
+        assert payload.agent_slug == "qa"
+
+    def test_task_on_chat_raises(self) -> None:
+        with pytest.raises(AutomationTaskOnlyOnProject):
+            AutomationService.build_create_payload(
+                name="Daily",
+                prompt_template="x",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+                agent_slug="qa",
+                action_kind="task",
+                project_kind="chat",
+                project_id=None,
+                session_agent_slug=None,
+            )
+
+    def test_missing_agent_raises(self) -> None:
+        with pytest.raises(AutomationAgentRequired):
+            AutomationService.build_create_payload(
+                name="Daily",
+                prompt_template="x",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+                agent_slug=None,
+                action_kind="chat",
+                project_kind="project",
+                project_id="ws-proj",
+                session_agent_slug=None,
+            )

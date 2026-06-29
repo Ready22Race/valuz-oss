@@ -3,23 +3,27 @@
 ADR-006 freezes ``session.model`` at create time, but skills + MCP stay
 mutable. These helpers (re)install the ``valuz-project-docs`` skill +
 ``valuz_docs`` MCP on a session — or across every active session in a
-workspace when a KB binding changes. Deliberately **sync**: invoked from sync
+project when a KB binding changes. Deliberately **sync**: invoked from sync
 service code (``send_message``) and from the synchronous in-process eventbus
-(``workspace.bindings.changed``); the async host store is driven via the
-``kernel_sync`` thread bridge.
+(``project.bindings.changed``); the async host store is driven via the
+former ``kernel_sync`` thread bridge (now fully async).
 """
 
 from __future__ import annotations
 
 import logging
 
+from app.schemas import UpdateSessionRequest
+
+import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect for app.schemas
+from valuz_agent.adapters import kernel_client
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.modules.sessions.mappers import _copy_session
 
 logger = logging.getLogger(__name__)
 
 
-def refresh_docs_capabilities_for_session(session_id: str) -> bool:
+async def refresh_docs_capabilities_for_session(session_id: str) -> bool:
     """Ensure the valuz-project-docs skill + ``valuz_docs`` MCP are
     present on an existing session row.
 
@@ -45,17 +49,16 @@ def refresh_docs_capabilities_for_session(session_id: str) -> bool:
 
     Safe to call repeatedly — idempotent on the docs pair.
     """
-    from src.core.types import (
-        McpHttpServerConfig as _McpHttpServerConfig,  # type: ignore[import-not-found]
+    from app.schemas import (
+        McpHttpServerConfigSchema as _McpHttpServerConfig,
     )
 
-    from valuz_agent.adapters import kernel_sync
     from valuz_agent.adapters.capability_resolver import _PROJECT_DOCS_SKILL_DIR
     from valuz_agent.infra.config import settings as _settings
     from valuz_agent.integrations.docs_mcp_server import docs_mcp_url
-    from valuz_agent.modules.projects.datastore import WorkspaceDatastore
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-    session = kernel_sync.load_session_sync(session_id)
+    session = await kernel_client.get_session(require_current_user_id(), session_id)
     if session is None:
         return False
     # Sessions that have already finished don't run new turns; capability
@@ -63,25 +66,21 @@ def refresh_docs_capabilities_for_session(session_id: str) -> bool:
     if session.status in ("terminated",):
         return False
 
-    workspace_id = str(session.project_id)
+    project_id = str(((session.metadata or {}).get("valuz", {}) or {}).get("project_id") or "")
+    if not project_id:
+        return False
 
     # Every session (chat + project) carries the docs capability —
     # see ``capability_resolver`` (2.5). The MCP server's tools return
-    # empty results when the workspace has no KB bindings, so chat
+    # empty results when the project has no KB bindings, so chat
     # sessions trivially short-circuit at the tool layer.
     #
-    # This function stays SYNC: it's invoked both from sync service code
-    # (``send_message``) and from the synchronous in-process eventbus
-    # (``workspace.bindings.changed`` → ``refresh_docs_capabilities_for_workspace``).
-    # The host datastore is now async, so we drive the workspace lookup on a
-    # dedicated thread (same bridge ``kernel_sync`` uses for the async kernel
-    # store) rather than colour this whole sync surface async.
-    async def _load_workspace():  # type: ignore[no-untyped-def]
+    async def _load_project():  # type: ignore[no-untyped-def]
         async with async_unit_of_work(commit=False) as db:
-            return await WorkspaceDatastore(db).get_by_id(workspace_id)
+            return await ProjectDatastore(db).get_by_id(session.user_id, project_id)
 
-    workspace = kernel_sync._run_in_thread(_load_workspace)  # noqa: SLF001
-    if workspace is None:
+    project = await _load_project()
+    if project is None:
         return False
     if not _PROJECT_DOCS_SKILL_DIR.is_dir():
         return False
@@ -110,12 +109,11 @@ def refresh_docs_capabilities_for_session(session_id: str) -> bool:
                 },
             )
         )
-    updated = _copy_session(
-        session,
-        skills=tuple(new_skills),
-        mcp_servers=tuple(new_mcp),
+    await kernel_client.update_session(
+        require_current_user_id(),
+        session_id,
+        UpdateSessionRequest(skills=list(new_skills), mcp_servers=list(new_mcp)),
     )
-    kernel_sync.save_session_sync(updated)
     logger.info(
         "Refreshed docs capabilities on session %s (skill=%s mcp=%s)",
         session_id,
@@ -125,40 +123,45 @@ def refresh_docs_capabilities_for_session(session_id: str) -> bool:
     return True
 
 
-def refresh_always_on_mcp_for_session(session_id: str) -> bool:
+async def refresh_always_on_mcp_for_session(session_id: str) -> bool:
     """Re-stamp the always-on in-process MCP servers (docs / automations /
     connectors) on an existing session row with the CURRENT process values.
 
     Why this exists
     ---------------
-    ``settings.internal_mcp_token`` is generated **per process** and is baked
-    into every always-on ``McpHttpServerConfig`` header at session create-time
-    (``capability_resolver.always_on_http_mcp_servers``). It is not stable
-    across restarts. A session created before a backend restart therefore
-    carries a *stale* ``X-Valuz-Internal``; when the turn resumes, the
-    in-process MCP gate 403s every request and Claude Code parks the server in
-    ``needsAuth`` — hiding the real tools (``automation`` / ``doc_search`` /
-    ``create_mcp``) and exposing only its synthetic OAuth ``authenticate`` /
-    ``complete_authentication`` stubs. The agent then "needs OAuth" for a
-    server that never used OAuth.
+    The always-on ``McpHttpServerConfig`` headers carry ``X-Valuz-Internal``
+    (``settings.internal_mcp_token``) + ``backend_base_url`` + ``session_id``,
+    baked at session create-time (``capability_resolver.always_on_http_mcp_servers``).
+    Historically ``internal_mcp_token`` was a per-process RANDOM secret, so a
+    session created before a backend restart carried a *stale* token; on resume
+    the in-process MCP gate 403'd every request and Claude Code parked the server
+    in ``needsAuth`` — hiding the real tools (``automation`` / ``doc_search`` /
+    ``create_mcp``, and for a lead the whole orchestration set) and exposing only
+    synthetic OAuth stubs. The token is now DERIVED from the stable local owner
+    id (``config.internal_mcp_token``) so it no longer rotates across restarts —
+    but the ``backend_base_url`` / ``session_id`` can still drift (port change,
+    legacy rows), and an ``internal_mcp_token_override`` change still needs
+    convergence, so this re-stamp stays as cheap, idempotent self-healing.
 
-    Re-stamping the always-on trio on every turn keeps the token in-memory
-    while letting this derived state self-heal: the persisted headers are
-    rewritten with the live token + ``backend_base_url`` + ``session_id``,
-    preserving any user-attached external MCP entries untouched.
+    Re-stamping the always-on trio on every turn rewrites the persisted headers
+    with the live values, preserving any user-attached external MCP entries
+    untouched.
 
     Returns ``True`` when the session row actually changed (i.e. something was
     stale), ``False`` when the always-on set already matched (the common case,
     so the prompt cache stays warm).
     """
-    from valuz_agent.adapters import kernel_sync
-    from valuz_agent.adapters.capability_resolver import always_on_http_mcp_servers
+    from valuz_agent.adapters.capability_resolver import (
+        always_on_http_mcp_servers,
+        harness_toolkit_for_run_kind,
+    )
 
-    session = kernel_sync.load_session_sync(session_id)
+    session = await kernel_client.get_session(require_current_user_id(), session_id)
     if session is None or session.status in ("terminated",):
         return False
 
-    fresh = always_on_http_mcp_servers(session_id)
+    run_kind = ((session.metadata or {}).get("valuz", {}) or {}).get("run_kind")
+    fresh = always_on_http_mcp_servers(session_id, toolkit=harness_toolkit_for_run_kind(run_kind))
     fresh_names = {m.name for m in fresh}
     current = list(session.mcp_servers or ())
     # Drop any existing always-on entry (stale token/url), keep everything
@@ -171,29 +174,31 @@ def refresh_always_on_mcp_for_session(session_id: str) -> bool:
     if new_mcp == tuple(current):
         return False
 
-    updated = _copy_session(session, mcp_servers=new_mcp)
-    kernel_sync.save_session_sync(updated)
+    await kernel_client.update_session(
+        require_current_user_id(), session_id, UpdateSessionRequest(mcp_servers=list(new_mcp))
+    )
     logger.info("Re-stamped always-on MCP token on session %s", session_id)
     return True
 
 
-def refresh_docs_capabilities_for_workspace(workspace_id: str) -> int:
-    """Refresh docs capabilities for every active session in ``workspace_id``.
+async def refresh_docs_capabilities_for_project(project_id: str) -> int:
+    """Refresh docs capabilities for every active session in ``project_id``.
 
-    Used as the ``workspace.bindings.changed`` event handler so binding a
+    Used as the ``project.bindings.changed`` event handler so binding a
     document on a project propagates to all open sessions immediately
     (not just to whatever new session the user creates afterwards).
 
     Returns the number of sessions whose row actually changed.
     """
-    from valuz_agent.adapters import kernel_sync
+    from valuz_agent.modules.sessions import project_index
 
     try:
-        sessions = kernel_sync.list_sessions_sync(project_id=workspace_id, limit=500)
+        ids = await project_index.list_session_ids(project_id, limit=500)
+        sessions = await kernel_client.list_sessions(require_current_user_id(), ids=ids, limit=500)
     except Exception:  # noqa: BLE001 — never raise into eventbus handlers
         logger.exception(
-            "refresh_docs_capabilities_for_workspace: failed to list sessions for %s",
-            workspace_id,
+            "refresh_docs_capabilities_for_project: failed to list sessions for %s",
+            project_id,
         )
         return 0
     changed = 0
@@ -202,7 +207,7 @@ def refresh_docs_capabilities_for_workspace(workspace_id: str) -> int:
         if s.status == "terminated":
             continue
         try:
-            if refresh_docs_capabilities_for_session(s.id):
+            if await refresh_docs_capabilities_for_session(s.id):
                 changed += 1
         except Exception:  # noqa: BLE001 — one bad session can't sink the batch
             logger.exception(
@@ -211,8 +216,8 @@ def refresh_docs_capabilities_for_workspace(workspace_id: str) -> int:
             )
     if changed:
         logger.info(
-            "workspace.bindings.changed: refreshed docs caps on %d session(s) for workspace %s",
+            "project.bindings.changed: refreshed docs caps on %d session(s) for project %s",
             changed,
-            workspace_id,
+            project_id,
         )
     return changed

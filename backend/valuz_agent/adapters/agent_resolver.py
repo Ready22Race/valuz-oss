@@ -1,14 +1,14 @@
-"""agent_resolver — resolve workspace members and build kernel Sessions for dispatch.
+"""agent_resolver — resolve project members and build kernel Sessions for dispatch.
 
 Slice 1 scope (lead-dispatch-mvp §S3):
-  resolve_member_agent — workspace_id + agent_slug → AgentConfig or None.
+  resolve_member_agent — project_id + agent_slug → AgentConfig or None.
 
 Slice 2 scope (lead-dispatch-mvp §S3 / H-T6):
   DISPATCH_PLAYBOOK — the §1.5 methodology text injected into lead sessions only.
   build_member_session — constructs a full kernel Session dataclass ready for
     save_session_sync. Lead sessions receive the dispatch playbook; member sessions
     receive only the scoped brief. Caller is responsible for saving the returned
-    Session via kernel_sync.save_session_sync.
+    create request via ``kernel_client.create_session``.
 
 Boundary notes (§S0):
   - kernel Session has NO ``tools`` field — tools live on AgentConfig only.
@@ -20,49 +20,179 @@ Boundary notes (§S0):
 # ruff: noqa: I001 — kernel_bootstrap side-effect import must precede ``from src.core``
 from __future__ import annotations
 
+import functools
 import logging
 import os
+import sys
+import threading
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import valuz_agent.boot.kernel  # noqa: F401 — ensure kernel sys.path
 
-from src.core import AgentConfig, ModelSettings, Session  # type: ignore[import-not-found]
+from app.schemas import (
+    CreateSessionRequest,
+    ModelSettingsSchema,
+)
+from src.core import AgentConfig
 
-from valuz_agent.adapters import kernel_store
 from valuz_agent.adapters.capability_resolver import (
     always_on_http_mcp_servers,
     always_on_skill_paths,
     resolve_skill_slugs_to_paths,
 )
-from valuz_agent.adapters.system_prompt_builder import build_workspace_system_prompt
+from valuz_agent.adapters.system_prompt_builder import (
+    assemble_session_instructions,
+    build_project_system_prompt,
+)
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Goal-mode brief length guard
+# Goal-mode brief budget
 # ---------------------------------------------------------------------------
 #
-# The bundled Claude Code CLI inside ``claude_agent_sdk._bundled.claude`` caps
-# ``/goal <text>`` payloads at 4000 characters and rejects anything longer
-# with::
+# A goal-mode session feeds its brief into the bundled Claude Code CLI as a
+# ``/goal <text>`` payload. Two limits apply:
 #
-#     Goal condition is limited to 4000 characters (got NNNN)
+#   1. TOKEN budget (primary) — we keep a goal brief within ``GOAL_BRIEF_MAX_TOKENS``
+#      (~2000 tokens). Past that the goal is too heavy to drive a focused
+#      auto-loop, so the full text is spilled to a doc and only a short pointer
+#      rides ``/goal``.
+#   2. CHARACTER backstop (hard) — the CLI itself rejects ``/goal`` payloads over
+#      4000 chars ("Goal condition is limited to 4000 characters (got NNNN)").
+#      A token-light but char-heavy brief could pass the token budget yet still
+#      blow this cap, so ``GOAL_BRIEF_MAX_CHARS`` (3900, ~100 chars headroom for
+#      the ``/goal `` prefix + padding) is enforced regardless.
 #
-# That error surfaces mid-turn (after the session has been created, after
-# attachments are registered, after agents start spinning up) — by which
-# point the user sees an opaque crash, not a fixable input error.
-#
-# We pre-check inside ``build_member_session`` whenever ``goal_mode=True`` so
-# the failure is loud and immediate, with a friendly hint at the call site
-# that actually has the raw user prompt. The budget is 3900 — leaves ~100
-# chars of headroom for the ``/goal `` prefix and any future runtime padding.
-# Subjective hierarchy: a single number kept in one place, reusable from
-# tests, is preferable to a literal sprinkled across the 6 brief construction
-# sites in ``modules/tasks/orchestrator.py``.
+# ``goal_brief_exceeds_budget`` spills when EITHER limit is exceeded, so we honor
+# the token budget while never crashing the CLI mid-turn. Token counting uses the
+# OSS ``tiktoken`` BPE tokenizer (``o200k_base`` — already in the dependency
+# tree): the exact tokenizer for the codex runtime and a close open-source proxy
+# for Claude (no official Claude tokenizer ships for offline use). If tiktoken
+# can't load its vocab (offline packaged build), counting degrades to a
+# script-aware char heuristic so the fence never fails.
 
+GOAL_BRIEF_MAX_TOKENS: int = 2000
 GOAL_BRIEF_MAX_CHARS: int = 3900
+
+# OSS tokenizer vocabulary. ``o200k_base`` is the GPT-4o / codex BPE vocab — the
+# most modern tiktoken encoding and the best open-source proxy for Claude.
+_TOKEN_ENCODING_NAME = "o200k_base"
+
+
+def _vendored_tiktoken_cache_dir() -> str | None:
+    """Locate the vendored tiktoken vocab dir so the (offline) packaged app can
+    load the encoding without ever reaching the network.
+
+    tiktoken reads a cached vocab from ``$TIKTOKEN_CACHE_DIR/<sha1(blob_url)>``
+    before downloading. We ship that file under ``backend/vendor/tiktoken/`` and
+    point the env there. Priority: ``VALUZ_TIKTOKEN_CACHE_DIR`` override > the
+    frozen bundle (``_MEIPASS/vendor/tiktoken``, staged by the PyInstaller spec)
+    > the dev tree (``backend/vendor/tiktoken``). Returns None if none exist,
+    leaving tiktoken to its default (network) behavior.
+    """
+    env = os.environ.get("VALUZ_TIKTOKEN_CACHE_DIR")
+    if env and os.path.isdir(env):
+        return env
+    if getattr(sys, "frozen", False):
+        bundled = os.path.join(sys._MEIPASS, "vendor", "tiktoken")  # type: ignore[attr-defined]
+        if os.path.isdir(bundled):
+            return bundled
+    # Dev tree: this file is backend/valuz_agent/adapters/agent_resolver.py.
+    dev = Path(__file__).resolve().parents[2] / "vendor" / "tiktoken"
+    return str(dev) if dev.is_dir() else None
+
+
+@functools.lru_cache(maxsize=1)
+def _token_encoding() -> Any | None:
+    """Lazily load the OSS ``tiktoken`` encoding; return None if unavailable.
+
+    Points ``TIKTOKEN_CACHE_DIR`` at the vendored vocab first (so a packaged,
+    offline app loads it without network), unless the operator already set it.
+    Cached so the one-time load is paid once per process. Returns None — never
+    raises — when tiktoken or its vocab can't be loaded (e.g. an unvendored
+    offline build), letting ``estimate_tokens`` fall back to the heuristic.
+    Prefer ``prewarm_token_estimator`` at boot so this load is off the event loop.
+    """
+    try:
+        if not os.environ.get("TIKTOKEN_CACHE_DIR"):
+            cache_dir = _vendored_tiktoken_cache_dir()
+            if cache_dir:
+                os.environ["TIKTOKEN_CACHE_DIR"] = cache_dir
+
+        import tiktoken
+
+        return tiktoken.get_encoding(_TOKEN_ENCODING_NAME)
+    except Exception:  # noqa: BLE001 — any failure → heuristic fallback
+        logger.debug(
+            "tiktoken %s unavailable — goal token budget falls back to the char heuristic",
+            _TOKEN_ENCODING_NAME,
+            exc_info=True,
+        )
+        return None
+
+
+def prewarm_token_estimator() -> None:
+    """Warm the tiktoken encoding in a background daemon thread (best-effort).
+
+    The first ``tiktoken.get_encoding`` may fetch + parse the vocab (seconds);
+    doing it lazily on the first task would stall the event loop. Boot calls this
+    so the cache (or the None fallback) is ready before any task runs. Safe to
+    call repeatedly — the lru_cache makes the actual load run at most once.
+    """
+    threading.Thread(target=_token_encoding, name="tiktoken-prewarm", daemon=True).start()
+
+
+def _heuristic_tokens(text: str) -> int:
+    """Dependency-free token estimate used when tiktoken is unavailable.
+
+    Approximate by script: CJK ideographs / kana / hangul cost ~1 token each
+    (they rarely merge), and the remaining (mostly Latin/punctuation) text costs
+    ~1 token per 4 chars — the widely-used rough ratio. Conservative on purpose.
+    """
+
+    def _is_cjk(ch: str) -> bool:
+        return (
+            "一" <= ch <= "鿿"  # CJK Unified Ideographs
+            or "㐀" <= ch <= "䶿"  # CJK Extension A
+            or "぀" <= ch <= "ヿ"  # Hiragana + Katakana
+            or "가" <= ch <= "힣"  # Hangul syllables
+            or "豈" <= ch <= "﫿"  # CJK Compatibility Ideographs
+        )
+
+    cjk = sum(1 for ch in text if _is_cjk(ch))
+    other = len(text) - cjk
+    return cjk + (other + 3) // 4
+
+
+def estimate_tokens(text: str) -> int:
+    """Token count for the goal-mode budget.
+
+    Uses the OSS ``tiktoken`` ``o200k_base`` BPE tokenizer when available
+    (precise), falling back to a script-aware char heuristic offline. Arbitrary
+    user text is encoded with ``disallowed_special=()`` so literal ``<|...|>``
+    sequences are counted as plain text rather than raising.
+    """
+    if not text:
+        return 0
+    enc = _token_encoding()
+    if enc is not None:
+        try:
+            return len(enc.encode(text, disallowed_special=()))
+        except Exception:  # noqa: BLE001 — never let counting fail the fence
+            logger.debug("tiktoken encode failed — using heuristic", exc_info=True)
+    return _heuristic_tokens(text)
+
+
+def goal_brief_exceeds_budget(brief: str) -> bool:
+    """True when ``brief`` is too long to ride a ``/goal`` payload — over the
+    token budget OR the hard character backstop (see module comment)."""
+    return estimate_tokens(brief) > GOAL_BRIEF_MAX_TOKENS or len(brief) > GOAL_BRIEF_MAX_CHARS
 
 
 class BriefTooLongError(ValueError):
@@ -87,13 +217,85 @@ class BriefTooLongError(ValueError):
 def assert_goal_brief_length(brief: str, *, limit: int = GOAL_BRIEF_MAX_CHARS) -> None:
     """Raise ``BriefTooLongError`` when ``brief`` exceeds the goal-mode cap.
 
-    Pure — no side effects. Callers that need the friendly error at task
-    *creation* time (chat draft/commit), before any session is built, can
-    call this directly with the user's prompt.
+    Pure — no side effects. Retained as a public predicate; the task pipeline
+    no longer raises on a long goal — it *spills* it to a doc instead (see
+    ``spill_goal_brief_if_too_long``). Kept for callers/tests that want the
+    bare length assertion.
     """
     n = len(brief)
     if n > limit:
         raise BriefTooLongError(length=n, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Goal-mode brief spill — the fence that replaces the hard length error.
+# ---------------------------------------------------------------------------
+#
+# Instead of failing an over-long task goal / subtask brief mid-turn, we LAND the
+# full brief in a doc under the session's working dir and hand ``/goal`` only a
+# short pointer that tells the agent to read that doc first. Goal mode then
+# auto-loops against a brief that always fits the budget, while the full goal +
+# refs + acceptance criteria live in a file every agent (lead or member) can
+# read. The spill triggers on ``goal_brief_exceeds_budget`` (token budget OR the
+# hard char backstop).
+#
+# This is a Lead-facing concern (the lead drives the whole task goal AND writes
+# each subtask's goal), so the lead playbooks flag both directions: a goal may
+# arrive as a doc pointer to read, and an over-long subtask goal should be
+# written to a file with only its path dispatched.
+
+
+def _goal_brief_pointer(doc_path: str, *, is_lead: bool) -> str:
+    """Build the short ``/goal`` pointer that stands in for a spilled brief."""
+    noun = "任务" if is_lead else "子任务"
+    return (
+        f"本{noun}的完整目标内容较长(超出 {GOAL_BRIEF_MAX_TOKENS} token 预算),已落地为"
+        f"文档,无法直接作为 goal 条件传入。\n\n"
+        f"请先用文件读取工具完整阅读下面这份文档——它包含本{noun}的完整目标、参考资料"
+        f"与验收标准——然后据此开展工作,直到达成其中描述的目标:\n\n"
+        f"{doc_path}"
+    )
+
+
+def spill_goal_brief_if_too_long(
+    brief: str,
+    *,
+    run_dir: str | Path,
+    task_id: str,
+    label: str,
+    is_lead: bool,
+) -> str:
+    """Return ``brief`` unchanged when it fits the goal-mode budget; otherwise
+    spill the full text to a doc under ``run_dir`` and return a short pointer.
+
+    "Fits the budget" = within ``GOAL_BRIEF_MAX_TOKENS`` AND the hard char
+    backstop (see ``goal_brief_exceeds_budget``). Call this at every site that
+    feeds a brief into a goal-mode session (i.e. the ``/goal`` payload): task
+    kickoff/commit (lead), dispatch (member), and recovery re-injection.
+    Idempotent against an already-spilled (short) brief — one within budget is
+    returned verbatim and no file is written, so it is safe to call both at the
+    caller (to fence the initial prompt) and as defense-in-depth inside
+    ``build_member_session`` (to fence the embedded instructions) without
+    double-writing.
+
+    Only the file write touches disk; the path comes from ``FsRegistry`` (which
+    never writes content), keeping the single-write-registry rule intact.
+    """
+    if not goal_brief_exceeds_budget(brief):
+        return brief
+    from valuz_agent.infra.fs_registry import fs_registry
+
+    doc_path = fs_registry.task_brief_path(run_dir, task_id, label)
+    doc_path.write_text(brief, encoding="utf-8")
+    logger.info(
+        "goal brief spilled to doc (~%d tokens / %d chars > budget): task=%s label=%s -> %s",
+        estimate_tokens(brief),
+        len(brief),
+        task_id,
+        label,
+        doc_path,
+    )
+    return _goal_brief_pointer(str(doc_path), is_lead=is_lead)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +307,21 @@ DISPATCH_PLAYBOOK = """\
 ## Dispatch Playbook (lead session only)
 
 You are the lead for this Task. Drive the WHOLE task in this one turn —
-dispatch, collect, review, repeat — until you call finish_task. Protocol:
+dispatch, collect, review, repeat — until you call finish_task.
+
+NOTE — the goal-mode length budget (~2000 tokens per goal). Two directions:
+  • RECEIVING: if THIS task's goal was too long to pass inline you'll get a
+    short pointer to a doc file instead of the full goal — read that doc FIRST
+    (file-read tool) for the complete goal / references / criteria before you
+    plan.
+  • DISPATCHING: keep each subtask's `goal` concise. When a subtask needs a lot
+    of context or instructions (over ~2000 tokens), FIRST write that content to
+    a file in the project (e.g. tasks/_briefs/<name>.md) and put the FILE PATH
+    in the subtask `goal` (or in refs) — do NOT inline a huge goal. (Over-long
+    goals are auto-spilled to a doc as a safety net, but writing the file
+    yourself keeps the plan readable and the member focused.)
+
+Protocol:
 
 1. PLAN FIRST. Decompose the goal into a structured subtask plan and record it
    with plan_task(subtasks=[{key, title, goal, agent, review_criteria,
@@ -176,7 +392,19 @@ COMMITTED_LEAD_PLAYBOOK = """\
 You are the lead for this Task. Your plan was ALREADY laid down and approved
 by the user during a chat draft session — DO NOT call plan_task (the handler
 will reject it because the plan is non-empty). Drive execution in this one
-turn until finish_task. Protocol:
+turn until finish_task.
+
+NOTE — the goal-mode length budget (~2000 tokens per goal). Two directions:
+  • RECEIVING: if THIS task's goal was too long to pass inline you'll get a
+    short pointer to a doc file instead of the full goal — read that doc FIRST
+    (file-read tool) for the complete goal / references / criteria.
+  • DISPATCHING / modify_plan: keep each subtask's `goal` concise. When a
+    subtask needs a lot of context (over ~2000 tokens), FIRST write it to a
+    file in the project and put the FILE PATH in the subtask `goal` (or refs)
+    — do NOT inline a huge goal. (Over-long goals are auto-spilled as a safety
+    net, but writing the file yourself keeps the plan readable.)
+
+Protocol:
 
 1. READ THE PLAN. Start by calling get_plan() to see the committed subtask
    DAG: each node carries a stable `key`, target `agent`, dependencies, and
@@ -223,7 +451,7 @@ ROLE_SUMMARY_LIMIT = 400
 
 
 # Playbook nudge appended to project-conversation agents (i.e. chat sessions
-# in a workspace that can spawn tasks). Teaches the model when to use
+# in a project that can spawn tasks). Teaches the model when to use
 # ``draft_task`` vs ``create_task`` and when to ``inject_into_task`` instead
 # of starting a new task mid-execution. NOT applied to lead/member agents —
 # their playbooks (DISPATCH_PLAYBOOK / COMMITTED_LEAD_PLAYBOOK) cover their
@@ -231,7 +459,7 @@ ROLE_SUMMARY_LIMIT = 400
 CHAT_TASK_PLAYBOOK = """\
 ## Task playbook (chat mode)
 
-You are the user's chat partner inside a workspace. When the user asks
+You are the user's chat partner inside a project. When the user asks
 you to "do" something that needs orchestration (multiple steps, parallel
 sub-work, or a longer-running job), follow this flow.
 
@@ -274,17 +502,17 @@ You may modify the plan of a DRAFT task directly with ``modify_plan``
 
 1. KNOW THE TEAM FIRST.
 
-   ⚠️ ``list_members`` is an MCP TOOL CALL — it returns the workspace's
+   ⚠️ ``list_members`` is an MCP TOOL CALL — it returns the project's
    agent roster (slugs + role_summary) from the database. It is NOT a
    filesystem lookup. **DO NOT** use Bash / Read / ls to search for
-   agents — this workspace's team is NOT defined in ``.claude/agents/``
-   or any other directory. Agents are workspace-scoped DB rows,
+   agents — this project's team is NOT defined in ``.claude/agents/``
+   or any other directory. Agents are project-scoped DB rows,
    accessible only via the ``list_members`` MCP tool.
 
    Hard rule: BEFORE the FIRST ``draft_task`` / ``create_task`` of a
    conversation, you MUST emit a ``list_members()`` tool call and read
    its result. Skip this and the next call will fail with
-   ``agent <slug> is not a member of workspace`` — slugs you invent
+   ``agent <slug> is not a member of project`` — slugs you invent
    (``claude``, ``assistant``, ``lead``, ``Frontend Engineer``, …)
    are not real members.
 
@@ -379,9 +607,40 @@ def summarize_role(instructions: str | None) -> str:
     return flat[:ROLE_SUMMARY_LIMIT].rstrip() + "…"
 
 
+async def _member_agent_config(member, members: ProjectMemberDatastore):  # noqa: ANN001, ANN202
+    """Build the member's AgentConfig from its source library row.
+
+    The kernel has no agents table — the library AgentRow is the single
+    source of truth and the config is built in memory (and embedded into
+    sessions as their snapshot). Members created before provenance landed
+    (``source_agent_slug`` NULL, despite the legacy backfill) resolve to None.
+    """
+    if not member.source_agent_slug:
+        logger.warning(
+            "member %s/%s has no source_agent_slug — cannot build agent config",
+            member.project_id,
+            member.agent_slug,
+        )
+        return None
+    from valuz_agent.modules.agents.datastore import AgentDatastore
+    from valuz_agent.modules.agents.service import AgentService
+
+    db = members._db  # noqa: SLF001 — same unit of work as the member lookup
+    row = await AgentDatastore(db).get_agent(require_current_user_id(), member.source_agent_slug)
+    if row is None:
+        logger.warning(
+            "member %s/%s points at missing library agent %s",
+            member.project_id,
+            member.agent_slug,
+            member.source_agent_slug,
+        )
+        return None
+    return await AgentService(db).build_agent_config(row)
+
+
 async def build_member_roster(
     *,
-    workspace_id: str,
+    project_id: str,
     members: ProjectMemberDatastore,
     exclude_slug: str,
 ) -> str:
@@ -391,12 +650,12 @@ async def build_member_roster(
     can route sub-tasks to the right agent without first calling
     ``list_members``. Excludes the lead itself.
     """
-    rows = await members.list_by_workspace(workspace_id)
+    rows = await members.list_by_project(require_current_user_id(), project_id)
     lines: list[str] = []
     for row in rows:
         if row.agent_slug == exclude_slug:
             continue
-        agent = await kernel_store.load_agent(row.kernel_agent_id)
+        agent = await _member_agent_config(row, members)
         if agent is None:
             continue
         summary = summarize_role(agent.instructions)
@@ -418,29 +677,28 @@ async def build_member_roster(
 
 
 async def resolve_member_agent(
-    workspace_id: str,
+    project_id: str,
     agent_slug: str,
     members: ProjectMemberDatastore,
 ) -> AgentConfig | None:
-    """Resolve a workspace-local agent slug to its kernel AgentConfig.
+    """Resolve a project-local agent slug to its kernel AgentConfig.
 
     Returns None when:
-      - No ProjectMemberRow exists for (workspace_id, agent_slug)
+      - No ProjectMemberRow exists for (project_id, agent_slug)
       - The kernel agent row is missing (orphaned membership)
 
     Callers should handle None as "agent not found" and surface a 404.
     """
-    member = await members.get(workspace_id, agent_slug)
+    member = await members.get(require_current_user_id(), project_id, agent_slug)
     if member is None:
-        logger.debug("resolve_member_agent: no membership for %s/%s", workspace_id, agent_slug)
+        logger.debug("resolve_member_agent: no membership for %s/%s", project_id, agent_slug)
         return None
 
-    agent = await kernel_store.load_agent(member.kernel_agent_id)
+    agent = await _member_agent_config(member, members)
     if agent is None:
         logger.warning(
-            "resolve_member_agent: orphaned member row — kernel agent %s missing for %s/%s",
-            member.kernel_agent_id,
-            workspace_id,
+            "resolve_member_agent: member %s/%s has no resolvable library agent",
+            project_id,
             agent_slug,
         )
     return agent
@@ -468,7 +726,7 @@ async def _resolve_agent_provider(
     if not provider_id:
         logger.warning(
             "agent_resolver: agent %s (%s) has no provider_id in metadata — "
-            "metadata keys=%s. Re-add the agent via the project workspace "
+            "metadata keys=%s. Re-add the agent via the project "
             "dialog so the provider pin is written.",
             agent.id,
             agent.name,
@@ -497,13 +755,19 @@ async def _resolve_agent_provider(
             runtime_provider=agent.runtime_provider,
         )
         if resolved is None:
-            logger.warning(
-                "agent_resolver: resolve_model_provider returned None for "
-                "agent %s provider_id=%s model=%s — provider row may be "
-                "missing, disabled, or its credential source unresolved.",
-                agent.id,
+            # The ONLY non-raising None path in ``resolve_model_provider`` is an
+            # OAuth subscription provider (``auth_type="oauth"`` — codex/claude
+            # ``/login``): there is no API key to forward because credentials
+            # live in the CLI's keychain, so the kernel skips env overrides and
+            # the spawned process uses the ambient login token. This is the
+            # healthy, expected path — every genuine failure (row missing /
+            # disabled / no credentials) raises ``ProviderNotResolvable`` and is
+            # handled in the ``except`` below. Debug breadcrumb only, not a warning.
+            logger.debug(
+                "agent_resolver: provider %s for agent %s is an OAuth subscription "
+                "(no env override; CLI supplies the credential out-of-band).",
                 provider_id,
-                model,
+                agent.id,
             )
         return resolved
     except Exception:
@@ -515,17 +779,30 @@ async def _resolve_agent_provider(
         return None
 
 
+def embed_agent_config(request: CreateSessionRequest, agent: object) -> CreateSessionRequest:
+    """Return *request* with its ``agent_config`` snapshot replaced by *agent*.
+
+    *agent* is a domain ``AgentConfig`` (e.g. the per-task lead clone from
+    ``_materialize_lead_agent``); it is serialized to the wire schema here so
+    callers never touch the schema layer themselves. The request is a Pydantic
+    model — ``dataclasses.replace`` does not apply.
+    """
+    from app.serializers import agent_config_to_schema
+
+    return request.model_copy(update={"agent_config": agent_config_to_schema(agent)})
+
+
 async def build_member_session(
     *,
-    workspace_id: str,
+    project_id: str,
     agent_slug: str,
     members: ProjectMemberDatastore,
     is_lead: bool,
     task_id: str,
     run_dir: str,
     brief: str,
-    workspace_name: str = "",
-    workspace_instructions_md: str | None = None,
+    project_name: str = "",
+    project_instructions_md: str | None = None,
     model_override: str | None = None,
     providers: object | None = None,
     secrets: object | None = None,
@@ -533,15 +810,15 @@ async def build_member_session(
     dispatch_mode: str = "sync",
     goal_mode: bool = False,
     plan_pre_committed: bool = False,
-) -> Session | None:
-    """Construct a kernel Session dataclass for a dispatch member or lead.
+) -> CreateSessionRequest | None:
+    """Construct the kernel create-session request for a dispatch member or lead.
 
     Returns None when the member cannot be resolved (orphaned slug).
-    Caller must persist the returned Session via ``kernel_sync.save_session_sync``.
+    Caller persists via ``kernel_client.create_session`` (the returned object IS the request).
 
     Args:
-        workspace_id: The valuz workspace id (= kernel project id).
-        agent_slug: The workspace-local agent handle.
+        project_id: The valuz project id (= kernel project id).
+        agent_slug: The project-local agent handle.
         members: Open ProjectMemberDatastore instance.
         is_lead: True for the task lead session; False for subtask sessions.
         task_id: The valuz task id (for metadata).
@@ -550,43 +827,51 @@ async def build_member_session(
                  subrun_dir is only used for opt-in repo-worktree isolation.
         brief: Text injected as the session brief — for leads this is the
                full task goal/md; for subtasks it is the scoped goal+refs.
-        workspace_name: Optional workspace display name (for system prompt).
-        workspace_instructions_md: Optional workspace-level instructions.
+        project_name: Optional project display name (for system prompt).
+        project_instructions_md: Optional project-level instructions.
         model_override: Override the agent's default model when provided.
 
     Session fields set:
         cwd = run_dir (K-PR3)
-        instructions = agent.instructions + workspace_prompt
+        instructions = agent.instructions + project_prompt
                        + (DISPATCH_PLAYBOOK if is_lead else "") + brief
-        metadata["valuz"] = {workspace_id, agent_slug, task_id, run_kind}
+        metadata["valuz"] = {project_id, agent_slug, task_id, run_kind}
         runtime_provider, model, skills, mcp_servers, permission_mode from agent
     """
-    member_row = await members.get(workspace_id, agent_slug)
+    member_row = await members.get(require_current_user_id(), project_id, agent_slug)
     if member_row is None:
-        logger.debug("build_member_session: no membership for %s/%s", workspace_id, agent_slug)
+        logger.debug("build_member_session: no membership for %s/%s", project_id, agent_slug)
         return None
 
-    agent = await kernel_store.load_agent(member_row.kernel_agent_id)
+    agent = await _member_agent_config(member_row, members)
     if agent is None:
         logger.warning(
-            "build_member_session: orphaned member — kernel agent %s missing for %s/%s",
-            member_row.kernel_agent_id,
-            workspace_id,
+            "build_member_session: member %s/%s has no resolvable library agent",
+            project_id,
             agent_slug,
         )
         return None
 
-    # Goal-mode payload guard (see ``assert_goal_brief_length`` docstring).
-    # Only enforced for runtimes whose kernel wrap_for_mode actually prepends
-    # ``/goal `` — claude_agent + codex. deepagents bypasses the slash wrap
-    # so a long brief isn't a CLI-level failure there.
+    # Goal-mode payload fence (see ``spill_goal_brief_if_too_long``). Only the
+    # runtimes whose kernel wrap_for_mode prepends ``/goal `` (claude_agent +
+    # codex) are capped; deepagents bypasses the slash wrap so a long brief is
+    # not a CLI-level failure there. Defense-in-depth: callers spill the brief
+    # they also use as the initial ``/goal`` prompt, so by here ``brief`` is
+    # already short and this is a no-op — but if a path forgets, this fences the
+    # brief embedded into the session instructions.
     if goal_mode and agent.runtime_provider in ("claude_agent", "codex"):
-        assert_goal_brief_length(brief)
+        brief = spill_goal_brief_if_too_long(
+            brief,
+            run_dir=run_dir,
+            task_id=task_id,
+            label=agent_slug,
+            is_lead=is_lead,
+        )
 
     # Build the instructions string (§S3 point ③)
-    workspace_prompt = build_workspace_system_prompt(
-        workspace_name=workspace_name,
-        instructions_md=workspace_instructions_md,
+    project_prompt = build_project_system_prompt(
+        project_name=project_name,
+        instructions_md=project_instructions_md,
     )
     # Lead-only: dispatch playbook + a roster of dispatchable members (with
     # their role summaries) so the lead can route sub-tasks accurately.
@@ -601,9 +886,7 @@ async def build_member_session(
         else:
             playbook_block = DISPATCH_PLAYBOOK_V2 if dispatch_mode == "async" else DISPATCH_PLAYBOOK
     roster_block = (
-        await build_member_roster(
-            workspace_id=workspace_id, members=members, exclude_slug=agent_slug
-        )
+        await build_member_roster(project_id=project_id, members=members, exclude_slug=agent_slug)
         if is_lead
         else ""
     )
@@ -644,19 +927,19 @@ async def build_member_session(
             "\nIgnore any other skills present in the working directory not listed above."
         )
     skills_block = "\n".join(block_lines)
-    parts = [
-        p
-        for p in [
-            agent.instructions,
-            workspace_prompt,
-            roster_block,
-            skills_block,
-            playbook_block,
-            brief,
+    # Wrap each block in an XML tag (shared chokepoint with the chat/project
+    # path) so the agent / task guidance / project instructions / roster /
+    # skills / brief are delineated instead of one undelimited blob.
+    instructions = assemble_session_instructions(
+        [
+            ("agent-instructions", agent.instructions or ""),
+            ("project-instructions", project_prompt),
+            ("member-roster", roster_block),
+            ("available-skills", skills_block),
+            ("task-playbook", playbook_block),
+            ("task-brief", brief),
         ]
-        if p.strip()
-    ]
-    instructions = "\n\n".join(parts)
+    )
 
     run_kind = "lead" if is_lead else "subtask"
 
@@ -688,7 +971,7 @@ async def build_member_session(
     # That's a per-model constraint — clear effort on those agents — not a
     # reason to strip it for every deepagents session.
     agent_effort = getattr(agent, "effort", None)
-    model_settings = ModelSettings(effort=agent_effort) if agent_effort else None
+    model_settings = ModelSettingsSchema(effort=agent_effort) if agent_effort else None
 
     # Session-modes (docs/exec-plans/active/task-goal-mode.md): when the
     # caller opts into goal mode (lead whole-task / member sub-run), set
@@ -706,18 +989,23 @@ async def build_member_session(
     # servers (docs / schedules / connectors) must be injected here. Generate
     # the session id up front so it can scope those servers' request headers.
     session_id = uuid4().hex
-    builtin_mcp = always_on_http_mcp_servers(session_id)
+    builtin_mcp = always_on_http_mcp_servers(session_id, toolkit="lead" if is_lead else "base")
     # De-dupe by name in case the agent's own mcp_servers already carry a
     # reserved ``valuz_*`` name (shouldn't, but keep injection idempotent).
     existing_names = {getattr(m, "name", None) for m in (agent.mcp_servers or ())}
-    mcp_servers = tuple(agent.mcp_servers or ()) + tuple(
+    from app.serializers import mcp_to_schema as _mcp_to_schema
+
+    mcp_servers = [_mcp_to_schema(m) for m in (agent.mcp_servers or ())] + [
         m for m in builtin_mcp if m.name not in existing_names
+    ]
+
+    from app.serializers import (
+        agent_config_to_schema,
     )
 
-    session = Session(
+    session = CreateSessionRequest(
         id=session_id,
-        project_id=workspace_id,
-        agent_id=agent.id,
+        agent_config=agent_config_to_schema(agent),
         cwd=run_dir,
         mode=session_mode,
         runtime_provider=agent.runtime_provider,
@@ -725,12 +1013,12 @@ async def build_member_session(
         model_provider=model_provider,
         model_settings=model_settings,
         instructions=instructions,
-        skills=session_skills,
-        mcp_servers=mcp_servers,
+        skills=list(session_skills),
+        mcp_servers=list(mcp_servers),
         permission_mode=agent.permission_mode,
         metadata={
             "valuz": {
-                "workspace_id": workspace_id,
+                "project_id": project_id,
                 "agent_slug": agent_slug,
                 "task_id": task_id,
                 "run_kind": run_kind,

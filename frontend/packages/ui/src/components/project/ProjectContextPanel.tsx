@@ -19,11 +19,15 @@ import {
   Plus,
   MoreHorizontal,
   FilePenLine,
+  Pause,
+  Play,
+  Power,
   Zap,
   RefreshCw,
   PanelRightOpen,
   AlertTriangle,
   Link2,
+  Sparkles,
 } from "lucide-react";
 import { modelLabel } from "@valuz/shared";
 import {
@@ -47,6 +51,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
@@ -124,7 +129,7 @@ export interface ProjectMemberItem {
   id: string;
   name: string;
   slug: string;
-  /** Global library agent slug this member was派驻 from. Passed to
+  /** Global library agent slug this member was deployed from. Passed to
    *  ``onOpenMember`` so the host can show the SHARED agent's detail (not
    *  the project-local member). Falls back to ``slug`` when unknown
    *  (e.g. legacy rows). */
@@ -138,7 +143,7 @@ export interface ProjectMemberItem {
    *  decoupled from ``@valuz/core`` (only allowed deps: ``@valuz/shared``). */
   runtimeLabel?: string;
   /** True when the underlying library agent was removed — render a
-   *  "已被智能体库移除" placeholder with only the remove (解除派驻) action. */
+   *  "removed from the agent library" placeholder with only the remove (undeploy) action. */
   orphan?: boolean;
 }
 
@@ -150,10 +155,11 @@ export interface UploadedFileItem {
   /** Parser/upload status for the row badge. */
   status?: "uploaded" | "ok" | "failed";
   /** Async parse status of the attachment. ``parsing`` renders an inline
-   *  spinner + "解析中"; ``failed`` renders the error badge. Distinct from
-   *  ``status`` so the live poll can drive the indicator without disturbing
-   *  legacy callers. */
-  parseStatus?: "parsing" | "ready" | "failed";
+   *  spinner + "parsing"; ``failed`` renders the error badge; ``native`` is an
+   *  image with no local text extract that the runtime reads directly (no
+   *  error). Distinct from ``status`` so the live poll can drive the indicator
+   *  without disturbing legacy callers. */
+  parseStatus?: "parsing" | "ready" | "failed" | "native";
   /** Origin of the attachment: ``local`` (multipart upload) vs
    * ``kb_doc`` (live reference to a global knowledge-base document).
    * Drives the row icon — KB picks render a ``Database`` glyph so
@@ -161,6 +167,21 @@ export interface UploadedFileItem {
    * ``local`` for back-compat with callers that haven't been
    * updated yet (e.g. before the kb-attachment flow shipped). */
   sourceKind?: "local" | "kb_doc";
+}
+
+/**
+ * One agent-delivered deliverable — the "生成文件" list, recorded by the
+ * built-in ``deliver_artifacts`` MCP tool. The inverse of
+ * {@link UploadedFileItem} (user uploads): these are files the agent produced
+ * and explicitly marked as outputs. Read-only; the row click opens the file.
+ */
+export interface GeneratedArtifactItem {
+  id: string;
+  name: string;
+  /** Optional human-readable byte size, e.g. "1.2 MB". */
+  size?: string;
+  /** Absolute path the row opens via ``onOpenGeneratedFile``. */
+  path: string;
 }
 
 /**
@@ -190,7 +211,7 @@ export interface ProjectContextPanelProps {
   showTodos?: boolean;
   /**
    * Project Instructions markdown. ``undefined`` hides the section entirely
-   * (used by the chat-default workspace, which has no project-level prompt).
+   * (used by the chat-default project, which has no project-level prompt).
    */
   instructions?: string;
   onInstructionsChange?: (value: string) => void;
@@ -200,10 +221,10 @@ export interface ProjectContextPanelProps {
    */
   members?: ProjectMemberItem[];
   onAddMember?: () => void;
-  /** Open a member's shared agent (live-reference 派驻: editing is global —
+  /** Open a member's shared agent (live-reference deployment: editing is global —
    *  the host navigates to the agent detail page). */
   onOpenMember?: (slug: string) => void;
-  /** Remove a member from the project (解除派驻). The host is expected to confirm. */
+  /** Remove a member from the project (undeploy). The host is expected to confirm. */
   onRemoveMember?: (slug: string) => void;
   skills?: ProjectSkill[];
   onAddSkill?: () => void;
@@ -232,7 +253,7 @@ export interface ProjectContextPanelProps {
   onExpandKbFolder?: (kbId: string, folderId: string) => Promise<void>;
   /** Remove a whole KB from the project (the ``×`` on a KB header row). */
   onRemoveKb?: (kbId: string) => void;
-  /** Reset a KB back to "whole knowledge base in scope" (the ``全选``
+  /** Reset a KB back to "whole knowledge base in scope" (the ``select-all``
    *  affordance shown on a narrowed KB's header row). */
   onSelectAllInKb?: (kbId: string) => void;
   /**
@@ -244,6 +265,15 @@ export interface ProjectContextPanelProps {
   onUploadFile?: () => void;
   onRemoveUploadedFile?: (id: string) => void;
   /**
+   * Files the agent delivered as finished outputs (the "生成文件" list,
+   * recorded by the ``deliver_artifacts`` tool). Provide the array (even
+   * empty) to render the section; ``undefined`` hides it. Read-only — rows
+   * open via {@link onOpenGeneratedFile}.
+   */
+  generatedFiles?: GeneratedArtifactItem[];
+  /** Open one delivered artifact (its absolute path) in the OS. */
+  onOpenGeneratedFile?: (path: string) => void;
+  /**
    * Latest TODO snapshot from the agent (kernel V5+messages emits this
    * via ``todo_update`` events whenever the agent calls TodoWrite). The
    * section auto-hides when this is ``undefined``, ``null``, or empty —
@@ -253,17 +283,28 @@ export interface ProjectContextPanelProps {
   todos?: TodoListItem[] | null;
   scheduledTasks?: ScheduledTaskSummary[];
   onAddScheduledTask?: () => void;
+  /** Open the edit dialog for a scheduled task — wired to both a row click and
+   *  the row's "Edit" menu item. */
+  onEditScheduledTask?: (taskId: string) => void;
   onToggleScheduledTask?: (taskId: string, nextStatus: "on" | "off") => void;
   onDeleteScheduledTask?: (taskId: string) => void;
+  onRunScheduledTask?: (taskId: string) => void;
   onManageScheduledTasks?: () => void;
   fileTree?: FileTreeNode[];
-  /** Section title for the file-tree accordion. Project workspaces use
-   * "{t("project.projectFiles")}"; chat workspaces use "生成的文件" — the underlying tree
+  /** Section title for the file-tree accordion. Project projects use
+   * "{t("project.projectFiles")}"; chat projects use "generated files" — the underlying tree
    * is the same component, only the label changes per context. */
   fileTreeTitle?: string;
   /** Render the file tree as a top-level tab instead of an accordion. This is
    * opt-in so conversation side panels keep their original layout. */
   fileTreeInTab?: boolean;
+  /** Project-scope memory entries (auto-curated). ``undefined`` hides the
+   * project-memory tab entirely — pass it only on the real-project home panel. */
+  projectMemory?: string[];
+  /** Delete one memory entry (located by its exact text). */
+  onMemoryDeleteEntry?: (text: string) => void;
+  /** Clear all project memory. */
+  onMemoryClear?: () => void;
   /** Hide project-level edit/manage affordances for read-only conversation
    * context panels while keeping them available on the project home panel. */
   hideProjectContextActions?: boolean;
@@ -287,7 +328,7 @@ export interface ProjectContextPanelProps {
    *  accordion. Project home uses this so the user can see Project
    *  README / Agent Team / Docs at a glance without clicking. ``false``
    *  (default) keeps the exclusive single-open behaviour the chat
-   *  workspace rail relies on. */
+   *  project rail relies on. */
   multiOpen?: boolean;
   /** Optional controlled collapsed state. When provided, the panel uses this
    * value instead of its internal state — useful when an external chrome
@@ -315,7 +356,7 @@ function KbTreeRow({
   expanded: Set<string>;
   onToggle: (id: string) => void;
   onExpand: (id: string) => void;
-  /** Returns true when the workspace binding table has an exact row for
+  /** Returns true when the project binding table has an exact row for
    * ``(node.kind, node.id)``. Drives the checked-state visual. */
   isDirectlyBound?: (kind: "kb" | "folder" | "document", id: string) => boolean;
   /** Returns true when an ancestor row is bound (and therefore implicitly
@@ -340,7 +381,7 @@ function KbTreeRow({
   const isMissing = node.status === "missing";
   const isKbOrFolder = node.kind === "kb" || node.kind === "folder";
 
-  // Tri-state binding indicator. ``direct`` means the workspace has a
+  // Tri-state binding indicator. ``direct`` means the project has a
   // row for this exact (kind,id); ``covered`` means an ancestor row
   // implicitly includes it. We render the same checkbox for both but
   // ``covered`` is half-opacity and click is a no-op — toggling the
@@ -352,7 +393,7 @@ function KbTreeRow({
   const direct = isDirectlyBound?.(node.kind, node.id) ?? false;
   const covered = !direct && (isCoveredByParent?.(node.kind, node.id) ?? false);
   const checkboxClass = cn(
-    "h-3 w-3 shrink-0 rounded-sm border transition-colors",
+    "h-3 w-3 shrink-0 rounded-[3px] border transition-colors",
     direct
       ? "border-brand bg-brand text-white"
       : covered
@@ -364,7 +405,7 @@ function KbTreeRow({
     <>
       <div
         className={cn(
-          "group flex items-center gap-1.5 rounded-md py-1.5 pr-2 text-xs transition-colors hover:bg-[color:var(--fg-1)]",
+          "group flex items-center gap-1.5 rounded-md py-1.5 pr-2 text-xs transition-colors hover:bg-surface-muted/60",
           isMissing && "opacity-55",
         )}
         style={{ paddingLeft: `${depth * 16 + 8}px` }}
@@ -418,7 +459,7 @@ function KbTreeRow({
             >
               <span className={checkboxClass}>
                 {direct ? (
-                  <Check className="h-2.5 w-2.5" strokeWidth={2} />
+                  <Check className="h-2.5 w-2.5" strokeWidth={3} />
                 ) : null}
               </span>
             </button>
@@ -435,7 +476,7 @@ function KbTreeRow({
             >
               <span className={checkboxClass}>
                 {direct ? (
-                  <Check className="h-2.5 w-2.5" strokeWidth={2} />
+                  <Check className="h-2.5 w-2.5" strokeWidth={3} />
                 ) : null}
               </span>
             </span>
@@ -482,7 +523,7 @@ function KbTreeRow({
           <button
             type="button"
             onClick={() => onSelectAllInKb(node.id)}
-            className="shrink-0 rounded px-1 text-2xs text-ink-meta opacity-0 transition-colors hover:bg-[color:var(--fg-1)] hover:text-ink-body group-hover:opacity-100"
+            className="shrink-0 rounded px-1 text-2xs text-ink-meta opacity-0 transition-colors hover:bg-surface-border hover:text-ink-body group-hover:opacity-100"
           >
             {t("knowledge.selectAllKb")}
           </button>
@@ -491,7 +532,7 @@ function KbTreeRow({
           <button
             type="button"
             onClick={() => onRemoveKb(node.id)}
-            className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-muted opacity-0 transition-colors hover:bg-[color:var(--fg-1)] hover:text-error-text group-hover:opacity-100"
+            className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-muted opacity-0 transition-colors hover:bg-surface-border hover:text-error-text group-hover:opacity-100"
             title={t("common.remove")}
           >
             <X className="h-3 w-3" />
@@ -574,7 +615,7 @@ function TodosList({ items }: { items: TodoListItem[] }) {
           >
             <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
               {todo.status === "completed" ? (
-                <Check className="h-3 w-3 text-success-text" />
+                <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
               ) : todo.status === "in_progress" ? (
                 <Loader2 className="h-3 w-3 animate-spin text-brand" />
               ) : (
@@ -586,6 +627,77 @@ function TodosList({ items }: { items: TodoListItem[] }) {
         );
       })}
     </ol>
+  );
+}
+
+/* ── Project memory tab ───────────────────────────────────────── */
+
+function MemoryTab({
+  entries,
+  onDeleteEntry,
+  onClear,
+}: {
+  entries: string[];
+  onDeleteEntry?: (text: string) => void;
+  onClear?: () => void;
+}) {
+  const { t } = useI18n();
+  const [confirmClear, setConfirmClear] = useState(false);
+  return (
+    <div className="py-2">
+      <div className="mb-2 flex items-center justify-between px-1">
+        <span className="text-2xs text-ink-meta">
+          {t("project.memoryAuto")} · {entries.length}
+        </span>
+        {entries.length > 0 && onClear && (
+          <button
+            type="button"
+            onClick={() => {
+              if (confirmClear) {
+                onClear();
+                setConfirmClear(false);
+              } else {
+                setConfirmClear(true);
+              }
+            }}
+            onBlur={() => setConfirmClear(false)}
+            className="rounded-md px-2 py-0.5 text-2xs text-ink-meta transition hover:bg-error-light hover:text-error-text"
+          >
+            {confirmClear
+              ? t("project.memoryClearConfirm")
+              : t("settings.memory.clearScope")}
+          </button>
+        )}
+      </div>
+      {entries.length === 0 ? (
+        <p className="px-2 py-8 text-center text-2xs leading-relaxed text-ink-meta">
+          {t("project.memoryEmpty")}
+        </p>
+      ) : (
+        <ul className="space-y-1">
+          {entries.map((entry, i) => (
+            <li
+              key={`${i}-${entry.slice(0, 16)}`}
+              className="group flex items-start gap-2 rounded-md px-2 py-2 hover:bg-surface-soft"
+            >
+              <span className="flex-1 whitespace-pre-wrap text-2xs leading-relaxed text-ink-body">
+                {entry}
+              </span>
+              {onDeleteEntry && (
+                <button
+                  type="button"
+                  aria-label={t("common.delete")}
+                  onClick={() => onDeleteEntry(entry)}
+                  className="shrink-0 rounded p-1 text-ink-meta opacity-0 transition group-hover:opacity-100 hover:text-error-text"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -624,7 +736,7 @@ export function FileRefreshButton({ onClick }: { onClick: () => void }) {
           timerRef.current = null;
         }, 2000);
       }}
-      className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)] disabled:pointer-events-none"
+      className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border disabled:pointer-events-none"
       title={spinning ? t("system.refreshing") : t("system.refreshFiles")}
     >
       <RefreshCw className={cn("h-3.5 w-3.5", spinning && "animate-spin")} />
@@ -646,7 +758,9 @@ export function AccordionSection({
   count,
   action,
   defaultOpen = false,
+  className,
   contentClassName,
+  fill = false,
   children,
 }: {
   title: string;
@@ -658,7 +772,16 @@ export function AccordionSection({
   defaultOpen?: boolean;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** Extra classes on the section root (e.g. ``shrink-0`` / ``flex-1``). */
+  className?: string;
   contentClassName?: string;
+  /**
+   * Stretch the open section (root → grid → content) to fill its flex parent
+   * so the ``children`` list can own the remaining height and scroll inside it,
+   * instead of the section sizing to content. Opt-in; off leaves the section
+   * exactly as before. The parent must be a flex column with a bounded height.
+   */
+  fill?: boolean;
   children: React.ReactNode;
 }) {
   const [internalOpen, setInternalOpen] = useState(defaultOpen);
@@ -669,11 +792,20 @@ export function AccordionSection({
   };
 
   return (
-    <div className="mb-2 overflow-hidden rounded-xl border border-surface-border/40 bg-surface-soft dark:border-surface-border">
+    // Spec 5.8 Context Section card: bg #F7F8FA, border 1px #F3F4F6,
+    // radius 12, mb 8px. Header min-h 40, padding 10px 14px, gap 9px,
+    // title 13px / 500 / #131313, count 12px / #6E7481, chevron #94A3B8.
+    <div
+      className={cn(
+        "mb-2 overflow-hidden rounded-xl border border-[#F3F4F6] bg-surface-soft dark:border-surface-border",
+        fill && "flex min-h-0 flex-1 flex-col",
+        className,
+      )}
+    >
       {/* Hover lives on the row wrapper so background color spans the
           entire header (including the trailing action button), not just
           the toggle hit-area. */}
-      <div className="flex items-center transition-colors duration-[120ms] hover:bg-[color:var(--fg-1)]">
+      <div className="flex items-center transition-colors duration-[120ms] hover:bg-[rgba(0,0,0,0.02)]">
         <button
           type="button"
           onClick={() => setOpen(!open)}
@@ -691,7 +823,7 @@ export function AccordionSection({
               "h-3.5 w-3.5 shrink-0",
               iconClassName ?? "text-ink-body",
             )}
-            strokeWidth={2}
+            strokeWidth={1.9}
           />
           <span className="flex-1 text-left text-[13px] font-medium text-ink-heading">
             {title}
@@ -706,9 +838,15 @@ export function AccordionSection({
         className={cn(
           "grid transition-[grid-template-rows] duration-200 ease-in-out",
           open ? "grid-rows-[1fr]" : "grid-rows-[0fr]",
+          // ``fill``: let the open section grow to fill its flex parent so the
+          // content's own scroll container owns the leftover height.
+          fill && open && "min-h-0 flex-1",
         )}
       >
-        <div className="overflow-hidden">
+        <div className={cn("overflow-hidden", fill && "min-h-0")}>
+          {/* Nested white content surface (no border, top corners only) —
+              layered over the outer surface-soft for depth. Mirrors the
+              ContextSection in frontend/docs/design/app.jsx. */}
           <div
             className={cn(
               "overflow-hidden rounded-t-xl bg-surface px-3 py-3",
@@ -753,14 +891,21 @@ export const ProjectDetailContextPanel = ({
   onSelectAllInKb,
   uploadedFiles,
   onRemoveUploadedFile,
+  generatedFiles,
+  onOpenGeneratedFile,
   todos,
   scheduledTasks,
   onAddScheduledTask,
+  onEditScheduledTask,
   onToggleScheduledTask,
   onDeleteScheduledTask,
+  onRunScheduledTask,
   fileTree,
   fileTreeTitle,
   fileTreeInTab = false,
+  projectMemory,
+  onMemoryDeleteEntry,
+  onMemoryClear,
   hideProjectContextActions = false,
   rootPath = "",
   onFileClick,
@@ -777,16 +922,16 @@ export const ProjectDetailContextPanel = ({
   const { t } = useI18n();
 
   // Resolve default titles through i18n when caller doesn't override.
-  // Default header label is the conversation workspace name; the project
+  // Default header label is the conversation project name; the project
   // detail page overrides this with its own ``title`` prop.
-  const resolvedTitle = title ?? t("conversation.workspace");
+  const resolvedTitle = title ?? t("conversation.project");
   const resolvedInstructionsTitle =
     instructionsTitle ?? t("project.instruction");
   const resolvedScheduledTasksTitle =
     scheduledTasksTitle ?? t("project.scheduledTasks");
   const resolvedFileTreeTitle = fileTreeTitle ?? t("project.fileTree");
 
-  // Section visibility — chat workspace omits sections it has no data for.
+  // Section visibility — chat project omits sections it has no data for.
   const showInstructions = instructions !== undefined;
   const showScheduled =
     scheduledTasks !== undefined || onAddScheduledTask !== undefined;
@@ -794,9 +939,14 @@ export const ProjectDetailContextPanel = ({
     (kbTree !== undefined && kbTree !== null) || (docs && docs.length > 0);
   const showUploadedFiles = uploadedFiles !== undefined;
   const visibleUploadedFiles = uploadedFiles ?? [];
+  const showGeneratedFiles = generatedFiles !== undefined;
+  const visibleGeneratedFiles = generatedFiles ?? [];
   // Files section shows whenever the caller provides a fileTree array. Chat
-  // workspaces should pass ``undefined`` to hide the section altogether.
+  // projects should pass ``undefined`` to hide the section altogether.
   const showFiles = fileTree !== undefined;
+  // Memory tab shows only when the caller passes project memory (real-project
+  // home panel). Conversation panels / chat projects pass undefined → no tab.
+  const showMemory = projectMemory !== undefined;
   const defaultOpenSection =
     initialOpenSection !== undefined
       ? initialOpenSection
@@ -838,7 +988,7 @@ export const ProjectDetailContextPanel = ({
   //    render and each section toggles independently. AccordionSection
   //    keeps its own internal open state.
   //  - multiOpen=false  → single-open accordion driven by
-  //    ``openSection`` (legacy chat workspace behaviour).
+  //    ``openSection`` (legacy chat project behaviour).
   const sectionState = (id: string, defaultOpen = false) =>
     multiOpen
       ? { defaultOpen: true }
@@ -874,7 +1024,7 @@ export const ProjectDetailContextPanel = ({
               <button
                 type="button"
                 onClick={() => toggleCollapsed(false)}
-                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition-colors duration-[120ms] hover:bg-[color:var(--fg-1)] hover:text-ink-heading"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-ink-body transition-colors duration-[120ms] hover:bg-surface-soft hover:text-ink-heading"
               >
                 <PanelRightOpen className="h-4 w-4" />
               </button>
@@ -895,7 +1045,7 @@ export const ProjectDetailContextPanel = ({
           <button
             type="button"
             onClick={onOpenInFinder}
-            className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+            className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
             title={t("project.inFinder")}
           >
             <FolderOpen className="h-3.5 w-3.5" />
@@ -970,7 +1120,7 @@ export const ProjectDetailContextPanel = ({
                   e.stopPropagation();
                   onOpenInFinder();
                 }}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
                 title={t("project.inFinder")}
               >
                 <FolderOpen className="h-3.5 w-3.5" />
@@ -1006,7 +1156,7 @@ export const ProjectDetailContextPanel = ({
       count={visibleUploadedFiles.length || undefined}
     >
       {visibleUploadedFiles.length > 0 ? (
-        <div className="space-y-1">
+        <div className="-mr-3 max-h-[25vh] space-y-1 overflow-y-auto overflow-x-hidden pr-3">
           {visibleUploadedFiles.map((f) => {
             // KB-sourced rows render a database glyph so the user can
             // visually tell "this is a live reference to a global KB
@@ -1015,7 +1165,7 @@ export const ProjectDetailContextPanel = ({
             return (
               <div
                 key={f.id}
-                className="group -mx-2 flex items-center gap-2.5 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-[color:var(--fg-1)]"
+                className="group -mx-2 flex items-center gap-2.5 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-surface-muted/60"
               >
                 {isKb ? (
                   <Database className="h-3.5 w-3.5 shrink-0 text-[#1d4ed8]" />
@@ -1044,7 +1194,7 @@ export const ProjectDetailContextPanel = ({
                   <button
                     type="button"
                     onClick={() => onRemoveUploadedFile(f.id)}
-                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-error-light hover:text-error-text"
+                    className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-red-50 hover:text-red-500"
                     title={t("common.remove")}
                   >
                     <X className="h-3 w-3" />
@@ -1056,6 +1206,44 @@ export const ProjectDetailContextPanel = ({
         </div>
       ) : (
         <p className="text-2xs text-ink-meta">{t("knowledge.noUploadFiles")}</p>
+      )}
+    </AccordionSection>
+  ) : null;
+
+  const generatedFilesSection = showGeneratedFiles ? (
+    <AccordionSection
+      {...sectionState("generated", visibleGeneratedFiles.length > 0)}
+      title={t("conversation.generatedFiles")}
+      icon={Sparkles}
+      iconClassName="text-brand"
+      contentClassName="px-5 py-2"
+      count={visibleGeneratedFiles.length || undefined}
+    >
+      {visibleGeneratedFiles.length > 0 ? (
+        <div className="space-y-1">
+          {visibleGeneratedFiles.map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              onClick={() => onOpenGeneratedFile?.(f.path)}
+              disabled={!onOpenGeneratedFile}
+              className="group -mx-2 flex w-[calc(100%+1rem)] items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-xs transition-colors hover:bg-surface-muted/60 disabled:cursor-default disabled:hover:bg-transparent"
+              title={f.path}
+            >
+              <FileTypeIcon filename={f.name} />
+              <span className="flex-1 truncate text-ink-heading">{f.name}</span>
+              {f.size ? (
+                <span className="shrink-0 text-2xs text-ink-meta">
+                  {f.size}
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p className="text-2xs text-ink-meta">
+          {t("conversation.noGeneratedFiles")}
+        </p>
       )}
     </AccordionSection>
   ) : null;
@@ -1090,7 +1278,7 @@ export const ProjectDetailContextPanel = ({
         </AccordionSection>
       )}
 
-      {/* Instructions — project-only; chat workspace omits this. */}
+      {/* Instructions — project-only; chat project omits this. */}
       {showInstructions && (
         <AccordionSection
           {...sectionState("instructions", initialOpenSection === undefined)}
@@ -1102,7 +1290,7 @@ export const ProjectDetailContextPanel = ({
               <button
                 type="button"
                 onClick={() => instructionsEditorRef.current?.openEditor()}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
                 title={t("project.writeInstructions")}
               >
                 <FilePenLine className="h-3.5 w-3.5" />
@@ -1122,7 +1310,7 @@ export const ProjectDetailContextPanel = ({
 
       {/* Member agents (PRD-NEXT §3.4) — the project's agent team. Caller
           passes ``members`` (even empty) to show the section; ``undefined``
-          hides it (chat workspaces have no team). */}
+          hides it (chat projects have no team). */}
       {members !== undefined && (
         <AccordionSection
           {...sectionState("members")}
@@ -1138,7 +1326,7 @@ export const ProjectDetailContextPanel = ({
                   event.currentTarget.blur();
                   onAddMember();
                 }}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
                 title={t("agent.addMember" as Parameters<typeof t>[0])}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1147,93 +1335,107 @@ export const ProjectDetailContextPanel = ({
           }
         >
           {members.length > 0 ? (
-            <div className="mx-auto w-[301px]">
-              {members.map((member, index) => {
-                const isOrphan = member.orphan === true;
-                return (
-                  <div key={member.id}>
-                    {index > 0 ? (
-                      <div className="h-px w-[301px] bg-surface-border/40 dark:bg-surface-border" />
-                    ) : null}
-                    <div className="group relative rounded-lg bg-card">
-                      <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[color:var(--fg-1)]" />
-                      <div className="relative z-10 flex items-center gap-2.5 py-2.5">
-                        {/* Row body opens the shared agent (global edit). */}
-                        <button
-                          type="button"
-                          disabled={isOrphan || !onOpenMember}
-                          onClick={(event) => {
-                            event.currentTarget.blur();
-                            // Only open the overlay when we know the global
-                            // library slug — local member slug isn't valid
-                            // for the agent detail endpoint (would 404).
-                            if (member.sourceAgentSlug) {
-                              onOpenMember?.(member.sourceAgentSlug);
-                            }
-                          }}
-                          className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
-                        >
-                          <div
-                            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
-                              isOrphan
-                                ? "bg-surface-soft text-ink-muted"
-                                : "bg-brand/8 text-brand"
-                            }`}
+            // Cap the member list so a large team doesn't push the sections
+            // below it (Files / Automations) out of view on a short window —
+            // it scrolls internally instead. ``vh`` keeps it window-relative:
+            // tall windows show the whole list, short ones scroll. The inner
+            // ``w-[301px]`` wrapper sits inside so the row's ``-inset-x-1.5``
+            // hover bleed has horizontal room and doesn't trip an x-scrollbar.
+            <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
+              <div className="mx-auto w-[301px]">
+                {members.map((member, index) => {
+                  const isOrphan = member.orphan === true;
+                  return (
+                    <div key={member.id}>
+                      {index > 0 ? (
+                        <div className="h-px w-[301px] bg-[#f7f8fa]" />
+                      ) : null}
+                      <div className="group relative rounded-lg bg-card">
+                        <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
+                        <div className="relative z-10 flex items-center gap-2.5 py-2.5">
+                          {/* Row body opens the shared agent (global edit). */}
+                          <button
+                            type="button"
+                            disabled={isOrphan || !onOpenMember}
+                            onClick={(event) => {
+                              event.currentTarget.blur();
+                              // Only open the overlay when we know the global
+                              // library slug — local member slug isn't valid
+                              // for the agent detail endpoint (would 404).
+                              if (member.sourceAgentSlug) {
+                                onOpenMember?.(member.sourceAgentSlug);
+                              }
+                            }}
+                            className="flex min-w-0 flex-1 items-center gap-2.5 text-left disabled:cursor-default"
                           >
-                            <Bot className="h-3 w-3" />
-                          </div>
-                          <div className="min-w-0 flex-1">
                             <div
-                              className={`truncate text-xs font-medium ${
-                                isOrphan ? "text-ink-meta" : "text-ink-heading"
+                              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${
+                                isOrphan
+                                  ? "bg-surface-soft text-ink-muted"
+                                  : "bg-brand/8 text-brand"
                               }`}
                             >
-                              {member.name}
+                              <Bot className="h-3 w-3" />
                             </div>
-                            <div className="truncate text-2xs text-ink-meta">
-                              {isOrphan
-                                ? t(
-                                    "agent.memberOrphaned" as Parameters<
-                                      typeof t
-                                    >[0],
-                                  )
-                                : `${
-                                    member.runtimeLabel
-                                      ? `${member.runtimeLabel} · `
-                                      : ""
-                                  }${
-                                    member.model
-                                      ? modelLabel(member.model)
-                                      : member.slug
-                                  }`}
+                            <div className="min-w-0 flex-1">
+                              <div
+                                className={`truncate text-xs font-medium ${
+                                  isOrphan
+                                    ? "text-ink-meta"
+                                    : "text-ink-heading"
+                                }`}
+                              >
+                                {member.name}
+                              </div>
+                              <div className="truncate text-2xs text-ink-meta">
+                                {isOrphan
+                                  ? t(
+                                      "agent.memberOrphaned" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )
+                                  : `${
+                                      member.runtimeLabel
+                                        ? `${member.runtimeLabel} · `
+                                        : ""
+                                    }${
+                                      member.model
+                                        ? modelLabel(member.model)
+                                        : member.slug
+                                    }`}
+                              </div>
                             </div>
-                          </div>
-                        </button>
-                        {onRemoveMember && (
-                          <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.currentTarget.blur();
-                                onRemoveMember(member.slug);
-                              }}
-                              className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-error-light hover:text-error-text"
-                              title={t(
-                                "agent.deleteMember" as Parameters<typeof t>[0],
-                              )}
-                              aria-label={t(
-                                "agent.deleteMember" as Parameters<typeof t>[0],
-                              )}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        )}
+                          </button>
+                          {onRemoveMember && (
+                            <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                              <button
+                                type="button"
+                                onClick={(event) => {
+                                  event.currentTarget.blur();
+                                  onRemoveMember(member.slug);
+                                }}
+                                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
+                                title={t(
+                                  "agent.deleteMember" as Parameters<
+                                    typeof t
+                                  >[0],
+                                )}
+                                aria-label={t(
+                                  "agent.deleteMember" as Parameters<
+                                    typeof t
+                                  >[0],
+                                )}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
             </div>
           ) : (
             <p className="text-2xs leading-5 text-ink-meta">
@@ -1243,7 +1445,7 @@ export const ProjectDetailContextPanel = ({
         </AccordionSection>
       )}
 
-      {/* Skills — project workspaces only. Chat workspaces have
+      {/* Skills — project projects only. Chat projects have
           no per-conversation binding semantics (the global skill
           catalog applies to every chat), so the panel skips this
           section to avoid suggesting configurability that isn't
@@ -1265,7 +1467,7 @@ export const ProjectDetailContextPanel = ({
                   event.currentTarget.blur();
                   onAddSkill();
                 }}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
                 title={t("project.addSkill")}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1314,7 +1516,7 @@ export const ProjectDetailContextPanel = ({
                       <button
                         type="button"
                         onClick={() => onRemoveSkill(skill.id)}
-                        className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-error-light hover:text-error-text"
+                        className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-red-50 hover:text-red-500"
                         title={t("common.remove")}
                       >
                         <X className="h-3 w-3" />
@@ -1346,7 +1548,7 @@ export const ProjectDetailContextPanel = ({
               <button
                 type="button"
                 onClick={() => setConnectorPickerOpen(true)}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
                 title={t("project.addConnector" as Parameters<typeof t>[0])}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1380,7 +1582,7 @@ export const ProjectDetailContextPanel = ({
                       <button
                         type="button"
                         onClick={() => onToggleMcpServer(server.slug, false)}
-                        className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-error-light hover:text-error-text"
+                        className="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded text-ink-meta opacity-0 transition group-hover:opacity-100 hover:bg-red-50 hover:text-red-500"
                         title={t("common.remove" as Parameters<typeof t>[0])}
                       >
                         <X className="h-3 w-3" />
@@ -1397,10 +1599,10 @@ export const ProjectDetailContextPanel = ({
         </AccordionSection>
       )}
 
-      {/* Uploaded files (session attachments) */}
-      {uploadedFilesSection}
+      {/* Generated files (agent-delivered artifacts — the 生成文件 list) */}
+      {generatedFilesSection}
 
-      {/* Scheduled — project-only; chat workspace omits this. */}
+      {/* Scheduled — project-only; chat project omits this. */}
       {showScheduled && (
         <AccordionSection
           {...sectionState("scheduled", (scheduledTasks ?? []).length > 0)}
@@ -1417,7 +1619,7 @@ export const ProjectDetailContextPanel = ({
                   e.stopPropagation();
                   onAddScheduledTask();
                 }}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
                 title={t("project.addScheduledTask")}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1426,83 +1628,144 @@ export const ProjectDetailContextPanel = ({
           }
         >
           {(scheduledTasks ?? []).length > 0 ? (
-            <div className="mx-auto w-[301px] divide-y divide-surface-border">
-              {(scheduledTasks ?? []).map((task) => (
-                <div
-                  key={task.id}
-                  className="group relative rounded-lg bg-card"
-                >
-                  <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[color:var(--fg-1)]" />
-                  <div className="relative z-10 py-2.5">
-                    <div className="flex items-center gap-2">
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink-heading">
-                        {task.name}
-                      </span>
-                      <span
-                        className={cn(
-                          "rounded px-1.5 py-px text-2xs",
-                          task.status === "on"
-                            ? "bg-success-light text-success-text"
-                            : "bg-surface-soft text-ink-meta",
-                        )}
-                      >
-                        {task.status === "on"
-                          ? t("project.taskEnabled")
-                          : t("project.taskPaused")}
-                      </span>
-                      {(onToggleScheduledTask || onDeleteScheduledTask) && (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              type="button"
-                              className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-[color:var(--fg-1)] hover:text-ink-label"
-                              title={t("project.taskActions")}
+            <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
+              <div className="mx-auto w-[301px] divide-y divide-[#f3f4f6]">
+                {(scheduledTasks ?? []).map((task) => (
+                  <div
+                    key={task.id}
+                    // Row is clickable to edit, but intentionally keeps the
+                    // default cursor (no pointer/hand) per design.
+                    className="group relative rounded-lg bg-card"
+                    role={onEditScheduledTask ? "button" : undefined}
+                    tabIndex={onEditScheduledTask ? 0 : undefined}
+                    onClick={
+                      onEditScheduledTask
+                        ? () => onEditScheduledTask(task.id)
+                        : undefined
+                    }
+                    onKeyDown={
+                      onEditScheduledTask
+                        ? (e) => {
+                            if (e.key === "Enter" || e.key === " ") {
+                              e.preventDefault();
+                              onEditScheduledTask(task.id);
+                            }
+                          }
+                        : undefined
+                    }
+                  >
+                    <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
+                    <div className="relative z-10 py-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink-heading">
+                          {task.name}
+                        </span>
+                        <span
+                          className={cn(
+                            "rounded px-1.5 py-px text-2xs",
+                            task.status === "on"
+                              ? "bg-emerald-50 text-emerald-600"
+                              : "bg-surface-soft text-ink-meta",
+                          )}
+                        >
+                          {task.status === "on"
+                            ? t("project.taskEnabled")
+                            : t("project.taskPaused")}
+                        </span>
+                        {(onEditScheduledTask ||
+                          onToggleScheduledTask ||
+                          onDeleteScheduledTask) && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                type="button"
+                                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-label"
+                                title={t("project.taskActions")}
+                                // The row itself opens the editor; keep a menu
+                                // click from also triggering that row handler.
+                                onClick={(e) => e.stopPropagation()}
+                                onPointerDown={(e) => e.stopPropagation()}
+                              >
+                                <MoreHorizontal className="h-3.5 w-3.5" />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="end"
+                              className="min-w-[140px]"
+                              onCloseAutoFocus={(e) => e.preventDefault()}
+                              // Portaled, but clicks still bubble through the
+                              // React tree to the row's onClick (which opens the
+                              // editor). Stop it so toggling pause/enable or
+                              // deleting doesn't also pop the edit dialog.
+                              onClick={(e) => e.stopPropagation()}
                             >
-                              <MoreHorizontal className="h-3.5 w-3.5" />
-                            </button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent
-                            align="end"
-                            className="min-w-[120px]"
-                          >
-                            {onToggleScheduledTask && (
-                              <DropdownMenuItem
-                                onClick={() =>
-                                  onToggleScheduledTask(
-                                    task.id,
-                                    task.status === "on" ? "off" : "on",
-                                  )
-                                }
-                              >
-                                {task.status === "on"
-                                  ? t("project.disable")
-                                  : t("project.enable")}
-                              </DropdownMenuItem>
-                            )}
-                            {onDeleteScheduledTask && (
-                              <DropdownMenuItem
-                                variant="destructive"
-                                onClick={() => onDeleteScheduledTask(task.id)}
-                              >
-                                {t("common.delete")}
-                              </DropdownMenuItem>
-                            )}
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      )}
-                    </div>
-                    <div className="mt-1.5 flex items-center gap-2 text-2xs text-ink-meta">
-                      <span>{task.humanReadable}</span>
-                      <span className="text-surface-border">·</span>
-                      <span>
-                        {t("project.nextRun" as Parameters<typeof t>[0], {
-                          time: task.nextRun,
-                        })}
-                      </span>
+                              {onEditScheduledTask && (
+                                <DropdownMenuItem
+                                  onSelect={() => onEditScheduledTask(task.id)}
+                                >
+                                  <FilePenLine />
+                                  {t("common.edit")}
+                                </DropdownMenuItem>
+                              )}
+                              {onToggleScheduledTask && (
+                                <DropdownMenuItem
+                                  onSelect={() =>
+                                    onToggleScheduledTask(
+                                      task.id,
+                                      task.status === "on" ? "off" : "on",
+                                    )
+                                  }
+                                >
+                                  {task.status === "on" ? <Pause /> : <Power />}
+                                  {task.status === "on"
+                                    ? t("cron.pause")
+                                    : t("project.enable")}
+                                </DropdownMenuItem>
+                              )}
+                              {onRunScheduledTask && (
+                                <DropdownMenuItem
+                                  disabled={task.status !== "on"}
+                                  onSelect={() => {
+                                    if (task.status === "on") {
+                                      onRunScheduledTask(task.id);
+                                    }
+                                  }}
+                                >
+                                  <Play />
+                                  {t("cron.runNow")}
+                                </DropdownMenuItem>
+                              )}
+                              {onDeleteScheduledTask && (
+                                <>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    onSelect={() =>
+                                      onDeleteScheduledTask(task.id)
+                                    }
+                                  >
+                                    <Trash2 />
+                                    {t("common.delete")}
+                                  </DropdownMenuItem>
+                                </>
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-2 text-2xs text-ink-meta">
+                        <span>{task.humanReadable}</span>
+                        <span className="text-surface-border">·</span>
+                        <span>
+                          {t("project.nextRun" as Parameters<typeof t>[0], {
+                            time: task.nextRun,
+                          })}
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           ) : (
             <p className="text-2xs text-ink-meta">
@@ -1511,6 +1774,10 @@ export const ProjectDetailContextPanel = ({
           )}
         </AccordionSection>
       )}
+
+      {/* Uploaded files (session attachments) — sits between the automations
+          and knowledge-base sections. */}
+      {uploadedFilesSection}
 
       {/* Docs — KB tree or flat list (project-only) */}
       {showKbDocs && (
@@ -1535,7 +1802,7 @@ export const ProjectDetailContextPanel = ({
               <button
                 type="button"
                 onClick={onImportFile}
-                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-[color:var(--fg-1)]"
+                className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
                 title={t("knowledge.manageKb")}
               >
                 <Plus className="h-3.5 w-3.5" />
@@ -1558,7 +1825,7 @@ export const ProjectDetailContextPanel = ({
                   />
                 </div>
               )}
-              <div className="space-y-0">
+              <div className="-mr-3 max-h-[25vh] space-y-0 overflow-y-auto overflow-x-hidden pr-3">
                 {(() => {
                   // Precompute binding lookups so each KbTreeRow can
                   // resolve its checkbox state without re-walking the
@@ -1698,7 +1965,7 @@ export const ProjectDetailContextPanel = ({
                         {filteredReferencedDocs.map((doc) => (
                           <div
                             key={doc.id}
-                            className="group flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-[color:var(--fg-1)]"
+                            className="group flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-surface-muted/60"
                           >
                             <Checkbox
                               checked
@@ -1722,7 +1989,7 @@ export const ProjectDetailContextPanel = ({
                         {filteredReadyDocs.map((doc) => (
                           <label
                             key={doc.id}
-                            className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-[color:var(--fg-1)]"
+                            className="flex items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors hover:bg-surface-muted/60"
                           >
                             <Checkbox
                               onCheckedChange={() => onToggleDoc?.(doc.id)}
@@ -1756,8 +2023,8 @@ export const ProjectDetailContextPanel = ({
       style={width !== undefined ? { width } : undefined}
     >
       {/* One tab shell everywhere — the assistant conversation has only the
-          "工作区" tab (no project files) but keeps the same line-tab styling
-          for consistency. The "项目文件" tab is added only when files exist. */}
+          "workspace" tab (no project files) but keeps the same line-tab styling
+          for consistency. The "project files" tab is added only when files exist. */}
       <Tabs
         defaultValue="context"
         className="flex h-full min-h-0 flex-col gap-0"
@@ -1775,6 +2042,11 @@ export const ProjectDetailContextPanel = ({
                 {t("project.projectFiles")}
               </TabsTrigger>
             )}
+            {showMemory && (
+              <TabsTrigger value="memory" className="after:!opacity-0">
+                {t("project.projectMemory")}
+              </TabsTrigger>
+            )}
           </TabsList>
         </header>
         <TabsContent value="context" className="min-h-0 overflow-y-auto px-2">
@@ -1786,6 +2058,18 @@ export const ProjectDetailContextPanel = ({
             className="min-h-0 overflow-hidden px-2 pb-2"
           >
             {fileTreePanel}
+          </TabsContent>
+        )}
+        {showMemory && (
+          <TabsContent
+            value="memory"
+            className="min-h-0 overflow-y-auto px-2 pb-2"
+          >
+            <MemoryTab
+              entries={projectMemory ?? []}
+              onDeleteEntry={onMemoryDeleteEntry}
+              onClear={onMemoryClear}
+            />
           </TabsContent>
         )}
       </Tabs>

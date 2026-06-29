@@ -7,14 +7,18 @@ import {
   ChevronDown,
   ChevronRight,
   Database,
+  FileUp,
   Flame,
   FolderClosed,
   Gauge,
   Hand,
+  Link2,
   Loader2,
   Lock,
   Paperclip,
   Plus,
+  Search,
+  Settings,
   Square,
   X,
   Zap,
@@ -118,7 +122,6 @@ const EFFORT_ORDER: readonly EffortLevel[] = [
 
 const EFFORT_FALLBACK: EffortLevel = "high";
 import { MAX_SESSION_ATTACHMENTS, modelLabel } from "@valuz/shared";
-import { AttachmentMenu } from "./conversation/AttachmentMenu";
 import {
   Tooltip,
   TooltipContent,
@@ -126,9 +129,21 @@ import {
   TooltipTrigger,
 } from "./ui/tooltip";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
+import { Switch } from "./ui/switch";
+import {
   SkillSearchMenu,
   type SkillSearchItem,
 } from "./conversation/SkillSearchMenu";
+import { filterSkillItems } from "./conversation/skill-search-filter";
 import { cn } from "../lib/cn";
 import { useI18n } from "../hooks/use-i18n";
 
@@ -206,7 +221,7 @@ export interface RuntimeSelectorItem {
 }
 
 export interface ComposerAgentItem {
-  /** Workspace-local agent handle (the ``agent_slug``). */
+  /** Project-local agent handle (the ``agent_slug``). */
   slug: string;
   /** Display name. */
   name: string;
@@ -217,13 +232,20 @@ export interface ComposerAgentItem {
 }
 
 export interface ComposerProjectItem {
-  /** Workspace id (project). */
+  /** Project id (project). */
   id: string;
   /** Display name. */
   name: string;
   /** 派驻 member count, shown as dropdown subtext. */
   memberCount?: number;
   /** Optional one-line description. */
+  description?: string;
+}
+
+/** A connected connector shown (with a toggle) in the composer "+" menu. */
+export interface ComposerConnector {
+  slug: string;
+  label: string;
   description?: string;
 }
 
@@ -240,6 +262,22 @@ export interface ComposerProps {
   onLocalUpload?: (files: File[]) => void;
   /** Called when user picks knowledge base file */
   onKBPick?: () => void;
+  /** Connected connectors offered in the "+" menu's Connectors submenu. Each
+   *  has a toggle; the enabled set is what the host hands the new session. Omit
+   *  / empty to hide the submenu (e.g. on a live session where connectors are
+   *  already locked). */
+  connectors?: ComposerConnector[];
+  /** Slugs of the connectors currently toggled on. */
+  selectedConnectorSlugs?: string[];
+  /** Toggle a connector on/off in the Connectors submenu. */
+  onToggleConnector?: (slug: string, enabled: boolean) => void;
+  /** Render the Connectors submenu read-only — switches disabled, no toggling.
+   *  Used on a live session, where connectors are locked at creation. */
+  connectorsReadOnly?: boolean;
+  /** Navigate to the Skills page (the "Manage" item in the Skills submenu). */
+  onManageSkills?: () => void;
+  /** Navigate to the Connectors page (the "Manage" item in the submenu). */
+  onManageConnectors?: () => void;
   /**
    * Upload-on-attach mode. When true the composer does NOT keep its own
    * not-yet-uploaded ``File[]`` queue: picking / dropping a file fires
@@ -271,8 +309,10 @@ export interface ComposerProps {
     id: string;
     name: string;
     /** Async parse status — drives the inline progress indicator on the
-     *  chip ("解析中" spinner while ``parsing``, error tint on ``failed``). */
-    parseStatus?: "parsing" | "ready" | "failed";
+     *  chip ("解析中" spinner while ``parsing``, error tint on ``failed``).
+     *  ``native`` (an image the runtime reads directly) and ``ready`` both
+     *  render as an ordinary chip. */
+    parseStatus?: "parsing" | "ready" | "failed" | "native";
     /** ``local`` upload vs ``kb_doc`` live reference — drives the chip icon. */
     sourceKind?: "local" | "kb_doc";
   }[];
@@ -344,10 +384,12 @@ export interface ComposerProps {
    * keeps the classic model picker (quick chats).
    */
   agents?: ComposerAgentItem[];
-  /** Currently selected project agent slug (null = none picked yet). */
+  /** Currently selected project agent slug (null = the "Default" entry — no
+   *  agent, runs on the system default runtime/model/effort). */
   selectedAgentSlug?: string | null;
-  /** Called when the user picks a different project agent. */
-  onAgentChange?: (slug: string) => void;
+  /** Called when the user picks an agent, or ``null`` for the "Default"
+   *  (no-agent) entry. */
+  onAgentChange?: (slug: string | null) => void;
   /**
    * Agent mode only: also surface the runtime / model / effort controls so
    * the user can override the selected agent's brain for THIS conversation.
@@ -355,26 +397,19 @@ export interface ComposerProps {
    * Off by default — only the new-conversation composer opts in.
    */
   allowAgentBrainOverride?: boolean;
-  /**
-   * True when the conversation's model diverges from the bound agent's
-   * default (i.e. the user actually overrode it). Drives the muted model
-   * hint inside the agent button — shown only when overridden, so an
-   * un-customized chat stays clean.
-   */
-  agentModelOverridden?: boolean;
   /** Read-only display once a session exists (agent frozen at creation). */
   agentLocked?: boolean;
   /** Project options for the 📁 chip. When provided (even empty) the chip
    *  renders. ``undefined`` hides it (callers not yet wired). */
   projects?: ComposerProjectItem[];
-  /** Currently selected workspace. ``null`` = 临时对话 (chat-default); a
+  /** Currently selected project. ``null`` = 临时对话 (chat-default); a
    *  project id otherwise. */
-  selectedWorkspaceId?: string | null;
+  selectedProjectId?: string | null;
   /** Called when the user switches project/临时. ``null`` => 临时. */
-  onWorkspaceChange?: (id: string | null) => void;
-  /** Read-only display once a session exists (workspace frozen at creation,
+  onProjectChange?: (id: string | null) => void;
+  /** Read-only display once a session exists (project frozen at creation,
    *  ADR-006). */
-  workspaceLocked?: boolean;
+  projectLocked?: boolean;
   /** Entry point to create/add an agent to the project. */
   onAddAgent?: () => void;
   /** Disable the send button regardless of content (e.g. no agent picked). */
@@ -403,12 +438,61 @@ export interface ComposerProps {
   /** Called when the user clicks the stop button (only while sending). */
   onStop?: () => void;
   /**
-   * Show the inline skill (``/``) picker button. Hidden in project composers
-   * where skills are configured per-agent, not picked inline. Default true.
+   * When true, a small send button is shown alongside Stop while a turn is in
+   * flight so the user can submit a follow-up that gets queued (the page routes
+   * ``onSend`` to its enqueue path). Enter also works. Off for non-chat uses.
+   */
+  queueWhileSending?: boolean;
+  /**
+   * Show the toolbar "add skill" affordance (the ``+`` menu's Skills submenu).
+   * Hidden in project composers where skills are configured per-agent, not
+   * attached inline. Default true.
    */
   showSkillButton?: boolean;
+  /**
+   * Enable the inline ``/`` skill picker (read-only query over ``skills``).
+   * Decoupled from ``showSkillButton`` so a project conversation can let the
+   * user invoke the *selected agent's* bound skills with ``/`` without exposing
+   * a separate "add skill" button. Defaults to ``showSkillButton`` when unset,
+   * preserving the prior coupled behavior for existing callers.
+   */
+  showSkillSlash?: boolean;
   /** Optional class override for the outer composer wrapper. */
   wrapperClassName?: string;
+}
+
+/** Sub-trigger row height (px-3 py-2, 18px line) — the anchor we bottom-align
+ *  the submenu against. */
+const SUB_TRIGGER_HEIGHT = 34;
+
+/**
+ * A "+" menu submenu panel that **bottom-aligns** with its parent row. Radix
+ * hardcodes ``align="start"`` for submenus, so we measure the panel and shift
+ * it up by its own height (minus the trigger height) via ``alignOffset``;
+ * ``sideOffset`` adds the gap. The panel stays visible the whole time — the
+ * measure → reposition flushes before paint, so there's no flash. (An earlier
+ * ``visibility:hidden`` guard here both delayed the panel's appearance and ate
+ * the search box's caret on programmatic focus.)
+ */
+function ComposerSubmenuContent({ children }: { children: React.ReactNode }) {
+  const [alignOffset, setAlignOffset] = useState(-260);
+  const measure = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return;
+    const h = el.offsetHeight;
+    if (h) setAlignOffset(SUB_TRIGGER_HEIGHT - h);
+  }, []);
+  return (
+    <DropdownMenuSubContent
+      sideOffset={6}
+      alignOffset={alignOffset}
+      collisionPadding={12}
+      className="w-[240px] p-0"
+    >
+      <div ref={measure} className="flex flex-col">
+        {children}
+      </div>
+    </DropdownMenuSubContent>
+  );
 }
 
 export const Composer = ({
@@ -419,6 +503,12 @@ export const Composer = ({
   onSkillSelect,
   onLocalUpload,
   onKBPick,
+  connectors = [],
+  selectedConnectorSlugs = [],
+  onToggleConnector,
+  connectorsReadOnly = false,
+  onManageSkills,
+  onManageConnectors,
   uploadOnAttach = false,
   existingAttachmentCount = 0,
   pinnedAttachments = [],
@@ -442,12 +532,11 @@ export const Composer = ({
   selectedAgentSlug,
   onAgentChange,
   allowAgentBrainOverride = false,
-  agentModelOverridden = false,
   agentLocked = false,
   projects,
-  selectedWorkspaceId,
-  onWorkspaceChange,
-  workspaceLocked = false,
+  selectedProjectId,
+  onProjectChange,
+  projectLocked = false,
   onAddAgent,
   sendDisabled = false,
   mode = "chat",
@@ -455,9 +544,15 @@ export const Composer = ({
   autoFocus = false,
   sending = false,
   onStop,
+  queueWhileSending = false,
   showSkillButton = true,
+  showSkillSlash,
   wrapperClassName,
 }: ComposerProps) => {
+  // The ``/`` inline picker defaults to the toolbar button's visibility so
+  // existing callers keep their behavior; a caller can enable it independently
+  // (e.g. project conversations exposing the bound agent's skills via ``/``).
+  const slashEnabled = showSkillSlash ?? showSkillButton;
   // Toolbar dropdowns flip direction based on where the composer sits in the
   // viewport: top half → open downward (room below), bottom half → open
   // upward. Recomputed on resize/scroll via rAF; ``setMenuDir`` bails when the
@@ -494,7 +589,6 @@ export const Composer = ({
   const isControlled = controlledValue !== undefined;
   const currentValue = isControlled ? controlledValue : internalValue;
 
-  const [attachOpen, setAttachOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
   const [agentOpen, setAgentOpen] = useState(false);
   // Drill-in for the per-conversation brain override (agent popover). ``null``
@@ -503,8 +597,98 @@ export const Composer = ({
   const [agentSubmenu, setAgentSubmenu] = useState<
     null | "runtime" | "model" | "effort"
   >(null);
+  // Whether the "默认" entry's runtime/model/effort flyout (二级菜单) is open.
+  const [defaultBrainMenuOpen, setDefaultBrainMenuOpen] = useState(false);
+  // Whether the collapsed "Agent" entry's roster flyout (二级菜单) is open.
+  const [agentListMenuOpen, setAgentListMenuOpen] = useState(false);
+  const [agentListVAlign, setAgentListVAlign] = useState<"top" | "bottom">(
+    "top",
+  );
+  // How the agent popover's nested flyouts (二级 / 三级) lay out, measured
+  // against the viewport when each mounts.
+  //  - Horizontal: open RIGHT by default, flipping LEFT only when the right
+  //    can't fit BOTH nested levels (二级 + 三级).
+  //  - Vertical: align each flyout's TOP to its anchor (grow down) by default,
+  //    flipping to bottom-align (grow up) only when it would overflow below.
+  const [submenuSide, setSubmenuSide] = useState<"left" | "right">("right");
+  const [rowMenuVAlign, setRowMenuVAlign] = useState<"top" | "bottom">("top");
+  const measureAgentPopover = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    // Need room for two nested levels (~220px each + a small gap) on the right.
+    const needRight = 2 * (220 + 6);
+    // Measure to the conversation column's right edge, not the viewport — a
+    // right-hand context panel sits beyond it and must not be drawn over, so
+    // the nested menus flip left when the panel leaves no room.
+    const main = el.closest("main");
+    const rightEdge = main
+      ? main.getBoundingClientRect().right
+      : window.innerWidth;
+    const roomRight = rightEdge - rect.right;
+    setSubmenuSide(roomRight >= needRight ? "right" : "left");
+  }, []);
+  // Lay out a nested flyout (a 三级 runtime/model/effort picker, or the Agent
+  // roster): cap its height at a fixed maximum, but snap that cap DOWN to the
+  // last whole row so the bottom item is shown in full rather than sliced in
+  // half. A short list shows at its own height; a long one stops at the cap and
+  // scrolls — the height never grows past the cap.
+  const layoutFlyout = useCallback(
+    (el: HTMLDivElement | null, setAlign: (v: "top" | "bottom") => void) => {
+      if (!el) return;
+      const anchor = el.parentElement?.getBoundingClientRect();
+      if (!anchor) return;
+      const MARGIN = 8;
+      const CHROME = 5; // the flyout's own bottom padding (p-1) + border
+      const CAP = 240; // fixed max height; never grows past this
+      const content = el.scrollHeight;
+      let maxH = Math.min(content, CAP);
+      el.style.maxHeight = `${maxH}px`;
+      if (content > maxH) {
+        // Scrolling is unavoidable — pull the cap up so it ends right after the
+        // last WHOLE row, so the bottom item is never sliced in half. Measured
+        // in viewport coords (precise across border/sub-pixel rounding).
+        const menuRect = el.getBoundingClientRect();
+        const contentBottom = menuRect.bottom - CHROME;
+        let lastFullBottom = 0;
+        for (const row of Array.from(
+          el.querySelectorAll<HTMLElement>("button, [class*='uppercase']"),
+        )) {
+          const rb = row.getBoundingClientRect().bottom;
+          if (rb <= contentBottom + 1) lastFullBottom = rb;
+          else break;
+        }
+        if (lastFullBottom > 0) {
+          maxH = Math.floor(maxH - (menuRect.bottom - (lastFullBottom + CHROME)));
+          el.style.maxHeight = `${maxH}px`;
+        }
+      }
+      // Grow down unless the capped menu would run past the viewport bottom.
+      setAlign(
+        anchor.top + maxH <= window.innerHeight - MARGIN ? "top" : "bottom",
+      );
+    },
+    [],
+  );
+  const measureRowMenuV = useCallback(
+    (el: HTMLDivElement | null) => layoutFlyout(el, setRowMenuVAlign),
+    [layoutFlyout],
+  );
+  // The roster caps + scrolls via CSS (flex column with a pinned footer), so it
+  // only needs the grow direction here.
+  const measureAgentListV = useCallback((el: HTMLDivElement | null) => {
+    if (!el) return;
+    const anchor = el.parentElement?.getBoundingClientRect();
+    if (!anchor) return;
+    setAgentListVAlign(
+      anchor.top + el.offsetHeight <= window.innerHeight - 8 ? "top" : "bottom",
+    );
+  }, []);
   useEffect(() => {
-    if (!agentOpen) setAgentSubmenu(null);
+    if (!agentOpen) {
+      setAgentSubmenu(null);
+      setDefaultBrainMenuOpen(false);
+      setAgentListMenuOpen(false);
+    }
   }, [agentOpen]);
   const agentRef = useRef<HTMLDivElement>(null);
   const [projectOpen, setProjectOpen] = useState(false);
@@ -520,6 +704,45 @@ export const Composer = ({
     active: boolean;
     query: string;
   }>({ active: false, query: "" });
+  // Skills matching the live ``/`` query. Empty means the user is typing a
+  // slash *command* (e.g. ``/compact``) — not a skill name — so we let it pass
+  // through: the picker closes and Enter sends the command verbatim, rather
+  // than dead-ending on "no matching skill" while the runtime would happily
+  // run it. ``skillMenuOpen`` is the single gate for both the popup's
+  // visibility and the Enter-capture below, using the same predicate the menu
+  // renders with so the two can't drift apart.
+  const skillMatches =
+    slashEnabled && skillSearch.active
+      ? filterSkillItems(skills, skillSearch.query)
+      : [];
+  const skillMenuOpen = skillMatches.length > 0;
+  // Search queries for the "+" menu's Skills / Connectors submenus (separate
+  // from the inline ``/`` picker above).
+  const [skillMenuQuery, setSkillMenuQuery] = useState("");
+  const [connectorMenuQuery, setConnectorMenuQuery] = useState("");
+  const skillSearchRef = useRef<HTMLInputElement>(null);
+  const connectorSearchRef = useRef<HTMLInputElement>(null);
+  // Focus a submenu's search box when it opens. Driven by ``DropdownMenuSub
+  // onOpenChange`` (fires on *every* open) rather than the panel mount, which
+  // Radix may skip when it keeps a submenu mounted across a quick re-open
+  // (e.g. open Connectors → Skills → Connectors). Deferred a frame (the panel
+  // mounts after the open) + a fallback beat (Switch/menu focus can otherwise
+  // reclaim focus a tick later).
+  const focusSubmenuSearch = useCallback(
+    (ref: React.RefObject<HTMLInputElement | null>) => {
+      // The panel is visible from the first frame now, so an immediate focus
+      // renders the caret. rAF + a short fallback covers the mount timing.
+      requestAnimationFrame(() => ref.current?.focus({ preventScroll: true }));
+      window.setTimeout(() => ref.current?.focus({ preventScroll: true }), 60);
+    },
+    [],
+  );
+  const skillMenuMatches = filterSkillItems(skills, skillMenuQuery);
+  const connectorMenuMatches = connectorMenuQuery.trim()
+    ? connectors.filter((c) =>
+        c.label.toLowerCase().includes(connectorMenuQuery.trim().toLowerCase()),
+      )
+    : connectors;
   const [attachments, setAttachments] = useState<File[]>([]);
   const [dragOver, setDragOver] = useState(false);
 
@@ -632,7 +855,10 @@ export const Composer = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (skillSearch.active) return;
+    // Only yield Enter/arrows to the skill picker while it's actually open with
+    // matches. A ``/command`` that matches no skill keeps normal composer keys,
+    // so Enter sends it instead of inserting a newline.
+    if (skillMenuOpen) return;
     if (e.key === "Enter" && !e.shiftKey && !isImeCompositionEvent(e)) {
       e.preventDefault();
       handleSend();
@@ -726,6 +952,10 @@ export const Composer = ({
     onSend?.();
     setAttachments([]);
     onAttachmentsChange?.([]);
+    // Pass-through commands send with the picker still in its ``active`` state
+    // (no match closed the popup, not a selection). Reset it so the next ``/``
+    // starts clean.
+    setSkillSearch({ active: false, query: "" });
   };
 
   // Insert a chip at the caret. If the caret immediately follows a
@@ -1053,12 +1283,12 @@ export const Composer = ({
     agents?.find((a) => a.slug === selectedAgentSlug) ?? null;
 
   // Project-selector mode (📁 chip). When ``projects`` is provided the chip
-  // renders; ``selectedWorkspaceId == null`` means 临时对话 (chat-default).
+  // renders; ``selectedProjectId == null`` means 临时对话 (chat-default).
   const projectMode = projects !== undefined;
   const selectedProject =
-    selectedWorkspaceId == null
+    selectedProjectId == null
       ? null
-      : (projects?.find((p) => p.id === selectedWorkspaceId) ?? null);
+      : (projects?.find((p) => p.id === selectedProjectId) ?? null);
   const projectTriggerLabel = selectedProject
     ? selectedProject.name
     : t("conversation.tempChat" as Parameters<typeof t>[0]);
@@ -1153,7 +1383,7 @@ export const Composer = ({
           dragOver
             ? "border-brand/50"
             : mode === "task"
-              ? "border-brand bg-surface"
+              ? "border-[#725cf9] bg-surface"
               : "border-surface-border bg-surface",
         )}
         style={
@@ -1185,6 +1415,8 @@ export const Composer = ({
                 const isKb = doc.sourceKind === "kb_doc";
                 const isParsing = doc.parseStatus === "parsing";
                 const isFailed = doc.parseStatus === "failed";
+                // ``native`` (an image the runtime reads directly) renders like
+                // any ordinary attachment — no special icon or hint.
                 const ChipIcon = isParsing
                   ? Loader2
                   : isKb
@@ -1196,7 +1428,7 @@ export const Composer = ({
                     className={cn(
                       "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-2xs",
                       isFailed
-                        ? "border-error-border bg-error-light text-error-text"
+                        ? "border-error/30 bg-error-light text-error-text"
                         : isKb
                           ? "border-brand/25 bg-brand-light text-brand"
                           : "border-surface-border bg-surface-soft text-ink-body",
@@ -1276,12 +1508,16 @@ export const Composer = ({
               onPaste={handlePaste}
               onKeyDown={handleKeyDown}
             />
-            {showSkillButton && skillSearch.active && skills.length > 0 && (
+            {skillMenuOpen && (
               <SkillSearchMenu
                 skills={skills}
                 query={skillSearch.query}
                 onSelect={handleSkillSelect}
                 onClose={() => setSkillSearch({ active: false, query: "" })}
+                // Open the menu away from the nearer viewport edge — downward
+                // for a top-anchored composer (project detail page), upward for
+                // a bottom-anchored one — matching the toolbar dropdowns.
+                direction={menuDir}
               />
             )}
           </div>
@@ -1313,7 +1549,7 @@ export const Composer = ({
                         "flex h-6 items-center rounded-md px-2 font-medium transition-colors duration-[120ms]",
                         active
                           ? m === "task"
-                            ? "bg-brand text-white shadow-sm"
+                            ? "bg-[#725cf9] text-white shadow-sm"
                             : "bg-card text-ink-heading shadow-sm"
                           : "text-ink-body hover:text-ink-heading",
                       )}
@@ -1328,73 +1564,229 @@ export const Composer = ({
                 })}
               </div>
             )}
-            <div className="relative">
+            {/* Unified "+" menu: file/KB attach + Skills and Connectors
+                submenus. The ``/`` (skill) and ``@`` (KB) typing triggers still
+                work; this is the click affordance for the same actions. */}
+            <DropdownMenu>
               <TooltipProvider delayDuration={150}>
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      className="flex h-7 w-7 items-center justify-center rounded-lg text-ink-body transition-colors duration-[120ms] hover:bg-surface-soft hover:text-ink-heading"
-                      onClick={() => setAttachOpen(!attachOpen)}
-                    >
-                      <Paperclip
-                        className="h-[15px] w-[15px]"
-                        strokeWidth={2}
-                      />
-                    </button>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        type="button"
+                        aria-label={t("conversation.composerPlusTooltip")}
+                        className="flex h-7 w-7 items-center justify-center rounded-lg text-ink-body transition-colors duration-[120ms] hover:bg-surface-soft hover:text-ink-heading data-[state=open]:bg-surface-soft data-[state=open]:text-ink-heading"
+                      >
+                        <Plus className="h-[17px] w-[17px]" strokeWidth={1.9} />
+                      </button>
+                    </DropdownMenuTrigger>
                   </TooltipTrigger>
                   <TooltipContent side="bottom">
-                    {t("conversation.addAttachment")}
+                    {t("conversation.composerPlusTooltip")}
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
-              {attachOpen && (
-                <AttachmentMenu
-                  onLocalUpload={() => {
-                    setAttachOpen(false);
-                    fileInputRef.current?.click();
-                  }}
-                  onKnowledgeBasePick={onKBPick}
-                  onClose={() => setAttachOpen(false)}
+              <DropdownMenuContent
+                align="start"
+                side="top"
+                sideOffset={6}
+                className="min-w-[212px]"
+                // Don't restore focus to the "+" button on close — a mouse
+                // dismiss would otherwise leave a focus ring on it.
+                onCloseAutoFocus={(e) => e.preventDefault()}
+              >
+                <DropdownMenuItem
                   disabled={atAttachmentLimit}
-                  disabledHint={t("conversation.attachmentLimitReached", {
-                    max: String(MAX_SESSION_ATTACHMENTS),
-                  })}
-                />
-              )}
-            </div>
-            {/* Skill picker — hidden in project composers, where skills are
-                configured per-agent rather than picked inline. Surfaces the
-                ``/`` slash menu as a button when shown. */}
-            {showSkillButton && (
-              <TooltipProvider delayDuration={150}>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button
-                      type="button"
-                      aria-label="Skill"
-                      className={cn(
-                        "flex h-7 w-7 items-center justify-center rounded-lg transition-colors duration-[120ms]",
-                        skillSearch.active
-                          ? "bg-surface-soft text-ink-heading"
-                          : "text-ink-body hover:bg-surface-soft hover:text-ink-heading",
+                  onSelect={() => fileInputRef.current?.click()}
+                >
+                  <FileUp className="h-4 w-4 text-ink-meta" />
+                  {t("conversation.localUpload")}
+                </DropdownMenuItem>
+                {onKBPick && (
+                  <DropdownMenuItem
+                    disabled={atAttachmentLimit}
+                    onSelect={() => onKBPick()}
+                  >
+                    <Database className="h-4 w-4 text-ink-meta" />
+                    {t("conversation.fromKnowledgeBase")}
+                  </DropdownMenuItem>
+                )}
+                {atAttachmentLimit && (
+                  <p className="px-2 py-1 text-2xs text-ink-meta">
+                    {t("conversation.attachmentLimitReached", {
+                      max: String(MAX_SESSION_ATTACHMENTS),
+                    })}
+                  </p>
+                )}
+                {(showSkillButton || connectors.length > 0) && (
+                  <DropdownMenuSeparator />
+                )}
+                {showSkillButton && (
+                  <DropdownMenuSub
+                    onOpenChange={(open) =>
+                      open && focusSubmenuSearch(skillSearchRef)
+                    }
+                  >
+                    <DropdownMenuSubTrigger>
+                      <Zap className="h-4 w-4 text-ink-meta" />
+                      {t("conversation.composerSkills")}
+                    </DropdownMenuSubTrigger>
+                    {/* Search pinned at top, list scrolls, Manage pinned at
+                        bottom. ``ComposerSubmenuContent`` bottom-aligns the panel
+                        with this trigger and keeps it off the viewport edges. */}
+                    <ComposerSubmenuContent>
+                      <div className="flex items-center gap-2.5 border-b border-surface-border px-3 py-2">
+                        <Search className="h-4 w-4 shrink-0 text-ink-meta" />
+                        <input
+                          ref={skillSearchRef}
+                          autoFocus
+                          value={skillMenuQuery}
+                          onChange={(e) => setSkillMenuQuery(e.target.value)}
+                          // Don't let the menu's typeahead steal keystrokes while
+                          // searching; Escape still bubbles up to close it.
+                          onKeyDown={(e) => {
+                            if (e.key !== "Escape") e.stopPropagation();
+                          }}
+                          placeholder={t("conversation.searchSkill")}
+                          className="min-w-0 flex-1 bg-transparent text-[12.5px] text-ink-heading outline-none placeholder:text-ink-meta"
+                        />
+                      </div>
+                      <div className="max-h-[260px] overflow-y-auto p-1">
+                        {skillMenuMatches.length === 0 ? (
+                          <p className="px-2 py-3 text-center text-xs text-ink-muted">
+                            {t("conversation.composerNoMatches")}
+                          </p>
+                        ) : (
+                          skillMenuMatches.map((skill) => (
+                            <DropdownMenuItem
+                              key={skill.slug || skill.name}
+                              onSelect={() => handleSkillSelect(skill)}
+                            >
+                              <Zap className="h-4 w-4 text-ink-meta" />
+                              <div className="min-w-0">
+                                <div className="truncate text-ink-heading">
+                                  {skill.name}
+                                </div>
+                                {skill.description && (
+                                  <div className="truncate text-2xs text-ink-meta">
+                                    {skill.description}
+                                  </div>
+                                )}
+                              </div>
+                            </DropdownMenuItem>
+                          ))
+                        )}
+                      </div>
+                      {onManageSkills && (
+                        <>
+                          <DropdownMenuSeparator className="my-0" />
+                          <div className="p-1">
+                            <DropdownMenuItem onSelect={() => onManageSkills()}>
+                              <Settings className="h-4 w-4 text-ink-meta" />
+                              {t("conversation.composerManageSkills")}
+                            </DropdownMenuItem>
+                          </div>
+                        </>
                       )}
-                      onClick={() => {
-                        setSkillSearch((prev) =>
-                          prev.active
-                            ? { active: false, query: "" }
-                            : { active: true, query: "" },
-                        );
-                        editorRef.current?.focus();
-                      }}
-                    >
-                      <Zap className="h-[15px] w-[15px]" strokeWidth={2} />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom">Skill</TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
+                    </ComposerSubmenuContent>
+                  </DropdownMenuSub>
+                )}
+                {connectors.length > 0 && (
+                  <DropdownMenuSub
+                    onOpenChange={(open) =>
+                      open && focusSubmenuSearch(connectorSearchRef)
+                    }
+                  >
+                    <DropdownMenuSubTrigger>
+                      <Link2 className="h-4 w-4 text-ink-meta" />
+                      {t("conversation.composerConnectors")}
+                    </DropdownMenuSubTrigger>
+                    <ComposerSubmenuContent>
+                      <div className="flex items-center gap-2.5 border-b border-surface-border px-3 py-2">
+                        <Search className="h-4 w-4 shrink-0 text-ink-meta" />
+                        <input
+                          ref={connectorSearchRef}
+                          autoFocus
+                          value={connectorMenuQuery}
+                          onChange={(e) =>
+                            setConnectorMenuQuery(e.target.value)
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key !== "Escape") e.stopPropagation();
+                          }}
+                          placeholder={t(
+                            "conversation.composerSearchConnectors",
+                          )}
+                          className="min-w-0 flex-1 bg-transparent text-[12.5px] text-ink-heading outline-none placeholder:text-ink-meta"
+                        />
+                      </div>
+                      {connectorsReadOnly && (
+                        <p className="px-3 pt-1.5 text-2xs text-ink-meta">
+                          {t("conversation.composerConnectorsLocked")}
+                        </p>
+                      )}
+                      <div className="max-h-[260px] overflow-y-auto p-1">
+                        {connectorMenuMatches.length === 0 ? (
+                          <p className="px-2 py-3 text-center text-xs text-ink-muted">
+                            {t("conversation.composerNoMatches")}
+                          </p>
+                        ) : (
+                          connectorMenuMatches.map((c) => {
+                            const on = selectedConnectorSlugs.includes(c.slug);
+                            return (
+                              <DropdownMenuItem
+                                key={c.slug}
+                                className="justify-between"
+                                // Keep the menu open so several can be toggled
+                                // (and never toggle when read-only).
+                                onSelect={(e) => {
+                                  e.preventDefault();
+                                  if (!connectorsReadOnly)
+                                    onToggleConnector?.(c.slug, !on);
+                                }}
+                              >
+                                <div className="flex min-w-0 items-center gap-2.5">
+                                  <Link2 className="h-4 w-4 shrink-0 text-ink-meta" />
+                                  <div className="min-w-0">
+                                    <div className="truncate text-ink-heading">
+                                      {c.label}
+                                    </div>
+                                    {c.description && (
+                                      <div className="truncate text-2xs text-ink-meta">
+                                        {c.description}
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                                <Switch
+                                  checked={on}
+                                  disabled={connectorsReadOnly}
+                                  tabIndex={-1}
+                                  className="pointer-events-none shrink-0"
+                                />
+                              </DropdownMenuItem>
+                            );
+                          })
+                        )}
+                      </div>
+                      {onManageConnectors && (
+                        <>
+                          <DropdownMenuSeparator className="my-0" />
+                          <div className="p-1">
+                            <DropdownMenuItem
+                              onSelect={() => onManageConnectors()}
+                            >
+                              <Settings className="h-4 w-4 text-ink-meta" />
+                              {t("conversation.composerManageConnectors")}
+                            </DropdownMenuItem>
+                          </div>
+                        </>
+                      )}
+                    </ComposerSubmenuContent>
+                  </DropdownMenuSub>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
             {/* ADR-013/014 cross-runtime approval mode picker. Visible
                 when the host passes ``permissionMode`` (back-compat: when
                 undefined the picker is hidden). Mode is frozen at session
@@ -1479,10 +1871,7 @@ export const Composer = ({
                               "flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors",
                               disabled
                                 ? "cursor-not-allowed text-ink-muted"
-                                : "text-ink-heading hover:bg-[color:var(--fg-1)]",
-                              selected &&
-                                !disabled &&
-                                "bg-[color:var(--fg-1)] group-hover/permission-menu:bg-transparent hover:!bg-[color:var(--fg-1)]",
+                                : "text-ink-heading hover:bg-surface-muted",
                             )}
                             onClick={() => {
                               if (disabled) return;
@@ -1497,7 +1886,7 @@ export const Composer = ({
                               )}
                             />
                             <span className="flex min-w-0 flex-1 flex-col">
-                              <span className="truncate text-[14px] leading-[18px]">
+                              <span className="truncate text-[12.5px] leading-[18px]">
                                 {item.label}
                               </span>
                               <span className="truncate text-[11px] leading-[15px] text-ink-meta">
@@ -1505,7 +1894,7 @@ export const Composer = ({
                               </span>
                             </span>
                             {selected && !disabled && (
-                              <Check className="mt-0.5 block h-3.5 w-3.5 shrink-0 text-ink-heading" />
+                              <Check className="block h-3.5 w-3.5 shrink-0 self-center text-ink-heading" />
                             )}
                           </button>
                         );
@@ -1532,38 +1921,38 @@ export const Composer = ({
           </div>
           <div className="flex items-center gap-2">
             {/* 09-assistant 📁 project chip — switches the conversation
-                between 临时对话 (chat-default) and a project workspace.
+                between 临时对话 (chat-default) and a project project.
                 Sits immediately before the 🤖 agent chip so the two read
                 "📁 🤖" left-to-right. Frozen once a session exists
-                (``workspaceLocked``, ADR-006). */}
+                (``projectLocked``, ADR-006). */}
             {projectMode && (
               <div className="relative" ref={projectRef}>
                 <button
                   type="button"
                   className={cn(
                     "flex h-7 items-center gap-1 rounded-lg px-2 text-xs transition-colors duration-[120ms]",
-                    workspaceLocked
+                    projectLocked
                       ? "cursor-not-allowed text-ink-muted"
                       : "text-ink-body hover:bg-surface-soft hover:text-ink-heading",
                     projectOpen &&
-                      !workspaceLocked &&
+                      !projectLocked &&
                       "bg-surface-soft text-ink-heading",
                   )}
                   onClick={() => {
-                    if (!workspaceLocked) setProjectOpen((v) => !v);
+                    if (!projectLocked) setProjectOpen((v) => !v);
                   }}
                 >
                   <FolderClosed className="h-3 w-3 shrink-0" />
                   <span className="max-w-[160px] truncate">
                     {projectTriggerLabel}
                   </span>
-                  {workspaceLocked ? (
+                  {projectLocked ? (
                     <Lock className="h-3 w-3 shrink-0 opacity-70" />
                   ) : (
                     <ChevronDown className="h-3 w-3 shrink-0" />
                   )}
                 </button>
-                {projectOpen && !workspaceLocked && (
+                {projectOpen && !projectLocked && (
                   <div
                     className={cn(
                       "absolute left-0 z-50 min-w-[260px] rounded-lg border border-surface-border bg-surface shadow-lg",
@@ -1571,20 +1960,17 @@ export const Composer = ({
                     )}
                   >
                     <div className="max-h-[320px] overflow-y-auto p-1">
-                      {/* 临时对话 row — selected when selectedWorkspaceId == null */}
+                      {/* 临时对话 row — selected when selectedProjectId == null */}
                       <button
                         type="button"
                         onClick={() => {
-                          onWorkspaceChange?.(null);
+                          onProjectChange?.(null);
                           setProjectOpen(false);
                         }}
-                        className={cn(
-                          "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[color:var(--fg-1)]",
-                          selectedWorkspaceId == null && "bg-[color:var(--fg-1)]",
-                        )}
+                        className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted"
                       >
                         <span className="flex min-w-0 flex-1 flex-col">
-                          <span className="truncate text-[14px] text-ink-heading">
+                          <span className="truncate text-[12.5px] text-ink-heading">
                             {t(
                               "conversation.tempChat" as Parameters<
                                 typeof t
@@ -1599,7 +1985,7 @@ export const Composer = ({
                             )}
                           </span>
                         </span>
-                        {selectedWorkspaceId == null && (
+                        {selectedProjectId == null && (
                           <Check className="h-3.5 w-3.5 shrink-0 text-ink-heading" />
                         )}
                       </button>
@@ -1607,22 +1993,19 @@ export const Composer = ({
                         <div className="my-1 h-px bg-surface-border" />
                       )}
                       {projects?.map((p) => {
-                        const sel = p.id === selectedWorkspaceId;
+                        const sel = p.id === selectedProjectId;
                         return (
                           <button
                             key={p.id}
                             type="button"
                             onClick={() => {
-                              onWorkspaceChange?.(p.id);
+                              onProjectChange?.(p.id);
                               setProjectOpen(false);
                             }}
-                            className={cn(
-                              "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[color:var(--fg-1)]",
-                              sel && "bg-[color:var(--fg-1)]",
-                            )}
+                            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted"
                           >
                             <span className="flex min-w-0 flex-1 flex-col">
-                              <span className="truncate text-[14px] text-ink-heading">
+                              <span className="truncate text-[12.5px] text-ink-heading">
                                 {p.name}
                               </span>
                               {(p.memberCount != null || p.description) && (
@@ -1659,9 +2042,10 @@ export const Composer = ({
                   // the user can see the session's brain and tweak effort
                   // (which live-reconciles); runtime/model stay frozen
                   // (ADR-006).
-                  const canOpen =
-                    !agentLocked ||
-                    (allowAgentBrainOverride && !!selectedAgentSlug);
+                  // A locked session still opens (read-only) so the effort can
+                  // be tweaked via the Default entry's submenu; the selection
+                  // (agent / default) itself stays frozen.
+                  const canOpen = !agentLocked || allowAgentBrainOverride;
                   // When locked to a session whose bound agent is no longer in
                   // the candidate list (e.g. the library agent was deleted
                   // after the session was created), fall back to the raw slug
@@ -1670,9 +2054,23 @@ export const Composer = ({
                     ? selectedAgent.name
                     : agentLocked && selectedAgentSlug
                       ? selectedAgentSlug
-                      : t(
-                          "conversation.selectAgent" as Parameters<typeof t>[0],
-                        );
+                      : allowAgentBrainOverride
+                        ? // No agent = the "Default" entry (agentless quick chat).
+                          t("conversation.defaultBrain" as Parameters<typeof t>[0])
+                        : t(
+                            "conversation.selectAgent" as Parameters<typeof t>[0],
+                          );
+                  // When an agent is selected use its own host-computed model
+                  // label (correct for project members, whose model id may not
+                  // resolve against the composer's own provider list — that path
+                  // falls back to a placeholder). Default/agentless uses the
+                  // composer's resolved model.
+                  const triggerModelLabel =
+                    selectedAgent?.modelLabel ??
+                    // Hide the "Model" placeholder when no model channel is
+                    // configured — ``selectedModelLabel`` falls back to that
+                    // literal only when ``providers`` is empty.
+                    (providers.length > 0 ? selectedModelLabel : null);
                   return (
                     <>
                       <button
@@ -1697,26 +2095,22 @@ export const Composer = ({
                               the task detail page uses (TaskContextPanel
                               + sub-sidebar). */}
                           {mode === "task" && (
-                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand/10 px-1 text-[10px] leading-none font-normal text-brand">
+                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-[#725cf9]/10 px-1 text-[10px] leading-none font-normal text-[#725cf9]">
                               {t("task.runLead" as Parameters<typeof t>[0])}
                             </span>
                           )}
                           <span className="max-w-[200px] truncate text-ink-heading leading-none">
                             {triggerLabel}
                           </span>
-                          {/* Overridden model as a muted hint inside the
-                              agent button — shown ONLY once the user diverges
-                              from the agent's default (temp/quick chats; not
-                              project conversations). An un-customized chat
-                              stays clean. The picker lives in the dropdown's
-                              override rows. */}
-                          {allowAgentBrainOverride &&
-                            agentModelOverridden &&
-                            selectedModelLabel && (
-                              <span className="max-w-[120px] truncate leading-none text-ink-muted">
-                                {selectedModelLabel}
-                              </span>
-                            )}
+                          {/* The bound model as a muted hint inside the trigger
+                              — always shown (Default, library agent, or project
+                              member) so the button reads e.g. "行业分析师 ·
+                              Sonnet 4.6". The picker lives in the dropdown rows. */}
+                          {triggerModelLabel && (
+                            <span className="max-w-[120px] truncate leading-none text-ink-muted">
+                              {triggerModelLabel}
+                            </span>
+                          )}
                           {canOpen && (
                             <ChevronDown className="h-3 w-3 shrink-0" />
                           )}
@@ -1724,13 +2118,215 @@ export const Composer = ({
                       </button>
                       {agentOpen && canOpen && (
                         <div
+                          ref={measureAgentPopover}
                           className={cn(
                             "absolute right-0 z-50 min-w-[260px] rounded-lg border border-surface-border bg-surface shadow-lg",
                             menuVClass,
                           )}
                         >
-                          <div className="max-h-[300px] overflow-y-auto p-1">
-                            {agents && agents.length > 0 ? (
+                          <div
+                            className={cn(
+                              "p-1",
+                              // Collapsed mode is just 默认 + Agent (short) and
+                              // must NOT clip the Agent roster flyout; the flat
+                              // project list keeps its own scroll.
+                              !allowAgentBrainOverride &&
+                                "max-h-[300px] overflow-y-auto",
+                            )}
+                          >
+                            {/* "Default" entry (no agent): an agentless quick
+                                chat on the system default brain, editable in the
+                                rows below. Only in the agentless-capable composer
+                                (new conversation), not project member-pick. */}
+                            {allowAgentBrainOverride && (
+                              <button
+                                type="button"
+                                // Frozen on a locked agent run (nothing editable);
+                                // a locked Default run stays hoverable so the
+                                // effort can still be changed.
+                                disabled={agentLocked && !!selectedAgentSlug}
+                                className={cn(
+                                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent",
+                                  // Highlight only while its 二级菜单 is open;
+                                  // selection is shown by the ✓, not a persistent
+                                  // grey background (avoids two adjacent greys).
+                                  defaultBrainMenuOpen && "bg-surface-muted",
+                                )}
+                                onMouseEnter={() => {
+                                  setAgentSubmenu(null);
+                                  setAgentListMenuOpen(false);
+                                  // The runtime/model 二级菜单 belongs to the
+                                  // Default selection (effort stays editable when
+                                  // locked); an agent run keeps it frozen.
+                                  if (!selectedAgentSlug)
+                                    setDefaultBrainMenuOpen(true);
+                                }}
+                                onClick={() => {
+                                  // Selection is frozen once a session exists; the
+                                  // submenu (effort) is still reachable on hover.
+                                  if (agentLocked) return;
+                                  onAgentChange?.(null);
+                                  setDefaultBrainMenuOpen(true);
+                                }}
+                              >
+                                <span className="flex min-w-0 flex-1 flex-col">
+                                  <span className="truncate text-[12.5px] text-ink-heading">
+                                    {t(
+                                      "conversation.defaultBrain" as Parameters<
+                                        typeof t
+                                      >[0],
+                                    )}
+                                  </span>
+                                  <span className="truncate text-2xs text-ink-meta">
+                                    {selectedRuntimeLabel} · {selectedModelLabel}
+                                  </span>
+                                </span>
+                                {!selectedAgentSlug && (
+                                  <Check className="h-3.5 w-3.5 shrink-0 text-ink-heading" />
+                                )}
+                                {/* ▸ shows whenever the submenu can open — hidden
+                                    on a locked agent run (everything frozen). */}
+                                {!(agentLocked && selectedAgentSlug) && (
+                                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-meta" />
+                                )}
+                              </button>
+                            )}
+                            {allowAgentBrainOverride ? (
+                              // New-conversation composer: collapse the roster
+                              // into a single "Agent" entry (parallel to 默认);
+                              // its 二级菜单 lists the agents + 添加 Agent.
+                              <div
+                                className="relative"
+                                onMouseEnter={() => {
+                                  setDefaultBrainMenuOpen(false);
+                                  setAgentSubmenu(null);
+                                  // No agent switching once the session is locked
+                                  // — the roster stays closed; the entry is inert
+                                  // (like the frozen Default selection).
+                                  if (!agentLocked) setAgentListMenuOpen(true);
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  disabled={agentLocked}
+                                  className={cn(
+                                    "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent",
+                                    // Grey only while the roster 二级菜单 is open;
+                                    // selection is the ✓, not a persistent grey.
+                                    agentListMenuOpen && "bg-surface-muted",
+                                  )}
+                                  onClick={() => {
+                                    if (agentLocked) return;
+                                    setAgentListMenuOpen(true);
+                                  }}
+                                >
+                                  <span className="flex min-w-0 flex-1 flex-col">
+                                    <span className="truncate text-[12.5px] text-ink-heading">
+                                      {selectedAgent
+                                        ? selectedAgent.name
+                                        : t(
+                                            "conversation.selectAgent" as Parameters<
+                                              typeof t
+                                            >[0],
+                                          )}
+                                    </span>
+                                    {selectedAgent && (
+                                      <span className="truncate text-2xs text-ink-meta">
+                                        {selectedAgent.runtimeLabel} ·{" "}
+                                        {selectedAgent.modelLabel}
+                                      </span>
+                                    )}
+                                  </span>
+                                  {!!selectedAgentSlug && (
+                                    <Check className="h-3.5 w-3.5 shrink-0 text-ink-heading" />
+                                  )}
+                                  {/* No ▸ when locked — the roster can't open. */}
+                                  {!agentLocked && (
+                                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-meta" />
+                                  )}
+                                </button>
+                                {agentListMenuOpen && (
+                                  <div
+                                    ref={measureAgentListV}
+                                    className={cn(
+                                      "absolute z-50 flex max-h-[320px] min-w-[200px] flex-col rounded-lg border border-surface-border bg-surface shadow-lg",
+                                      submenuSide === "left"
+                                        ? "right-full mr-2"
+                                        : "left-full ml-2",
+                                      agentListVAlign === "top"
+                                        ? "top-0"
+                                        : "bottom-0",
+                                    )}
+                                  >
+                                    <div className="min-h-0 flex-1 overflow-y-auto p-1">
+                                      {agents && agents.length > 0 ? (
+                                        agents.map((a) => {
+                                          const selected =
+                                            a.slug === selectedAgentSlug;
+                                          return (
+                                            <button
+                                              key={a.slug}
+                                              type="button"
+                                              disabled={agentLocked}
+                                              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent"
+                                              onClick={() => {
+                                                if (agentLocked) return;
+                                                onAgentChange?.(a.slug);
+                                                setAgentOpen(false);
+                                              }}
+                                            >
+                                              <span className="flex min-w-0 flex-1 flex-col">
+                                                <span className="truncate text-[12.5px] text-ink-heading">
+                                                  {a.name}
+                                                </span>
+                                                <span className="truncate text-2xs text-ink-meta">
+                                                  {a.runtimeLabel} ·{" "}
+                                                  {a.modelLabel}
+                                                </span>
+                                              </span>
+                                              {selected && (
+                                                <Check className="h-3.5 w-3.5 shrink-0 text-ink-heading" />
+                                              )}
+                                            </button>
+                                          );
+                                        })
+                                      ) : (
+                                        <div className="px-2 py-3 text-center text-xs text-ink-meta">
+                                          {t(
+                                            "conversation.noAgents" as Parameters<
+                                              typeof t
+                                            >[0],
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                    {onAddAgent && !agentLocked && (
+                                      // Pinned footer — stays visible even when
+                                      // the agent list above it scrolls.
+                                      <div className="shrink-0 border-t border-surface-border p-1">
+                                        <button
+                                          type="button"
+                                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
+                                          onClick={() => {
+                                            setAgentOpen(false);
+                                            onAddAgent();
+                                          }}
+                                        >
+                                          <Plus className="h-4 w-4 shrink-0 text-ink-meta" />
+                                          <span className="truncate">
+                                            {t(
+                                              "conversation.addAgent" as Parameters<
+                                                typeof t
+                                              >[0],
+                                            )}
+                                          </span>
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            ) : agents && agents.length > 0 ? (
                               agents.map((a) => {
                                 const selected = a.slug === selectedAgentSlug;
                                 return (
@@ -1738,10 +2334,7 @@ export const Composer = ({
                                     key={a.slug}
                                     type="button"
                                     disabled={agentLocked}
-                                    className={cn(
-                                      "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-default disabled:hover:bg-transparent",
-                                      selected && "bg-[color:var(--fg-1)]",
-                                    )}
+                                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent"
                                     onClick={() => {
                                       if (agentLocked) return;
                                       onAgentChange?.(a.slug);
@@ -1749,7 +2342,7 @@ export const Composer = ({
                                     }}
                                   >
                                     <span className="flex min-w-0 flex-1 flex-col">
-                                      <span className="truncate text-[14px] text-ink-heading">
+                                      <span className="truncate text-[12.5px] text-ink-heading">
                                         {a.name}
                                       </span>
                                       <span className="truncate text-2xs text-ink-meta">
@@ -1772,15 +2365,22 @@ export const Composer = ({
                               </div>
                             )}
                           </div>
-                          {allowAgentBrainOverride && selectedAgentSlug && (
-                            <div className="border-t border-surface-border p-1">
-                                <div className="px-2 pt-1 pb-1 text-2xs font-medium tracking-wide text-ink-meta uppercase">
-                                  {t(
-                                    "conversation.brainOverride" as Parameters<
-                                      typeof t
-                                    >[0],
-                                  )}
-                                </div>
+                          {/* Runtime / model / effort are the "默认" (no-agent)
+                              entry's brain, shown as its 二级菜单 — a flyout to
+                              the left of the popover, opened by hovering the
+                              Default row. Agents run on their own brain (shown
+                              in the trigger) and carry no controls here. */}
+                          {allowAgentBrainOverride &&
+                            !selectedAgentSlug &&
+                            defaultBrainMenuOpen && (
+                            <div
+                              className={cn(
+                                "absolute top-1 z-50 min-w-[200px] rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
+                                submenuSide === "left"
+                                  ? "right-full mr-1"
+                                  : "left-full ml-1",
+                              )}
+                            >
                                 {(
                                   [
                                     {
@@ -1812,12 +2412,12 @@ export const Composer = ({
                                     <button
                                       type="button"
                                       className={cn(
-                                        "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors",
+                                        "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",
                                         row.key !== "effort" && modelLocked
                                           ? "cursor-default"
-                                          : "hover:bg-[color:var(--fg-1)]",
+                                          : "hover:bg-surface-muted",
                                         agentSubmenu === row.key &&
-                                          "bg-[color:var(--fg-1)]",
+                                          "bg-surface-muted",
                                       )}
                                       onMouseEnter={() => {
                                         if (row.key !== "effort" && modelLocked)
@@ -1856,9 +2456,17 @@ export const Composer = ({
                                         off-screen. */}
                                     {agentSubmenu === row.key && (
                                       <div
+                                        ref={measureRowMenuV}
                                         className={cn(
-                                          "absolute right-full z-50 mr-1 max-h-[300px] min-w-[200px] overflow-y-auto rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
-                                          menuDir === "down"
+                                          "absolute z-50 max-h-[240px] min-w-[200px] overflow-y-auto rounded-lg border border-surface-border bg-surface p-1 shadow-lg",
+                                          // mr-2/ml-2 (not mr-1): this flyout
+                                          // anchors to the row, which sits inside
+                                          // the 二级's p-1 padding — the extra 4px
+                                          // restores a gap equal to 一级↔二级.
+                                          submenuSide === "left"
+                                            ? "right-full mr-2"
+                                            : "left-full ml-2",
+                                          rowMenuVAlign === "top"
                                             ? "top-0"
                                             : "bottom-0",
                                         )}
@@ -1869,11 +2477,7 @@ export const Composer = ({
                                               key={r.id}
                                               type="button"
                                               disabled={!r.available}
-                                              className={cn(
-                                                "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-not-allowed disabled:opacity-50",
-                                                r.id === selectedRuntimeId &&
-                                                  "bg-[color:var(--fg-1)]",
-                                              )}
+                                              className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
                                               onClick={() => {
                                                 onRuntimeChange?.(r.id);
                                                 setAgentSubmenu(null);
@@ -1916,10 +2520,7 @@ export const Composer = ({
                                                   <button
                                                     key={`${m.providerId}::${m.modelId}`}
                                                     type="button"
-                                                    className={cn(
-                                                      "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-[color:var(--fg-1)]",
-                                                      sel && "bg-[color:var(--fg-1)]",
-                                                    )}
+                                                    className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-muted"
                                                     onClick={() => {
                                                       onModelChange?.(
                                                         m.providerId,
@@ -1946,10 +2547,7 @@ export const Composer = ({
                                               <button
                                                 key={level}
                                                 type="button"
-                                                className={cn(
-                                                  "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-[color:var(--fg-1)]",
-                                                  sel && "bg-[color:var(--fg-1)]",
-                                                )}
+                                                className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-muted"
                                                 onClick={() => {
                                                   onEffortChange?.(level);
                                                   setAgentSubmenu(null);
@@ -1970,17 +2568,20 @@ export const Composer = ({
                                 ))}
                               </div>
                             )}
-                          {onAddAgent && !agentLocked && (
+                          {/* Project mode keeps the inline 添加 Agent footer; the
+                              collapsed (new-conversation) mode moves it into the
+                              Agent roster 二级菜单 above. */}
+                          {onAddAgent && !agentLocked && !allowAgentBrainOverride && (
                             <div className="border-t border-surface-border p-1">
                               <button
                                 type="button"
-                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-brand transition-colors hover:bg-[color:var(--fg-1)]"
+                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
                                 onClick={() => {
                                   setAgentOpen(false);
                                   onAddAgent();
                                 }}
                               >
-                                <Plus className="h-3.5 w-3.5 shrink-0" />
+                                <Plus className="h-4 w-4 shrink-0 text-ink-meta" />
                                 <span className="truncate">
                                   {t(
                                     "conversation.addAgent" as Parameters<
@@ -2061,13 +2662,10 @@ export const Composer = ({
                           type="button"
                           disabled={disabled}
                           className={cn(
-                            "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] transition-colors",
+                            "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",
                             disabled
                               ? "cursor-not-allowed text-ink-muted"
-                              : "text-ink-heading hover:bg-[color:var(--fg-1)]",
-                            selected &&
-                              !disabled &&
-                              "bg-[color:var(--fg-1)] group-hover/runtime-menu:bg-transparent hover:!bg-[color:var(--fg-1)]",
+                              : "text-ink-heading hover:bg-surface-muted",
                           )}
                           onClick={() => {
                             if (disabled) return;
@@ -2209,9 +2807,7 @@ export const Composer = ({
                                       type="button"
                                       disabled={modelLocked}
                                       className={cn(
-                                        "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]",
-                                        selected &&
-                                          "bg-[color:var(--fg-1)] group-hover/model-menu:bg-transparent hover:!bg-[color:var(--fg-1)]",
+                                        "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted",
                                         modelLocked &&
                                           "cursor-not-allowed opacity-50 hover:bg-transparent",
                                       )}
@@ -2264,7 +2860,7 @@ export const Composer = ({
                       >
                         <button
                           type="button"
-                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]"
+                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
                           onClick={() => setEffortSubOpen(true)}
                         >
                           <span className="min-w-0 flex-1 truncate">
@@ -2286,10 +2882,7 @@ export const Composer = ({
                                 <button
                                   key={level}
                                   type="button"
-                                  className={cn(
-                                    "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[14px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]",
-                                    sel && "bg-[color:var(--fg-1)]",
-                                  )}
+                                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
                                   onClick={() => {
                                     onEffortChange?.(level);
                                     setEffortSubOpen(false);
@@ -2326,18 +2919,37 @@ export const Composer = ({
                 clicking it routes to ``onStop`` (the page maps to its
                 interrupt handler). */}
             {sending ? (
-              <button
-                type="button"
-                className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-white transition-colors duration-[120ms] hover:bg-brand-hover"
-                onClick={() => onStop?.()}
-                title={t("conversation.stop")}
-                aria-label={t("conversation.stop")}
-              >
-                <Square
-                  className="h-[11px] w-[11px] fill-current"
-                  strokeWidth={0}
-                />
-              </button>
+              <div className="flex items-center gap-1.5">
+                {queueWhileSending && (
+                  <button
+                    type="button"
+                    className={cn(
+                      "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
+                      hasContent && !sendDisabled
+                        ? "bg-brand text-white"
+                        : "bg-brand/40 text-white/60",
+                    )}
+                    onClick={handleSend}
+                    disabled={!hasContent || sendDisabled}
+                    title={t("common.queueSend")}
+                    aria-label={t("common.queueSend")}
+                  >
+                    <ArrowUp className="h-[13px] w-[13px]" strokeWidth={2} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-white transition-opacity duration-[120ms] hover:opacity-90"
+                  onClick={() => onStop?.()}
+                  title={t("conversation.stop")}
+                  aria-label={t("conversation.stop")}
+                >
+                  <Square
+                    className="h-[11px] w-[11px] fill-current"
+                    strokeWidth={0}
+                  />
+                </button>
+              </div>
             ) : mode === "task" ? (
               // Task mode submit. Labelled accent pill ``⚡ Launch task`` when
               // the composer is wide (≥500px); collapses to the compact 28×28
@@ -2347,11 +2959,11 @@ export const Composer = ({
               <button
                 type="button"
                 className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-lg transition-colors duration-[120ms]",
+                  "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
                   "@min-[500px]/composer:w-auto @min-[500px]/composer:gap-1 @min-[500px]/composer:px-2 @min-[500px]/composer:text-xs @min-[500px]/composer:font-medium",
                   hasContent && !sendDisabled
-                    ? "bg-brand text-white hover:bg-brand-hover"
-                    : "bg-brand/40 text-white/70",
+                    ? "bg-[#725cf9] text-white"
+                    : "bg-[#725cf9]/40 text-white/70",
                 )}
                 onClick={handleSend}
                 disabled={!hasContent || sendDisabled}
@@ -2367,9 +2979,9 @@ export const Composer = ({
               <button
                 type="button"
                 className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-lg transition-colors duration-[120ms]",
+                  "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
                   hasContent && !sendDisabled
-                    ? "bg-brand text-white hover:bg-brand-hover"
+                    ? "bg-brand text-white"
                     : "bg-brand/40 text-white/60",
                 )}
                 onClick={handleSend}

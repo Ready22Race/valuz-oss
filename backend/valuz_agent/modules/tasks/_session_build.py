@@ -17,7 +17,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from valuz_agent.adapters import kernel_store
 
 logger = logging.getLogger(__name__)
 
@@ -25,13 +24,12 @@ logger = logging.getLogger(__name__)
 def _provider_resolver_deps(db: Any) -> dict[str, Any]:
     """Build the (providers, secrets) deps so build_member_session
     can resolve a per-agent pinned provider into the run's model_provider."""
-    from valuz_agent.infra.config import settings
-    from valuz_agent.infra.secret_store import FileSecretStore
     from valuz_agent.modules.providers.datastore import ProviderDatastore
+    from valuz_agent.ports.extensions import ext
 
     return {
         "providers": ProviderDatastore(db),
-        "secrets": FileSecretStore(settings.secrets_dir),
+        "secrets": ext.secret_store,
     }
 
 
@@ -69,18 +67,16 @@ async def _credential_gap(session: Any, agent_slug: str, *, db: Any | None = Non
     # loading the agent and checking the pinned provider's auth_type.
     if db is not None:
         try:
+            from valuz_agent.infra.auth_context import require_current_user_id
             from valuz_agent.modules.providers.datastore import ProviderDatastore
 
-            agent_id = getattr(session, "agent_id", None)
-            if agent_id:
-                agent = await kernel_store.load_agent(agent_id)
-                provider_id = (
-                    (getattr(agent, "metadata", None) or {}).get("provider_id")
-                    if agent is not None
-                    else None
-                )
+            agent = getattr(session, "agent_config", None)
+            if agent is not None:
+                provider_id = (getattr(agent, "metadata", None) or {}).get("provider_id")
                 if provider_id:
-                    provider = await ProviderDatastore(db).get_by_id(provider_id)
+                    provider = await ProviderDatastore(db).get_by_id(
+                        require_current_user_id(), provider_id
+                    )
                     if provider is not None and provider.auth_type == "oauth":
                         # CLI-managed credentials — model_provider=None is
                         # the expected resolver output, not a gap.

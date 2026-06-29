@@ -6,6 +6,7 @@ import {
   Composer,
   DataSourcePicker,
   SuggestionList,
+  IconBox,
   type DataSourceOption,
   type SkillSearchItem,
 } from "@valuz/ui";
@@ -19,8 +20,8 @@ import {
   useRuntimes,
   usePanelStore,
   useSessionAttachments,
-  workspacesApi,
-  type ProviderDetail,
+  projectsApi,
+  type LLMChannelDetail,
   type RuntimeId,
   type SessionListItem,
   type SkillView,
@@ -37,7 +38,7 @@ export const ConversationsHomePage = () => {
   const [recentSessions, setRecentSessions] = useState<SessionListItem[]>([]);
   const [dataSources, setDataSources] = useState<DataSourceOption[]>([]);
   const [enabledSlugs, setEnabledSlugs] = useState<string[]>([]);
-  const [providers, setProviders] = useState<ProviderDetail[]>([]);
+  const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
   const [selectedProviderId, setSelectedProviderId] = useState<string | null>(
     null,
   );
@@ -155,10 +156,13 @@ export const ConversationsHomePage = () => {
     setSelectedModelId(preferred.modelId);
   }, [composerProviders, selectedProviderId, selectedModelId, defaultsLoading]);
 
+  // The quick-chat landing has no agent picker, so the ``/`` list is just the
+  // library-ENABLED skills (the global switch the Skills page toggles). Default
+  // on, so only an explicit off removes a skill here.
   const availableSkills: SkillSearchItem[] = useMemo(
     () =>
       globalSkills
-        .filter((s) => s.enabled)
+        .filter((s) => s.library_enabled !== false)
         .map((s) => ({
           id: s.id,
           name: s.name,
@@ -170,18 +174,18 @@ export const ConversationsHomePage = () => {
 
   const bootstrap = useCallback(async () => {
     try {
-      // Each quick-chat is now its own ephemeral chat workspace, so the
+      // Each quick-chat is now its own ephemeral chat project, so the
       // "recent chats" list aggregates sessions across every chat-kind
-      // workspace rather than reading from a single singleton id.
+      // project rather than reading from a single singleton id.
       const [wsResponse, sessResponse] = await Promise.all([
-        workspacesApi.list(),
+        projectsApi.list(),
         sessionsApi.list(),
       ]);
       const chatWsIds = new Set(
-        wsResponse.workspaces.filter((w) => w.kind === "chat").map((w) => w.id),
+        wsResponse.projects.filter((w) => w.kind === "chat").map((w) => w.id),
       );
       const chatSessions = sessResponse.sessions.filter((s) =>
-        chatWsIds.has(s.workspace_id),
+        chatWsIds.has(s.project_id),
       );
       setRecentSessions(chatSessions.slice(0, 5));
     } catch {
@@ -204,7 +208,7 @@ export const ConversationsHomePage = () => {
           .filter((c) => c.enabled)
           .map((c) => providersApi.get(c.id).catch(() => null)),
       );
-      setProviders(details.filter((d): d is ProviderDetail => d !== null));
+      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
     } catch {
       // Silently fail — Composer model picker just shows empty state.
     }
@@ -227,13 +231,13 @@ export const ConversationsHomePage = () => {
   };
 
   // ``"chat-default"`` is a server-side sentinel: each ``POST /v1/sessions``
-  // with this id allocates a brand-new ephemeral chat workspace (and a
+  // with this id allocates a brand-new ephemeral chat project (and a
   // fresh kernel project + cwd), so quick-chats never share working
   // directories with one another. ADR-006: model_provider is locked at
   // session creation, so the composer's pick rides on the create call —
   // sendMessage ignores it.
   const sessionPayload = () => ({
-    workspace_id: "chat-default",
+    project_id: "chat-default",
     mcp_provider_slugs: enabledSlugs.length > 0 ? enabledSlugs : undefined,
     provider_id: selectedProviderId ?? undefined,
     model_id: selectedModelId ?? undefined,
@@ -297,7 +301,7 @@ export const ConversationsHomePage = () => {
       {/* Top-right mascot — ``position: fixed`` anchors to the
           viewport (not the page or scroll container), so it sits in
           the window's top-right regardless of any scroll context.
-          ``top-[60px]`` clears the workspace TopBar (h-12 = 48 px);
+          ``top-[60px]`` clears the project TopBar (h-12 = 48 px);
           ``right-6`` keeps a 24 px breathing margin from the window
           edge. Only mounted on the home page so it doesn't bleed
           onto other routes.
@@ -337,9 +341,9 @@ export const ConversationsHomePage = () => {
         <div className="flex-1 overflow-y-auto">
           <div className="mx-auto max-w-[680px] px-8 pt-4 pb-16">
             <div className="mb-10">
-              <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-xl bg-brand-light text-brand">
+              <IconBox size="xl" variant="brand" className="mb-4">
                 <Sparkles className="h-6 w-6" />
-              </div>
+              </IconBox>
               <h1 className="mb-2 text-2xl font-heading font-semibold text-ink-heading">
                 {t("conversation.newChat" as Parameters<typeof t>[0])}
               </h1>
@@ -487,6 +491,7 @@ export const ConversationsHomePage = () => {
                     | "parsing"
                     | "ready"
                     | "failed"
+                    | "native"
                     | undefined,
                   sourceKind: a.source_kind,
                 }))}

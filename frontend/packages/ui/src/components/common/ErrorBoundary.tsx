@@ -26,7 +26,7 @@ export class ErrorBoundary extends Component<Props, State> {
       return (
         <div className="flex h-full flex-col items-center justify-center gap-4 p-8">
           <img
-            src="/logo.png"
+            src="./logo.png"
             alt=""
             className="h-10 w-10 opacity-40"
             draggable={false}

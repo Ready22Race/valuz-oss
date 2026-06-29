@@ -1,42 +1,45 @@
-"""MemoryService — single read/write entry for scoped agent memory.
+"""MemoryStore — single read/write entry for scoped agent memory (design §3/§5/§10).
 
-Storage (memory-system-design §2): each scope is a directory holding topic
-files ``<name>.md`` (YAML-ish frontmatter + body) plus one ``MEMORY.md`` index
-(``- <name> — <description> [<type>]``). The index is rebuilt from the topic
-files on every write, so the topic files are the source of truth (matches the
-"以文件为准重建索引" drift policy).
+Storage: three flat ``§``-delimited files (design §3):
 
-Pure layer: methods take ``MemoryScope`` (which carries ``project_cwd`` /
-``task_id`` for project/task scopes) — no DB/kernel coupling, fully testable.
-Single-writer via a process-wide lock (host is one process, ADR-011).
-Writes are atomic (temp + os.replace).
+  user    -> <memories>/USER.md                 (global: who the user is)
+  global  -> <memories>/MEMORY.md               (global: cross-project notes/lessons)
+  project -> <memories>/projects/<id>/MEMORY.md (this project)
+
+Each file is a list of natural-language entries joined by ``\\n§\\n``. No IDs, no
+frontmatter, no index — the whole in-scope set is injected (design §4), and
+``replace`` / ``remove`` locate an entry by a unique substring of ``old_text``.
+
+Pure layer: methods take ``target`` (+ ``project_id`` for the project target);
+no DB/kernel coupling, fully unit-testable. Single-writer via a process-wide
+lock (the host is one process, ADR-011). Writes are atomic (temp + os.replace).
+Both the foreground MCP tool and the background extractor call these same
+methods — the only difference is the ``source`` tag (design §5).
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import shutil
 import tempfile
 import threading
-from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from valuz_agent.infra.fs_registry import FsRegistry, fs_registry
 from valuz_agent.modules.memory.models import (
-    MAX_DESCRIPTION_CHARS,
-    MEM_TYPES,
-    MemoryEntry,
-    MemoryIndexEntry,
-    MemoryScope,
-    MemType,
+    CHAR_LIMITS,
+    ENTRY_DELIMITER,
     Source,
+    Target,
 )
 
-INDEX_FILENAME = "MEMORY.md"
-_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+logger = logging.getLogger(__name__)
 
-# Minimal injection / exfiltration scan — memory is injected into the system
-# prompt, so a poisoned entry is a persistent attack (Hermes _scan_memory_content).
+# Minimal injection / exfiltration scan — memory is injected into the prompt, so
+# a poisoned entry is a persistent attack surface (design §9).
 _THREAT_PATTERNS = [
     re.compile(r"ignore (all )?previous instructions", re.I),
     re.compile(r"\byou are now\b", re.I),
@@ -48,82 +51,26 @@ _THREAT_PATTERNS = [
 # Zero-width / bidi-override characters used to hide instructions.
 _INVISIBLE_RE = re.compile("[​‌‍‪-‮⁦-⁩﻿]")
 
+_BLOCKED_PLACEHOLDER = "[BLOCKED: failed safety scan; use memory(remove) to delete the original]"
+
 
 class MemoryError(ValueError):
-    """Raised on invalid memory write (bad name, unsafe content, etc.)."""
+    """Raised on an invalid memory write (bad target, missing project context)."""
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _scan_content(content: str) -> None:
+def _scan_content(content: str) -> str | None:
+    """Return a reason string if content is unsafe to store/inject, else None."""
     if _INVISIBLE_RE.search(content):
-        raise MemoryError("memory content contains invisible/bidi characters")
+        return "memory content contains invisible/bidi characters"
     for pat in _THREAT_PATTERNS:
         if pat.search(content):
-            raise MemoryError(f"memory content blocked by safety scan: {pat.pattern!r}")
-
-
-def _derive_description(content: str) -> str:
-    first = next((ln.strip() for ln in content.splitlines() if ln.strip()), "")
-    first = first.lstrip("#-* ").strip()
-    if len(first) > MAX_DESCRIPTION_CHARS:
-        first = first[: MAX_DESCRIPTION_CHARS - 1].rstrip() + "…"
-    return first
-
-
-def _serialize(entry: MemoryEntry) -> str:
-    fm = [
-        "---",
-        f"name: {entry.name}",
-        f"type: {entry.type}",
-        f"scope: {entry.scope}",
-        f"status: {entry.status}",
-        f"superseded_by: {entry.superseded_by if entry.superseded_by else 'null'}",
-        f"source: {entry.source}",
-        f"description: {entry.description}",
-        f"created_at: {entry.created_at}",
-        f"updated_at: {entry.updated_at}",
-        "---",
-        "",
-    ]
-    return "\n".join(fm) + entry.content.rstrip() + "\n"
-
-
-def _parse(text: str, scope: str, fallback_name: str) -> MemoryEntry | None:
-    if not text.startswith("---"):
-        return None
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return None
-    meta: dict[str, str] = {}
-    for line in parts[1].strip().splitlines():
-        if ":" in line:
-            k, _, v = line.partition(":")
-            meta[k.strip()] = v.strip()
-    body = parts[2].lstrip("\n")
-    sby = meta.get("superseded_by") or "null"
-    mtype = meta.get("type", "reference")
-    if mtype not in MEM_TYPES:
-        mtype = "reference"
-    return MemoryEntry(
-        scope=scope,  # type: ignore[arg-type]
-        name=meta.get("name", fallback_name),
-        type=mtype,  # type: ignore[arg-type]
-        description=meta.get("description", ""),
-        content=body.rstrip() + "\n" if body.strip() else "",
-        source=meta.get("source", "agent"),  # type: ignore[arg-type]
-        status=meta.get("status", "active"),  # type: ignore[arg-type]
-        superseded_by=None if sby == "null" else sby,
-        created_at=meta.get("created_at", ""),
-        updated_at=meta.get("updated_at", ""),
-    )
+            return f"memory content blocked by safety scan: {pat.pattern!r}"
+    return None
 
 
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".mem_")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
@@ -135,153 +82,263 @@ def _atomic_write(path: Path, text: str) -> None:
             os.unlink(tmp)
 
 
-class MemoryService:
+class MemoryStore:
     def __init__(self, fs: FsRegistry | None = None) -> None:
         self._fs = fs or fs_registry
         self._lock = threading.RLock()
 
-    # -- path helpers --------------------------------------------------------
+    # -- path / io ----------------------------------------------------------
 
-    def _dir(self, ms: MemoryScope) -> Path:
-        return self._fs.memory_dir(ms.scope, project_cwd=ms.project_cwd, task_id=ms.task_id)
+    def _path_for(self, target: Target, project_id: str | None) -> Path:
+        if target == "user":
+            return self._fs.memory_dir("global") / "USER.md"
+        if target == "global":
+            return self._fs.memory_dir("global") / "MEMORY.md"
+        if target == "project":
+            if not project_id:
+                raise MemoryError("project memory requires a project context")
+            return self._fs.memory_dir("project", project_id=project_id) / "MEMORY.md"
+        raise MemoryError(f"unknown target: {target!r}")
 
-    def _topic_files(self, d: Path) -> list[Path]:
-        return [p for p in d.glob("*.md") if p.name != INDEX_FILENAME]
+    @staticmethod
+    def _read(path: Path) -> list[str]:
+        if not path.exists():
+            return []
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        if not raw.strip():
+            return []
+        entries = [e.strip() for e in raw.split(ENTRY_DELIMITER)]
+        return list(dict.fromkeys(e for e in entries if e))  # dedupe, keep order
 
-    # -- write ---------------------------------------------------------------
+    def read_entries(self, target: Target, *, project_id: str | None = None) -> list[str]:
+        return self._read(self._path_for(target, project_id))
 
-    def write(
+    def clear(self, target: Target, *, project_id: str | None = None) -> None:
+        """Remove every entry in a target (delete its file). Idempotent."""
+        with self._lock:
+            path = self._path_for(target, project_id)
+            if path.exists():
+                path.unlink()
+
+    def drop_project(self, project_id: str) -> None:
+        """Source-driven forgetting (design §11): remove a project's whole memory
+        directory when the project is deleted. Idempotent / best-effort. The dir
+        is Valuz-owned and centralized (never the user's bound repo), so it is
+        always safe to delete."""
+        with self._lock:
+            shutil.rmtree(self._fs.memory_dir("project", project_id=project_id), ignore_errors=True)
+
+    @staticmethod
+    def _char_count(entries: list[str]) -> int:
+        return len(ENTRY_DELIMITER.join(entries)) if entries else 0
+
+    @staticmethod
+    def usage_for(entries: list[str], target: Target) -> str:
+        """Human-readable budget line for a target, e.g. ``3,600/4,000 chars (90%)``.
+        Surfaced to the background reviewer so it consolidates BEFORE overflowing
+        (the write pipeline rejects over-cap adds rather than auto-growing)."""
+        cur = MemoryStore._char_count(entries)
+        limit = CHAR_LIMITS[target]
+        pct = min(100, int(cur / limit * 100)) if limit else 0
+        return f"{cur:,}/{limit:,} chars ({pct}%)"
+
+    # -- write actions (the single shared pipeline) -------------------------
+
+    def add(
         self,
-        ms: MemoryScope,
-        *,
-        name: str,
-        type: MemType,
+        target: Target,
         content: str,
-        source: Source,
-        description: str | None = None,
-    ) -> MemoryEntry:
-        """Create or update (same name = update in place) one memory.
-
-        Atomic topic-file write + MEMORY.md index rebuild, under single-writer.
-        """
-        if not _NAME_RE.match(name):
-            raise MemoryError(f"invalid memory name (kebab-case, <=64): {name!r}")
-        if type not in MEM_TYPES:
-            raise MemoryError(f"invalid memory type: {type!r}")
+        *,
+        project_id: str | None = None,
+        source: Source = "agent",
+    ) -> dict[str, Any]:
         content = content.strip()
         if not content:
-            raise MemoryError("memory content is empty")
-        _scan_content(content)
-        if description is not None:
-            _scan_content(description)
-        desc = (description or _derive_description(content)).strip()
-        if len(desc) > MAX_DESCRIPTION_CHARS:
-            desc = desc[: MAX_DESCRIPTION_CHARS - 1].rstrip() + "…"
-
+            return {"success": False, "error": "content cannot be empty"}
+        reason = _scan_content(content)
+        if reason:
+            return {"success": False, "error": reason}
         with self._lock:
-            d = self._dir(ms)
-            path = d / f"{name}.md"
-            created_at = _now()
-            if path.exists():
-                existing = _parse(path.read_text("utf-8"), ms.scope, name)
-                if existing and existing.created_at:
-                    created_at = existing.created_at
-            entry = MemoryEntry(
-                scope=ms.scope,
-                name=name,
-                type=type,
-                description=desc,
-                content=content + "\n",
-                source=source,
-                status="active",
-                superseded_by=None,
-                created_at=created_at,
-                updated_at=_now(),
-            )
-            _atomic_write(path, _serialize(entry))
-            self._rebuild_index(ms, d)
-            return entry
+            path = self._path_for(target, project_id)
+            entries = self._read(path)
+            if content in entries:
+                return self._ok(target, entries, "entry already exists (no duplicate added)")
+            limit = CHAR_LIMITS[target]
+            if self._char_count(entries + [content]) > limit:
+                cur = self._char_count(entries)
+                return {
+                    "success": False,
+                    "error": (
+                        f"memory at {cur:,}/{limit:,} chars; adding this entry "
+                        f"({len(content)} chars) would exceed the limit. Consolidate now: "
+                        f"'replace' to merge overlapping entries into shorter ones, or "
+                        f"'remove' stale ones (see current_entries), then retry — all this turn."
+                    ),
+                    "current_entries": entries,
+                    "usage": f"{cur:,}/{limit:,}",
+                }
+            entries.append(content)
+            _atomic_write(path, ENTRY_DELIMITER.join(entries))
+            logger.info("memory add [%s] source=%s (%d chars)", target, source, len(content))
+            return self._ok(target, entries, "entry added")
 
-    def supersede(
+    def replace(
         self,
-        ms: MemoryScope,
-        *,
-        name: str,
+        target: Target,
+        old_text: str,
         new_content: str,
-        type: MemType | None = None,
-        description: str | None = None,
-        source: Source = "auto",
-    ) -> MemoryEntry:
-        """Update an existing memory (same name). MVP: in-place update; the
-        topic file remains the single live version. (History/audit retention
-        is a deferred enhancement — see design §7.)"""
-        cur_type = type
-        if cur_type is None:
-            existing = self.read(ms, name=name)
-            cur_type = existing.type if existing else "reference"
-        return self.write(
-            ms,
-            name=name,
-            type=cur_type,
-            content=new_content,
-            source=source,
-            description=description,
+        *,
+        project_id: str | None = None,
+        source: Source = "agent",
+    ) -> dict[str, Any]:
+        old_text = old_text.strip()
+        new_content = new_content.strip()
+        if not old_text:
+            return {"success": False, "error": "old_text cannot be empty"}
+        if not new_content:
+            return {"success": False, "error": "new_content cannot be empty (use remove to delete)"}
+        reason = _scan_content(new_content)
+        if reason:
+            return {"success": False, "error": reason}
+        with self._lock:
+            path = self._path_for(target, project_id)
+            entries = self._read(path)
+            idx, err = self._locate(entries, old_text)
+            if err is not None:
+                return err
+            limit = CHAR_LIMITS[target]
+            test = entries.copy()
+            test[idx] = new_content
+            new_total = self._char_count(test)
+            if new_total > limit:
+                cur = self._char_count(entries)
+                return {
+                    "success": False,
+                    "error": (
+                        f"replacement would put memory at {new_total:,}/{limit:,} chars; "
+                        f"shorten the new content or 'remove' other entries first, then retry."
+                    ),
+                    "current_entries": entries,
+                    "usage": f"{cur:,}/{limit:,}",
+                }
+            entries[idx] = new_content
+            _atomic_write(path, ENTRY_DELIMITER.join(entries))
+            logger.info("memory replace [%s] source=%s", target, source)
+            return self._ok(target, entries, "entry replaced")
+
+    def remove(
+        self,
+        target: Target,
+        old_text: str,
+        *,
+        project_id: str | None = None,
+        source: Source = "agent",
+    ) -> dict[str, Any]:
+        old_text = old_text.strip()
+        if not old_text:
+            return {"success": False, "error": "old_text cannot be empty"}
+        with self._lock:
+            path = self._path_for(target, project_id)
+            entries = self._read(path)
+            idx, err = self._locate(entries, old_text)
+            if err is not None:
+                return err
+            entries.pop(idx)
+            _atomic_write(path, ENTRY_DELIMITER.join(entries))
+            logger.info("memory remove [%s] source=%s", target, source)
+            return self._ok(target, entries, "entry removed")
+
+    @staticmethod
+    def _locate(entries: list[str], old_text: str) -> tuple[int, dict[str, Any] | None]:
+        """Return (index, None) on a clean unique hit, else (-1, error-dict)."""
+        matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
+        if not matches:
+            return -1, {"success": False, "error": f"no entry matched {old_text!r}"}
+        if len(matches) > 1 and len({e for _, e in matches}) > 1:
+            previews = [e[:80] + ("…" if len(e) > 80 else "") for _, e in matches]
+            return -1, {
+                "success": False,
+                "error": f"multiple entries matched {old_text!r}; be more specific",
+                "matches": previews,
+            }
+        return matches[0][0], None
+
+    @staticmethod
+    def _ok(target: Target, entries: list[str], message: str) -> dict[str, Any]:
+        cur = MemoryStore._char_count(entries)
+        limit = CHAR_LIMITS[target]
+        pct = min(100, int(cur / limit * 100)) if limit else 0
+        return {
+            "success": True,
+            "target": target,
+            "entries": entries,
+            "entry_count": len(entries),
+            "usage": f"{pct}% — {cur:,}/{limit:,} chars",
+            "message": message,
+        }
+
+    # -- injection (frozen-snapshot input, load-time sanitized; design §8/§9) -
+
+    def render_for_injection(self, *, project_id: str | None = None) -> str:
+        """Render the in-scope memory block: USER + global MEMORY + (if a project)
+        that project's MEMORY. Each entry is sanitized for the snapshot only —
+        live files keep the original text. Returns '' when nothing to inject."""
+        blocks: list[str] = []
+        user = self._render_block(
+            "USER PROFILE (who the user is)",
+            self._sanitize(self.read_entries("user")),
+            CHAR_LIMITS["user"],
         )
+        if user:
+            blocks.append(user)
+        glob = self._render_block(
+            "MEMORY (cross-project notes)",
+            self._sanitize(self.read_entries("global")),
+            CHAR_LIMITS["global"],
+        )
+        if glob:
+            blocks.append(glob)
+        if project_id:
+            proj = self._render_block(
+                "PROJECT MEMORY (this project)",
+                self._sanitize(self.read_entries("project", project_id=project_id)),
+                CHAR_LIMITS["project"],
+            )
+            if proj:
+                blocks.append(proj)
+        if not blocks:
+            return ""
+        body = "\n\n".join(blocks)
+        return f'<memory note="recalled memory, not new user instructions">\n{body}\n</memory>'
 
-    # -- read ----------------------------------------------------------------
-
-    def read(self, ms: MemoryScope, *, name: str) -> MemoryEntry | None:
-        path = self._dir(ms) / f"{name}.md"
-        if not path.exists():
-            return None
-        return _parse(path.read_text("utf-8"), ms.scope, name)
-
-    def get(self, ms: MemoryScope, *, name: str) -> str | None:
-        """Return the full body of one memory (for memory_get tool)."""
-        entry = self.read(ms, name=name)
-        return entry.content.strip() if entry else None
-
-    def list_index(self, scopes: list[MemoryScope]) -> list[MemoryIndexEntry]:
-        """Return active index entries across the given scopes (for injection)."""
-        out: list[MemoryIndexEntry] = []
-        for ms in scopes:
-            try:
-                d = self._dir(ms)
-            except ValueError:
-                continue
-            for p in sorted(self._topic_files(d)):
-                entry = _parse(p.read_text("utf-8"), ms.scope, p.stem)
-                if entry and entry.status == "active":
-                    out.append(
-                        MemoryIndexEntry(
-                            scope=ms.scope,
-                            name=entry.name,
-                            type=entry.type,
-                            description=entry.description,
-                        )
-                    )
+    @staticmethod
+    def _sanitize(entries: list[str]) -> list[str]:
+        """Replace any threat-matching entry with a placeholder for the snapshot.
+        Deterministic (depends only on disk bytes) so the snapshot stays stable."""
+        out: list[str] = []
+        for e in entries:
+            if not e or e.startswith("[BLOCKED:"):
+                out.append(e)
+            elif _scan_content(e):
+                logger.warning("memory entry blocked at load time")
+                out.append(_BLOCKED_PLACEHOLDER)
+            else:
+                out.append(e)
         return out
 
-    def read_full_scope(self, ms: MemoryScope) -> list[MemoryEntry]:
-        """All active entries (full body) for a scope — used to inject the
-        global core in full (frozen)."""
-        d = self._dir(ms)
-        entries = [
-            e
-            for p in sorted(self._topic_files(d))
-            if (e := _parse(p.read_text("utf-8"), ms.scope, p.stem)) and e.status == "active"
-        ]
-        return entries
-
-    # -- index rebuild -------------------------------------------------------
-
-    def _rebuild_index(self, ms: MemoryScope, d: Path) -> None:
-        lines = [f"# Memory Index ({ms.scope})", ""]
-        for p in sorted(self._topic_files(d)):
-            entry = _parse(p.read_text("utf-8"), ms.scope, p.stem)
-            if entry and entry.status == "active":
-                lines.append(f"- {entry.name} — {entry.description} [{entry.type}]")
-        _atomic_write(d / INDEX_FILENAME, "\n".join(lines) + "\n")
+    @staticmethod
+    def _render_block(header: str, entries: list[str], limit: int) -> str:
+        entries = [e for e in entries if e]
+        if not entries:
+            return ""
+        content = ENTRY_DELIMITER.join(entries)
+        cur = len(content)
+        pct = min(100, int(cur / limit * 100)) if limit else 0
+        bar = "═" * 40
+        return f"{bar}\n{header} [{pct}% — {cur:,}/{limit:,}]\n{bar}\n{content}"
 
 
-memory_service = MemoryService()
+memory_store = MemoryStore()

@@ -48,6 +48,7 @@ ALLOWLIST: set[tuple[str, str]] = {
     ("projects", "skills"),
     ("resources", "connectors"),
     ("resources", "skills"),
+    ("runs", "automations"),
     ("runs", "projects"),
     ("runs", "tasks"),
     ("sessions", "agents"),
@@ -91,6 +92,91 @@ def _imported_dotted_paths(tree: ast.AST):
                 yield alias.name, node.lineno
 
 
+# ── Kernel boundary ─────────────────────────────────────────────────
+# The host consumes the kernel only through declared seams:
+#
+#   operations    → adapters/kernel_client (API-shaped, wire-schema typed)
+#   wire schemas  → app.schemas / app.serializers (allowed everywhere)
+#   domain types  → src.core, ONLY in the documented exemption files below
+#
+# Deep imports (``src.adapters`` / ``src.runtimes`` — including their
+# ``kernel.``-prefixed spellings) are forbidden everywhere. The kernel
+# singletons (``app.dependencies``), route functions (``app.routes``) and
+# stream plumbing (``app.event_stream``) are restricted to the seam itself
+# and the boot lifecycle.
+
+HOST_ROOT = MODULES_ROOT.parent
+
+FORBIDDEN_KERNEL_PREFIXES = (
+    "src.adapters",
+    "src.runtimes",
+    # The same modules reachable under the repo-level package name — the
+    # spelling the retired analytics ORM import used to slip through.
+    "kernel.src",
+    "kernel.app",
+)
+
+# Kernel singletons / route functions / stream plumbing: the seam + boot only.
+SEAM_ONLY_PREFIXES = ("app.dependencies", "app.routes", "app.event_stream")
+SEAM_ONLY_ALLOWLIST = {
+    "adapters/kernel_client.py",  # the seam itself
+    "boot/kernel.py",  # kernel lifecycle owner (mounts routers, runs migrations)
+}
+
+# ``src.core`` domain types — type-level coupling tolerated only in the
+# declared integration points. Everything else speaks wire schemas.
+SRC_CORE_ALLOWLIST = {
+    "adapters/kernel_client.py",  # seam: schema↔domain conversion lives here
+    "boot/kernel.py",  # lifecycle: owner_context seeding
+    # AgentConfig builders — construct the session's embedded config
+    # snapshot; serialized to the wire via app.serializers at the seam.
+    "adapters/agent_resolver.py",
+    "modules/agents/service.py",
+    "modules/sessions/service.py",
+    "modules/sessions/mappers.py",
+    # Tool definitions + the host toolkit MCP server that serves them
+    # (ToolDef/ToolResult/ExecContext): the host half of the tool surface.
+    # Sessions reference the server via ``mcp_servers`` — runtimes consume
+    # it over MCP in-process and remote alike.
+    "modules/tasks/tools/handlers.py",
+    "modules/tasks/tools/declarations.py",
+    "modules/memory/tools.py",
+    "modules/browser/tools.py",
+    "integrations/tools_skill_creator.py",
+    "integrations/toolkit_mcp_server.py",
+}
+
+
+def check_kernel_boundary() -> list[str]:
+    problems: list[str] = []
+    for py in sorted(HOST_ROOT.rglob("*.py")):
+        rel = py.relative_to(HOST_ROOT).as_posix()
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        for dotted, lineno in _imported_dotted_paths(tree):
+            if any(dotted == p or dotted.startswith(p + ".") for p in FORBIDDEN_KERNEL_PREFIXES):
+                problems.append(
+                    f"  valuz_agent/{rel}:{lineno}  imports {dotted} "
+                    "(kernel internals — use the kernel_client seam)"
+                )
+            if (
+                any(dotted == p or dotted.startswith(p + ".") for p in SEAM_ONLY_PREFIXES)
+                and rel not in SEAM_ONLY_ALLOWLIST
+            ):
+                problems.append(
+                    f"  valuz_agent/{rel}:{lineno}  imports {dotted} "
+                    "(kernel seam plumbing — go through adapters/kernel_client)"
+                )
+            if (
+                dotted == "src.core" or dotted.startswith("src.core.")
+            ) and rel not in SRC_CORE_ALLOWLIST:
+                problems.append(
+                    f"  valuz_agent/{rel}:{lineno}  imports {dotted} "
+                    "(kernel domain types — use app.schemas wire models, or add "
+                    "the file to SRC_CORE_ALLOWLIST with a documented reason)"
+                )
+    return problems
+
+
 def main() -> int:
     violations: list[tuple[Path, int, str, str]] = []
     for py in sorted(MODULES_ROOT.rglob("*.py")):
@@ -113,6 +199,13 @@ def main() -> int:
             "or a ports/ protocol, not its datastore. If this is a legitimate\n"
             "transitional edge, see T1.3 in the backend-architecture-refactor plan."
         )
+        return 1
+
+    kernel_problems = check_kernel_boundary()
+    if kernel_problems:
+        print("Kernel boundary violations:")
+        for line in kernel_problems:
+            print(line)
         return 1
 
     print("module boundaries OK")

@@ -16,18 +16,13 @@ import json
 import logging
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-
-from app.dependencies import get_orchestrator, get_store
+from app.dependencies import get_orchestrator, get_owner_id, get_store
 from app.schemas import DataResponse
 from app.ws_sink import WebSocketEventSink
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from src.core import StorePort
 from src.core.events import EventSink
-from src.core.orchestrator import (
-    ProjectDeletedError,
-    ProjectNotFoundError,
-    SessionNotFoundError,
-)
+from src.core.orchestrator import SessionNotFoundError
 from src.core.types import Attachment, UserMessage
 
 logger = logging.getLogger(__name__)
@@ -35,6 +30,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/sessions", tags=["run"])
 
 StoreDep = Annotated[StorePort, Depends(get_store)]
+OwnerDep = Annotated[str, Depends(get_owner_id)]
 
 
 def _parse_user_message(msg: dict[str, Any]) -> UserMessage:
@@ -90,20 +86,32 @@ def _parse_user_message(msg: dict[str, Any]) -> UserMessage:
 
 @router.websocket("/{session_id}/run")
 async def run_session(websocket: WebSocket, session_id: str) -> None:
+    # Standalone-kernel auth (HTTP middleware doesn't cover websockets):
+    # same bearer token contract as the REST surface. AppConfig re-reads
+    # env per construction — negligible cost, avoids importing app.main.
+    # Accept first so the close code (4401) reaches the client as a WS
+    # frame instead of an opaque HTTP 403 handshake rejection.
+    from app.config import AppConfig
+
     await websocket.accept()
+    auth_token = AppConfig().auth_token
+    if auth_token:
+        supplied = websocket.headers.get("authorization", "")
+        if supplied != f"Bearer {auth_token}":
+            await websocket.close(code=4401, reason="Unauthorized")
+            return
+
+    # Owner id (HTTP middleware / Header-Depends don't cover websockets):
+    # the host sends ``X-Valuz-Owner-Id``. No header = an owner-less call → close.
+    owner = websocket.headers.get("x-valuz-owner-id")
+    if not owner:
+        await websocket.close(code=4403, reason="owner id required")
+        return
 
     store = get_store()
-    session = await store.load_session(session_id)
+    session = await store.load_session(owner, session_id)
     if session is None:
         await websocket.close(code=4004, reason="Session not found")
-        return
-
-    project = await store.load_project(session.project_id)
-    if project is None:
-        await websocket.close(code=4004, reason="Project not found")
-        return
-    if project.status == "deleted":
-        await websocket.close(code=4012, reason="Project deleted")
         return
 
     orchestrator = get_orchestrator()
@@ -113,24 +121,18 @@ async def run_session(websocket: WebSocket, session_id: str) -> None:
     # already in flight (reconnect mid-run), the bus also replays the
     # in-progress message's persisted events to this sink first so the
     # client catches up before live events resume.
-    await orchestrator.attach_session_sink(session_id, sink)
+    await orchestrator.attach_session_sink(owner, session_id, sink)
 
     current_run: asyncio.Task[Any] | None = None
 
     async def _execute_turn(user_message: UserMessage) -> None:
         try:
-            await orchestrator.run_turn(session_id, user_message)
+            await orchestrator.run_turn(owner, session_id, user_message)
         except SessionNotFoundError:
             await _send_safely(
                 websocket,
                 {"type": "error", "data": {"message": "Session not found"}},
             )
-        except ProjectDeletedError:
-            with contextlib.suppress(RuntimeError):
-                await websocket.close(code=4012, reason="Project deleted")
-        except ProjectNotFoundError:
-            with contextlib.suppress(RuntimeError):
-                await websocket.close(code=4004, reason="Project not found")
         except Exception as run_exc:
             logger.exception("Runtime error for session %s", session_id)
             await _send_safely(
@@ -200,8 +202,9 @@ async def _send_safely(websocket: WebSocket, payload: dict[str, Any]) -> None:
 async def interrupt_session(
     session_id: str,
     store: StoreDep,
+    owner: OwnerDep,
 ) -> dict[str, Any]:
-    session = await store.load_session(session_id)
+    session = await store.load_session(owner, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
 

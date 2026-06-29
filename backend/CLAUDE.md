@@ -8,10 +8,11 @@
 > wins on backend mechanics.
 
 Python/FastAPI on an Agent Harness kernel. The **host**
-(`valuz_agent/`) owns the workspace UX, skill catalog, KB, providers, MCP
-catalog, scheduling, tasks, and OAuth; the **kernel** (`kernel/`) owns
-Project/Agent/Session/Event persistence and the runtime adapters. The two meet
-only at the adapter seam (§6).
+(`valuz_agent/`) owns the project UX, agent library, skill catalog, KB,
+providers, MCP catalog, scheduling, tasks, and OAuth; the **kernel**
+(`kernel/`) owns Session/Message/Event persistence (each session embeds its
+AgentConfig snapshot and cwd — the kernel knows no projects or agents) and
+the runtime adapters. The two meet only at the adapter seam (§6).
 
 ## Layout
 
@@ -38,12 +39,16 @@ backend/
     └── cli.py                    # Typer CLI (`serve`, `reset-providers`)
 ```
 
-A single SQLite file at `~/.valuz/app/valuz.db` carries both layers:
-4 unprefixed kernel tables (`projects` / `agents` / `sessions` / `events`),
-the `valuz_*`-prefixed business tables, and two alembic heads
-(`alembic_version` kernel + `alembic_version_host` host). Both layers run
-**async** SQLAlchemy on aiosqlite; WAL + per-connection `busy_timeout` make
-concurrent access safe.
+Two SQLite files under `~/.valuz-oss/`: the host's `valuz.db` (the
+`valuz_*`-prefixed business tables + `alembic_version_host`) and the kernel's
+own `kernel.db` (the 3 unprefixed kernel tables `sessions` / `messages` /
+`events`, its langgraph checkpoint tables, and `alembic_version`). The split
+(config `kernel_db_url`, default-on for SQLite) lets a sandboxed/remote kernel
+own its file and gives `make dev` + `make dev-sandbox` one shared history; an
+explicit `database_url` (Postgres) co-locates both instead. A one-time boot step
+(`boot/kernel_db_split.py`) migrates a pre-split `valuz.db`'s kernel tables into
+`kernel.db`. Both layers run **async** SQLAlchemy on aiosqlite; WAL +
+per-connection `busy_timeout` make concurrent access safe.
 
 ## The two boundary contracts
 
@@ -55,14 +60,33 @@ collaboration goes through the sibling's **service** API or a `ports/`
 protocol. Enforced by `scripts/check_module_boundaries.py` (wired into
 `make lint`).
 
-**Kernel boundary** — the host consumes the kernel **only through its declared
-public API**: `from src.core import …` (domain types/protocols), `from
-app.dependencies import …` (singletons + lifecycle), `from app.config import
-AppConfig`, and `from app.routes.* import router`. `from src.adapters.*` /
-`from src.runtimes.*` are forbidden **outside**
-`valuz_agent/adapters/kernel_sync.py` — the single sanctioned escape hatch.
-Keep host code talking to the kernel through its public API above rather than
-reaching into kernel internals.
+**Kernel boundary** — every host *operation* on kernel state goes through
+`adapters/kernel_client.py` (the `KernelClient` protocol: API-shaped, typed
+with the kernel's wire schemas from `app.schemas`). Two transports implement
+it: `InProcessKernelClient` (default) and `HttpKernelClient`
+(`adapters/kernel_client_http.py`) for a kernel running as a separate
+process — selected by `VALUZ_KERNEL_MODE=inprocess|http`
+(+ `VALUZ_KERNEL_URL` / `VALUZ_KERNEL_TOKEN`); `VALUZ_KERNEL_DATABASE_URL`
+gives the kernel its own database file. Env contract for the split: the
+kernel *server* process reads `KERNEL_AUTH_TOKEN` (and refuses to start
+standalone without it unless `KERNEL_ALLOW_UNAUTHENTICATED=1`); the host
+*client* sends `VALUZ_KERNEL_TOKEN` — the provisioner sets both to the
+same secret. Import rules, all mechanically
+enforced by `scripts/check_module_boundaries.py`:
+`src.adapters` / `src.runtimes` (and their `kernel.`-prefixed spellings)
+are forbidden everywhere; `app.dependencies` / `app.routes` /
+`app.event_stream` are restricted to the seam + `boot/kernel.py`;
+`src.core` domain types are restricted to the documented exemption files
+(`SRC_CORE_ALLOWLIST` — AgentConfig builders + tool registration).
+Event reads/subscriptions, usage aggregates and the run-drivers all go
+through the client (the former `broadcast_sink` / raw-SQL SSE adapter /
+analytics-ORM bypasses are retired). The former in-process
+tool-handler registration is retired too: the harness tools (dispatch /
+orchestration / memory / submit_skill) are served by the host's toolkit
+MCP server (`integrations/toolkit_mcp_server.py`, mounted at
+`/internal/mcp/toolkit/{base,lead}`) and referenced from
+`session.mcp_servers` as the `harness` entry — every runtime consumes
+them through its standard MCP client path, in-process and remote alike.
 
 ## Anatomy of a business module
 
@@ -151,12 +175,12 @@ session-creation time:
 
 | Adapter | Job |
 |---------|-----|
-| `kernel_sync` | sync facade over the kernel's async `StorePort` (only importer of `src.adapters` / `src.runtimes`) |
-| `capability_resolver` | workspace + extras → kernel skills / MCP set |
+| `kernel_client` | `KernelClient` protocol + in-process impl — API-shaped seam, wire-schema typed (swap for HTTP in remote mode) |
+| `capability_resolver` | project + extras → kernel skills / MCP set |
 | `model_resolver` | request + provider + default → concrete model id |
 | `mcp_resolver` | slug + creds → `list[McpServerConfig]` |
 | `event_sse_adapter` | kernel `events` table → SSE frames |
-| `system_prompt_builder` | agent instructions + workspace context → system prompt |
+| `system_prompt_builder` | agent instructions + project context → system prompt |
 
 If you need kernel behavior, add it behind an adapter — do not import kernel
 internals from `api/`, `modules/`, or `integrations/`.
@@ -177,14 +201,14 @@ code. Add a capability by defining a port, then a default integration.
 
 ## Config, secrets, filesystem
 
-- `infra/config.py` owns all paths (the `~/.valuz` tree) and settings. It is
+- `infra/config.py` owns all paths (the `~/.valuz-oss` tree) and settings. It is
   the only place allowed to compute `Path.home()`-relative locations.
 - `infra/secret_store` keeps API keys / OAuth tokens in the OS keychain — never
   plaintext on disk.
 - `infra/fs_registry.FsRegistry` is the single gate for host filesystem writes.
   Hardcoded `~/.claude/...` or ad-hoc `Path.home()` outside `config.py` and the
   registry are forbidden. The kernel manages its own subtree under each
-  `project.cwd`; get the cwd from `workspace_cwd(...)` and let the kernel take
+  `project.cwd`; get the cwd from `project_cwd(...)` and let the kernel take
   it from there.
 
 ## Adding an endpoint (contract-first recipe)
@@ -231,4 +255,16 @@ logs land under `.ai/dev/{backend,frontend}.log`.
   `libexec/rg`. The binary is vendored per platform at
   `backend/vendor/rg/<platform-tag>-<arch-tag>/` (refresh with
   `scripts/download-rg.sh`).
+- **Browser engine** (`modules/browser`) runs the `chrome-devtools-mcp` CLI
+  under Node. Packaged desktop can't see the user's Node (stripped GUI PATH), so
+  the sidecar sets `VALUZ_NODE_PATH` + `VALUZ_CDT_ENTRY` to bundled `libexec`
+  paths and `_engine_argv()` invokes `node <entry>` directly; without them it
+  falls back to `npx` (dev). Both engine halves are fetched at build (only pins
+  committed): the JS tree via `npm ci` from
+  `backend/vendor/chrome-devtools-mcp/{package.json,package-lock.json}` (refresh
+  `scripts/vendor-chrome-devtools-mcp.sh`), and the Node binary downloaded +
+  SHA256-verified (`scripts/download-node.sh`). At boot the host installs a
+  friendly `chrome-devtools` wrapper on `os.environ["PATH"]` so the agent runs a
+  clean `chrome-devtools <tool>`. Skill + `browser_start`/`browser_stop` tools
+  are gated on `node_available()`. See `docs/design/browser-feature.md` §8.
 ```

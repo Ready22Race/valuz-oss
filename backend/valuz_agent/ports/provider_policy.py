@@ -19,8 +19,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-from valuz_agent.ports.identity import UserIdentity
-
 ProviderWriteAction = Literal["create", "update", "enable"]
 
 
@@ -30,7 +28,7 @@ class ProviderWriteContext:
     the provider being written (``"user"`` for member BYOK; ``"managed"`` /
     ``"system"`` are governed elsewhere and normally not gated here)."""
 
-    user: UserIdentity
+    user_id: str
     action: ProviderWriteAction
     provider_source: str = "user"
 
@@ -101,13 +99,16 @@ _provider_policy: ProviderPolicyPort = AllowAllProviderPolicy()
 
 
 def get_provider_policy() -> ProviderPolicyPort:
-    return _provider_policy
+    from valuz_agent.ports.extensions import ext
+
+    return ext.policy
 
 
 def set_provider_policy(policy: ProviderPolicyPort) -> None:
     """Replace the provider policy (called by the commercial app at startup)."""
-    global _provider_policy
-    _provider_policy = policy
+    from valuz_agent.ports.extensions import ext
+
+    ext.policy = policy
 
 
 __all__ = [

@@ -1,13 +1,13 @@
 """Activity overview — aggregates running (and recently finished) runs.
 
 A "run" is a kernel session, classified by source:
-- ``assistant``     — chat in the default (kind="chat") workspace
-- ``project_chat``  — chat in a project workspace
+- ``assistant``     — chat in the default (kind="chat") project
+- ``project_chat``  — chat in a project
 - ``task``          — a task's **lead** session (member subtasks never surface
   as standalone runs)
 
 Sessions live in the kernel; the host reads them via the kernel async store and
-enriches with host-owned workspace + task rows. Built directly off the kernel
+enriches with host-owned project + task rows. Built directly off the kernel
 ``Session`` objects (which already carry ``todos`` / ``status`` / ``model``)
 so the overview needs no per-session detail fetch.
 
@@ -17,21 +17,28 @@ kernel sessions/messages via the kernel's async ``StorePort``.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from src.core import Session as KernelSession  # type: ignore[import-not-found]
+from app.schemas import SessionData as KernelSession
+from app.schemas import TodoItem
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel on sys.path
-from valuz_agent.adapters import kernel_store
-from valuz_agent.modules.projects.datastore import WorkspaceDatastore
-from valuz_agent.modules.projects.models import WorkspaceRow
+from valuz_agent.adapters import kernel_client
+from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.modules.automations.datastore import AutomationDatastore
+from valuz_agent.modules.projects.datastore import ProjectDatastore
+from valuz_agent.modules.projects.models import ProjectRow
+from valuz_agent.modules.sessions import project_index
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
+
+logger = logging.getLogger(__name__)
 
 SourceKind = Literal["assistant", "project_chat", "task"]
 
@@ -59,6 +66,9 @@ _RUNNING_RUN_STATUS = {"running", "paused"}
 # above, not history.
 _FINISHED_RUN_STATUS = {"idle", "completed", "stopped", "blocked", "failed"}
 _FINISHED_LIMIT = 50
+# Index-pool size for the recency window. Generous so user activity stays in
+# range as automation runs accrue; the per-group _FINISHED_LIMIT bounds output.
+_INDEX_POOL = 500
 _OUTPUT_CHARS = 200
 
 
@@ -84,12 +94,13 @@ class TodoSnapshot:
 class RunSummary:
     session_id: str
     source_kind: SourceKind
-    workspace_id: str
+    project_id: str
     title: str
     status: str
     updated_at: int  # Unix epoch milliseconds (UTC)
-    workspace_name: str | None = None
+    project_name: str | None = None
     task_id: str | None = None
+    origin: str = "user"
     current_todo: TodoSnapshot | None = None
     last_message: str | None = None
     # Chats: last round's assistant output (truncated). Tasks use ``last_event``.
@@ -106,56 +117,71 @@ def _map_status(kernel_status: str) -> str:
     return {"terminated": "failed"}.get(kernel_status, kernel_status)
 
 
-def _pick_todo(todos: list[dict[str, Any]] | None) -> TodoSnapshot | None:
+def _pick_todo(todos: list[TodoItem] | None) -> TodoSnapshot | None:
     """The most relevant TODO step: the in-progress one, else the first
-    pending, else the last entry. ``None`` when there's no usable content."""
+    pending, else the last entry. ``None`` when there's no usable content.
+
+    ``todos`` are kernel ``TodoItem`` models (pydantic), not dicts — use
+    attribute access, not ``.get``.
+    """
     if not todos:
         return None
-    chosen: dict[str, Any] | None = None
-    for todo in todos:
-        if todo.get("status") == "in_progress":
-            chosen = todo
-            break
+    chosen = next((t for t in todos if t.status == "in_progress"), None)
     if chosen is None:
-        chosen = next((t for t in todos if t.get("status") == "pending"), todos[-1])
-    content = str(chosen.get("content") or "")
+        chosen = next((t for t in todos if t.status == "pending"), todos[-1])
+    content = str(chosen.content or "")
     if not content:
         return None
-    active_form = chosen.get("activeForm")
     return TodoSnapshot(
         content=content,
-        status=str(chosen.get("status") or "pending"),
-        activeForm=str(active_form) if active_form else None,
+        status=str(chosen.status or "pending"),
+        activeForm=str(chosen.activeForm) if chosen.activeForm else None,
     )
 
 
 class RunsService:
     def __init__(
         self,
-        workspaces: WorkspaceDatastore,
+        projects: ProjectDatastore,
         task_sessions: TaskSessionDatastore,
         tasks: TaskDatastore,
         task_events: TaskEventDatastore,
+        automations: AutomationDatastore,
     ) -> None:
-        self._workspaces = workspaces
+        self._projects = projects
         self._task_sessions = task_sessions
         self._tasks = tasks
         self._task_events = task_events
+        self._automations = automations
 
     async def list_runs(self, status: str = "running") -> list[RunSummary]:
-        # Kernel sessions via the async store facade (event-loop-native).
-        sessions: list[KernelSession] = await kernel_store.list_sessions(
-            project_id=None, limit=200, offset=0
+        # Recent sessions come from the host project↔session index; the
+        # kernel rows are bulk-fetched by id (the kernel itself is
+        # project-agnostic). The pool is generous (automation runs accrue
+        # fast); the per-group ``_FINISHED_LIMIT`` budget below is what bounds
+        # the response, not this fetch.
+        index_rows = await project_index.list_recent(limit=_INDEX_POOL)
+        proj_by_session = {r.session_id: r.project_id for r in index_rows}
+        sessions: list[KernelSession] = await kernel_client.list_sessions(
+            require_current_user_id(), ids=[r.session_id for r in index_rows], limit=_INDEX_POOL
         )
-        ws_map: dict[str, WorkspaceRow] = {
-            str(r.id): r for r in await self._workspaces.list_workspaces()
+        ws_map: dict[str, ProjectRow] = {
+            str(r.id): r for r in await self._projects.list_projects(require_current_user_id())
         }
         ts_map: dict[str, TaskSessionRow] = {
-            r.session_id: r for r in await self._task_sessions.list_all()
+            r.session_id: r for r in await self._task_sessions.list_all(require_current_user_id())
         }
         task_map: dict[str, TaskRow] = {
-            str(r.id): r for r in await self._tasks.list_all(limit=None)
+            str(r.id): r for r in await self._tasks.list_all(require_current_user_id(), limit=None)
         }
+        # Session ids spawned by a scheduled automation run. A task created by
+        # an automation has a lead session whose own origin stays "user" and
+        # whose task row carries no automation marker — but the automation's
+        # run record points at this session. Membership here is the reliable
+        # "automation-triggered" signal for both chats and task leads.
+        automation_session_ids = await self._automations.list_run_session_ids(
+            require_current_user_id()
+        )
 
         out: list[RunSummary] = []
         for sess in sessions:
@@ -169,10 +195,36 @@ class RunsService:
                     continue
             elif effective not in _FINISHED_RUN_STATUS:
                 continue
-            out.append(await self._build(sess, task_session, ws_map, task_map, effective))
+            # Isolate per-session enrichment: a single malformed session must
+            # not blank the entire overview. Skip the offender, keep the rest.
+            try:
+                summary = await self._build(
+                    sess,
+                    task_session,
+                    ws_map,
+                    task_map,
+                    effective,
+                    project_id=proj_by_session.get(sess.id, ""),
+                    automation_session_ids=automation_session_ids,
+                )
+            except Exception:
+                logger.exception(
+                    "runs overview: skipping session %s — failed to build summary",
+                    sess.id,
+                )
+                continue
+            out.append(summary)
 
         out.sort(key=lambda r: r.updated_at, reverse=True)
-        return out if status == "running" else out[:_FINISHED_LIMIT]
+        if status == "running":
+            return out
+        # Separate budgets so a flood of automation runs can't crowd user
+        # chats/tasks out of the recency-sorted window (and vice-versa). Each
+        # group keeps its own ``_FINISHED_LIMIT`` of most-recent runs; the
+        # client splits them across the 全部/对话/任务/自动化 tabs.
+        user_runs = [r for r in out if r.origin != "automation"]
+        automation_runs = [r for r in out if r.origin == "automation"]
+        return user_runs[:_FINISHED_LIMIT] + automation_runs[:_FINISHED_LIMIT]
 
     @staticmethod
     def _effective_status(
@@ -192,12 +244,15 @@ class RunsService:
         self,
         sess: KernelSession,
         task_session: TaskSessionRow | None,
-        ws_map: dict[str, WorkspaceRow],
+        ws_map: dict[str, ProjectRow],
         task_map: dict[str, TaskRow],
         effective_status: str,
+        *,
+        project_id: str,
+        automation_session_ids: set[str],
     ) -> RunSummary:
         meta: dict[str, Any] = (sess.metadata or {}).get("valuz") or {}
-        workspace = ws_map.get(str(sess.project_id))
+        project = ws_map.get(project_id)
         title = meta.get("name") or meta.get("last_user_message_text") or "Untitled"
         source: SourceKind
         task_id: str | None = None
@@ -214,17 +269,28 @@ class RunsService:
             last_event = await self._latest_task_event(task_id)
         else:
             source = (
-                "project_chat"
-                if workspace is not None and workspace.kind == "project"
-                else "assistant"
+                "project_chat" if project is not None and project.kind == "project" else "assistant"
             )
             last_output = _truncate_output(await self._latest_assistant_text(sess.id))
+
+        # ``origin`` = who triggered this run.
+        # - Chat sessions: read the session's own metadata origin (the
+        #   automation runner stamps "automation" at creation).
+        # - Task leads: the lead session's own origin stays "user" (the task
+        #   orchestrator doesn't propagate the trigger) and the task row carries
+        #   no marker. The reliable signal is the automation *run* record: if
+        #   this session id was produced by a scheduled run, it's automation.
+        own_origin = str(meta.get("origin") or "user")
+        if own_origin == "user" and sess.id in automation_session_ids:
+            own_origin = "automation"
+
         return RunSummary(
             session_id=sess.id,
             source_kind=source,
-            workspace_id=str(sess.project_id),
-            workspace_name=workspace.name if workspace is not None else None,
+            project_id=project_id,
+            project_name=project.name if project is not None else None,
             task_id=task_id,
+            origin=own_origin,
             title=str(title),
             status=effective_status,
             updated_at=sess.created_at,
@@ -242,7 +308,7 @@ class RunsService:
         the last round's content. Scans a few recent messages because the
         in-flight turn's message may not have its ``assistant_message`` set yet.
         """
-        messages = await kernel_store.list_messages_for_session(session_id, limit=3)
+        messages = await kernel_client.list_messages(require_current_user_id(), session_id, limit=3)
         for message in messages:  # most-recent first
             if message.assistant_message:
                 return str(message.assistant_message)
@@ -251,7 +317,7 @@ class RunsService:
     async def _latest_task_event(self, task_id: str | None) -> dict[str, Any] | None:
         if not task_id:
             return None
-        row = await self._task_events.latest_event(task_id)
+        row = await self._task_events.latest_event(require_current_user_id(), task_id)
         if row is None:
             return None
         return {"type": row.type, "payload": row.payload or {}}

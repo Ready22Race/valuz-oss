@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
@@ -23,7 +24,7 @@ async def send_to_member(
     from_session_id: str,
     to_session_id: str,
     text: str,
-    workspace_id: str,
+    project_id: str,
     task_id: str,
 ) -> dict[str, Any]:
     """Deliver a free-text follow-up from the lead to a running member.
@@ -38,11 +39,7 @@ async def send_to_member(
 
     async with async_unit_of_work(commit=False) as db:
         target_run = await TaskSessionDatastore(db).get_run(to_session_id)
-    if (
-        target_run is None
-        or target_run.task_id != task_id
-        or target_run.workspace_id != workspace_id
-    ):
+    if target_run is None or target_run.task_id != task_id or target_run.project_id != project_id:
         return {
             "delivered": False,
             "error": (
@@ -66,7 +63,8 @@ async def send_to_member(
 
     async with async_unit_of_work() as db:
         await TaskEventDatastore(db).append_event(
-            workspace_id=workspace_id,
+            require_current_user_id(),
+            project_id=project_id,
             task_id=task_id,
             type="subtask_message",
             actor="lead",
@@ -79,7 +77,7 @@ async def send_to_member(
 async def inject_into_task(
     *,
     task_id: str,
-    workspace_id: str,
+    project_id: str,
     text: str,
     from_session_id: str,
 ) -> dict[str, Any]:
@@ -103,7 +101,9 @@ async def inject_into_task(
     from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     async with async_unit_of_work(commit=False) as db:
-        task_row = await TaskDatastore(db).get_task_by_workspace(workspace_id, task_id)
+        task_row = await TaskDatastore(db).get_task_by_project(
+            require_current_user_id(), project_id, task_id
+        )
     if task_row is None:
         return {
             "delivered": False,
@@ -118,7 +118,7 @@ async def inject_into_task(
         }
 
     async with async_unit_of_work(commit=False) as db:
-        runs = await TaskSessionDatastore(db).list_runs(task_id)
+        runs = await TaskSessionDatastore(db).list_runs(require_current_user_id(), task_id)
     lead_run = next((r for r in runs if r.kind == "lead"), None)
     if lead_run is None:
         return {
@@ -138,7 +138,8 @@ async def inject_into_task(
         event_ds = TaskEventDatastore(db)
         if delivered:
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="user_inject",
                 actor=from_session_id,
@@ -147,7 +148,8 @@ async def inject_into_task(
             )
         else:
             await event_ds.append_event(
-                workspace_id=workspace_id,
+                require_current_user_id(),
+                project_id=project_id,
                 task_id=task_id,
                 type="user_inject_dropped",
                 actor=from_session_id,
@@ -165,7 +167,7 @@ async def inject_into_task(
 async def notify_lead_goal_revised(
     *,
     task_id: str,
-    workspace_id: str,
+    project_id: str,
     new_goal: str,
 ) -> dict[str, Any]:
     """Wake a running task's lead after the user revised ``task.goal``.
@@ -185,7 +187,7 @@ async def notify_lead_goal_revised(
     from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     async with async_unit_of_work(commit=False) as db:
-        runs = await TaskSessionDatastore(db).list_runs(task_id)
+        runs = await TaskSessionDatastore(db).list_runs(require_current_user_id(), task_id)
     lead_run = next((r for r in runs if r.kind == "lead"), None)
     if lead_run is None:
         return {"delivered": False, "lead_session_id": None, "reason": "NO_LEAD"}

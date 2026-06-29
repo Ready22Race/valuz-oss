@@ -1,69 +1,86 @@
 {
   "automation": {
+    "spawnedTask": "Task \"{title}\"",
     "actionCreate": "Create automation",
     "actionKindChat": "Simple",
     "actionKindChatHint": "One agent run per fire.",
     "actionKindLabel": "Mode",
     "actionKindTask": "Task",
-    "actionKindTaskDisabledHint": "Task mode requires a project workspace.",
+    "actionKindTaskDisabledHint": "Task mode requires a project.",
     "actionKindTaskHint": "Kick off a project task with this agent as Lead.",
     "actionNew": "New",
     "agentHint": "Execution model / runtime follow the selected agent.",
     "agentLabel": "Agent",
-    "timezoneLabel": "Timezone",
-    "nextRunPreview": "Next run",
     "agentPlaceholderEmpty": "No agents available — add one first",
     "agentPlaceholderPick": "Select an agent",
+    "createFailed": "Create failed: {error}",
     "createSuccess": "Created \"{name}\"",
-    "createFailed": "Create failed",
     "deleteConfirmDesc": "Deleting this automation removes its run history. This cannot be undone.",
-    "deleteFailed": "Delete failed",
+    "deleteFailed": "Delete failed: {error}",
     "deleteSuccess": "Deleted \"{name}\"",
     "deleteTitle": "Delete automation \"{name}\"?",
+    "detailTitle": "Automation detail",
     "dialogTitleChat": "New chat automation",
     "dialogTitleEdit": "Edit automation",
     "dialogTitleEditNamed": "Edit \"{name}\"",
     "dialogTitleNew": "New automation",
-    "dialogTitleProject": "New automation in {workspace}",
-    "updateFailed": "Update failed",
-    "updateSuccess": "Updated \"{name}\"",
+    "dialogTitleProject": "New automation in {project}",
     "emptyAction": "Create automation",
     "emptyDesc": "Run agent tasks on a schedule — daily reports, change monitoring, polling at minute-level intervals.",
     "emptyTitle": "No automations yet",
+    "execNoTask": "No linked task",
+    "execStatusErr": "Failed",
+    "execStatusOk": "Success",
+    "execStatusPending": "Pending",
+    "execStatusSkip": "Skipped",
+    "execTriggerAgent": "Agent",
+    "execTriggerCron": "Cron",
+    "execTriggerInterval": "Interval",
+    "execTriggerManual": "Manual",
+    "execTriggerRecoveredSkip": "Recovered skip",
     "groupCount": "{count} automation",
     "groupCountPlural": "{count} automations",
     "headerCount": "{count} automation",
     "headerCountPlural": "{count} automations",
     "headerEnabled": "{count} enabled",
-    "intervalEvery": "Every {seconds}s. Minimum {min}s (matches tick interval).",
-    "intervalUnitSeconds": "Seconds",
-    "intervalUnitMinutes": "Minutes",
-    "intervalUnitHours": "Hours",
-    "intervalUnitDays": "Days",
     "intervalBelowFloor": "Below {min}s floor; will be rounded up at submit.",
-    "loadFailed": "Failed to load automations",
-    "pauseFailed": "Pause failed",
-    "pauseSuccess": "Paused \"{name}\"",
-    "pickWorkspaceFirst": "Pick a workspace first",
-    "recentExecutions": "Recent executions",
+    "intervalEvery": "Every {seconds}s. Minimum {min}s (matches tick interval).",
+    "intervalEveryHours": "Every {count} hours",
+    "intervalEveryHoursMinutes": "Every {hours} hours {minutes} minutes",
+    "intervalEveryMinutes": "Every {count} minutes",
+    "intervalEveryMinutesSeconds": "Every {minutes}m {seconds}s",
+    "intervalEverySeconds": "Every {count} seconds",
+    "intervalUnitDays": "Days",
+    "intervalUnitHours": "Hours",
+    "intervalUnitMinutes": "Minutes",
+    "intervalUnitSeconds": "Seconds",
+    "loadFailed": "Failed to load automations: {error}",
+    "nextRunPreview": "Next run",
     "noExecutions": "No executions yet",
-    "execStatusOk": "Success",
-    "execStatusErr": "Failed",
-    "execStatusPending": "Pending",
-    "execStatusSkip": "Skipped",
-    "execTriggerCron": "Cron",
-    "execTriggerInterval": "Interval",
-    "execTriggerManual": "Manual",
-    "execTriggerRecoveredSkip": "Recovered skip",
-    "execNoTask": "No linked task",
+    "pauseFailed": "Pause failed: {error}",
+    "pauseSuccess": "Paused \"{name}\"",
+    "pickProjectFirst": "Pick a project first",
+    "proposalCreated": "Automation created.",
+    "proposalDismissed": "Dismissed",
+    "proposalFailed": "Couldn't prepare this automation",
+    "proposalLead": "Lead",
+    "proposalNew": "New automation",
+    "proposalUnnamed": "Unnamed automation",
+    "recentExecutions": "Recent executions",
     "resumeSuccess": "Resumed \"{name}\"",
-    "runFailed": "Run failed",
+    "runFailed": "Run failed: {error}",
     "runQueued": "Queued for immediate execution",
     "subtitle": "Recurring agent runs (cron + interval triggers).",
+    "targetChat": "Quick chat",
+    "targetLabelTask": "Project",
+    "timezoneLabel": "Timezone",
     "title": "Automation",
-    "toggleFailed": "Toggle failed",
+    "toggleFailed": "Toggle failed: {error}",
     "triggerCron": "Cron",
-    "triggerInterval": "Interval"
+    "triggerInterval": "Interval",
+    "triggerManual": "Manual",
+    "updateFailed": "Update failed: {error}",
+    "updateSuccess": "Updated \"{name}\""
   },
   "backend": {
     "schedule": {
@@ -121,7 +138,7 @@
     "select": "Select",
     "skills": "Skills",
     "uploadToKb": "Upload to knowledge base",
-    "workspaces": "Workspaces"
+    "projects": "Projects"
   },
   "common": {
     "add": "Add",
@@ -164,6 +181,7 @@
     "previousStep": "Previous",
     "processing": "Processing",
     "refresh": "Refresh",
+    "reload": "Reload Window",
     "remove": "Remove",
     "rename": "Rename",
     "retry": "Retry",
@@ -174,6 +192,11 @@
     "search": "Search",
     "select": "Select",
     "send": "Send",
+    "queueSend": "Queue",
+    "queueRunsAfter": "Runs after the current turn",
+    "queueContinue": "Continue",
+    "queueBlocked": "Could not run",
+    "queueSteer": "Send now",
     "starting": "Starting",
     "stop": "Stop",
     "success": "Success",
@@ -202,7 +225,7 @@
     "attachmentParsingBody": "Some attachments are still being parsed. Submit anyway? The agent will only be able to read the raw file — parsed content and document search won't be available.",
     "attachmentParsingConfirm": "Submit anyway",
     "attachmentParsingTitle": "Attachment still parsing",
-    "selectAgentFirst": "Select an agent before attaching files",
+    "selectAgentFirst": "Select an agent first",
     "answer": "Answer",
     "answered": "Answered",
     "askUserAnswerTitle": "Your answer",
@@ -215,6 +238,7 @@
     "cannotLoadKb": "Cannot load knowledge base",
     "clickEditTitle": "Click to edit title",
     "collapsePanel": "Collapse panel",
+    "contextCompacted": "Context compacted",
     "copy": "Copy",
     "copyFailed": "Copy failed",
     "copyLink": "Copy link",
@@ -233,10 +257,21 @@
     "fileTruncated": "\n… (file too large, truncated)",
     "filesChanged": "{count} files changed",
     "fromKnowledgeBase": "From knowledge base",
+    "composerSkills": "Skills",
+    "composerConnectors": "Connectors",
+    "composerConnectorsLocked": "Connectors were locked when this conversation started",
+    "composerPlusTooltip": "Add attachments, skills and connectors",
+    "defaultBrain": "Default",
+    "composerSearchConnectors": "Search connectors…",
+    "composerManageSkills": "Manage skills",
+    "composerManageConnectors": "Manage connectors",
+    "composerNoMatches": "No matches",
     "generatedFailed": "Generation failed",
+    "files": "Files",
     "generatedFiles": "Generated files",
     "generatedFilesCount": "{count}",
     "goToSettings": "Go to Settings",
+    "noGeneratedFiles": "No generated files yet",
     "indexing": "Indexing...",
     "inputPlaceholder": "Enter instruction... / @ skills, @ docs",
     "interruptFailed": "Interrupt failed",
@@ -256,8 +291,7 @@
     "selectAgent": "Select agent",
     "noAgents": "No agents yet — add one to start chatting.",
     "addAgent": "Add agent",
-    "selectAgentFirst": "Select an agent first",
-    "noAgentBanner": "You don't have any agents yet — create one or finish setup",
+    "noAgentBanner": "You haven't configured a model yet — set one up or finish setup",
     "noAgentBannerCta": "Set up",
     "noChannelBanner": "No model channel available yet — connect one",
     "noChannelAndAgentBanner": "No model channel or agent yet — finish setup",
@@ -267,6 +301,19 @@
     "taskCreated": "Task created",
     "openTask": "View task",
     "backToTask": "Back to task",
+    "workflow": {
+      "title": "Workflow",
+      "agentsDone": "{done}/{total} agents",
+      "statusRunning": "Running",
+      "statusCompleted": "Completed",
+      "statusStopped": "Stopped",
+      "statusFailed": "Failed",
+      "stateDone": "Done",
+      "stateRunning": "Running",
+      "question": "Question",
+      "summary": "Summary",
+      "viewDetails": "View full result"
+    },
     "brainOverride": "This chat only",
     "pillDrafted": "Task drafted",
     "pillPlanned": "Plan v{version} ({count} subtasks)",
@@ -335,7 +382,7 @@
     "viewDetails": "View details",
     "viewSession": "View full session",
     "workDir": "Conversation work dir",
-    "workspace": "Workspace",
+    "project": "Project",
     "permissionReview": "Default permission",
     "permissionReviewHint": "Confirm before tool calls (safety first)",
     "permissionAuto": "Auto review",
@@ -388,6 +435,7 @@
     "automationChatHelp2": ", like creating, pausing, deleting, or triggering tasks.",
     "automationChatHint": "You can also say it in chat, e.g. \"Remind me at 9am to review yesterday's report.\"",
     "automationIntro": "Tasks created in this project session are automatically linked.",
+    "automationTaskLabel": "automation tasks",
     "backToList": "Back to task list",
     "confirmDeleteTask": "Confirm delete task?",
     "confirmDeleteTaskDesc": "Deleting \"{name}\" will permanently remove it.",
@@ -438,15 +486,17 @@
     "paused": "Paused",
     "period": "Period",
     "recentExecutions": "Recent executions",
-    "sat": "Sat",
+    "runNow": "Run Now",
     "runtime": "Runtime",
+    "sat": "Sat",
     "selectModel": "Select model",
     "selectNewModel": "Select new model →",
+    "selectProject": "Please select a project",
     "selectRuntime": "Select runtime",
-    "selectWorkspace": "Please select a workspace",
     "setModel": "Set model →",
     "simple": "Simple",
     "statusColumn": "Status",
+    "statusOn": "Enabled",
     "sun": "Sun",
     "taskColumn": "Task",
     "taskCount": "{count} Tasks",
@@ -455,9 +505,9 @@
     "taskNotExist": "Task does not exist or failed to load",
     "taskUpdated": "Task updated",
     "thu": "Thu",
+    "timezoneColumn": "Timezone",
     "todayTime": "Today {time}",
     "triggerColumn": "Trigger",
-    "timezoneColumn": "Timezone",
     "triggerFailed": "Trigger failed",
     "triggerSuccess": "Triggered \"{name}\"",
     "triggered": "Triggered \"{name}\"",
@@ -466,8 +516,7 @@
     "updateFailed": "Update failed",
     "wed": "Wed",
     "weekdays": "Weekdays",
-    "yesterdayTime": "Yesterday {time}",
-    "automationTaskLabel": "automation tasks"
+    "yesterdayTime": "Yesterday {time}"
   },
   "decisionInbox": {
     "title": "Pending Questions",
@@ -599,15 +648,14 @@
     "loadingTools": "Loading tools…",
     "toolsError": "Couldn't load tools: {error}",
     "empty": "No connectors yet. Add one with the + button.",
-    "emptyTitle": "No connectors yet",
-    "emptyDesc": "Connect external tools and data services so agents can use them.",
-    "emptyAction": "Add connector",
     "noMatch": "No connectors match your search.",
     "disconnectConfirm": "Disconnect {name}?",
     "disconnectConfirmDesc": "This removes the connection and any stored credentials. You can reconnect later.",
     "statusConnecting": "Connecting…",
     "statusConnected": "Connected",
     "statusError": "Connection failed",
+    "statusNotConnected": "Not connected",
+    "groupInstalled": "Added",
     "groupOfficial": "Official",
     "groupBuiltin": "Built-in",
     "groupDirectory": "Connected",
@@ -637,6 +685,7 @@
     "earlier": "Earlier",
     "chatTag": "Chat",
     "taskTag": "Task",
+    "automationTag": "Automation",
     "filterAll": "All",
     "live": "Live",
     "waitingForEvents": "Waiting for events…",
@@ -685,10 +734,10 @@
     "untestedConfirm": "Connection not tested yet. Confirm save?",
     "useApiKey": "Switch to API Key mode →",
     "welcome": "Welcome to Valuz",
-    "heroTitle": "Your AI team,\nall in one workspace.",
+    "heroTitle": "Your AI team,\nall in one workbench.",
     "heroTitleLine1": "Your AI team,",
     "heroTitleLine2": "all in",
-    "heroTitleAccent": "one workspace",
+    "heroTitleAccent": "one workbench",
     "heroTitleSuffix": ".",
     "heroSubtitle": "Give it a goal, and the agent team breaks it down, splits the work, and drives it forward in parallel — with you able to step in at any point; from spec to ship, research to execution, idea to launch, getting the work truly done.",
     "heroSubtitleAccent": "breaks it down, splits the work, and drives it forward in parallel — with you able to step in at any point",
@@ -696,7 +745,7 @@
     "heroSubtitleSuffix": "; from spec to ship, research to execution, idea to launch, getting the work truly done.",
     "startButton": "Get started",
     "heroFootnote": "Conversations, files, and knowledge base all stored locally · Runtime and model under your control",
-    "heroQuote": "Every idea, every discussion, every decision — you and your agents share one workspace.",
+    "heroQuote": "Every idea, every discussion, every decision — you and your agents share one workbench.",
     "assignedToTeam": "Assigned to team",
     "statusRunning": "In progress",
     "statusDone": "Done",
@@ -707,6 +756,7 @@
     "connectStatusNoDefault": "Connect a channel and pick a default model",
     "connectLoading": "Loading available model channels…",
     "sectionLocalSubscription": "Local subscription",
+    "sectionSystem": "System models",
     "sectionApiKey": "API Key channel",
     "addApiKeyChannel": "Add API Key channel",
     "addApiKeyHint": "DeepSeek, OpenRouter, or any compatible API",
@@ -750,11 +800,6 @@
     "createAssistantFailed": "Failed to create the assistant. Please try again.",
     "exampleProjectName": "Example project",
     "teams": {
-      "general": {
-        "name": "General Team",
-        "tagline": "Research → Write → Review — the default crew for everyday knowledge work.",
-        "collab": "Researcher → Writer → Reviewer, with the Archivist filing as it happens."
-      },
       "investment": {
         "name": "Investment Research Team",
         "tagline": "Industry, valuation, tracking, compliance — a deep crew for investment research.",
@@ -768,85 +813,66 @@
       "custom": {
         "name": "No team for now",
         "tagline": "Just start chatting — get a feel for it first."
+      },
+      "content": {
+        "name": "Content Team",
+        "tagline": "Topic → copy → visuals → publish — a Xiaohongshu content line",
+        "collab": "Topic Planner → Note Writer → Visual Designer → Publisher"
       }
     },
     "roles": {
-      "general": {
-        "researcher": {
-          "name": "Researcher",
-          "duty": "Gather info, map the full picture",
-          "description": "Gathers information, maps the landscape, and produces sourced conclusions.",
-          "instructions": "You are the Researcher, lead of the General Team. You lay the information groundwork for the whole crew.\n\nYour position:\n- User requests come to you first; you decide what to actually research.\n- When research is done, you hand findings to the Writer for prose; the Reviewer gates publishing; the Archivist files what gets produced.\n\nWorkflow:\n1. Restate the task: scope, boundaries, and what counts as \"done\" (\"a survey, or an answer to one specific question?\").\n2. Outline 3-5 research dimensions up front so the team can sanity-check the direction.\n3. Search and synthesize against the outline; every conclusion must be traceable to a source.\n4. Hand off as \"conclusion + key points + sources\" to the Writer.\n\nOutput rules:\n- Bullets first, then expansion. Avoid wall-of-text paragraphs.\n- Every fact/figure carries its source (URL, doc name, page, or interview ID).\n- Mark uncertainty as \"to verify\" instead of forcing a conclusion.\n\nCollaboration:\n- Ask the user to clarify ambiguous tasks; don't guess.\n- Break large research into single-dimension chunks via todos.\n- Ship in stages — don't wait for \"perfect\"; the Writer can iterate on a draft.\n\nStyle: objective, traceable, not vague."
-        },
-        "writer": {
-          "name": "Writer",
-          "duty": "Turn research into finished prose",
-          "description": "Turns research conclusions into clear, reader-friendly finished prose.",
-          "instructions": "You are the Writer of the General Team. You don't research — you take the Researcher's findings and turn them into prose that readers actually read.\n\nYour position:\n- Upstream: Researcher. Downstream: Reviewer.\n- Researcher gives you \"conclusion + key points + sources\"; the Reviewer will check your output.\n\nWorkflow:\n1. Confirm audience and length first (\"500-word brief? 2000-word deep dive?\").\n2. Write the core argument in one sentence so upstream/downstream align.\n3. Draft using \"hook → claim → support → close\".\n4. Hand to the Reviewer and flag 2-3 phrasings you're unsure about.\n\nOutput rules:\n- One idea per paragraph. Break long sentences.\n- Keep the Researcher's source links when citing data/facts.\n- Don't invent facts — cut unsupported claims instead of bluffing.\n\nCollaboration:\n- Spot a logical gap in the source material? Ping the Researcher to fill it. Don't fabricate.\n- Leave 2-3 \"I'm not sure here\" notes for the Reviewer so they can focus.\n\nStyle: clear, with rhythm, not greasy."
-        },
-        "reviewer": {
-          "name": "Reviewer",
-          "duty": "The last gate before publishing",
-          "description": "Checks facts, logic, and phrasing before anything is finalized.",
-          "instructions": "You are the Reviewer, the General Team's last gate before publishing. Your job: make sure the piece survives both the reader and the facts.\n\nYour position:\n- Upstream: Writer. Downstream: publishing.\n- You don't rewrite; you raise issues with concrete, actionable suggestions, and let the author fix them.\n\nWorkflow:\n1. Read once end-to-end for the big picture (\"does the argument hold? is the structure sound?\").\n2. Second pass paragraph-by-paragraph; flag three classes: factual errors, logic gaps, fuzzy phrasing.\n3. Send a numbered checklist; each item must be actionable (\"rewrite §3 to X\" beats \"make this clearer\" by 10x).\n4. Confirm or bounce the revised draft.\n\nOutput rules:\n- Separate \"must fix\" from \"suggested\". Don't blur them.\n- Quote specific paragraphs/sentences; no generalities.\n- For phrasing issues, include at least one suggested rewrite.\n\nCollaboration:\n- Facts in question? Ping the Researcher to re-check; don't Google it yourself (that's their job).\n- Big changes: align with the Writer on intent before they touch the draft.\n\nStyle: strict, specific, not nitpicky-for-its-own-sake."
-        },
-        "archivist": {
-          "name": "Archivist",
-          "duty": "File, index, leave a trail",
-          "description": "Files, indexes, and leaves a trail so team output stays searchable and traceable.",
-          "instructions": "You are the Archivist, the General Team's records keeper. Whatever the Researcher, Writer, and Reviewer produce, you file, index, and leave a trail for.\n\nYour position:\n- Whole-process observer: as each role ships something, you file it.\n- Your output lets someone returning a month later find what they need in under a minute.\n\nWorkflow:\n1. At project start, set up the directory structure (topic + time dual index).\n2. On every deliverable, file the original + add metadata (author, date, keywords, related task IDs).\n3. Periodically publish an \"index snapshot\" — what shipped this week/month, and where it lives.\n4. At project close, output a master index that links to every deliverable.\n\nOutput rules:\n- Filenames follow `YYYYMMDD-topic-author.md`; keywords go in frontmatter.\n- Index docs as tables, one deliverable per row.\n- Never silently rename or delete someone else's original.\n\nCollaboration:\n- See something unfiled? Ask \"save this? where?\" — don't presume.\n- Index conflicts: defer to the creator; don't merge unilaterally.\n\nStyle: low-key, reliable, not attention-seeking."
-        }
-      },
       "investment": {
         "analyst": {
           "name": "Industry Analyst",
-          "duty": "Coordinate, position, wrap up",
-          "description": "Coordinates the full research process, judges industry position, and synthesizes the final view.",
-          "instructions": "You are the Industry Analyst, lead of the Investment Research Team. You're not just an analyst — you're the conductor: deciding how the research runs, who delivers what, and how the final view is shaped.\n\nYour position:\n- Users hand you investment research requests; you split work to the Financial Modeler, Quarterly Tracker, and Compliance Reviewer.\n- You personally own \"industry position and structure\" judgment.\n- The final synthesis and external view is yours to call.\n\nWorkflow:\n1. On intake, publish the research framework: industry state, competitive landscape, core drivers, valuation, tracking points, compliance boundaries.\n2. Dispatch subtasks: Modeler → valuation, Tracker → quarterly forecasts, Compliance → risk review.\n3. In parallel, do your own industry-position work (market size, structure, moat, cycle position).\n4. Integrate subtask outputs into a full report.\n5. Present to the user: one-line conclusion + key disagreements first, details after.\n\nOutput rules:\n- Every judgment ties to an assumption and sensitivity (\"if X moves to Y, conclusion becomes Z\").\n- Separate \"facts/data\" from \"judgment/opinion\".\n- Reserve a \"expectation gap / counterargument\" section — don't echo-chamber.\n\nCollaboration:\n- When dispatching, give clear inputs (sources, time window, definitions) and acceptance criteria.\n- When subtasks come back, judge at a glance — don't redo their work.\n\nStyle: macro view, willing to call it, room for disagreement."
+          "duty": "Orchestrate · positioning · wrap-up"
         },
         "modeler": {
           "name": "Financial Modeler",
-          "duty": "DCF + comparable-company valuation",
-          "description": "Builds DCF and comparable-company models with explicit assumptions and sensitivity analysis.",
-          "instructions": "You are the Financial Modeler of the Investment Research Team. You turn the team's judgments about a company into a model that can be computed and stress-tested.\n\nYour position:\n- The Industry Analyst (lead) sets the scope and key assumptions.\n- You produce DCF + comparable-company valuation with sensitivity analysis.\n- The Quarterly Tracker's forecasts feed directly into your model.\n\nWorkflow:\n1. List the modeling inputs needed: revenue definition, margins, capex, tax rate, discount rate, etc.\n2. Build the DCF (explicit growth period, steady state, terminal value).\n3. Pick 3-5 comparables; compare valuation multiples (PE / PB / EV/EBITDA).\n4. Run sensitivities: each key assumption ±20%, watch valuation move.\n5. Hand the lead a valuation summary: fair range + main drivers + key risks.\n\nOutput rules:\n- Transparent model: every assumption traceable to a source.\n- Give a range, not a single point estimate.\n- Explicitly flag the model's blind spots (e.g., non-financial factors).\n\nCollaboration:\n- Align assumptions with the lead before building; don't freelance.\n- When the Tracker updates forecasts, re-run the model proactively.\n\nStyle: rigorous, humble, leaves a margin."
+          "duty": "DCF + 3-statement + comps"
         },
         "tracker": {
-          "name": "Quarterly Tracker",
-          "duty": "Three-scenario forecasts, run in parallel",
-          "description": "Tracks quarterly results, builds multi-scenario forecasts, and flags expectation gaps.",
-          "instructions": "You are the Quarterly Tracker of the Investment Research Team. Your job is to keep the team's research from being stuck on last year's filings — every quarter's developments flow through you.\n\nYour position:\n- The Modeler's forecasts use your numbers as input.\n- The lead relies on you to flag when the research conclusion has gone stale.\n\nWorkflow:\n1. Lock in each target's quarterly cadence (pre-announcement, formal filing, earnings call).\n2. Within 24 hours of release, complete a \"results vs. expectation\" comparison and quantify the gap.\n3. Produce three-scenario forecasts: bull / base / bear, with explicit triggers.\n4. When tracking multiple targets in parallel, use a unified table to compare landscape shifts.\n5. Spot an inflection signal? Escalate to the lead.\n\nOutput rules:\n- Data must be fresh, definitions stable, expectation gaps quantified.\n- Every scenario must have a trigger — not just \"I think\".\n- Tables beat paragraphs (better for cross-comparison).\n\nCollaboration:\n- Model assumption contradicts latest reality? Tell the Modeler to re-run.\n- Cadence over depth: better to update a little every quarter than backlog.\n\nStyle: timely, accurate, unemotional."
+          "name": "Earnings Tracker",
+          "duty": "Full earnings-season tracking"
         },
-        "compliance": {
-          "name": "Compliance Reviewer",
-          "duty": "Local-only, data stays on device",
-          "description": "Reviews findings for compliance and risk; data never leaves the device.",
-          "instructions": "You are the Compliance Reviewer, the Investment Research Team's risk floor. Your job: make sure the team's conclusions never get bounced for compliance/data issues, and user data never leaks.\n\nYour position:\n- Every external conclusion passes through you.\n- You run locally; data never leaves the device.\n- You don't make research judgments — only risk calls.\n\nWorkflow:\n1. At project start, audit data sources for compliance (public / paid / internal).\n2. During research, monitor: any non-public info cited? any internal materials going out?\n3. Before sign-off, run four checks: source compliance, definition accuracy, risk disclosure completeness, sensitive data redaction.\n4. Pass → release. Fail → return a specific remediation list.\n\nOutput rules:\n- Risk callouts as numbered list, each tied to a specific source/section.\n- Failed drafts must come back with \"how to fix\", not just \"no\".\n- Default assumption: data stays on device; double-check before anything goes out.\n\nCollaboration:\n- Spot a compliance issue? Escalate to the lead immediately — don't sit on it.\n- Don't substitute for the team's research judgment (compliance and research are different jobs).\n\nStyle: conservative, rigorous, won't bend."
+        "reportWriter": {
+          "name": "Report Writer",
+          "duty": "Initiations · morning notes · decks"
         }
       },
       "product": {
         "pm": {
           "name": "Product Manager",
-          "duty": "Break down asks, set the plan, prioritize",
-          "description": "Turns fuzzy goals into structured, prioritized specs that can actually ship.",
-          "instructions": "You are the Product Manager, lead of the Product Team. You don't write code or draw mockups, but the team's direction, scope, and priority is your call.\n\nYour position:\n- User requests come to you first; you break them into executable features/tasks.\n- You dispatch interaction design to the Designer, implementation to Engineering, validation to QA.\n- Release and go/no-go decisions are yours.\n\nWorkflow:\n1. On intake, ask three questions: whose problem, current workaround, success metric?\n2. Write a one-page PRD: context, goal, scope, key user flow, acceptance criteria, dependencies.\n3. Hand interaction detail to the Designer; let Engineering own the tech approach.\n4. Track progress, unblock blockers, cut scope to protect the release if needed.\n5. Before ship, review the QA report and call go/no-go.\n\nOutput rules:\n- PRD short: one page beats two.\n- Acceptance criteria phrased as \"user can X / sees Y\" — no tech jargon.\n- Prioritize as P0 / P1 / P2; \"everything's P0\" means no prioritization.\n\nCollaboration:\n- Listen to design/engineering on their turf; don't dictate from outside.\n- Team grabbing scope? Cut what doesn't belong this release.\n\nStyle: focused, decisive, owns the outcome."
+          "duty": "Break down asks, set the plan, prioritize"
         },
         "designer": {
           "name": "Designer",
-          "duty": "UI/UX design and handoff",
-          "description": "Produces UI/UX specs and assets that engineers can implement as-is.",
-          "instructions": "You are the Designer of the Product Team, the experience gatekeeper. You turn PM requirements into UI and interactions that users actually find smooth.\n\nYour position:\n- Upstream: PM (requirements). Downstream: Engineering (handoff).\n- You don't just draw screens — interaction soundness is on you too.\n\nWorkflow:\n1. On a PRD, restate: in what scenario, with what action, achieves what?\n2. Sketch 3 directions; let the PM pick a direction before you commit to detail.\n3. Produce detailed designs: component states, empty/error/loading, responsive breakpoints — all of them.\n4. Handoff to Engineering with specs: spacing, type scale, color tokens, component names.\n5. After implementation, do a walkthrough; tweak the small stuff, escalate big mismatches back to the PRD.\n\nOutput rules:\n- Flow diagrams first, then UI — avoid pretty UI with broken flow.\n- Draw all states, not just the happy path.\n- Reference design-system tokens; don't invent ad-hoc colors.\n\nCollaboration:\n- PRD ambiguous? Ping the PM. Don't paper over it yourself.\n- Implementation drifting? Give Engineering specific deltas, not \"close enough\".\n\nStyle: restrained, systematic, no pile-on."
+          "duty": "UI/UX design and handoff"
         },
         "engineer": {
           "name": "Full-stack Engineer",
-          "duty": "Build features, write code",
-          "description": "Implements frontend and backend per spec; writes clear, typed, testable code.",
-          "instructions": "You are the Full-stack Engineer of the Product Team. Whether the design and spec ship as a reliable system is on you.\n\nYour position:\n- Upstream: PM (requirements) + Designer (specs).\n- Downstream: QA.\n- You own the technical approach; PM and Design should respect your tech judgment.\n\nWorkflow:\n1. With PRD + designs in hand, evaluate the tech approach (API, data model, blast radius).\n2. Write a 100-300-word tech note so PM and QA see risks early.\n3. Break down tasks before coding so progress is visible.\n4. Write code: API contract first, types complete, logs on the critical path.\n5. Self-test, hand to QA with \"what to focus on + known trade-offs\".\n\nOutput rules:\n- Code: testable, typed, logged on the hot path.\n- API contract changes: update OpenAPI first, then implementation.\n- No premature abstraction for \"might use later\" — three copies before extracting.\n\nCollaboration:\n- Requirement implies major complexity? Offer the PM an alternative, don't silently absorb it.\n- QA finds a bug? Diagnose then fix — no band-aids.\n\nStyle: steady, clear, no flexing."
+          "duty": "Build features, write code"
         },
         "qa": {
           "name": "QA",
-          "duty": "Cover the cases, run regression",
-          "description": "Writes test plans, covers the key cases, runs regression, files clear repros for bugs.",
-          "instructions": "You are QA, the Product Team's quality gate. Your job is to make sure every release survives real user use.\n\nYour position:\n- Upstream: Engineering (commits). Downstream: PM / users (reports).\n- You don't fix code, but you decide which bugs must be fixed before release.\n\nWorkflow:\n1. Before receiving the build, write a test plan from the PRD: core flow, boundaries, exceptions, regression points.\n2. Execute tests: each case logs steps, expected, actual, screenshots/logs.\n3. Classify bugs: blocker / serious / general / nice-to-have.\n4. Push blockers and serious bugs back to Engineering with reliable repros.\n5. After fixes, run regression; confirm no new breakage.\n6. Before release, give the PM a \"release quality report\".\n\nOutput rules:\n- Bug reports need reliable repro steps; mark intermittent ones as \"flaky\" + observed frequency.\n- Every bug states expected behavior — not just \"wrong\".\n- Reports group by severity so the PM can call go/no-go at a glance.\n\nCollaboration:\n- Found a bug? Align repro path with Engineering first, then file formally.\n- See a boundary the PRD missed? Ping the PM to add acceptance criteria.\n\nStyle: patient, detail-oriented, doesn't let things slide."
+          "duty": "Cover the cases, run regression"
+        }
+      },
+      "content": {
+        "topicPlanner": {
+          "name": "Topic Planner",
+          "duty": "Mine topics, set hooks, plan the calendar"
+        },
+        "noteWriter": {
+          "name": "Note Writer",
+          "duty": "Write persuasive Xiaohongshu copy"
+        },
+        "visualDesigner": {
+          "name": "Visual Designer",
+          "duty": "Cover and in-note visual direction"
+        },
+        "publisher": {
+          "name": "Publisher",
+          "duty": "Schedule, publish, track results"
         }
       }
     },
@@ -874,7 +900,7 @@
     "valuzHelper": {
       "name": "Valuz Helper",
       "description": "Valuz onboarding assistant. Ask anything about using Valuz, how to plan tasks, or how to configure agents.",
-      "instructions": "You are the Valuz Helper, Valuz's built-in general assistant and the in-product onboarding guide.\nYou handle everyday Q&A and chat, and you're especially good at helping users get started with Valuz.\n\nYou know Valuz's core concepts:\n- Project: a workspace where an Agent team collaborates. \"Deploying\" an Agent from the library into a project lets it participate.\n- Agent: a configurable execution unit with instructions, skills, equipment (MCP connectors), and a model channel.\n- Quick chat: a non-project chat for ad-hoc questions and lightweight tasks.\n- Skills / equipment: pluggable modules that extend an Agent's abilities.\n\nResponse principles:\n- You're a general assistant: handle everyday questions, writing, lookups, and casual chat normally —\n  don't deflect just because \"I'm a product assistant\".\n- First figure out what the user wants to achieve, then give the shortest workable path.\n  If one sentence suffices, don't expand.\n- For \"how to use Valuz\" questions, lean on your guide role:\n  give concrete steps and entry points (which page, which button), and let the user finish themselves.\n- For deeper professional work (investment research, writing, product work),\n  suggest the user deploy a more specialized Agent in a project instead of struggling alone.\n- Defer to your \"Valuz Handbook\" skill for product specifics;\n  if it's not in the handbook, say \"I'm not sure\" honestly — don't invent.\n- Friendly, concise, actionable, and prefer bullets."
+      "instructions": "You are the Valuz Helper, Valuz's built-in general assistant and the in-product onboarding guide.\nYou handle everyday Q&A and chat, and you're especially good at helping users get started with Valuz.\n\nYou know Valuz's core concepts:\n- Project: a shared space where an Agent team collaborates. \"Deploying\" an Agent from the library into a project lets it participate.\n- Agent: a configurable execution unit with instructions, skills, equipment (MCP connectors), and a model channel.\n- Quick chat: a non-project chat for ad-hoc questions and lightweight tasks.\n- Skills / equipment: pluggable modules that extend an Agent's abilities.\n\nResponse principles:\n- You're a general assistant: handle everyday questions, writing, lookups, and casual chat normally —\n  don't deflect just because \"I'm a product assistant\".\n- First figure out what the user wants to achieve, then give the shortest workable path.\n  If one sentence suffices, don't expand.\n- For \"how to use Valuz\" questions, lean on your guide role:\n  give concrete steps and entry points (which page, which button), and let the user finish themselves.\n- For deeper professional work (investment research, writing, product work),\n  suggest the user deploy a more specialized Agent in a project instead of struggling alone.\n- Defer to your \"Valuz Handbook\" skill for product specifics;\n  if it's not in the handbook, say \"I'm not sure\" honestly — don't invent.\n- Friendly, concise, actionable, and prefer bullets."
     }
   },
   "permission": {
@@ -906,11 +932,15 @@
     "basedOnContext": "Generate report based on project context",
     "browse": "Browse",
     "create": "Create",
-    "createDesc": "Enter a project name and select a directory to create a new workspace.",
+    "createDesc": "Enter a project name and select a directory to create a new project.",
     "createFailed": "Creation failed",
     "createTitle": "Create New Project",
     "created": "Project \"{name}\" created",
     "deleteTask": "Delete",
+    "deployAgents": "Deploy agents",
+    "deployAgentsHint": "Pick one or more; Valuz Helper is deployed by default. You can change members later.",
+    "deployPartialFail": "Failed to deploy {count} agent(s); you can retry later in the project.",
+    "noAgentsToDeploy": "Your agent library is empty — you can add members later in the project.",
     "dirAlreadyBound": "This directory is already bound to another project",
     "dirHint": "Select a local directory as the project root. Each directory can only be bound to one project.",
     "disable": "Disable",
@@ -939,6 +969,10 @@
     "parseFailed": "Parse failed",
     "projectDir": "Project Directory",
     "projectFiles": "Files",
+    "projectMemory": "Memory",
+    "memoryAuto": "Auto",
+    "memoryClearConfirm": "Confirm clear?",
+    "memoryEmpty": "Memory accumulates automatically after the conversation goes idle.",
     "projectName": "Project Name",
     "refDocs": "Referenced docs",
     "refreshFiles": "Refresh file list",
@@ -987,6 +1021,37 @@
     }
   },
   "settings": {
+    "browser": {
+      "statusLabel": "Browser",
+      "connected": "Connected",
+      "disconnected": "Not connected",
+      "modeManaged": "Managed profile",
+      "modeAttach": "Attach to my Chrome",
+      "open": "Open my browser",
+      "stop": "Stop",
+      "opened": "Browser ready",
+      "loadFailed": "Failed to load browser status",
+      "openFailed": "Failed to open the browser",
+      "riskNote": "This is a separate, isolated browser instance — only sign into the accounts you need. Treat page content as untrusted."
+    },
+    "memory": {
+      "enabledLabel": "Enable memory",
+      "enabledDesc": "Master switch: memory injection + background auto-generation",
+      "autoExtractLabel": "Background auto-memory",
+      "autoExtractDesc": "Distil and save memory after a chat goes idle (calls a model)",
+      "customInstructionsLabel": "Custom memory instructions",
+      "customInstructionsDesc": "Add your own preferences on top of the built-in memory rules — what background auto-memory should focus on or ignore (leave empty to disable)",
+      "customInstructionsPlaceholder": "e.g. Focus on decisions and their rationale; ignore small talk and throwaway debugging details",
+      "scopeUser": "About you",
+      "scopeGlobal": "General notes",
+      "empty": "No memory yet",
+      "clearScope": "Clear",
+      "loading": "Loading…",
+      "deleted": "Deleted",
+      "cleared": "Cleared",
+      "loadFailed": "Failed to load memory",
+      "saveFailed": "Action failed"
+    },
     "onboarding": {
       "title": "Onboarding",
       "rerunLabel": "Re-run onboarding",
@@ -1149,10 +1214,10 @@
         "desc": "Manage your identity, sync scope, and subscription status to keep a consistent research context across devices",
         "statLabel": "Account Health",
         "statValue": "98%",
-        "title": "Account & Workspace"
+        "title": "Account & Projects"
       },
       "appearance": {
-        "desc": "Tune your desktop workspace to your preferred reading rhythm, information density, and brand style",
+        "desc": "Tune your desktop experience to your preferred reading rhythm, information density, and brand style",
         "statLabel": "Current Theme",
         "statValue": "Light",
         "title": "Display & Visual Preferences"
@@ -1235,7 +1300,7 @@
       "modelChannel": "Model Channels",
       "modelChannelDesc": "Configured LLM providers",
       "defaultConfig": "Default Config",
-      "defaultConfigDesc": "Default configuration for new conversations when no workspace override is specified",
+      "defaultConfigDesc": "Default configuration for new conversations when no project override is specified",
       "discoveredModels": "Discover models",
       "followSubscription": "Follow subscription",
       "agentEngine": "Select default agent engine",
@@ -1247,6 +1312,7 @@
       "notInstalled": "Not installed",
       "notLoggedIn": "Not logged in",
       "installCli": "Install CLI",
+      "subscriptionLoginRequired": "{name} channel isn't logged in yet — run {command} in a terminal, or connect it from Settings → Models, then retry",
       "runtimeSwitchedReSelect": "Runtime switched — please re-select the default model",
       "availableModelsList": "Available models",
       "availableModelsHelp": "(Comma or newline separated, at least 1)",
@@ -1278,7 +1344,7 @@
       "kindSpreadsheet": "Excel",
       "kindText": "Plain Text / Markdown",
       "kindWeb": "HTML Pages",
-      "loadFailed": "Failed to load parsing config",
+      "loadFailed": "Failed to load parsing config: {error}",
       "loadingConfig": "Loading parsing config...",
       "localDownload": "Local Capability Downloads",
       "localDownloadDesc": "Some local capabilities (e.g. image OCR) depend on external model files, Your explicit authorization is required before downloading on first use",
@@ -1289,7 +1355,7 @@
       "primarySwitched": "Primary engine switched to {name}",
       "routingSection": "Parse Routing",
       "routingSectionDesc": "Pick the primary engine, types it can't handle fall back to local parsing",
-      "saveFailed": "Save failed",
+      "saveFailed": "Save failed: {error}",
       "setup": {
         "agreeAndDownload": "Agree & Download",
         "agreement": "I have read and agree to the model source and license above; I allow downloading these files to my device.",
@@ -1315,15 +1381,15 @@
         "sourceAndLicense": "Source: {source} · License: {license}",
         "startFailed": "Start failed: {error}"
       },
-      "switchFailed": "Switch failed",
+      "switchFailed": "Switch failed: {error}",
       "sync": "Sync",
-      "testPluginFailed": "{name} test failed",
-      "testRequestFailed": "Test request failed",
+      "testPluginFailed": "{name} test failed: {error}",
+      "testRequestFailed": "Test request failed: {error}",
       "testNotConfigured": "Enter and save the API token above before testing.",
       "testHealthFailed": "The API token may be invalid or the service is unreachable.",
       "title": "Document Parsing",
       "updateConfig": "Update Config",
-      "updateFailed": "Update failed",
+      "updateFailed": "Update failed: {error}",
       "getToken": "Get Token",
       "getTokenLink": "Get Token"
     },
@@ -1368,8 +1434,8 @@
       "seriesCount": "{count} series",
       "title": "Data Sources",
       "valuzConnected": "Valuz connected",
-      "workspaceScoped": "Workspace scoped",
-      "workspaceScopedHint": "Granted per workspace"
+      "projectScoped": "Project scoped",
+      "projectScopedHint": "Granted per project"
     },
     "systemLogs": {
       "copiedLines": "Copied {count} lines",
@@ -1407,6 +1473,14 @@
       "general": {
         "desc": "Appearance & shortcuts",
         "label": "General"
+      },
+      "memory": {
+        "desc": "Inspect and control memory",
+        "label": "Memory"
+      },
+      "browser": {
+        "desc": "Connect and manage the controlled browser",
+        "label": "Browser"
       },
       "shortcuts": {
         "desc": "Global commands & input",
@@ -1462,6 +1536,7 @@
     "tasks": "Tasks",
     "noTasks": "No tasks yet",
     "sessions": "Conversations",
+    "chats": "Chats",
     "taskStatus": {
       "active": "Running",
       "paused": "Paused",
@@ -1480,12 +1555,17 @@
   },
   "skill": {
     "addBtn": "Add",
+    "libraryEnabledTip": "Available in new conversations",
+    "libraryDisabledTip": "Hidden from new conversations",
+    "rescan": "Rescan skill library",
+    "rescanDone": "Re-indexed {count} skill(s)",
+    "rescanFailed": "Rescan failed",
     "addSkill": "Add skill",
     "addSkillDesc": "Select skills to enable in this project",
     "aiCreate": "AI create",
     "aiHint": "Card refreshes automatically when AI writes files.",
     "automationFailed": "Automation failed",
-    "boundToWorkspace": "· Bound to {name}",
+    "boundToProject": "· Bound to {name}",
     "builtin": "Built-in",
     "builtinHint": "Bundled with client · Cannot disable",
     "cancelled": "Cancelled, not saved",
@@ -1512,9 +1592,9 @@
     "fileStructure": "File structure",
     "generatedSkills": "Generated skills",
     "groupAgents": "Agents",
-    "groupClaude": ".claude",
+    "groupClaude": "Claude",
     "groupCodex": "Codex",
-    "groupOfficial": "Official",
+    "groupOfficial": "Built-in",
     "importFailed": "Import failed: {error}",
     "importName": "Import name",
     "imported": "Skill \"{name}\" imported",
@@ -1541,9 +1621,6 @@
     "newSkillLabel": "New",
     "nextRun": "· Next {time}",
     "noAvailable": "No available skills",
-    "emptyTitle": "No skills yet",
-    "emptyDesc": "Add or import skills so agents can reuse working methods and tool instructions.",
-    "emptyAction": "Add skill",
     "noFiles": "No files",
     "noGenerated": "No generated skills yet.",
     "noGeneratedHint": "Describe the skill on the left, AI will write to staging.",
@@ -1664,6 +1741,41 @@
     "failed": "Failed",
     "running": "Running"
   },
+  "menu": {
+    "about": "About Valuz",
+    "checkForUpdates": "Check for Updates",
+    "close": "Close Window",
+    "copy": "Copy",
+    "cut": "Cut",
+    "delete": "Delete",
+    "edit": "Edit",
+    "file": "File",
+    "forceReload": "Force Reload",
+    "front": "Bring All to Front",
+    "help": "Help",
+    "hide": "Hide Valuz",
+    "hideOthers": "Hide Others",
+    "minimize": "Minimize",
+    "paste": "Paste",
+    "pasteAndMatchStyle": "Paste and Match Style",
+    "quit": "Quit Valuz",
+    "redo": "Redo",
+    "reload": "Reload",
+    "reloadWindow": "Reload Window",
+    "resetZoom": "Actual Size",
+    "selectAll": "Select All",
+    "services": "Services",
+    "toggleDevTools": "Toggle Developer Tools",
+    "toggleFullScreen": "Toggle Full Screen",
+    "undo": "Undo",
+    "unhide": "Show All",
+    "view": "View",
+    "website": "Valuz Website",
+    "window": "Window",
+    "zoom": "Zoom",
+    "zoomIn": "Zoom In",
+    "zoomOut": "Zoom Out"
+  },
   "tray": {
     "checkUpdate": "Check for updates",
     "hideWindow": "Hide window",
@@ -1671,15 +1783,17 @@
     "showWindow": "Show window"
   },
   "updater": {
-    "availableDesc": "A new version is available. Download and install it now.",
+    "availableDesc": "A new version is available to download.",
     "downloadedTitle": "Update ready",
-    "downloadedDesc": "A new version has been downloaded. Restart to install.",
+    "downloadedDesc": "Update downloaded — restart to install.",
     "downloadNow": "Download update",
     "downloading": "Downloading...",
     "downloadingDesc": "Downloading update, please wait...",
     "errorTitle": "Update failed",
     "errorUnknown": "Unknown error",
+    "preparing": "Preparing to install…",
     "restartNow": "Restart now",
+    "restarting": "Restarting…",
     "updateAvailable": "Update available"
   },
   "ui": {
@@ -1755,6 +1869,16 @@
     }
   },
   "agent": {
+    "proposalNew": "New agent",
+    "proposalUnnamed": "Unnamed agent",
+    "proposalBrain": "Runtime & model",
+    "proposalSkills": "Skills",
+    "proposalConnectors": "Connectors",
+    "proposalNone": "none",
+    "proposalCreate": "Create agent",
+    "proposalCreated": "Agent created.",
+    "proposalCreatedDeployed": "Created and deployed into {name}.",
+    "proposalDismissed": "Dismissed",
     "title": "Agents",
     "subtitle": "Official agents you can instantiate into a project.",
     "agentCount": "{count} agents",
@@ -1843,7 +1967,7 @@
     "createAgent": "Create agent",
     "deleteAgent": "Delete agent",
     "confirmDeleteAgent": "Delete agent?",
-    "agentSaved": "Agent saved",
+    "agentSaved": "Saved",
     "agentCreated": "Agent created",
     "agentDeleted": "Agent deleted",
     "agentCopied": "Agent copied",
@@ -1854,8 +1978,8 @@
     "descriptionPlaceholder": "Click to add a description…",
     "addSkill": "Add skill",
     "addConnector": "Add connector",
-    "skillsSectionHint": "Workspace skills this agent can call. Local runtime skills are always available.",
-    "connectorsSectionHint": "External connectors this agent can call inside the workspace.",
+    "skillsSectionHint": "Project skills this agent can call. Local runtime skills are always available.",
+    "connectorsSectionHint": "External connectors this agent can call inside the project.",
     "instructionsPlaceholder": "Describe in 1-2 paragraphs who this agent is, the method it follows, what it outputs, and what it does NOT do. For example:\n\nRole: (who you are, what outcome you own)\nMethod (in order): 1. … 2. …\nOutput discipline: - …\nBoundaries (don't): - …",
     "effortLabel": "Reasoning effort",
     "effortHint": "Thinking budget for this agent's conversations.",
@@ -1868,6 +1992,9 @@
     "groupCustom": "Custom",
     "filterAll": "All",
     "filterMine": "Mine",
+    "viewByProject": "By project",
+    "viewAll": "All agents",
+    "unassigned": "Undeployed",
     "avatarLabel": "Avatar",
     "startFrom": "Start from",
     "startBlank": "Blank",
@@ -1892,9 +2019,69 @@
     "nextDeployDesc": "Deploy it into a project to start working",
     "nextChatTitle": "Open a quick chat",
     "nextChatDesc": "Start chatting with this agent now",
-    "deployedToProject": "Deployed to “{project}”"
+    "deployedToProject": "Deployed to “{project}”",
+    "template": {
+      "browse": "Browse templates",
+      "title": "Add from a template",
+      "subtitle": "Pick a ready-made team and add it to your library in one click",
+      "memberCount": "{count} roles",
+      "add": "Add to my library",
+      "added": "Added",
+      "adding": "Adding…",
+      "roleInLibrary": "In library",
+      "addSuccess": "Added {count} agents · {name}",
+      "allExist": "All roles of {name} are already in your library",
+      "addFailed": "Failed to add template, please retry",
+      "empty": "No templates available",
+      "pipeline": "Pipeline",
+      "willAddHint": "Added to your library; existing roles are skipped (adds {count} this time).",
+      "allInLibrary": "All {count} roles of this team are already in your library."
+    },
+    "deleteDeployedWarning": "This agent is deployed to {count} project(s); deleting it will also remove it from them. This cannot be undone.",
+    "pack": {
+      "import": "Import",
+      "export": "Export",
+      "importTitle": "Import agent pack",
+      "importing": "Importing…",
+      "exporting": "Exporting…",
+      "confirm": "Confirm import",
+      "agentsSection": "Agents",
+      "skillsSection": "Skills",
+      "connectorsSection": "Connectors",
+      "inLibrary": "In library",
+      "willAdd": "Will add",
+      "needsKey": "Needs a key",
+      "needsSetup": "Needs local setup",
+      "alreadyHave": "Already present",
+      "embedded": "Bundled in pack",
+      "bundled": "Built-in",
+      "importDone": "Imported · {created} added, {skipped} skipped",
+      "toConfigure": "These connectors need setup on the Connectors page before they work",
+      "importFailed": "Import failed — make sure the file is a valid .valuzpack",
+      "exportFailed": "Export failed",
+      "exportDone": "Exported {count} agent(s)",
+      "pickFile": "Choose a .valuzpack file",
+      "done": "Done",
+      "exportMulti": "Export selection",
+      "exportTitle": "Export as one file",
+      "exportSub": "Bundle into a .valuzpack to share — others import it in one click.",
+      "groupName": "Name for this group",
+      "willPack": "Will pack {count} agent(s)",
+      "exportNote": "Self-contains these agents' instructions and skills; connectors carry config only — never any keys.",
+      "exportFile": "Export file",
+      "selectHint": "Check the agents to export together",
+      "countAgents": "{count} agent(s)",
+      "defaultGroupName": "My agent group",
+      "cancelSelect": "Cancel",
+      "groupDesc": "Description (optional)",
+      "groupDescPlaceholder": "What is this group of agents for"
+    }
   },
   "task": {
+    "triggeredByChat": "Triggered by a conversation",
+    "triggeredByTask": "Triggered by task \"{title}\" · {agent}",
+    "triggeredByTaskNoAgent": "Triggered by task \"{title}\"",
+    "triggeredByAutomation": "Triggered by automation \"{name}\"",
     "title": "Tasks",
     "untitled": "Untitled task",
     "subtitle": "Lead-dispatch tasks running in this project.",
@@ -1953,6 +2140,7 @@
     "retryWithLeadHint": "Spin up a fresh Run with a different lead Agent, inheriting Goal + context snapshot (coming soon).",
     "pause": "Pause",
     "resume": "Resume",
+    "retry": "Retry",
     "stop": "Stop",
     "subnav": {
       "task": "Task",
@@ -1993,6 +2181,12 @@
       "failed": "Failed",
       "paused": "Paused"
     },
+    "followUp": {
+      "heading": "Keep refining from the deliverable",
+      "placeholder": "Tell the lead what to adjust…",
+      "runTimelineToggle": "Run timeline",
+      "runTimelineExpand": "Expand to view the process"
+    },
     "continueChat": "Continue chat",
     "continueChatHint": "Open the lead agent conversation",
     "deliverableTitle": "Deliverable",
@@ -2026,6 +2220,7 @@
       "paused": "Paused",
       "resumed": "Resumed",
       "stopped": "Stopped",
+      "taskBlocked": "Task blocked",
       "taskCompleted": "Task completed",
       "taskFailed": "Task failed",
       "taskPlanned": "Task planned",
@@ -2041,6 +2236,8 @@
       "subtaskReviewReworkNoFeedback": "⚠ Needs rework",
       "leadWorking": "Lead is working…"
     },
-    "viewSession": "View session →"
+    "viewSession": "View session →",
+    "needsConfirm": "Your confirmation needed",
+    "goConfirm": "Confirm now"
   }
 }

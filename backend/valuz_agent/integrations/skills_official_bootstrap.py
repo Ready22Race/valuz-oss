@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import shutil
+from collections.abc import Iterable
 from pathlib import Path
 
 from valuz_agent.infra.fs_registry import fs_registry
@@ -29,7 +30,7 @@ def _resources_root() -> Path:
 def _user_official_skills_root() -> Path:
     """Bundled-skill landing root. Delegated to ``fs_registry`` so the
     bootstrap and the discovery source (`OfficialSkillSource`) always
-    agree on the location. Default is ``~/.valuz/app/official-skills/``;
+    agree on the location. Default is ``~/.valuz-oss/official-skills/``;
     ``$VALUZ_OFFICIAL_SKILLS_DIR`` overrides."""
     return fs_registry.official_skill_root()
 
@@ -102,3 +103,46 @@ def sync_bundled_official_skills() -> list[str]:
 def is_bundled_skill(skill_dir: Path) -> bool:
     """True if the skill directory carries our bundled-version marker."""
     return (skill_dir / BUNDLED_VERSION_FILE).is_file()
+
+
+def _template_skills_root() -> Path:
+    """Path to ``backend/valuz_agent/resources/template_skills/``.
+
+    These are bundled skills that ship *with an agent-team template* (the
+    investment / Xiaohongshu / World Cup rosters). Unlike ``official_skills/``,
+    they are NOT synced for everyone at boot — they'd clutter the library with
+    skills no agent uses yet. They land on demand when the template is added
+    (see ``materialize_template_skills``)."""
+    return Path(__file__).resolve().parent.parent / "resources" / "template_skills"
+
+
+def materialize_template_skills(slugs: Iterable[str]) -> list[str]:
+    """Copy the named template skills into the user's official-skills dir.
+
+    Same idempotent marker logic as :func:`sync_bundled_official_skills`, so a
+    skill an agent team brings in lands in the library *and* resolves at session
+    time. Slugs not shipped under ``template_skills/`` are skipped. Returns the
+    slugs that were (re-)installed.
+    """
+    src_root = _template_skills_root()
+    dest_root = _user_official_skills_root()
+    dest_root.mkdir(parents=True, exist_ok=True)
+
+    installed: list[str] = []
+    for slug in slugs:
+        src = src_root / slug
+        if not src.is_dir():
+            continue
+        dest = dest_root / slug
+        try:
+            version_hash = _hash_directory(src)
+            existing_marker = dest / BUNDLED_VERSION_FILE
+            if dest.exists() and existing_marker.exists():
+                if existing_marker.read_text(encoding="utf-8").strip() == version_hash:
+                    continue  # already up to date
+            _copy_skill(src, dest, version_hash)
+            installed.append(slug)
+            logger.info("materialized template skill: %s", slug)
+        except Exception:  # noqa: BLE001 — best-effort, one bad skill shouldn't sink the add
+            logger.exception("failed to materialize template skill: %s", slug)
+    return installed

@@ -2,7 +2,7 @@
 
 OSS is single-tenant: every row is owned by one local user. That owner id is a
 stable string generated **once** on first install from a device fingerprint,
-then persisted to ``~/.valuz/app/installation.json`` so it survives both process
+then persisted to ``~/.valuz-oss/installation.json`` so it survives both process
 restarts and DB clean-up rebuilds (the file lives outside the business tables on
 purpose — see ``infra.config.installation_file``).
 

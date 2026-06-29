@@ -42,7 +42,9 @@
     "display_name": "GitHub",
     "description": "Access GitHub repositories, issues, pull requests and more.",
     "icon_url": "https://github.com/favicon.ico",
-    "categories": ["developer"],
+    "categories": [
+      "developer"
+    ],
     "url": "https://api.githubcopilot.com/mcp/",
     "auth_type": "oauth",
     "transport": "http",
@@ -69,7 +71,9 @@
     "display_name": "Linear",
     "description": "Manage Linear issues, projects and cycles.",
     "icon_url": "https://linear.app/favicon.ico",
-    "categories": ["productivity"],
+    "categories": [
+      "productivity"
+    ],
     "url": "https://mcp.linear.app/mcp",
     "auth_type": "oauth",
     "transport": "http",
@@ -80,26 +84,27 @@
     "display_name": "Notion",
     "description": "Read and write Notion pages and databases.",
     "icon_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAAAAABXZoBIAAAA80lEQVR4AZTRIYyDMBjF8efxBn3qfFD1IcGiUFOIyVokAos6h8IjEXNIfD6DqUXOVb7jNnK027pkf9mfeE0LvukjtOtifJRp6BpdqAi3kquDLSJV6KYbJjF/5zXGA8/o6SU4OYhyHzQyX4bupwSWA4FvOMUKpYvVtjlOsqz322QunumXP6A1MpGcK62eUQGoSKPBZ2QOQMj+JWYREIUwzVqgCWFCACaIM5AMIWQJxEG0ADxsdswUyfEB7R0lQm7J3EfKDcdZVm4ZbhX/yM55eHs1Mk84kDmaWp9S51O7AxkDwFda6Lrth8s+gN/BTaMgUWMCAITxMqVHQtVcAAAAAElFTkSuQmCC",
-    "categories": ["productivity"],
+    "categories": [
+      "productivity"
+    ],
     "url": "https://mcp.notion.com/mcp",
     "auth_type": "oauth",
     "transport": "http",
     "oauth_credentials_schema": []
   },
   {
-    "slug": "chrome-devtools",
-    "display_name": {
-      "zh-CN": "Chrome DevTools",
-      "en-US": "Chrome DevTools"
-    },
+    "slug": "firecrawl",
+    "display_name": "Firecrawl",
     "description": {
-      "zh-CN": "通过 Chrome DevTools 协议调试、检查和自动化网页",
-      "en-US": "Debug, inspect and automate web pages via the Chrome DevTools Protocol"
+      "zh-CN": "网页抓取、爬取与搜索，提取结构化网页内容（免费匿名档，无需登录）",
+      "en-US": "Scrape, crawl and search the web; extract structured page content (free anonymous tier, no login)"
     },
-    "categories": ["developer"],
-    "transport": "stdio",
+    "icon_url": "https://www.firecrawl.dev/favicon.ico",
+    "categories": [
+      "developer"
+    ],
+    "url": "https://mcp.firecrawl.dev/v2/mcp",
     "auth_type": "none",
-    "command": "npx",
-    "args": ["-y", "chrome-devtools-mcp@latest"]
+    "transport": "http"
   }
 ]

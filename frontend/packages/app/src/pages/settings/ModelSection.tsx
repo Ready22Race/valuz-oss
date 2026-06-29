@@ -1,13 +1,6 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { toast } from "sonner";
-import {
-  Cpu,
-  FilePenLine,
-  Lock,
-  Plus,
-  RefreshCw,
-  Trash2,
-} from "lucide-react";
+import { Cpu, FilePenLine, Lock, Plus, RefreshCw, Trash2 } from "lucide-react";
 import type { ProviderOption } from "@valuz/ui";
 import {
   Badge,
@@ -26,6 +19,7 @@ import {
   SelectValue,
   SettingsSection,
   cn,
+  IconBox,
 } from "@valuz/ui";
 import { useCapabilities, useTranslation } from "@valuz/core";
 import {
@@ -34,6 +28,7 @@ import {
   type CliLoginStatus,
 } from "@valuz/app/components";
 import { usePlatform } from "@valuz/app/platform";
+import { modelLabel } from "@valuz/shared";
 import {
   providersApi,
   runtimesApi,
@@ -43,11 +38,13 @@ import {
   RUNTIME_DISPLAY_NAME,
   DEFAULT_EFFORT_VALUES,
   EFFORT_FALLBACK,
-  type ProviderListItem,
-  type ProviderDetail,
+  type LLMChannel,
+  type LLMChannelDetail,
   type ProviderDescriptor,
   type RuntimeListItem,
   type ModelDefaults,
+  type ModelOptionGroup,
+  type ModelOptionProvider,
   type EffortLevel,
   type RuntimeId,
 } from "@valuz/core";
@@ -71,6 +68,20 @@ const ModelAvailableBadge = ({ label }: { label: string }) => (
     {label}
   </Badge>
 );
+
+// A model-options provider is "usable" when its credential is actually
+// reachable: subscription rows (``client_resolved``) depend on the local CLI
+// login the server can't see, so the client decides from its keychain probe;
+// system / api_key / org rows are server-authoritative via ``status``.
+const isModelProviderUsable = (
+  p: ModelOptionProvider,
+  cliStatus: Partial<Record<CliTool, CliLoginStatus>>,
+): boolean =>
+  p.status === "client_resolved"
+    ? p.cli_tool
+      ? cliStatus[p.cli_tool as CliTool]?.state === "logged_in"
+      : false
+    : p.status === "available";
 
 export const ModelSection = () => {
   const { t } = useTranslation();
@@ -101,11 +112,24 @@ export const ModelSection = () => {
   >({});
 
   // -- Provider state --
-  const [providersList, setProvidersList] = useState<ProviderListItem[]>([]);
+  const [providersList, setProvidersList] = useState<LLMChannel[]>([]);
+  // False until the first provider-list fetch settles, so the "模型通道"
+  // (manage-channels) section isn't shown with an empty card during the
+  // initial page load — only after we actually have the list.
+  const [providersListLoaded, setProvidersListLoaded] = useState(false);
+  // The default-config model picker reads from the resolved model-options read
+  // model (runtime-tagged, system channels included), NOT providersList — that
+  // list is for the manage-channels section below. Keeps the picker's "which
+  // models can run on the selected runtime" logic server-side.
+  const [modelOptions, setModelOptions] = useState<ModelOptionGroup[]>([]);
+  // False until the first model-options fetch settles. The "no usable model"
+  // warning keys off this so it never flashes during the initial page load —
+  // we only assert "no model" once we've actually looked.
+  const [modelOptionsLoaded, setModelOptionsLoaded] = useState(false);
   const [providers, setProviders] = useState<ProviderDescriptor[]>([]);
   const [addOpen, setAddOpen] = useState(false);
-  const [editProvider, setEditProvider] = useState<ProviderDetail | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<ProviderListItem | null>(
+  const [editProvider, setEditProvider] = useState<LLMChannelDetail | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<LLMChannel | null>(
     null,
   );
   const [deleting, setDeleting] = useState(false);
@@ -115,6 +139,10 @@ export const ModelSection = () => {
       const res = await providersApi.list();
       // Hide:
       // - managed (Reportify) -- those live under the Connectors module.
+      // - system (platform-provided, e.g. "Valuz 系统模型") -- these need no
+      //   setup and aren't user-managed, so they're noise in the
+      //   manage-your-channels list. They still appear in onboarding's
+      //   model-default picker (ConnectStep), which has its own filter.
       // - Unconfigured api_key descriptors -- they're "quick-add" seeds
       //   that show up as "未配置" dead rows if the user never touched
       //   them. Two exceptions kept:
@@ -126,18 +154,73 @@ export const ModelSection = () => {
         res.providers.filter(
           (p) =>
             p.source !== "managed" &&
+            p.source !== "system" &&
             (p.credential_source !== "none" || p.auth_type === "oauth"),
         ),
       );
     } catch {
       // silently fail
+    } finally {
+      // First resolution done — gate the manage-channels section on this so it
+      // doesn't render an empty card during the initial load.
+      setProvidersListLoaded(true);
     }
   }, []);
+
+  // Re-check the CLI subscription login state (Claude/Codex). The login runs
+  // in an external terminal, so the app has to re-poll to notice it.
+  const refreshCliStatus = useCallback(async () => {
+    if (!platformCheckCliLogin) return;
+    try {
+      const [claude, codex] = (await Promise.all([
+        platformCheckCliLogin("claude"),
+        platformCheckCliLogin("codex"),
+      ])) as [CliLoginStatus, CliLoginStatus];
+      setCliStatus({ claude, codex });
+    } catch {
+      // best-effort -- stale cliStatus is fine
+    }
+  }, [platformCheckCliLogin]);
+
+  // (B) After a login terminal is launched, poll that tool's status until it
+  // flips to logged_in (or ~3 min passes), then refresh the row. One timer
+  // per tool; cleared on success / timeout / unmount.
+  const cliPollRef = useRef<Partial<Record<CliTool, number>>>({});
+  const pollCliLogin = useCallback(
+    (tool: CliTool) => {
+      if (!platformCheckCliLogin) return;
+      const deadline = Date.now() + 180_000;
+      const tick = async () => {
+        if (Date.now() > deadline) {
+          delete cliPollRef.current[tool];
+          return;
+        }
+        try {
+          const status = (await platformCheckCliLogin(tool)) as CliLoginStatus;
+          if (status.state === "logged_in") {
+            setCliStatus((prev) => ({ ...prev, [tool]: status }));
+            void loadProvidersList();
+            delete cliPollRef.current[tool];
+            return;
+          }
+        } catch {
+          // keep polling
+        }
+        cliPollRef.current[tool] = window.setTimeout(tick, 2500);
+      };
+      if (cliPollRef.current[tool] !== undefined) {
+        window.clearTimeout(cliPollRef.current[tool]);
+      }
+      cliPollRef.current[tool] = window.setTimeout(tick, 2500);
+    },
+    [platformCheckCliLogin, loadProvidersList],
+  );
 
   const cliLogin = useCliLoginFlow({
     onProviderMarkedOAuth: () => {
       void loadProvidersList();
     },
+    onLoginLaunched: pollCliLogin,
   });
 
   const loadProviders = useCallback(async () => {
@@ -149,12 +232,30 @@ export const ModelSection = () => {
     }
   }, []);
 
+  const loadModelOptions = useCallback(async () => {
+    try {
+      const res = await settingsApi.getModelOptions();
+      setModelOptions(res.groups);
+    } catch {
+      // soft-fail: picker shows no options until a reload succeeds
+    } finally {
+      // First resolution done (success or fail) — lets the no-model warning
+      // render only after we've actually checked, not during initial load.
+      setModelOptionsLoaded(true);
+    }
+  }, []);
+
   useEffect(() => {
     void loadProvidersList();
   }, [loadProvidersList]);
   useEffect(() => {
     void loadProviders();
   }, [loadProviders]);
+  // Reload the picker options whenever the manage-channels list changes (add /
+  // delete / enable) — providersList is the cheapest "something changed" signal.
+  useEffect(() => {
+    void loadModelOptions();
+  }, [loadModelOptions, providersList]);
 
   useEffect(() => {
     void settingsApi
@@ -177,22 +278,72 @@ export const ModelSection = () => {
   // "available" without the user having to reload. Failures degrade
   // silently (status stays ``undefined``, badge hides).
   useEffect(() => {
-    let cancelled = false;
+    void refreshCliStatus();
+  }, [providersList, refreshCliStatus]);
+
+  // Auto-materialize a logged-in subscription into a real channel. The CLI
+  // keychain is local + invisible to the server, so "available" is detected
+  // client-side; the moment a subscription kind is seen logged in but still
+  // un-materialized (a virtual template: auth_type "oauth" + !deletable — e.g.
+  // an external `codex login` the in-app login flow never enabled), tell the
+  // backend to enable it. This is what makes "可用 = ready to configure an
+  // agent" actually true: without it the row stays a template whose `ch-*` id
+  // 400s ("provider not found") at session creation. Idempotent + guarded so it
+  // fires once per kind — after enable the row turns deletable, so it no longer
+  // matches.
+  const materializingRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const pending = providersList.filter((p) => {
+      if (p.auth_type !== "oauth" || p.deletable) return false;
+      const tool = CLI_TOOL_BY_PROVIDER_KIND[p.provider_kind];
+      if (!tool) return false;
+      return (
+        cliStatus[tool]?.state === "logged_in" &&
+        !materializingRef.current.has(p.id)
+      );
+    });
+    if (pending.length === 0) return;
     void (async () => {
+      pending.forEach((p) => materializingRef.current.add(p.id));
       try {
-        const [claude, codex] = (await Promise.all([
-          platformCheckCliLogin!("claude"),
-          platformCheckCliLogin!("codex"),
-        ])) as [CliLoginStatus, CliLoginStatus];
-        if (!cancelled) setCliStatus({ claude, codex });
+        await Promise.all(pending.map((p) => providersApi.enable(p.id)));
+        await loadProvidersList();
       } catch {
-        // best-effort -- stale cliStatus is fine
+        // best-effort: the session-creation backstop still materializes on use.
+      } finally {
+        pending.forEach((p) => materializingRef.current.delete(p.id));
       }
     })();
-    return () => {
-      cancelled = true;
+  }, [providersList, cliStatus, loadProvidersList]);
+
+  // (A) Re-check when the window regains focus / becomes visible — the user
+  // typically switches back to the app right after finishing the terminal
+  // login, so the badge flips without a manual refresh.
+  useEffect(() => {
+    const recheck = () => {
+      void refreshCliStatus();
+      void loadProvidersList();
     };
-  }, [providersList]);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") recheck();
+    };
+    window.addEventListener("focus", recheck);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", recheck);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refreshCliStatus, loadProvidersList]);
+
+  // Stop any in-flight CLI-login polls on unmount.
+  useEffect(() => {
+    const polls = cliPollRef.current;
+    return () => {
+      Object.values(polls).forEach(
+        (id) => id !== undefined && window.clearTimeout(id),
+      );
+    };
+  }, []);
 
   const handleSetEffort = async (value: EffortLevel) => {
     try {
@@ -345,601 +496,604 @@ export const ModelSection = () => {
     return "••••••••";
   };
 
+  // The picker can select something iff some channel exposes a usable model
+  // (any runtime). Drives the "no model configured" warning — which must follow
+  // what's actually pickable in the default-config card (system channels
+  // included via model-options), NOT the manage-channels ``providersList`` that
+  // deliberately omits system channels.
+  const hasUsableModel = modelOptions.some((g) =>
+    g.providers.some(
+      (p) => isModelProviderUsable(p, cliStatus) && p.models.length > 0,
+    ),
+  );
+
   return (
     <>
       <SettingsSection
         title={t("settings.model.title")}
         desc={t("settings.model.desc")}
       >
-        {/* No provider warning */}
-        {providersList.filter((c) => c.enabled).length === 0 && (
-          <div className="mt-5 flex items-center gap-3 rounded-lg border border-error-border bg-error-light px-3 py-2 text-xs text-error-text">
-            <div className="flex h-7 min-w-0 flex-1 items-center gap-2.5">
-              <Lock className="h-3.5 w-3.5 shrink-0" />
-              <span className="min-w-0">
-                {t("settings.model.noModelWarning")}
-              </span>
-            </div>
+        {/* No-model warning — gated on what the picker can actually select
+            (model-options), so it disappears the moment a usable model exists,
+            including system channels absent from ``providersList``.
+            ``modelOptionsLoaded`` suppresses it during the initial fetch so it
+            never flashes before we've checked. */}
+        {modelOptionsLoaded && !hasUsableModel && (
+          <div className="mt-5 flex items-center gap-3 rounded-xl border border-error-text/20 bg-error-light px-4 py-3 text-xs text-error-text">
+            <Lock className="h-4 w-4" />
+            <span className="flex-1">{t("settings.model.noModelWarning")}</span>
             {configureModelChannel && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-7 shrink-0 border-error-border bg-transparent px-3 text-xs text-error-text shadow-none hover:bg-error-light hover:text-error-text"
-                onClick={() => setAddOpen(true)}
-              >
+              <Button size="sm" onClick={() => setAddOpen(true)}>
                 {t("settings.model.configureModel")}
               </Button>
             )}
           </div>
         )}
 
-        {/* -- Default card -- */}
-        {providersList.filter((c) => c.enabled).length > 0 && (
-          <>
-            <div className="mt-5 mb-3">
-              <div className="text-sm font-medium text-ink-heading">
-                {t("settings.model.defaultConfig" as Parameters<typeof t>[0])}
-              </div>
-              <div className="mt-0.5 text-xs text-ink-meta">
-                {t(
-                  "settings.model.defaultConfigDesc" as Parameters<typeof t>[0],
-                )}
-              </div>
+        {/* -- Default card -- always rendered. Previously gated on
+            `providersList.filter(c => c.enabled).length > 0`, which hid the
+            entire runtime / model / reasoning-effort picker until a channel was
+            configured. The model picker reads the server-resolved model-options
+            (system channels included) and shows a "no models for this runtime"
+            placeholder when empty, so it is safe to always render. */}
+        <>
+          <div className="mt-5 mb-3">
+            <div className="text-sm font-medium text-ink-heading">
+              {t("settings.model.defaultConfig" as Parameters<typeof t>[0])}
             </div>
-            {(() => {
-              type ModelOption = {
-                key: string;
-                providerId: string;
-                providerName: string;
-                modelId: string;
-                itemLabel: string;
-              };
-              const usableProviders = providersList.filter(
-                (p) =>
-                  p.enabled &&
-                  (p.credential_source !== "none" || p.auth_type === "oauth") &&
-                  isProviderRuntimeCompatible(p, modelDefaults.default_runtime),
-              );
-              const allOptions: ModelOption[] = [];
-              const groups: {
-                providerId: string;
-                providerName: string;
-                options: ModelOption[];
-              }[] = [];
-              for (const p of usableProviders) {
-                const models =
-                  p.model_options.length > 0
-                    ? p.model_options
-                    : p.auth_type === "oauth"
-                      ? [""]
-                      : p.default_model
-                        ? [p.default_model]
-                        : [];
-                const groupOptions: ModelOption[] = [];
-                if (models.length === 0) {
-                  groupOptions.push({
-                    key: `${p.id}::__nomodel__`,
-                    providerId: p.id,
-                    providerName: p.name,
-                    modelId: "",
-                    itemLabel: t(
-                      "settings.model.discoveredModels" as Parameters<
-                        typeof t
-                      >[0],
-                    ),
-                  });
-                } else {
-                  for (const m of models) {
-                    // Prefer the admin-supplied display label when the provider
-                    // surfaces one (overlay-contributed system channels do —
-                    // user api_key providers' model_labels is ``{}``). Wire-level
-                    // ``modelId`` is untouched.
-                    const labeled = p.model_labels?.[m];
-                    groupOptions.push({
-                      key: `${p.id}::${m}`,
-                      providerId: p.id,
-                      providerName: p.name,
-                      modelId: m,
-                      itemLabel:
-                        labeled ||
-                        m ||
-                        t(
-                          "settings.model.followSubscription" as Parameters<
-                            typeof t
-                          >[0],
-                        ),
-                    });
-                  }
-                }
+            <div className="mt-0.5 text-xs text-ink-meta">
+              {t("settings.model.defaultConfigDesc" as Parameters<typeof t>[0])}
+            </div>
+          </div>
+          {(() => {
+            type ModelOpt = {
+              key: string;
+              providerId: string;
+              providerName: string;
+              modelId: string;
+              itemLabel: string;
+            };
+            const runtime = modelDefaults.default_runtime;
+            const allOptions: ModelOpt[] = [];
+            const groups: {
+              providerId: string;
+              providerName: string;
+              options: ModelOpt[];
+            }[] = [];
+            for (const grp of modelOptions) {
+              for (const p of grp.providers) {
+                if (!isModelProviderUsable(p, cliStatus)) continue;
+                // The picker is runtime-first: show only models that can run
+                // on the selected runtime. ``provider_id`` on each model is its
+                // OWNING channel (a merged system card spans descriptors), so
+                // the (provider, model) the user picks resolves correctly.
+                const models = p.models.filter((m) =>
+                  m.runtimes.includes(runtime),
+                );
+                if (models.length === 0) continue;
+                const groupOptions: ModelOpt[] = models.map((m) => ({
+                  key: `${m.provider_id}::${m.model_id}`,
+                  providerId: m.provider_id,
+                  providerName: p.label,
+                  modelId: m.model_id,
+                  // Server label wins when it's a real display name; subscription
+                  // / built-in rows have none (``m.label`` === raw id) → fall back
+                  // to the static brand catalog, same as the Composer picker.
+                  itemLabel:
+                    m.label !== m.model_id ? m.label : modelLabel(m.model_id),
+                }));
                 allOptions.push(...groupOptions);
                 groups.push({
-                  providerId: p.id,
-                  providerName: p.name,
+                  providerId: p.provider_id,
+                  providerName: p.label,
                   options: groupOptions,
                 });
               }
-              const selectedKey = modelDefaults.default_provider_id
-                ? `${modelDefaults.default_provider_id}::${modelDefaults.default_model ?? ""}`
-                : "";
-              const selectedOption =
-                allOptions.find((o) => o.key === selectedKey) ?? null;
-              return (
-                <Card className="rounded-xl border-0 bg-card shadow-sm">
-                  <CardContent className="px-5 py-0">
-                    {/* Runtime */}
-                    <div className="flex items-center gap-4 border-b border-[#f7f8fa] px-0 py-3 dark:border-surface-border">
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-ink-heading">
-                          {t("cron.runtime" as Parameters<typeof t>[0])}
-                        </div>
-                        <div className="mt-0.5 text-2xs text-ink-meta">
-                          {t(
-                            "settings.model.agentEngine" as Parameters<
-                              typeof t
-                            >[0],
-                          )}
-                        </div>
+            }
+            const selectedKey = modelDefaults.default_provider_id
+              ? `${modelDefaults.default_provider_id}::${modelDefaults.default_model ?? ""}`
+              : "";
+            const selectedOption =
+              allOptions.find((o) => o.key === selectedKey) ?? null;
+            return (
+              <Card className="rounded-xl shadow-xs">
+                <CardContent className="px-5 py-0">
+                  {/* Runtime */}
+                  <div className="flex items-center gap-4 border-b border-[#f7f8fa] px-0 py-3 dark:border-surface-border">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-ink-heading">
+                        {t("cron.runtime" as Parameters<typeof t>[0])}
                       </div>
-                      <Select
-                        value={modelDefaults.default_runtime}
-                        onValueChange={(v) => {
-                          void handleSetRuntime(v as RuntimeId);
-                        }}
-                      >
-                        <SelectTrigger
-                          size="sm"
-                          className="h-8 w-[200px] text-xs"
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {runtimes.map((r) => (
-                            <SelectItem
-                              key={r.id}
-                              value={r.id}
-                              disabled={!r.available}
-                            >
-                              {r.display_name}
-                              {!r.available && r.unavailable_reason
-                                ? ` · ${r.unavailable_reason}`
-                                : ""}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-
-                    {/* Model (provider x model combined) */}
-                    <div className="flex items-center gap-4 border-b border-[#f7f8fa] px-0 py-3 dark:border-surface-border">
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-ink-heading">
-                          {t("common.model" as Parameters<typeof t>[0])}
-                        </div>
-                        <div className="mt-0.5 text-2xs text-ink-meta">
-                          {allOptions.length === 0
-                            ? t(
-                                "settings.model.noModelsForRuntime" as Parameters<
-                                  typeof t
-                                >[0],
-                              )
-                            : t(
-                                "settings.model.selectDefaultProvider" as Parameters<
-                                  typeof t
-                                >[0],
-                              )}
-                        </div>
+                      <div className="mt-0.5 text-2xs text-ink-meta">
+                        {t(
+                          "settings.model.agentEngine" as Parameters<
+                            typeof t
+                          >[0],
+                        )}
                       </div>
-                      {selectedOption && (
-                        <span className="shrink-0 truncate text-2xs text-ink-meta">
-                          {selectedOption.providerName}
-                        </span>
-                      )}
-                      <Select
-                        value={selectedOption ? selectedKey : ""}
-                        onValueChange={(v) => {
-                          void handleSetDefaultModelCombo(v);
-                        }}
-                        disabled={allOptions.length === 0}
-                      >
-                        <SelectTrigger
-                          size="sm"
-                          className="h-8 w-[200px] text-xs"
-                        >
-                          {selectedOption ? (
-                            <span className="truncate text-ink-heading">
-                              {selectedOption.itemLabel}
-                            </span>
-                          ) : (
-                            <SelectValue
-                              placeholder={t(
-                                "settings.model.selectDefaultModel" as Parameters<
-                                  typeof t
-                                >[0],
-                              )}
-                            />
-                          )}
-                        </SelectTrigger>
-                        <SelectContent>
-                          {groups.map((g, idx) => (
-                            <SelectGroup key={g.providerId}>
-                              {idx > 0 && (
-                                <div className="my-1 border-t border-[#f7f8fa] dark:border-surface-border" />
-                              )}
-                              <SelectLabel className="text-2xs font-medium text-ink-meta uppercase tracking-wide">
-                                {g.providerName}
-                              </SelectLabel>
-                              {g.options.map((o) => (
-                                <SelectItem key={o.key} value={o.key}>
-                                  {o.itemLabel}
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          ))}
-                        </SelectContent>
-                      </Select>
                     </div>
+                    <Select
+                      value={modelDefaults.default_runtime}
+                      onValueChange={(v) => {
+                        void handleSetRuntime(v as RuntimeId);
+                      }}
+                    >
+                      <SelectTrigger
+                        size="sm"
+                        className="h-8 w-[200px] text-xs"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {runtimes.map((r) => (
+                          <SelectItem
+                            key={r.id}
+                            value={r.id}
+                            disabled={!r.available}
+                          >
+                            {r.display_name}
+                            {!r.available && r.unavailable_reason
+                              ? ` · ${r.unavailable_reason}`
+                              : ""}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
 
-                    {/* Reasoning effort (kernel V5+bba3014 ModelSettings.effort).
+                  {/* Model (provider x model combined) */}
+                  <div className="flex items-center gap-4 border-b border-[#f7f8fa] px-0 py-3 dark:border-surface-border">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-ink-heading">
+                        {t("common.model" as Parameters<typeof t>[0])}
+                      </div>
+                      <div className="mt-0.5 text-2xs text-ink-meta">
+                        {allOptions.length === 0
+                          ? t(
+                              "settings.model.noModelsForRuntime" as Parameters<
+                                typeof t
+                              >[0],
+                            )
+                          : t(
+                              "settings.model.selectDefaultProvider" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                      </div>
+                    </div>
+                    <Select
+                      value={selectedOption ? selectedKey : ""}
+                      onValueChange={(v) => {
+                        void handleSetDefaultModelCombo(v);
+                      }}
+                      disabled={allOptions.length === 0}
+                    >
+                      <SelectTrigger
+                        size="sm"
+                        className="h-8 w-[200px] text-xs"
+                      >
+                        {selectedOption ? (
+                          <span className="truncate text-ink-heading">
+                            {selectedOption.itemLabel}
+                          </span>
+                        ) : (
+                          <SelectValue
+                            placeholder={t(
+                              "settings.model.selectDefaultModel" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          />
+                        )}
+                      </SelectTrigger>
+                      <SelectContent>
+                        {groups.map((g, idx) => (
+                          <SelectGroup key={g.providerId}>
+                            {idx > 0 && (
+                              <div className="my-1 border-t border-[#f7f8fa] dark:border-surface-border" />
+                            )}
+                            <SelectLabel className="text-2xs font-medium text-ink-meta uppercase tracking-wide">
+                              {g.providerName}
+                            </SelectLabel>
+                            {g.options.map((o) => (
+                              <SelectItem key={o.key} value={o.key}>
+                                {o.itemLabel}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Reasoning effort (kernel V5+bba3014 ModelSettings.effort).
                         Mirrors the Composer's EffortSelector -- 5 values
                         + "Default" (= null, let the runtime SDK pick).
                         Setting written here is applied to new sessions
                         that don't pass an explicit effort. */}
-                    <div className="flex items-center gap-4 px-0 py-3">
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium text-ink-heading">
-                          {t(
-                            "settings.model.thinkingDepth" as Parameters<
-                              typeof t
-                            >[0],
-                          )}
-                        </div>
-                        <div className="mt-0.5 text-2xs text-ink-meta">
-                          {t(
-                            "settings.model.thinkingDepthDesc" as Parameters<
-                              typeof t
-                            >[0],
-                          )}
-                        </div>
-                      </div>
-                      <Select
-                        value={modelDefaults.default_effort}
-                        onValueChange={(v) => {
-                          void handleSetEffort(v as EffortLevel);
-                        }}
-                      >
-                        <SelectTrigger
-                          size="sm"
-                          className="h-8 w-[200px] text-xs"
-                        >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {DEFAULT_EFFORT_VALUES.map((key) => (
-                            <SelectItem key={key} value={key}>
-                              {t(`effort.${key}` as Parameters<typeof t>[0])}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })()}
-          </>
-        )}
-
-        {/* -- Model channel list -- */}
-        <div className="mt-6 mb-3 flex items-end justify-between">
-          <div>
-            <div className="text-sm font-medium text-ink-heading">
-              {t("settings.model.modelChannel" as Parameters<typeof t>[0])}
-            </div>
-            <div className="mt-0.5 text-xs text-ink-meta">
-              {t("settings.model.modelChannelDesc" as Parameters<typeof t>[0])}
-            </div>
-          </div>
-          {configureModelChannel && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1.5"
-              onClick={() => setAddOpen(true)}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              {t("common.add" as Parameters<typeof t>[0])}
-            </Button>
-          )}
-        </div>
-
-        <Card className="rounded-xl border-0 bg-card shadow-sm">
-          <CardContent className="px-5 py-0">
-            {providersList
-              // Hide Valuz managed providers (Reportify) -- these are
-              // internal infrastructure, not user-visible models.
-              // All other providers are shown regardless of config state.
-              .filter((c) => c.source !== "managed")
-              .map((provider, idx) => {
-                const isManaged = provider.source === "managed";
-                // ADR-007: overlay-contributed system providers
-                // (e.g. Valuz system model). Read-only -- no edit /
-                // delete / test / CLI-login affordances.
-                const isSystem = provider.source === "system";
-                // CLI-OAuth providers (the CLI's
-                // own keychain holds the credential), so they read as
-                // ``credential_source === "none"`` from the API. Treat
-                // them as configured anyway -- the provider IS reachable.
-                const isConfigured =
-                  provider.credential_source !== "none" ||
-                  provider.auth_type === "oauth";
-
-                return (
-                  <div
-                    key={provider.id}
-                    className={cn(
-                      "flex items-center gap-3 border-b border-[#f7f8fa] px-0 py-3 last:border-b-0 dark:border-surface-border",
-                      isManaged && "bg-brand/5",
-                      !isConfigured && !isManaged && "opacity-60",
-                      idx === 0 && "rounded-t-xl",
-                    )}
-                  >
-                    {/* Icon */}
-                    {isManaged ? (
-                      <img
-                        src="./logo.png"
-                        alt="Valuz"
-                        className="h-9 w-9 shrink-0 object-contain"
-                      />
-                    ) : (
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-surface-border bg-surface-soft text-brand">
-                        <Cpu className="h-4 w-4" />
-                      </div>
-                    )}
-
-                    {/* Info */}
+                  <div className="flex items-center gap-4 px-0 py-3">
                     <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-ink-heading">
-                          {provider.name}
-                        </span>
-                        {isManaged && (
-                          <Badge variant="brand">
-                            {t("settings.model.builtIn")}
-                          </Badge>
-                        )}
-                        {isSystem && (
-                          <Badge variant="brand">
-                            {t(
-                              "settings.model.systemProvider" as Parameters<
-                                typeof t
-                              >[0],
-                            )}
-                          </Badge>
-                        )}
-                        {provider.is_default && (
-                          <Badge variant="outline">
-                            {t("settings.model.default")}
-                          </Badge>
+                      <div className="text-sm font-medium text-ink-heading">
+                        {t(
+                          "settings.model.thinkingDepth" as Parameters<
+                            typeof t
+                          >[0],
                         )}
                       </div>
-                      <div className="mt-0.5 flex items-center gap-3 text-2xs text-ink-meta">
-                        {provider.auth_type !== "oauth" &&
-                          maskApiKey(provider.credential_source) && (
-                            <span className="font-mono">
-                              API Key: {maskApiKey(provider.credential_source)}
-                            </span>
-                          )}
-                        {isManaged && isConfigured && (
-                          <span>{t("settings.model.modelFollowsPlan")}</span>
+                      <div className="mt-0.5 text-2xs text-ink-meta">
+                        {t(
+                          "settings.model.thinkingDepthDesc" as Parameters<
+                            typeof t
+                          >[0],
                         )}
-                        {!isManaged && provider.model_options.length > 0 && (
-                          <span>
-                            {t(
-                              "common.modelsCount" as Parameters<typeof t>[0],
-                              {
-                                count: String(provider.model_options.length),
-                              },
-                            )}
-                          </span>
-                        )}
-                        {(() => {
-                          const compat = compatibleRuntimes(provider);
-                          if (compat.length === 0) return null;
-                          return (
-                            <span>
-                              {t(
-                                "settings.model.availableFor" as Parameters<
-                                  typeof t
-                                >[0],
-                              )}{" "}
-                              {compat
-                                .map((r) => RUNTIME_DISPLAY_NAME[r])
-                                .join(" · ")}
-                            </span>
-                          );
-                        })()}
                       </div>
                     </div>
+                    <Select
+                      value={modelDefaults.default_effort}
+                      onValueChange={(v) => {
+                        void handleSetEffort(v as EffortLevel);
+                      }}
+                    >
+                      <SelectTrigger
+                        size="sm"
+                        className="h-8 w-[200px] text-xs"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {DEFAULT_EFFORT_VALUES.map((key) => (
+                          <SelectItem key={key} value={key}>
+                            {t(`effort.${key}` as Parameters<typeof t>[0])}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })()}
+        </>
 
-                    {/* Status badge */}
-                    {isSystem && provider.enabled && (
-                      <ModelAvailableBadge label={t("common.available")} />
-                    )}
-                    {isSystem && !provider.enabled && (
-                      <Badge variant="outline" className="gap-1">
-                        <Lock className="h-2.5 w-2.5" />
-                        {provider.unavailable_reason ??
-                          t("settings.model.notLoggedIn")}
-                      </Badge>
-                    )}
-                    {isManaged && !isConfigured && (
-                      <Badge variant="outline" className="gap-1">
-                        <Lock className="h-2.5 w-2.5" />{" "}
-                        {t("settings.model.needsConnection")}
-                      </Badge>
-                    )}
-                    {isManaged && isConfigured && (
-                      <ModelAvailableBadge label={t("common.available")} />
-                    )}
-                    {!isManaged && provider.test_status === "success" && (
-                      <ModelAvailableBadge label={t("common.available")} />
-                    )}
-                    {!isManaged &&
-                      provider.auth_type !== "oauth" &&
-                      provider.test_status === "failed" && (
-                        <Badge variant="error">
-                          {t("settings.model.connectionFailed")}
-                        </Badge>
-                      )}
-                    {!isManaged &&
-                      provider.auth_type !== "oauth" &&
-                      isConfigured &&
-                      provider.test_status !== "success" &&
-                      provider.test_status !== "failed" && (
-                        <Badge variant="outline">{t("common.notTested")}</Badge>
-                      )}
-                    {!isManaged &&
-                      provider.auth_type !== "oauth" &&
-                      !isConfigured && (
-                        <Badge variant="outline">
-                          {t("common.notConfigured")}
-                        </Badge>
-                      )}
-                    {!isManaged &&
-                      provider.auth_type === "oauth" &&
-                      (() => {
-                        // OAuth subscription badges follow real CLI
-                        // keychain state, not the seeded test_status.
-                        // While detection is pending we render
-                        // nothing to avoid flashing a wrong state.
-                        const tool =
-                          CLI_TOOL_BY_PROVIDER_KIND[provider.provider_kind];
-                        const status = tool ? cliStatus[tool] : undefined;
-                        if (!status) return null;
-                        if (status.state === "unsupported") {
-                          return (
-                            <Badge variant="outline">
-                              {t(
-                                "settings.model.platformNotSupported" as Parameters<
-                                  typeof t
-                                >[0],
+        {/* Model-channel management — the whole section (header + list + Add
+            button) is gated on ``configureModelChannel``. The commercial overlay
+            flips this off when the org's ``member_custom_model_enabled`` policy
+            is false, hiding the entire area; OSS single-run keeps it true.
+            Also gated on ``providersListLoaded`` so the section doesn't flash an
+            empty card during the initial page load. */}
+        {configureModelChannel && providersListLoaded && (
+          <>
+            {/* -- Model channel list -- */}
+            <div className="mt-6 mb-3 flex items-end justify-between">
+              <div>
+                <div className="text-sm font-medium text-ink-heading">
+                  {t("settings.model.modelChannel" as Parameters<typeof t>[0])}
+                </div>
+                <div className="mt-0.5 text-xs text-ink-meta">
+                  {t(
+                    "settings.model.modelChannelDesc" as Parameters<
+                      typeof t
+                    >[0],
+                  )}
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={() => setAddOpen(true)}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                {t("common.add" as Parameters<typeof t>[0])}
+              </Button>
+            </div>
+
+            <Card className="rounded-xl shadow-xs">
+              <CardContent className="px-5 py-0">
+                {providersList
+                  // Hide Valuz managed providers (Reportify) -- these are
+                  // internal infrastructure, not user-visible models.
+                  // All other providers are shown regardless of config state.
+                  .filter((c) => c.source !== "managed")
+                  .map((provider, idx) => {
+                    const isManaged = provider.source === "managed";
+                    // ADR-007: overlay-contributed system providers
+                    // (e.g. Valuz system model). Read-only -- no edit /
+                    // delete / test / CLI-login affordances.
+                    const isSystem = provider.source === "system";
+                    // CLI-OAuth providers (the CLI's
+                    // own keychain holds the credential), so they read as
+                    // ``credential_source === "none"`` from the API. Treat
+                    // them as configured anyway -- the provider IS reachable.
+                    const isConfigured =
+                      provider.credential_source !== "none" ||
+                      provider.auth_type === "oauth";
+
+                    return (
+                      <div
+                        key={provider.id}
+                        className={cn(
+                          "flex items-center gap-3 border-b border-[#f7f8fa] px-0 py-3 last:border-b-0 dark:border-surface-border",
+                          isManaged && "bg-brand/5",
+                          !isConfigured && !isManaged && "opacity-60",
+                          idx === 0 && "rounded-t-xl",
+                        )}
+                      >
+                        {/* Icon */}
+                        {isManaged ? (
+                          <img
+                            src="./logo.png"
+                            alt="Valuz"
+                            className="h-9 w-9 shrink-0 object-contain"
+                          />
+                        ) : (
+                          <IconBox variant="outline" className="text-brand">
+                            <Cpu className="h-4 w-4" />
+                          </IconBox>
+                        )}
+
+                        {/* Info */}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium text-ink-heading">
+                              {provider.name}
+                            </span>
+                            {isManaged && (
+                              <Badge variant="brand">
+                                {t("settings.model.builtIn")}
+                              </Badge>
+                            )}
+                            {isSystem && (
+                              <Badge variant="brand">
+                                {t(
+                                  "settings.model.systemProvider" as Parameters<
+                                    typeof t
+                                  >[0],
+                                )}
+                              </Badge>
+                            )}
+                            {provider.is_default && (
+                              <Badge variant="outline">
+                                {t("settings.model.default")}
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-3 text-2xs text-ink-meta">
+                            {provider.auth_type !== "oauth" &&
+                              maskApiKey(provider.credential_source) && (
+                                <span className="font-mono">
+                                  API Key:{" "}
+                                  {maskApiKey(provider.credential_source)}
+                                </span>
                               )}
-                            </Badge>
-                          );
-                        }
-                        if (!status.installed) {
-                          return (
-                            <Badge variant="outline" className="gap-1">
-                              <Lock className="h-2.5 w-2.5" />
-                              {t(
-                                "settings.model.notInstalled" as Parameters<
-                                  typeof t
-                                >[0],
-                              )}
-                            </Badge>
-                          );
-                        }
-                        if (status.state === "logged_out") {
-                          return (
-                            <Badge variant="outline" className="gap-1">
-                              <Lock className="h-2.5 w-2.5" />
-                              {t(
-                                "settings.model.notLoggedIn" as Parameters<
-                                  typeof t
-                                >[0],
-                              )}
-                            </Badge>
-                          );
-                        }
-                        return (
+                            {isManaged && isConfigured && (
+                              <span>
+                                {t("settings.model.modelFollowsPlan")}
+                              </span>
+                            )}
+                            {!isManaged && provider.models.length > 0 && (
+                              <span>
+                                {t(
+                                  "common.modelsCount" as Parameters<
+                                    typeof t
+                                  >[0],
+                                  {
+                                    count: String(provider.models.length),
+                                  },
+                                )}
+                              </span>
+                            )}
+                            {(() => {
+                              const compat = compatibleRuntimes(provider);
+                              if (compat.length === 0) return null;
+                              return (
+                                <span>
+                                  {t(
+                                    "settings.model.availableFor" as Parameters<
+                                      typeof t
+                                    >[0],
+                                  )}{" "}
+                                  {compat
+                                    .map((r) => RUNTIME_DISPLAY_NAME[r])
+                                    .join(" · ")}
+                                </span>
+                              );
+                            })()}
+                          </div>
+                        </div>
+
+                        {/* Status badge */}
+                        {isSystem && provider.enabled && (
                           <ModelAvailableBadge label={t("common.available")} />
-                        );
-                      })()}
+                        )}
+                        {isSystem && !provider.enabled && (
+                          <Badge variant="outline" className="gap-1">
+                            <Lock className="h-2.5 w-2.5" />
+                            {provider.unavailable_reason ??
+                              t("settings.model.notLoggedIn")}
+                          </Badge>
+                        )}
+                        {isManaged && !isConfigured && (
+                          <Badge variant="outline" className="gap-1">
+                            <Lock className="h-2.5 w-2.5" />{" "}
+                            {t("settings.model.needsConnection")}
+                          </Badge>
+                        )}
+                        {isManaged && isConfigured && (
+                          <ModelAvailableBadge label={t("common.available")} />
+                        )}
+                        {!isManaged && provider.test_status === "success" && (
+                          <ModelAvailableBadge label={t("common.available")} />
+                        )}
+                        {!isManaged &&
+                          provider.auth_type !== "oauth" &&
+                          provider.test_status === "failed" && (
+                            <Badge variant="error">
+                              {t("settings.model.connectionFailed")}
+                            </Badge>
+                          )}
+                        {!isManaged &&
+                          provider.auth_type !== "oauth" &&
+                          isConfigured &&
+                          provider.test_status !== "success" &&
+                          provider.test_status !== "failed" && (
+                            <Badge variant="outline">
+                              {t("common.notTested")}
+                            </Badge>
+                          )}
+                        {!isManaged &&
+                          provider.auth_type !== "oauth" &&
+                          !isConfigured && (
+                            <Badge variant="outline">
+                              {t("common.notConfigured")}
+                            </Badge>
+                          )}
+                        {!isManaged &&
+                          provider.auth_type === "oauth" &&
+                          (() => {
+                            // OAuth subscription badges follow real CLI
+                            // keychain state, not the seeded test_status.
+                            // While detection is pending we render
+                            // nothing to avoid flashing a wrong state.
+                            const tool =
+                              CLI_TOOL_BY_PROVIDER_KIND[provider.provider_kind];
+                            const status = tool ? cliStatus[tool] : undefined;
+                            if (!status) return null;
+                            if (status.state === "unsupported") {
+                              return (
+                                <Badge variant="outline">
+                                  {t(
+                                    "settings.model.platformNotSupported" as Parameters<
+                                      typeof t
+                                    >[0],
+                                  )}
+                                </Badge>
+                              );
+                            }
+                            if (!status.installed) {
+                              return (
+                                <Badge variant="outline" className="gap-1">
+                                  <Lock className="h-2.5 w-2.5" />
+                                  {t(
+                                    "settings.model.notInstalled" as Parameters<
+                                      typeof t
+                                    >[0],
+                                  )}
+                                </Badge>
+                              );
+                            }
+                            if (status.state === "logged_out") {
+                              return (
+                                <Badge variant="outline" className="gap-1">
+                                  <Lock className="h-2.5 w-2.5" />
+                                  {t(
+                                    "settings.model.notLoggedIn" as Parameters<
+                                      typeof t
+                                    >[0],
+                                  )}
+                                </Badge>
+                              );
+                            }
+                            return (
+                              <ModelAvailableBadge
+                                label={t("common.available")}
+                              />
+                            );
+                          })()}
 
-                    {/* Actions -- system providers are read-only. The hosted
+                        {/* Actions -- system providers are read-only. The hosted
                         "managed" (Reportify) provider path was removed with the
                         account OAuth subsystem; managed providers no longer
                         exist (also filtered out above). */}
-                    {isSystem ? null : (
-                      <>
-                        {(() => {
-                          // Show the CLI-login affordance only when
-                          // it's actually needed: not installed or
-                          // not logged in. Already-logged-in
-                          // subscription rows hide the button so
-                          // the row reads as "ready to go".
-                          const tool =
-                            CLI_TOOL_BY_PROVIDER_KIND[provider.provider_kind];
-                          if (!tool) return null;
-                          const status = cliStatus[tool];
-                          if (!status) return null;
-                          if (status.state === "unsupported") return null;
-                          if (status.state === "logged_in") return null;
-                          const label = status.installed
-                            ? t("settings.model.cliLogin")
-                            : t(
-                                "settings.model.installCli" as Parameters<
-                                  typeof t
-                                >[0],
+                        {isSystem ? null : (
+                          <>
+                            {(() => {
+                              // Show the CLI-login affordance only when
+                              // it's actually needed: not installed or
+                              // not logged in. Already-logged-in
+                              // subscription rows hide the button so
+                              // the row reads as "ready to go".
+                              const tool =
+                                CLI_TOOL_BY_PROVIDER_KIND[
+                                  provider.provider_kind
+                                ];
+                              if (!tool) return null;
+                              const status = cliStatus[tool];
+                              if (!status) return null;
+                              if (status.state === "unsupported") return null;
+                              if (status.state === "logged_in") return null;
+                              const label = status.installed
+                                ? t("settings.model.cliLogin")
+                                : t(
+                                    "settings.model.installCli" as Parameters<
+                                      typeof t
+                                    >[0],
+                                  );
+                              return (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="gap-1.5 text-xs"
+                                  onClick={() => {
+                                    void cliLogin.trigger(tool);
+                                  }}
+                                >
+                                  {label}
+                                </Button>
                               );
-                          return (
+                            })()}
                             <Button
                               variant="outline"
                               size="sm"
                               className="gap-1.5 text-xs"
                               onClick={() => {
-                                void cliLogin.trigger(tool);
+                                void handleOpenEdit(provider.id);
                               }}
                             >
-                              {label}
+                              <FilePenLine className="h-3 w-3" />
+                              {t("common.edit")}
                             </Button>
-                          );
-                        })()}
-                        {configureModelChannel && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="gap-1.5 text-xs"
-                            onClick={() => {
-                              void handleOpenEdit(provider.id);
-                            }}
-                          >
-                            <FilePenLine className="h-3 w-3" />
-                            {t("common.edit")}
-                          </Button>
+                            {provider.auth_type !== "oauth" && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                aria-label={t("common.refresh")}
+                                className="h-8 w-8 p-0 text-[#131313] hover:text-[#131313]"
+                                onClick={() => {
+                                  void handleTestProvider(provider.id);
+                                }}
+                              >
+                                <RefreshCw className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {/* Subscription channels (auth_type "oauth") are not
+                            user-deletable: their availability mirrors the CLI
+                            login state (auto-materialized on login, gone when the
+                            user logs the CLI out), so a delete button here would
+                            be futile — the channel reappears on the next login
+                            probe. Keeps codex and Claude symmetric. Only
+                            user-added api_key channels get the trash action. */}
+                            {provider.deletable &&
+                              provider.auth_type !== "oauth" && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  aria-label={t("common.delete")}
+                                  className="h-8 w-8 p-0 text-[#131313] hover:text-[#f54b4b]"
+                                  onClick={() => setDeleteTarget(provider)}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
+                          </>
                         )}
-                        {configureModelChannel &&
-                          provider.auth_type !== "oauth" && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              aria-label={t("common.refresh")}
-                              className="h-8 w-8 p-0 text-[#131313] hover:text-[#131313]"
-                              onClick={() => {
-                                void handleTestProvider(provider.id);
-                              }}
-                            >
-                              <RefreshCw className="h-3.5 w-3.5" />
-                            </Button>
-                          )}
-                        {configureModelChannel && provider.deletable && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            aria-label={t("common.delete")}
-                            className="h-8 w-8 p-0 text-ink-heading hover:bg-error-light hover:text-error-text"
-                            onClick={() => setDeleteTarget(provider)}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        )}
-                      </>
-                    )}
-                  </div>
-                );
-              })}
-          </CardContent>
-        </Card>
+                      </div>
+                    );
+                  })}
+              </CardContent>
+            </Card>
+          </>
+        )}
       </SettingsSection>
 
       {/* Provider Add Dialog */}
@@ -1012,7 +1166,7 @@ export const ModelSection = () => {
           }
           currentBaseUrl={editProvider.base_url ?? ""}
           currentProtocol={editProvider.protocol ?? null}
-          initialModels={editProvider.model_options}
+          initialModels={editProvider.models.map((m) => m.id)}
           supportsCustomBaseUrl={editProvider.supports_custom_base_url}
           supportsProtocolSelection={
             providers.find((p) => p.kind === editProvider.provider_kind)

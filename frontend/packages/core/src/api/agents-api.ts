@@ -29,25 +29,20 @@ export interface Agent {
   deletable: boolean;
   /** Preset icon key or uploaded asset URL (08-agents-module v2); null = unset. */
   avatar: string | null;
-  /** Shared kernel AgentConfig id (v2 live-reference); null until first deploy.
-   *  Maps a project member back to its library agent
-   *  (member.kernel_agent_id === agent.kernel_agent_id). */
-  kernel_agent_id: string | null;
 }
 
-/** One派驻 of an agent — the project (workspace) it's deployed into. */
+/** One派驻 of an agent — the project (project) it's deployed into. */
 export interface AgentDeployment {
-  workspace_id: string;
+  project_id: string;
   /** Project-local member handle. */
   agent_slug: string;
 }
 
-/** Membership row linking a workspace to a kernel agent. */
+/** Membership row linking a project to a kernel agent. */
 export interface ProjectMember {
   id: string;
-  workspace_id: string;
+  project_id: string;
   agent_slug: string;
-  kernel_agent_id: string;
   source_agent_slug: string | null;
 }
 
@@ -80,12 +75,12 @@ export interface ConnectorBindingInput {
 export interface DeployAgentPayload {
   source_agent_slug: string;
   /** Optional — backend derives from the source agent's name, unique within
-   *  the target workspace, when omitted (VALUZ-AGENT-SLUG). */
+   *  the target project, when omitted (VALUZ-AGENT-SLUG). */
   agent_slug?: string;
 }
 
 export interface CreateBlankAgentPayload {
-  /** Optional — backend derives from ``name``, unique within the workspace,
+  /** Optional — backend derives from ``name``, unique within the project,
    *  when omitted (VALUZ-AGENT-SLUG). */
   agent_slug?: string;
   name: string;
@@ -127,6 +122,28 @@ export interface UpdateAgentPayload {
   avatar?: string | null;
 }
 
+/** Spec of an agent the user is confirming after the assistant proposed it
+ *  via the ``propose_agent`` tool. Backend derives a unique slug from name. */
+export interface ProposeAgentConfirmPayload {
+  name: string;
+  instructions: string;
+  description?: string;
+  runtime?: string;
+  model?: string;
+  effort?: EffortLevel | null;
+  skills?: string[];
+  connectors?: string[];
+  avatar?: string | null;
+}
+
+export interface ProposeAgentConfirmResult {
+  agent: AgentSummary;
+  member: ProjectMember | null;
+  /** True when the session was bound to a project and the agent was deployed. */
+  deployed: boolean;
+  project_id: string | null;
+}
+
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const agentsApi = {
@@ -163,25 +180,29 @@ export const agentsApi = {
     });
   },
 
-  deleteAgent(slug: string): Promise<void> {
-    return fetchJson(`/v1/agents/${encodeURIComponent(slug)}`, {
+  /** Delete an agent. ``cascade`` first 解除 every 派驻 the agent has, then
+   *  deletes it — the confirmed-delete path. Without it, an agent still
+   *  deployed to a project returns 409. */
+  deleteAgent(slug: string, opts?: { cascade?: boolean }): Promise<void> {
+    const query = opts?.cascade ? "?cascade=true" : "";
+    return fetchJson(`/v1/agents/${encodeURIComponent(slug)}${query}`, {
       method: "DELETE",
     });
   },
 
-  listMembers(workspaceId: string): Promise<{ agents: MemberWithAgent[] }> {
+  listMembers(projectId: string): Promise<{ agents: MemberWithAgent[] }> {
     return fetchJson(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents`,
+      `/v1/projects/${encodeURIComponent(projectId)}/agents`,
     );
   },
 
   /** v2 派驻: deploy (live-reference) a library agent into a project. */
   deploy(
-    workspaceId: string,
+    projectId: string,
     payload: DeployAgentPayload,
   ): Promise<MemberWithAgent> {
     return fetchJson(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents:deploy`,
+      `/v1/projects/${encodeURIComponent(projectId)}/agents:deploy`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -191,11 +212,11 @@ export const agentsApi = {
   },
 
   createBlank(
-    workspaceId: string,
+    projectId: string,
     payload: CreateBlankAgentPayload,
   ): Promise<MemberWithAgent> {
     return fetchJson(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents`,
+      `/v1/projects/${encodeURIComponent(projectId)}/agents`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -204,9 +225,25 @@ export const agentsApi = {
     );
   },
 
-  deleteMember(workspaceId: string, agentSlug: string): Promise<void> {
+  /** Confirm an agent the assistant proposed via ``propose_agent``. Creates
+   *  the library agent and, when the session has a project, deploys it there. */
+  confirmProposal(
+    sessionId: string,
+    payload: ProposeAgentConfirmPayload,
+  ): Promise<ProposeAgentConfirmResult> {
     return fetchJson(
-      `/v1/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentSlug)}`,
+      `/v1/agents/proposals/${encodeURIComponent(sessionId)}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+    );
+  },
+
+  deleteMember(projectId: string, agentSlug: string): Promise<void> {
+    return fetchJson(
+      `/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentSlug)}`,
       { method: "DELETE" },
     );
   },

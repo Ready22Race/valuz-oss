@@ -1,0 +1,7 @@
+# The Node binary is downloaded + checksum-verified at build time
+# (scripts/download-node.sh, invoked by build-desktop.sh Phase A4) — it is too
+# large (~100 MB/platform) to commit. Only this .gitignore and README.md are
+# tracked here.
+*
+!.gitignore
+!README.md

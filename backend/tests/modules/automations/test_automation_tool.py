@@ -8,7 +8,7 @@ the service builder so the test focuses on:
 - required-field guards (name, prompt_template, agent_slug, trigger)
 - trigger discriminated-union coercion
 - scope coercion (project forces ``this``; chat defaults to ``all``)
-- cross-workspace denial for project sessions
+- cross-project denial for project sessions
 
 Service-layer behaviour itself is covered in ``test_automation_service``,
 so the asserts here are deliberately thin (e.g. "request reached
@@ -19,6 +19,7 @@ service does with it).
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -26,6 +27,7 @@ import pytest
 from valuz_agent.integrations import automations_mcp_server as mod
 from valuz_agent.modules.automations.schemas import (
     AutomationItemResponse,
+    AutomationProposalSpec,
     AutomationToolPayload,
     CronTrigger,
     IntervalTrigger,
@@ -46,19 +48,19 @@ class StubService:
     def _record(self, method: str, **kwargs: Any) -> None:
         self.calls.append((method, kwargs))
 
-    async def create(self, payload, *, calling_session_workspace_id=None):  # type: ignore[no-untyped-def]
+    async def create(self, payload, *, calling_session_project_id=None):  # type: ignore[no-untyped-def]
         self._record(
             "create",
             payload=payload,
-            calling_session_workspace_id=calling_session_workspace_id,
+            calling_session_project_id=calling_session_project_id,
         )
         self._next_id += 1
         automation_id = f"auto-{self._next_id}"
         item = AutomationItemResponse(
             automation_id=automation_id,
-            workspace_id=payload.workspace_id or "ws-auto",
-            workspace_name="ws",
-            workspace_kind=payload.workspace_kind,
+            project_id=payload.project_id or "ws-auto",
+            project_name="ws",
+            project_kind=payload.project_kind,
             name=payload.name,
             agent_kind=payload.agent_kind,
             agent_slug=payload.agent_slug,
@@ -87,13 +89,34 @@ class StubService:
         )()
         return detail
 
+    async def preview(self, payload, *, calling_session_project_id=None):  # type: ignore[no-untyped-def]
+        """``create`` action now PROPOSES (validate + preview, no persist) —
+        the dispatcher calls ``preview`` instead of ``create``. Record the call
+        so routing/defaulting asserts still inspect the resolved payload."""
+        self._record(
+            "preview",
+            payload=payload,
+            calling_session_project_id=calling_session_project_id,
+        )
+        return AutomationProposalSpec(
+            name=payload.name,
+            prompt_template=payload.prompt_template,
+            trigger=payload.trigger,
+            agent_slug=payload.agent_slug,
+            agent_kind=payload.agent_kind,
+            agent_name=payload.agent_slug,
+            action_kind=payload.action_kind,
+            trigger_human_readable="OK",
+            next_run_at=None,
+        )
+
     async def list_all_automations(self):
         self._record("list_all_automations")
         return list(self._rows.values())
 
-    async def list_automations_in_workspace(self, workspace_id):  # type: ignore[no-untyped-def]
-        self._record("list_automations_in_workspace", workspace_id=workspace_id)
-        return [r for r in self._rows.values() if r.workspace_id == workspace_id]
+    async def list_automations_in_project(self, project_id):  # type: ignore[no-untyped-def]
+        self._record("list_automations_in_project", project_id=project_id)
+        return [r for r in self._rows.values() if r.project_id == project_id]
 
     async def pause(self, automation_id):  # type: ignore[no-untyped-def]
         self._record("pause", automation_id=automation_id)
@@ -107,8 +130,8 @@ class StubService:
         self._record("delete", automation_id=automation_id)
         self._rows.pop(automation_id, None)
 
-    async def run_now(self, automation_id):  # type: ignore[no-untyped-def]
-        self._record("run_now", automation_id=automation_id)
+    async def run_now(self, automation_id, *, trigger_type="manual", invoked_by_session_id=None):  # type: ignore[no-untyped-def]
+        self._record("run_now", automation_id=automation_id, trigger_type=trigger_type)
         return type("Run", (), {"run_id": f"run-{automation_id}"})()
 
     async def update(self, automation_id, payload):  # type: ignore[no-untyped-def]
@@ -121,7 +144,10 @@ class StubService:
         def __init__(self, parent: StubService) -> None:
             self._parent = parent
 
-        async def get_automation(self, automation_id: str):
+        async def get_automation(self, user_id: str, automation_id: str):  # noqa: ARG002
+            # Signature mirrors the real ``AutomationDatastore.get_automation``
+            # (user_id first) so the dispatcher's call shape is exercised — a
+            # one-arg stub would mask a missing-user_id regression.
             return self._parent._rows.get(automation_id) or _row(automation_id)
 
     @property
@@ -145,12 +171,12 @@ def _detail(automation_id: str, label: str) -> Any:
     )()
 
 
-def _row(automation_id: str = "auto-x", workspace_id: str = "ws-1") -> AutomationItemResponse:
+def _row(automation_id: str = "auto-x", project_id: str = "ws-1") -> AutomationItemResponse:
     return AutomationItemResponse(
         automation_id=automation_id,
-        workspace_id=workspace_id,
-        workspace_name="ws",
-        workspace_kind="project",
+        project_id=project_id,
+        project_name="ws",
+        project_kind="project",
         name="Test",
         agent_kind="project_member",
         agent_slug="qa",
@@ -174,12 +200,12 @@ def stub_service() -> StubService:
 def patched_dispatch(monkeypatch: pytest.MonkeyPatch, stub_service: StubService):
     """Patch the session-context resolver + service builder so the
     dispatcher runs against the stub without needing a DB."""
-    workspace_id = {"value": "ws-proj"}
-    workspace_kind = {"value": "project"}
+    project_id = {"value": "ws-proj"}
+    project_kind = {"value": "project"}
     session_agent_slug = {"value": None}
 
     async def _fake_session_context(session_id: str):  # noqa: ARG001
-        return workspace_id["value"], workspace_kind["value"], session_agent_slug["value"]
+        return project_id["value"], project_kind["value"], session_agent_slug["value"]
 
     async def _fake_build_service(db):  # noqa: ARG001
         return stub_service
@@ -203,7 +229,7 @@ def patched_dispatch(monkeypatch: pytest.MonkeyPatch, stub_service: StubService)
     # The dispatch imports async_unit_of_work locally; patch where it's used.
     monkeypatch.setattr("valuz_agent.infra.db.async_unit_of_work", _fake_async_unit_of_work)
 
-    return workspace_id, workspace_kind, session_agent_slug
+    return project_id, project_kind, session_agent_slug
 
 
 # ── Routing + validation ────────────────────────────────────────────
@@ -286,9 +312,9 @@ class TestAgentKindByContext:
     async def test_project_session_should_create_as_project_member(
         self, patched_dispatch: Any, stub_service: StubService
     ) -> None:
-        workspace_id, workspace_kind, session_agent_slug = patched_dispatch
-        workspace_kind["value"] = "project"
-        workspace_id["value"] = "ws-proj"
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "project"
+        project_id["value"] = "ws-proj"
 
         await mod.automation_invoke(
             AutomationToolPayload(
@@ -299,20 +325,20 @@ class TestAgentKindByContext:
                 trigger=CronTrigger(cron_expr="0 9 * * *"),
             )
         )
-        assert stub_service.calls[0][0] == "create"
+        assert stub_service.calls[0][0] == "preview"
         payload = stub_service.calls[0][1]["payload"]
         assert payload.agent_kind == "project_member"
-        assert payload.workspace_kind == "project"
-        # Project sessions never forward a calling workspace — the row binds
-        # to the workspace_id field, not the calling-session inference path.
-        assert stub_service.calls[0][1]["calling_session_workspace_id"] is None
+        assert payload.project_kind == "project"
+        # Project sessions never forward a calling project — the row binds
+        # to the project_id field, not the calling-session inference path.
+        assert stub_service.calls[0][1]["calling_session_project_id"] is None
 
     async def test_chat_session_should_create_as_library_agent(
         self, patched_dispatch: Any, stub_service: StubService
     ) -> None:
-        workspace_id, workspace_kind, session_agent_slug = patched_dispatch
-        workspace_kind["value"] = "chat"
-        workspace_id["value"] = "ws-chat-existing"
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "chat"
+        project_id["value"] = "ws-chat-existing"
 
         await mod.automation_invoke(
             AutomationToolPayload(
@@ -325,10 +351,10 @@ class TestAgentKindByContext:
         )
         payload = stub_service.calls[0][1]["payload"]
         assert payload.agent_kind == "library_agent"
-        assert payload.workspace_kind == "chat"
-        # Chat sessions DO forward the calling workspace so library agents
+        assert payload.project_kind == "chat"
+        # Chat sessions DO forward the calling project so library agents
         # land in the user's current chat ws (not a fresh one).
-        assert stub_service.calls[0][1]["calling_session_workspace_id"] == "ws-chat-existing"
+        assert stub_service.calls[0][1]["calling_session_project_id"] == "ws-chat-existing"
 
     async def test_chat_create_should_default_agent_slug_to_session_agent(
         self, patched_dispatch: Any, stub_service: StubService
@@ -336,9 +362,9 @@ class TestAgentKindByContext:
         """A project-less chat omits agent_slug → it defaults to the session's
         bound agent (the agent the user is talking to / default-assistant), so
         creation succeeds without any list_members round-trip."""
-        workspace_id, workspace_kind, session_agent_slug = patched_dispatch
-        workspace_kind["value"] = "chat"
-        workspace_id["value"] = "ws-chat-1"
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "chat"
+        project_id["value"] = "ws-chat-1"
         session_agent_slug["value"] = "default-assistant"
 
         result = await mod.automation_invoke(
@@ -359,8 +385,8 @@ class TestAgentKindByContext:
     async def test_chat_create_explicit_agent_slug_overrides_session_default(
         self, patched_dispatch: Any, stub_service: StubService
     ) -> None:
-        workspace_id, workspace_kind, session_agent_slug = patched_dispatch
-        workspace_kind["value"] = "chat"
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "chat"
         session_agent_slug["value"] = "default-assistant"
 
         await mod.automation_invoke(
@@ -380,8 +406,8 @@ class TestAgentKindByContext:
     ) -> None:
         """The chat default must NOT leak into project sessions — they still
         require an explicit project-member slug."""
-        workspace_id, workspace_kind, session_agent_slug = patched_dispatch
-        workspace_kind["value"] = "project"
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "project"
         # Even if the project conversation has a bound agent, project create
         # is not auto-defaulted (the lead must pick the right member).
         session_agent_slug["value"] = "some-conversation-agent"
@@ -397,6 +423,79 @@ class TestAgentKindByContext:
         decoded = json.loads(result)
         assert decoded["ok"] is False
         assert decoded["error_code"] == "MISSING_AGENT"
+
+
+# ── Propose (create → confirm card) ────────────────────────────────
+
+
+class TestCreateProposes:
+    async def test_create_returns_proposal_and_does_not_persist(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        """``create`` validates + previews; it must NOT call the persisting
+        ``create`` — the user's confirm click does that."""
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="create",
+                name="Daily",
+                prompt_template="x",
+                agent_slug="qa",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        assert decoded["proposal"] is not None
+        assert decoded["proposal"]["name"] == "Daily"
+        assert decoded["automation"] is None
+        methods = [c[0] for c in stub_service.calls]
+        assert "preview" in methods
+        assert "create" not in methods
+
+    async def test_chat_rejects_task_action_kind(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        """Task mode needs a project context — a chat session rejects it."""
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "chat"
+        session_agent_slug["value"] = "default-assistant"
+
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="create",
+                name="Daily",
+                prompt_template="x",
+                action_kind="task",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is False
+        assert decoded["error_code"] == "TASK_REQUIRES_PROJECT"
+        assert not stub_service.calls  # never reached the service
+
+    async def test_project_task_action_kind_flows_to_preview(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "project"
+        project_id["value"] = "ws-proj"
+
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="create",
+                name="Nightly report",
+                prompt_template="x",
+                agent_slug="qa",
+                action_kind="task",
+                trigger=CronTrigger(cron_expr="0 9 * * *"),
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        assert decoded["proposal"]["action_kind"] == "task"
+        payload = stub_service.calls[0][1]["payload"]
+        assert payload.action_kind == "task"
 
 
 # ── Trigger discriminator routing ──────────────────────────────────
@@ -451,16 +550,16 @@ class TestTriggerCoercion:
         assert payload.trigger.kind == "manual"
 
 
-# ── Scope coercion + cross-workspace denial ─────────────────────────
+# ── Scope coercion + cross-project denial ─────────────────────────
 
 
-class TestScopeAndCrossWorkspace:
+class TestScopeAndCrossProject:
     async def test_chat_list_should_default_to_all_scope(
         self, patched_dispatch: Any, stub_service: StubService
     ) -> None:
-        workspace_id, workspace_kind, session_agent_slug = patched_dispatch
-        workspace_kind["value"] = "chat"
-        workspace_id["value"] = "ws-chat-1"
+        project_id, project_kind, session_agent_slug = patched_dispatch
+        project_kind["value"] = "chat"
+        project_id["value"] = "ws-chat-1"
 
         await mod.automation_invoke(AutomationToolPayload(action="list"))
         # ``all`` scope hits ``list_all_automations``.
@@ -472,25 +571,45 @@ class TestScopeAndCrossWorkspace:
         # Even with scope="all" the project-session coercion forces ``this``.
         await mod.automation_invoke(AutomationToolPayload(action="list", scope="all"))
         assert any(
-            c[0] == "list_automations_in_workspace" and c[1]["workspace_id"] == "ws-proj"
+            c[0] == "list_automations_in_project" and c[1]["project_id"] == "ws-proj"
             for c in stub_service.calls
         )
 
-    async def test_project_session_should_deny_cross_workspace_mutate(
+    async def test_project_session_should_deny_cross_project_mutate(
         self,
         patched_dispatch: Any,
         stub_service: StubService,
     ) -> None:
-        # Pre-seed an automation living in a DIFFERENT workspace.
+        # Pre-seed an automation living in a DIFFERENT project.
         stub_service._rows["auto-other"] = _row(  # noqa: SLF001
-            automation_id="auto-other", workspace_id="ws-other-project"
+            automation_id="auto-other", project_id="ws-other-project"
         )
         result = await mod.automation_invoke(
             AutomationToolPayload(action="pause", automation_id="auto-other")
         )
         decoded = json.loads(result)
         assert decoded["ok"] is False
-        assert decoded["error_code"] == "CROSS_WORKSPACE_DENIED"
+        assert decoded["error_code"] == "CROSS_PROJECT_DENIED"
+
+    async def test_run_action_should_tag_trigger_type_agent(
+        self,
+        patched_dispatch: Any,
+        stub_service: StubService,
+    ) -> None:
+        # An agent firing an automation via the MCP ``run`` action records the
+        # run as ``trigger_type="agent"`` — distinct from a human "Run now"
+        # (``manual``) and the scheduled cron / interval fires.
+        stub_service._rows["auto-run"] = _row(  # noqa: SLF001
+            automation_id="auto-run", project_id="ws-proj"
+        )
+        result = await mod.automation_invoke(
+            AutomationToolPayload(action="run", automation_id="auto-run")
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        assert decoded["action"] == "run"
+        run_calls = [c for c in stub_service.calls if c[0] == "run_now"]
+        assert run_calls == [("run_now", {"automation_id": "auto-run", "trigger_type": "agent"})]
 
 
 # ── Decorated ``automation`` thin wrapper trigger coercion ─────────
@@ -541,3 +660,86 @@ class TestDecoratedToolTriggerCoercion:
         )
         payload = stub_service.calls[0][1]["payload"]
         assert payload.trigger.kind == "manual"
+
+
+# ── Session-context resolution ─────────────────────────────────────
+
+
+class _FakeKernelSession:
+    """Mimics the kernel ``SessionData`` shape the resolver reads.
+
+    Crucially it has **no** ``project_id`` attribute — project_id lives under
+    ``metadata["valuz"]``. Reproduces the regression where the resolver did
+    ``str(kernel_session.project_id)`` and blew up with ``AttributeError``.
+    """
+
+    def __init__(self, *, user_id: str, metadata: dict[str, Any]) -> None:
+        self.user_id = user_id
+        self.metadata = metadata
+
+
+class _FakeProjectDatastore:
+    def __init__(self, db: Any) -> None:  # noqa: ARG002
+        pass
+
+    async def get_by_id(self, user_id: str, project_id: str):  # noqa: ARG002
+        return SimpleNamespace(id=project_id, kind="project")
+
+
+@pytest.fixture
+def patched_resolver(monkeypatch: pytest.MonkeyPatch):
+    """Patch the inner imports of ``_resolve_session_context`` so it runs
+    without a kernel or DB. ``session_box["value"]`` controls what
+    ``kernel_client.get_session`` returns."""
+    session_box: dict[str, Any] = {"value": None}
+
+    async def _fake_get_session(user_id: str, session_id: str):  # noqa: ARG001
+        return session_box["value"]
+
+    class _UoW:
+        async def __aenter__(self):
+            return None
+
+        async def __aexit__(self, *args):  # noqa: ANN002
+            return None
+
+    monkeypatch.setattr(mod, "require_current_user_id", lambda: "user-1")
+    monkeypatch.setattr("valuz_agent.adapters.kernel_client.get_session", _fake_get_session)
+    monkeypatch.setattr("valuz_agent.infra.db.async_unit_of_work", lambda commit=True: _UoW())
+    monkeypatch.setattr(
+        "valuz_agent.modules.projects.datastore.ProjectDatastore",
+        _FakeProjectDatastore,
+    )
+    return session_box
+
+
+class TestResolveSessionContext:
+    async def test_should_read_project_id_from_valuz_metadata(
+        self, patched_resolver: dict[str, Any]
+    ) -> None:
+        patched_resolver["value"] = _FakeKernelSession(
+            user_id="user-1",
+            metadata={"valuz": {"project_id": "ws-42", "agent_slug": "qa"}},
+        )
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context("sess-1")
+        assert project_id == "ws-42"
+        assert project_kind == "project"
+        assert bound_agent_slug == "qa"
+
+    async def test_should_treat_missing_project_id_as_chat(
+        self, patched_resolver: dict[str, Any]
+    ) -> None:
+        patched_resolver["value"] = _FakeKernelSession(
+            user_id="user-1",
+            metadata={"valuz": {"agent_slug": "default-assistant"}},
+        )
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context("sess-1")
+        assert project_id is None
+        assert project_kind == "chat"
+        assert bound_agent_slug == "default-assistant"
+
+    async def test_should_treat_gc_d_session_as_chat(
+        self, patched_resolver: dict[str, Any]
+    ) -> None:
+        patched_resolver["value"] = None
+        assert await mod._resolve_session_context("sess-1") == (None, "chat", None)

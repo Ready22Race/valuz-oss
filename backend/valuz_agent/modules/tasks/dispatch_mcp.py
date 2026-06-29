@@ -5,12 +5,12 @@ mechanism (same pattern as ``providers/tools_skill_creator.py``):
 
   dispatch          — NON-BLOCKING spawn of a planned subtask (returns a handle)
   await_members     — block (in-turn) to collect finished members' results
-  list_members      — list workspace members (slug/runtime/description)
+  list_members      — list project members (slug/runtime/description)
   finish_task       — close the task with a summary and optional artifacts
   (+ send / plan_task / get_plan / modify_plan / review_subtask)
 
 The lead-only tools enforce the **lead gate** (§S0①): handlers inspect
-``session.metadata["valuz"]["run_kind"]`` via ``kernel_sync`` and return
+``session.metadata["valuz"]["run_kind"]`` via ``kernel_client`` and return
 an error ToolResult when the caller is not the lead session. This is the
 only enforcement point — kernel Session has no ``tools`` field, so we
 cannot restrict tool availability at the session level.
@@ -21,15 +21,15 @@ as ``mcp__harness__dispatch`` etc. Member sessions whose agents also
 carry the declarations are still blocked by the handler gate.
 
 Usage (startup):
-    from valuz_agent.modules.tasks.dispatch_mcp import register_dispatch_tools
-    register_dispatch_tools(orchestrator)
+    from valuz_agent.modules.tasks.dispatch_mcp import build_task_tool_defs
+    install_toolkit_toolsets(... build_task_tool_defs(orchestrator) ...)
 
 ADR-023 Step 4: this module is now a thin re-export shim. The static,
 import-safe surface (tool names, JSON-schema parameters,
 ``ToolDef(handler=None)`` declarations, ``strip_dispatch_tools`` /
 ``ensure_orchestration_tools_on_agent``) lives in ``tools/declarations.py``;
 the thin args → service-call → ToolResult handlers and
-``register_dispatch_tools`` live in ``tools/handlers.py``. Keeping this module
+``build_task_tool_defs`` live in ``tools/handlers.py``. Keeping this module
 name + its public surface stable means existing import sites (app.py,
 projects/service.py, agents/service.py, lifecycle._materialize_lead_agent) keep
 working unchanged.
@@ -38,9 +38,9 @@ working unchanged.
 from __future__ import annotations
 
 # Re-export the adapter the gate helpers use, so test monkeypatching of
-# ``dispatch_mcp.kernel_store.load_session`` keeps targeting the same object
+# ``dispatch_mcp.kernel_client.load_session`` keeps targeting the same object
 # the handlers reach (it is the shared adapter module object).
-from valuz_agent.adapters import kernel_store, kernel_sync
+from valuz_agent.adapters import kernel_client
 from valuz_agent.modules.tasks.tools.declarations import (
     ABANDON_TASK_TOOL_DECLARATION,
     ABANDON_TASK_TOOL_NAME,
@@ -83,6 +83,8 @@ from valuz_agent.modules.tasks.tools.declarations import (
     SEND_TOOL_NAME,
     STOP_SUBTASK_TOOL_DECLARATION,
     STOP_SUBTASK_TOOL_NAME,
+    UPDATE_DELIVERABLE_TOOL_DECLARATION,
+    UPDATE_DELIVERABLE_TOOL_NAME,
     ensure_orchestration_tools_on_agent,
     strip_dispatch_tools,
 )
@@ -92,7 +94,7 @@ from valuz_agent.modules.tasks.tools.handlers import (
     _check_plan_writer_gate,
     _resolve_plan_reader_task,
     _resolve_plan_writer_task,
-    register_dispatch_tools,
+    build_task_tool_defs,
 )
 
 __all__ = [
@@ -128,7 +130,7 @@ __all__ = [
     "LIST_TASKS_TOOL_DECLARATION",
     "GET_TASK_TOOL_DECLARATION",
     "ensure_orchestration_tools_on_agent",
-    "register_dispatch_tools",
+    "build_task_tool_defs",
     # Additional re-exports kept for completeness (used by tests / internal
     # callers that reference the per-tool declarations or names).
     "ABANDON_TASK_TOOL_NAME",
@@ -142,10 +144,11 @@ __all__ = [
     "REVIEW_SUBTASK_TOOL_DECLARATION",
     "STOP_SUBTASK_TOOL_NAME",
     "STOP_SUBTASK_TOOL_DECLARATION",
+    "UPDATE_DELIVERABLE_TOOL_NAME",
+    "UPDATE_DELIVERABLE_TOOL_DECLARATION",
     # Gate helpers + adapters re-exported for tests / internal callers that
     # reference them through the ``dispatch_mcp`` module path.
-    "kernel_store",
-    "kernel_sync",
+    "kernel_client",
     "_check_lead_gate",
     "_check_orchestration_gate",
     "_check_plan_writer_gate",

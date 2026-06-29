@@ -132,6 +132,11 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     monkeypatch.setattr(deps_mod, "_polling_scheduler", _NoopRunner)
     monkeypatch.setattr(docs_scheduler_mod, "start_auto_discovery", lambda: None)
     monkeypatch.setattr(docs_scheduler_mod, "stop_auto_discovery", lambda: None)
+
+    import valuz_agent.modules.skills.scheduler as skill_scheduler_mod
+
+    monkeypatch.setattr(skill_scheduler_mod, "start_skill_auto_scan", lambda: None)
+    monkeypatch.setattr(skill_scheduler_mod, "stop_skill_auto_scan", lambda: None)
     monkeypatch.setattr(fw_mod, "SkillFileWatcher", _NoopWatcher)
 
     # The three in-process MCP servers mounted + run at app startup (docs,
@@ -168,6 +173,12 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     # `run_kernel_migrations`) before the first request. Without the context
     # manager, startup never runs.
     with TestClient(app) as client:
+        # Built-ins are no longer seeded at boot (OSS's contract: configure a
+        # model channel before use). Skill-creator chat-start creates a session,
+        # which needs a configured provider — establish that precondition the
+        # way a real install would (the admin reset endpoint repopulates the
+        # built-in channels for this owner).
+        client.post("/v1/providers/reset")
         yield {
             "client": client,
             "user_skills": user_skills,
@@ -179,14 +190,28 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
 def _session_staging_root(session_id: str) -> Path:
     """Resolve the staging dir the product actually scans for a session.
 
-    The host now keys staging off the session's *workspace cwd*
-    (``data_dir/workspaces/{project_id}/.skill-staging/``) rather than the
+    The host now keys staging off the session's *project cwd*
+    (``data_dir/projects/{project_id}/.skill-staging/``) rather than the
     legacy ``{staging_root}/{session_id}/`` layout, so tests must write the
     agent's staged slugs to the same place the route reads them from.
     """
+    import asyncio
+
+    from valuz_agent.infra import auth_context
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.modules.skills.staging import staging_dir_for_session
 
-    return staging_dir_for_session(session_id, mkdir=True)
+    async def _resolve() -> Path:
+        # Resolve under the SAME owner the TestClient's AuthMiddleware uses, so
+        # the kernel session created via the API is visible here (get_session is
+        # owner-scoped) and write/read land in the same staging dir.
+        token = auth_context.set_current_user_id(resolve_local_user_id())
+        try:
+            return await staging_dir_for_session(session_id, mkdir=True)
+        finally:
+            auth_context.reset_current_user_id(token)
+
+    return asyncio.run(_resolve())
 
 
 def _write_staging_skill(
@@ -211,7 +236,7 @@ def test_start_create_chat_returns_session_id(isolated_app):  # type: ignore[no-
     assert res.status_code == 201, res.text
     body = res.json()
     assert "session_id" in body
-    assert "authoring_workspace_id" in body
+    assert "authoring_project_id" in body
 
 
 def test_scan_returns_empty_slugs_for_fresh_session(isolated_app):  # type: ignore[no-untyped-def]
@@ -332,7 +357,7 @@ def test_sync_unknown_slug_returns_404(isolated_app):  # type: ignore[no-untyped
     assert res.status_code == 404
 
 
-def test_sync_project_scope_requires_workspace_id(isolated_app):  # type: ignore[no-untyped-def]
+def test_sync_project_scope_requires_project_id(isolated_app):  # type: ignore[no-untyped-def]
     client = isolated_app["client"]
     staging: Path = isolated_app["staging"]
     sid = client.post("/v1/skills/create/chat/start").json()["session_id"]
@@ -367,6 +392,13 @@ def test_optimize_copies_existing_skill_into_staging(isolated_app):  # type: ign
     from valuz_agent.api.deps import get_skill_service
 
     async def _refresh_index() -> None:
+        # Run the scan under the SAME owner the TestClient's AuthMiddleware
+        # resolves (the local install id), so the owner-scoped index lookups
+        # match the subsequent HTTP calls instead of the conftest test owner.
+        from valuz_agent.infra import auth_context
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
+        token = auth_context.set_current_user_id(resolve_local_user_id())
         gen = get_skill_service()
         svc = await gen.__anext__()
         try:
@@ -374,6 +406,7 @@ def test_optimize_copies_existing_skill_into_staging(isolated_app):  # type: ign
         finally:
             with contextlib.suppress(StopAsyncIteration):
                 await gen.__anext__()
+            auth_context.reset_current_user_id(token)
 
     asyncio.run(_refresh_index())
 
@@ -431,3 +464,28 @@ def test_per_session_extra_skills_round_trip(isolated_app):  # type: ignore[no-u
     # Re-fetch confirms persistence.
     again = client.get(f"/v1/sessions/{sid}/skills").json()
     assert sorted(again["skill_ids"]) == ["official:bar", "user:foo"]
+
+
+def test_rescan_skills_picks_up_new_disk_skill(isolated_app):  # type: ignore[no-untyped-def]
+    """POST /v1/skills/scan re-indexes the disk and returns the count. Adding a
+    skill folder after boot and rescanning bumps the indexed count by one — the
+    manual counterpart of the boot scan, so a just-added skill resolves without
+    a restart."""
+    client = isolated_app["client"]
+    user_skills: Path = isolated_app["user_skills"]
+
+    before = client.post("/v1/skills/scan")
+    assert before.status_code == 200, before.text
+    base = before.json()["indexed"]
+    assert isinstance(base, int)
+
+    skill_dir = user_skills / "my-fresh-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        '---\nname: "my-fresh-skill"\ndescription: "Fresh"\n---\n\nBody\n',
+        encoding="utf-8",
+    )
+
+    after = client.post("/v1/skills/scan")
+    assert after.status_code == 200, after.text
+    assert after.json()["indexed"] == base + 1
