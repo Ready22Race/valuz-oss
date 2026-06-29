@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
+from valuz_agent.modules.projects.models import ProjectRow
 
 
 class AgentDatastore:
@@ -147,11 +148,19 @@ class ProjectMemberDatastore:
 
         Powers the delete guard (block deleting a still-deployed agent) and
         the agent detail page's「派驻于 N 个项目」panel.
+
+        Join through ``ProjectRow`` so stale member rows left behind by older
+        project-delete code no longer count as live deployments.
         """
         return list(
             (
                 await self._db.execute(
                     select(ProjectMemberRow)
+                    .join(
+                        ProjectRow,
+                        (ProjectRow.id == ProjectMemberRow.project_id)
+                        & (ProjectRow.user_id == ProjectMemberRow.user_id),
+                    )
                     .where(
                         ProjectMemberRow.source_agent_slug == source_agent_slug,
                         ProjectMemberRow.user_id == user_id,
@@ -183,4 +192,14 @@ class ProjectMemberDatastore:
             )
         )
         await self._db.commit()
-        return bool(res.rowcount)
+        return bool(getattr(res, "rowcount", 0))
+
+    async def delete_by_project(self, user_id: str, project_id: str) -> int:
+        res = await self._db.execute(
+            sa_delete(ProjectMemberRow).where(
+                ProjectMemberRow.project_id == project_id,
+                ProjectMemberRow.user_id == user_id,
+            )
+        )
+        await self._db.commit()
+        return int(getattr(res, "rowcount", 0) or 0)

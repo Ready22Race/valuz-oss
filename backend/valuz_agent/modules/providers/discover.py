@@ -50,6 +50,12 @@ class ModelDiscoveryError(RuntimeError):
         self.reason = reason
 
 
+@dataclass(frozen=True)
+class DiscoveredModel:
+    id: str
+    label: str | None = None
+
+
 async def discover_models(
     *,
     base_url: str,
@@ -57,6 +63,23 @@ async def discover_models(
     protocol: ApiProtocol,
     client: httpx.AsyncClient | None = None,
 ) -> list[str]:
+    """Fetch model ids from the provider's upstream."""
+    models = await discover_model_entries(
+        base_url=base_url,
+        api_key=api_key,
+        protocol=protocol,
+        client=client,
+    )
+    return [m.id for m in models]
+
+
+async def discover_model_entries(
+    *,
+    base_url: str,
+    api_key: str,
+    protocol: ApiProtocol,
+    client: httpx.AsyncClient | None = None,
+) -> list[DiscoveredModel]:
     """Fetch the model id list from the provider's upstream.
 
     Parameters
@@ -109,7 +132,7 @@ async def _try_candidates(
     candidates: list[str],
     headers: dict[str, str],
     protocol: ApiProtocol,
-) -> list[str]:
+) -> list[DiscoveredModel]:
     # Error messages here are surfaced verbatim in the add-provider
     # dialog (frontend extracts ``detail.reason`` from FastAPI's 422
     # body), so write them as Chinese product copy, not engineer notes.
@@ -144,12 +167,18 @@ async def _try_candidates(
             last_reason = "服务方返回格式异常，无法解析模型列表"
             continue
 
-        ids = _extract_model_ids(payload, protocol)
-        if not ids:
+        models = _extract_model_entries(payload, protocol)
+        if not models:
             last_reason = "服务方未返回任何可用模型"
             continue
 
-        return sorted(set(ids))
+        by_id: dict[str, DiscoveredModel] = {}
+        for model in models:
+            if model.id not in by_id:
+                by_id[model.id] = model
+            elif by_id[model.id].label is None and model.label is not None:
+                by_id[model.id] = model
+        return [by_id[mid] for mid in sorted(by_id)]
 
     raise ModelDiscoveryError(last_reason or "服务方未提供可用的模型列表接口")
 
@@ -161,13 +190,18 @@ def _extract_model_ids(payload: object, protocol: ApiProtocol) -> list[str]:
     Items missing an ``id`` are skipped (rather than raising) so a
     well-formed list with one bad row still discovers the rest.
     """
+    return [m.id for m in _extract_model_entries(payload, protocol)]
+
+
+def _extract_model_entries(payload: object, protocol: ApiProtocol) -> list[DiscoveredModel]:
+    """Pull model ids and optional display labels from an upstream response."""
     if not isinstance(payload, dict):
         return []
     items = payload.get("data")
     if not isinstance(items, list):
         return []
 
-    ids: list[str] = []
+    models: list[DiscoveredModel] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -176,8 +210,9 @@ def _extract_model_ids(payload: object, protocol: ApiProtocol) -> list[str]:
             continue
         if protocol == "anthropic":
             raw = _strip_anthropic_date_suffix(raw)
-        ids.append(raw)
-    return ids
+        label = item.get("display_name") or item.get("name")
+        models.append(DiscoveredModel(id=raw, label=label if isinstance(label, str) else None))
+    return models
 
 
 def _strip_anthropic_date_suffix(model_id: str) -> str:
@@ -428,10 +463,12 @@ def _extract_error_reason(payload: object) -> str | None:
 __all__ = [
     "ApiProtocol",
     "DISCOVERY_TIMEOUT_SECONDS",
+    "DiscoveredModel",
     "PING_TIMEOUT_SECONDS",
     "ModelDiscoveryError",
     "PingBatchResult",
     "discover_models",
+    "discover_model_entries",
     "ping_credentials",
     "ping_credentials_batch",
 ]

@@ -127,6 +127,8 @@ _RUNTIME_TO_DEFAULT_PROTOCOL: dict[RuntimeProvider, ApiProtocol] = {
     "deepagents": "openai_completion",
 }
 
+_ZHIPU_CODING_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+
 
 async def resolve_model_provider(
     *,
@@ -299,6 +301,8 @@ def _resolve_base_url(provider: ProviderRow, api_protocol: ApiProtocol) -> str |
             return descriptor.anthropic_base_url
         if descriptor.default_base_url:
             return f"{descriptor.default_base_url.rstrip('/')}/anthropic"
+        return row_base_url
+    if provider.provider_kind == "zhipu" and row_base_url == _ZHIPU_CODING_BASE_URL:
         return row_base_url
     return descriptor.default_base_url or row_base_url
 

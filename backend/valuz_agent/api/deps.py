@@ -13,6 +13,7 @@ from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.integrations.docs_embedded import EmbeddedDocsRuntime
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.integrations.skills_official import OfficialSkillSource
+from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.automations.datastore import AutomationDatastore
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
@@ -91,6 +92,7 @@ async def get_project_service() -> AsyncGenerator[ProjectService, None]:
             automation_datastore=AutomationDatastore(db),
             skill_datastore=SkillDatastore(db),
             connector_datastore=ConnectorDatastore(db),
+            member_datastore=ProjectMemberDatastore(db),
         )
 
 

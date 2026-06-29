@@ -121,6 +121,7 @@ export interface PingResponse {
 
 export interface ProbeModelsResponse {
   models: string[];
+  model_labels: Record<string, string>;
   suggested_default: string | null;
 }
 
@@ -131,4 +132,5 @@ export interface DiscoverModelsResponse {
   /** Provider's full model_options after merging discovered ids with
    *  any user-added entries (sorted, de-duplicated). */
   merged: string[];
+  model_labels: Record<string, string>;
 }

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from valuz_agent.api.deps import get_provider_service, require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
@@ -116,6 +116,7 @@ class ProbeModelsRequest(BaseModel):
 
 class ProbeModelsResponse(BaseModel):
     models: list[str]
+    model_labels: dict[str, str] = Field(default_factory=dict)
     suggested_default: str | None = None
 
 
@@ -371,6 +372,7 @@ class DiscoverModelsResponse(BaseModel):
     provider_id: str
     discovered: list[str]
     merged: list[str]
+    model_labels: dict[str, str] = Field(default_factory=dict)
 
 
 @router.post("/{provider_id}/discover-models")

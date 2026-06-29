@@ -41,6 +41,10 @@ export const ApiKeyConfigPage = () => {
   const [discoveredModels, setDiscoveredModels] = useState<string[] | null>(
     null,
   );
+  const [discoveredModelLabels, setDiscoveredModelLabels] = useState<Record<
+    string,
+    string
+  > | null>(null);
   const [urlProvider, setUrlProvider] = useState<string | null>(null);
 
   const isCustom = providerKind === "compatible";
@@ -115,6 +119,7 @@ export const ApiKeyConfigPage = () => {
     setTestStatus("idle");
     setTestMsg("");
     setDiscoveredModels(null);
+    setDiscoveredModelLabels(null);
   }, [provider]);
 
   // No protocol-driven baseUrl flip needed: built-in providers no longer
@@ -133,6 +138,7 @@ export const ApiKeyConfigPage = () => {
         protocol: protocolEditable ? protocol : undefined,
       });
       setDiscoveredModels(result.models);
+      setDiscoveredModelLabels(result.model_labels ?? null);
       setTestStatus("ok");
       setTestMsg(
         `${t("common.success" as Parameters<typeof t>[0])} · ${result.models.length}`,
@@ -243,18 +249,21 @@ export const ApiKeyConfigPage = () => {
               setApiKey(v);
               setTestStatus("idle");
               setDiscoveredModels(null);
+              setDiscoveredModelLabels(null);
             }}
             baseUrl={baseUrl}
             onBaseUrlChange={(v) => {
               setBaseUrl(v);
               setTestStatus("idle");
               setDiscoveredModels(null);
+              setDiscoveredModelLabels(null);
             }}
             showEndpoint={showEndpoint}
             endpointReadOnly={!isCustom}
             testStatus={testStatus}
             testMsg={testMsg}
             discoveredModels={discoveredModels}
+            discoveredModelLabels={discoveredModelLabels}
           />
         </div>
 

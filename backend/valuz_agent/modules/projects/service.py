@@ -5,6 +5,7 @@ import mimetypes
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -122,6 +123,10 @@ class ProjectDeletePreview:
     doc_binding_count: int
     schedule_count: int
     skill_config_count: int
+
+
+class ProjectMemberCleanup(Protocol):
+    async def delete_by_project(self, user_id: str, project_id: str) -> int: ...
 
 
 @dataclass
@@ -259,6 +264,7 @@ class ProjectService:
         automation_datastore: AutomationDatastore | None = None,
         skill_datastore: SkillDatastore | None = None,
         connector_datastore: ConnectorDatastore | None = None,
+        member_datastore: ProjectMemberCleanup | None = None,
     ) -> None:
         self._ds = datastore
         self._bus = event_bus
@@ -271,6 +277,7 @@ class ProjectService:
         self._automations = automation_datastore
         self._skills = skill_datastore
         self._connectors = connector_datastore
+        self._members = member_datastore
 
     async def ensure_chat_project(self, user_id: str) -> None:
         existing = await self._ds.get_chat_project(user_id)
@@ -482,6 +489,8 @@ class ProjectService:
             await self._automations.delete_all_for_project(user_id, project_id)
         if self._skills:
             await self._skills.set_project_skills(user_id, project_id, [])
+        if self._members:
+            await self._members.delete_by_project(user_id, project_id)
         await self._ds.delete(user_id, project_id)
         # Source-driven forgetting (memory-system-design §11): a deleted project's
         # centralized memory dir is Valuz-owned (never the user's bound repo), so
