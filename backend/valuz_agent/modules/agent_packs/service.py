@@ -124,9 +124,7 @@ class AgentPackService:
         # Install embedded (user-authored) skills carried inside the archive.
         embedded = [s.slug for s in manifest.skills if s.source == "embedded"]
         if embedded and embedded_skills_root is not None:
-            await asyncio.to_thread(
-                self._install_embedded_skills, embedded_skills_root, embedded
-            )
+            await asyncio.to_thread(self._install_embedded_skills, embedded_skills_root, embedded)
 
         # Index the just-installed skills NOW so the pack's agents resolve them
         # immediately. Without this they're only picked up by the next boot scan
@@ -187,9 +185,7 @@ class AgentPackService:
             created += 1
 
         pack_id = manifest.collection.id if manifest.collection else "agent-pack"
-        logger.info(
-            "agent-packs: import %r — created=%d skipped=%d", pack_id, created, skipped
-        )
+        logger.info("agent-packs: import %r — created=%d skipped=%d", pack_id, created, skipped)
         return {
             "template_id": pack_id,
             "created": created,
@@ -229,23 +225,7 @@ class AgentPackService:
         skill_slugs: list[str] = []
         connector_slugs: list[str] = []
         for a in agents:
-            pack_agents.append(
-                PackAgent(
-                    slug=a.slug,
-                    name=a.name,
-                    description=a.description or "",
-                    instructions=a.instructions or "",
-                    avatar=a.avatar,
-                    runtime=a.runtime,
-                    model_hint=a.model or None,
-                    effort=a.effort,
-                    # Sanitize each slug to a single safe segment — some installs
-                    # stored it as a full path (Windows drive letters etc.), which
-                    # must not leak into the portable manifest or the archive.
-                    skills=[sanitize_skill_slug(s) for s in (a.skills or [])],
-                    connectors=list(a.connector_types or []),
-                )
-            )
+            pack_agents.append(self.pack_agent_from_row(a))
             for s in a.skills or []:
                 if s not in skill_slugs:
                     skill_slugs.append(s)
@@ -323,6 +303,31 @@ class AgentPackService:
             connectors=conns_idx,
         )
         return manifest, skill_dirs
+
+    def pack_agent_from_row(self, row: Any) -> PackAgent:
+        """Build a portable :class:`PackAgent` snapshot from a library
+        ``AgentRow``.
+
+        Drops ``provider_id`` (machine-local), demotes ``model``→
+        ``model_hint`` (the concrete ``(provider_id, model)`` is re-resolved
+        against the recipient's channel at import time), and sanitizes each
+        carried skill slug to a single safe archive segment. The single
+        source of truth for this projection — ``_build_export_manifest`` and
+        ``ProjectPackService`` both call it so the agent-pack and
+        project-pack shapes never drift.
+        """
+        return PackAgent(
+            slug=row.slug,
+            name=row.name,
+            description=row.description or "",
+            instructions=row.instructions or "",
+            avatar=row.avatar,
+            runtime=row.runtime,
+            model_hint=row.model or None,
+            effort=row.effort,
+            skills=[sanitize_skill_slug(s) for s in (row.skills or [])],
+            connectors=list(row.connector_types or []),
+        )
 
     # -- import (upload → preview → confirm) ------------------------------
 

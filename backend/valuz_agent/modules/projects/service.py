@@ -91,9 +91,7 @@ CODE_EXTENSIONS = frozenset(
         "astro",
     }
 )
-PLAIN_EXTENSIONS = frozenset(
-    {"txt", "log", "env", "gitignore", "dockerignore", "editorconfig"}
-)
+PLAIN_EXTENSIONS = frozenset({"txt", "log", "env", "gitignore", "dockerignore", "editorconfig"})
 HTML_EXTENSIONS = frozenset({"html", "htm"})
 DOCX_EXTENSIONS = frozenset({"docx"})
 SPREADSHEET_EXTENSIONS = frozenset({"csv", "xls", "xlsx"})
@@ -340,6 +338,60 @@ class ProjectService:
         await self._ds.create(user_id, row)
         return _row_to_detail(row, cwd=self.resolve_project_cwd(row))
 
+    async def get_by_name(self, user_id: str, name: str) -> ProjectRow | None:
+        """Exact-name passthrough to the datastore (used by project import's
+        name-collision check). Returns ``None`` when no project of that name
+        exists for the caller."""
+        return await self._ds.get_by_name(user_id, name)
+
+    async def create_project_from_pack(
+        self,
+        user_id: str,
+        name: str,
+        kind: str,
+        icon: str | None,
+        instructions_md: str | None,
+        root_path: str | None = None,
+    ) -> ProjectRow:
+        """Create a project from an imported pack's metadata.
+
+        Mints a fresh id. If ``root_path`` is supplied (user picked a
+        folder in the import dialog), it is resolved + uniqueness-checked
+        against existing projects and used verbatim — same rule as
+        ``create_project``. Otherwise a managed cwd under
+        ``data_dir/projects/{id}/`` is created (cross-machine portability:
+        the source machine's ``root_path`` is never reused). Only
+        ``project`` kind is supported — chat projects are not exportable.
+        """
+        from uuid import uuid4
+
+        if kind != "project":
+            raise ValueError(f"create_project_from_pack does not support kind={kind!r}")
+        new_id = uuid4().hex
+        if root_path and root_path.strip():
+            resolved_root = str(Path(root_path).resolve())
+            existing = await self._ds.get_by_root_path(user_id, resolved_root)
+            if existing:
+                raise ValueError(f"directory already bound to a project: {resolved_root}")
+        else:
+            # Imported projects without a user-picked folder get a managed
+            # cwd under data_dir/projects/{id}/ (mirrors chat projects) so
+            # they're still cross-machine portable.
+            managed_cwd = fs_registry.data_dir() / "projects" / new_id
+            managed_cwd.mkdir(parents=True, exist_ok=True)
+            resolved_root = str(managed_cwd)
+        row = ProjectRow(
+            id=new_id,
+            name=name,
+            kind="project",
+            root_path=resolved_root,
+            icon=icon,
+            instructions_md=(instructions_md or "").strip() or None,
+            sort_order=10,
+        )
+        await self._ds.create(user_id, row)
+        return row
+
     async def rename_project(self, user_id: str, project_id: str, name: str) -> ProjectDetail:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
@@ -585,9 +637,7 @@ class ProjectService:
             else:
                 content = ExternalArtifactContent(
                     kind="external",
-                    reason=(
-                        f"{preview_kind.upper()} is larger than the in-app parsing limit."
-                    ),
+                    reason=(f"{preview_kind.upper()} is larger than the in-app parsing limit."),
                 )
         else:
             content = ExternalArtifactContent(
