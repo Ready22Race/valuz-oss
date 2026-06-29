@@ -609,9 +609,9 @@ export const CreateAutomationDialog = ({
           {/* 所属项目 + 智能体 share one row. The project field is dropped when
               there's neither a selectable target nor a fixed project, so the
               agent field then spans the full width. */}
-          <div className="flex items-start gap-3">
+          <div className="grid grid-cols-2 items-start gap-3">
             {(showTargetSelector || fixedTargetName) && (
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0">
                 {showTargetSelector ? (
                   <FormField
                     label={t(
@@ -622,7 +622,7 @@ export const CreateAutomationDialog = ({
                       value={selectedTargetId ?? ""}
                       onValueChange={(v) => v && onSelectTarget?.(v)}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger className="w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -652,7 +652,7 @@ export const CreateAutomationDialog = ({
                     {/* Disabled Select = the same control, locked: the dimmed
                         trigger + non-interactive chevron read as "fixed". */}
                     <Select value="__fixed__" disabled>
-                      <SelectTrigger>
+                      <SelectTrigger className="w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -666,7 +666,13 @@ export const CreateAutomationDialog = ({
               </div>
             )}
 
-            <div className="min-w-0 flex-1">
+            <div
+              className={
+                showTargetSelector || fixedTargetName
+                  ? "min-w-0"
+                  : "col-span-2 min-w-0"
+              }
+            >
               <FormField
                 label={t("automation.agentLabel" as Parameters<typeof t>[0])}
               >
@@ -675,7 +681,7 @@ export const CreateAutomationDialog = ({
                   onValueChange={setAgentSlug}
                   disabled={agents.length === 0}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger className="w-full">
                     <SelectValue
                       placeholder={
                         agents.length === 0
