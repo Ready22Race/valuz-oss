@@ -34,19 +34,20 @@ from valuz_agent.modules.agent_packs.manifest import (
     PackSkill,
     resolve_text,
 )
-from valuz_agent.modules.agent_packs.packaging import (
+from valuz_agent.modules.agents.service import AgentService
+from valuz_agent.modules.packs_common import (
+    PackManifest,
     build_archive,
     embedded_skill_dir,
     extract_archive,
     sanitize_skill_slug,
 )
-from valuz_agent.modules.agents.service import AgentService
 
 logger = logging.getLogger(__name__)
 
 # Staged uploads between preview and confirm: preview_id → (manifest, temp root).
 # The temp root holds extracted embedded skills; confirm consumes + cleans it.
-_pack_import_stage: dict[str, tuple[AgentPackManifest, Path]] = {}
+_pack_import_stage: dict[str, tuple[PackManifest, Path]] = {}
 
 
 class AgentPackService:
@@ -100,7 +101,7 @@ class AgentPackService:
     async def import_manifest(
         self,
         user_id: str,
-        manifest: AgentPackManifest,
+        manifest: AgentPackManifest | PackManifest,
         *,
         runtime: str,
         provider_id: str,
@@ -110,6 +111,11 @@ class AgentPackService:
     ) -> dict[str, Any]:
         """Install the pack's skills, register its connectors, then create its
         agents (de-dup by slug). Returns ``{pack_id, created, skipped, roles}``.
+
+        Accepts both the unified :class:`PackManifest` (user imports / project
+        packs) and the legacy v1 :class:`AgentPackManifest` (built-in packs):
+        the install path only reads the shared ``agents`` / ``skills`` /
+        ``connectors`` / ``collection`` fields, which both models carry.
 
         ``embedded_skills_root`` is the extracted archive root for a user-imported
         pack — ``embedded`` skills are copied from ``<root>/skills/<slug>/`` into
@@ -218,7 +224,7 @@ class AgentPackService:
         user_id: str,
         agents: list[Any],
         collection: dict[str, Any] | None,
-    ) -> tuple[AgentPackManifest, dict[str, Path]]:
+    ) -> tuple[PackManifest, dict[str, Path]]:
         from valuz_agent.adapters.capability_resolver import resolve_skill_slugs_to_paths
 
         pack_agents: list[PackAgent] = []
@@ -296,7 +302,7 @@ class AgentPackService:
             scenario=col.get("scenario") or "",
             icon=col.get("icon"),
         )
-        manifest = AgentPackManifest(
+        manifest = PackManifest(
             collection=collection_obj,
             agents=pack_agents,
             skills=skills_idx,
@@ -338,6 +344,15 @@ class AgentPackService:
             manifest, root = extract_archive(data)
         except Exception as exc:
             raise PackImportFailed(str(exc)) from exc
+
+        # This endpoint imports an agent collection. A project pack (carries a
+        # ``project`` target, no ``collection``) belongs to the project import
+        # flow — reject it clearly instead of half-importing its agents.
+        if manifest.collection is None:
+            shutil.rmtree(root, ignore_errors=True)
+            raise PackImportFailed(
+                "this is a project pack — import it from the projects page, not here"
+            )
 
         preview_id = f"pack-{uuid4().hex[:8]}"
         _pack_import_stage[preview_id] = (manifest, root)
@@ -441,7 +456,9 @@ class AgentPackService:
             except Exception:  # noqa: BLE001 — one bad skill shouldn't sink the import
                 logger.exception("agent-packs: failed to install embedded skill %s", slug)
 
-    async def _register_connectors(self, user_id: str, manifest: AgentPackManifest) -> None:
+    async def _register_connectors(
+        self, user_id: str, manifest: AgentPackManifest | PackManifest
+    ) -> None:
         """Register the pack's connectors as the user's ConnectorRows (idempotent
         by slug). These are deferred from the default catalog, so importing the
         team is what makes them appear and resolve. Best-effort: a bad connector

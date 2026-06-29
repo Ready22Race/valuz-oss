@@ -191,7 +191,7 @@ async def test_import_pack_indexes_embedded_skills(
         PackCollection,
         PackSkill,
     )
-    from valuz_agent.modules.agent_packs.packaging import build_archive, extract_archive
+    from valuz_agent.modules.packs_common import build_archive, extract_archive
 
     skill_src = tmp_path / "src" / "my-skill"
     skill_src.mkdir(parents=True)
@@ -269,7 +269,7 @@ def test_packaging_roundtrip(tmp_path) -> None:
         PackCollection,
         PackSkill,
     )
-    from valuz_agent.modules.agent_packs.packaging import (
+    from valuz_agent.modules.packs_common import (
         build_archive,
         embedded_skill_dir,
         extract_archive,
@@ -300,7 +300,7 @@ def test_packaging_roundtrip(tmp_path) -> None:
 
 
 def test_extract_rejects_non_zip() -> None:
-    from valuz_agent.modules.agent_packs.packaging import PackArchiveError, extract_archive
+    from valuz_agent.modules.packs_common import PackArchiveError, extract_archive
 
     with pytest.raises(PackArchiveError):
         extract_archive(b"not a zip file")

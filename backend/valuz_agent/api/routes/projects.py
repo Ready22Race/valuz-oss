@@ -262,7 +262,7 @@ async def set_connectors(
 
 
 # ---------------------------------------------------------------------------
-# Export / Import (.valuz-project archives)
+# Export / Import (.valuzpack archives — unified pack format, project target)
 # ---------------------------------------------------------------------------
 
 
@@ -354,7 +354,8 @@ async def export_project(
     project_svc: ProjectService = Depends(get_project_service),
 ) -> StreamingResponse:
     """Export the project (team + automations + project skills + project
-    connectors + memory) as a downloadable ``.valuz-project`` archive."""
+    connectors + memory) as a downloadable ``.valuzpack`` archive (the unified
+    pack format — a project pack carries a ``project`` target)."""
     try:
         data = await svc.export_project(user_id, project_id)
     except ProjectPackNotFound as exc:
@@ -368,7 +369,7 @@ async def export_project(
         name_stem = (await project_svc.get_project(user_id, project_id)).name
     except Exception:  # noqa: BLE001 — filename best-effort
         pass
-    filename = f"{_safe_project_filename(name_stem)}.valuz-project"
+    filename = f"{_safe_project_filename(name_stem)}.valuzpack"
     return StreamingResponse(
         iter([data]),
         media_type="application/zip",
@@ -385,9 +386,9 @@ async def import_project_preview(
     user_id: str = Depends(require_current_user_id),
     svc: ProjectPackService = Depends(get_project_pack_service),
 ) -> ImportProjectPreviewResponse:
-    """Stage an uploaded ``.valuz-project`` archive and return what's
+    """Stage an uploaded ``.valuzpack`` project archive and return what's
     inside (members, automations, skills, connectors) plus a ``preview_id``
-    to confirm with."""
+    to confirm with. The legacy ``.valuz-project`` format is rejected."""
     data = await file.read()
     try:
         preview = await svc.preview_import(user_id, data)

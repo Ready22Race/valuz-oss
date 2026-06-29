@@ -10,7 +10,7 @@ const { exportProjectMock } = vi.hoisted(() => ({
     .fn()
     .mockResolvedValue({
       blob: new Blob(["x"]),
-      filename: "demo.valuz-project",
+      filename: "demo.valuzpack",
     }),
 }));
 

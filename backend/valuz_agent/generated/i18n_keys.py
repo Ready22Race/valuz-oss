@@ -1102,6 +1102,7 @@ I18nKey = Literal[
     "project.export",
     "project.exportDone",
     "project.exportFailed",
+    "project.exportFileName",
     "project.exportNote",
     "project.exportSub",
     "project.exportTitle",

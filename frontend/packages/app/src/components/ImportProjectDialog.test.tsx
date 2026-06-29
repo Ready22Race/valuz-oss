@@ -83,7 +83,7 @@ describe("ImportProjectDialog", () => {
     previewMock.mockResolvedValue(conflictPreview);
     render(
       <ImportProjectDialog
-        file={new File(["x"], "demo.valuz-project")}
+        file={new File(["x"], "demo.valuzpack")}
         open
         onOpenChange={() => {}}
       />,
@@ -103,7 +103,7 @@ describe("ImportProjectDialog", () => {
     const onImported = vi.fn();
     render(
       <ImportProjectDialog
-        file={new File(["x"], "demo.valuz-project")}
+        file={new File(["x"], "demo.valuzpack")}
         open
         onOpenChange={() => {}}
         onImported={onImported}

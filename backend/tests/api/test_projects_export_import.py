@@ -266,7 +266,7 @@ async def test_round_trip_recreates_project_members_automations_memory(client, t
     data = resp.content
 
     # Preview
-    files = {"file": ("p.valuz-project", io.BytesIO(data), "application/zip")}
+    files = {"file": ("p.valuzpack", io.BytesIO(data), "application/zip")}
     prev = await c.post("/v1/projects/import-preview", files=files)
     assert prev.status_code == 200, prev.text
     body = prev.json()
@@ -310,7 +310,7 @@ async def test_name_conflict_skip(client) -> None:
     assert resp.status_code == 200
     data = resp.content
 
-    files = {"file": ("p.valuz-project", io.BytesIO(data), "application/zip")}
+    files = {"file": ("p.valuzpack", io.BytesIO(data), "application/zip")}
     prev = await c.post("/v1/projects/import-preview", files=files)
     preview_id = prev.json()["preview_id"]
 
@@ -338,7 +338,7 @@ async def test_library_agent_slug_dedup(client) -> None:
     await deps.session.delete(await deps.session.get(ProjectRow, project.id))
     await deps.session.commit()
 
-    files = {"file": ("p.valuz-project", io.BytesIO(data), "application/zip")}
+    files = {"file": ("p.valuzpack", io.BytesIO(data), "application/zip")}
     prev = await c.post("/v1/projects/import-preview", files=files)
     body = prev.json()
     assert any(m["source_agent_slug"] == "shared-src" and m["in_library"] for m in body["members"])
@@ -395,7 +395,7 @@ async def test_two_members_same_source_dedupe_false(client) -> None:
     await deps.session.delete(await deps.session.get(ProjectRow, project.id))
     await deps.session.commit()
 
-    files = {"file": ("p.valuz-project", io.BytesIO(data), "application/zip")}
+    files = {"file": ("p.valuzpack", io.BytesIO(data), "application/zip")}
     prev = await c.post("/v1/projects/import-preview", files=files)
     body = prev.json()
     confirm = await c.post("/v1/projects/import/confirm", json={"preview_id": body["preview_id"]})

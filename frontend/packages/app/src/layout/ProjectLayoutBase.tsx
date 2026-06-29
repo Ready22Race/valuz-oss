@@ -1017,7 +1017,7 @@ export function ProjectLayoutBase({
       <input
         ref={importInputRef}
         type="file"
-        accept=".valuz-project,.zip"
+        accept=".valuzpack,.zip"
         className="hidden"
         onChange={(e) => {
           const f = e.target.files?.[0] ?? null;

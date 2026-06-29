@@ -2676,13 +2676,14 @@ paths:
 
   /v1/projects/{project_id}/export:
     get:
-      summary: Export a project as a downloadable .valuz-project archive
+      summary: Export a project as a downloadable .valuzpack archive
       operationId: exportProject
       tags: [projects]
       description: |
-        Build a portable .valuz-project (zip) for the given project — its
-        metadata, team members (each embedding its source library agent
-        snapshot), automations, project-scoped skill configs, project-scoped
+        Build a portable .valuzpack (zip) for the given project in the unified
+        pack format (schema_version 2, a `project` target) — its metadata, team
+        members (slim handles referencing the hoisted top-level agents[]
+        payload), automations, project-scoped skill configs, project-scoped
         connector slugs (definitions in the shared connectors[] index, secrets
         stripped), and the on-disk project memory directory. Chat projects are
         not exportable (422).
@@ -2693,7 +2694,7 @@ paths:
           schema: {type: string}
       responses:
         "200":
-          description: The .valuz-project archive
+          description: The .valuzpack archive
           content:
             application/zip:
               schema: {type: string, format: binary}
@@ -2712,15 +2713,17 @@ paths:
 
   /v1/projects/import-preview:
     post:
-      summary: Upload a .valuz-project and stage it for import (preview)
+      summary: Upload a .valuzpack project and stage it for import (preview)
       operationId: importProjectPreview
       tags: [projects]
       description: |
-        Parse + stage an uploaded .valuz-project. Returns a preview of what it
+        Parse + stage an uploaded .valuzpack carrying a `project` target.
+        Returns a preview of what it
         contains (project meta, members with library state, automations,
         project skills, project connectors, shared skill/connector indexes)
         plus a preview_id to confirm with. Reports a name_conflict flag when a
-        same-named project already exists for the caller.
+        same-named project already exists for the caller. An agent collection
+        pack uploaded here is rejected (400).
       requestBody:
         required: true
         content:
@@ -2746,7 +2749,7 @@ paths:
 
   /v1/projects/import/confirm:
     post:
-      summary: Commit a staged .valuz-project import
+      summary: Commit a staged .valuzpack project import
       operationId: confirmProjectImport
       tags: [projects]
       description: |

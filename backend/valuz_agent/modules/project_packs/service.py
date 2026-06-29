@@ -1,5 +1,5 @@
-"""ProjectPackService — export/import a project as a ``.valuz-project``
-archive.
+"""ProjectPackService — export/import a project as a ``.valuzpack`` archive
+(the unified pack format, ``project`` target).
 
 Mirrors ``AgentPackService`` (export / preview / confirm) and reuses its
 ``pack_agent_from_row`` to build the per-agent portable snapshot, plus
@@ -31,32 +31,29 @@ from uuid import uuid4
 from valuz_agent.adapters.capability_resolver import resolve_skill_slugs_to_paths
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.agent_packs.manifest import (
-    AgentPackManifest,
     PackCollection,
     PackConnector,
     PackSkill,
     resolve_text,
 )
-from valuz_agent.modules.agent_packs.packaging import sanitize_skill_slug
 from valuz_agent.modules.agent_packs.service import AgentPackService
 from valuz_agent.modules.agents.service import AgentService
 from valuz_agent.modules.automations.service import AutomationService
+from valuz_agent.modules.packs_common import (
+    PackAutomation,
+    PackManifest,
+    PackMember,
+    PackProject,
+    PackProjectConnector,
+    PackProjectSkillConfig,
+    build_archive,
+    extract_archive,
+    sanitize_skill_slug,
+)
 from valuz_agent.modules.project_packs.errors import (
     ProjectNotExportable,
     ProjectPackImportFailed,
     ProjectPackNotFound,
-)
-from valuz_agent.modules.project_packs.manifest import (
-    PackAutomation,
-    PackMember,
-    PackProjectConnector,
-    PackProjectSkillConfig,
-    ProjectMeta,
-    ProjectPackManifest,
-)
-from valuz_agent.modules.project_packs.packaging import (
-    build_project_archive,
-    extract_project_archive,
 )
 from valuz_agent.modules.projects.service import ProjectService
 
@@ -65,11 +62,11 @@ logger = logging.getLogger(__name__)
 # Staged uploads between preview and confirm: preview_id → (manifest, temp
 # root). The temp root holds extracted embedded skills + memory; confirm
 # consumes + cleans it. Mirrors AgentPackService._pack_import_stage.
-_project_import_stage: dict[str, tuple[ProjectPackManifest, Path]] = {}
+_project_import_stage: dict[str, tuple[PackManifest, Path]] = {}
 
 
 class ProjectPackService:
-    """Reads/writes ``.valuz-project`` archives. Constructor injects every
+    """Reads/writes ``.valuzpack`` project archives. Constructor injects every
     service the export/import paths need so the module boundary stays
     clean (no sibling datastores imported)."""
 
@@ -90,7 +87,7 @@ class ProjectPackService:
     # ------------------------------------------------------------------
 
     async def export_project(self, user_id: str, project_id: str) -> bytes:
-        """Build a ``.valuz-project`` archive for the given project.
+        """Build a ``.valuzpack`` archive for the given project.
 
         Chat projects are not exportable (they're ephemeral local
         scratch). Raises ``ProjectPackNotFound`` if the id is unknown and
@@ -114,12 +111,18 @@ class ProjectPackService:
         memory_dir = self._resolve_memory_dir(project_id)
 
         skill_dirs = await self._resolve_embedded_skill_dirs(user_id, manifest)
-        return build_project_archive(manifest, skill_dirs, memory_dir)
+        return build_archive(manifest, skill_dirs, memory_dir)
 
-    async def _build_export_manifest(self, user_id: str, project_row: Any) -> ProjectPackManifest:
-        # --- members + their agent snapshots ---
+    async def _build_export_manifest(self, user_id: str, project_row: Any) -> PackManifest:
+        # --- members + the hoisted agent payload ---
+        # Each member is a project-local ``agent_slug`` handle pointing at a
+        # library agent; the agent *definition* lives once in the top-level
+        # ``agents[]`` payload (de-duped by slug), so two handles onto the same
+        # library agent cost one payload entry and two slim members.
         members_data = await self._agents.list_members(user_id, project_row.id)
         pack_members: list[PackMember] = []
+        pack_agents: list[Any] = []
+        seen_agent_slugs: set[str] = set()
         skill_slugs: list[str] = []
         connector_slugs: list[str] = []
         for entry in members_data:
@@ -138,11 +141,13 @@ class ProjectPackService:
                 # Without a source snapshot the member isn't portable.
                 continue
             pack_agent = self._agent_packs.pack_agent_from_row(agent_row)
+            if pack_agent.slug not in seen_agent_slugs:
+                seen_agent_slugs.add(pack_agent.slug)
+                pack_agents.append(pack_agent)
             pack_members.append(
                 PackMember(
                     agent_slug=member.agent_slug,
-                    source_agent_slug=member.source_agent_slug,
-                    agent=pack_agent,
+                    source_agent_slug=member.source_agent_slug or pack_agent.slug,
                 )
             )
             for s in agent_row.skills or []:
@@ -208,18 +213,19 @@ class ProjectPackService:
             # bound root exports an empty connector list.
             pass
 
-        project_meta = ProjectMeta(
+        project = PackProject(
             name=project_row.name,
             kind="project",
             icon=project_row.icon,
             instructions_md=project_row.instructions_md or "",
-        )
-        return ProjectPackManifest(
-            project=project_meta,
             members=pack_members,
             automations=automations,
-            project_skills=project_skills,
-            project_connectors=project_connectors,
+            skills=project_skills,
+            connectors=project_connectors,
+        )
+        return PackManifest(
+            project=project,
+            agents=pack_agents,
             skills=skills_idx,
             connectors=conns_idx,
         )
@@ -229,12 +235,22 @@ class ProjectPackService:
     # ------------------------------------------------------------------
 
     async def preview_import(self, user_id: str, data: bytes) -> dict[str, Any]:
-        """Parse + stage an uploaded ``.valuz-project``; return what it
+        """Parse + stage an uploaded ``.valuzpack`` project; return what it
         contains and how it lands. Performs NO DB writes."""
         try:
-            manifest, root = extract_project_archive(data)
+            manifest, root = extract_archive(data)
         except Exception as exc:
             raise ProjectPackImportFailed(str(exc)) from exc
+
+        # This endpoint imports a project. An agent collection pack (carries a
+        # ``collection`` target, no ``project``) belongs to the agents import
+        # flow — reject it clearly instead of failing deep inside confirm.
+        project = manifest.project
+        if project is None:
+            shutil.rmtree(root, ignore_errors=True)
+            raise ProjectPackImportFailed(
+                "this is an agent pack — import it from the agents page, not here"
+            )
 
         preview_id = f"project-{uuid4().hex[:8]}"
         _project_import_stage[preview_id] = (manifest, root)
@@ -246,17 +262,22 @@ class ProjectPackService:
             else set()
         )
 
-        name_conflict = await self._projects.get_by_name(user_id, manifest.project.name) is not None
+        name_conflict = await self._projects.get_by_name(user_id, project.name) is not None
 
+        # Members are slim handles; resolve each to its agent snapshot in the
+        # top-level ``agents[]`` payload (by source slug) for display.
+        agent_by_slug = {a.slug: a for a in manifest.agents}
         members_preview = []
-        for m in manifest.members:
+        for m in project.members:
+            source_slug = m.source_agent_slug or m.agent_slug
+            agent = agent_by_slug.get(source_slug)
             members_preview.append(
                 {
                     "agent_slug": m.agent_slug,
-                    "source_agent_slug": m.source_agent_slug or m.agent.slug,
-                    "name": resolve_text(m.agent.name),
-                    "description": resolve_text(m.agent.description),
-                    "in_library": m.agent.slug in present_agents,
+                    "source_agent_slug": source_slug,
+                    "name": resolve_text(agent.name) if agent else source_slug,
+                    "description": resolve_text(agent.description) if agent else "",
+                    "in_library": source_slug in present_agents,
                 }
             )
 
@@ -269,7 +290,7 @@ class ProjectPackService:
                 "interval_seconds": a.interval_seconds,
                 "status": a.status,
             }
-            for a in manifest.automations
+            for a in project.automations
         ]
 
         skills_preview = [{"slug": s.slug, "source": s.source} for s in manifest.skills]
@@ -287,19 +308,19 @@ class ProjectPackService:
         return {
             "preview_id": preview_id,
             "project": {
-                "name": manifest.project.name,
-                "kind": manifest.project.kind,
-                "icon": manifest.project.icon,
-                "instructions_md": resolve_text(manifest.project.instructions_md),
+                "name": project.name,
+                "kind": project.kind,
+                "icon": project.icon,
+                "instructions_md": resolve_text(project.instructions_md),
             },
             "name_conflict": name_conflict,
             "members": members_preview,
             "automations": automations_preview,
-            "project_skills": [s.skill_path for s in manifest.project_skills],
-            "project_connectors": [c.slug for c in manifest.project_connectors],
+            "project_skills": [s.skill_path for s in project.skills],
+            "project_connectors": [c.slug for c in project.connectors],
             "skills": skills_preview,
             "connectors": connectors_preview,
-            "has_memory": (root / "memory").is_dir(),
+            "has_memory": bool(project.memory),
         }
 
     async def confirm_import(
@@ -324,19 +345,27 @@ class ProjectPackService:
             )
         manifest, root = staged
         try:
+            project = manifest.project
+            if project is None:
+                raise ProjectPackImportFailed(
+                    "this is an agent pack — import it from the agents page, not here"
+                )
+
             # Re-check name conflict at confirm time (a project created
             # between preview and confirm must not be overwritten).
-            if await self._projects.get_by_name(user_id, manifest.project.name) is not None:
+            if await self._projects.get_by_name(user_id, project.name) is not None:
                 return {
                     "status": "skipped_name_conflict",
                     "project": None,
-                    "project_name": manifest.project.name,
+                    "project_name": project.name,
                 }
 
             # 1) Install skills + connectors + library agents de-duped by slug.
-            synth = AgentPackManifest(
-                collection=PackCollection(name=manifest.project.name),
-                agents=[m.agent for m in manifest.members],
+            #    Reuse the agent-pack install path by presenting the payload as
+            #    a collection manifest (the agents already live in ``agents[]``).
+            synth = PackManifest(
+                collection=PackCollection(name=project.name),
+                agents=list(manifest.agents),
                 skills=manifest.skills,
                 connectors=manifest.connectors,
             )
@@ -355,27 +384,30 @@ class ProjectPackService:
             #    otherwise create_project_from_pack falls back to a managed cwd.
             project_row = await self._projects.create_project_from_pack(
                 user_id,
-                name=manifest.project.name,
-                kind=manifest.project.kind,
-                icon=manifest.project.icon,
-                instructions_md=resolve_text(manifest.project.instructions_md),
+                name=project.name,
+                kind=project.kind,
+                icon=project.icon,
+                instructions_md=resolve_text(project.instructions_md),
                 root_path=root_path,
             )
 
             # 3) Restore memory dir (best-effort — never fail the import).
+            #    Locate it via the manifest's archive-relative ``memory`` pointer;
+            #    guard against a traversal in an untrusted manifest.
             try:
-                src_memory = root / "memory"
-                if src_memory.is_dir():
-                    dest_memory = fs_registry.memory_dir("project", project_id=project_row.id)
-                    shutil.copytree(src_memory, dest_memory, dirs_exist_ok=True)
+                if project.memory:
+                    src_memory = (root / project.memory).resolve()
+                    if src_memory.is_dir() and src_memory.is_relative_to(root.resolve()):
+                        dest_memory = fs_registry.memory_dir("project", project_id=project_row.id)
+                        shutil.copytree(src_memory, dest_memory, dirs_exist_ok=True)
             except Exception:  # noqa: BLE001
                 logger.exception("project-pack: memory restore failed for %s", project_row.id)
 
             # 4) Recreate members, preserving each member's project-local
             #    ``agent_slug`` handle so automations keep resolving.
             recreated_members: list[dict[str, Any]] = []
-            for m in manifest.members:
-                source_slug = m.source_agent_slug or m.agent.slug
+            for m in project.members:
+                source_slug = m.source_agent_slug or m.agent_slug
                 try:
                     await self._agents.deploy_agent(
                         user_id,
@@ -398,7 +430,7 @@ class ProjectPackService:
             automation_errors: list[dict[str, str]] = []
             from valuz_agent.modules.automations.models import AutomationRow
 
-            for a in manifest.automations:
+            for a in project.automations:
                 row = AutomationRow(
                     name=a.name,
                     agent_kind=a.agent_kind,
@@ -433,7 +465,7 @@ class ProjectPackService:
             # 7) Restore project connectors (slugs only; recipient must have
             #    installed the connector for it to activate).
             try:
-                slugs = [c.slug for c in manifest.project_connectors]
+                slugs = [c.slug for c in project.connectors]
                 # Filter to slugs the recipient actually has installed.
                 installed = (
                     {v.slug for v in await self._agents._connectors.list_connectors(user_id)}
@@ -507,7 +539,7 @@ class ProjectPackService:
         return d
 
     async def _resolve_embedded_skill_dirs(
-        self, user_id: str, manifest: ProjectPackManifest
+        self, user_id: str, manifest: PackManifest
     ) -> dict[str, Path]:
         """For every embedded skill in the manifest, resolve its on-disk
         directory; bundled skills are skipped."""
@@ -615,19 +647,19 @@ class ProjectPackService:
             return []
 
     async def _restore_project_skills(
-        self, user_id: str, project_id: str, manifest: ProjectPackManifest
+        self, user_id: str, project_id: str, manifest: PackManifest
     ) -> None:
         """Best-effort restore of project-skill paths. Each path is written
         through the project service's skills datastore so the boundary rule
         is respected."""
         skills_ds = getattr(self._projects, "_skills", None)
-        if skills_ds is None:
+        if skills_ds is None or manifest.project is None:
             return
         try:
             project_detail = await self._projects.get_project(user_id, project_id)
             if project_detail is None or project_detail.kind != "project":
                 return
-            for cfg in manifest.project_skills:
+            for cfg in manifest.project.skills:
                 path = cfg.skill_path
                 if not path:
                     continue
