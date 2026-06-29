@@ -495,13 +495,15 @@ class AutomationService:
                     # The calling session was a project session that asked
                     # for kind=chat — treat as "lazy create".
                     fresh = await self._ws.create_chat_project_for_session(
-                        name=payload.name.strip()
+                        require_current_user_id(), name=payload.name.strip()
                     )
                     project_id = fresh.id
             else:
                 # Automation page "Chat" picker: no calling session, no
                 # explicit ws — lazy-create one named after the automation.
-                fresh = await self._ws.create_chat_project_for_session(name=payload.name.strip())
+                fresh = await self._ws.create_chat_project_for_session(
+                    require_current_user_id(), name=payload.name.strip()
+                )
                 project_id = fresh.id
 
             # 2. Resolve the agent for that project

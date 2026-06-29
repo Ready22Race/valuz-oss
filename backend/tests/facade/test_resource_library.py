@@ -149,7 +149,9 @@ class TestSkillListSmoke:
         from valuz_agent.modules.skills.models import SkillsCatalog
 
         class _FakeSkillService:
-            async def list_catalog(self, project_id: str, **_: object) -> SkillsCatalog:
+            async def list_catalog(
+                self, user_id: str, project_id: str, **_: object
+            ) -> SkillsCatalog:
                 return SkillsCatalog(project_id=project_id, skills=[])
 
         async def _fake_get_skill_service():  # type: ignore[return]
@@ -176,7 +178,9 @@ class TestSkillListSmoke:
         )
 
         class _FakeSkillService:
-            async def list_catalog(self, project_id: str, **_: object) -> SkillsCatalog:
+            async def list_catalog(
+                self, user_id: str, project_id: str, **_: object
+            ) -> SkillsCatalog:
                 return SkillsCatalog(project_id=project_id, skills=[fake_view])
 
         async def _fake_get_skill_service():  # type: ignore[return]
@@ -248,7 +252,7 @@ class TestKbListSmoke:
         """list("kb") should return a list without crashing."""
 
         class _FakeDocService:
-            async def list_kbs(self):
+            async def list_kbs(self, user_id):
                 return []
 
         async def _fake_get_document_service():  # type: ignore[return]

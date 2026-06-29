@@ -537,7 +537,9 @@ class SessionService:
         # path) so the runtime is isolated from sibling chats and the library
         # agent isn't (wrongly) looked up as a member of "chat-default".
         if project_id == "chat-default" and self._project_svc:
-            fresh_ws = await self._project_svc.create_chat_project_for_session()
+            fresh_ws = await self._project_svc.create_chat_project_for_session(
+                require_current_user_id()
+            )
             project_id = fresh_ws.id
 
         kernel_agent_id, agent = await self._resolve_bound_agent(project_id, agent_slug)
@@ -796,7 +798,9 @@ class SessionService:
         # still uses the literal ``"chat-default"`` string as the scope
         # key, independent of any specific project id.
         if project_id == "chat-default" and self._project_svc:
-            fresh_ws = await self._project_svc.create_chat_project_for_session()
+            fresh_ws = await self._project_svc.create_chat_project_for_session(
+                require_current_user_id()
+            )
             project_id = fresh_ws.id
 
         # Apply app-level defaults from Settings → "Default model" (the

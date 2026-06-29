@@ -10,14 +10,14 @@ class AnalyticsService:
     def __init__(self, datastore: AnalyticsDatastore) -> None:
         self._ds = datastore
 
-    async def get_monthly_usage(self, year: int, month: int) -> dict[str, Any]:
+    async def get_monthly_usage(self, user_id: str, year: int, month: int) -> dict[str, Any]:
         # Kernel MessageModel.started_at is Unix epoch ms (BIGINT) since the
         # timestamps-epoch-millis kernel bump — bound the window in epoch ms.
         end_year, end_month = (year + 1, 1) if month == 12 else (year, month + 1)
         start_ms = int(datetime(year, month, 1, tzinfo=UTC).timestamp() * 1000)
         end_ms = int(datetime(end_year, end_month, 1, tzinfo=UTC).timestamp() * 1000)
 
-        rows = await self._ds.monthly_usage_rows(start_ms, end_ms)
+        rows = await self._ds.monthly_usage_rows(user_id, start_ms, end_ms)
 
         models: dict[str, dict[str, Any]] = {}
         daily_overview: dict[str, dict[str, int]] = {}

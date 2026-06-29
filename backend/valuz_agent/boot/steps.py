@@ -538,7 +538,11 @@ async def start_skills(app: FastAPI) -> None:
         pass
 
     from valuz_agent.api.deps import get_skill_service
+    from valuz_agent.infra.auth_context import require_current_user_id
 
+    # Boot context: ``ensure_local_identity`` has seeded the owner for the
+    # startup install id — resolve it once and thread it into the scans.
+    owner = require_current_user_id()
     skill_gen = get_skill_service()
     skill_svc = await skill_gen.__anext__()
     try:
@@ -549,12 +553,12 @@ async def start_skills(app: FastAPI) -> None:
         # references them unable to resolve the skill. This targeted upsert
         # guarantees they are in valuz_skill_index every boot.
         try:
-            indexed = await skill_svc.index_official_skills()
+            indexed = await skill_svc.index_official_skills(owner)
             logger.info("index_official_skills: indexed %d official skill(s)", indexed)
         except Exception:
             logger.exception("index_official_skills failed")
         try:
-            await skill_svc.startup_scan()
+            await skill_svc.startup_scan(owner)
         except Exception:
             # Best-effort, but no longer silent: a failed scan that leaves the
             # index stale was exactly the bug this step hardens against.

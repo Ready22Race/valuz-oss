@@ -54,13 +54,13 @@ TOOL_DESCRIPTION = (
 )
 
 
-async def _resolve_project_id(session_id: str) -> str | None:
+async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
     """Project id for the calling session — read from the host-stamped
     ``metadata.valuz.project_id``. Returns None for quick chats / agent-only
     sessions (no project), which gates the tool to project sessions."""
     if not session_id:
         return None
-    sess = await kernel_client.get_session(require_current_user_id(), session_id)
+    sess = await kernel_client.get_session(user_id, session_id)
     if sess is None:
         return None
     return ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or None
@@ -79,7 +79,10 @@ async def _handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
             content="project_instructions: 'content' is required for set/append", is_error=True
         )
 
-    project_id = await _resolve_project_id(ctx.session_id)
+    # MCP tool boundary: the toolkit server published the caller's owner into
+    # the auth context — resolve it once here and thread it explicitly.
+    user_id = require_current_user_id()
+    project_id = await _resolve_project_id(user_id, ctx.session_id)
     if not project_id:
         return ToolResult(
             content=(
@@ -94,7 +97,6 @@ async def _handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
     from valuz_agent.modules.projects.datastore import ProjectDatastore
     from valuz_agent.modules.projects.service import ProjectService
 
-    user_id = require_current_user_id()
     try:
         # Read path: return the current full instructions (the read half of a
         # deliberate read → revise → set edit).
@@ -104,9 +106,7 @@ async def _handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
             if row is None:
                 return ToolResult(content="project_instructions: project not found", is_error=True)
             return ToolResult(
-                content=json.dumps(
-                    {"instructions": row.instructions_md or ""}, ensure_ascii=False
-                )
+                content=json.dumps({"instructions": row.instructions_md or ""}, ensure_ascii=False)
             )
 
         text = str(content).strip()

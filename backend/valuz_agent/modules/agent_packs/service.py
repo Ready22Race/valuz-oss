@@ -139,14 +139,14 @@ class AgentPackService:
             try:
                 from valuz_agent.modules.skills.service import reindex_official_skills
 
-                await reindex_official_skills()
+                await reindex_official_skills(user_id)
             except Exception:  # noqa: BLE001 — best-effort; the boot scan backstops it
                 logger.exception("reindex_official_skills after pack import failed")
         if embedded:
             try:
                 from valuz_agent.modules.skills.service import reindex_user_skills
 
-                await reindex_user_skills()
+                await reindex_user_skills(user_id)
             except Exception:  # noqa: BLE001 — best-effort; the boot scan backstops it
                 logger.exception("reindex_user_skills after pack import failed")
 

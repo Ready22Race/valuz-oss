@@ -10,7 +10,6 @@ from urllib.parse import quote
 from pydantic import BaseModel, ConfigDict, Field
 
 from valuz_agent.adapters import kernel_client
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.automations.datastore import AutomationDatastore
@@ -282,7 +281,7 @@ class ProjectService:
         row = ProjectRow(name="Chat", kind="chat", sort_order=0)
         await self._ds.create(user_id, row)
 
-    async def create_chat_project_for_session(self, name: str = "Chat") -> ProjectRow:
+    async def create_chat_project_for_session(self, user_id: str, name: str = "Chat") -> ProjectRow:
         """Materialize a fresh, ephemeral chat project for one chat-kind context.
 
         Each call creates a NEW ``ProjectRow(kind="chat")`` and mirrors it
@@ -304,7 +303,7 @@ class ProjectService:
         sessions, not bound to any single chat project's id.
         """
         row = ProjectRow(name=name, kind="chat", sort_order=100)
-        await self._ds.create(require_current_user_id(), row)
+        await self._ds.create(user_id, row)
         return row
 
     async def list_projects(self, user_id: str) -> list[ProjectListItem]:
@@ -422,7 +421,7 @@ class ProjectService:
         # come from the host index, which is cleared in the same sweep.
         try:
             for sid in await project_index.remove_for_project(project_id):
-                await kernel_client.delete_session(require_current_user_id(), sid)
+                await kernel_client.delete_session(user_id, sid)
         except Exception:  # noqa: BLE001
             pass
         if self._docs:

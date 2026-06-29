@@ -35,7 +35,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.config import settings
 from valuz_agent.integrations.skills_filesystem import (
     _default_user_skill_root,
@@ -113,7 +112,7 @@ class StagingMeta:
 # (which previously fell through the cracks of the per-session prompt
 # injection scheme).
 #
-# ``staging_dir_for_session(session_id)`` is preserved as the public
+# ``staging_dir_for_session(user_id, session_id)`` is preserved as the public
 # entry point so the existing scan / sync / optimize / cleanup flows
 # don't have to change at every call site — internally it now resolves
 # the project cwd from the session row and points at
@@ -134,7 +133,7 @@ def staging_root() -> Path:
     return settings.skill_staging_dir.expanduser()
 
 
-async def _resolve_project_cwd_for_session(session_id: str) -> Path | None:
+async def _resolve_project_cwd_for_session(user_id: str, session_id: str) -> Path | None:
     """Look up the project cwd a session is running in.
 
     Returns ``None`` when the kernel session row is missing — the caller
@@ -145,7 +144,7 @@ async def _resolve_project_cwd_for_session(session_id: str) -> Path | None:
     from valuz_agent.infra.fs_registry import fs_registry
 
     try:
-        session = await kernel_client.get_session(require_current_user_id(), session_id)
+        session = await kernel_client.get_session(user_id, session_id)
     except Exception:  # noqa: BLE001 — kernel store transient failures are non-fatal here
         return None
     if session is None:
@@ -180,7 +179,7 @@ async def _resolve_project_cwd_for_session(session_id: str) -> Path | None:
         return None
 
 
-async def staging_dir_for_session(session_id: str, *, mkdir: bool = False) -> Path:
+async def staging_dir_for_session(user_id: str, session_id: str, *, mkdir: bool = False) -> Path:
     """Return the staging directory for a session.
 
     The returned path is ``{project_cwd}/.skill-staging/`` for the
@@ -198,7 +197,7 @@ async def staging_dir_for_session(session_id: str, *, mkdir: bool = False) -> Pa
 
     from valuz_agent.infra.fs_registry import fs_registry
 
-    project_cwd = await _resolve_project_cwd_for_session(session_id)
+    project_cwd = await _resolve_project_cwd_for_session(user_id, session_id)
     if project_cwd is None:
         # Legacy fallback — keeps in-flight staging content discoverable.
         path = staging_root() / session_id
@@ -309,7 +308,7 @@ def _read_manifest_meta(slug_dir: Path) -> tuple[str, str, int | None]:
     return name, description, version
 
 
-async def scan_staging(session_id: str) -> StagingScanResult:
+async def scan_staging(user_id: str, session_id: str) -> StagingScanResult:
     """Enumerate slugs in this session's staging dir.
 
     For each slug we compute the conflict kind against the user skill library:
@@ -319,7 +318,7 @@ async def scan_staging(session_id: str) -> StagingScanResult:
       - diverged: target exists but differs from what we forked from →
         user modified the original elsewhere; suggest fork-as-vN
     """
-    session_dir = await staging_dir_for_session(session_id)
+    session_dir = await staging_dir_for_session(user_id, session_id)
     user_skill_root = _default_user_skill_root()
 
     if not session_dir.exists():
@@ -384,6 +383,7 @@ def _copy_clean(src: Path, dest: Path) -> None:
 
 
 async def sync_slug(
+    user_id: str,
     session_id: str,
     slug: str,
     strategy: SyncStrategy,
@@ -401,7 +401,7 @@ async def sync_slug(
             slug=slug, strategy=strategy, written_path=None, new_slug=None, skipped=True
         )
 
-    src = await staging_dir_for_session(session_id) / slug
+    src = await staging_dir_for_session(user_id, session_id) / slug
     if not src.is_dir() or _detect_manifest(src) is None:
         raise FileNotFoundError(f"no staging slug {slug!r} for session {session_id!r}")
 
@@ -434,7 +434,9 @@ async def sync_slug(
 # ── Optimize: prepare staging from an existing skill ─────────────────
 
 
-async def prepare_optimize(session_id: str, source_skill_dir: Path, source_skill_id: str) -> Path:
+async def prepare_optimize(
+    user_id: str, session_id: str, source_skill_dir: Path, source_skill_id: str
+) -> Path:
     """Copy an existing skill into staging so the agent can edit it in place.
 
     Writes a .staging-meta.json so a later sync can detect 'same_source' vs
@@ -445,7 +447,7 @@ async def prepare_optimize(session_id: str, source_skill_dir: Path, source_skill
     if _detect_manifest(source_skill_dir) is None:
         raise ValueError(f"source dir is not a valid skill (no SKILL.md): {source_skill_dir}")
 
-    session_dir = await staging_dir_for_session(session_id, mkdir=True)
+    session_dir = await staging_dir_for_session(user_id, session_id, mkdir=True)
     slug = source_skill_dir.name
     if not SLUG_RE.match(slug):
         raise ValueError(f"source skill slug is not a valid identifier: {slug!r}")
@@ -468,15 +470,15 @@ async def prepare_optimize(session_id: str, source_skill_dir: Path, source_skill
 # ── Cleanup ───────────────────────────────────────────────────────────
 
 
-async def remove_slug(session_id: str, slug: str) -> None:
+async def remove_slug(user_id: str, session_id: str, slug: str) -> None:
     """Best-effort delete of a single slug under the session's staging dir."""
-    target = await staging_dir_for_session(session_id) / slug
+    target = await staging_dir_for_session(user_id, session_id) / slug
     if target.is_dir():
         shutil.rmtree(target)
 
 
-async def remove_session_staging(session_id: str) -> None:
-    target = await staging_dir_for_session(session_id)
+async def remove_session_staging(user_id: str, session_id: str) -> None:
+    target = await staging_dir_for_session(user_id, session_id)
     if target.is_dir():
         shutil.rmtree(target)
 

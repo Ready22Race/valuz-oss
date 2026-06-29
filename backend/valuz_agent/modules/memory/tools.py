@@ -34,13 +34,13 @@ _ACTIONS = ("add", "replace", "remove")
 # --- context resolution (module-level so tests can monkeypatch) -------------
 
 
-async def _resolve_project_id(session_id: str) -> str | None:
+async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
     """Project id for the session — read from the host-stamped
     ``metadata.valuz.project_id`` (the kernel knows no projects). Returns None
     for quick chats / agent-only sessions (only user+global are writable there)."""
     if not session_id:
         return None
-    sess = await kernel_client.get_session(require_current_user_id(), session_id)
+    sess = await kernel_client.get_session(user_id, session_id)
     if sess is None:
         return None
     return ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or None
@@ -70,7 +70,9 @@ async def _memory_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
 
     project_id: str | None = None
     if target == "project":
-        project_id = await _resolve_project_id(ctx.session_id)
+        # MCP tool boundary: the toolkit server has published the caller's owner
+        # into the auth context — resolve it once here and thread it explicitly.
+        project_id = await _resolve_project_id(require_current_user_id(), ctx.session_id)
         if not project_id:
             return ToolResult(
                 content=(

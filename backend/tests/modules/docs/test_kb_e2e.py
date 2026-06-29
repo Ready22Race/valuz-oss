@@ -199,9 +199,9 @@ async def _create_kb_and_settle(service: DocumentLibraryService, **kwargs):
     scan has populated the DB, so re-fetch the KB to return a settled
     detail that reflects the post-scan state.
     """
-    kb = await service.create_kb(**kwargs)
+    kb = await service.create_kb("local-test-owner", **kwargs)
     await _drain(service)
-    return await service.get_kb(kb.id)
+    return await service.get_kb("local-test-owner", kb.id)
 
 
 # ── 1. KB lifecycle ──────────────────────────────────────────────────
@@ -218,16 +218,16 @@ class TestKbLifecycle:
 
     async def test_should_reject_create_when_root_path_not_exists(self, svc):
         with pytest.raises(KbRootInaccessible):
-            await svc.create_kb(name="Bad", root_path="/nonexistent/path/xyz")
+            await svc.create_kb("local-test-owner", name="Bad", root_path="/nonexistent/path/xyz")
 
     async def test_should_reject_duplicate_root_path(self, svc, tmp_kb_root):
         await _create_kb_and_settle(svc, name="First", root_path=str(tmp_kb_root))
         with pytest.raises(KbRootDuplicated):
-            await svc.create_kb(name="Second", root_path=str(tmp_kb_root))
+            await svc.create_kb("local-test-owner", name="Second", root_path=str(tmp_kb_root))
 
     async def test_should_list_kbs(self, svc, tmp_kb_root):
         await _create_kb_and_settle(svc, name="KB1", root_path=str(tmp_kb_root))
-        kbs = await svc.list_kbs()
+        kbs = await svc.list_kbs("local-test-owner")
         assert len(kbs) == 1
         assert kbs[0].name == "KB1"
 
@@ -249,32 +249,32 @@ class TestKbLifecycle:
         )
         await db.commit()
 
-        [listed] = await svc.list_kbs()
+        [listed] = await svc.list_kbs("local-test-owner")
         assert listed.status == "has_processing"
 
     async def test_should_get_kb_by_id(self, svc, tmp_kb_root):
         created = await _create_kb_and_settle(svc, name="KB", root_path=str(tmp_kb_root))
-        fetched = await svc.get_kb(created.id)
+        fetched = await svc.get_kb("local-test-owner", created.id)
         assert fetched.id == created.id
         assert fetched.name == "KB"
 
     async def test_should_raise_when_kb_not_found(self, svc):
         with pytest.raises(KbNotFound):
-            await svc.get_kb("nonexistent-id")
+            await svc.get_kb("local-test-owner", "nonexistent-id")
 
     async def test_should_update_kb_name(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="Old", root_path=str(tmp_kb_root))
-        updated = await svc.update_kb(kb.id, name="New")
+        updated = await svc.update_kb("local-test-owner", kb.id, name="New")
         assert updated.name == "New"
 
     async def test_should_delete_kb_and_cleanup(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="ToDelete", root_path=str(tmp_kb_root))
         kb_id = kb.id
-        await svc.delete_kb(kb_id)
+        await svc.delete_kb("local-test-owner", kb_id)
 
         with pytest.raises(KbNotFound):
-            await svc.get_kb(kb_id)
-        assert await svc.list_kbs() == []
+            await svc.get_kb("local-test-owner", kb_id)
+        assert await svc.list_kbs("local-test-owner") == []
 
 
 # ── 2. Initial scan ─────────────────────────────────────────────────
@@ -283,7 +283,7 @@ class TestKbLifecycle:
 class TestInitialScan:
     async def test_should_discover_files_on_create(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="Scan", root_path=str(tmp_kb_root))
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
 
         filenames = {d.filename for d in docs}
         assert "report.pdf" in filenames
@@ -296,7 +296,7 @@ class TestInitialScan:
     async def test_should_create_folder_structure(self, svc_with_root):
         svc, root = svc_with_root
         kb = await _create_kb_and_settle(svc, name="Folders", root_path=str(root))
-        tree = await svc.get_kb_tree(kb.id)
+        tree = await svc.get_kb_tree("local-test-owner", kb.id)
 
         folder_names = {n.name for n in tree if n.kind == "folder"}
         assert "nvidia" in folder_names
@@ -310,7 +310,7 @@ class TestInitialScan:
         (root / ".git" / "config").write_text("git", encoding="utf-8")
 
         kb = await _create_kb_and_settle(svc, name="Hidden", root_path=str(root))
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         assert len(docs) == 1
         assert docs[0].filename == "visible.txt"
 
@@ -321,7 +321,7 @@ class TestInitialScan:
         (root / "data.csv").write_text("a,b\n1,2", encoding="utf-8")
 
         kb = await _create_kb_and_settle(svc, name="Ext", root_path=str(root))
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         filenames = {d.filename for d in docs}
         assert "data.csv" in filenames
         assert "code.py" not in filenames
@@ -333,13 +333,13 @@ class TestInitialScan:
 class TestRescan:
     async def test_should_detect_new_file_on_rescan(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="Rescan", root_path=str(tmp_kb_root))
-        initial_count = len(await svc.list_documents(kb_id=kb.id))
+        initial_count = len(await svc.list_documents("local-test-owner", kb_id=kb.id))
 
         (tmp_kb_root / "new_file.txt").write_text("new", encoding="utf-8")
         await svc.rescan_kb(kb.id)
         await _drain(svc)
 
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         assert len(docs) == initial_count + 1
         filenames = {d.filename for d in docs}
         assert "new_file.txt" in filenames
@@ -379,7 +379,7 @@ class TestRescan:
         await _drain(svc)
 
         assert injected["done"]
-        filenames = {d.filename for d in await svc.list_documents(kb_id=kb.id)}
+        filenames = {d.filename for d in await svc.list_documents("local-test-owner", kb_id=kb.id)}
         assert "extra.txt" in filenames
 
     async def test_should_mark_missing_when_file_deleted(self, svc, tmp_kb_root):
@@ -389,7 +389,7 @@ class TestRescan:
         await svc.rescan_kb(kb.id)
         await _drain(svc)
 
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         missing_docs = [d for d in docs if d.status == "missing"]
         missing_names = {d.filename for d in missing_docs}
         assert "notes.md" in missing_names
@@ -405,7 +405,7 @@ class TestRescan:
         await svc.rescan_kb(kb.id)
         await _drain(svc)
 
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         draft_docs = [d for d in docs if "draft" in d.filename]
         assert all(d.status == "missing" for d in draft_docs)
 
@@ -421,7 +421,7 @@ class TestRescan:
         await svc.rescan_kb(kb.id)
         await _drain(svc)
 
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         notes = [d for d in docs if d.filename == "notes.md"]
         assert len(notes) == 1
         assert notes[0].status == "ready"
@@ -435,7 +435,7 @@ class TestRescan:
         credentials and retry."""
         kb = await _create_kb_and_settle(svc, name="FailedRetry", root_path=str(tmp_kb_root))
         # Flip one doc to "failed" with a fake error code.
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         target_doc = next(d for d in docs if d.filename == "notes.md")
         row = await svc._ds.get_by_id("local-test-owner", target_doc.id)
         assert row is not None
@@ -492,7 +492,7 @@ class TestRescan:
 
         # Initial parse settled every PDF to "ready" with parser_mode
         # mapping to light_local (pymupdf4llm).
-        for d in await service.list_documents(kb_id=kb.id):
+        for d in await service.list_documents("local-test-owner", kb_id=kb.id):
             row = await service._ds.get_by_id("local-test-owner", d.id)
             assert row is not None and row.status == "ready", d.filename
 
@@ -503,7 +503,7 @@ class TestRescan:
 
         pdf_rows = [
             await service._ds.get_by_id("local-test-owner", d.id)
-            for d in await service.list_documents(kb_id=kb.id)
+            for d in await service.list_documents("local-test-owner", kb_id=kb.id)
             if d.filename.endswith(".pdf")
         ]
         assert pdf_rows and all(r is not None and r.parser_mode == "mineru" for r in pdf_rows), [
@@ -518,55 +518,60 @@ class TestProjectBinding:
     async def test_should_bind_entire_kb(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="BindKB", root_path=str(tmp_kb_root))
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [{"binding_kind": "kb", "target_id": kb.id}],
         )
-        bindings = await svc.list_project_bindings("project-1")
+        bindings = await svc.list_project_bindings("local-test-owner", "project-1")
         assert len(bindings) == 1
         assert bindings[0].binding_kind == "kb"
         assert bindings[0].target_id == kb.id
 
     async def test_should_minimize_redundant_bindings(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="MinCover", root_path=str(tmp_kb_root))
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         doc_id = docs[0].id
 
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [
                 {"binding_kind": "kb", "target_id": kb.id},
                 {"binding_kind": "document", "target_id": doc_id},
             ],
         )
-        bindings = await svc.list_project_bindings("project-1")
+        bindings = await svc.list_project_bindings("local-test-owner", "project-1")
         assert len(bindings) == 1
         assert bindings[0].binding_kind == "kb"
 
     async def test_should_count_bindings(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="Count", root_path=str(tmp_kb_root))
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [{"binding_kind": "kb", "target_id": kb.id}],
         )
-        assert await svc.count_project_bindings("project-1") == 1
+        assert await svc.count_project_bindings("local-test-owner", "project-1") == 1
 
     async def test_should_remove_all_bindings(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="RemoveAll", root_path=str(tmp_kb_root))
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [{"binding_kind": "kb", "target_id": kb.id}],
         )
-        await svc.remove_project_bindings("project-1")
-        assert await svc.count_project_bindings("project-1") == 0
+        await svc.remove_project_bindings("local-test-owner", "project-1")
+        assert await svc.count_project_bindings("local-test-owner", "project-1") == 0
 
     async def test_should_delete_kb_cleanup_bindings(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="Cleanup", root_path=str(tmp_kb_root))
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [{"binding_kind": "kb", "target_id": kb.id}],
         )
-        await svc.delete_kb(kb.id)
-        assert await svc.count_project_bindings("project-1") == 0
+        await svc.delete_kb("local-test-owner", kb.id)
+        assert await svc.count_project_bindings("local-test-owner", "project-1") == 0
 
 
 # ── 5. Scope resolution ─────────────────────────────────────────────
@@ -574,7 +579,7 @@ class TestProjectBinding:
 
 class TestScopeResolution:
     async def test_should_resolve_empty_scope_when_no_bindings(self, svc):
-        scope = await svc.resolve_doc_scope("no-project")
+        scope = await svc.resolve_doc_scope("local-test-owner", "no-project")
         assert scope == []
 
     async def test_should_resolve_all_ready_docs_for_kb_binding(
@@ -591,10 +596,11 @@ class TestScopeResolution:
             await ds.update(doc)
 
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [{"binding_kind": "kb", "target_id": kb.id}],
         )
-        scope = await svc.resolve_doc_scope("project-1")
+        scope = await svc.resolve_doc_scope("local-test-owner", "project-1")
         assert len(scope) == 5
 
     async def test_should_exclude_missing_docs_from_scope(
@@ -612,10 +618,11 @@ class TestScopeResolution:
             await ds.update(doc)
 
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [{"binding_kind": "kb", "target_id": kb.id}],
         )
-        scope = await svc.resolve_doc_scope("project-1")
+        scope = await svc.resolve_doc_scope("local-test-owner", "project-1")
         assert len(scope) == 3
 
     async def test_should_resolve_folder_subtree_binding(
@@ -635,10 +642,11 @@ class TestScopeResolution:
         assert nvidia_folder is not None
 
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [{"binding_kind": "folder", "target_id": nvidia_folder.id}],
         )
-        scope = await svc.resolve_doc_scope("project-1")
+        scope = await svc.resolve_doc_scope("local-test-owner", "project-1")
         assert len(scope) >= 2
         assert len(scope) <= 3
 
@@ -658,10 +666,11 @@ class TestScopeResolution:
 
         target_doc = all_docs[0]
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [{"binding_kind": "document", "target_id": target_doc.id}],
         )
-        scope = await svc.resolve_doc_scope("project-1")
+        scope = await svc.resolve_doc_scope("local-test-owner", "project-1")
         assert scope == [target_doc.id]
 
 
@@ -670,7 +679,7 @@ class TestScopeResolution:
 
 class TestDocScopeTree:
     async def test_should_build_empty_tree_when_no_bindings(self, svc):
-        tree = await svc.build_doc_scope_tree("no-project")
+        tree = await svc.build_doc_scope_tree("local-test-owner", "no-project")
         assert tree.total_documents == 0
         assert tree.knowledge_bases == ()
 
@@ -688,10 +697,11 @@ class TestDocScopeTree:
             await ds.update(doc)
 
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-1",
             [{"binding_kind": "kb", "target_id": kb.id}],
         )
-        tree = await svc.build_doc_scope_tree("project-1")
+        tree = await svc.build_doc_scope_tree("local-test-owner", "project-1")
         assert tree.total_documents == 5
         assert len(tree.knowledge_bases) == 1
         assert tree.knowledge_bases[0].name == "TreeKB"
@@ -704,18 +714,18 @@ class TestDocScopeTree:
 class TestDocumentCrud:
     async def test_should_get_document_detail(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="Detail", root_path=str(tmp_kb_root))
-        docs = await svc.list_documents(kb_id=kb.id)
-        detail = await svc.get_document(docs[0].id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
+        detail = await svc.get_document("local-test-owner", docs[0].id)
         assert detail.source_path is not None
         assert detail.kb_id == kb.id
 
     async def test_should_delete_document(self, svc, tmp_kb_root):
         kb = await _create_kb_and_settle(svc, name="Delete", root_path=str(tmp_kb_root))
-        docs = await svc.list_documents(kb_id=kb.id)
+        docs = await svc.list_documents("local-test-owner", kb_id=kb.id)
         initial_count = len(docs)
 
-        await svc.delete_document(docs[0].id)
-        remaining = await svc.list_documents(kb_id=kb.id)
+        await svc.delete_document("local-test-owner", docs[0].id)
+        remaining = await svc.list_documents("local-test-owner", kb_id=kb.id)
         assert len(remaining) == initial_count - 1
 
     async def test_should_list_docs_filtered_by_status(self, svc, tmp_kb_root):
@@ -724,9 +734,9 @@ class TestDocumentCrud:
         # parsed and moved to ``ready``. Verify both filters work —
         # ``ready`` returns the full set, ``queued`` returns nothing.
         kb = await _create_kb_and_settle(svc, name="Filter", root_path=str(tmp_kb_root))
-        ready = await svc.list_documents(kb_id=kb.id, status="ready")
+        ready = await svc.list_documents("local-test-owner", kb_id=kb.id, status="ready")
         assert len(ready) == 5
-        queued = await svc.list_documents(kb_id=kb.id, status="queued")
+        queued = await svc.list_documents("local-test-owner", kb_id=kb.id, status="queued")
         assert len(queued) == 0
 
 
@@ -736,7 +746,7 @@ class TestDocumentCrud:
 class TestHealth:
     async def test_should_report_health_status(self, svc, tmp_kb_root):
         await _create_kb_and_settle(svc, name="Health", root_path=str(tmp_kb_root))
-        health = await svc.get_docs_health()
+        health = await svc.get_docs_health("local-test-owner")
         assert health["status"] == "healthy"
         assert health["total_documents"] == 5
 
@@ -767,16 +777,17 @@ class TestFullE2EScenario:
         nvidia_folder = await ds.get_folder_by_path("local-test-owner", kb.id, "nvidia")
         assert nvidia_folder is not None
         await svc.update_project_bindings(
+            "local-test-owner",
             "project-alpha",
             [{"binding_kind": "folder", "target_id": nvidia_folder.id}],
         )
 
         # 4. Scope resolution → only nvidia subtree docs
-        scope = await svc.resolve_doc_scope("project-alpha")
+        scope = await svc.resolve_doc_scope("local-test-owner", "project-alpha")
         assert len(scope) >= 2  # Q4, Q3, possibly draft
 
         # 5. Doc scope tree → shows nvidia folder
-        tree = await svc.build_doc_scope_tree("project-alpha")
+        tree = await svc.build_doc_scope_tree("local-test-owner", "project-alpha")
         assert tree.total_documents > 0
         kb_node = tree.knowledge_bases[0]
         assert kb_node.name == "研究资料"
@@ -792,7 +803,7 @@ class TestFullE2EScenario:
         new_doc = await ds.get_by_relative_path("local-test-owner", kb.id, "nvidia/Q2-report.pdf")
         assert new_doc is not None and new_doc.status == "ready"
 
-        scope_after = await svc.resolve_doc_scope("project-alpha")
+        scope_after = await svc.resolve_doc_scope("local-test-owner", "project-alpha")
         assert len(scope_after) > len(scope)
 
         # 7. Rescan finds deleted file → status=missing, excluded
@@ -808,18 +819,18 @@ class TestFullE2EScenario:
         assert len(q3) == 1
         assert q3[0].status == "missing"
 
-        scope_after_missing = await svc.resolve_doc_scope("project-alpha")
+        scope_after_missing = await svc.resolve_doc_scope("local-test-owner", "project-alpha")
         assert q3[0].id not in scope_after_missing
 
         # 8. User manually deletes the missing doc
-        await svc.delete_document(q3[0].id)
+        await svc.delete_document("local-test-owner", q3[0].id)
         remaining = await ds.list_documents("local-test-owner", kb_id=kb.id)
         assert not any(d.source_filename == "Q3-report.pdf" for d in remaining)
 
         # 9. Delete KB → all bindings cleaned
-        await svc.delete_kb(kb.id)
-        assert await svc.count_project_bindings("project-alpha") == 0
-        assert await svc.list_kbs() == []
+        await svc.delete_kb("local-test-owner", kb.id)
+        assert await svc.count_project_bindings("local-test-owner", "project-alpha") == 0
+        assert await svc.list_kbs("local-test-owner") == []
 
 
 # ── 10. Auto-discovery scheduler ─────────────────────────────────────
@@ -869,8 +880,8 @@ class TestAutoDiscoveryScheduler:
             await svc.rescan_kb(kb.id)
             await _drain(svc)
 
-        auto_docs = await svc.list_documents(kb_id=auto_kb.id)
-        manual_docs = await svc.list_documents(kb_id=manual_kb.id)
+        auto_docs = await svc.list_documents("local-test-owner", kb_id=auto_kb.id)
+        manual_docs = await svc.list_documents("local-test-owner", kb_id=manual_kb.id)
 
         auto_names = {d.filename for d in auto_docs}
         manual_names = {d.filename for d in manual_docs}

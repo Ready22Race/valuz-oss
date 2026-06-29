@@ -17,13 +17,12 @@ class ResourceFacade:
         self._db = db
         self._remote = remote_port
 
-    async def delete_resource(self, resource_id: str, resource_type: str) -> None:
+    async def delete_resource(self, user_id: str, resource_id: str, resource_type: str) -> None:
         if resource_type == "agent":
-            from valuz_agent.infra.auth_context import require_current_user_id
             from valuz_agent.modules.agents.service import AgentService
 
             agent_svc = AgentService(self._db)  # type: ignore[arg-type]
-            await agent_svc.delete_agent(require_current_user_id(), resource_id)
+            await agent_svc.delete_agent(user_id, resource_id)
         elif resource_type == "connector":
             from valuz_agent.modules.connectors.datastore import ConnectorDatastore
             from valuz_agent.modules.connectors.service import ConnectorService
@@ -33,15 +32,13 @@ class ResourceFacade:
                 ConnectorDatastore(self._db),
                 ext.secret_store,
             )
-            from valuz_agent.infra.auth_context import require_current_user_id
 
-            await conn_svc.delete_connector(require_current_user_id(), resource_id)
+            await conn_svc.delete_connector(user_id, resource_id)
         elif resource_type == "skill":
-            from valuz_agent.infra.auth_context import require_current_user_id
             from valuz_agent.modules.skills.datastore import SkillDatastore
 
             ds = SkillDatastore(self._db)
-            await ds.delete(require_current_user_id(), resource_id)
+            await ds.delete(user_id, resource_id)
         else:
             raise ValueError(f"Unknown resource type: {resource_type}")
 

@@ -64,7 +64,7 @@ async def _use(dep_factory: Any) -> AsyncGenerator[Any, None]:
     Usage::
 
         async with _use(get_skill_service) as svc:
-            result = await svc.list_catalog("chat-default")
+            result = await svc.list_catalog(user_id, "chat-default")
     """
     gen = dep_factory()
     value = await gen.__anext__()
@@ -100,7 +100,7 @@ class ResourceLibrary:
             from valuz_agent.api.deps import get_skill_service
 
             async with _use(get_skill_service) as svc:
-                cat = await svc.list_catalog("chat-default")
+                cat = await svc.list_catalog(user_id, "chat-default")
             return [ResourceRef(kind="skill", key=s.slug, name=s.name) for s in cat.skills]
 
         if kind == "connector":
@@ -115,7 +115,7 @@ class ResourceLibrary:
             from valuz_agent.api.deps import get_document_service
 
             async with _use(get_document_service) as svc:
-                items = await svc.list_kbs()
+                items = await svc.list_kbs(user_id)
             return [ResourceRef(kind="kb", key=item.name, name=item.name) for item in items]
 
         raise NotImplementedError(f"list({kind}) not implemented")
@@ -157,16 +157,16 @@ class ResourceLibrary:
 
             async with _use(get_skill_service) as svc:
                 # Resolve slug → skill id via catalog
-                cat = await svc.list_catalog("chat-default")
+                cat = await svc.list_catalog(user_id, "chat-default")
                 matched = next((s for s in cat.skills if s.slug == key), None)
                 if matched is None:
                     return None
-                detail = await svc.get_skill_detail(matched.id)
-                file_nodes = await svc.list_skill_files(matched.id)
+                detail = await svc.get_skill_detail(user_id, matched.id)
+                file_nodes = await svc.list_skill_files(user_id, matched.id)
                 files: dict[str, str] = {}
                 for node in file_nodes:
                     try:
-                        fc = await svc.read_skill_file(matched.id, node.path)
+                        fc = await svc.read_skill_file(user_id, matched.id, node.path)
                         files[node.path] = fc.content
                     except Exception:
                         logger.debug(
@@ -222,11 +222,11 @@ class ResourceLibrary:
             from valuz_agent.api.deps import get_document_service
 
             async with _use(get_document_service) as svc:
-                items = await svc.list_kbs()
+                items = await svc.list_kbs(user_id)
                 matched_item = next((item for item in items if item.name == key), None)
                 if matched_item is None:
                     return None
-                detail = await svc.get_kb(matched_item.id)
+                detail = await svc.get_kb(user_id, matched_item.id)
             return ResourceSnapshot(
                 kind="kb",
                 key=detail.name,
@@ -269,12 +269,13 @@ class ResourceLibrary:
                 # Try create; on slug-conflict fall back to update
                 try:
                     view = await svc.create_skill(
+                        user_id,
                         SkillCreateRequest(
                             name=data["name"],
                             target_scope=data.get("target_scope", "user"),
                             description=data.get("description") or "",
                             instructions_markdown=data.get("instructions_markdown"),
-                        )
+                        ),
                     )
                 except Exception as exc:
                     # A skill with this name / slug already exists — resolve
@@ -283,7 +284,7 @@ class ResourceLibrary:
                         "ResourceLibrary.save skill: create failed (%s), attempting update",
                         exc,
                     )
-                    cat = await svc.list_catalog("chat-default")
+                    cat = await svc.list_catalog(user_id, "chat-default")
                     slug = data["name"].lower().replace(" ", "-")
                     matched = next(
                         (s for s in cat.skills if s.slug == snapshot.key or s.slug == slug), None
@@ -291,6 +292,7 @@ class ResourceLibrary:
                     if matched is None:
                         raise
                     view = await svc.update_skill(
+                        user_id,
                         matched.id,
                         SkillUpdateRequest(
                             name=data.get("name"),
@@ -303,6 +305,7 @@ class ResourceLibrary:
                 for path, content in (snapshot.files or {}).items():
                     try:
                         await svc.write_skill_file(
+                            user_id,
                             view.id,
                             SkillFileAction(path=path, action="create", content=content),
                         )
@@ -364,17 +367,18 @@ class ResourceLibrary:
             async with _use(get_document_service) as svc:
                 try:
                     kb = await svc.create_kb(
+                        user_id,
                         name=data["name"],
                         root_path=root,
                         parser_routing=data.get("parser_routing", "local_only"),
                         auto_discover=bool(data.get("auto_discover", False)),
                     )
                 except KbRootDuplicated:
-                    kbs = await svc.list_kbs()
+                    kbs = await svc.list_kbs(user_id)
                     matched_item = next((item for item in kbs if item.name == data["name"]), None)
                     if matched_item is None:
                         raise
-                    kb = await svc.get_kb(matched_item.id)
+                    kb = await svc.get_kb(user_id, matched_item.id)
             return ResourceRef(kind="kb", key=kb.name, name=kb.name)
 
         raise NotImplementedError(f"save({snapshot.kind}) not implemented")

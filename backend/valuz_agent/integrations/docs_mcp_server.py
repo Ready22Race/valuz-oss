@@ -66,12 +66,11 @@ def _current_session_id() -> str:
     return sid
 
 
-async def _resolve_project_id(session_id: str) -> str | None:
+async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
     """Map ``session_id`` → ``project_id`` via the kernel store."""
     from valuz_agent.adapters import kernel_client
-    from valuz_agent.infra.auth_context import require_current_user_id
 
-    session = await kernel_client.get_session(require_current_user_id(), session_id)
+    session = await kernel_client.get_session(user_id, session_id)
     if session is None:
         return None
     project_id = ((session.metadata or {}).get("valuz", {}) or {}).get("project_id")
@@ -129,15 +128,21 @@ async def doc_search(
     intersected with the project's bindings server-side so the agent
     cannot reach docs outside its scope by guessing ids.
     """
+    from valuz_agent.infra.auth_context import require_current_user_id
     from valuz_agent.infra.db import async_unit_of_work
 
+    # MCP request boundary: the ASGI wrapper has published the calling session's
+    # owner into the auth context. Resolve it once here and thread it explicitly
+    # into the project lookup + the owner-scoped search.
+    user_id = require_current_user_id()
     session_id = _current_session_id()
-    project_id = await _resolve_project_id(session_id)
+    project_id = await _resolve_project_id(user_id, session_id)
     if project_id is None:
         return []
     async with async_unit_of_work(commit=False) as db:
         svc = _build_doc_service(db)
         hits = await svc.search_docs(
+            user_id,
             project_id=project_id,
             query=query,
             folder_ids=folder_ids or None,
@@ -170,16 +175,18 @@ async def list_doc_scope(folder_id: str | None = None) -> dict[str, Any]:
     the agent whether the user explicitly bound that node vs inheriting
     via a parent.
     """
+    from valuz_agent.infra.auth_context import require_current_user_id
     from valuz_agent.infra.db import async_unit_of_work
 
     del folder_id  # full-tree view is enough today; folder drilldown is a TODO.
+    user_id = require_current_user_id()
     session_id = _current_session_id()
-    project_id = await _resolve_project_id(session_id)
+    project_id = await _resolve_project_id(user_id, session_id)
     if project_id is None:
         return {"knowledge_bases": [], "total_documents": 0}
     async with async_unit_of_work(commit=False) as db:
         svc = _build_doc_service(db)
-        tree = await svc.build_doc_scope_tree(project_id)
+        tree = await svc.build_doc_scope_tree(user_id, project_id)
     return _scope_tree_to_dict(tree)
 
 

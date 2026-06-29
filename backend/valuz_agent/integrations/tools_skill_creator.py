@@ -132,9 +132,11 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -
             is_error=True,
         )
 
+    from valuz_agent.infra.auth_context import require_current_user_id
     from valuz_agent.modules.skills.staging import staging_dir_for_session
 
-    staging_base = await staging_dir_for_session(session_id)
+    user_id = require_current_user_id()
+    staging_base = await staging_dir_for_session(user_id, session_id)
     expected_dir = staging_base / str(slug)
     project_root = str(staging_base.parent)
     skill_md = expected_dir / "SKILL.md"

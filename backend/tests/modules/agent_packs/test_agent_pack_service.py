@@ -176,8 +176,8 @@ async def test_import_pack_indexes_embedded_skills(
 
     calls: list[str] = []
 
-    async def _spy_reindex_user() -> int:
-        calls.append("user")
+    async def _spy_reindex_user(user_id: str) -> int:
+        calls.append(user_id)
         return 0
 
     monkeypatch.setattr(
@@ -208,7 +208,7 @@ async def test_import_pack_indexes_embedded_skills(
 
     assert res["created"] == 1
     # explicit index trigger fired for the user-scope skill
-    assert calls == ["user"]
+    assert calls == [USER]
     # and the skill actually landed in the user library
     assert (tmp_path / "user-skills" / "my-skill" / "SKILL.md").is_file()
 

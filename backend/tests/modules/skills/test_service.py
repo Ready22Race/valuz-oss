@@ -174,7 +174,7 @@ class TestIndexOfficialSkills:
         _make_skill_dir(official_dir, "comps")
         service._extra_sources = [OfficialSkillSource(official_dir=official_dir)]
 
-        count = await service.index_official_skills()
+        count = await service.index_official_skills("u")
 
         assert count == 2
         rows = await service._ds.list_skills("u")
@@ -191,8 +191,8 @@ class TestIndexOfficialSkills:
         _make_skill_dir(official_dir, "dcf")
         service._extra_sources = [OfficialSkillSource(official_dir=official_dir)]
 
-        await service.index_official_skills()
-        await service.index_official_skills()  # second pass updates, no duplicate row
+        await service.index_official_skills("u")
+        await service.index_official_skills("u")  # second pass updates, no duplicate row
 
         rows = await service._ds.list_skills("u")
         assert len([r for r in rows if r.slug == "dcf"]) == 1
@@ -202,7 +202,7 @@ class TestListCatalog:
     async def test_should_return_name_and_description_fields(self, svc, skill_root):
         service, _ = svc
         _make_skill_dir(skill_root, "alpha", "Alpha body")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill = catalog.skills[0]
         assert skill.name == "alpha"
         assert skill.description == "Test alpha"
@@ -212,7 +212,7 @@ class TestListCatalog:
     async def test_should_include_slug_and_tags(self, svc, skill_root):
         service, _ = svc
         _make_skill_dir(skill_root, "beta")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill = catalog.skills[0]
         assert skill.slug == "beta"
         assert skill.tags == ["test"]
@@ -220,14 +220,14 @@ class TestListCatalog:
     async def test_should_include_content_hash(self, svc, skill_root):
         service, _ = svc
         _make_skill_dir(skill_root, "hashed")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill = catalog.skills[0]
         assert skill.content_hash is not None
         assert len(skill.content_hash) == 64
 
     async def test_should_return_empty_when_no_skills(self, svc):
         service, _ = svc
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         assert catalog.skills == []
 
     async def test_should_sort_by_folder_birthtime_desc(self, svc, skill_root):
@@ -248,7 +248,7 @@ class TestListCatalog:
         _os.utime(old_dir, (now - 3600, now - 3600))
         _os.utime(new_dir, (now, now))
 
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         # When st_birthtime exists (macOS), the test still passes
         # because mkdir() actually creates the folder slightly earlier
         # for old-skill — both candidates fall under the
@@ -291,7 +291,7 @@ class TestListCatalog:
                 ]
 
         service._extra_sources = [_NullTimeSource()]
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         slugs = [s.slug for s in catalog.skills]
         # zzz-legacy has no birthtime → must be after the real ones
         # regardless of its alphabetical-last name.
@@ -307,11 +307,11 @@ class TestLibraryState:
         _make_skill_dir(skill_root, "alpha")
         _make_skill_dir(skill_root, "beta")
         # Turn alpha off by its catalog row id; beta left at the default (on).
-        cat0 = await service.list_catalog("ws-1")
+        cat0 = await service.list_catalog("u", "ws-1")
         alpha_id = next(s for s in cat0.skills if s.slug == "alpha").id
         await service._ds.set_library_enabled("u", alpha_id, False)
 
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         by_slug = {s.slug: s for s in catalog.skills}
 
         assert by_slug["alpha"].library_enabled is False
@@ -328,11 +328,11 @@ class TestLibraryState:
             '---\nname: "skill-creator"\ndescription: "x"\norigin-label: "Built-in"\n---\n\nbody\n',
             encoding="utf-8",
         )
-        cat0 = await service.list_catalog("ws-1")
+        cat0 = await service.list_catalog("u", "ws-1")
         sc_id = next(s for s in cat0.skills if s.slug == "skill-creator").id
         await service._ds.set_library_enabled("u", sc_id, False)
 
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         sc = next(s for s in catalog.skills if s.slug == "skill-creator")
         assert sc.origin_label == "Built-in"
         assert sc.library_enabled is True
@@ -342,7 +342,7 @@ class TestLibraryState:
 
         service, _ = svc
         _make_skill_dir(skill_root, "gamma")
-        cat = await service.list_catalog("ws-1")
+        cat = await service.list_catalog("u", "ws-1")
         gamma = next(s for s in cat.skills if s.slug == "gamma")
         assert gamma.library_enabled is True
         # Seed the index row so the service can resolve id → slug.
@@ -357,13 +357,11 @@ class TestLibraryState:
             user_id="u",
         )
 
-        updated = await service.set_library_enabled(gamma.id, False)
+        updated = await service.set_library_enabled("u", gamma.id, False)
         assert updated.library_enabled is False
 
-        cat2 = await service.list_catalog("ws-1")
-        assert (
-            next(s for s in cat2.skills if s.slug == "gamma").library_enabled is False
-        )
+        cat2 = await service.list_catalog("u", "ws-1")
+        assert next(s for s in cat2.skills if s.slug == "gamma").library_enabled is False
 
 
 class TestCreateSkill:
@@ -371,14 +369,14 @@ class TestCreateSkill:
         service, bus = svc
         events = []
         bus.subscribe("skill.changed", lambda **kw: events.append(kw))
-        await service.create_skill(SkillCreateRequest(name="new-skill", description="desc"))
+        await service.create_skill("u", SkillCreateRequest(name="new-skill", description="desc"))
         assert len(events) == 1
         assert events[0]["reason"] == "created"
 
     async def test_should_create_skill_dir_with_manifest(self, svc, skill_root):
         service, _ = svc
         result = await service.create_skill(
-            SkillCreateRequest(name="created", description="A test")
+            "u", SkillCreateRequest(name="created", description="A test")
         )
         assert result.name == "created"
         assert (Path(result.path) / "SKILL.md").exists()
@@ -389,7 +387,7 @@ class TestCreateSkill:
         the returned view still reports the skill as "created"."""
         service, _ = svc
         result = await service.create_skill(
-            SkillCreateRequest(name="origin-check", description="x")
+            "u", SkillCreateRequest(name="origin-check", description="x")
         )
         raw = (Path(result.path) / "SKILL.md").read_text(encoding="utf-8")
         assert "creation-origin" not in raw
@@ -399,8 +397,8 @@ class TestCreateSkill:
         """The catalog View must expose ``creation_origin`` sourced from
         the DB index — it's what drives the .agents group's badge."""
         service, _ = svc
-        await service.create_skill(SkillCreateRequest(name="origin-view", description="y"))
-        catalog = await service.list_catalog("ws-1")
+        await service.create_skill("u", SkillCreateRequest(name="origin-view", description="y"))
+        catalog = await service.list_catalog("u", "ws-1")
         match = next(s for s in catalog.skills if s.slug == "origin-view")
         assert match.creation_origin == "created"
 
@@ -410,7 +408,7 @@ class TestCreateSkill:
         the bug behind the .agents-vs-.claude display confusion."""
         service, _ = svc
         _make_skill_dir(skill_root, "scanned-skill")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         match = next(s for s in catalog.skills if s.slug == "scanned-skill")
         assert match.creation_origin == "discovered"
 
@@ -419,12 +417,12 @@ class TestUpdateSkill:
     async def test_should_publish_event_on_update(self, svc, skill_root):
         service, bus = svc
         _make_skill_dir(skill_root, "updatable")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
 
         events = []
         bus.subscribe("skill.changed", lambda **kw: events.append(kw))
-        await service.update_skill(skill_id, SkillUpdateRequest(name="updated-name"))
+        await service.update_skill("u", skill_id, SkillUpdateRequest(name="updated-name"))
         assert len(events) == 1
         assert events[0]["reason"] == "updated"
 
@@ -433,20 +431,20 @@ class TestDeleteSkill:
     async def test_should_publish_event_on_confirm_delete(self, svc, skill_root):
         service, bus = svc
         _make_skill_dir(skill_root, "deletable")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
 
         events = []
         bus.subscribe("skill.changed", lambda **kw: events.append(kw))
-        await service.delete_skill(skill_id, mode="confirm")
+        await service.delete_skill("u", skill_id, mode="confirm")
         assert any(e["reason"] == "deleted" for e in events)
 
     async def test_dry_run_should_return_preview(self, svc, skill_root):
         service, _ = svc
         _make_skill_dir(skill_root, "preview-del")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
-        result = await service.delete_skill(skill_id, mode="dry_run")
+        result = await service.delete_skill("u", skill_id, mode="dry_run")
         assert result is not None
         assert hasattr(result, "count")
 
@@ -455,7 +453,7 @@ class TestReadonlySkill:
     async def test_should_reject_write_on_readonly_skill(self, svc, skill_root):
         service, _ = svc
         _make_skill_dir(skill_root, "locked")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill = catalog.skills[0]
         # Patch the skill to be readonly
         skill.readonly = True
@@ -465,7 +463,7 @@ class TestReadonlySkill:
         with patch.object(service, "_resolve_skill", new=AsyncMock(return_value=skill)):
             with pytest.raises(SourceReadonly):
                 await service.write_skill_file(
-                    skill.id, SkillFileAction(action="create", path="test.md", content="x")
+                    "u", skill.id, SkillFileAction(action="create", path="test.md", content="x")
                 )
 
 
@@ -487,7 +485,9 @@ class TestUrlImport:
         from valuz_agent.modules.skills.models import SkillImportUrlConfirmRequest
 
         with pytest.raises(PreviewExpired):
-            await service.confirm_url_import(SkillImportUrlConfirmRequest(preview_id=preview_id))
+            await service.confirm_url_import(
+                "u", SkillImportUrlConfirmRequest(preview_id=preview_id)
+            )
         _import_previews.pop(preview_id, None)
 
 
@@ -496,9 +496,9 @@ class TestSkillFiles:
         service, _ = svc
         skill_dir = _make_skill_dir(skill_root, "with-files")
         (skill_dir / "extra.txt").write_text("hello")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
-        files = await service.list_skill_files(skill_id)
+        files = await service.list_skill_files("u", skill_id)
         paths = [f.path for f in files]
         assert "SKILL.md" in paths
         assert "extra.txt" in paths
@@ -507,9 +507,9 @@ class TestSkillFiles:
         service, _ = svc
         skill_dir = _make_skill_dir(skill_root, "readable")
         (skill_dir / "data.txt").write_text("content here")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
-        result = await service.read_skill_file(skill_id, "data.txt")
+        result = await service.read_skill_file("u", skill_id, "data.txt")
         assert result.content == "content here"
 
 
@@ -517,9 +517,9 @@ class TestSkillDetail:
     async def test_should_return_detail_with_instructions(self, svc, skill_root):
         service, _ = svc
         _make_skill_dir(skill_root, "detailed", "Detailed instructions here.")
-        catalog = await service.list_catalog("ws-1")
+        catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
-        detail = await service.get_skill_detail(skill_id)
+        detail = await service.get_skill_detail("u", skill_id)
         assert detail.instructions_markdown is not None
         assert "Detailed instructions" in detail.instructions_markdown
         assert detail.file_count >= 1
@@ -531,7 +531,7 @@ class TestTags:
         service, _ = svc
         _make_skill_dir(skill_root, "tag-a")
         _make_skill_dir(skill_root, "tag-b")
-        tags = await service.list_all_tags()
+        tags = await service.list_all_tags("u")
         assert "test" in tags
         assert len(tags) == len(set(tags))
 
@@ -567,7 +567,7 @@ class TestImportFromSessionConfirm:
             ],
         )
         result = await service.import_from_session_confirm(
-            SessionSkillImportConfirmRequest(session_id="sess-1", name="from-session")
+            "u", SessionSkillImportConfirmRequest(session_id="sess-1", name="from-session")
         )
         assert seen == ["sess-1"]
         body = (Path(result.path) / "SKILL.md").read_text(encoding="utf-8")
@@ -579,9 +579,10 @@ class TestImportFromSessionConfirm:
         service, _ = svc
         self._patch_events(monkeypatch, [])
         result = await service.import_from_session_confirm(
+            "u",
             SessionSkillImportConfirmRequest(
                 session_id="sess-2", name="empty-session", description="Fallback body."
-            )
+            ),
         )
         body = (Path(result.path) / "SKILL.md").read_text(encoding="utf-8")
         assert "Fallback body." in body

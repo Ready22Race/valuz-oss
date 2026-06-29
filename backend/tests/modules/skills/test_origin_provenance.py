@@ -47,7 +47,7 @@ async def test_load_origin_parses_valid_blob() -> None:
     blob = SkillOrigin(
         type="github", source_url="https://github.com/o/r", path=""
     ).model_dump_json()
-    origin = await _svc(_Row(blob))._load_origin("user:x")
+    origin = await _svc(_Row(blob))._load_origin("u", "user:x")
     assert origin is not None
     assert origin.type == "github"
     assert origin.source_url == "https://github.com/o/r"
@@ -56,4 +56,4 @@ async def test_load_origin_parses_valid_blob() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("row", [None, _Row(None), _Row(""), _Row("{not valid json")])
 async def test_load_origin_tolerates_missing_or_malformed(row: object | None) -> None:
-    assert await _svc(row)._load_origin("user:x") is None
+    assert await _svc(row)._load_origin("u", "user:x") is None

@@ -148,9 +148,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     # as a separate process and serves /api/v1/* itself; mounting the in-process
     # routers here would shadow it with a ghost kernel bound to a different
     # (host) database (B3).
-    from valuz_agent.infra.config import settings as _settings
-
-    if not _settings.is_http_kernel:
+    if not settings.is_http_kernel:
         from valuz_agent.boot.kernel import get_kernel_routers
 
         for kernel_router in get_kernel_routers():
@@ -160,7 +158,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     # fall back to settings; an empty result → a single mount at "" (native
     # paths, unchanged). Multiple entries (e.g. ["", "/valuz-backend"]) → the
     # surface is served under each base at once.
-    prefixes = api_prefix if api_prefix is not None else _settings.api_prefix
+    prefixes = api_prefix if api_prefix is not None else settings.api_prefix
     for _prefix in prefixes or [""]:
         app.include_router(api, prefix=_prefix)
 
