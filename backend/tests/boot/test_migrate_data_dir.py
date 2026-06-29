@@ -385,8 +385,48 @@ def test_old_tree_without_any_dbs_is_a_noop_success(fake_home):
     migrate.migrate_legacy_data_dir()  # must not raise
 
     assert (new_root / migrate._MARKER_FILENAME).exists()
-    assert (new_root / "logs" / "backend.log").exists()
+    # ``logs/`` is excluded from the cutover (disposable runtime output that, on
+    # Windows, holds the running process's own open handle), so the old log is
+    # NOT carried over. See ``_active_logs_dir_is_skipped`` for the rationale.
+    assert not (new_root / "logs" / "backend.log").exists()
     assert not (new_root / "valuz.db").exists()
+
+
+def test_active_logs_dir_is_skipped_not_clobbered(fake_home):
+    """Regression: Windows upgrades crashed at ~boot because the running process
+    holds ``new_root/logs/backend.log`` OPEN (logging is configured before this
+    step). On Windows that open file can be neither deleted by
+    ``_reset_partial_copy`` nor overwritten by the copy ([WinError 32]). The
+    cutover must skip ``logs/`` entirely: the live log survives untouched and the
+    old tree's log is not copied over it. POSIX allows deleting/overwriting open
+    files, so this asserts the SKIP via content/existence rather than the raise."""
+    old_app, old_kb, new_root = fake_home
+    _build_old_tree(old_app.parent.parent, old_app, old_kb)
+
+    # The OLD tree carries a stale log that must NOT clobber the live one.
+    (old_app / "logs").mkdir(parents=True)
+    (old_app / "logs" / "backend.log").write_text("OLD LOG\n")
+
+    # Simulate boot: the writer lock pre-created new_root, and the logging
+    # handler created + opened new_root/logs/backend.log.
+    new_root.mkdir(parents=True)
+    (new_root / ".single-writer.lock").write_text("pid\n")
+    (new_root / "logs").mkdir()
+    live_log = new_root / "logs" / "backend.log"
+    live_log.write_text("LIVE LOG\n")
+
+    with live_log.open("a", encoding="utf-8") as handle:  # held open across migrate
+        handle.write("boot line\n")
+        handle.flush()
+        migrate.migrate_legacy_data_dir()  # must not raise; must not touch logs/
+
+    assert (new_root / migrate._MARKER_FILENAME).exists()
+    assert (new_root / "valuz.db").exists()  # real data still migrated
+    # The live log was neither deleted by the reset nor overwritten by the copy.
+    assert live_log.exists()
+    contents = live_log.read_text()
+    assert "LIVE LOG" in contents
+    assert "OLD LOG" not in contents
 
 
 def test_identity_resolves_to_migrated_owner_not_fresh_fingerprint(fake_home):
