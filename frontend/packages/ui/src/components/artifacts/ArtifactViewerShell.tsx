@@ -26,6 +26,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -536,8 +537,112 @@ function MediaRenderer({ artifact, content }: ArtifactRendererProps) {
   return <UnsupportedRenderer artifact={artifact} content={content} />;
 }
 
+const HTML_PREVIEW_STYLE = `
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html,
+    body {
+      box-sizing: border-box !important;
+      min-width: 0 !important;
+      max-width: 100% !important;
+      min-height: 100% !important;
+      height: auto !important;
+      overflow: auto !important;
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: inherit;
+    }
+
+    body {
+      width: auto !important;
+      margin: 0;
+    }
+
+    body > * {
+      max-width: 100% !important;
+    }
+
+    img,
+    video,
+    canvas,
+    svg,
+    table {
+      max-width: 100% !important;
+    }
+  </style>
+`;
+
+function htmlPreviewSrcDoc(source: string): string {
+  if (/<head[\s>]/i.test(source)) {
+    return source.replace(/<head([^>]*)>/i, `<head$1>${HTML_PREVIEW_STYLE}`);
+  }
+  if (/<html[\s>]/i.test(source)) {
+    return source.replace(
+      /<html([^>]*)>/i,
+      `<html$1><head>${HTML_PREVIEW_STYLE}</head>`,
+    );
+  }
+  return `<!doctype html><html><head>${HTML_PREVIEW_STYLE}</head><body>${source}</body></html>`;
+}
+
 function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
   const [mode, setMode] = useState<PreviewSourceMode>("preview");
+  const htmlSource = content?.kind === "text" ? content.content : null;
+  const previewHostRef = useRef<HTMLDivElement | null>(null);
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [iframeHeight, setIframeHeight] = useState<number | null>(null);
+
+  const resizePreview = useCallback(() => {
+    const host = previewHostRef.current;
+    const iframe = iframeRef.current;
+    if (!host || !iframe) return;
+    try {
+      const doc = iframe.contentDocument;
+      const htmlElement = doc?.documentElement;
+      const body = doc?.body;
+      if (!doc || !htmlElement || !body) return;
+
+      body.style.setProperty("zoom", "1");
+      htmlElement.style.setProperty("height", "auto", "important");
+      body.style.setProperty("height", "auto", "important");
+      htmlElement.style.setProperty("overflow", "hidden", "important");
+      body.style.setProperty("overflow", "hidden", "important");
+
+      const availableWidth = Math.max(host.clientWidth, 1);
+      const contentWidth = Math.max(
+        htmlElement.scrollWidth,
+        body.scrollWidth,
+        body.offsetWidth,
+        availableWidth,
+      );
+      const scale = Math.min(1, availableWidth / contentWidth);
+      body.style.setProperty("zoom", String(scale));
+
+      window.requestAnimationFrame(() => {
+        const contentHeight = Math.max(
+          htmlElement.scrollHeight,
+          body.scrollHeight,
+          host.clientHeight,
+        );
+        setIframeHeight(Math.ceil(contentHeight * scale));
+      });
+    } catch {
+      setIframeHeight(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (mode !== "preview") return;
+    const host = previewHostRef.current;
+    if (!host) return;
+    const observer = new ResizeObserver(() => resizePreview());
+    observer.observe(host);
+    resizePreview();
+    return () => observer.disconnect();
+  }, [htmlSource, mode, resizePreview]);
 
   if (!content || content.kind !== "text") {
     return <UnsupportedRenderer artifact={artifact} content={content} />;
@@ -563,13 +668,22 @@ function HtmlRenderer({ artifact, content }: ArtifactRendererProps) {
         <span className="text-xs text-ink-body">HTML</span>
         <PreviewSourceToggle mode={mode} onModeChange={setMode} />
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden bg-surface-base p-4">
+      <div
+        ref={previewHostRef}
+        className="min-h-0 flex-1 overflow-auto bg-surface-base p-4"
+      >
         <iframe
-          srcDoc={content.content}
+          ref={iframeRef}
+          srcDoc={htmlPreviewSrcDoc(content.content)}
           title={artifact.name}
-          sandbox=""
-          scrolling="auto"
-          className="h-full w-full rounded-md border border-surface-border bg-white"
+          sandbox="allow-same-origin"
+          scrolling="no"
+          onLoad={resizePreview}
+          className="w-full rounded-md border border-surface-border bg-white"
+          style={{
+            height: iframeHeight ? `${iframeHeight}px` : "100%",
+            minHeight: "100%",
+          }}
         />
       </div>
       {content.truncated ? (
