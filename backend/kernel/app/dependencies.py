@@ -51,6 +51,12 @@ async def init_dependencies(config: AppConfig) -> None:
     _session_factory = create_session_factory(_engine)
     local: StorePort = SQLAlchemyStore(_session_factory)
     durable = _build_durable_store(config)
+    if _durable_engine is not None:
+        # In-process durable (``kernel_store=pg``): create the kernel schema if
+        # absent. ``create_all`` is checkfirst (idempotent) — a no-op when the
+        # DB was already provisioned by alembic, and it materializes the full
+        # current model (incl. the ``event_uid`` unique index) on a fresh PG.
+        await _ensure_durable_schema(_durable_engine)
     store: StorePort = WriteThroughStore(local, durable) if durable is not None else local
     _store = store
     _orchestrator = SessionOrchestrator(
@@ -207,6 +213,18 @@ def _build_durable_store(config: AppConfig) -> StorePort | None:
         base_url=config.data_api_url,
         access_token=_access_token,
     )
+
+
+async def _ensure_durable_schema(engine: AsyncEngine) -> None:
+    """Create the kernel schema on the in-process durable engine if missing.
+
+    Idempotent (``create_all`` is checkfirst). Used only for ``kernel_store=pg``;
+    the HTTP-remote durable owns its own (externally migrated) schema.
+    """
+    from src.adapters.sqlalchemy_store.models import Base
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 
 def _ensure_remote_backend(kind: str) -> None:
