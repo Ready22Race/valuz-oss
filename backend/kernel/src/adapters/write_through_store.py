@@ -1,16 +1,25 @@
-"""WriteThroughStore — local-first store + synchronous write-through to durable.
+"""WriteThroughStore — local-first store + write-through to a durable backend.
 
 Model A: the kernel ALWAYS writes a local copy (local-first reads + availability)
-and, when a durable backend is configured, **synchronously mirrors writes** to it.
+and mirrors writes to a durable backend. Two **per-tier** policies (the durability
+vs. availability trade-off the deployment dictates):
 
-- **events** are the SaaS-centralization authority for ordering: ``append_event`` is
-  **durable-first** — the durable store assigns the authoritative ``seq``
-  (autoincrement) and the local copy is then written with that explicit ``seq``, so
-  both copies (and a future central store) share one ordering. A shared
-  ``request_id`` makes the pair idempotent under retry (``event_uid``).
-- **sessions / messages / delete** are local-then-durable (client-UUID PKs, no seq
-  concern; each store upserts).
-- **reads** are local-first.
+**Strict** (``durable_required=True`` — ``remote``/sandbox): the durable write
+must land before the call returns. ``append_event`` is **durable-first** — the
+durable store assigns the authoritative ``seq`` (central ordering for SaaS) and
+the local copy mirrors it. A durable failure is **fail-loud** (propagates), so a
+sandbox never dies with un-persisted data.
+
+**Best-effort** (``durable_required=False`` — ``pg``, the OSS user's own
+Postgres): the LOCAL write is authoritative and always succeeds first (incl. the
+event ``seq``, assigned by the local autoincrement). The durable mirror is
+attempted next; on ANY failure the op is enqueued in the :class:`DurableOutbox`
+and the call returns normally — a durable outage never blocks local-first
+writes. A background drainer re-pushes the backlog on recovery (idempotent
+replay via ``event_uid`` / UUID PKs).
+
+Common to both: a shared ``request_id`` makes the durable+local pair idempotent;
+**reads are local-first**.
 
 Constructed ONLY when ``durable`` is genuinely distinct from ``local`` — when they
 resolve to the same backend the dependency layer returns the local store directly,
@@ -21,32 +30,72 @@ Structurally satisfies ``src.core.StorePort`` (does not inherit the Protocol).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Sequence
 
+from src.adapters import store_wire as sw
+from src.adapters.durable_outbox import DurableOutbox
 from src.core.events import Event
 from src.core.store_port import StoredEvent, StorePort, UsageRollupRow
 from src.core.types import Message, Session
 
+logger = logging.getLogger(__name__)
+
 
 class WriteThroughStore:
-    def __init__(self, local: StorePort, durable: StorePort) -> None:
+    def __init__(
+        self,
+        local: StorePort,
+        durable: StorePort,
+        *,
+        durable_required: bool = True,
+        outbox: DurableOutbox | None = None,
+    ) -> None:
+        if not durable_required and outbox is None:
+            raise ValueError("best-effort write-through requires a DurableOutbox")
         self._local = local
         self._durable = durable
+        self._strict = durable_required
+        self._outbox = outbox
 
     # ---- writes ----------------------------------------------------------
 
     async def save_session(self, session: Session) -> None:
         await self._local.save_session(session)
-        await self._durable.save_session(session)
+        if self._strict:
+            await self._durable.save_session(session)
+            return
+        await self._mirror(
+            self._durable.save_session(session),
+            op="save_session",
+            user_id=session.user_id,
+            body={"session": sw.session_to_row(session)},
+        )
 
     async def save_message(self, user_id: str, message: Message) -> None:
         await self._local.save_message(user_id, message)
-        await self._durable.save_message(user_id, message)
+        if self._strict:
+            await self._durable.save_message(user_id, message)
+            return
+        await self._mirror(
+            self._durable.save_message(user_id, message),
+            op="save_message",
+            user_id=user_id,
+            body={"message": sw.message_to_row(message)},
+        )
 
     async def delete_session(self, user_id: str, session_id: str) -> bool:
         deleted = await self._local.delete_session(user_id, session_id)
-        await self._durable.delete_session(user_id, session_id)
+        if self._strict:
+            await self._durable.delete_session(user_id, session_id)
+            return deleted
+        await self._mirror(
+            self._durable.delete_session(user_id, session_id),
+            op="delete_session",
+            user_id=user_id,
+            body={"session_id": session_id},
+        )
         return deleted
 
     async def append_event(
@@ -60,15 +109,54 @@ class WriteThroughStore:
         seq: int | None = None,
     ) -> int | None:
         rid = request_id or uuid.uuid4().hex  # one idempotency key for both copies
-        # Durable assigns the authoritative seq (central ordering for SaaS)…
-        durable_seq = await self._durable.append_event(
+        if self._strict:
+            # Durable assigns the authoritative seq (central ordering for SaaS)…
+            durable_seq = await self._durable.append_event(
+                user_id, session_id, message_id, event, request_id=rid, seq=seq
+            )
+            # …then mirror locally with that exact seq (idempotent on event_uid).
+            await self._local.append_event(
+                user_id, session_id, message_id, event, request_id=rid, seq=durable_seq
+            )
+            return durable_seq
+        # Best-effort: the LOCAL store is the seq authority; the durable mirror
+        # replays that exact seq (so a recovered durable matches local ordering).
+        local_seq = await self._local.append_event(
             user_id, session_id, message_id, event, request_id=rid, seq=seq
         )
-        # …then mirror locally with that exact seq (idempotent on event_uid).
-        await self._local.append_event(
-            user_id, session_id, message_id, event, request_id=rid, seq=durable_seq
+        await self._mirror(
+            self._durable.append_event(
+                user_id, session_id, message_id, event, request_id=rid, seq=local_seq
+            ),
+            op="append_event",
+            user_id=user_id,
+            body={
+                "session_id": session_id,
+                "message_id": message_id,
+                "event": sw.event_to_row(event),
+                "request_id": rid,
+                "seq": local_seq,
+            },
         )
-        return durable_seq
+        return local_seq
+
+    async def _mirror(self, coro, *, op: str, user_id: str, body: dict) -> None:
+        """Best-effort durable mirror: await ``coro``; on ANY failure enqueue the
+        op for later re-push so the (already-committed) local write is never
+        blocked by a durable outage."""
+        assert self._outbox is not None  # guaranteed by __init__ in best-effort mode
+        try:
+            await coro
+        except Exception as exc:  # noqa: BLE001 — availability over consistency here
+            logger.warning("durable mirror failed (op=%s); queued to outbox: %s", op, exc)
+            await self._outbox.enqueue(op, user_id, body)
+
+    async def drain_outbox(self) -> int:
+        """Re-push any queued durable writes (best-effort mode). No-op in strict
+        mode. Returns the number of ops drained."""
+        if self._outbox is None:
+            return 0
+        return await self._outbox.drain(self._durable)
 
     # ---- reads (local-first) --------------------------------------------
 
