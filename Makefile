@@ -1,4 +1,4 @@
-.PHONY: dev test typecheck lint seed help
+.PHONY: dev dev-sandbox dev-remote test typecheck lint seed help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -17,6 +17,9 @@ dev: ## Start backend + frontend (foreground; Ctrl+C stops both)
 
 dev-sandbox: ## Like dev, but run the kernel in a Seatbelt sandbox (macOS)
 	VALUZ_SANDBOX_DRIVER=seatbelt bash scripts/dev.sh $(or $(TARGET),all)
+
+dev-remote: ## Remote-store stack: podman Postgres + data service + seatbelt backend (macOS)
+	bash scripts/dev-remote.sh
 
 seed: ## Load seed data into database
 	cd backend && uv run python -m scripts.seed

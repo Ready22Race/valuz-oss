@@ -79,7 +79,13 @@ install_backend() {
     # ``uv run pytest`` after every startup (ModuleNotFoundError: pytest).
     # (Runtime OCR deps live in the DEFAULT dependencies, so they are not
     # pruned here and need no extra.)
-    uv sync --extra dev
+    #
+    # Remote-store mode (make dev-remote) also needs the ``postgres`` extra
+    # (asyncpg) — keep it so the same ``uv sync`` doesn't prune the driver the
+    # data service connects with.
+    local extras="--extra dev"
+    [[ "${VALUZ_KERNEL_STORE:-}" == "remote" ]] && extras="$extras --extra postgres"
+    uv sync $extras
     ok "backend deps ready"
 }
 

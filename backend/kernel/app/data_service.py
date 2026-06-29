@@ -272,6 +272,6 @@ def build_app_from_env() -> FastAPI:
     engine = create_async_engine(_to_async_url(db_url))
     install_rls_guc(engine)
     store = SQLAlchemyStore(async_sessionmaker(engine, expire_on_commit=False))
-    app = create_data_service_app(store, HmacTokenVerifier(secret))
-    app.add_event_handler("shutdown", engine.dispose)
-    return app
+    # The engine lives for the process lifetime; the OS reclaims its
+    # connections on exit (a standalone, long-running service).
+    return create_data_service_app(store, HmacTokenVerifier(secret))

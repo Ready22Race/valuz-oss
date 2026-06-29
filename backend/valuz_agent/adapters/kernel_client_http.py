@@ -369,6 +369,21 @@ class HttpKernelClient:
     ) -> MessageData:
         import websockets
 
+        # Re-establish the dynamic workspace grant for this session's cwd before
+        # running. Sandbox-extension grants are per-sandbox-INSTANCE and only
+        # ``create_session`` issues them — so resuming a session whose cwd is
+        # outside the static write-mounts in a FRESH sandbox (e.g. after a
+        # backend restart) would hit "Operation not permitted" the moment the
+        # runtime materializes skills into ``<cwd>/.agents/skills``. Guarded on
+        # ``is_active`` so this only costs a ``get_session`` read when a real
+        # sandbox is configured; idempotent + a no-op for in-static-root cwds.
+        from valuz_agent.integrations import sandbox_runtime
+
+        if sandbox_runtime.is_active():
+            session = await self.get_session(user_id, session_id)
+            if session is not None and session.cwd:
+                await sandbox_runtime.ensure_workspace_granted(session.cwd)
+
         ws_base = self._base_url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
         url = f"{ws_base}/api/v1/sessions/{session_id}/run"
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
