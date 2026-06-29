@@ -47,7 +47,7 @@ def _patch_staging_resolver(monkeypatch: pytest.MonkeyPatch, staging_base: Path)
     of session id — stands in for the kernel/project lookup the handler does
     in production."""
 
-    async def _fake(session_id: str, *, mkdir: bool = False) -> Path:  # noqa: ARG001
+    async def _fake(user_id: str, session_id: str, *, mkdir: bool = False) -> Path:  # noqa: ARG001
         return staging_base
 
     # The handler imports the symbol lazily from the staging module, so patch

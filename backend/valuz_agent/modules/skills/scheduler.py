@@ -89,22 +89,19 @@ def run_skill_scan() -> None:
 
 
 async def _arun_skill_scan() -> None:
-    # Seed the owner ContextVar — this daemon thread's loop does not inherit the
-    # main thread's boot-seeded ``valuz_current_user_id`` (see auth_context
-    # contract). ``resolve_local_user_id`` is process-cached, so it matches.
-    from valuz_agent.infra.auth_context import set_current_user_id
-    from valuz_agent.infra.local_identity import resolve_local_user_id
-
-    set_current_user_id(resolve_local_user_id())
-
+    # The skills auto-scan daemon runs as the local install owner.
+    # ``startup_scan`` is fully owner-explicit (threads ``user_id`` down), so we
+    # pass the owner directly instead of seeding the ambient ContextVar.
     from valuz_agent.api.deps import get_skill_service
     from valuz_agent.infra.eventbus import event_bus
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.modules.skills.events import SKILL_CHANGED
 
+    owner = resolve_local_user_id()
     gen = get_skill_service()
     svc = await gen.__anext__()
     try:
-        indexed = await svc.startup_scan()
+        indexed = await svc.startup_scan(owner)
         logger.info("skill auto-scan: indexed %d skill(s)", indexed)
         # Refresh any open catalog (the same event the manual endpoint emits).
         event_bus.publish(SKILL_CHANGED, skill_id="*", reason="auto-scan")

@@ -64,7 +64,7 @@ async def _use(dep_factory: Any) -> AsyncGenerator[Any, None]:
     Usage::
 
         async with _use(get_skill_service) as svc:
-            result = await svc.list_catalog("chat-default")
+            result = await svc.list_catalog(user_id, "chat-default")
     """
     gen = dep_factory()
     value = await gen.__anext__()
@@ -100,7 +100,7 @@ class ResourceLibrary:
             from valuz_agent.api.deps import get_skill_service
 
             async with _use(get_skill_service) as svc:
-                cat = await svc.list_catalog("chat-default")
+                cat = await svc.list_catalog(user_id, "chat-default")
             return [ResourceRef(kind="skill", key=s.slug, name=s.name) for s in cat.skills]
 
         if kind == "connector":
@@ -157,16 +157,16 @@ class ResourceLibrary:
 
             async with _use(get_skill_service) as svc:
                 # Resolve slug → skill id via catalog
-                cat = await svc.list_catalog("chat-default")
+                cat = await svc.list_catalog(user_id, "chat-default")
                 matched = next((s for s in cat.skills if s.slug == key), None)
                 if matched is None:
                     return None
-                detail = await svc.get_skill_detail(matched.id)
-                file_nodes = await svc.list_skill_files(matched.id)
+                detail = await svc.get_skill_detail(user_id, matched.id)
+                file_nodes = await svc.list_skill_files(user_id, matched.id)
                 files: dict[str, str] = {}
                 for node in file_nodes:
                     try:
-                        fc = await svc.read_skill_file(matched.id, node.path)
+                        fc = await svc.read_skill_file(user_id, matched.id, node.path)
                         files[node.path] = fc.content
                     except Exception:
                         logger.debug(
@@ -269,12 +269,13 @@ class ResourceLibrary:
                 # Try create; on slug-conflict fall back to update
                 try:
                     view = await svc.create_skill(
+                        user_id,
                         SkillCreateRequest(
                             name=data["name"],
                             target_scope=data.get("target_scope", "user"),
                             description=data.get("description") or "",
                             instructions_markdown=data.get("instructions_markdown"),
-                        )
+                        ),
                     )
                 except Exception as exc:
                     # A skill with this name / slug already exists — resolve
@@ -283,7 +284,7 @@ class ResourceLibrary:
                         "ResourceLibrary.save skill: create failed (%s), attempting update",
                         exc,
                     )
-                    cat = await svc.list_catalog("chat-default")
+                    cat = await svc.list_catalog(user_id, "chat-default")
                     slug = data["name"].lower().replace(" ", "-")
                     matched = next(
                         (s for s in cat.skills if s.slug == snapshot.key or s.slug == slug), None
@@ -291,6 +292,7 @@ class ResourceLibrary:
                     if matched is None:
                         raise
                     view = await svc.update_skill(
+                        user_id,
                         matched.id,
                         SkillUpdateRequest(
                             name=data.get("name"),
@@ -303,6 +305,7 @@ class ResourceLibrary:
                 for path, content in (snapshot.files or {}).items():
                     try:
                         await svc.write_skill_file(
+                            user_id,
                             view.id,
                             SkillFileAction(path=path, action="create", content=content),
                         )
