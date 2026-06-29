@@ -18,16 +18,29 @@ wiring for a standalone deployment is assembled by the caller.
 
 from __future__ import annotations
 
+import contextvars
+import os
 from dataclasses import replace
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, FastAPI, HTTPException, Request
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 from src.adapters import store_wire as sw
+from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
 from src.core import StorePort
-from src.core.token_signer import InvalidTokenError
+from src.core.token_signer import HmacTokenVerifier, InvalidTokenError
 from src.core.token_verifier import TokenVerifier
 
 router = APIRouter()
+
+# Request owner for the per-transaction RLS GUC bridge (PG deployments). Set per
+# request from the verified token; read by the engine "begin" listener in
+# ``build_app_from_env``. ContextVars are task-local, so concurrent requests
+# never see each other's owner.
+_owner_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "data_service_owner", default=None
+)
 
 
 def _bearer(authorization: str | None) -> str | None:
@@ -48,6 +61,9 @@ async def _owner_dep(request: Request) -> str:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     if claims is None:
         raise HTTPException(status_code=401, detail="missing or invalid token")
+    # Stamp the owner for the per-transaction RLS GUC (read by the engine
+    # "begin" listener on Postgres; a no-op on SQLite).
+    _owner_ctx.set(claims.user_id)
     return claims.user_id
 
 
@@ -204,4 +220,58 @@ def create_data_service_app(store: StorePort, verifier: TokenVerifier) -> FastAP
     app.state.store = store
     app.state.verifier = verifier
     app.include_router(router)
+    return app
+
+
+def _to_async_url(url: str) -> str:
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("sqlite://") and "+aiosqlite" not in url:
+        return url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+    return url
+
+
+def install_rls_guc(engine: AsyncEngine) -> None:
+    """On Postgres, stamp the request owner into a per-transaction GUC
+    (``app.current_user_id``) so RLS policies enforce owner isolation as a DB
+    backstop — even a query that forgot its app-layer ``user_id`` filter is
+    scoped to the token owner. ``SET LOCAL`` is transaction-scoped, so a pooled
+    connection never leaks one request's owner into the next. No-op on SQLite.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+
+    @event.listens_for(engine.sync_engine, "begin")
+    def _set_owner_guc(conn) -> None:  # type: ignore[no-untyped-def]
+        owner = _owner_ctx.get()
+        if owner is not None:
+            # set_config(..., is_local=true) == SET LOCAL; bound param is safe.
+            conn.execute(
+                text("SELECT set_config('app.current_user_id', :owner, true)"),
+                {"owner": owner},
+            )
+
+
+def build_app_from_env() -> FastAPI:
+    """Standalone data service from env (uvicorn ``--factory`` entrypoint).
+
+    ``VALUZ_DATA_SERVICE_DATABASE_URL`` (or ``DATABASE_URL``) — the DB DSN. This
+    is the ONLY place a DB credential lives; the sandbox never gets it. For RLS
+    enforcement, point it at a NON-owner role (the table owner bypasses RLS).
+    ``VALUZ_DATA_SERVICE_JWT_SECRET`` — the HS256 secret shared with the host
+    token signer. Assumes the schema is already migrated.
+    """
+    db_url = os.environ.get("VALUZ_DATA_SERVICE_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    secret = os.environ.get("VALUZ_DATA_SERVICE_JWT_SECRET")
+    if not db_url:
+        raise RuntimeError(
+            "data service requires VALUZ_DATA_SERVICE_DATABASE_URL (or DATABASE_URL)"
+        )
+    if not secret:
+        raise RuntimeError("data service requires VALUZ_DATA_SERVICE_JWT_SECRET")
+    engine = create_async_engine(_to_async_url(db_url))
+    install_rls_guc(engine)
+    store = SQLAlchemyStore(async_sessionmaker(engine, expire_on_commit=False))
+    app = create_data_service_app(store, HmacTokenVerifier(secret))
+    app.add_event_handler("shutdown", engine.dispose)
     return app
