@@ -609,7 +609,7 @@ export const CreateAutomationDialog = ({
           {/* 所属项目 + 智能体 share one row. The project field is dropped when
               there's neither a selectable target nor a fixed project, so the
               agent field then spans the full width. */}
-          <div className="grid grid-cols-2 items-start gap-3">
+          <div className="grid grid-cols-2 items-start gap-2">
             {(showTargetSelector || fixedTargetName) && (
               <div className="min-w-0">
                 {showTargetSelector ? (
