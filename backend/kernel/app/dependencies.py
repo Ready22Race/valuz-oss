@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from src.adapters.remote_store import build_remote_store
 from src.adapters.sqlalchemy_store.engine import create_engine, create_session_factory
 from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
+from src.adapters.write_through_store import WriteThroughStore
 from src.core import NullTokenVerifier, StorePort, TokenVerifier
 from src.core.orchestrator import SessionOrchestrator
 
@@ -38,16 +39,15 @@ async def init_dependencies(config: AppConfig) -> None:
     (per design doc §6.3 — D6 contract symmetry across runtimes).
     """
     global _engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
-    if config.kernel_store == "remote":
-        # Remote mode (sandbox/SaaS): hold NO database. StorePort talks to a
-        # trusted data API over HTTP; this process has no DSN/engine/driver.
-        _engine = None
-        _session_factory = None
-        store: StorePort = _build_remote_store(config)
-    else:
-        _engine = create_engine(config.database_url)
-        _session_factory = create_session_factory(_engine)
-        store = SQLAlchemyStore(_session_factory)
+    # Model A: the LOCAL store ALWAYS exists (local-first). The kernel keeps its
+    # own SQLite/PG via this engine; when a durable backend is configured
+    # (remote DataService / central PG) every write is mirrored through it
+    # (WriteThroughStore). No "remote replaces local" branch.
+    _engine = create_engine(config.database_url)
+    _session_factory = create_session_factory(_engine)
+    local: StorePort = SQLAlchemyStore(_session_factory)
+    durable = _build_durable_store(config)
+    store: StorePort = WriteThroughStore(local, durable) if durable is not None else local
     _store = store
     _orchestrator = SessionOrchestrator(
         store,
@@ -58,13 +58,9 @@ async def init_dependencies(config: AppConfig) -> None:
     # subprocesses; see SessionOrchestrator). Safe before the orphan scan's
     # possible early return so it runs regardless of migration state.
     _orchestrator.start()
-    if config.kernel_store == "remote":
-        # Cross-owner orphan sweeps (``list_sessions(user_id=None)``) belong to
-        # the trusted resident, not a per-session sandbox; RLS would scope them
-        # to one owner anyway. Skip them in remote mode.
-        return
-    # Best-effort scan — schema may not be migrated yet (typical in unit
-    # tests that skip Alembic and run against an empty in-memory DB).
+    # Orphan scans run against the always-present local store.
+    # Best-effort — schema may not be migrated yet (typical in unit tests that
+    # skip Alembic and run against an empty in-memory DB).
     try:
         sealed = await _orchestrator.scan_orphan_pendings()
         reset_runs = await _orchestrator.scan_orphan_runs()
@@ -165,20 +161,25 @@ def set_token_verifier(verifier: TokenVerifier) -> None:
     _token_verifier = verifier
 
 
-def _build_remote_store(config: AppConfig) -> StorePort:
-    """Construct the remote ``StorePort`` for ``KERNEL_STORE=remote``.
+def _build_durable_store(config: AppConfig) -> StorePort | None:
+    """The durable write-through target (model A), or ``None`` for local-only.
 
-    No engine, no DSN — only the data-API URL + a bearer-token hook. The
-    concrete backend (``data_api_kind``) self-registers on import.
+    ``kernel_store=remote`` + ``data_api_url`` → a client to the remote
+    DataService (sandbox/SaaS); the local store is mirrored to it. No engine /
+    DSN here — only the data-API URL + a bearer-token hook (the concrete
+    backend ``data_api_kind`` self-registers on import). Returns ``None`` when
+    no durable backend is configured (the kernel runs local-only).
     """
+    if config.kernel_store != "remote":
+        return None
     if not config.data_api_url:
         raise RuntimeError("KERNEL_STORE=remote requires VALUZ_DATA_API_URL")
     _ensure_remote_backend(config.data_api_kind)
     token = config.data_api_token or ""
 
     async def _access_token() -> str:
-        # Phase A: static token from env. Phase B/C replaces this with a
-        # refresh hook that re-mints a short-lived JWT from the host.
+        # Static token from env for now; a refresh hook (re-mint short-lived
+        # JWT from the host) plugs in here later.
         return token
 
     return build_remote_store(

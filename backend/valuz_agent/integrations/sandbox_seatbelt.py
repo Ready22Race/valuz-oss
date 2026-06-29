@@ -381,18 +381,17 @@ class SeatbeltSandboxProvider:
                 "SeatbeltSandboxProvider preflight failed: " + "; ".join(problems)
             )
         token = secrets.token_urlsafe(24)
-        # Remote store mode: the sandbox holds NO database — no DSN, no private
-        # SQLite, no migration. It persists the three kernel tables through a
-        # trusted data API (KERNEL_STORE / VALUZ_DATA_API_* carried in
-        # ``spec.env``). Local mode keeps the private kernel SQLite.
-        remote = spec.env.get("KERNEL_STORE") == "remote"
-        db_url: str | None = None
-        if not remote:
-            db_url = f"sqlite+aiosqlite:///{spec.kernel_db_path}"
-            # Bootstrap step 1 — migrate the private kernel DB. Done host-side
-            # in a one-shot subprocess (clean settings, private DB); the
-            # kernel-image self-migration is the cloud-form upgrade.
-            await self._migrate(spec.kernel_db_path)
+        # Model A: the sandbox ALWAYS keeps a private local kernel SQLite
+        # (local-first reads + availability). When ``KERNEL_STORE=remote`` it
+        # ADDITIONALLY write-throughs to a trusted data API (the durable
+        # backend) over HTTP — the sandbox holds only a JWT + the data-API URL
+        # (KERNEL_STORE / VALUZ_DATA_API_* carried in ``spec.env``), never a PG
+        # credential. The local DB is present in both modes.
+        db_url = f"sqlite+aiosqlite:///{spec.kernel_db_path}"
+        # Bootstrap step 1 — migrate the private kernel DB. Done host-side in a
+        # one-shot subprocess (clean settings, private DB); the kernel-image
+        # self-migration is the cloud-form upgrade.
+        await self._migrate(spec.kernel_db_path)
 
         # Bootstrap step 2 — spawn the sandboxed server on port 0.
         profile = build_seatbelt_profile(spec)
@@ -569,9 +568,9 @@ class SeatbeltSandboxProvider:
                 **spec.env,  # ⑥ L1 credential injection (provider keys + store mode)
             }
         )
-        # Local store mode passes the private SQLite DSN; remote mode passes
-        # NONE — the sandbox must hold no DB connection at all (it persists
-        # through the data API authenticated by the injected JWT).
+        # Model A: the sandbox always holds its private local SQLite DSN; remote
+        # mode adds the data-API coordinates (in ``spec.env``) for write-through
+        # on top of it, never instead of it.
         if db_url is not None:
             env["DATABASE_URL"] = db_url
         if spec.host_callback_url:
@@ -682,26 +681,23 @@ class SeatbeltDriver:
         kernel_db = settings.kernel_db_path
 
         mounts = host_sandbox_rw_mounts()
-        # Remote store mode: persist through the data API; the sandbox holds NO
-        # database. Inject only the store mode + data-API coordinates (NEVER a
-        # PG DSN) and grant no kernel.db write files.
-        remote = settings.kernel_store == "remote"
         env = dict(ctx.passthrough_env)  # ⑥ L1 credential injection
-        rw_files: tuple[str, ...]
-        if remote:
+        # Model A: the sandbox ALWAYS keeps a local kernel.db (grant its write
+        # files in every mode). ``KERNEL_STORE=remote`` ADDITIONALLY injects the
+        # data-API coordinates (NEVER a PG DSN) so the kernel write-throughs to
+        # the durable backend over HTTP, holding only a JWT.
+        rw_files: tuple[str, ...] = (
+            str(kernel_db),
+            str(kernel_db) + "-wal",
+            str(kernel_db) + "-shm",
+        )
+        if settings.kernel_store == "remote":
             env["KERNEL_STORE"] = "remote"
             env["VALUZ_DATA_API_KIND"] = settings.kernel_data_api_kind
             if settings.kernel_data_api_url:
                 env["VALUZ_DATA_API_URL"] = settings.kernel_data_api_url
             if settings.kernel_data_api_token:
                 env["VALUZ_DATA_API_TOKEN"] = settings.kernel_data_api_token
-            rw_files = ()
-        else:
-            rw_files = (
-                str(kernel_db),
-                str(kernel_db) + "-wal",
-                str(kernel_db) + "-shm",
-            )
         spec = SandboxSpec(
             sandbox_id="host-kernel",
             kernel_db_path=str(kernel_db),

@@ -1,7 +1,8 @@
 """Phase A — kernel dependency wiring for the remote store seam.
 
-Covers the ``init_dependencies`` store-selection helper (``_build_remote_store``)
-and the token-aware ``get_owner_id`` branch. No DB, no network.
+Covers the ``init_dependencies`` durable write-through helper
+(``_build_durable_store``) and the token-aware ``get_owner_id`` branch.
+No DB, no network.
 """
 
 # ruff: noqa: I001 — boot.kernel side-effect import MUST precede src.*/app.* (sys.path)
@@ -31,13 +32,18 @@ def test_default_kernel_store_is_local():
     assert AppConfig(kernel_store="local").kernel_store == "local"
 
 
-def test_build_remote_store_requires_url():
+def test_local_store_has_no_durable():
+    # Model A default: local-only, no durable write-through target.
+    assert deps._build_durable_store(AppConfig(kernel_store="local")) is None
+
+
+def test_build_durable_store_requires_url():
     config = AppConfig(kernel_store="remote", data_api_url=None)
     with pytest.raises(RuntimeError, match="VALUZ_DATA_API_URL"):
-        deps._build_remote_store(config)
+        deps._build_durable_store(config)
 
 
-async def test_build_remote_store_wires_kind_url_and_token():
+async def test_build_durable_store_wires_kind_url_and_token():
     captured: dict = {}
 
     def _factory(**kw):
@@ -51,11 +57,11 @@ async def test_build_remote_store_wires_kind_url_and_token():
         data_api_token="jwt-tok",
         data_api_kind="wire-test",
     )
-    result = deps._build_remote_store(config)
+    result = deps._build_durable_store(config)
 
     assert result == "STORE-SENTINEL"
     assert captured["base_url"] == "http://127.0.0.1:3000"
-    # The access-token hook returns the configured bearer (Phase A: static).
+    # The access-token hook returns the configured bearer (static for now).
     assert await captured["access_token"]() == "jwt-tok"
 
 
