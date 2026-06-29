@@ -8,7 +8,7 @@ const emptyStateVariants = cva("", {
   variants: {
     variant: {
       dashed:
-        "rounded-[10px] border border-dashed border-surface-border-hover bg-surface-soft px-5 py-6 text-center",
+        "w-[300px] rounded-xl px-5 py-8 text-center",
       plain:
         "flex flex-col items-center text-center",
     },
@@ -28,7 +28,7 @@ export interface EmptyStateProps extends VariantProps<typeof emptyStateVariants>
   message?: string;
   /** Primary title (preferred over `message`). */
   title?: string;
-  /** Secondary description shown below the title. Only rendered in `plain` variant. */
+  /** Secondary description shown below the title. */
   description?: string;
   /** Optional call-to-action below the message */
   action?: ReactNode;
@@ -38,7 +38,7 @@ export interface EmptyStateProps extends VariantProps<typeof emptyStateVariants>
 
 /**
  * Empty state component with two variants:
- * - `dashed` (default): dashed-border card for inline empty lists
+ * - `dashed` (default): v2.6 09 Empty State layout
  * - `plain`: centered layout for full-page empty states
  */
 export const EmptyState = ({
@@ -74,9 +74,22 @@ export const EmptyState = ({
   return (
     <div className={cn(emptyStateVariants({ variant }), className)}>
       {icon && (
-        <div className="mb-2 flex justify-center text-ink-meta">{icon}</div>
+        <IconBox
+          size="lg"
+          variant="default"
+          className="mx-auto mb-3 rounded-[10px] text-ink-muted [&_svg:not([class*='size-'])]:size-5"
+        >
+          {icon}
+        </IconBox>
       )}
-      <p className="text-sm text-ink-body">{text}</p>
+      <b className="block text-[13px] font-semibold text-ink-heading">
+        {text}
+      </b>
+      {description && (
+        <p className="mt-1 mb-3 text-xs leading-[1.6] text-ink-body">
+          {description}
+        </p>
+      )}
       {action && <div className="mt-3">{action}</div>}
     </div>
   );
