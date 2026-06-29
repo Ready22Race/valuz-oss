@@ -479,7 +479,14 @@ def model_to_message(model: MessageModel) -> Message:
 # -- Event --
 
 
-def event_to_model(user_id: str, session_id: str, message_id: str, event: Event) -> EventModel:
+def event_to_model(
+    user_id: str,
+    session_id: str,
+    message_id: str,
+    event: Event,
+    *,
+    event_uid: str | None = None,
+) -> EventModel:
     return EventModel(
         user_id=user_id,  # owner stamped explicitly (no column default)
         session_id=session_id,
@@ -487,6 +494,7 @@ def event_to_model(user_id: str, session_id: str, message_id: str, event: Event)
         type=event.type,
         data=event.data,
         timestamp=event.timestamp,
+        event_uid=event_uid,  # idempotency key for remote appends (NULL local)
     )
 
 

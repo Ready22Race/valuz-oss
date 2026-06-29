@@ -50,6 +50,21 @@ class Settings(BaseSettings):
     kernel_url: str = "http://127.0.0.1:8400"
     kernel_token: str | None = None
 
+    # Remote kernel store — when ``remote``, a sandboxed kernel is
+    # provisioned holding NO database: it persists the three kernel tables
+    # through a trusted data API (PostgREST / data service) at
+    # ``kernel_data_api_url``, authenticated by a short-lived JWT. The
+    # sandbox NEVER receives a PG DSN/credential. ``local`` (default) keeps
+    # the sandbox owning its own SQLite (today's behaviour). The driver
+    # injects these into the sandbox env (``KERNEL_STORE`` / ``VALUZ_DATA_API_*``).
+    # ``kernel_data_api_token`` is a convenience for the seatbelt closed-loop
+    # validation; production mints a per-session token via the refresh hook.
+    # Override with VALUZ_KERNEL_STORE / VALUZ_KERNEL_DATA_API_URL / etc.
+    kernel_store: str = "local"
+    kernel_data_api_url: str | None = None
+    kernel_data_api_kind: str = "http"
+    kernel_data_api_token: str | None = None
+
     @property
     def is_http_kernel(self) -> bool:
         """True when the kernel runs as a SEPARATE process (subprocess /

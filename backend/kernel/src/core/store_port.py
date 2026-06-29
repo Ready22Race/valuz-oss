@@ -103,12 +103,23 @@ class StorePort(Protocol):
     # -- Event log --
 
     async def append_event(
-        self, user_id: str, session_id: str, message_id: str, event: Event
+        self,
+        user_id: str,
+        session_id: str,
+        message_id: str,
+        event: Event,
+        *,
+        request_id: str | None = None,
     ) -> int | None:
         """Append an owner-stamped event scoped to (session, message).
 
         Returns the persisted row id (the client paging cursor ``seq``)
-        when the backend can report it, else ``None``."""
+        when the backend can report it, else ``None``.
+
+        ``request_id`` is an optional idempotency key for at-least-once remote
+        writes: passing the same key twice (a retry) must NOT insert a second
+        row — the backend returns the original ``seq``. ``None`` (local
+        in-process appends) keeps the plain-insert behaviour."""
         ...
 
     async def get_events(

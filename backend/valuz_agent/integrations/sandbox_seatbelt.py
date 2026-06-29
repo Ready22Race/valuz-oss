@@ -81,6 +81,7 @@ def _macos_major() -> int | None:
     except ValueError:
         return None
 
+
 # Standard macOS sandbox-extension classes, keyed by mount mode. These match
 # the ``(extension "...")`` class the profile pre-declares; the values are
 # the ``APP_SANDBOX_READ[_WRITE]`` symbol values exported by libsandbox.
@@ -275,7 +276,7 @@ def build_seatbelt_profile(spec: SandboxSpec) -> str:
 
     lines.append("; --- write: project cwd + kernel data dir + tmp only ---")
     for p in (*rw_subpaths, tmpdir):
-        lines.append(f'(allow file-write* (subpath {_q(p)}))')
+        lines.append(f"(allow file-write* (subpath {_q(p)}))")
 
     # Individual writable FILES (not trees): the shared kernel.db + its WAL/SHM
     # sidecars, which live next to valuz.db outside every rw mount. A per-file
@@ -285,7 +286,7 @@ def build_seatbelt_profile(spec: SandboxSpec) -> str:
     if spec.rw_files:
         lines.append("; --- write: shared kernel.db + WAL/SHM (files, not tree) ---")
         for f in spec.rw_files:
-            lines.append(f'(allow file-write* (literal {_q(f)}))')
+            lines.append(f"(allow file-write* (literal {_q(f)}))")
 
     # Dynamic mount: pre-declare that this long-lived sandbox HONOURS macOS
     # sandbox-extension tokens of the standard read-write class. This grants
@@ -298,9 +299,7 @@ def build_seatbelt_profile(spec: SandboxSpec) -> str:
     # dynamic-mount path. Backward-compatible: a sandbox that never receives
     # a token behaves exactly as before.
     lines.append("; --- dynamic mount: honour rw sandbox-extension tokens ---")
-    lines.append(
-        '(allow file-read* file-write* (extension "com.apple.app-sandbox.read-write"))'
-    )
+    lines.append('(allow file-read* file-write* (extension "com.apple.app-sandbox.read-write"))')
 
     # The agent CLIs need their own state dirs READ AND WRITE: codex
     # writes ``~/.codex/state_*.sqlite`` (and claude its caches), so a
@@ -312,12 +311,12 @@ def build_seatbelt_profile(spec: SandboxSpec) -> str:
     lines.append("; --- agent CLI state dirs (login + runtime, rw) ---")
     for d in (".claude", ".codex"):
         cli_dir = str(Path(home) / d)
-        lines.append(f'(allow file-read*  (subpath {_q(cli_dir)}))')
-        lines.append(f'(allow file-write* (subpath {_q(cli_dir)}))')
+        lines.append(f"(allow file-read*  (subpath {_q(cli_dir)}))")
+        lines.append(f"(allow file-write* (subpath {_q(cli_dir)}))")
 
     lines.append("; --- network: host callback (④) + LLM hosts ---")
-    lines.append("(allow network-outbound (remote ip \"localhost:*\"))")
-    lines.append('(allow network-outbound (remote unix-socket))')
+    lines.append('(allow network-outbound (remote ip "localhost:*"))')
+    lines.append("(allow network-outbound (remote unix-socket))")
     # Outbound to arbitrary TLS hosts — the minimal form keeps this broad;
     # tightening to spec.allowed_domains is the NetworkPolicy upgrade (S1+).
     lines.append('(allow network-outbound (remote tcp "*:443"))')
@@ -329,8 +328,8 @@ def build_seatbelt_profile(spec: SandboxSpec) -> str:
     # a directory the manifest write-allows.
     lines.append("; --- RED LINE: host business DB + secrets (deny wins) ---")
     for deny in spec.deny_paths:
-        lines.append(f'(deny file-read*  (subpath {_q(deny)}))')
-        lines.append(f'(deny file-write* (subpath {_q(deny)}))')
+        lines.append(f"(deny file-read*  (subpath {_q(deny)}))")
+        lines.append(f"(deny file-write* (subpath {_q(deny)}))")
 
     return "\n".join(lines) + "\n"
 
@@ -382,12 +381,18 @@ class SeatbeltSandboxProvider:
                 "SeatbeltSandboxProvider preflight failed: " + "; ".join(problems)
             )
         token = secrets.token_urlsafe(24)
-        db_url = f"sqlite+aiosqlite:///{spec.kernel_db_path}"
-
-        # Bootstrap step 1 — migrate the private kernel DB. Done host-side
-        # in a one-shot subprocess (clean settings, private DB); the
-        # kernel-image self-migration is the cloud-form upgrade.
-        await self._migrate(spec.kernel_db_path)
+        # Remote store mode: the sandbox holds NO database — no DSN, no private
+        # SQLite, no migration. It persists the three kernel tables through a
+        # trusted data API (KERNEL_STORE / VALUZ_DATA_API_* carried in
+        # ``spec.env``). Local mode keeps the private kernel SQLite.
+        remote = spec.env.get("KERNEL_STORE") == "remote"
+        db_url: str | None = None
+        if not remote:
+            db_url = f"sqlite+aiosqlite:///{spec.kernel_db_path}"
+            # Bootstrap step 1 — migrate the private kernel DB. Done host-side
+            # in a one-shot subprocess (clean settings, private DB); the
+            # kernel-image self-migration is the cloud-form upgrade.
+            await self._migrate(spec.kernel_db_path)
 
         # Bootstrap step 2 — spawn the sandboxed server on port 0.
         profile = build_seatbelt_profile(spec)
@@ -441,9 +446,7 @@ class SeatbeltSandboxProvider:
                 # Pipe closed under us on teardown — nothing left to drain.
                 pass
 
-        t = threading.Thread(
-            target=_pump, name=f"sandbox-log-{sandbox_id}", daemon=True
-        )
+        t = threading.Thread(target=_pump, name=f"sandbox-log-{sandbox_id}", daemon=True)
         t.start()
         self._log_drainers[sandbox_id] = t
 
@@ -552,21 +555,25 @@ class SeatbeltSandboxProvider:
         spec: SandboxSpec,
         profile: str,
         token: str,
-        db_url: str,
+        db_url: str | None,
     ) -> subprocess.Popen[bytes]:
         env = dict(os.environ)
         env.update(
             {
-                "DATABASE_URL": db_url,
                 "KERNEL_AUTH_TOKEN": token,
                 "PYTHONPATH": str(KERNEL_DIR),
                 # Mount the self-extension control plane so the host can
                 # grant new external paths into this live sandbox after boot
                 # (see kernel/app/sandbox_control.py).
                 "KERNEL_SANDBOX_CONTROL": "1",
-                **spec.env,  # ⑥ L1 credential injection (provider keys)
+                **spec.env,  # ⑥ L1 credential injection (provider keys + store mode)
             }
         )
+        # Local store mode passes the private SQLite DSN; remote mode passes
+        # NONE — the sandbox must hold no DB connection at all (it persists
+        # through the data API authenticated by the injected JWT).
+        if db_url is not None:
+            env["DATABASE_URL"] = db_url
         if spec.host_callback_url:
             # ④ harness MCP callback target for the codex runtime.
             env["CODEX_TOOLKIT_BASE_URL"] = spec.host_callback_url
@@ -612,9 +619,7 @@ class SeatbeltSandboxProvider:
         while port is None:
             raw = await loop.run_in_executor(None, proc.stdout.readline)
             if not raw:
-                raise SandboxProvisionError(
-                    "kernel exited before binding:\n" + "".join(lines)
-                )
+                raise SandboxProvisionError("kernel exited before binding:\n" + "".join(lines))
             text = raw.decode(errors="replace")
             lines.append(text)
             m = _BIND_LINE.search(text)
@@ -677,16 +682,32 @@ class SeatbeltDriver:
         kernel_db = settings.kernel_db_path
 
         mounts = host_sandbox_rw_mounts()
+        # Remote store mode: persist through the data API; the sandbox holds NO
+        # database. Inject only the store mode + data-API coordinates (NEVER a
+        # PG DSN) and grant no kernel.db write files.
+        remote = settings.kernel_store == "remote"
+        env = dict(ctx.passthrough_env)  # ⑥ L1 credential injection
+        rw_files: tuple[str, ...]
+        if remote:
+            env["KERNEL_STORE"] = "remote"
+            env["VALUZ_DATA_API_KIND"] = settings.kernel_data_api_kind
+            if settings.kernel_data_api_url:
+                env["VALUZ_DATA_API_URL"] = settings.kernel_data_api_url
+            if settings.kernel_data_api_token:
+                env["VALUZ_DATA_API_TOKEN"] = settings.kernel_data_api_token
+            rw_files = ()
+        else:
+            rw_files = (
+                str(kernel_db),
+                str(kernel_db) + "-wal",
+                str(kernel_db) + "-shm",
+            )
         spec = SandboxSpec(
             sandbox_id="host-kernel",
             kernel_db_path=str(kernel_db),
             mounts=mounts,
-            rw_files=(
-                str(kernel_db),
-                str(kernel_db) + "-wal",
-                str(kernel_db) + "-shm",
-            ),
-            env=ctx.passthrough_env,  # ⑥ L1 credential injection
+            rw_files=rw_files,
+            env=env,
             host_callback_url=ctx.host_callback_url,
             # RED LINE: host business DB (+ wal/shm) and secret store.
             deny_paths=(

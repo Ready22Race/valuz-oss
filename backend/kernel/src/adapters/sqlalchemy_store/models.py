@@ -125,9 +125,16 @@ class EventModel(Base):
     type: Mapped[str] = mapped_column(String(30))
     data: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     timestamp: Mapped[int] = mapped_column(BigInteger)
+    # Client-supplied idempotency key for at-least-once REMOTE appends. NULL for
+    # local in-process appends — NULLs are distinct under the unique index, so
+    # local inserts never conflict. A retried remote append reuses the same uid:
+    # the unique (user_id, event_uid) index turns the duplicate into a conflict
+    # and the store returns the original row's seq. See StorePort.append_event.
+    event_uid: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     __table_args__ = (
         Index("ix_events_session_timestamp", "session_id", "timestamp"),
         Index("ix_events_session_type", "session_id", "type"),
         Index("ix_events_message_id", "message_id"),
+        Index("uq_events_owner_uid", "user_id", "event_uid", unique=True),
     )

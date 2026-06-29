@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 from typing import Annotated
@@ -10,17 +11,22 @@ from app.config import AppConfig
 from fastapi import Header, HTTPException
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from src.adapters.remote_store import build_remote_store
 from src.adapters.sqlalchemy_store.engine import create_engine, create_session_factory
 from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
-from src.core import StorePort
+from src.core import NullTokenVerifier, StorePort, TokenVerifier
 from src.core.orchestrator import SessionOrchestrator
 
 logger = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
-_store: SQLAlchemyStore | None = None
+_store: StorePort | None = None
 _orchestrator: SessionOrchestrator | None = None
+# Owner-from-token seam: OSS default never derives identity from a token, so
+# ``get_owner_id`` keeps using the trusted ``X-Valuz-Owner-Id`` header. A SaaS
+# overlay binds a real verifier via ``set_token_verifier``.
+_token_verifier: TokenVerifier = NullTokenVerifier()
 
 
 async def init_dependencies(config: AppConfig) -> None:
@@ -32,11 +38,19 @@ async def init_dependencies(config: AppConfig) -> None:
     (per design doc §6.3 — D6 contract symmetry across runtimes).
     """
     global _engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
-    _engine = create_engine(config.database_url)
-    _session_factory = create_session_factory(_engine)
-    _store = SQLAlchemyStore(_session_factory)
+    if config.kernel_store == "remote":
+        # Remote mode (sandbox/SaaS): hold NO database. StorePort talks to a
+        # trusted data API over HTTP; this process has no DSN/engine/driver.
+        _engine = None
+        _session_factory = None
+        store: StorePort = _build_remote_store(config)
+    else:
+        _engine = create_engine(config.database_url)
+        _session_factory = create_session_factory(_engine)
+        store = SQLAlchemyStore(_session_factory)
+    _store = store
     _orchestrator = SessionOrchestrator(
-        _store,
+        store,
         max_warm_runtimes=_env_int("VALUZ_MAX_WARM_RUNTIMES"),
         runtime_idle_ttl_s=_env_float("VALUZ_RUNTIME_IDLE_TTL_S"),
     )
@@ -44,6 +58,11 @@ async def init_dependencies(config: AppConfig) -> None:
     # subprocesses; see SessionOrchestrator). Safe before the orphan scan's
     # possible early return so it runs regardless of migration state.
     _orchestrator.start()
+    if config.kernel_store == "remote":
+        # Cross-owner orphan sweeps (``list_sessions(user_id=None)``) belong to
+        # the trusted resident, not a per-session sandbox; RLS would scope them
+        # to one owner anyway. Skip them in remote mode.
+        return
     # Best-effort scan — schema may not be migrated yet (typical in unit
     # tests that skip Alembic and run against an empty in-memory DB).
     try:
@@ -102,18 +121,84 @@ def _env_float(name: str) -> float | None:
         return None
 
 
-def get_owner_id(x_valuz_owner_id: Annotated[str | None, Header()] = None) -> str:
+def get_owner_id(
+    x_valuz_owner_id: Annotated[str | None, Header()] = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> str:
     """FastAPI dependency — the request's owner id (``user_id``).
 
-    The host (valuz / commercial overlay) sends the resolved per-request owner in
-    the ``X-Valuz-Owner-Id`` header. The in-process seam never reaches this
-    dependency — it passes the owner to the route functions as an explicit
-    argument. So an absent header means a direct, owner-less HTTP call: 403, the
-    kernel never serves owner-scoped data without one.
+    Two sources, in order:
+
+    1. **Verified token** (remote / SaaS): when a ``TokenVerifier`` is bound and
+       a bearer token is present, the owner comes from the VERIFIED token claims
+       — never from a caller-supplied header (an untrusted sandbox could forge
+       ``X-Valuz-Owner-Id``). OSS binds ``NullTokenVerifier`` (always ``None``),
+       so this branch is inert and behaviour is unchanged.
+    2. **Header** (trusted host mount): the host sends the resolved per-request
+       owner in ``X-Valuz-Owner-Id``. The in-process seam never reaches this
+       dependency — it passes the owner explicitly. An absent header on a direct
+       HTTP call is a 403; the kernel never serves owner-scoped data without one.
     """
+    claims = _token_verifier.verify(_bearer_token(authorization))
+    if claims is not None:
+        return claims.user_id
     if not x_valuz_owner_id:
         raise HTTPException(status_code=403, detail="owner id required")
     return x_valuz_owner_id
+
+
+def _bearer_token(authorization: str | None) -> str | None:
+    """Extract the bearer credential from an ``Authorization`` header."""
+    if not authorization:
+        return None
+    scheme, _, value = authorization.partition(" ")
+    if scheme.lower() == "bearer" and value.strip():
+        return value.strip()
+    return None
+
+
+def set_token_verifier(verifier: TokenVerifier) -> None:
+    """Bind the owner-from-token verifier. A SaaS overlay swaps the default
+    ``NullTokenVerifier`` for a signing-key/JWKS-backed implementation so the
+    sandbox's owner is derived from its verified JWT, not a header."""
+    global _token_verifier  # noqa: PLW0603
+    _token_verifier = verifier
+
+
+def _build_remote_store(config: AppConfig) -> StorePort:
+    """Construct the remote ``StorePort`` for ``KERNEL_STORE=remote``.
+
+    No engine, no DSN — only the data-API URL + a bearer-token hook. The
+    concrete backend (``data_api_kind``) self-registers on import.
+    """
+    if not config.data_api_url:
+        raise RuntimeError("KERNEL_STORE=remote requires VALUZ_DATA_API_URL")
+    _ensure_remote_backend(config.data_api_kind)
+    token = config.data_api_token or ""
+
+    async def _access_token() -> str:
+        # Phase A: static token from env. Phase B/C replaces this with a
+        # refresh hook that re-mints a short-lived JWT from the host.
+        return token
+
+    return build_remote_store(
+        kind=config.data_api_kind,
+        base_url=config.data_api_url,
+        access_token=_access_token,
+    )
+
+
+def _ensure_remote_backend(kind: str) -> None:
+    """Import the module that self-registers ``kind`` (Phase B: postgrest)."""
+    module = {
+        "http": "src.adapters.remote_store_http",
+        "postgrest": "src.adapters.remote_store_postgrest",
+    }.get(kind)
+    if module:
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            logger.debug("remote store backend module %s not importable yet", module)
 
 
 def get_store() -> StorePort:
