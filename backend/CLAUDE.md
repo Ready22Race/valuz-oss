@@ -61,12 +61,23 @@ is *also* mirrored to, via `WriteThroughStore` (`src/adapters/`):
 | `pg` | in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL` | OSS "configure a Postgres"; same process, no HTTP. Schema auto-created (`_ensure_durable_schema`, checkfirst) |
 | `remote` | `RemoteStoreHttp` → trusted data service | sandbox/SaaS; holds ONLY a JWT (`VALUZ_DATA_API_*`) — never a DB DSN |
 
-`append_event` is **durable-first**: the durable store assigns the authoritative
-`seq` (central ordering for SaaS) and the local copy mirrors it; `event_uid` +
-`request_id` make the pair idempotent. The data service (`kernel/app/data_service.py`,
-`POST /rpc/{op}` per StorePort method) is the durable end for `remote`; its
-route↔client↔StorePort contract is pinned by `test_data_service_contract.py`.
-Sandbox always keeps a local `kernel.db`; `remote` only *adds* the write-through.
+**Per-tier failure policy** (durability vs. availability):
+- `remote`/sandbox = **strict** — `append_event` is **durable-first** (the durable
+  store assigns the authoritative `seq`, central ordering for SaaS; the local copy
+  mirrors it) and a durable failure is **fail-loud**, so a sandbox never dies with
+  un-persisted data.
+- `pg` = **best-effort** — the LOCAL store is authoritative (incl. the event `seq`);
+  a durable failure is queued in the `durable_outbox` table (local DB) instead of
+  blocking, so a Postgres outage never takes down local-first writes. A background
+  drainer (`WriteThroughStore.drain_outbox` / `DurableOutbox`) re-pushes the backlog
+  on recovery — idempotent (`event_uid`/UUID PKs), stops at the first failure to
+  preserve per-session ordering.
+
+`event_uid` + `request_id` make the durable+local pair idempotent in both tiers.
+The data service (`kernel/app/data_service.py`, `POST /rpc/{op}` per StorePort
+method) is the durable end for `remote`; its route↔client↔StorePort contract is
+pinned by `test_data_service_contract.py`. Sandbox always keeps a local
+`kernel.db`; `remote` only *adds* the write-through.
 
 ## The two boundary contracts
 
