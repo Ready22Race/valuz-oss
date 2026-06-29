@@ -58,6 +58,21 @@ KEY_MEMORY_AUTO_EXTRACT = "memory.auto_extract"
 KEY_MEMORY_CUSTOM_INSTRUCTIONS = "memory.custom_instructions"
 MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS = 1500
 
+# Kernel data-service config (model-A durable write-through). Persisted here so
+# the hidden Settings → Data Service panel can drive the IN-PROCESS kernel's
+# store tier; ``boot.kernel.init_kernel_dependencies`` reads these and injects
+# the matching env (``KERNEL_STORE`` / ``VALUZ_DURABLE_DATABASE_URL`` /
+# ``VALUZ_DATA_API_*``) before the kernel's ``AppConfig`` is constructed.
+# Takes effect on the NEXT backend start (the store is built once at boot).
+KEY_KERNEL_STORE = "kernel.store"
+KEY_DURABLE_DATABASE_URL = "kernel.durable_database_url"
+KEY_DATA_API_URL = "kernel.data_api_url"
+KEY_DATA_API_TOKEN = "kernel.data_api_token"  # noqa: S105 — a settings KEY, not a credential
+KEY_DATA_API_KIND = "kernel.data_api_kind"
+KERNEL_STORE_VALUES = ("local", "pg", "remote")
+FALLBACK_KERNEL_STORE = "local"
+FALLBACK_DATA_API_KIND = "http"
+
 FALLBACK_TIMEZONE = "UTC"
 FALLBACK_LOCALE = "zh-CN"
 # Default reasoning-effort budget when no ``model.default_effort`` is
@@ -339,6 +354,60 @@ async def set_memory_custom_instructions(db: AsyncSession, value: str) -> None:
         KEY_MEMORY_CUSTOM_INSTRUCTIONS,
         value.strip()[:MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS],
     )
+
+
+# ── Kernel data-service config ───────────────────────────────────────
+
+
+async def get_kernel_store(db: AsyncSession) -> str:
+    """Durable store tier for the in-process kernel: ``local`` / ``pg`` /
+    ``remote`` (default ``local`` = local-only single write)."""
+    raw = await _read(db, KEY_KERNEL_STORE)
+    return raw if raw in KERNEL_STORE_VALUES else FALLBACK_KERNEL_STORE
+
+
+async def set_kernel_store(db: AsyncSession, value: str) -> None:
+    cleaned = value.strip().lower()
+    if cleaned not in KERNEL_STORE_VALUES:
+        raise ValueError(f"kernel_store must be one of {KERNEL_STORE_VALUES}, got {value!r}")
+    await _write(db, KEY_KERNEL_STORE, cleaned)
+
+
+async def get_durable_database_url(db: AsyncSession) -> str:
+    """Postgres DSN for the ``pg`` tier (empty = unset)."""
+    return (await _read(db, KEY_DURABLE_DATABASE_URL)) or ""
+
+
+async def set_durable_database_url(db: AsyncSession, value: str) -> None:
+    await _write(db, KEY_DURABLE_DATABASE_URL, value.strip())
+
+
+async def get_data_api_url(db: AsyncSession) -> str:
+    """Remote data-service base URL for the ``remote`` tier (empty = unset)."""
+    return (await _read(db, KEY_DATA_API_URL)) or ""
+
+
+async def set_data_api_url(db: AsyncSession, value: str) -> None:
+    await _write(db, KEY_DATA_API_URL, value.strip())
+
+
+async def get_data_api_token(db: AsyncSession) -> str:
+    """Bearer token (JWT) the kernel presents to the remote data service."""
+    return (await _read(db, KEY_DATA_API_TOKEN)) or ""
+
+
+async def set_data_api_token(db: AsyncSession, value: str) -> None:
+    await _write(db, KEY_DATA_API_TOKEN, value.strip())
+
+
+async def get_data_api_kind(db: AsyncSession) -> str:
+    """Remote backend kind (``http`` = own thin data service; default)."""
+    return (await _read(db, KEY_DATA_API_KIND)) or FALLBACK_DATA_API_KIND
+
+
+async def set_data_api_kind(db: AsyncSession, value: str) -> None:
+    cleaned = value.strip() or FALLBACK_DATA_API_KIND
+    await _write(db, KEY_DATA_API_KIND, cleaned)
 
 
 def detect_system_timezone() -> str:

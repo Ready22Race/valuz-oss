@@ -10,6 +10,7 @@ import {
   Activity,
   Brain,
   Cpu,
+  Database,
   FileText,
   Globe,
   Info,
@@ -30,6 +31,11 @@ import { BrowserSection } from "./settings/BrowserSection";
 import { ParsingSection } from "./settings/ParsingSection";
 import { SystemLogsSettingsSection } from "./settings/SystemLogsSection";
 import { AboutSection } from "./settings/AboutSection";
+import { DataServiceSection } from "./settings/DataServiceSection";
+import {
+  isDataServiceUnlocked,
+  registerDataServiceSection,
+} from "./settings/data-service-unlock";
 
 const SETTINGS_TAB_STORAGE_KEY = "valuz-settings-tab";
 
@@ -49,6 +55,8 @@ const TAB_ICON_MAP: Record<string, ReactNode> = {
   brain: <Brain className="h-4 w-4" />,
   globe: <Globe className="h-4 w-4" />,
   browser: <Globe className="h-4 w-4" />,
+  "data-service": <Database className="h-4 w-4" />,
+  database: <Database className="h-4 w-4" />,
 };
 
 const readStoredTab = (): string => {
@@ -76,6 +84,7 @@ const SECTION_MAP: Record<string, React.ComponentType> = {
   parsing: ParsingSection,
   "system-logs": SystemLogsSettingsSection,
   about: AboutSection,
+  "data-service": DataServiceSection,
 };
 
 export const SettingsPage = () => {
@@ -102,6 +111,11 @@ export const SettingsPage = () => {
     setHideHeader(true);
     return () => setHideHeader(false);
   }, [setHideHeader]);
+
+  // Reveal the hidden Data Service section if previously unlocked (9× About tap).
+  useEffect(() => {
+    if (isDataServiceUnlocked()) registerDataServiceSection();
+  }, []);
 
   const [tab, setTabState] = useState<string>(() => {
     const fromUrl = searchParams.get("tab");

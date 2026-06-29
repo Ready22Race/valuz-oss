@@ -18,21 +18,31 @@ from valuz_agent.modules.settings.model_options import (
 )
 from valuz_agent.modules.settings.preferences import (
     detect_system_timezone,
+    get_data_api_kind,
+    get_data_api_token,
+    get_data_api_url,
     get_default_effort,
     get_default_locale,
     get_default_model,
     get_default_provider_id,
     get_default_runtime,
     get_default_timezone,
+    get_durable_database_url,
     get_font_size,
+    get_kernel_store,
     get_theme,
+    set_data_api_kind,
+    set_data_api_token,
+    set_data_api_url,
     set_default_effort,
     set_default_locale,
     set_default_model,
     set_default_provider_id,
     set_default_runtime,
     set_default_timezone,
+    set_durable_database_url,
     set_font_size,
+    set_kernel_store,
     set_theme,
 )
 from valuz_agent.modules.settings.service import (
@@ -101,6 +111,91 @@ async def patch_preferences(payload: PreferencesPatchPayload) -> PreferencesResp
             if payload.font_size is not None:
                 await set_font_size(db, payload.font_size)
             return await _read_preferences(db)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# ── Kernel data service (model-A durable write-through) ──────────────
+#
+# Advanced/hidden config (revealed in the UI by tapping About 9×). Drives the
+# IN-PROCESS kernel's store tier; applied at the NEXT backend start by
+# ``boot.kernel.init_kernel_dependencies`` (the store is built once at boot).
+# The ``token`` is write-only on the wire: GET returns ``token_set`` (a bool),
+# never the value, so the secret isn't echoed back to the client.
+
+
+class DataServiceResponse(BaseModel):
+    kernel_store: str  # one of KERNEL_STORE_VALUES
+    durable_database_url: str
+    data_api_url: str
+    data_api_kind: str
+    token_set: bool
+    # True once the persisted config differs from what the running kernel
+    # booted with — the UI shows a "restart to apply" hint. Best-effort.
+    restart_required: bool
+
+
+class DataServicePatchPayload(BaseModel):
+    kernel_store: str | None = Field(default=None)
+    durable_database_url: str | None = None
+    data_api_url: str | None = None
+    data_api_kind: str | None = None
+    # ``None`` = leave unchanged; ``""`` = clear.
+    data_api_token: str | None = None
+
+
+async def _read_data_service(db: AsyncSession) -> DataServiceResponse:
+    import os
+
+    kernel_store = await get_kernel_store(db)
+    durable = await get_durable_database_url(db)
+    api_url = await get_data_api_url(db)
+    api_kind = await get_data_api_kind(db)
+    token = await get_data_api_token(db)
+    # The running kernel booted from these env vars (set by init_kernel_dependencies).
+    booted_store = os.environ.get("KERNEL_STORE", "local")
+    booted_durable = os.environ.get("VALUZ_DURABLE_DATABASE_URL", "")
+    booted_api_url = os.environ.get("VALUZ_DATA_API_URL", "")
+    restart_required = (kernel_store, durable, api_url) != (
+        booted_store,
+        booted_durable,
+        booted_api_url,
+    )
+    return DataServiceResponse(
+        kernel_store=kernel_store,
+        durable_database_url=durable,
+        data_api_url=api_url,
+        data_api_kind=api_kind,
+        token_set=bool(token),
+        restart_required=restart_required,
+    )
+
+
+@router.get("/data-service")
+async def get_data_service() -> DataServiceResponse:
+    """Return the kernel data-service (durable store) config. The bearer token
+    is never echoed — only ``token_set``."""
+    async with async_unit_of_work(commit=False) as db:
+        return await _read_data_service(db)
+
+
+@router.patch("/data-service")
+async def patch_data_service(payload: DataServicePatchPayload) -> DataServiceResponse:
+    """Update the kernel data-service config. Only sent keys change; takes
+    effect on the next backend start."""
+    try:
+        async with async_unit_of_work() as db:
+            if payload.kernel_store is not None:
+                await set_kernel_store(db, payload.kernel_store)
+            if payload.durable_database_url is not None:
+                await set_durable_database_url(db, payload.durable_database_url)
+            if payload.data_api_url is not None:
+                await set_data_api_url(db, payload.data_api_url)
+            if payload.data_api_kind is not None:
+                await set_data_api_kind(db, payload.data_api_kind)
+            if payload.data_api_token is not None:
+                await set_data_api_token(db, payload.data_api_token)
+            return await _read_data_service(db)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

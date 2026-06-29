@@ -126,11 +126,48 @@ export interface ModelOptionsResponse {
   groups: ModelOptionGroup[];
 }
 
+/** Durable store tier for the in-process kernel (model-A write-through). */
+export type KernelStoreMode = "local" | "pg" | "remote";
+
+export interface DataServiceResponse {
+  kernel_store: KernelStoreMode;
+  durable_database_url: string;
+  data_api_url: string;
+  data_api_kind: string;
+  /** The bearer token is never echoed — only whether one is set. */
+  token_set: boolean;
+  /** Persisted config differs from what the running kernel booted with. */
+  restart_required: boolean;
+}
+
+export interface DataServicePatchPayload {
+  kernel_store?: KernelStoreMode;
+  durable_database_url?: string;
+  data_api_url?: string;
+  data_api_kind?: string;
+  /** Omit to leave unchanged; ``""`` clears. Never returned by GET. */
+  data_api_token?: string;
+}
+
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const settingsApi = {
   getPreferences(): Promise<PreferencesResponse> {
     return fetchJson("/v1/settings/preferences");
+  },
+
+  getDataService(): Promise<DataServiceResponse> {
+    return fetchJson("/v1/settings/data-service");
+  },
+
+  patchDataService(
+    payload: DataServicePatchPayload,
+  ): Promise<DataServiceResponse> {
+    return fetchJson("/v1/settings/data-service", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
   },
 
   patchPreferences(

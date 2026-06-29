@@ -235,6 +235,71 @@ def run_kernel_migrations() -> None:
         raise error[0]
 
 
+async def _apply_data_service_env() -> None:
+    """Translate the persisted Settings → Data Service config into the env the
+    kernel's ``AppConfig`` reads (``KERNEL_STORE`` / ``VALUZ_DURABLE_DATABASE_URL``
+    / ``VALUZ_DATA_API_*``). This is how a GUI store-tier choice reaches the
+    IN-PROCESS kernel — applied at boot, before ``AppConfig()`` is constructed.
+
+    Best-effort: a fresh DB (no settings yet) or any read error leaves the kernel
+    at its default local-only store. Read directly via ``SettingsDatastore`` with
+    the resolved local user (there is no request auth context at boot).
+    """
+    import json
+
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.infra.local_identity import resolve_local_user_id
+    from valuz_agent.modules.settings.datastore import SettingsDatastore
+    from valuz_agent.modules.settings.preferences import (
+        FALLBACK_DATA_API_KIND,
+        KERNEL_STORE_VALUES,
+        KEY_DATA_API_KIND,
+        KEY_DATA_API_TOKEN,
+        KEY_DATA_API_URL,
+        KEY_DURABLE_DATABASE_URL,
+        KEY_KERNEL_STORE,
+    )
+
+    def _val(row: object) -> str:
+        value_json = getattr(row, "value_json", None)
+        if not value_json:
+            return ""
+        try:
+            data = json.loads(value_json)
+        except (TypeError, ValueError):
+            return ""
+        value = data.get("value") if isinstance(data, dict) else None
+        return value if isinstance(value, str) else ""
+
+    try:
+        owner = resolve_local_user_id()
+        async with async_unit_of_work(commit=False) as db:
+            ds = SettingsDatastore(db)
+            store = _val(await ds.get_setting(owner, KEY_KERNEL_STORE)) or "local"
+            if store not in KERNEL_STORE_VALUES or store == "local":
+                return  # default / unset → leave the kernel local-only
+            durable = _val(await ds.get_setting(owner, KEY_DURABLE_DATABASE_URL))
+            api_url = _val(await ds.get_setting(owner, KEY_DATA_API_URL))
+            api_kind = (
+                _val(await ds.get_setting(owner, KEY_DATA_API_KIND)) or FALLBACK_DATA_API_KIND
+            )
+            api_token = _val(await ds.get_setting(owner, KEY_DATA_API_TOKEN))
+    except Exception:  # noqa: BLE001 — never block boot on a settings read
+        logger.debug("data-service config not applied (no settings yet?)", exc_info=True)
+        return
+
+    os.environ["KERNEL_STORE"] = store
+    if store == "pg" and durable:
+        os.environ["VALUZ_DURABLE_DATABASE_URL"] = durable
+    if store == "remote":
+        if api_url:
+            os.environ["VALUZ_DATA_API_URL"] = api_url
+        os.environ["VALUZ_DATA_API_KIND"] = api_kind
+        if api_token:
+            os.environ["VALUZ_DATA_API_TOKEN"] = api_token
+    logger.info("kernel data-service: applied store tier %r from settings", store)
+
+
 async def init_kernel_dependencies() -> None:
     """Initialize the kernel's engine/session/store/orchestrator singletons.
 
@@ -242,6 +307,7 @@ async def init_kernel_dependencies() -> None:
     settings instead of the kernel's own AppConfig defaults.
     """
     _set_kernel_env()
+    await _apply_data_service_env()
     import app.dependencies as kernel_deps
     from app.config import AppConfig
     from app.dependencies import init_dependencies

@@ -1,4 +1,5 @@
 import { Check, Loader2, RefreshCw, ArrowUpRight } from "lucide-react";
+import { toast } from "sonner";
 import {
   Button,
   Card,
@@ -7,7 +8,13 @@ import {
   SettingsSection,
 } from "@valuz/ui";
 import { useTranslation, useUpdaterStore, useSystemStore } from "@valuz/core";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import {
+  UNLOCK_TAP_COUNT,
+  isDataServiceUnlocked,
+  unlockDataService,
+} from "./data-service-unlock";
 
 const REPO_BASE = "https://github.com/valuz-ai/valuz-oss";
 
@@ -44,6 +51,18 @@ export const AboutSection = () => {
 
   const displayVersion = appVersion ?? systemStatus?.version ?? null;
 
+  // Hidden reveal: tap the version card 9× to unlock the Data Service section.
+  const tapCountRef = useRef(0);
+  const handleAboutTap = useCallback(() => {
+    if (isDataServiceUnlocked()) return;
+    tapCountRef.current += 1;
+    if (tapCountRef.current >= UNLOCK_TAP_COUNT) {
+      tapCountRef.current = 0;
+      unlockDataService();
+      toast.success(t("settings.dataService.unlocked"));
+    }
+  }, [t]);
+
   const handleCheck = useCallback(() => {
     if (!bridge) return;
     void bridge.invoke("updater:check");
@@ -78,7 +97,10 @@ export const AboutSection = () => {
           },
         ]}
       />
-      <Card className="mb-4 mt-4 rounded-xl shadow-xs">
+      <Card
+        className="mb-4 mt-4 select-none rounded-xl shadow-xs"
+        onClick={handleAboutTap}
+      >
         <CardContent className="py-3">
           <div className="flex items-center gap-4">
             <img src="./logo.png" alt="Valuz" className="h-14 w-14 shrink-0" />
