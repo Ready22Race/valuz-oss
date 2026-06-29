@@ -110,6 +110,7 @@ class StorePort(Protocol):
         event: Event,
         *,
         request_id: str | None = None,
+        seq: int | None = None,
     ) -> int | None:
         """Append an owner-stamped event scoped to (session, message).
 
@@ -118,8 +119,13 @@ class StorePort(Protocol):
 
         ``request_id`` is an optional idempotency key for at-least-once remote
         writes: passing the same key twice (a retry) must NOT insert a second
-        row — the backend returns the original ``seq``. ``None`` (local
-        in-process appends) keeps the plain-insert behaviour."""
+        row — the backend returns the original ``seq``.
+
+        ``seq`` lets the **durable/central** store stay the authority for event
+        ordering (SaaS centralization): the durable store is called with
+        ``seq=None`` and assigns it (autoincrement); a **local mirror** is then
+        called with that explicit ``seq`` so both copies share one ordering.
+        ``None`` everywhere = plain single-store autoincrement."""
         ...
 
     async def get_events(

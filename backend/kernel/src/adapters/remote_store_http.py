@@ -79,17 +79,24 @@ class RemoteStoreHttp(RemoteStore):
         await self._post("save_message", {"message": sw.message_to_row(message)})
 
     async def _append_event_once(
-        self, user_id: str, session_id: str, message_id: str, event: Event, *, request_id: str
+        self,
+        user_id: str,
+        session_id: str,
+        message_id: str,
+        event: Event,
+        *,
+        request_id: str,
+        seq: int | None = None,
     ) -> int | None:
-        data = await self._post(
-            "append_event",
-            {
-                "session_id": session_id,
-                "message_id": message_id,
-                "event": sw.event_to_row(event),
-                "request_id": request_id,
-            },
-        )
+        body: dict[str, Any] = {
+            "session_id": session_id,
+            "message_id": message_id,
+            "event": sw.event_to_row(event),
+            "request_id": request_id,
+        }
+        if seq is not None:
+            body["seq"] = seq
+        data = await self._post("append_event", body)
         return int(data) if data is not None else None
 
     async def _delete_session_once(self, user_id: str, session_id: str, *, request_id: str) -> bool:

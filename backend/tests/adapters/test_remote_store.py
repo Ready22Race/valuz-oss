@@ -44,7 +44,9 @@ class FakeRemoteStore(RemoteStore):
         self._by_uid: dict[str, int] = {}
         self._seq = 0
 
-    async def _append_event_once(self, user_id, session_id, message_id, event, *, request_id):
+    async def _append_event_once(
+        self, user_id, session_id, message_id, event, *, request_id, seq=None
+    ):
         self.append_attempts += 1
         self.append_request_ids.append(request_id)
         self.tokens_seen.append(await self._bearer())
@@ -173,9 +175,7 @@ def test_build_unregistered_backend_fails_loud():
 
 
 def test_register_and_build_backend():
-    register_remote_backend(
-        "fake-test", lambda **kw: FakeRemoteStore(**kw)
-    )
+    register_remote_backend("fake-test", lambda **kw: FakeRemoteStore(**kw))
     store = build_remote_store(kind="fake-test", access_token=_const_token())
     assert isinstance(store, FakeRemoteStore)
 

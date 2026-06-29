@@ -102,14 +102,15 @@ async def save_message(body: JsonBody, owner_id: OwnerDep, store: StoreDep) -> d
 
 @router.post("/rpc/append_event")
 async def append_event(body: JsonBody, owner_id: OwnerDep, store: StoreDep) -> dict[str, Any]:
-    seq = await store.append_event(
+    result_seq = await store.append_event(
         owner_id,
         body["session_id"],
         body["message_id"],
         sw.row_to_event(body["event"]),
         request_id=body.get("request_id"),
+        seq=body.get("seq"),
     )
-    return {"data": seq}
+    return {"data": result_seq}
 
 
 @router.post("/rpc/delete_session")

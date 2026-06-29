@@ -185,12 +185,21 @@ class RemoteStore(abc.ABC):
         )
 
     async def append_event(
-        self, user_id: str, session_id: str, message_id: str, event: Event
+        self,
+        user_id: str,
+        session_id: str,
+        message_id: str,
+        event: Event,
+        *,
+        request_id: str | None = None,
+        seq: int | None = None,
     ) -> int | None:
-        rid = self._new_request_id()
+        rid = request_id or self._new_request_id()  # shared key when WriteThrough mints it
         return await self._retry(
             "append_event",
-            lambda: self._append_event_once(user_id, session_id, message_id, event, request_id=rid),
+            lambda: self._append_event_once(
+                user_id, session_id, message_id, event, request_id=rid, seq=seq
+            ),
         )
 
     async def get_events(
@@ -278,7 +287,14 @@ class RemoteStore(abc.ABC):
 
     @abc.abstractmethod
     async def _append_event_once(
-        self, user_id: str, session_id: str, message_id: str, event: Event, *, request_id: str
+        self,
+        user_id: str,
+        session_id: str,
+        message_id: str,
+        event: Event,
+        *,
+        request_id: str,
+        seq: int | None = None,
     ) -> int | None: ...
 
     @abc.abstractmethod

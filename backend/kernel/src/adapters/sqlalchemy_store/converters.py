@@ -486,8 +486,9 @@ def event_to_model(
     event: Event,
     *,
     event_uid: str | None = None,
+    seq: int | None = None,
 ) -> EventModel:
-    return EventModel(
+    model = EventModel(
         user_id=user_id,  # owner stamped explicitly (no column default)
         session_id=session_id,
         message_id=message_id,
@@ -496,6 +497,12 @@ def event_to_model(
         timestamp=event.timestamp,
         event_uid=event_uid,  # idempotency key for remote appends (NULL local)
     )
+    # Explicit ``seq`` = a local MIRROR row carrying the durable/central store's
+    # authoritative id (events.id is the seq cursor). Without it the store
+    # autoincrements (the durable/single-store authority path).
+    if seq is not None:
+        model.id = seq
+    return model
 
 
 def model_to_event(model: EventModel) -> Event:

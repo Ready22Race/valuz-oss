@@ -152,9 +152,12 @@ class SQLAlchemyStore:
         event: Event,
         *,
         request_id: str | None = None,
+        seq: int | None = None,
     ) -> int | None:
         async with self._session_factory() as db:
-            model = event_to_model(user_id, session_id, message_id, event, event_uid=request_id)
+            model = event_to_model(
+                user_id, session_id, message_id, event, event_uid=request_id, seq=seq
+            )
             db.add(model)
             try:
                 await db.commit()
