@@ -5,6 +5,7 @@ import {
   Bot,
   ChevronDown,
   Clock,
+  Download,
   ExternalLink,
   FilePenLine,
   FolderOpen,
@@ -16,6 +17,7 @@ import {
   Plus,
   Settings,
   Trash2,
+  Upload,
   Zap,
 } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -342,6 +344,7 @@ interface ProjectRowProps {
   onProjectRenameConfirm?: (projectId: string, newName: string) => void;
   onProjectRenameCancel?: () => void;
   onProjectOpenInFinder?: (projectId: string) => void;
+  onProjectExport?: (projectId: string) => void;
   onProjectRemove?: (projectId: string) => void;
 }
 
@@ -359,13 +362,17 @@ const ProjectRow = ({
   onProjectRenameConfirm,
   onProjectRenameCancel,
   onProjectOpenInFinder,
+  onProjectExport,
   onProjectRemove,
 }: ProjectRowProps) => {
   const { t } = useI18n();
   const isActiveProject = isActivePath(activePath, project.href);
 
   const hasAnyAction =
-    !!onProjectOpenInFinder || !!onProjectRenameStart || !!onProjectRemove;
+    !!onProjectOpenInFinder ||
+    !!onProjectRenameStart ||
+    !!onProjectRemove ||
+    !!onProjectExport;
 
   return (
     <div className="mx-1">
@@ -500,6 +507,14 @@ const ProjectRow = ({
                   {t("sidebar.openInFinder")}
                 </DropdownMenuItem>
               )}
+              {onProjectExport && (
+                <DropdownMenuItem
+                  onSelect={() => onProjectExport(project.id)}
+                >
+                  <Download />
+                  {t("project.export")}
+                </DropdownMenuItem>
+              )}
               {onProjectRemove && (
                 <>
                   <DropdownMenuSeparator />
@@ -570,10 +585,18 @@ export interface DesktopSidebarProps {
    * its navigation — including when the home route is already active (a
    * same-path click that wouldn't otherwise trigger a route effect). */
   onPrimaryAction?: () => void;
-  /** Callback when the "+" button next to Projects is clicked */
+  /** Callback when the "+" button next to Projects is clicked. When
+   *  provided alongside ``onImportProject`` the "+" becomes a dropdown
+   *  with Create (this) + Import actions. */
   onAddProject?: () => void;
+  /** When provided, the "+" Projects dropdown shows an "Import project…"
+   *  item that calls this. Hidden otherwise (the "+" stays a single action). */
+  onImportProject?: () => void;
   /** Project row "..." actions. Pass ``undefined`` to hide an option. */
   onProjectOpenInFinder?: (projectId: string) => void;
+  /** When provided, the project "..." menu shows an "Export project" item
+   *  that calls this with the project id. */
+  onProjectExport?: (projectId: string) => void;
   /** When provided, the "..." menu shows a Rename entry. The callback is
    * triggered with the new name after the user inline-edits the project
    * header. The sidebar manages the inline edit state itself; the host
@@ -605,7 +628,9 @@ export const DesktopSidebar = ({
   onPrimaryAction,
   projectGroups,
   onAddProject,
+  onImportProject,
   onProjectOpenInFinder,
+  onProjectExport,
   onProjectRename,
   onProjectRemove,
   onRecentRename,
@@ -1006,13 +1031,43 @@ export const DesktopSidebar = ({
                   open={projectsSectionOpen}
                   onToggle={() => setProjectsSectionOpen((v) => !v)}
                   action={
-                    <button
-                      type="button"
-                      className="flex h-6 w-6 items-center justify-center rounded-md text-ink-body transition-colors hover:bg-surface-muted"
-                      onClick={onAddProject}
-                    >
-                      <Plus className="h-3 w-3" />
-                    </button>
+                    onImportProject ? (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label={t("sidebar.addProject")}
+                            className="flex h-6 w-6 items-center justify-center rounded-md text-ink-body transition-colors hover:bg-surface-muted"
+                          >
+                            <Plus className="h-3 w-3" />
+                          </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="start"
+                          className="min-w-[180px]"
+                          onCloseAutoFocus={(e) => e.preventDefault()}
+                        >
+                          {onAddProject && (
+                            <DropdownMenuItem onSelect={onAddProject}>
+                              <Plus />
+                              {t("project.create")}
+                            </DropdownMenuItem>
+                          )}
+                          <DropdownMenuItem onSelect={onImportProject}>
+                            <Upload />
+                            {t("project.import")}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    ) : (
+                      <button
+                        type="button"
+                        className="flex h-6 w-6 items-center justify-center rounded-md text-ink-body transition-colors hover:bg-surface-muted"
+                        onClick={onAddProject}
+                      >
+                        <Plus className="h-3 w-3" />
+                      </button>
+                    )
                   }
                 >
                   {t("sidebar.projects")}
@@ -1062,6 +1117,7 @@ export const DesktopSidebar = ({
                             setProjectRenamingId(null)
                           }
                           onProjectOpenInFinder={onProjectOpenInFinder}
+                          onProjectExport={onProjectExport}
                           onProjectRemove={onProjectRemove}
                         />
                         {expanded &&

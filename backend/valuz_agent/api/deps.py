@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     from valuz_agent.modules.automations.service import AutomationService
     from valuz_agent.modules.decisions.aggregator import DecisionAggregator
+    from valuz_agent.modules.project_packs.service import ProjectPackService
 
 
 async def get_current_user_id() -> str | None:
@@ -276,6 +277,56 @@ async def get_settings_service() -> AsyncGenerator[SettingsService, None]:
         yield SettingsService(
             datastore=SettingsDatastore(db),
             event_bus=event_bus,
+        )
+
+
+async def get_project_pack_service() -> AsyncGenerator[ProjectPackService, None]:
+    """Construct a ``ProjectPackService`` per request.
+
+    All four collaborators (``ProjectService``, ``AgentService``,
+    ``AgentPackService``, ``AutomationService``) are wired over the SAME
+    unit-of-work so the import's writes (project row + members +
+    automations + project skills + project connectors + installed
+    agents / skills / connectors) land in a single transactional view.
+    """
+    from valuz_agent.modules.agent_packs.service import AgentPackService
+    from valuz_agent.modules.agents.service import AgentService
+    from valuz_agent.modules.automations.service import AutomationService
+    from valuz_agent.modules.connectors.service import ConnectorService
+    from valuz_agent.modules.project_packs.service import ProjectPackService
+    from valuz_agent.modules.settings.preferences import (
+        get_default_locale,
+        get_effective_default_timezone,
+    )
+
+    async with async_unit_of_work() as db:
+        locale = await get_default_locale(db)
+        default_timezone = await get_effective_default_timezone(db)
+        project_svc = ProjectService(
+            datastore=ProjectDatastore(db),
+            event_bus=event_bus,
+            automation_datastore=AutomationDatastore(db),
+            skill_datastore=SkillDatastore(db),
+            connector_datastore=ConnectorDatastore(db),
+            session_datastore=SessionDatastore(db),
+            document_datastore=DocumentDatastore(db),
+        )
+        connector_svc = ConnectorService(datastore=ConnectorDatastore(db))
+        agent_svc = AgentService(db=db, connector_service=connector_svc)
+        agent_pack_svc = AgentPackService(agent_svc)
+        automation_svc = AutomationService(
+            db=db,
+            event_bus=event_bus,
+            project_service=project_svc,
+            agent_service=agent_svc,
+            locale=locale,
+            default_timezone=default_timezone,
+        )
+        yield ProjectPackService(
+            project_service=project_svc,
+            agent_service=agent_svc,
+            agent_pack_service=agent_pack_svc,
+            automation_service=automation_svc,
         )
 
 

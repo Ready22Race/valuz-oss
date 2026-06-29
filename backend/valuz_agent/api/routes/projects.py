@@ -1,12 +1,24 @@
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from valuz_agent.api.deps import (
+    get_project_pack_service,
     get_project_service,
     get_session_service,
     require_current_user_id,
 )
+from valuz_agent.api.routes.onboarding import _resolve_deploy_target
+from valuz_agent.infra.db import get_async_session
+from valuz_agent.modules.agent_packs.errors import PackImportFailed
+from valuz_agent.modules.project_packs.errors import (
+    ProjectNotExportable,
+    ProjectPackImportFailed,
+    ProjectPackNotFound,
+)
+from valuz_agent.modules.project_packs.service import ProjectPackService
 from valuz_agent.modules.projects.models import ProjectCreateRequest
 from valuz_agent.modules.projects.service import (
     ArtifactFileResponse,
@@ -16,6 +28,7 @@ from valuz_agent.modules.projects.service import (
     ProjectService,
 )
 from valuz_agent.modules.sessions.service import SessionService
+from valuz_agent.modules.settings.preferences import get_default_effort
 
 router = APIRouter(prefix="/v1/projects", tags=["projects"])
 
@@ -246,3 +259,190 @@ async def set_connectors(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Export / Import (.valuz-project archives)
+# ---------------------------------------------------------------------------
+
+
+class ImportProjectPreviewMember(BaseModel):
+    agent_slug: str
+    source_agent_slug: str
+    name: str
+    description: str
+    in_library: bool
+
+
+class ImportProjectPreviewAutomation(BaseModel):
+    name: str
+    agent_slug: str
+    trigger_kind: str
+    cron_expr: str | None
+    interval_seconds: int | None
+    status: str
+
+
+class ImportProjectPreviewSkill(BaseModel):
+    slug: str
+    source: str
+
+
+class ImportProjectPreviewConnector(BaseModel):
+    slug: str
+    display_name: str
+    requires_credentials: bool
+    requires_setup: bool
+    already_present: bool
+
+
+class ImportProjectPreviewResponse(BaseModel):
+    preview_id: str
+    project: dict[str, Any]
+    name_conflict: bool
+    members: list[ImportProjectPreviewMember]
+    automations: list[ImportProjectPreviewAutomation]
+    project_skills: list[str]
+    project_connectors: list[str]
+    skills: list[ImportProjectPreviewSkill]
+    connectors: list[ImportProjectPreviewConnector]
+    has_memory: bool
+
+
+class ImportProjectConfirmRequest(BaseModel):
+    preview_id: str
+    # Optional user-picked project folder. When omitted, the service creates
+    # the project under a managed cwd (``data_dir/projects/{id}/``).
+    root_path: str | None = None
+
+
+class ConnectorToConfigure(BaseModel):
+    slug: str
+    display_name: str
+    requires_credentials: bool
+    requires_setup: bool
+
+
+class ImportProjectConfirmResponse(BaseModel):
+    status: str
+    project: dict[str, Any] | None = None
+    project_id: str | None = None
+    project_name: str | None = None
+    members_created: int = 0
+    members_reused: int = 0
+    agents_created: int = 0
+    agents_skipped: int = 0
+    automations_created: int = 0
+    automation_errors: list[dict[str, str]] = []
+    members: list[dict[str, Any]] = []
+    automations: list[dict[str, Any]] = []
+    connectors_to_configure: list[ConnectorToConfigure] = []
+
+
+def _safe_project_filename(name: str) -> str:
+    import re
+
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip()).strip("-")
+    return (stem or "project")[:64]
+
+
+@router.get("/{project_id}/export")
+async def export_project(
+    project_id: str,
+    user_id: str = Depends(require_current_user_id),
+    svc: ProjectPackService = Depends(get_project_pack_service),
+    project_svc: ProjectService = Depends(get_project_service),
+) -> StreamingResponse:
+    """Export the project (team + automations + project skills + project
+    connectors + memory) as a downloadable ``.valuz-project`` archive."""
+    try:
+        data = await svc.export_project(user_id, project_id)
+    except ProjectPackNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProjectNotExportable as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Filename derives from the project name (looked up best-effort).
+    name_stem = "project"
+    try:
+        name_stem = (await project_svc.get_project(user_id, project_id)).name
+    except Exception:  # noqa: BLE001 — filename best-effort
+        pass
+    filename = f"{_safe_project_filename(name_stem)}.valuz-project"
+    return StreamingResponse(
+        iter([data]),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post(
+    "/import-preview",
+    response_model=ImportProjectPreviewResponse,
+)
+async def import_project_preview(
+    file: Annotated[UploadFile, File(...)],
+    user_id: str = Depends(require_current_user_id),
+    svc: ProjectPackService = Depends(get_project_pack_service),
+) -> ImportProjectPreviewResponse:
+    """Stage an uploaded ``.valuz-project`` archive and return what's
+    inside (members, automations, skills, connectors) plus a ``preview_id``
+    to confirm with."""
+    data = await file.read()
+    try:
+        preview = await svc.preview_import(user_id, data)
+    except ProjectPackImportFailed as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ImportProjectPreviewResponse.model_validate(preview)
+
+
+@router.post(
+    "/import/confirm",
+    response_model=ImportProjectConfirmResponse,
+)
+async def import_project_confirm(
+    body: ImportProjectConfirmRequest,
+    user_id: str = Depends(require_current_user_id),
+    svc: ProjectPackService = Depends(get_project_pack_service),
+    db: Any = Depends(get_async_session),
+) -> ImportProjectConfirmResponse:
+    """Commit a staged import: install skills + connectors, recreate library
+    agents de-duped by slug, create the project row, restore memory, recreate
+    members + automations + project skill/connector configs. If a project
+    with the same name exists for the caller, SKIP (return
+    ``status="skipped_name_conflict"``)."""
+    runtime, provider_id, model = await _resolve_deploy_target(db)
+    effort = await get_default_effort(db)
+    try:
+        result = await svc.confirm_import(
+            user_id,
+            body.preview_id,
+            runtime=runtime,
+            provider_id=provider_id,
+            model=model,
+            effort=effort,
+            root_path=body.root_path,
+        )
+    except (ProjectPackImportFailed, PackImportFailed) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        # Directory the user picked is already bound to another project.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return ImportProjectConfirmResponse(
+        status=result.get("status", "created"),
+        project=result.get("project"),
+        project_id=result.get("project_id"),
+        project_name=result.get("project_name"),
+        members_created=result.get("members_created", 0),
+        members_reused=result.get("members_reused", 0),
+        agents_created=result.get("agents_created", 0),
+        agents_skipped=result.get("agents_skipped", 0),
+        automations_created=result.get("automations_created", 0),
+        automation_errors=result.get("automation_errors", []),
+        members=result.get("members", []),
+        automations=result.get("automations", []),
+        connectors_to_configure=[
+            ConnectorToConfigure(**c) for c in result.get("connectors_to_configure", [])
+        ],
+    )

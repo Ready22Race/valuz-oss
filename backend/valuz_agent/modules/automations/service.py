@@ -781,6 +781,122 @@ class AutomationService:
         )
         return await self._row_to_detail(row)
 
+    async def create_from_row(
+        self,
+        row: AutomationRow,
+        *,
+        owner_user_id: str | None = None,
+    ) -> AutomationDetailResponse:
+        """Persist a ``AutomationRow`` built by a peer module (project-pack
+        import) without going through ``AutomationCreatePayload`` routing.
+
+        The caller has already set ``id`` / ``project_id`` / ``agent_slug``
+        / ``name`` / ``prompt_template`` / ``action_kind`` / ``trigger_kind``
+        / ``cron_expr`` / ``timezone`` / ``interval_seconds`` / ``status``
+        on the row. This method:
+
+        - re-validates the discriminated-trigger invariants
+          (cron→``cron_expr`` set; interval→``interval_seconds >= 30``);
+        - recomputes ``next_run_at`` for enabled rows;
+        - writes via the datastore and pokes the scheduler exactly like the
+          public ``create``.
+
+        ``owner_user_id`` is threaded explicitly because the import path
+        must not depend on the ambient ``require_current_user_id()``
+        ContextVar (which is set by HTTP middleware and may differ in
+        tests / batched imports). When ``None`` the ambient owner is used,
+        matching the rest of this service.
+        """
+        uid = owner_user_id or require_current_user_id()
+        # Enforce the same invariants the DB CHECK constraints do, so a bad
+        # import surfaces a typed error instead of an IntegrityError.
+        if row.trigger_kind == "cron" and not (row.cron_expr or "").strip():
+            raise AutomationAgentRequired()  # type: ignore[misc]
+        if row.trigger_kind == "interval" and (
+            row.interval_seconds is None or row.interval_seconds < MIN_INTERVAL_SECONDS
+        ):
+            raise IntervalTooShort()
+        if row.trigger_kind == "cron":
+            tz = self._effective_tz_for(row.timezone)
+            valid, _, _, err_msg = self._cron.validate(row.cron_expr or "", tz)
+            if not valid:
+                raise InvalidCronExpression(err_msg)
+        if not row.name.strip():
+            raise AutomationNameEmpty()
+        if not row.prompt_template.strip():
+            raise AutomationPromptEmpty()
+        if not row.agent_slug:
+            raise AutomationAgentRequired()
+
+        now = now_ms()
+        row.id = row.id or uuid4().hex
+        row.user_id = uid
+        row.created_at = now
+        row.updated_at = now
+        row.origin_tool_call_id = None
+        row.last_run_at = None
+        if row.status == "enabled":
+            row.next_run_at = self._triggers.initial_next_fire(row, now=now)
+        else:
+            row.next_run_at = None
+
+        await self._ds.create_automation(uid, row)
+        self._bus.publish(
+            "automation.changed",
+            project_id=row.project_id,
+            automation_id=row.id,
+        )
+        return await self._row_to_detail_for(row, uid)
+
+    async def _row_to_detail_for(
+        self, row: AutomationRow, user_id: str
+    ) -> AutomationDetailResponse:
+        """Detail projection scoped to an explicit owner (the import path
+        threads the owner explicitly rather than reading the ambient
+        ContextVar, so this avoids surprising ContextVar dependencies)."""
+        try:
+            ws_name, ws_kind = await self._get_project_info_for(row.project_id, user_id)
+        except AutomationProjectNotFound:
+            ws_name, ws_kind = row.project_id, "project"
+        last_run = await self._ds.last_run(user_id, row.id)
+        item = AutomationItemResponse(
+            automation_id=row.id,
+            project_id=row.project_id,
+            project_name=ws_name,
+            project_kind=ws_kind,
+            name=row.name,
+            agent_kind=row.agent_kind,
+            agent_slug=row.agent_slug,
+            agent_name=None,
+            action_kind=row.action_kind,
+            trigger=self._row_to_trigger(row),
+            trigger_human_readable=self._trigger_human(row),
+            status=row.status,
+            next_run_at=row.next_run_at,
+            last_run_at=row.last_run_at,
+            last_run_status=last_run.status if last_run else None,
+        )
+        return AutomationDetailResponse(
+            **item.model_dump(),
+            prompt_template=row.prompt_template,
+            total_runs=await self._ds.count_runs(user_id, row.id),
+            recent_failures=await self._ds.count_recent_failures(user_id, row.id),
+            created_at=row.created_at or now_ms(),
+            updated_at=row.updated_at or now_ms(),
+        )
+
+    async def _get_project_info_for(self, project_id: str, user_id: str) -> tuple[str, str]:
+        """Owner-explicit variant of ``_get_project_info`` for the import path."""
+        if self._ws is None:
+            raise AutomationProjectNotFound()
+        try:
+            ws = await self._ws.get_project(user_id, project_id)
+            return ws.name, ws.kind
+        except AutomationProjectNotFound:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise AutomationProjectNotFound() from exc
+
     async def update(
         self, automation_id: str, payload: AutomationUpdatePayload
     ) -> AutomationDetailResponse:
