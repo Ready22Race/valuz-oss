@@ -21,6 +21,9 @@ from src.core.orchestrator import SessionOrchestrator
 logger = logging.getLogger(__name__)
 
 _engine: AsyncEngine | None = None
+# In-process durable Postgres engine (``kernel_store=pg``); disposed on shutdown
+# alongside ``_engine``. ``None`` when local-only or the durable is HTTP-remote.
+_durable_engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 _store: StorePort | None = None
 _orchestrator: SessionOrchestrator | None = None
@@ -39,6 +42,7 @@ async def init_dependencies(config: AppConfig) -> None:
     (per design doc §6.3 — D6 contract symmetry across runtimes).
     """
     global _engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
+    global _durable_engine  # noqa: PLW0603
     # Model A: the LOCAL store ALWAYS exists (local-first). The kernel keeps its
     # own SQLite/PG via this engine; when a durable backend is configured
     # (remote DataService / central PG) every write is mirrored through it
@@ -75,7 +79,7 @@ async def init_dependencies(config: AppConfig) -> None:
 
 async def shutdown_dependencies() -> None:
     """Dispose engine and clear singletons. Called during app lifespan shutdown."""
-    global _engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
+    global _engine, _durable_engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
     if _orchestrator is not None:
         # Cancel the idle sweeper and close every warm runtime — terminates all
         # live claude/codex subprocesses deterministically on shutdown.
@@ -85,7 +89,10 @@ async def shutdown_dependencies() -> None:
             logger.debug("orchestrator shutdown failed", exc_info=True)
     if _engine:
         await _engine.dispose()
+    if _durable_engine:
+        await _durable_engine.dispose()
     _engine = None
+    _durable_engine = None
     _session_factory = None
     _store = None
     _orchestrator = None
@@ -164,12 +171,25 @@ def set_token_verifier(verifier: TokenVerifier) -> None:
 def _build_durable_store(config: AppConfig) -> StorePort | None:
     """The durable write-through target (model A), or ``None`` for local-only.
 
+    ``kernel_store=pg`` → an in-process ``SQLAlchemyStore`` on
+    ``durable_database_url`` (same process, no HTTP; the OSS "configure a
+    Postgres" path). Its engine is stashed on ``_durable_engine`` so the
+    lifespan shutdown disposes it.
+
     ``kernel_store=remote`` + ``data_api_url`` → a client to the remote
     DataService (sandbox/SaaS); the local store is mirrored to it. No engine /
     DSN here — only the data-API URL + a bearer-token hook (the concrete
-    backend ``data_api_kind`` self-registers on import). Returns ``None`` when
-    no durable backend is configured (the kernel runs local-only).
+    backend ``data_api_kind`` self-registers on import).
+
+    Returns ``None`` (``kernel_store=local``) when no durable backend is
+    configured — the kernel runs local-only.
     """
+    global _durable_engine  # noqa: PLW0603
+    if config.kernel_store == "pg":
+        if not config.durable_database_url:
+            raise RuntimeError("KERNEL_STORE=pg requires VALUZ_DURABLE_DATABASE_URL")
+        _durable_engine = create_engine(config.durable_database_url)
+        return SQLAlchemyStore(create_session_factory(_durable_engine))
     if config.kernel_store != "remote":
         return None
     if not config.data_api_url:

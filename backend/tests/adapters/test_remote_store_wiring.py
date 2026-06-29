@@ -37,6 +37,28 @@ def test_local_store_has_no_durable():
     assert deps._build_durable_store(AppConfig(kernel_store="local")) is None
 
 
+def test_build_durable_store_pg_requires_url():
+    config = AppConfig(kernel_store="pg", durable_database_url=None)
+    with pytest.raises(RuntimeError, match="VALUZ_DURABLE_DATABASE_URL"):
+        deps._build_durable_store(config)
+
+
+def test_build_durable_store_pg_is_in_process_sqlalchemy():
+    from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
+
+    config = AppConfig(
+        kernel_store="pg",
+        durable_database_url="sqlite+aiosqlite:///:memory:",
+    )
+    try:
+        durable = deps._build_durable_store(config)
+        assert isinstance(durable, SQLAlchemyStore)
+        # The in-process engine is tracked for lifespan disposal.
+        assert deps._durable_engine is not None
+    finally:
+        deps._durable_engine = None
+
+
 def test_build_durable_store_requires_url():
     config = AppConfig(kernel_store="remote", data_api_url=None)
     with pytest.raises(RuntimeError, match="VALUZ_DATA_API_URL"):

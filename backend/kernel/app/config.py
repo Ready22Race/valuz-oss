@@ -26,14 +26,22 @@ class AppConfig:
     # auth fronts these routes. Applies to HTTP and the WS run channel.
     auth_token: str | None = field(default_factory=lambda: os.getenv("KERNEL_AUTH_TOKEN") or None)
 
-    # Persistence mode. ``local`` (default) binds the in-process
-    # ``SQLAlchemyStore`` on ``database_url`` — local-first, zero change.
-    # ``remote`` binds a ``RemoteStore`` that talks to a trusted data API
-    # over HTTP, authenticated by ``data_api_token`` (a short-lived JWT):
-    # this process then holds NO database connection — no DSN, no driver,
-    # no PG credentials. Only the sandbox/remote deployment sets ``remote``
-    # (via ``KERNEL_STORE``); see ``docs`` plan saas-kernel.
+    # Durable write-through backend (model A). The local ``SQLAlchemyStore`` on
+    # ``database_url`` is ALWAYS present (local-first); ``kernel_store`` selects
+    # the OPTIONAL durable target every write is also mirrored to:
+    #   ``local``  (default) — none; local-only, zero change.
+    #   ``pg``     — an in-process ``SQLAlchemyStore`` on ``durable_database_url``
+    #                (the OSS "configure a Postgres" path; same process, no HTTP).
+    #   ``remote`` — a ``RemoteStore`` over a trusted data API (HTTP), authed by
+    #                ``data_api_token`` (short-lived JWT). The sandbox holds ONLY
+    #                that token — never a DB DSN/driver/PG credential.
+    # Set via ``KERNEL_STORE``; see ``docs`` plan saas-kernel.
     kernel_store: str = field(default_factory=lambda: os.getenv("KERNEL_STORE", "local"))
+    # DSN of the in-process durable Postgres (``kernel_store=pg`` only). Distinct
+    # from ``database_url`` (the local store): writes go to both.
+    durable_database_url: str | None = field(
+        default_factory=lambda: os.getenv("VALUZ_DURABLE_DATABASE_URL") or None
+    )
     # Base URL of the remote data API (e.g. PostgREST) — remote mode only.
     data_api_url: str | None = field(
         default_factory=lambda: os.getenv("VALUZ_DATA_API_URL") or None
