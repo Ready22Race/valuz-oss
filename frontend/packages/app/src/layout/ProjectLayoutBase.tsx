@@ -949,7 +949,7 @@ export function ProjectLayoutBase({
                   {t("project.projectDir")}
                 </label>
                 <div className="flex items-center gap-2">
-                  {directoryFieldMode === "picker" && platform.isElectron ? (
+                  {directoryFieldMode === "picker" ? (
                     <button
                       type="button"
                       className="flex h-8 flex-1 items-center rounded-lg border border-input bg-surface px-2.5 text-sm text-foreground transition-[border-color,box-shadow,color,background-color] hover:border-ring focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 focus-visible:outline-none"
@@ -976,7 +976,7 @@ export function ProjectLayoutBase({
                       className="flex-1"
                     />
                   )}
-                  {platform.isElectron ? (
+                  {directoryFieldMode === "picker" || platform.isElectron ? (
                     <Button
                       type="button"
                       variant="outline"
