@@ -12,17 +12,10 @@ import {
 } from "@valuz/ui";
 import { projectsApi, useTranslation } from "@valuz/core";
 
+import { downloadBlob, toValuzpackFilename } from "./pack-filename";
+
 type Tx = ReturnType<typeof useTranslation>["t"];
 const k = (key: string) => key as Parameters<Tx>[0];
-
-/** Turn the user's filename input into a ``<stem>.valuzpack`` download name —
- *  trims, drops a pack extension the user may have typed (so it isn't doubled),
- *  and falls back to the project name when empty. */
-function toValuzpackFilename(input: string, fallback: string): string {
-  let stem = input.trim() || fallback.trim() || "project";
-  stem = stem.replace(/\.(valuzpack|valuz-project|zip)$/i, "").trim();
-  return `${stem || "project"}.valuzpack`;
-}
 
 /**
  * Name-and-download flow for a single project export into a ``.valuzpack``
@@ -63,12 +56,7 @@ export function ExportProjectDialog({
     setBusy(true);
     try {
       const { blob } = await projectsApi.exportProject(projectId);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = toValuzpackFilename(fileName, projectName);
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(blob, toValuzpackFilename(fileName, projectName));
       toast.success(t(k("project.exportDone"), { name: projectName }));
       onOpenChange(false);
     } catch (err) {
