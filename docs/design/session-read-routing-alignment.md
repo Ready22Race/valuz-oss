@@ -157,9 +157,11 @@ the execution plane.
   DataService** (identical `SessionData`, sandbox-agnostic) rather than re-deriving
   gate facts from host tables — lower risk for auth-sensitive code; full host-table
   re-derivation (`kind`→run_kind, `task_of()`) remains a possible follow-up.
-- **Pending:** one-time backfill of pre-`pg` local-only sessions into the durable
-  (§8.3); full backend suite is regression-free against the post-merge baseline
-  (11 pre-existing upstream task-stub failures unchanged).
+- **Backfill — done.** `scripts/backfill_durable_sessions.py` copies pre-`pg`
+  local-only sessions (+messages +events) into the durable; idempotent at session
+  granularity, insert-only. Run with the app's `VALUZ_DURABLE_DATABASE_URL`.
+- Full backend suite is regression-free against the post-merge baseline (11
+  pre-existing upstream task-stub failures unchanged).
 
 ## 10. Suggested sequencing
 
