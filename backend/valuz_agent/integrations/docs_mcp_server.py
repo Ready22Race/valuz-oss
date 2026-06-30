@@ -70,13 +70,14 @@ def _current_user_id() -> str:
 
 
 async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
-    """Map ``session_id`` → ``project_id`` via the kernel store."""
-    from valuz_agent.adapters import kernel_client
+    """Map ``session_id`` → ``project_id`` via the host project↔session index.
 
-    session = await kernel_client.get_session(user_id, session_id)
-    if session is None:
-        return None
-    project_id = ((session.metadata or {}).get("valuz", {}) or {}).get("project_id")
+    A host fact (``valuz_project_session``), so no kernel round-trip — works
+    even when a remote sandbox kernel is gone (DataService design §5).
+    """
+    from valuz_agent.modules.sessions import project_index
+
+    project_id = await project_index.project_of(session_id)
     return str(project_id) if project_id else None
 
 

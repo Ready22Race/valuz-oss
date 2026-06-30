@@ -59,6 +59,32 @@ class LocalDataServiceReader:
         # already carry the attributes the frame translator needs.
         return SimpleNamespace(items=items, has_more=has_more)
 
+    # -- Session reads (DataService design §5: session fetches go through the
+    # DataService, never the execution-local sqlite). Projected to ``SessionData``
+    # via the same serializer the kernel route uses, so the host-side session
+    # mappers consume this interchangeably with the ``KernelClient`` seam.
+    async def get_session(self, user_id: str, session_id: str) -> Any:
+        from app.serializers import session_to_data
+
+        session = await self._store.load_session(user_id, session_id)
+        return session_to_data(session) if session is not None else None
+
+    async def list_sessions(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+        ids: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Any]:
+        from app.serializers import session_to_data
+
+        sessions = await self._store.list_sessions(
+            user_id, status=status, ids=ids, limit=limit, offset=offset
+        )
+        return [session_to_data(s) for s in sessions]
+
 
 _reader: LocalDataServiceReader | None = None
 
@@ -71,3 +97,16 @@ def bind_local_reader(store: StorePort | None) -> None:
 
 def get_local_reader() -> LocalDataServiceReader | None:
     return _reader
+
+
+def session_reader() -> Any:
+    """Transport for reading session detail/list (DataService design §5).
+
+    The in-process host-mounted DataService store when one is bound (``pg`` /
+    ``remote`` — durable, sandbox-agnostic), else the ``KernelClient`` seam
+    (``local`` — the in-process kernel store IS the data layer). Both expose the
+    same ``get_session`` / ``list_sessions`` surface returning ``SessionData``.
+    """
+    from valuz_agent.adapters import kernel_client
+
+    return _reader if _reader is not None else kernel_client

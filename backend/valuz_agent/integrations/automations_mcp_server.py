@@ -109,14 +109,17 @@ async def _resolve_session_context(
     gone. The caller then forwards ``None`` to ``AutomationService.create``
     which lazy-creates a fresh chat project named after the automation.
     """
-    from valuz_agent.adapters import kernel_client
+    from valuz_agent.adapters.data_service_local import session_reader
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.projects.datastore import ProjectDatastore
 
     if user_id is None:
         raise ValueError("user_id is required")
 
-    kernel_session = await kernel_client.get_session(user_id, session_id)
+    # ``agent_slug`` lives only on the kernel session (``metadata.valuz``), so we
+    # fetch the session — but via the DataService reader (durable, sandbox-agnostic;
+    # DataService design §5), not a kernel round-trip to a possibly-gone sandbox.
+    kernel_session = await session_reader().get_session(user_id, session_id)
     if kernel_session is None:
         return None, "chat", None
 

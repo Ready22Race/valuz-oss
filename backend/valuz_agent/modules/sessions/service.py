@@ -41,6 +41,7 @@ from src.core.agent_config import (
 import valuz_agent.boot.kernel  # noqa: F401 — side-effect: puts kernel on sys.path
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.capability_resolver import resolve_session_capabilities
+from valuz_agent.adapters.data_service_local import session_reader
 from valuz_agent.adapters.model_resolver import resolve_model
 from valuz_agent.adapters.system_prompt_builder import build_project_system_prompt
 from valuz_agent.infra.db import async_unit_of_work
@@ -311,7 +312,7 @@ class SessionService:
         chat_ids = await project_index.list_session_ids(
             project_id, user_only=True, limit=10, user_id=uid
         )
-        chat_sessions = await kernel_client.list_sessions(uid, ids=chat_ids, limit=10)
+        chat_sessions = await session_reader().list_sessions(uid, ids=chat_ids, limit=10)
         chat_pick: dict[str, str | None] | None = None
         for s in chat_sessions:
             meta = _valuz_meta(s)
@@ -330,7 +331,7 @@ class SessionService:
         lead_ids = await project_index.list_session_ids(
             project_id, kind="task_lead", limit=10, user_id=uid
         )
-        lead_sessions = await kernel_client.list_sessions(uid, ids=lead_ids, limit=10)
+        lead_sessions = await session_reader().list_sessions(uid, ids=lead_ids, limit=10)
         task_agent_slug: str | None = None
         for s in lead_sessions:
             if a := _valuz_meta(s).get("agent_slug"):
@@ -365,7 +366,7 @@ class SessionService:
         ids = await project_index.list_session_ids(
             project_id, user_only=True, limit=200, user_id=user_id
         )
-        sessions = await kernel_client.list_sessions(user_id, ids=ids, limit=200)
+        sessions = await session_reader().list_sessions(user_id, ids=ids, limit=200)
         order = {sid: i for i, sid in enumerate(ids)}
         sessions.sort(key=lambda s: order.get(s.id, len(order)))
         items = [_session_to_list_item(s) for s in sessions]
@@ -375,7 +376,7 @@ class SessionService:
         return items
 
     async def get_session(self, session_id: str, user_id: str | None = None) -> SessionDetail:
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
         return _session_to_detail(session)
@@ -394,7 +395,7 @@ class SessionService:
         events that have no legacy counterpart are filtered.
         """
         # Verify session exists.
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -430,7 +431,7 @@ class SessionService:
         turns"); the linear ``list_events`` / SSE path stays for
         incremental delivery.
         """
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1192,7 +1193,7 @@ class SessionService:
                 session_id,
             )
 
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1277,7 +1278,7 @@ class SessionService:
                 session_id,
             )
 
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1356,7 +1357,7 @@ class SessionService:
                     )
 
             # Update valuz metadata.
-            reloaded = await kernel_client.get_session(user_id, session_id)
+            reloaded = await session_reader().get_session(user_id, session_id)
             if reloaded is not None:
                 meta = dict(reloaded.metadata)
                 valuz = dict(meta.get("valuz") or {})
@@ -1423,7 +1424,7 @@ class SessionService:
             raise
 
         # Fallback (should not reach here).
-        reloaded2 = await kernel_client.get_session(user_id, session_id)
+        reloaded2 = await session_reader().get_session(user_id, session_id)
         detail = _session_to_detail(reloaded2) if reloaded2 else _session_to_detail(session)
         return SessionRunResponse(session=detail, events=[])
 
@@ -1447,7 +1448,7 @@ class SessionService:
         a stranded ``running`` row wedges the session forever (same
         failure mode ``recover_running_sessions`` cleans up at boot).
         """
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1563,7 +1564,7 @@ class SessionService:
         immediate drain; otherwise the post-turn drain picks it up.
         """
         uid = user_id
-        session = await kernel_client.get_session(uid, session_id)
+        session = await session_reader().get_session(uid, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
         status = _map_kernel_status(session.status)
@@ -1633,7 +1634,7 @@ class SessionService:
 
     async def resume_queue(self, session_id: str, user_id: str | None = None) -> QueuedInputList:
         uid = user_id
-        session = await kernel_client.get_session(uid, session_id)
+        session = await session_reader().get_session(uid, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
         await project_index.set_queue_paused(session_id, False)
@@ -1658,7 +1659,7 @@ class SessionService:
         ``turn/steer`` (see docs/design/session-input-queue.md §11).
         """
         uid = user_id
-        session = await kernel_client.get_session(uid, session_id)
+        session = await session_reader().get_session(uid, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1687,7 +1688,7 @@ class SessionService:
         return await self.list_queue(session_id, user_id=user_id)
 
     async def cancel(self, session_id: str, user_id: str | None = None) -> SessionDetail:
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1706,7 +1707,7 @@ class SessionService:
         return _session_to_detail(updated)
 
     async def regenerate(self, session_id: str, user_id: str | None = None) -> SessionDetail:
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
         meta = _valuz_meta(session)
@@ -1718,7 +1719,7 @@ class SessionService:
     async def rename_session(
         self, session_id: str, name: str, user_id: str | None = None
     ) -> SessionDetail:
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1733,7 +1734,7 @@ class SessionService:
         return _session_to_detail(updated)
 
     async def delete_session(self, session_id: str, user_id: str | None = None) -> None:
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
         await kernel_client.delete_session(user_id, session_id)
@@ -1748,7 +1749,7 @@ class SessionService:
             logger.debug("delete_session: queue cleanup failed for %s", session_id)
 
     async def get_extra_skills(self, session_id: str, user_id: str | None = None) -> list[str]:
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
         meta = _valuz_meta(session)
@@ -1760,7 +1761,7 @@ class SessionService:
     async def set_extra_skills(
         self, session_id: str, skill_ids: list[str], user_id: str | None = None
     ) -> SessionDetail:
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1794,7 +1795,7 @@ class SessionService:
 
         A turn already in flight keeps the mode it started with.
         """
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1830,7 +1831,7 @@ class SessionService:
         ``ValueError`` on an unknown effort value so the route layer
         can 400.
         """
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 
@@ -1883,7 +1884,7 @@ class SessionService:
         # Verify session exists so we raise our own 404 before reaching
         # the orchestrator (which would also 404 but with a kernel-shaped
         # error message). Keeping host errors host-flavoured.
-        session = await kernel_client.get_session(user_id, session_id)
+        session = await session_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
 

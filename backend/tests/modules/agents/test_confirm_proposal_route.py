@@ -125,15 +125,14 @@ async def test_real_kind_project_resolves(db_session, monkeypatch) -> None:
     )
     await db_session.commit()
 
-    class _Sess:
-        metadata = {"valuz": {"project_id": "realp"}}
+    # session→project is a host fact now (``valuz_project_session``), resolved
+    # via ``project_index.project_of`` — not a kernel round-trip.
+    async def _project_of(_sid):
+        return "realp"
 
-    async def _get_session(_uid, _sid):
-        return _Sess()
+    import valuz_agent.modules.sessions.project_index as pidx
 
-    import valuz_agent.adapters.kernel_client as kc
-
-    monkeypatch.setattr(kc, "get_session", _get_session)
+    monkeypatch.setattr(pidx, "project_of", _project_of)
     resolved = await agents_route._resolve_session_project_id(
         USER_ID, "sess-1", db_session
     )
