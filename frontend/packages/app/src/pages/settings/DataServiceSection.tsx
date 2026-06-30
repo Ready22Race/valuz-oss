@@ -26,10 +26,11 @@ import type {
 export const DataServiceSection = () => {
   const { t } = useTranslation();
   const [cfg, setCfg] = useState<DataServiceResponse | null>(null);
-  const [mode, setMode] = useState<KernelStoreMode>("local");
+  // OSS exposes only local + pg (a PG-backed data service). The "remote"
+  // (HTTP+JWT) reach is a SaaS/cloud-sandbox deployment binding, not a
+  // user-facing OSS choice — so a persisted "remote" collapses to "pg" here.
+  const [mode, setMode] = useState<Exclude<KernelStoreMode, "remote">>("local");
   const [durableUrl, setDurableUrl] = useState("");
-  const [apiUrl, setApiUrl] = useState("");
-  const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [health, setHealth] = useState<DataServiceHealthResponse | null>(null);
   const [checking, setChecking] = useState(false);
@@ -75,9 +76,9 @@ export const DataServiceSection = () => {
       .then((c) => {
         if (cancelled) return;
         setCfg(c);
-        setMode(c.kernel_store);
+        // A SaaS-bound "remote" maps to the user-facing "pg" choice.
+        setMode(c.kernel_store === "local" ? "local" : "pg");
         setDurableUrl(c.durable_database_url);
-        setApiUrl(c.data_api_url);
       })
       .catch(() => {
         // leave defaults; the form still works
@@ -95,13 +96,8 @@ export const DataServiceSection = () => {
       if (mode === "pg") {
         payload.durable_database_url = durableUrl.trim();
       }
-      if (mode === "remote") {
-        payload.data_api_url = apiUrl.trim();
-        if (token.trim()) payload.data_api_token = token.trim();
-      }
       const next = await settingsApi.patchDataService(payload);
       setCfg(next);
-      setToken("");
       toast.success(t("settings.dataService.saved"));
       void checkHealth();
     } catch {
@@ -203,7 +199,7 @@ export const DataServiceSection = () => {
             </p>
             <Select
               value={mode}
-              onValueChange={(v) => setMode(v as KernelStoreMode)}
+              onValueChange={(v) => setMode(v as "local" | "pg")}
             >
               <SelectTrigger className="w-full max-w-md">
                 <SelectValue />
@@ -214,9 +210,6 @@ export const DataServiceSection = () => {
                 </SelectItem>
                 <SelectItem value="pg">
                   {t("settings.dataService.modePg")}
-                </SelectItem>
-                <SelectItem value="remote">
-                  {t("settings.dataService.modeRemote")}
                 </SelectItem>
               </SelectContent>
             </Select>
@@ -238,40 +231,6 @@ export const DataServiceSection = () => {
                 spellCheck={false}
               />
             </div>
-          ) : null}
-
-          {/* remote: data-service URL + token */}
-          {mode === "remote" ? (
-            <>
-              <div className="space-y-1.5">
-                <Label>{t("settings.dataService.remoteUrlLabel")}</Label>
-                <Input
-                  value={apiUrl}
-                  onChange={(e) => setApiUrl(e.target.value)}
-                  placeholder="http://127.0.0.1:8400"
-                  className="max-w-xl font-mono text-xs"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>{t("settings.dataService.tokenLabel")}</Label>
-                <p className="text-xs text-ink-body">
-                  {cfg?.token_set
-                    ? t("settings.dataService.tokenSet")
-                    : t("settings.dataService.tokenDesc")}
-                </p>
-                <Input
-                  type="password"
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  placeholder={cfg?.token_set ? "••••••••" : ""}
-                  className="max-w-xl font-mono text-xs"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
-            </>
           ) : null}
 
           <div className="flex justify-end pt-1">
