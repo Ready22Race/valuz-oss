@@ -398,6 +398,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 goal=args.get("goal"),
                 refs=args.get("refs") or [],
                 project_mode=args.get("project_mode"),
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False), is_error="error" in result
@@ -422,6 +423,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 # waiting for the slowest sibling. Loop to collect the rest.
                 mode=args.get("mode") or "any",
                 timeout_s=args.get("timeout_s"),
+                user_id=ctx.user_id,
             )
             return ToolResult(content=json.dumps(result, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
@@ -446,6 +448,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 text=text,
                 project_id=project_id,
                 task_id=task_id,
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -481,6 +484,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 originating_session_id=ctx.session_id,
                 refs=args.get("refs") or [],
                 title=args.get("title"),
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(
@@ -594,6 +598,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 project_id=task.project_id,
                 text=text,
                 from_session_id=ctx.session_id,
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -713,6 +718,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 status=args.get("status"),
                 mine_session_id=ctx.session_id if args.get("mine_only") else None,
                 limit=int(args.get("limit") or 20),
+                user_id=ctx.user_id,
             )
             return ToolResult(content=json.dumps({"tasks": tasks}, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
@@ -728,7 +734,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         if not task_id:
             return ToolResult(content="get_task: task_id is required", is_error=True)
         try:
-            detail = await queries.get_task(task_id, project_id)
+            detail = await queries.get_task(task_id, project_id, user_id=ctx.user_id)
             if detail is None:
                 return ToolResult(
                     content=f"task {task_id!r} not found in this project", is_error=True
@@ -753,7 +759,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
             return ToolResult(content="list_members: caller session has no project", is_error=True)
 
         try:
-            members = await queries.list_members(project_id)
+            members = await queries.list_members(project_id, user_id=user_id)
             if not members:
                 # Project-less chat fallback (see ``_bound_agent_member``):
                 # a chat project has no deployed project members, but the
@@ -787,6 +793,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 summary=summary,
                 artifacts=artifacts,
                 status=status,
+                user_id=ctx.user_id,
             )
             # Plan-completeness guard rejected the close — surface it so the
             # lead dispatches the remaining subtasks instead of stopping.
