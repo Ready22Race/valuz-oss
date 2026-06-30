@@ -67,6 +67,11 @@ not imply a sandbox. Any combination is valid.
 The point: forms 1→4 are one implementation with the two knobs flipped. SaaS is
 not a fork — it is form 3 with a cloud sandbox driver and a PG backend.
 
+The diagram below shows all forms' interactions and module dependencies (blue =
+data flow / read+write, red dashed = the sandbox HTTP+JWT boundary):
+
+![DataService architecture — all forms: interactions and module dependencies](data-service-architecture.svg)
+
 ---
 
 ## 4. Write path — dual-write + outbox consistency
