@@ -218,7 +218,7 @@ class RecoveryService:
         for task_id, project_id, user_id in active:
             token = set_current_user_id(user_id)
             try:
-                if await self._recover_one_task(task_id, project_id):
+                if await self._recover_one_task(task_id, project_id, user_id=user_id):
                     recovered += 1
             except Exception:  # noqa: BLE001
                 logger.exception("recover_active_tasks: failed for task %s", task_id)
@@ -279,7 +279,10 @@ class RecoveryService:
                 if rec.disposition == "completed":
                     try:
                         manifest = await collect_manifest(
-                            run.session_id, Path(run.run_dir) if run.run_dir else Path(), "idle"
+                            run.session_id,
+                            Path(run.run_dir) if run.run_dir else Path(),
+                            "idle",
+                            user_id=user_id,
                         )
                     except Exception:  # noqa: BLE001
                         manifest = {
@@ -356,6 +359,7 @@ class RecoveryService:
                     role="subtask",
                     task_id=task_id,
                     project_id=project_id,
+                    user_id=user_id,
                 )
             )
         lead_brief = (
@@ -371,6 +375,7 @@ class RecoveryService:
                 role="lead",
                 task_id=task_id,
                 project_id=project_id,
+                user_id=user_id,
             )
         )
         return True
@@ -535,7 +540,7 @@ class RecoveryService:
                 actor=actor,
                 payload={"from": prior_status},
             )
-        ok = await self._recover_one_task(task_id, project_id)
+        ok = await self._recover_one_task(task_id, project_id, user_id=user_id)
         return {"ok": ok, "prior_status": prior_status, "resumed": ok}
 
     async def stop_member(self, session_id: str, user_id: str | None = None) -> bool:

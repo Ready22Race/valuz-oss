@@ -158,6 +158,7 @@ class CoordinationService:
                         task_id=task_id,
                         project_id=project_id,
                         pending_keys=pending_now,
+                        user_id=user_id,
                     )
                 )
                 continue
@@ -188,6 +189,7 @@ class CoordinationService:
                     task_id=task_id,
                     project_id=project_id,
                     member_session_id=from_sid,
+                    user_id=user_id,
                 )
             m = msg.payload or {}
             collected[sk] = {
@@ -271,6 +273,7 @@ class CoordinationService:
                             run.session_id,
                             Path(run.run_dir) if run.run_dir else Path(),
                             "idle",
+                            user_id=user_id,
                         )
                     except Exception:  # noqa: BLE001
                         manifest = {
@@ -348,7 +351,9 @@ class CoordinationService:
             lead_session_id = run.dispatched_by or ""
             run_dir = Path(run.run_dir) if run.run_dir else Path()
             since = self._members.dispatch_started_at(session_id)
-            manifest = await collect_manifest(session_id, run_dir, status, since_epoch=since)
+            manifest = await collect_manifest(
+                session_id, run_dir, status, since_epoch=since, user_id=user_id
+            )
             manifest["agent"] = run.agent_slug
             await event_ds.append_event(
                 user_id,
