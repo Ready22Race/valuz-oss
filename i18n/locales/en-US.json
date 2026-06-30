@@ -1463,7 +1463,11 @@
       "save": "Save",
       "saved": "Data service settings saved",
       "saveFailed": "Failed to save data service settings",
-      "unlocked": "Data Service settings unlocked"
+      "unlocked": "Data Service settings unlocked",
+      "healthLabel": "Backend health",
+      "healthOk": "Reachable",
+      "healthError": "Unreachable",
+      "healthRefresh": "Re-check"
     },
     "tab": {
       "about": {

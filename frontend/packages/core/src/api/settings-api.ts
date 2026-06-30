@@ -149,6 +149,14 @@ export interface DataServicePatchPayload {
   data_api_token?: string;
 }
 
+export interface DataServiceHealthResponse {
+  /** "ok" | "error" — is the configured durable backend reachable. */
+  status: "ok" | "error";
+  /** "local" | "pg" | "remote" — the configured backend kind. */
+  backend: KernelStoreMode;
+  detail: string;
+}
+
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const settingsApi = {
@@ -168,6 +176,10 @@ export const settingsApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
+  },
+
+  getDataServiceHealth(): Promise<DataServiceHealthResponse> {
+    return fetchJson("/v1/settings/data-service/health");
   },
 
   patchPreferences(

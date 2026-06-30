@@ -200,6 +200,72 @@ async def patch_data_service(payload: DataServicePatchPayload) -> DataServiceRes
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+class DataServiceHealthResponse(BaseModel):
+    # "ok" | "error" — whether the configured durable backend is reachable.
+    status: str
+    # "local" | "pg" | "remote" — the configured backend kind.
+    backend: str
+    detail: str
+
+
+async def _probe_data_service(db: AsyncSession) -> DataServiceHealthResponse:
+    """Probe the CONFIGURED durable backend (not the currently-booted one) so the
+    panel reflects what a restart would use. local → always ok; pg → connect +
+    SELECT 1; remote → GET the data-API ``/health``."""
+    kernel_store = await get_kernel_store(db)
+    if kernel_store == "pg":
+        dsn = await get_durable_database_url(db)
+        if not dsn:
+            return DataServiceHealthResponse(
+                status="error", backend="pg", detail="Postgres DSN not configured"
+            )
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        engine = create_async_engine(dsn)
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+            return DataServiceHealthResponse(status="ok", backend="pg", detail="Postgres reachable")
+        except Exception as exc:  # noqa: BLE001 — surfaced to the UI as a status
+            return DataServiceHealthResponse(status="error", backend="pg", detail=str(exc)[:200])
+        finally:
+            await engine.dispose()
+    if kernel_store == "remote":
+        base = await get_data_api_url(db)
+        if not base:
+            return DataServiceHealthResponse(
+                status="error", backend="remote", detail="data-API URL not configured"
+            )
+        import httpx
+
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(base.rstrip("/") + "/health")
+            if resp.status_code < 400:
+                return DataServiceHealthResponse(
+                    status="ok", backend="remote", detail=f"data service reachable ({base})"
+                )
+            return DataServiceHealthResponse(
+                status="error", backend="remote", detail=f"HTTP {resp.status_code} from {base}"
+            )
+        except Exception as exc:  # noqa: BLE001 — surfaced to the UI as a status
+            return DataServiceHealthResponse(
+                status="error", backend="remote", detail=str(exc)[:200]
+            )
+    return DataServiceHealthResponse(
+        status="ok", backend="local", detail="host-managed SQLite (always available)"
+    )
+
+
+@router.get("/data-service/health")
+async def get_data_service_health() -> DataServiceHealthResponse:
+    """Live health of the configured durable backend (sqlite / Postgres / remote
+    data service), for the Data Service settings panel."""
+    async with async_unit_of_work(commit=False) as db:
+        return await _probe_data_service(db)
+
+
 # ── Model defaults (runtime + provider + model + effort) ─────────────
 
 

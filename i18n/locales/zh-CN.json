@@ -1463,7 +1463,11 @@
       "save": "保存",
       "saved": "数据服务设置已保存",
       "saveFailed": "保存数据服务设置失败",
-      "unlocked": "已解锁「数据服务」设置"
+      "unlocked": "已解锁「数据服务」设置",
+      "healthLabel": "后端健康",
+      "healthOk": "可达",
+      "healthError": "不可达",
+      "healthRefresh": "重新检测"
     },
     "tab": {
       "about": {

@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, XCircle } from "lucide-react";
 import {
+  Badge,
   Button,
   Card,
   CardContent,
@@ -16,6 +17,7 @@ import {
 } from "@valuz/ui";
 import { settingsApi, useTranslation } from "@valuz/core";
 import type {
+  DataServiceHealthResponse,
   DataServicePatchPayload,
   DataServiceResponse,
   KernelStoreMode,
@@ -29,6 +31,19 @@ export const DataServiceSection = () => {
   const [apiUrl, setApiUrl] = useState("");
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
+  const [health, setHealth] = useState<DataServiceHealthResponse | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const checkHealth = useCallback(async () => {
+    setChecking(true);
+    try {
+      setHealth(await settingsApi.getDataServiceHealth());
+    } catch {
+      setHealth({ status: "error", backend: "local", detail: "health check failed" });
+    } finally {
+      setChecking(false);
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -44,10 +59,11 @@ export const DataServiceSection = () => {
       .catch(() => {
         // leave defaults; the form still works
       });
+    void checkHealth();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [checkHealth]);
 
   const save = async () => {
     setSaving(true);
@@ -64,6 +80,7 @@ export const DataServiceSection = () => {
       setCfg(next);
       setToken("");
       toast.success(t("settings.dataService.saved"));
+      void checkHealth();
     } catch {
       toast.error(t("settings.dataService.saveFailed"));
     } finally {
@@ -82,6 +99,50 @@ export const DataServiceSection = () => {
           <span>{t("settings.dataService.restartRequired")}</span>
         </div>
       ) : null}
+
+      {/* Backend health */}
+      <div className="mb-4 flex items-center gap-2">
+        <span className="text-xs text-ink-meta">
+          {t("settings.dataService.healthLabel")}
+        </span>
+        {checking ? (
+          <Badge variant="secondary" className="gap-1">
+            <Loader2 className="h-3 w-3 animate-spin" />
+          </Badge>
+        ) : health ? (
+          <Badge
+            variant={health.status === "ok" ? "success" : "error"}
+            className="gap-1"
+          >
+            {health.status === "ok" ? (
+              <CheckCircle2 className="h-3 w-3" />
+            ) : (
+              <XCircle className="h-3 w-3" />
+            )}
+            {health.backend} ·{" "}
+            {t(
+              health.status === "ok"
+                ? "settings.dataService.healthOk"
+                : "settings.dataService.healthError",
+            )}
+          </Badge>
+        ) : null}
+        {health?.detail ? (
+          <span className="truncate text-xs text-ink-meta" title={health.detail}>
+            {health.detail}
+          </span>
+        ) : null}
+        <Button
+          variant="ghost"
+          size="xs"
+          className="ml-auto"
+          onClick={() => void checkHealth()}
+          disabled={checking}
+        >
+          <RefreshCw className="mr-1 h-3 w-3" />
+          {t("settings.dataService.healthRefresh")}
+        </Button>
+      </div>
 
       <Card className="rounded-xl shadow-xs">
         <CardContent className="space-y-5 py-5">
