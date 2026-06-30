@@ -86,10 +86,7 @@ SUBMIT_SKILL_PARAMETERS: dict[str, object] = {
 }
 
 
-async def _submit_skill_handler(args: dict[str, object], context: ExecContext, user_id: str | None = None) -> ToolResult:
-    if user_id is None:
-        raise ValueError("user_id is required")
-
+async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -> ToolResult:
     """Acknowledge the submission, but only if the slug is actually staged.
 
     Validates that the agent wrote ``SKILL.md`` to
@@ -106,6 +103,7 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext, u
     what actually promotes the staged slug into the library; see
     ``POST /v1/skills/submissions/{session_id}/{slug}/confirm``.
     """
+    user_id = context.user_id
     slug = args.get("slug") or "<unknown>"
     summary = args.get("summary") or ""
     change_kind = args.get("change_kind") or "create"

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
-from src.core.tools import ExecContext
+from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
 
 import valuz_agent.modules.projects.tools as t
 
@@ -24,10 +24,8 @@ def _const(value):  # noqa: ANN001, ANN202 — async stub factory for monkeypatc
 
 
 def test_rejects_bad_action_and_missing_content() -> None:
-    ctx = ExecContext(session_id="proj")
-    assert asyncio.run(
-        t._handler({"action": "frob", "content": "x"}, ctx)
-    ).is_error
+    ctx = HostExecContext(session_id="proj", user_id="local-test-owner")
+    assert asyncio.run(t._handler({"action": "frob", "content": "x"}, ctx)).is_error
     assert asyncio.run(t._handler({"action": "set", "content": ""}, ctx)).is_error
     assert asyncio.run(t._handler({"action": "set"}, ctx)).is_error
 
@@ -36,7 +34,10 @@ def test_gated_to_project_sessions(monkeypatch) -> None:  # noqa: ANN001
     # No project on the session → refused (this is the "project only" gate).
     monkeypatch.setattr(t, "_resolve_project_id", _const(None))
     r = asyncio.run(
-        t._handler({"action": "set", "content": "be concise"}, ExecContext(session_id="chat"))
+        t._handler(
+            {"action": "set", "content": "be concise"},
+            HostExecContext(session_id="chat", user_id="local-test-owner"),
+        )
     )
     assert r.is_error
     assert "no project" in r.content
@@ -54,6 +55,10 @@ def test_tool_def_shape() -> None:
 def test_get_needs_no_content_but_still_gated(monkeypatch) -> None:  # noqa: ANN001
     # get is valid without content, but still refused outside a project.
     monkeypatch.setattr(t, "_resolve_project_id", _const(None))
-    r = asyncio.run(t._handler({"action": "get"}, ExecContext(session_id="chat")))
+    r = asyncio.run(
+        t._handler(
+            {"action": "get"}, HostExecContext(session_id="chat", user_id="local-test-owner")
+        )
+    )
     assert r.is_error
     assert "no project" in r.content

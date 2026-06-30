@@ -19,7 +19,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel src/ on sys.path
-from src.core.tools import ExecContext
+from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
 
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.sessions.artifacts_tool import _deliver_artifacts_handler
@@ -56,8 +56,7 @@ async def test_records_artifact_and_derives_metadata(session_factory, owner, tmp
 
     result = await _deliver_artifacts_handler(
         {"attachments": [{"filePath": str(f)}]},
-        ExecContext(session_id="s1"),
-        user_id=owner,
+        HostExecContext(session_id="s1", user_id=owner),
     )
 
     assert not result.is_error
@@ -85,8 +84,7 @@ async def test_honors_explicit_metadata(session_factory, owner, tmp_path):  # ty
                 }
             ]
         },
-        ExecContext(session_id="s1"),
-        user_id=owner,
+        HostExecContext(session_id="s1", user_id=owner),
     )
 
     assert not result.is_error
@@ -101,15 +99,13 @@ async def test_redelivery_upserts_in_place(session_factory, owner, tmp_path):  #
     f.write_text("v1", encoding="utf-8")
     await _deliver_artifacts_handler(
         {"attachments": [{"filePath": str(f)}]},
-        ExecContext(session_id="s1"),
-        user_id=owner,
+        HostExecContext(session_id="s1", user_id=owner),
     )
     # Grow the file, re-deliver the same path.
     f.write_text("v2 longer", encoding="utf-8")
     await _deliver_artifacts_handler(
         {"attachments": [{"filePath": str(f)}]},
-        ExecContext(session_id="s1"),
-        user_id=owner,
+        HostExecContext(session_id="s1", user_id=owner),
     )
 
     rows = await _list(session_factory)
@@ -120,8 +116,7 @@ async def test_redelivery_upserts_in_place(session_factory, owner, tmp_path):  #
 async def test_missing_file_is_skipped(session_factory, owner, tmp_path):  # type: ignore[no-untyped-def]
     result = await _deliver_artifacts_handler(
         {"attachments": [{"filePath": str(tmp_path / "nope.txt")}]},
-        ExecContext(session_id="s1"),
-        user_id=owner,
+        HostExecContext(session_id="s1", user_id=owner),
     )
 
     # Nothing delivered → surfaced as an error so the model notices.
@@ -132,7 +127,7 @@ async def test_missing_file_is_skipped(session_factory, owner, tmp_path):  # typ
 
 async def test_empty_attachments_errors() -> None:
     result = await _deliver_artifacts_handler(
-        {"attachments": []}, ExecContext(session_id="s1"), user_id="u1"
+        {"attachments": []}, HostExecContext(session_id="s1", user_id="u1")
     )
     assert result.is_error
 
@@ -141,7 +136,7 @@ async def test_no_session_id_errors(tmp_path) -> None:  # type: ignore[no-untype
     f = tmp_path / "x.txt"
     f.write_text("x", encoding="utf-8")
     result = await _deliver_artifacts_handler(
-        {"attachments": [{"filePath": str(f)}]}, ExecContext(), user_id="u1"
+        {"attachments": [{"filePath": str(f)}]}, HostExecContext(user_id="u1")
     )
     assert result.is_error
     assert "session" in result.content.lower()

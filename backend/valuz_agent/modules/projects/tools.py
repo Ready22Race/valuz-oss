@@ -65,9 +65,8 @@ async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
     return ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or None
 
 
-async def _handler(args: dict[str, Any], ctx: ExecContext, user_id: str | None = None) -> ToolResult:
-    if user_id is None:
-        raise ValueError("user_id is required")
+async def _handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+    user_id = ctx.user_id
 
     action = args.get("action")
     content = args.get("content")

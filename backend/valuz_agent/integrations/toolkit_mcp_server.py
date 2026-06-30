@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any
 from collections.abc import AsyncIterator
 
@@ -61,6 +62,7 @@ import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 from valuz_agent.integrations._mcp_asgi import (
     build_internal_mcp_asgi,
     get_current_mcp_session_id,
+    get_current_mcp_user_id,
 )
 
 from mcp.server import Server
@@ -70,6 +72,21 @@ from mcp.types import TextContent, Tool
 from src.core.tools import ExecContext, ToolDef
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class HostExecContext(ExecContext):
+    """``ExecContext`` enriched with the resolved session owner.
+
+    The kernel's ``ExecContext`` stays owner-agnostic (owner scoping is a host
+    concern). The host's built-in MCP toolkit hands its tool handlers this
+    richer context — populated once at the request boundary (``_call_tool``) —
+    so handlers read ``ctx.user_id`` instead of an ambient context var and stay
+    pure. Tests construct it directly with the owner they seed.
+    """
+
+    user_id: str = ""
+
 
 TOOLSET_NAMES = ("base", "lead")
 
@@ -98,6 +115,13 @@ def _current_session_id() -> str:
     if not sid:
         raise RuntimeError("toolkit MCP tool called outside of a session-scoped request")
     return sid
+
+
+def _current_user_id() -> str:
+    uid = get_current_mcp_user_id()
+    if not uid:
+        raise RuntimeError("toolkit MCP tool called outside of a user-scoped request")
+    return uid
 
 
 def _build_server(toolset: str) -> Server:
@@ -130,7 +154,7 @@ def _build_server(toolset: str) -> Server:
         tdef = by_name.get(tool_name)
         if tdef is None or tdef.handler is None:
             raise ValueError(f"unknown tool: {tool_name}")
-        ctx = ExecContext(session_id=_current_session_id())
+        ctx = HostExecContext(session_id=_current_session_id(), user_id=_current_user_id())
         result = await tdef.handler(dict(arguments), ctx)
         text = result.content if not result.is_error else f"ERROR: {result.content}"
         return [TextContent(type="text", text=text)]
@@ -169,7 +193,19 @@ def build_toolkit_mcp_asgi(toolset: str) -> Any:
     """
     if toolset not in TOOLSET_NAMES:
         raise ValueError(f"unknown toolkit toolset: {toolset}")
-    return build_internal_mcp_asgi(_ensure_manager(toolset).handle_request)
+
+    # Resolve the session manager LAZILY, per request — do NOT bind
+    # ``_ensure_manager(toolset).handle_request`` at mount time. This app is
+    # mounted at app-build, but ``install_toolkit_toolsets`` clears the manager
+    # registry later (in the boot lifespan, once the tasks orchestrator exists),
+    # and ``toolkit_mcp_session_managers_run`` then creates + ``run()``s a fresh
+    # manager. A mount-time binding would capture the pre-install manager (empty
+    # toolset, never ``run()``) and every request would 500 with "Task group is
+    # not initialized". Resolving here always hits the started manager.
+    async def _handle(scope: Any, receive: Any, send: Any) -> None:
+        await _ensure_manager(toolset).handle_request(scope, receive, send)
+
+    return build_internal_mcp_asgi(_handle)
 
 
 def toolkit_mcp_url(*, base_url: str, toolset: str) -> str:
