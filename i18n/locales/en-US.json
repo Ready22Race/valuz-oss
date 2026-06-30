@@ -2,6 +2,7 @@
   "automation": {
     "spawnedTask": "Task \"{title}\"",
     "actionCreate": "Create automation",
+    "actionGet": "Details",
     "actionKindChat": "Simple",
     "actionKindChatHint": "One agent run per fire.",
     "actionKindLabel": "Mode",

@@ -201,7 +201,7 @@ class DispatcherService:
 
             # Fail fast on a credential-less member — return a clear reason to
             # the lead instead of spawning a doomed "Not logged in" run.
-            gap = await _credential_gap(member_session, agent, db=db)
+            gap = await _credential_gap(member_session, agent, db=db, user_id=user_id)
             if gap is not None:
                 await event_ds.append_event(
                     user_id,
@@ -280,7 +280,7 @@ class DispatcherService:
         # Collect manifest (attribute artifacts by mtime since dispatch — the
         # member shares the project cwd under v2.1).
         manifest = await collect_manifest(
-            member_session.id, run_dir, final_status, since_epoch=started
+            member_session.id, run_dir, final_status, since_epoch=started, user_id=user_id
         )
 
         # Persist result
@@ -393,7 +393,9 @@ class DispatcherService:
         groups: dict[str, list[tuple[int, str]]] = {}
         for idx, key in enumerate(keys):
             node = plan0.get(key)
-            skill = await _skill_key(node.agent if node and node.agent else key)
+            skill = await _skill_key(
+                node.agent if node and node.agent else key, user_id=user_id
+            )
             groups.setdefault(skill, []).append((idx, key))
 
         results: dict[int, dict[str, Any]] = {}
@@ -405,6 +407,7 @@ class DispatcherService:
                     project_id=project_id,
                     lead_session_id=lead_session_id,
                     subtask_key=subtask_key,
+                    user_id=user_id,
                 )
 
         # Sequential across groups, parallel within each group
@@ -538,7 +541,7 @@ class DispatcherService:
                 }
 
             # Fail fast on a credential-less member before starting its actor.
-            gap = await _credential_gap(member_session, agent, db=db)
+            gap = await _credential_gap(member_session, agent, db=db, user_id=user_id)
             if gap is not None:
                 await event_ds.append_event(
                     user_id,
@@ -626,6 +629,7 @@ class DispatcherService:
                 role="subtask",
                 task_id=task_id,
                 project_id=project_id,
+                user_id=user_id,
             )
         )
 

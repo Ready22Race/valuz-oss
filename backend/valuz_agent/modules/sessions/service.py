@@ -1665,7 +1665,12 @@ class SessionService:
         async with async_unit_of_work() as db:
             promoted = await SessionDatastore(db).promote_to_front(uid, session_id, queue_id)
         if promoted is None:
-            raise QueuedInputNotFound()
+            # Race-tolerant: the item already left the queue — almost always the
+            # post-turn drain dispatched it the instant the user hit "Send now".
+            # Steer's goal (get this item out of the queue and running) is then
+            # already satisfied, so return the current queue rather than a
+            # confusing 404 for a message that actually went out.
+            return await self.list_queue(session_id, user_id=user_id)
 
         # Steer overrides any interrupt soft-pause so the drain proceeds.
         await project_index.set_queue_paused(session_id, False)

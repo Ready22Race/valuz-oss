@@ -241,6 +241,7 @@ I18nKey = Literal[
     "agent.viewAll",
     "agent.viewByProject",
     "automation.actionCreate",
+    "automation.actionGet",
     "automation.actionKindChat",
     "automation.actionKindChatHint",
     "automation.actionKindLabel",

@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -143,12 +142,14 @@ class StubService:
         *,
         trigger_type="manual",
         invoked_by_session_id=None,
+        extra_input=None,
         user_id=None,
     ):  # type: ignore[no-untyped-def]
         self._record(
             "run_now",
             automation_id=automation_id,
             trigger_type=trigger_type,
+            extra_input=extra_input,
             user_id=user_id,
         )
         return type("Run", (), {"run_id": f"run-{automation_id}"})()
@@ -325,6 +326,27 @@ class TestActionRouting:
         result = await mod.automation_invoke(AutomationToolPayload(action="pause"))
         decoded = json.loads(result)
         assert decoded["error_code"] == "MISSING_AUTOMATION_ID"
+
+    async def test_get_should_reject_missing_automation_id(self, patched_dispatch: Any) -> None:
+        result = await mod.automation_invoke(AutomationToolPayload(action="get"))
+        decoded = json.loads(result)
+        assert decoded["ok"] is False
+        assert decoded["error_code"] == "MISSING_AUTOMATION_ID"
+
+    async def test_get_should_return_automation_detail(
+        self, patched_dispatch: Any, stub_service: StubService
+    ) -> None:
+        stub_service._rows["auto-1"] = _row(  # noqa: SLF001
+            automation_id="auto-1", project_id="ws-proj"
+        )
+        result = await mod.automation_invoke(
+            AutomationToolPayload(action="get", automation_id="auto-1")
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        assert decoded["action"] == "get"
+        assert decoded["automation"] is not None
+        assert decoded["automation"]["automation_id"] == "auto-1"
 
 
 # ── agent_kind selection ───────────────────────────────────────────
@@ -637,10 +659,32 @@ class TestScopeAndCrossProject:
                 {
                     "automation_id": "auto-run",
                     "trigger_type": "agent",
+                    "extra_input": None,
                     "user_id": "user-1",
                 },
             )
         ]
+
+    async def test_run_action_forwards_input_as_extra_input(
+        self,
+        patched_dispatch: Any,
+        stub_service: StubService,
+    ) -> None:
+        # ``run`` with an ``input`` arg (e.g. a triage agent passing a discovered
+        # task id) forwards it as ``extra_input`` so the runner appends it to the
+        # automation's instruction for that single run.
+        stub_service._rows["auto-run"] = _row(  # noqa: SLF001
+            automation_id="auto-run", project_id="ws-proj"
+        )
+        result = await mod.automation_invoke(
+            AutomationToolPayload(
+                action="run", automation_id="auto-run", input="task_id=abc123"
+            )
+        )
+        decoded = json.loads(result)
+        assert decoded["ok"] is True
+        run_call = next(c for c in stub_service.calls if c[0] == "run_now")
+        assert run_call[1]["extra_input"] == "task_id=abc123"
 
 
 # ── Decorated ``automation`` thin wrapper trigger coercion ─────────

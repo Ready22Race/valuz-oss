@@ -2,6 +2,7 @@
   "automation": {
     "spawnedTask": "任务「{title}」",
     "actionCreate": "创建自动化",
+    "actionGet": "详情",
     "actionKindChat": "简单任务",
     "actionKindChatHint": "每次触发执行一次智能体对话。",
     "actionKindLabel": "执行模式",
