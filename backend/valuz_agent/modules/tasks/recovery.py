@@ -30,8 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.auth_context import (
-    require_current_user_id,
     reset_current_user_id,
     set_current_user_id,
 )
@@ -211,7 +211,7 @@ class RecoveryService:
         async with async_unit_of_work(commit=False) as db:
             # Cross-owner boot sweep: capture each task's owner so the per-task
             # recovery below runs under that owner's identity (the downstream
-            # datastore reads are owner-scoped via require_current_user_id()).
+            # datastore reads are owner-scoped via get_current_user_id()).
             active = [
                 (t.id, t.project_id, t.user_id) for t in await TaskDatastore(db).list_active()
             ]
@@ -231,7 +231,10 @@ class RecoveryService:
             )
         return recovered
 
-    async def _recover_one_task(self, task_id: str, project_id: str) -> bool:
+    async def _recover_one_task(self, task_id: str, project_id: str, user_id: str | None = None) -> bool:
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         """Reconcile one active task's members + re-drive its lead.
 
         Used by both Layer 1 (startup) and Layer 2 (user 'resume'). Returns False
@@ -250,10 +253,10 @@ class RecoveryService:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)
             event_ds = TaskEventDatastore(db)
-            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+            task = await task_ds.get_task_by_project(user_id, project_id, task_id)
             if task is None or task.status not in ("active", "paused"):
                 return False
-            runs = await run_ds.list_runs(require_current_user_id(), task_id)
+            runs = await run_ds.list_runs(user_id, task_id)
             lead_run = next((r for r in runs if r.kind == "lead"), None)
             if lead_run is None:
                 return False
@@ -264,7 +267,7 @@ class RecoveryService:
             for run in runs:
                 if run.kind != "subtask" or run.status not in ("active", "paused"):
                     continue
-                ks = await kernel_client.get_session(require_current_user_id(), run.session_id)
+                ks = await kernel_client.get_session(user_id, run.session_id)
                 node = plan.get(run.subtask_key) if run.subtask_key else None
                 rec = reconcile(
                     getattr(ks, "status", None) if ks is not None else None,
@@ -374,7 +377,7 @@ class RecoveryService:
     # Layer 2 (VALUZ-RESUME §5.5): user-initiated stop / resume
     # ------------------------------------------------------------------
 
-    async def _interrupt_kernel_session(self, session_id: str) -> None:
+    async def _interrupt_kernel_session(self, session_id: str, user_id: str | None = None) -> None:
         """Best-effort: ask the kernel runtime to stop an in-flight turn.
 
         Returns silently whether or not a runtime was active — a member parked
@@ -384,11 +387,11 @@ class RecoveryService:
         try:
             from valuz_agent.adapters import kernel_client
 
-            await kernel_client.interrupt(require_current_user_id(), session_id)
+            await kernel_client.interrupt(user_id, session_id)
         except Exception:  # noqa: BLE001
             logger.warning("interrupt failed for session %s", session_id, exc_info=True)
 
-    async def stop_task(self, task_id: str, project_id: str) -> bool:
+    async def stop_task(self, task_id: str, project_id: str, user_id: str | None = None) -> bool:
         """User-initiated cascade stop → ``paused`` (recoverable).
 
         Interrupts the lead + every in-flight member, broadcasts ``shutdown`` to
@@ -401,10 +404,10 @@ class RecoveryService:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)
             event_ds = TaskEventDatastore(db)
-            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+            task = await task_ds.get_task_by_project(user_id, project_id, task_id)
             if task is None or task.status != "active":
                 return False
-            runs = await run_ds.list_runs(require_current_user_id(), task_id)
+            runs = await run_ds.list_runs(user_id, task_id)
             lead_session_id: str | None = next(
                 (r.session_id for r in runs if r.kind == "lead"), None
             )
@@ -413,9 +416,9 @@ class RecoveryService:
             ]
             for sid in member_sids:
                 await run_ds.update_run_by_session(session_id=sid, status="paused")
-            await task_ds.update_task_status(require_current_user_id(), task_id, "paused")
+            await task_ds.update_task_status(user_id, task_id, "paused")
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id,
                 task_id,
                 "stopped",
@@ -441,6 +444,7 @@ class RecoveryService:
         project_id: str,
         *,
         actor: str = "user",
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         """User-initiated resume of a ``paused`` / ``blocked`` / ``stopped`` /
         ``completed`` task.
@@ -485,7 +489,7 @@ class RecoveryService:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
-            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+            task = await task_ds.get_task_by_project(user_id, project_id, task_id)
             if task is None:
                 return {"ok": False, "error": f"task {task_id!r} not found", "prior_status": None}
             prior_status = task.status
@@ -506,14 +510,14 @@ class RecoveryService:
             # Belt-and-suspenders: confirm the transition the state machine
             # accepts. paused/blocked/stopped/completed → active are all legal.
             assert_transition(prior_status, "active")
-            await task_ds.update_task_status(require_current_user_id(), task_id, "active")
+            await task_ds.update_task_status(user_id, task_id, "active")
             # When reviving a stopped OR completed task: finish_task previously
             # marked the lead run as "completed" and broadcast shutdown to
             # members. _recover_one_task respawns the lead unconditionally, but
             # the run row still showing "completed" would lie about reality —
             # fix it so listings + UI reflect the live state.
             if prior_status in ("stopped", "completed"):
-                runs = await run_ds.list_runs(require_current_user_id(), task_id)
+                runs = await run_ds.list_runs(user_id, task_id)
                 lead_run = next((r for r in runs if r.kind == "lead"), None)
                 if lead_run is not None and lead_run.status != "active":
                     await run_ds.update_run_by_session(
@@ -522,7 +526,7 @@ class RecoveryService:
                         ended_at=None,
                     )
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id,
                 task_id,
                 "resumed",
@@ -532,7 +536,7 @@ class RecoveryService:
         ok = await self._recover_one_task(task_id, project_id)
         return {"ok": ok, "prior_status": prior_status, "resumed": ok}
 
-    async def stop_member(self, session_id: str) -> bool:
+    async def stop_member(self, session_id: str, user_id: str | None = None) -> bool:
         """User-initiated single-member stop (task stays ``active``).
 
         Interrupts one subtask session, notifies the lead with a
@@ -557,7 +561,7 @@ class RecoveryService:
             await run_ds.update_run_by_session(session_id=session_id, status="rejected")
             if subtask_key:
                 task = await task_ds.get_task_by_project(
-                    require_current_user_id(), project_id, task_id
+                    user_id, project_id, task_id
                 )
                 if task is not None:
                     plan = TaskPlan.from_dict(task.plan)
@@ -578,7 +582,7 @@ class RecoveryService:
                             session_id=lead_session_id or None,
                         )
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id,
                 task_id,
                 "subtask_stopped",

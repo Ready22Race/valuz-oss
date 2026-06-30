@@ -28,7 +28,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
-from valuz_agent.api.deps import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
 from valuz_agent.infra.sse import shielded
 from valuz_agent.modules.automations.datastore import AutomationDatastore
@@ -274,7 +274,7 @@ async def kickoff_task(project_id: str, payload: KickoffTaskRequest) -> TaskResp
 async def list_tasks(
     project_id: str,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> dict[str, list[TaskResponse]]:
     rows = await TaskDatastore(db).list_tasks(user_id, project_id)
     triggers = await _resolve_triggers(db, user_id, rows)
@@ -285,7 +285,7 @@ async def list_tasks(
 async def list_all_tasks(
     limit: int = 50,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> dict[str, list[TaskResponse]]:
     """Global cross-project task list, newest activity first. Powers the
     sidebar TASKS section so users see what's running regardless of which
@@ -299,7 +299,7 @@ async def list_all_tasks(
 async def get_task(
     task_id: str,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> TaskDetailResponse:
     task = await TaskDatastore(db).get_task(user_id, task_id)
     if task is None:
@@ -317,7 +317,7 @@ async def get_task(
 async def list_task_events(
     task_id: str,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> dict[str, list[EventResponse]]:
     task = await TaskDatastore(db).get_task(user_id, task_id)
     if task is None:
@@ -401,7 +401,7 @@ async def stream_task_events(
     task_id: str,
     request: Request,
     after_seq: int = 0,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> EventSourceResponse:
     """SSE subscription for a task's event timeline.
 
@@ -440,7 +440,7 @@ async def intervene(
     task_id: str,
     payload: InterveneRequest,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> TaskResponse:
     """User intervention on a running task.
 
@@ -550,7 +550,7 @@ async def draft_task(project_id: str, payload: DraftTaskRequest) -> DraftTaskRes
 async def commit_task(
     task_id: str,
     payload: CommitTaskRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     """Promote a draft task to active by spawning its lead session."""
     async with async_unit_of_work(commit=False) as db:
@@ -572,7 +572,7 @@ async def commit_task(
 async def abandon_task(
     task_id: str,
     payload: AbandonTaskRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     """Discard a draft task. Terminal (cannot be resurrected)."""
     async with async_unit_of_work(commit=False) as db:
@@ -594,7 +594,7 @@ async def abandon_task(
 async def inject_into_task(
     task_id: str,
     payload: InjectTaskRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> InjectTaskResponse:
     """Push a user instruction into the lead session's mailbox. Returns
     delivered=False with reason when the lead is offline / task not active."""
@@ -621,7 +621,7 @@ async def inject_into_task(
 async def plan_task_route(
     task_id: str,
     payload: PlanTaskRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> PlanResponse:
     """Lay down the initial plan (errors if a plan with progress already exists)."""
     async with async_unit_of_work(commit=False) as db:
@@ -649,7 +649,7 @@ async def plan_task_route(
 async def modify_plan_route(
     task_id: str,
     payload: PlanTaskRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> PlanResponse:
     """Patch the plan: add nodes / update existing nodes. CAS via
     ``expected_version`` — returns 409 on conflict."""
@@ -679,7 +679,7 @@ async def modify_plan_route(
 @router.get("/v1/tasks/{task_id}/plan", response_model=PlanResponse)
 async def get_plan_route(
     task_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> PlanResponse:
     """Read the plan snapshot + ready keys + counts + current_version."""
     async with async_unit_of_work(commit=False) as db:

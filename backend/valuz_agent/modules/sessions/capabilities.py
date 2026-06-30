@@ -17,13 +17,13 @@ from app.schemas import UpdateSessionRequest
 
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect for app.schemas
 from valuz_agent.adapters import kernel_client
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 
 logger = logging.getLogger(__name__)
 
 
-async def refresh_docs_capabilities_for_session(session_id: str) -> bool:
+async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -> bool:
+
     """Ensure the valuz-project-docs skill + ``valuz_docs`` MCP are
     present on an existing session row.
 
@@ -58,7 +58,7 @@ async def refresh_docs_capabilities_for_session(session_id: str) -> bool:
     from valuz_agent.integrations.docs_mcp_server import docs_mcp_url
     from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-    session = await kernel_client.get_session(require_current_user_id(), session_id)
+    session = await kernel_client.get_session(user_id, session_id)
     if session is None:
         return False
     # Sessions that have already finished don't run new turns; capability
@@ -110,7 +110,7 @@ async def refresh_docs_capabilities_for_session(session_id: str) -> bool:
             )
         )
     await kernel_client.update_session(
-        require_current_user_id(),
+        user_id,
         session_id,
         UpdateSessionRequest(skills=list(new_skills), mcp_servers=list(new_mcp)),
     )
@@ -123,7 +123,7 @@ async def refresh_docs_capabilities_for_session(session_id: str) -> bool:
     return True
 
 
-async def refresh_always_on_mcp_for_session(session_id: str) -> bool:
+async def refresh_always_on_mcp_for_session(session_id: str, user_id: str) -> bool:
     """Re-stamp the always-on in-process MCP servers (docs / automations /
     connectors) on an existing session row with the CURRENT process values.
 
@@ -156,7 +156,7 @@ async def refresh_always_on_mcp_for_session(session_id: str) -> bool:
         harness_toolkit_for_run_kind,
     )
 
-    session = await kernel_client.get_session(require_current_user_id(), session_id)
+    session = await kernel_client.get_session(user_id, session_id)
     if session is None or session.status in ("terminated",):
         return False
 
@@ -175,13 +175,13 @@ async def refresh_always_on_mcp_for_session(session_id: str) -> bool:
         return False
 
     await kernel_client.update_session(
-        require_current_user_id(), session_id, UpdateSessionRequest(mcp_servers=list(new_mcp))
+        user_id, session_id, UpdateSessionRequest(mcp_servers=list(new_mcp))
     )
     logger.info("Re-stamped always-on MCP token on session %s", session_id)
     return True
 
 
-async def refresh_docs_capabilities_for_project(project_id: str) -> int:
+async def refresh_docs_capabilities_for_project(project_id: str, user_id: str) -> int:
     """Refresh docs capabilities for every active session in ``project_id``.
 
     Used as the ``project.bindings.changed`` event handler so binding a
@@ -193,8 +193,8 @@ async def refresh_docs_capabilities_for_project(project_id: str) -> int:
     from valuz_agent.modules.sessions import project_index
 
     try:
-        ids = await project_index.list_session_ids(project_id, limit=500)
-        sessions = await kernel_client.list_sessions(require_current_user_id(), ids=ids, limit=500)
+        ids = await project_index.list_session_ids(project_id, limit=500, user_id=user_id)
+        sessions = await kernel_client.list_sessions(user_id, ids=ids, limit=500)
     except Exception:  # noqa: BLE001 — never raise into eventbus handlers
         logger.exception(
             "refresh_docs_capabilities_for_project: failed to list sessions for %s",
@@ -207,7 +207,7 @@ async def refresh_docs_capabilities_for_project(project_id: str) -> int:
         if s.status == "terminated":
             continue
         try:
-            if await refresh_docs_capabilities_for_session(s.id):
+            if await refresh_docs_capabilities_for_session(s.id, user_id):
                 changed += 1
         except Exception:  # noqa: BLE001 — one bad session can't sink the batch
             logger.exception(

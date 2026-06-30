@@ -703,7 +703,7 @@ def patched_resolver(monkeypatch: pytest.MonkeyPatch):
         async def __aexit__(self, *args):  # noqa: ANN002
             return None
 
-    monkeypatch.setattr(mod, "require_current_user_id", lambda: "user-1")
+    monkeypatch.setattr(mod, "get_current_user_id", lambda: "user-1")
     monkeypatch.setattr("valuz_agent.adapters.kernel_client.get_session", _fake_get_session)
     monkeypatch.setattr("valuz_agent.infra.db.async_unit_of_work", lambda commit=True: _UoW())
     monkeypatch.setattr(

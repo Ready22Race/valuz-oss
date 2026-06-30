@@ -1671,10 +1671,10 @@ class ProviderService:
         )
 
         db = self._ds._db  # noqa: SLF001 — sanctioned cross-module db reuse (mirrors resolve_infer_config)
-        await set_default_provider_id(db, resolved_id)
+        await set_default_provider_id(db, resolved_id, user_id=user_id)
         effective_model = default_model if default_model is not None else row.default_model
         if effective_model:
-            await set_default_model(db, effective_model)
+            await set_default_model(db, effective_model, user_id=user_id)
 
         self._bus.publish("provider.default.changed", provider_id=resolved_id)
 

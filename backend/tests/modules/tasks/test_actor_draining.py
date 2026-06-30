@@ -126,7 +126,7 @@ def test_actor_loop_runs_normally_when_not_draining() -> None:
 
 def test_run_session_to_idle_draining_skips_finalize(monkeypatch: pytest.MonkeyPatch) -> None:
     finalize_calls: list[str] = []
-    monkeypatch.setattr(actor_runner, "require_current_user_id", lambda: "owner-1")
+    monkeypatch.setattr(actor_runner, "get_current_user_id", lambda: "owner-1")
     sess = SimpleNamespace(status="idle", metadata={})
     monkeypatch.setattr(actor_runner.kernel_client, "get_session", _as_async(lambda *_: sess))
     monkeypatch.setattr(

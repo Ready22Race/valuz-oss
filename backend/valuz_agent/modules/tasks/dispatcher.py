@@ -31,7 +31,7 @@ from valuz_agent.adapters.agent_resolver import (
     build_member_session,
     spill_goal_brief_if_too_long,
 )
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
@@ -96,7 +96,11 @@ class DispatcherService:
         goal: str | None = None,
         refs: list[str] | None = None,
         project_mode: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         """Dispatch one planned subtask (by key) and await its completion.
 
         Plan-first (VALUZ-TASK D2/D4): the subtask must exist in the plan and be
@@ -113,11 +117,10 @@ class DispatcherService:
             member_ds = ProjectMemberDatastore(db)
 
             task_row = await task_ds.get_task_by_project(
-                require_current_user_id(), project_id, task_id
+                user_id, project_id, task_id
             )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found", "status": "failed"}
-
             # Plan-first gate: resolve agent/goal from the planned node.
             resolved = planning.resolve_dispatch_node(
                 TaskPlan.from_dict(task_row.plan), subtask_key, agent, goal
@@ -188,6 +191,7 @@ class DispatcherService:
                 # its SubtaskResult to the lead. Lead's review_subtask
                 # (approve / rework) authority is unchanged.
                 goal_mode=True,
+                user_id=task_row.user_id,
                 **_provider_resolver_deps(db),
             )
             if member_session is None:
@@ -201,7 +205,7 @@ class DispatcherService:
             gap = await _credential_gap(member_session, agent, db=db)
             if gap is not None:
                 await event_ds.append_event(
-                    require_current_user_id(),
+                    user_id,
                     project_id=project_id,
                     task_id=task_id,
                     type="subtask_failed",
@@ -211,9 +215,13 @@ class DispatcherService:
                 )
                 return {"error": gap, "status": "failed", "agent": agent}
 
-            await kernel_client.create_session(require_current_user_id(), member_session)
+            await kernel_client.create_session(user_id, member_session)
             await project_index.record(
-                project_id, member_session.id, kind="task_subtask", origin="task"
+                project_id,
+                member_session.id,
+                kind="task_subtask",
+                origin="task",
+                user_id=user_id,
             )
 
             # Record run in index (linked to the plan node via subtask_key)
@@ -231,11 +239,11 @@ class DispatcherService:
                 run_dir=str(run_dir),
                 subtask_key=subtask_key,
             )
-            await run_ds.create_run(require_current_user_id(), run_row)
+            await run_ds.create_run(user_id, run_row)
 
             # Append spawned event
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id=project_id,
                 task_id=task_id,
                 type="subtask_spawned",
@@ -264,6 +272,7 @@ class DispatcherService:
                 session_id=member_session.id,
                 content=member_brief,
                 event_bus=self._bus,
+                user_id=user_id,
             )
         )
         final_status = await member_task
@@ -296,7 +305,7 @@ class DispatcherService:
             # ``stop_member``; the error rides along as ``review_feedback``.
             # Otherwise the node goes to in_review awaiting the lead's call.
             task_row2 = await task_ds2.get_task_by_project(
-                require_current_user_id(), project_id, task_id
+                user_id, project_id, task_id
             )
             plan2 = TaskPlan.from_dict(task_row2.plan) if task_row2 else None
             if plan2 is not None and plan2.get(subtask_key) is not None:
@@ -320,7 +329,7 @@ class DispatcherService:
                 )
             if failed:
                 await event_ds2.append_event(
-                    require_current_user_id(),
+                    user_id,
                     project_id=project_id,
                     task_id=task_id,
                     type="subtask_failed",
@@ -342,6 +351,7 @@ class DispatcherService:
         project_id: str,
         lead_session_id: str,
         keys: list[str],
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Dispatch multiple planned subtasks (by key) with concurrency control.
 
@@ -357,15 +367,15 @@ class DispatcherService:
         # Resolve each key's agent from the plan for skill grouping.
         async with async_unit_of_work(commit=False) as db0:
             task_row0 = await TaskDatastore(db0).get_task_by_project(
-                require_current_user_id(), project_id, task_id
+                user_id, project_id, task_id
             )
             plan0 = TaskPlan.from_dict(task_row0.plan) if task_row0 else TaskPlan()
 
-        async def _skill_key(agent_slug: str) -> str:
+        async def _skill_key(agent_slug: str, user_id: str | None = None) -> str:
             """Return a deterministic string representing the agent's skills."""
             async with async_unit_of_work(commit=False) as db:
                 member_ds = ProjectMemberDatastore(db)
-                member = await member_ds.get(require_current_user_id(), project_id, agent_slug)
+                member = await member_ds.get(user_id, project_id, agent_slug)
                 if member is None:
                     return agent_slug
                 from valuz_agent.adapters.agent_resolver import _member_agent_config
@@ -419,6 +429,7 @@ class DispatcherService:
         goal: str | None = None,
         refs: list[str] | None = None,
         project_mode: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         """Start a planned subtask's member actor (non-blocking); return its handle.
 
@@ -436,11 +447,10 @@ class DispatcherService:
             member_ds = ProjectMemberDatastore(db)
 
             task_row = await task_ds.get_task_by_project(
-                require_current_user_id(), project_id, task_id
+                user_id, project_id, task_id
             )
             if task_row is None:
                 return {"error": f"task {task_id!r} not found", "status": "failed"}
-
             _plan = TaskPlan.from_dict(task_row.plan)
             resolved = planning.resolve_dispatch_node(_plan, subtask_key, agent, goal)
             if isinstance(resolved, str):
@@ -517,6 +527,7 @@ class DispatcherService:
                 # (The collapsed ``dispatch`` tool routes here, so this is the
                 # live path — the now-unused sync ``dispatch`` had it too.)
                 goal_mode=True,
+                user_id=task_row.user_id,
                 **_provider_resolver_deps(db),
             )
             if member_session is None:
@@ -529,7 +540,7 @@ class DispatcherService:
             gap = await _credential_gap(member_session, agent, db=db)
             if gap is not None:
                 await event_ds.append_event(
-                    require_current_user_id(),
+                    user_id,
                     project_id=project_id,
                     task_id=task_id,
                     type="subtask_failed",
@@ -539,13 +550,17 @@ class DispatcherService:
                 )
                 return {"error": gap, "status": "failed", "agent": agent}
 
-            await kernel_client.create_session(require_current_user_id(), member_session)
+            await kernel_client.create_session(user_id, member_session)
             await project_index.record(
-                project_id, member_session.id, kind="task_subtask", origin="task"
+                project_id,
+                member_session.id,
+                kind="task_subtask",
+                origin="task",
+                user_id=user_id,
             )
 
             await run_ds.create_run(
-                require_current_user_id(),
+                user_id,
                 TaskSessionRow(
                     project_id=project_id,
                     task_id=task_id,
@@ -562,7 +577,7 @@ class DispatcherService:
                 ),
             )
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id=project_id,
                 task_id=task_id,
                 type="subtask_spawned",

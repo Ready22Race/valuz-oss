@@ -2847,11 +2847,12 @@ export const ConversationPage = () => {
 
   const ensureSession = useCallback(async (navigateOnCreate = true) => {
     if (selectedSession) return selectedSession;
-    if (!selectedProjectId) throw new Error("No active project.");
+    const sessionProjectId = selectedProjectId ?? "chat-default";
     // For quick-chat (kind="chat"), send the ``"chat-default"`` sentinel so
     // the backend allocates a fresh, isolated chat project + cwd for this
     // session. Project conversations keep passing their real project id.
-    const isChat = activeProject?.kind === "chat";
+    const isChat =
+      sessionProjectId === "chat-default" || activeProject?.kind === "chat";
     // 09-assistant §2.1/§2.2: every session binds to an agent — project
     // conversations to the chosen 派驻 member, 临时对话 to the picked "我的"
     // agent. There is no agentless path; the backend derives
@@ -2880,7 +2881,7 @@ export const ConversationPage = () => {
       created = await sessionsApi.get(start.session_id);
     } else {
       created = await sessionsApi.create({
-        project_id: isChat ? "chat-default" : selectedProjectId,
+        project_id: isChat ? "chat-default" : sessionProjectId,
         agent_slug: selectedAgentSlug ?? undefined,
         provider_id: selectedProviderId ?? undefined,
         model_id: selectedModelId ?? undefined,

@@ -139,13 +139,16 @@ async def _arun_auto_discovery_scan() -> None:
     for kb_id, kb_name, owner in kb_refs:
         # Background path: no request context. Publish the KB's owner so the
         # owner-scoped reads in this iteration (load_routing_config's settings
-        # lookups, rescan_kb) resolve against the right user. ``owner`` may be
-        # None for legacy single-user rows — skip publishing then (the global
-        # default-user fallback applies downstream).
-        owner_token = set_current_user_id(owner) if owner else None
+        # lookups, rescan_kb) resolve against the right user.
+        if owner is None:
+            logger.warning(
+                "KB auto-discovery skipping ownerless KB %s (%s)", kb_id, kb_name
+            )
+            continue
+        owner_token = set_current_user_id(owner)
         try:
             async with async_unit_of_work(commit=False) as db:
-                routing_config = await load_routing_config(db)
+                routing_config = await load_routing_config(db, user_id=owner)
                 parser = ParserRouter(
                     registry=_parser_registry(),
                     secret_resolver=_SecretStoreResolver(_secret_store(), owner),

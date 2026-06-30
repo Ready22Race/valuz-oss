@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
-from valuz_agent.api.deps import get_runs_service, require_current_user_id
+from valuz_agent.api.deps import get_runs_service, get_current_user_id
 from valuz_agent.modules.runs.service import RunsService
 
 router = APIRouter(prefix="/v1/runs", tags=["runs"])
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/v1/runs", tags=["runs"])
 @router.get("")
 async def list_runs(
     status: str = Query("running", pattern="^(running|finished)$"),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: RunsService = Depends(get_runs_service),
 ) -> dict[str, list[dict[str, Any]]]:
     """List runs for the activity overview.

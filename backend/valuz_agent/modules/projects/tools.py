@@ -29,7 +29,7 @@ from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,10 @@ async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
     return ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or None
 
 
-async def _handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+async def _handler(args: dict[str, Any], ctx: ExecContext, user_id: str | None = None) -> ToolResult:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     action = args.get("action")
     content = args.get("content")
 
@@ -81,7 +84,6 @@ async def _handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
 
     # MCP tool boundary: the toolkit server published the caller's owner into
     # the auth context — resolve it once here and thread it explicitly.
-    user_id = require_current_user_id()
     project_id = await _resolve_project_id(user_id, ctx.session_id)
     if not project_id:
         return ToolResult(

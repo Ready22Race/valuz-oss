@@ -24,7 +24,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 
 from app.schemas import SessionData as Session
 
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.decisions.schemas import DecisionEntry
@@ -72,7 +72,11 @@ async def enrich_pending(
     pending_id: str,
     question_payload: dict[str, Any],
     raised_at: int | None = None,
+    user_id: str | None = None,
 ) -> DecisionEntry | None:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Build a ``DecisionEntry`` from a kernel session + raw question payload.
 
     Returns ``None`` when:
@@ -101,7 +105,7 @@ async def enrich_pending(
     session_id = getattr(session, "id", "")
 
     async with async_unit_of_work(commit=False) as db:
-        task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
+        task = await TaskDatastore(db).get_task(user_id, task_id)
         if task is None:
             # Race: event broadcast outpaced the DB delete, or task was
             # just abandoned. Either way, no useful entry to render.

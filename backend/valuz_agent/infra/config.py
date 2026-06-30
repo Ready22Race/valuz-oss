@@ -101,6 +101,20 @@ class Settings(BaseSettings):
                 out.append(seg)
         return out
 
+    # Deployment profile controls startup behavior that depends on ownership
+    # assumptions. ``local`` keeps local-owner bootstrap semantics for desktop/
+    # single-instance clients. ``cloud`` skips owner-scoped startup mutations
+    # (official seed locale push, local identity seeding) that can leak
+    # synthetic owner ids into shared multi-user backends.
+    deployment_type: Literal["local", "cloud"] = "local"
+
+    @field_validator("deployment_type", mode="before")
+    @classmethod
+    def _normalize_deployment_type(cls, value: object) -> str:
+        if isinstance(value, str):
+            return value.strip().lower()
+        raise ValueError("deployment_type must be 'local' or 'cloud'")
+
     # Custom URL scheme the desktop shell registers (Electron
     # ``setAsDefaultProtocolClient`` — see
     # frontend/apps/desktop/src/main/deep-link-utils.ts ``DEEP_LINK_PROTOCOL``).
@@ -135,13 +149,6 @@ class Settings(BaseSettings):
     # the subscription templates are not surfaced in the providers list.
     # Override with ``VALUZ_SUBSCRIPTION_LOGIN_ENABLED``.
     subscription_login_enabled: bool = True
-
-    # One switch for local filesystem skill indexing: bundled-official sync,
-    # boot scan, file watcher, and the periodic auto-scan. Default stays ON for
-    # desktop/local deployments; shared server deployments can set
-    # ``VALUZ_SKILL_LOCAL_INDEX_ENABLED=false`` to avoid writing local-install
-    # skill rows into the shared DB at startup.
-    skill_local_index_enabled: bool = True
 
     @property
     def db_path(self) -> Path:

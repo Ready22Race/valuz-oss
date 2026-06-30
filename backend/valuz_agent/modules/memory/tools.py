@@ -20,7 +20,7 @@ from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.modules.memory.models import TARGETS
 from valuz_agent.modules.memory.prompts import TOOL_DESCRIPTION
 from valuz_agent.modules.memory.service import MemoryError, memory_store
@@ -49,7 +49,10 @@ async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
 # --- handler ----------------------------------------------------------------
 
 
-async def _memory_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+async def _memory_handler(args: dict[str, Any], ctx: ExecContext, user_id: str | None = None) -> ToolResult:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     action = args.get("action")
     target = args.get("target")
     content = args.get("content")
@@ -72,7 +75,7 @@ async def _memory_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
     if target == "project":
         # MCP tool boundary: the toolkit server has published the caller's owner
         # into the auth context — resolve it once here and thread it explicitly.
-        project_id = await _resolve_project_id(require_current_user_id(), ctx.session_id)
+        project_id = await _resolve_project_id(user_id, ctx.session_id)
         if not project_id:
             return ToolResult(
                 content=(
