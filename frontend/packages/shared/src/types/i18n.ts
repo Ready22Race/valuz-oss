@@ -709,6 +709,8 @@ export type KnownI18nKey =
   | "cron.generatedFile"
   | "cron.hour"
   | "cron.instruction"
+  | "cron.instructionCollapse"
+  | "cron.instructionExpand"
   | "cron.instructionPlaceholder"
   | "cron.lastRunColumn"
   | "cron.loadFailed"
