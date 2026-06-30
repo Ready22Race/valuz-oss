@@ -306,9 +306,13 @@ async def get_project_pack_service() -> AsyncGenerator[ProjectPackService, None]
         get_effective_default_timezone,
     )
 
+    # Mirror ``get_automation_service``: resolve owner from ambient request
+    # context up front and thread it through to the preference reads, which
+    # require an explicit ``user_id`` (see ``_read`` in ``settings.preferences``).
+    user_id = get_current_user_id()
     async with async_unit_of_work() as db:
-        locale = await get_default_locale(db)
-        default_timezone = await get_effective_default_timezone(db)
+        locale = await get_default_locale(db, user_id=user_id)
+        default_timezone = await get_effective_default_timezone(db, user_id=user_id)
         project_svc = ProjectService(
             datastore=ProjectDatastore(db),
             event_bus=event_bus,
