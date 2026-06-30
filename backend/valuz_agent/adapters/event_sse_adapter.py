@@ -43,14 +43,13 @@ IDLE_HEARTBEAT_SECONDS = 15.0
 # HISTORY straight from it (in-process), independent of whether the sandbox
 # kernel is alive — the sandbox owns execution + live deltas, the DataService
 # owns history. In local mode there is no DataService, so reads go through the
-# kernel seam (the in-process kernel store).
+# kernel seam (the in-process kernel store). History reads share the one typed
+# DataReader port with session reads.
 def _history_reader() -> Any:
-    """The transport for reading event HISTORY: the in-process host-mounted
-    DataService store when one is bound, else the ``KernelClient`` seam."""
-    from valuz_agent.adapters.data_service_local import get_local_reader
+    """The transport for reading event HISTORY — the shared ``DataReader`` port."""
+    from valuz_agent.adapters.data_reader import data_reader
 
-    reader = get_local_reader()
-    return reader if reader is not None else kernel_client
+    return data_reader()
 
 
 @dataclass(frozen=True)

@@ -135,13 +135,18 @@ the execution plane.
 
 ## 9. Status
 
-- **Part 1 — done.** `LocalDataServiceReader` gained `get_session` / `list_sessions`
-  (projected to `SessionData` via `session_to_data`); added `session_reader()`
-  accessor. The rpc backend already had `load_session` / `list_sessions`
-  (contract-tested in `EXPECTED_OPS`), so no backend change. `DataServiceReadClient`
-  is **deferred** — it is never instantiated (the host always owns the durable and
-  reads it in-process via `get_local_reader()`); its session methods land when a
-  split-host SaaS topology actually wires it.
+- **Part 1 — done, then hardened into a typed port.** `LocalDataServiceReader`
+  gained `get_session` / `list_sessions` (projected to `SessionData` via
+  `session_to_data`). The rpc backend already had `load_session` / `list_sessions`
+  (contract-tested in `EXPECTED_OPS`), so no backend change. The accessor was then
+  elevated to a **`DataReader` Protocol** (`adapters/data_reader.py`) bound at the
+  composition root via `bind_data_reader` — OSS binds `LocalDataServiceReader`; a
+  SaaS build embedding OSS as a submodule binds its own implementation with zero
+  call-site edits. The events accessor (`_history_reader`) and the session accessor
+  collapsed into this one seam (`data_reader()`); the kernel-seam fallback is the
+  typed `_KernelClientReader` default (local-only / sandbox, no host durable).
+  `DataServiceReadClient` remains **deferred** — never instantiated; its session
+  methods land when a split-host SaaS topology actually wires it.
 - **Part 3 — done (the clean subset).** The three pure-`project_id` resolvers
   (`docs_mcp_server`, `tools_agent_proposal`, `agents` route) now use
   `project_index.project_of()` — no kernel round-trip.

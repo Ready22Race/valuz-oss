@@ -1,20 +1,22 @@
-"""In-process handle to the host-mounted DataService store, for host READ paths.
+"""In-process :class:`~valuz_agent.adapters.data_reader.DataReader` over the
+host-mounted DataService store.
 
 Reads are **unified through the DataService**: whenever a durable DataService is
-configured, the host reads kernel history straight from its backend — in-process,
-independent of the (possibly dead) sandbox kernel. There is no "is the sandbox
-alive?" branch: the sandbox owns *execution* (run + live deltas); the DataService
-owns *history*.
+configured, the host reads kernel sessions + event history straight from its
+backend — in-process, independent of the (possibly dead) sandbox kernel. There is
+no "is the sandbox alive?" branch: the sandbox owns *execution* (run + live
+deltas); the DataService owns *history*.
 
-``bind_local_reader`` is called by the lifespan once the host DataService store is
-built; ``get_local_reader`` returns it (or ``None`` in local-only mode, where the
-in-process kernel store is the data layer and reads go through the kernel seam).
+This is the default OSS implementation of the ``DataReader`` port. The composition
+root (``boot/steps.py``) wraps the host store in this reader and binds it via
+``bind_data_reader``; a SaaS overlay can bind a different ``DataReader`` instead.
 
-The reader exposes the exact read surface ``event_sse_adapter`` consumes
-(``get_events(after_seq=…)`` / ``get_events_window``), adapting the StorePort's
-``get_events_after`` / ``get_events_window`` (which already yield
-``StoredEvent``s carrying ``seq``/``data``/``message_id``/``type``/``timestamp``,
-i.e. exactly what the frame translator reads).
+It exposes the read surface the host consumes — session fetches
+(``get_session`` / ``list_sessions``, projected to ``SessionData`` via the kernel
+route's ``session_to_data``) and event history (``get_events(after_seq=…)`` /
+``get_events_window``, adapting the StorePort's ``get_events_after`` /
+``get_events_window`` whose ``StoredEvent``s already carry
+``seq``/``data``/``message_id``/``type``/``timestamp``).
 """
 
 from __future__ import annotations
@@ -84,29 +86,3 @@ class LocalDataServiceReader:
             user_id, status=status, ids=ids, limit=limit, offset=offset
         )
         return [session_to_data(s) for s in sessions]
-
-
-_reader: LocalDataServiceReader | None = None
-
-
-def bind_local_reader(store: StorePort | None) -> None:
-    """Bind (or clear, with ``None``) the in-process host-DataService reader."""
-    global _reader  # noqa: PLW0603
-    _reader = LocalDataServiceReader(store) if store is not None else None
-
-
-def get_local_reader() -> LocalDataServiceReader | None:
-    return _reader
-
-
-def session_reader() -> Any:
-    """Transport for reading session detail/list (DataService design §5).
-
-    The in-process host-mounted DataService store when one is bound (``pg`` /
-    ``remote`` — durable, sandbox-agnostic), else the ``KernelClient`` seam
-    (``local`` — the in-process kernel store IS the data layer). Both expose the
-    same ``get_session`` / ``list_sessions`` surface returning ``SessionData``.
-    """
-    from valuz_agent.adapters import kernel_client
-
-    return _reader if _reader is not None else kernel_client

@@ -335,20 +335,22 @@ async def bind_data_service(app: FastAPI) -> None:
             get_or_create_ds_secret(_secret_store(), resolve_local_user_id())
         )
         app.state._data_service_engine = engine
-        # Unify host history reads through the DataService (in-process), so reads
-        # never depend on the sandbox being alive.
-        from valuz_agent.adapters.data_service_local import bind_local_reader
+        # Unify host reads (sessions + events) through the DataService
+        # (in-process), so reads never depend on the sandbox being alive. Bind
+        # the in-process reader into the typed DataReader port.
+        from valuz_agent.adapters.data_reader import bind_data_reader
+        from valuz_agent.adapters.data_service_local import LocalDataServiceReader
 
-        bind_local_reader(store)
+        bind_data_reader(LocalDataServiceReader(store))
         logging.getLogger(__name__).info("host DataService bound (backend=%s)", store_mode)
     except Exception:  # noqa: BLE001 — DS binding must never break boot
         logging.getLogger(__name__).warning("host DataService bind skipped", exc_info=True)
 
 
 async def dispose_data_service(app: FastAPI) -> None:
-    from valuz_agent.adapters.data_service_local import bind_local_reader
+    from valuz_agent.adapters.data_reader import bind_data_reader
 
-    bind_local_reader(None)
+    bind_data_reader(None)
     engine = getattr(app.state, "_data_service_engine", None)
     if engine is not None:
         await engine.dispose()

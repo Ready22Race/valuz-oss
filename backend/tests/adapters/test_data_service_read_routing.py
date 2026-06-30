@@ -103,7 +103,11 @@ async def test_client_maps_get_events_window():
 
 from src.core.store_port import StoredEvent  # noqa: E402
 
-from valuz_agent.adapters import data_service_local  # noqa: E402
+from valuz_agent.adapters.data_reader import (  # noqa: E402
+    _KernelClientReader,
+    bind_data_reader,
+    data_reader,
+)
 from valuz_agent.adapters.data_service_local import LocalDataServiceReader  # noqa: E402
 
 
@@ -128,28 +132,28 @@ class _FakeStore:
 
 @pytest.fixture
 def reset_reader():
-    data_service_local.bind_local_reader(None)
+    bind_data_reader(None)
     yield
-    data_service_local.bind_local_reader(None)
+    bind_data_reader(None)
 
 
 def test_local_mode_reads_via_kernel(reset_reader):
-    # No DataService bound → history reads go through the kernel seam.
-    assert sse._history_reader() is sse.kernel_client
+    # No DataReader bound → reads go through the kernel-seam default.
+    assert isinstance(data_reader(), _KernelClientReader)
 
 
 def test_durable_mode_reads_via_local_data_service(reset_reader):
-    # A bound DataService store → reads go straight to it, in-process.
-    data_service_local.bind_local_reader(_FakeStore())  # type: ignore[arg-type]
+    # A bound in-process DataService reader → reads go straight to it.
+    bind_data_reader(LocalDataServiceReader(_FakeStore()))  # type: ignore[arg-type]
     assert isinstance(sse._history_reader(), LocalDataServiceReader)
 
 
 async def test_list_events_after_reads_from_data_service(reset_reader):
-    """End-to-end: with a DataService bound, list_events_after reads + translates
+    """End-to-end: with a DataReader bound, list_events_after reads + translates
     frames straight from it — the kernel seam is never touched (sandbox-agnostic)."""
     from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
 
-    data_service_local.bind_local_reader(_FakeStore())  # type: ignore[arg-type]
+    bind_data_reader(LocalDataServiceReader(_FakeStore()))  # type: ignore[arg-type]
     tok = set_current_user_id("u")
     try:
         frames = await sse.list_events_after("s", after_seq=0, limit=10)

@@ -43,7 +43,7 @@ from typing import Any, Literal, cast
 from uuid import uuid4
 
 from valuz_agent.adapters import kernel_client
-from valuz_agent.adapters.data_service_local import session_reader
+from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.modules.sessions import project_index
 from valuz_agent.adapters.agent_resolver import (
     _member_agent_config,
@@ -832,7 +832,7 @@ class LifecycleService:
             error_msg: str | None = None
             error_category: str | None = None
             try:
-                sess = await session_reader().get_session(user_id, lead_session_id)
+                sess = await data_reader().get_session(user_id, lead_session_id)
                 sr = getattr(sess, "stop_reason", None) if sess is not None else None
                 if sr:
                     typ = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
@@ -1225,7 +1225,7 @@ class LifecycleService:
         # and so a re-opened conversation on this session isn't stuck in
         # goal mode. Best-effort — a missing session is not fatal here.
         try:
-            lead_sess = await session_reader().get_session(user_id, lead_session_id)
+            lead_sess = await data_reader().get_session(user_id, lead_session_id)
             if lead_sess is not None and getattr(lead_sess, "mode", "default") != "default":
                 await kernel_client.set_mode(user_id, lead_session_id, "default")
         except Exception:  # noqa: BLE001 — terminal bookkeeping, never block close
