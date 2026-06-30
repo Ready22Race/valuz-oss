@@ -235,6 +235,7 @@ export type KnownI18nKey =
   | "agent.viewAll"
   | "agent.viewByProject"
   | "automation.actionCreate"
+  | "automation.actionGet"
   | "automation.actionKindChat"
   | "automation.actionKindChatHint"
   | "automation.actionKindLabel"

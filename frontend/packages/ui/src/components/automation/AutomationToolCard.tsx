@@ -16,6 +16,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   ExternalLink,
+  Eye,
   Pause,
   Play,
   Sparkles,
@@ -27,6 +28,7 @@ import { useI18n } from "../../hooks/use-i18n";
 
 export type AutomationAction =
   | "create"
+  | "get"
   | "list"
   | "update"
   | "pause"
@@ -93,6 +95,7 @@ interface AutomationToolCardProps {
 
 const ACTION_LABEL_KEYS: Record<AutomationAction, string> = {
   create: "skill.createdTask",
+  get: "automation.actionGet",
   list: "cron.taskColumn",
   update: "skill.updated",
   pause: "skill.paused",
@@ -103,6 +106,7 @@ const ACTION_LABEL_KEYS: Record<AutomationAction, string> = {
 
 const ACTION_ICON: Record<AutomationAction, typeof AlarmClock> = {
   create: Sparkles,
+  get: Eye,
   list: AlarmClock,
   update: CheckCircle2,
   pause: Pause,
