@@ -98,18 +98,50 @@ async def main() -> int:
         # 4) verify the rows really landed in PG (read straight from the store).
         direct = await store.get_events(OWNER, sid, limit=10)
         assert len(direct) == 2, f"PG has {len(direct)} events"
+
+        # 5) HOST unified read path: bind the in-process reader (what the lifespan
+        # does) and read history through the REAL event_sse_adapter — the same
+        # path the SSE endpoint uses. No kernel/sandbox involved.
+        from valuz_agent.adapters import event_sse_adapter as sse
+        from valuz_agent.adapters.data_service_local import bind_local_reader
+        from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
+
+        bind_local_reader(store)
+        tok = set_current_user_id(OWNER)
+        try:
+            frames = await sse.list_events_after(sid, after_seq=0, limit=50)
+            assert len(frames) == 2, f"host read returned {len(frames)} frames"
+            window = await sse.list_events_window(sid, turn_limit=5)
+            assert len(window.items) >= 1, "turn window empty via DataService read"
+
+            # 6) "kill the sandbox": close the sandbox-side write client. The host
+            # read path must STILL work — reads go through the DataService, not the
+            # (now-gone) sandbox kernel.
+            await http.aclose()
+            frames_after_kill = await sse.list_events_after(sid, after_seq=0, limit=50)
+            assert len(frames_after_kill) == 2, "history unreadable after sandbox 'died'"
+        finally:
+            reset_current_user_id(tok)
+            bind_local_reader(None)
+
         print(
-            f"OK — host DataService over PG: session {sid[:8]} "
-            f"(seqs {s1},{s2}) written+read; spoof rejected."
+            f"OK — host DataService over PG: session {sid[:8]} (seqs {s1},{s2}). "
+            f"sandbox-write via JWT → PG; host unified read OK; "
+            f"read survived sandbox kill; spoof rejected."
         )
         return 0
     finally:
-        # cleanup this E2E session
-        try:
-            await remote.delete_session(OWNER, sid)
-        except Exception:  # noqa: BLE001
-            pass
-        await http.aclose()
+        # cleanup this E2E session (fresh client — the original may be closed).
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://host-ds"
+        ) as cleanup_http:
+            cleanup = RemoteStoreHttp(
+                base_url="http://host-ds", access_token=_tok, http_client=cleanup_http
+            )
+            try:
+                await cleanup.delete_session(OWNER, sid)
+            except Exception:  # noqa: BLE001
+                pass
         await engine.dispose()
 
 
