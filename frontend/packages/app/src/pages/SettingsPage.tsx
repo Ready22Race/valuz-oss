@@ -32,10 +32,6 @@ import { ParsingSection } from "./settings/ParsingSection";
 import { SystemLogsSettingsSection } from "./settings/SystemLogsSection";
 import { AboutSection } from "./settings/AboutSection";
 import { DataServiceSection } from "./settings/DataServiceSection";
-import {
-  isDataServiceUnlocked,
-  registerDataServiceSection,
-} from "./settings/data-service-unlock";
 
 const SETTINGS_TAB_STORAGE_KEY = "valuz-settings-tab";
 
@@ -111,11 +107,6 @@ export const SettingsPage = () => {
     setHideHeader(true);
     return () => setHideHeader(false);
   }, [setHideHeader]);
-
-  // Reveal the hidden Data Service section if previously unlocked (9× About tap).
-  useEffect(() => {
-    if (isDataServiceUnlocked()) registerDataServiceSection();
-  }, []);
 
   const [tab, setTabState] = useState<string>(() => {
     const fromUrl = searchParams.get("tab");

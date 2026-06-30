@@ -167,7 +167,7 @@ kernel.append_event → DataService(进程内) → host sqlite   (单次写)
 
 **所有行为都从 OSS 设置页控制**——不再有按形态定制的启动脚本。
 
-- **设置 → 数据服务**(连点 9 下"关于"解锁):
+- **设置 → 数据服务**(常规设置分区,位于「文档解析」与「服务日志」之间):
   - **模式 / 后端**:默认(host sqlite) vs **remote 同步**(PG DSN);(沙箱/远程时)
     DataService URL + token。
   - **健康状态**:DataService 及其后端的实时健康指示。

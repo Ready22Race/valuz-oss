@@ -117,7 +117,7 @@ async def patch_preferences(payload: PreferencesPatchPayload) -> PreferencesResp
 
 # ── Kernel data service (model-A durable write-through) ──────────────
 #
-# Advanced/hidden config (revealed in the UI by tapping About 9×). Drives the
+# Surfaced as a regular Settings tab (Data Service). Drives the
 # IN-PROCESS kernel's store tier; applied at the NEXT backend start by
 # ``boot.kernel.init_kernel_dependencies`` (the store is built once at boot).
 # The ``token`` is write-only on the wire: GET returns ``token_set`` (a bool),

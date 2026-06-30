@@ -191,7 +191,7 @@ reads → DataService (in-process) → host sqlite
 **All behaviour is controlled from the OSS settings page** — there are no
 bespoke launch scripts per form.
 
-- **Settings → Data Service** (revealed by the hidden 9-tap on "About"):
+- **Settings → Data Service** (a regular settings tab, between Parsing and System Logs):
   - **Mode / backend**: default (host sqlite) vs **remote sync** (PG DSN), and
     (when sandboxed/remote) the DataService URL + token.
   - **Health**: a live health indicator for the DataService + its backend.

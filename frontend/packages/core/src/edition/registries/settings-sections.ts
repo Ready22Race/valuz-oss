@@ -37,6 +37,13 @@ export const personalSettingsSections: SettingsSectionModule[] = [
     edition: "personal",
   },
   {
+    id: "data-service",
+    label: "settings.tab.dataService.label",
+    description: "settings.tab.dataService.desc",
+    icon: "database",
+    edition: "personal",
+  },
+  {
     id: "system-logs",
     label: "settings.tab.systemLogs.label",
     description: "settings.tab.systemLogs.desc",
