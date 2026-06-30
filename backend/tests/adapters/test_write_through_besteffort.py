@@ -135,10 +135,11 @@ async def test_drain_re_pushes_on_recovery(be):
     assert await outbox.pending_count() == 0
     assert await durable_inner.load_session("u", sid) is not None
     assert await durable_inner.load_message("u", mid) is not None
-    # The durable event carries the SAME (local-authoritative) seq.
-    local_seqs = [e.seq for e in await local.get_events_after("u", sid, after_seq=0)]
-    durable_seqs = [e.seq for e in await durable_inner.get_events_after("u", sid, after_seq=0)]
-    assert local_seqs == durable_seqs == [1]
+    # The event reached both stores. Seqs are per-store/independent (durable
+    # autoincrements on replay) — the contract is "both hold the event", not
+    # equal seq values.
+    assert len(await local.get_events("u", sid)) == 1
+    assert len(await durable_inner.get_events("u", sid)) == 1
 
 
 async def test_drain_idempotent_replay(be):

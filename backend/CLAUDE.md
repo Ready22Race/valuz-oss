@@ -61,17 +61,24 @@ is *also* mirrored to, via `WriteThroughStore` (`src/adapters/`):
 | `pg` | in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL` | OSS "configure a Postgres"; same process, no HTTP. Schema auto-created (`_ensure_durable_schema`, checkfirst) |
 | `remote` | `RemoteStoreHttp` → trusted data service | sandbox/SaaS; holds ONLY a JWT (`VALUZ_DATA_API_*`) — never a DB DSN |
 
+**Event seq is LOCAL-authoritative.** Each store owns its own `events` PK
+autoincrement; the two are **independent and need not match** (`event_uid` bridges
+identity across stores). `append_event` writes LOCAL first — its autoincrement
+assigns the seq it returns, so the orchestrator's persist→broadcast and the
+local-first read cursor agree — then mirrors to the durable with the durable's
+OWN autoincrement. **Never force the durable's seq onto the local PK**: the local
+`kernel.db` usually already holds events at overlapping ids, so forcing collides
+and silently drops every mirrored event (the bug that emptied remote-mode
+sessions).
+
 **Per-tier failure policy** (durability vs. availability):
-- `remote`/sandbox = **strict** — `append_event` is **durable-first** (the durable
-  store assigns the authoritative `seq`, central ordering for SaaS; the local copy
-  mirrors it) and a durable failure is **fail-loud**, so a sandbox never dies with
-  un-persisted data.
-- `pg` = **best-effort** — the LOCAL store is authoritative (incl. the event `seq`);
-  a durable failure is queued in the `durable_outbox` table (local DB) instead of
-  blocking, so a Postgres outage never takes down local-first writes. A background
-  drainer (`WriteThroughStore.drain_outbox` / `DurableOutbox`) re-pushes the backlog
-  on recovery — idempotent (`event_uid`/UUID PKs), stops at the first failure to
-  preserve per-session ordering.
+- `remote`/sandbox = **strict** — the durable mirror must land before returning;
+  a failure is **fail-loud**, so a sandbox never dies with un-persisted data.
+- `pg` = **best-effort** — a durable failure is queued in the `durable_outbox`
+  table (local DB) instead of blocking, so a Postgres outage never takes down
+  local-first writes. A background drainer (`WriteThroughStore.drain_outbox` /
+  `DurableOutbox`) re-pushes the backlog on recovery — idempotent
+  (`event_uid`/UUID PKs), stops at the first failure to preserve ordering.
 
 `event_uid` + `request_id` make the durable+local pair idempotent in both tiers.
 The data service (`kernel/app/data_service.py`, `POST /rpc/{op}` per StorePort

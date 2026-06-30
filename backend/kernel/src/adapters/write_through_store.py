@@ -4,19 +4,25 @@ Model A: the kernel ALWAYS writes a local copy (local-first reads + availability
 and mirrors writes to a durable backend. Two **per-tier** policies (the durability
 vs. availability trade-off the deployment dictates):
 
-**Strict** (``durable_required=True`` — ``remote``/sandbox): the durable write
-must land before the call returns. ``append_event`` is **durable-first** — the
-durable store assigns the authoritative ``seq`` (central ordering for SaaS) and
-the local copy mirrors it. A durable failure is **fail-loud** (propagates), so a
+**Event seq is LOCAL-authoritative.** Each store owns its own ``events`` PK
+sequence (autoincrement); the two are independent and need NOT match — a reader
+reads ONE store consistently, and ``event_uid`` bridges identity across stores
+for idempotency. ``append_event`` therefore writes the LOCAL copy first (its
+autoincrement assigns the seq), returns THAT seq (so the orchestrator's
+persist→broadcast and the local-first read cursor agree), and mirrors to the
+durable with its OWN autoincrement — never forcing the durable's seq onto the
+local PK (doing so collides with the local store's pre-existing ids and silently
+drops events).
+
+**Strict** (``durable_required=True`` — ``remote``/sandbox): the durable mirror
+must land before the call returns; a failure is **fail-loud** (propagates), so a
 sandbox never dies with un-persisted data.
 
 **Best-effort** (``durable_required=False`` — ``pg``, the OSS user's own
-Postgres): the LOCAL write is authoritative and always succeeds first (incl. the
-event ``seq``, assigned by the local autoincrement). The durable mirror is
-attempted next; on ANY failure the op is enqueued in the :class:`DurableOutbox`
-and the call returns normally — a durable outage never blocks local-first
-writes. A background drainer re-pushes the backlog on recovery (idempotent
-replay via ``event_uid`` / UUID PKs).
+Postgres): the durable mirror is attempted after the local write; on ANY failure
+the op is enqueued in the :class:`DurableOutbox` and the call returns normally —
+a durable outage never blocks local-first writes. A background drainer re-pushes
+the backlog on recovery (idempotent replay via ``event_uid`` / UUID PKs).
 
 Common to both: a shared ``request_id`` makes the durable+local pair idempotent;
 **reads are local-first**.
@@ -145,24 +151,23 @@ class WriteThroughStore:
         seq: int | None = None,
     ) -> int | None:
         rid = request_id or uuid.uuid4().hex  # one idempotency key for both copies
-        if self._strict:
-            # Durable assigns the authoritative seq (central ordering for SaaS)…
-            durable_seq = await self._durable.append_event(
-                user_id, session_id, message_id, event, request_id=rid, seq=seq
-            )
-            # …then mirror locally with that exact seq (idempotent on event_uid).
-            await self._local.append_event(
-                user_id, session_id, message_id, event, request_id=rid, seq=durable_seq
-            )
-            return durable_seq
-        # Best-effort: the LOCAL store is the seq authority; the durable mirror
-        # replays that exact seq (so a recovered durable matches local ordering).
+        # LOCAL is the seq authority: its autoincrement assigns the seq we return
+        # (reads + broadcast use it). The durable mirror autoincrements its OWN
+        # seq independently — NEVER force the durable's seq onto the local PK
+        # (that collides with the local store's existing ids and drops events).
         local_seq = await self._local.append_event(
-            user_id, session_id, message_id, event, request_id=rid, seq=seq
+            user_id, session_id, message_id, event, request_id=rid
         )
+        if self._strict:
+            # Durable mirror must land before returning; failure is fail-loud.
+            await self._durable.append_event(
+                user_id, session_id, message_id, event, request_id=rid
+            )
+            return local_seq
+        # Best-effort: mirror after the local write; on failure queue for replay.
         await self._mirror(
             self._durable.append_event(
-                user_id, session_id, message_id, event, request_id=rid, seq=local_seq
+                user_id, session_id, message_id, event, request_id=rid
             ),
             op="append_event",
             user_id=user_id,
@@ -171,7 +176,6 @@ class WriteThroughStore:
                 "message_id": message_id,
                 "event": sw.event_to_row(event),
                 "request_id": rid,
-                "seq": local_seq,
             },
         )
         return local_seq

@@ -76,18 +76,50 @@ async def test_writes_go_to_both(wt, tmp_path):
     assert await durable.load_message("u", mid) is not None
 
 
-async def test_event_seq_central_and_mirrored(wt, tmp_path):
+async def test_event_seq_local_authoritative(wt, tmp_path):
     store, local, durable = wt
     sid, mid = await _seed(store, "u", tmp_path)
     s1 = await store.append_event("u", sid, mid, Event(type="user_message", data={}))
     s2 = await store.append_event(
         "u", sid, mid, Event(type="assistant_message", data={"text": "x"})
     )
+    # The returned seq is the LOCAL autoincrement (monotonic), and the event
+    # lands in BOTH stores. The two stores' seqs are independent — the contract
+    # is "the local-first reader gets a consistent monotonic cursor", not that
+    # local and durable share seq values.
     assert s1 is not None and s2 is not None and s2 > s1
-    # both copies hold the SAME seqs (durable-assigned, local-mirrored)
     local_seqs = [e.seq for e in await local.get_events_after("u", sid, after_seq=0)]
-    durable_seqs = [e.seq for e in await durable.get_events_after("u", sid, after_seq=0)]
-    assert local_seqs == durable_seqs == [s1, s2]
+    assert local_seqs == [s1, s2]  # returned seq == local read cursor
+    assert len(await durable.get_events("u", sid)) == 2  # durable also has both
+
+
+async def test_local_preexisting_ids_never_drop_events(tmp_path):
+    """Regression: durable seq must NOT be forced onto the local PK.
+
+    Reproduces the data-loss bug — when the LOCAL store already holds events at
+    ids that overlap the durable's (independent, lower) autoincrement, forcing
+    ``local.id = durable_seq`` collided and silently dropped every mirrored
+    event. Local is now seq-authoritative, so its autoincrement never collides.
+    """
+    local, le = await _mk_store(tmp_path / "local.db")
+    durable, de = await _mk_store(tmp_path / "durable.db")
+    try:
+        sid, mid = await _seed(local, "u", tmp_path)  # seed DIRECTLY on local
+        # Pre-fill local with 5 events → local autoincrement now at 5.
+        for _ in range(5):
+            await local.append_event("u", sid, mid, Event(type="thinking", data={}))
+        assert len(await local.get_events("u", sid)) == 5
+        # Durable is fresh (its autoincrement starts at 1) — the exact overlap
+        # that used to collide. Append through the write-through store.
+        store = WriteThroughStore(local, durable)
+        s = await store.append_event("u", sid, mid, Event(type="user_message", data={}))
+        # The new event is in BOTH stores — none dropped.
+        assert s is not None and s > 5  # local autoincrement continued
+        assert len(await local.get_events("u", sid)) == 6
+        assert len(await durable.get_events("u", sid)) == 1
+    finally:
+        await le.dispose()
+        await de.dispose()
 
 
 async def test_append_idempotent_across_both(wt, tmp_path):
