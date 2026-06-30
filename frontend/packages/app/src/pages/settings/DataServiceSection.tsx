@@ -7,12 +7,12 @@ import {
   Card,
   CardContent,
   Input,
-  Label,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
+  SettingsRow,
   SettingsSection,
 } from "@valuz/ui";
 import { settingsApi, useTranslation } from "@valuz/core";
@@ -107,137 +107,153 @@ export const DataServiceSection = () => {
     }
   };
 
+  const backendName = (b: KernelStoreMode) =>
+    t(
+      b === "pg"
+        ? "settings.dataService.backendPg"
+        : b === "remote"
+          ? "settings.dataService.backendRemote"
+          : "settings.dataService.backendLocal",
+    );
+
+  const divider = <div className="my-5 h-px bg-surface-muted dark:bg-surface-border" />;
+
   return (
     <SettingsSection
       title={t("settings.dataService.title")}
       desc={t("settings.dataService.desc")}
     >
       {cfg?.restart_required ? (
-        <div className="mb-4 flex items-start gap-2 rounded-lg border border-warning-light bg-warning-light px-3 py-2 text-xs text-warning-text">
+        <div className="mb-5 mt-5 flex items-start gap-2 rounded-lg border border-warning-light bg-warning-light px-3 py-2.5 text-xs text-warning-text">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>{t("settings.dataService.restartRequired")}</span>
         </div>
       ) : null}
 
-      {/* Backend health */}
-      <div className="mb-4 flex items-center gap-2">
-        <span className="text-xs text-ink-meta">
-          {t("settings.dataService.healthLabel")}
-        </span>
-        {checking ? (
-          <Badge variant="secondary" className="gap-1">
-            <Loader2 className="h-3 w-3 animate-spin" />
-          </Badge>
-        ) : health ? (
-          <Badge
-            variant={health.status === "ok" ? "success" : "error"}
-            className="gap-1"
+      {/* ── Configuration ── */}
+      <div className="mb-2 mt-5 text-sm font-medium text-ink-heading">
+        {t("settings.dataService.configTitle")}
+      </div>
+      <Card className="mb-5 rounded-xl border-0 bg-card shadow-sm">
+        <CardContent className="py-5">
+          <SettingsRow
+            className="px-0 py-0"
+            label={t("settings.dataService.modeLabel")}
+            desc={t("settings.dataService.modeDesc")}
           >
-            {health.status === "ok" ? (
-              <CheckCircle2 className="h-3 w-3" />
-            ) : (
-              <XCircle className="h-3 w-3" />
-            )}
-            {health.backend} ·{" "}
-            {t(
-              health.status === "ok"
-                ? "settings.dataService.healthOk"
-                : "settings.dataService.healthError",
-            )}
-          </Badge>
-        ) : null}
-        {health?.detail ? (
-          <span className="truncate text-xs text-ink-meta" title={health.detail}>
-            {health.detail}
-          </span>
-        ) : null}
-        <Button
-          variant="ghost"
-          size="xs"
-          className="ml-auto"
-          onClick={() => void checkHealth()}
-          disabled={checking}
-        >
-          <RefreshCw className="mr-1 h-3 w-3" />
-          {t("settings.dataService.healthRefresh")}
-        </Button>
-      </div>
-
-      {/* OpenAPI (the /rpc data API contract) */}
-      <div className="mb-4">
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-ink-meta">
-            {t("settings.dataService.openApiLabel")}
-          </span>
-          <Button variant="ghost" size="xs" onClick={() => void toggleOps()}>
-            {showOps
-              ? t("settings.dataService.openApiHide")
-              : t("settings.dataService.openApiView")}
-          </Button>
-        </div>
-        {showOps && ops ? (
-          <div className="mt-2 flex flex-wrap gap-1.5">
-            {ops.map((op) => (
-              <code
-                key={op}
-                className="rounded-md bg-surface-soft px-1.5 py-0.5 font-mono text-[11px] text-ink-body"
-              >
-                /rpc/{op}
-              </code>
-            ))}
-          </div>
-        ) : null}
-      </div>
-
-      <Card className="rounded-xl shadow-xs">
-        <CardContent className="space-y-5 py-5">
-          {/* Mode */}
-          <div className="space-y-1.5">
-            <Label>{t("settings.dataService.modeLabel")}</Label>
-            <p className="text-xs text-ink-body">
-              {t("settings.dataService.modeDesc")}
-            </p>
-            <Select
-              value={mode}
-              onValueChange={(v) => setMode(v as "local" | "pg")}
-            >
-              <SelectTrigger className="w-full max-w-md">
+            <Select value={mode} onValueChange={(v) => setMode(v as "local" | "pg")}>
+              <SelectTrigger size="sm" className="h-8 w-auto min-w-[180px] text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="local">
                   {t("settings.dataService.modeLocal")}
                 </SelectItem>
-                <SelectItem value="pg">
-                  {t("settings.dataService.modePg")}
-                </SelectItem>
+                <SelectItem value="pg">{t("settings.dataService.modePg")}</SelectItem>
               </SelectContent>
             </Select>
-          </div>
+          </SettingsRow>
 
-          {/* pg: Postgres DSN */}
           {mode === "pg" ? (
-            <div className="space-y-1.5">
-              <Label>{t("settings.dataService.pgUrlLabel")}</Label>
-              <p className="text-xs text-ink-body">
-                {t("settings.dataService.pgUrlDesc")}
-              </p>
-              <Input
-                value={durableUrl}
-                onChange={(e) => setDurableUrl(e.target.value)}
-                placeholder="postgresql+asyncpg://user:pass@host:5432/db"
-                className="max-w-xl font-mono text-xs"
-                autoComplete="off"
-                spellCheck={false}
-              />
-            </div>
+            <>
+              {divider}
+              <div className="px-0">
+                <div className="text-sm font-medium text-ink-heading">
+                  {t("settings.dataService.pgUrlLabel")}
+                </div>
+                <div className="mt-0.5 text-xs text-ink-body">
+                  {t("settings.dataService.pgUrlDesc")}
+                </div>
+                <Input
+                  value={durableUrl}
+                  onChange={(e) => setDurableUrl(e.target.value)}
+                  placeholder="postgresql+asyncpg://user:pass@host:5432/db"
+                  className="mt-2.5 max-w-xl font-mono text-xs"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
+            </>
           ) : null}
 
-          <div className="flex justify-end pt-1">
+          <div className="mt-5 flex justify-end">
             <Button size="sm" onClick={() => void save()} loading={saving}>
               {t("settings.dataService.save")}
             </Button>
           </div>
+        </CardContent>
+      </Card>
+
+      {/* ── Status ── */}
+      <div className="mb-2 text-sm font-medium text-ink-heading">
+        {t("settings.dataService.statusTitle")}
+      </div>
+      <Card className="mb-5 rounded-xl border-0 bg-card shadow-sm">
+        <CardContent className="py-5">
+          <SettingsRow
+            className="px-0 py-0"
+            label={t("settings.dataService.healthLabel")}
+            desc={health?.detail || undefined}
+          >
+            <div className="flex items-center gap-2">
+              {checking ? (
+                <Badge variant="secondary" className="gap-1">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                </Badge>
+              ) : health ? (
+                <Badge
+                  variant={health.status === "ok" ? "success" : "error"}
+                  className="gap-1"
+                >
+                  {health.status === "ok" ? (
+                    <CheckCircle2 className="h-3 w-3" />
+                  ) : (
+                    <XCircle className="h-3 w-3" />
+                  )}
+                  {backendName(health.backend)}{" "}
+                  {t(
+                    health.status === "ok"
+                      ? "settings.dataService.healthOk"
+                      : "settings.dataService.healthError",
+                  )}
+                </Badge>
+              ) : null}
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={() => void checkHealth()}
+                disabled={checking}
+              >
+                <RefreshCw className="mr-1 h-3 w-3" />
+                {t("settings.dataService.healthRefresh")}
+              </Button>
+            </div>
+          </SettingsRow>
+
+          {divider}
+
+          <SettingsRow
+            className="px-0 py-0"
+            label={t("settings.dataService.openApiLabel")}
+          >
+            <Button variant="ghost" size="xs" onClick={() => void toggleOps()}>
+              {showOps
+                ? t("settings.dataService.openApiHide")
+                : t("settings.dataService.openApiView")}
+            </Button>
+          </SettingsRow>
+          {showOps && ops ? (
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {ops.map((op) => (
+                <code
+                  key={op}
+                  className="rounded-md bg-surface-soft px-1.5 py-0.5 font-mono text-[11px] text-ink-body"
+                >
+                  /rpc/{op}
+                </code>
+              ))}
+            </div>
+          ) : null}
         </CardContent>
       </Card>
     </SettingsSection>
