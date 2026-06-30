@@ -30,22 +30,22 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
 
     state = {"enabled": True, "auto_extract": True, "custom_instructions": ""}
 
-    async def _ge(_db):  # noqa: ANN001, ANN202
+    async def _ge(_db, _user_id: str | None = None, *_args, **_kwargs):  # noqa: ANN001, ANN202
         return state["enabled"]
 
-    async def _ga(_db):  # noqa: ANN001, ANN202
+    async def _ga(_db, _user_id: str | None = None, *_args, **_kwargs):  # noqa: ANN001, ANN202
         return state["auto_extract"]
 
-    async def _gc(_db):  # noqa: ANN001, ANN202
+    async def _gc(_db, _user_id: str | None = None, *_args, **_kwargs):  # noqa: ANN001, ANN202
         return state["custom_instructions"]
 
-    async def _se(_db, v):  # noqa: ANN001, ANN202
+    async def _se(_db, v, _user_id: str | None = None, *_args, **_kwargs):  # noqa: ANN001, ANN202
         state["enabled"] = v
 
-    async def _sa(_db, v):  # noqa: ANN001, ANN202
+    async def _sa(_db, v, _user_id: str | None = None, *_args, **_kwargs):  # noqa: ANN001, ANN202
         state["auto_extract"] = v
 
-    async def _sc(_db, v):  # noqa: ANN001, ANN202
+    async def _sc(_db, v, _user_id: str | None = None, *_args, **_kwargs):  # noqa: ANN001, ANN202
         state["custom_instructions"] = v.strip()[:1500]
 
     monkeypatch.setattr(m, "get_memory_enabled", _ge)
@@ -118,7 +118,7 @@ def test_set_custom_instructions_trims_and_caps(monkeypatch):
 
     captured: dict[str, str] = {}
 
-    async def _capture_write(_db, key, value):  # noqa: ANN001, ANN202
+    async def _capture_write(_db, key, value, user_id: str | None = None):  # noqa: ANN001, ANN202
         captured[key] = value
 
     monkeypatch.setattr(prefs, "_write", _capture_write)

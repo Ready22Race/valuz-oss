@@ -26,6 +26,9 @@ from valuz_agent.modules.tasks.orchestrator import (
 )
 
 
+LOCAL_USER_ID = "local-test-owner"
+
+
 def _fake_agent_config(**kw):
     """Real AgentConfig for resolver fakes — serializer needs full fields."""
     from src.core import AgentConfig  # type: ignore[import-not-found]
@@ -124,7 +127,7 @@ async def test_lead_loop_runs_turns_until_shutdown() -> None:
     prompts: list[str] = []
     finalized: list[tuple[str, str]] = []
 
-    async def fake_turn(session_id: str, content: str) -> str:
+    async def fake_turn(session_id: str, content: str, user_id: str | None = None) -> str:
         prompts.append(content)
         return "idle"
 
@@ -147,6 +150,7 @@ async def test_lead_loop_runs_turns_until_shutdown() -> None:
             role="lead",
             task_id="t1",
             project_id="w1",
+            user_id=LOCAL_USER_ID,
         ),
         timeout=2.0,
     )
@@ -164,10 +168,10 @@ async def test_member_loop_notifies_lead_and_self_reaps_on_ttl() -> None:
     notified: list[tuple[str, str]] = []
     finalized: list[str] = []
 
-    async def fake_turn(session_id: str, content: str) -> str:
+    async def fake_turn(session_id: str, content: str, user_id: str | None = None) -> str:
         return "idle"
 
-    async def fake_notify(session_id: str, status: str) -> None:
+    async def fake_notify(session_id: str, status: str, user_id: str | None = None) -> None:
         notified.append((session_id, status))
 
     async def fake_finalize(**kwargs: object) -> None:
@@ -186,6 +190,7 @@ async def test_member_loop_notifies_lead_and_self_reaps_on_ttl() -> None:
             task_id="t1",
             project_id="w1",
             idle_ttl=0.05,
+            user_id=LOCAL_USER_ID,
         ),
         timeout=2.0,
     )
@@ -198,7 +203,7 @@ async def test_terminal_turn_status_breaks_loop_immediately() -> None:
     orch = TaskOrchestrator()
     turns = 0
 
-    async def fake_turn(session_id: str, content: str) -> str:
+    async def fake_turn(session_id: str, content: str, user_id: str | None = None) -> str:
         nonlocal turns
         turns += 1
         return "terminated"
@@ -216,6 +221,7 @@ async def test_terminal_turn_status_breaks_loop_immediately() -> None:
             role="lead",
             task_id="t1",
             project_id="w1",
+            user_id=LOCAL_USER_ID,
         ),
         timeout=2.0,
     )
@@ -272,14 +278,14 @@ def test_resolve_turn_status_passes_through_clean_turns() -> None:
 def test_resolved_provider_has_no_gap() -> None:
     # A resolved model_provider is the single source of truth for credentials.
     sess = SimpleNamespace(model_provider=object(), runtime_provider="claude_agent")
-    assert asyncio.run(_credential_gap(sess, "writer")) is None
+    assert asyncio.run(_credential_gap(sess, "writer", user_id=LOCAL_USER_ID)) is None
 
 
 def test_no_model_provider_reports_gap() -> None:
     # No resolved provider → clear reason (no env sniffing — creds are funnelled
     # through the provider system per backend/CLAUDE.md).
     sess = SimpleNamespace(model_provider=None, runtime_provider="claude_agent")
-    gap = asyncio.run(_credential_gap(sess, "股票分析大师"))
+    gap = asyncio.run(_credential_gap(sess, "股票分析大师", user_id=LOCAL_USER_ID))
     assert gap is not None
     assert "股票分析大师" in gap
     assert "model provider" in gap
@@ -700,6 +706,7 @@ def test_send_to_member_rejects_cross_task(monkeypatch: pytest.MonkeyPatch) -> N
             text="hi",
             project_id="w1",
             task_id="T1",
+            user_id=LOCAL_USER_ID,
         )
     )
     assert res["delivered"] is False
@@ -875,6 +882,7 @@ async def test_await_members_all_returns_when_all_keys_done(monkeypatch) -> None
             keys=["A", "B"],
             mode="all",
             timeout_s=2,
+            user_id=LOCAL_USER_ID,
         )
         assert res["collected"] == 2
         assert res["pending"] == []
@@ -904,6 +912,7 @@ async def test_await_members_any_returns_on_first(monkeypatch) -> None:
             keys=["A", "B"],
             mode="any",
             timeout_s=2,
+            user_id=LOCAL_USER_ID,
         )
         assert res["collected"] == 1
         assert res["results"][0]["subtask_key"] == "A"
@@ -932,6 +941,7 @@ async def test_await_members_timeout_returns_partial_with_pending(monkeypatch) -
             keys=["A", "B"],
             mode="all",
             timeout_s=0.2,
+            user_id=LOCAL_USER_ID,
         )
         assert res["collected"] == 1
         assert res["pending"] == ["B"]

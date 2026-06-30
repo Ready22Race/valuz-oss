@@ -45,9 +45,9 @@ async def db(tmp_path) -> AsyncIterator:
 
 async def test_tier1_returns_user_chosen_runtime(db) -> None:
     """Explicit defaults: the stored runtime rides along, not claude_agent."""
-    await set_default_runtime(db, "codex")
-    await set_default_provider_id(db, "prov-openai")
-    await set_default_model(db, "gpt-5-codex")
+    await set_default_runtime(db, "codex", "local-test-owner")
+    await set_default_provider_id(db, "prov-openai", user_id="local-test-owner")
+    await set_default_model(db, "gpt-5-codex", user_id="local-test-owner")
 
     runtime, provider_id, model = await _resolve_deploy_target(db)
 

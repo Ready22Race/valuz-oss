@@ -21,6 +21,9 @@ from valuz_agent.modules.tasks import actor_runner
 from valuz_agent.modules.tasks.actor_runner import ActorRunner, run_session_to_idle
 
 
+LOCAL_USER_ID = "local-test-owner"
+
+
 @pytest.fixture(autouse=True)
 def _clear_draining():
     lifecycle.reset_draining()
@@ -58,17 +61,17 @@ def test_actor_loop_draining_skips_turn_and_finalize() -> None:
     calls: list[str] = []
 
     class _Host:
-        async def _run_turn_with_sink(self, sid: str, content: str) -> str:
+        async def _run_turn_with_sink(self, sid: str, content: str, user_id: str | None = None) -> str:
             calls.append("turn")
             return "idle"
 
         async def _finalize_actor(self, **k: Any) -> None:
             calls.append("finalize")
 
-        async def _notify_lead_member_idle(self, sid: str, status: str) -> None:
+        async def _notify_lead_member_idle(self, sid: str, status: str, user_id: str | None = None) -> None:
             pass
 
-        async def _lead_idle_with_no_pending(self, t: str, p: str) -> bool:
+        async def _lead_idle_with_no_pending(self, t: str, p: str, user_id: str | None = None) -> bool:
             return True
 
     runner = ActorRunner(_Host())
@@ -80,6 +83,7 @@ def test_actor_loop_draining_skips_turn_and_finalize() -> None:
             role="lead",
             task_id="t1",
             project_id="p1",
+            user_id=LOCAL_USER_ID,
         )
     )
 
@@ -93,17 +97,17 @@ def test_actor_loop_runs_normally_when_not_draining() -> None:
     calls: list[str] = []
 
     class _Host:
-        async def _run_turn_with_sink(self, sid: str, content: str) -> str:
+        async def _run_turn_with_sink(self, sid: str, content: str, user_id: str | None = None) -> str:
             calls.append("turn")
             return "terminated"  # terminal → loop exits after one turn
 
         async def _finalize_actor(self, **k: Any) -> None:
             calls.append("finalize")
 
-        async def _notify_lead_member_idle(self, sid: str, status: str) -> None:
+        async def _notify_lead_member_idle(self, sid: str, status: str, user_id: str | None = None) -> None:
             pass
 
-        async def _lead_idle_with_no_pending(self, t: str, p: str) -> bool:
+        async def _lead_idle_with_no_pending(self, t: str, p: str, user_id: str | None = None) -> bool:
             return True
 
     runner = ActorRunner(_Host())
@@ -114,6 +118,7 @@ def test_actor_loop_runs_normally_when_not_draining() -> None:
             role="lead",
             task_id="t2",
             project_id="p2",
+            user_id=LOCAL_USER_ID,
         )
     )
 
@@ -126,7 +131,6 @@ def test_actor_loop_runs_normally_when_not_draining() -> None:
 
 def test_run_session_to_idle_draining_skips_finalize(monkeypatch: pytest.MonkeyPatch) -> None:
     finalize_calls: list[str] = []
-    monkeypatch.setattr(actor_runner, "get_current_user_id", lambda: "owner-1")
     sess = SimpleNamespace(status="idle", metadata={})
     monkeypatch.setattr(actor_runner.kernel_client, "get_session", _as_async(lambda *_: sess))
     monkeypatch.setattr(
@@ -141,6 +145,6 @@ def test_run_session_to_idle_draining_skips_finalize(monkeypatch: pytest.MonkeyP
     )
 
     lifecycle.set_draining()
-    asyncio.run(run_session_to_idle("s3", "hi", _Bus()))
+    asyncio.run(run_session_to_idle("s3", "hi", _Bus(), user_id=LOCAL_USER_ID))
 
     assert finalize_calls == []  # finalize skipped while draining

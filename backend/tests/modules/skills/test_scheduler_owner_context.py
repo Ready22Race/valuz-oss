@@ -6,6 +6,8 @@ derive an explicit job owner instead of reading ``get_current_user_id_optional``
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from valuz_agent.infra import auth_context
@@ -51,16 +53,19 @@ async def test_auto_scan_uses_explicit_local_owner(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_auto_scan_skips_non_local_deployments(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "deployment_type", "cloud")
-    called = False
+    cloud_settings = settings.model_copy(update={"deployment_type": "cloud"})
+    called_in_main = False
+    main_thread = threading.main_thread()
 
     def _get_skill_service():  # type: ignore[no-untyped-def]
-        nonlocal called
-        called = True
+        nonlocal called_in_main
+        if threading.current_thread() is main_thread:
+            called_in_main = True
         return _skill_service_gen(_Svc())
 
     monkeypatch.setattr("valuz_agent.api.deps.get_skill_service", _get_skill_service)
+    monkeypatch.setattr("valuz_agent.infra.config.settings", cloud_settings)
 
     await sched._arun_skill_scan()
 
-    assert called is False
+    assert called_in_main is False

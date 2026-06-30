@@ -28,6 +28,7 @@ import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 from src.core.tools import ExecContext, ToolDef, ToolResult
 
 from valuz_agent.integrations import toolkit_mcp_server as tk
+from valuz_agent.integrations import _mcp_asgi
 
 
 @pytest.fixture(autouse=True)
@@ -96,11 +97,11 @@ def test_call_tool_rebuilds_exec_context_from_session_header() -> None:
     tk.install_toolkit_toolsets(base=(_echo_tool(),), lead=())
     server = tk._build_server("base")
 
-    token = tk._session_var.set("sess-42")
+    token = _mcp_asgi.set_current_mcp_context(session_id="sess-42", user_id="u1")
     try:
         result = asyncio.run(_call_tool(server, "echo", {"text": "hi"}))
     finally:
-        tk._session_var.reset(token)
+        _mcp_asgi.reset_current_mcp_context(token)
 
     content = result.root.content
     assert content[0].text == "echo:hi@sess-42"
@@ -117,11 +118,11 @@ def test_call_tool_outside_session_scope_fails() -> None:
 def test_tool_result_is_error_projected_as_text_prefix() -> None:
     tk.install_toolkit_toolsets(base=(_failing_tool(),), lead=())
     server = tk._build_server("base")
-    token = tk._session_var.set("sess-1")
+    token = _mcp_asgi.set_current_mcp_context(session_id="sess-1", user_id="u1")
     try:
         result = asyncio.run(_call_tool(server, "fails", {}))
     finally:
-        tk._session_var.reset(token)
+        _mcp_asgi.reset_current_mcp_context(token)
     # Not a wire-level failure — surfaced as ERROR-prefixed text.
     assert not result.root.isError
     assert result.root.content[0].text == "ERROR: boom"

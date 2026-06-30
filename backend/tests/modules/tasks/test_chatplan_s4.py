@@ -23,6 +23,9 @@ from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
 
+LOCAL_USER_ID = "local-test-owner"
+
+
 @pytest.fixture
 def db_factory(tmp_path, monkeypatch):
     """A tmp-SQLite async+sync sessionmaker pair (mirrors test_chatplan_s2)."""
@@ -118,6 +121,7 @@ def test_inject_into_active_task_with_registered_lead_delivers(db_factory, tmp_p
             project_id="w1",
             text="actually focus on Q4 earnings",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     assert result["delivered"] is True
@@ -134,6 +138,7 @@ def test_inject_appends_user_inject_event_on_delivery(db_factory, tmp_path):
             project_id="w1",
             text="hello lead",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     events = _events(db_factory)
@@ -155,6 +160,7 @@ def test_inject_queues_wrapped_message_in_lead_mailbox(db_factory, tmp_path):
             project_id="w1",
             text="please pivot to Q4",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     box = mailbox_registry._boxes["lead-sess-1"]
@@ -180,6 +186,7 @@ def test_inject_into_active_task_with_offline_lead_drops(db_factory, tmp_path):
             project_id="w1",
             text="hi",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     assert result["delivered"] is False
@@ -195,6 +202,7 @@ def test_inject_offline_lead_appends_user_inject_dropped_event(db_factory, tmp_p
             project_id="w1",
             text="hi",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     events = _events(db_factory)
@@ -216,6 +224,7 @@ def test_inject_into_draft_task_rejects_with_task_not_active(db_factory, tmp_pat
             project_id="w1",
             text="hi",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     assert result["delivered"] is False
@@ -234,6 +243,7 @@ def test_inject_into_completed_task_rejects(db_factory, tmp_path):
             project_id="w1",
             text="hi",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     assert result["delivered"] is False
@@ -249,6 +259,7 @@ def test_inject_into_stopped_task_rejects(db_factory, tmp_path):
             project_id="w1",
             text="hi",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     assert result["delivered"] is False
@@ -264,6 +275,7 @@ def test_inject_into_paused_task_is_allowed(db_factory, tmp_path):
             project_id="w1",
             text="resume soon please",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     assert result["delivered"] is True
@@ -282,6 +294,7 @@ def test_inject_with_no_lead_run_returns_no_lead(db_factory, tmp_path):
             project_id="w1",
             text="hi",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     assert result["delivered"] is False
@@ -301,6 +314,7 @@ def test_wrapped_envelope_uses_user_instruction_source_chat_tag(db_factory, tmp_
             project_id="w1",
             text="raw user text",
             from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
         )
     )
     msg = mailbox_registry._boxes["lead-sess-1"].get_nowait()

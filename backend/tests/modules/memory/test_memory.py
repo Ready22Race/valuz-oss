@@ -143,7 +143,9 @@ def test_tool_closed_loop_and_scope(store, monkeypatch):
 
     ctx = ExecContext(session_id="proj")
     r = asyncio.run(
-        t._memory_handler({"action": "add", "target": "project", "content": "use PG"}, ctx)
+        t._memory_handler(
+            {"action": "add", "target": "project", "content": "use PG"}, ctx, "u1"
+        )
     )
     assert not r.is_error
     assert json.loads(r.content)["success"]
@@ -153,14 +155,18 @@ def test_tool_closed_loop_and_scope(store, monkeypatch):
     monkeypatch.setattr(t, "_resolve_project_id", _async_const(None))
     chat = ExecContext(session_id="chat")
     assert asyncio.run(
-        t._memory_handler({"action": "add", "target": "project", "content": "x"}, chat)
+        t._memory_handler({"action": "add", "target": "project", "content": "x"}, chat, "u1")
     ).is_error
-    r = asyncio.run(t._memory_handler({"action": "add", "target": "global", "content": "zh"}, chat))
+    r = asyncio.run(t._memory_handler({"action": "add", "target": "global", "content": "zh"}, chat, "u1"))
     assert not r.is_error and "zh" in store.read_entries("global")
 
     # invalid action / missing required params -> error
-    assert asyncio.run(t._memory_handler({"action": "frob", "target": "global"}, chat)).is_error
-    assert asyncio.run(t._memory_handler({"action": "add", "target": "global"}, chat)).is_error
+    assert asyncio.run(
+        t._memory_handler({"action": "frob", "target": "global"}, chat, "u1")
+    ).is_error
+    assert asyncio.run(
+        t._memory_handler({"action": "add", "target": "global"}, chat, "u1")
+    ).is_error
 
 
 def test_drop_project_removes_dir(store, tmp_path):

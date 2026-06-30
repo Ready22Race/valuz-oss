@@ -245,7 +245,7 @@ def patched_dispatch(monkeypatch: pytest.MonkeyPatch, stub_service: StubService)
         return _UoW()
 
     monkeypatch.setattr(mod, "_resolve_session_context", _fake_session_context)
-    monkeypatch.setattr(mod, "_resolve_session_owner", AsyncMock(return_value="user-1"))
+    monkeypatch.setattr(mod, "get_current_mcp_user_id", lambda: "user-1")
     monkeypatch.setattr(mod, "_build_automation_service", _fake_build_service)
     monkeypatch.setattr(mod, "_current_session_id", lambda: "sess-1")
     # The dispatch imports async_unit_of_work locally; patch where it's used.
