@@ -266,6 +266,15 @@ async def get_data_service_health() -> DataServiceHealthResponse:
         return await _probe_data_service(db)
 
 
+@router.get("/data-service/openapi")
+async def get_data_service_openapi() -> dict[str, Any]:
+    """The DataService (``/rpc/{op}``) OpenAPI contract — the data API the
+    sandbox / SaaS client speaks. Surfaced read-only in the settings panel."""
+    from valuz_agent.boot.kernel import get_data_service_openapi as _schema
+
+    return _schema()
+
+
 # ── Model defaults (runtime + provider + model + effort) ─────────────
 
 

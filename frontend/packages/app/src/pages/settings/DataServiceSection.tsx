@@ -33,6 +33,29 @@ export const DataServiceSection = () => {
   const [saving, setSaving] = useState(false);
   const [health, setHealth] = useState<DataServiceHealthResponse | null>(null);
   const [checking, setChecking] = useState(false);
+  const [ops, setOps] = useState<string[] | null>(null);
+  const [showOps, setShowOps] = useState(false);
+
+  const toggleOps = useCallback(async () => {
+    if (showOps) {
+      setShowOps(false);
+      return;
+    }
+    setShowOps(true);
+    if (ops) return;
+    try {
+      const schema = await settingsApi.getDataServiceOpenApi();
+      setOps(
+        Object.keys(schema.paths ?? {})
+          .filter((p) => p.startsWith("/rpc/"))
+          .map((p) => p.replace("/rpc/", ""))
+          .sort(),
+      );
+    } catch {
+      setOps([]);
+      toast.error(t("settings.dataService.openApiError"));
+    }
+  }, [showOps, ops, t]);
 
   const checkHealth = useCallback(async () => {
     setChecking(true);
@@ -142,6 +165,32 @@ export const DataServiceSection = () => {
           <RefreshCw className="mr-1 h-3 w-3" />
           {t("settings.dataService.healthRefresh")}
         </Button>
+      </div>
+
+      {/* OpenAPI (the /rpc data API contract) */}
+      <div className="mb-4">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-ink-meta">
+            {t("settings.dataService.openApiLabel")}
+          </span>
+          <Button variant="ghost" size="xs" onClick={() => void toggleOps()}>
+            {showOps
+              ? t("settings.dataService.openApiHide")
+              : t("settings.dataService.openApiView")}
+          </Button>
+        </div>
+        {showOps && ops ? (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {ops.map((op) => (
+              <code
+                key={op}
+                className="rounded-md bg-surface-soft px-1.5 py-0.5 font-mono text-[11px] text-ink-body"
+              >
+                /rpc/{op}
+              </code>
+            ))}
+          </div>
+        ) : null}
       </div>
 
       <Card className="rounded-xl shadow-xs">

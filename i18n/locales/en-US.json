@@ -1467,7 +1467,11 @@
       "healthLabel": "Backend health",
       "healthOk": "Reachable",
       "healthError": "Unreachable",
-      "healthRefresh": "Re-check"
+      "healthRefresh": "Re-check",
+      "openApiLabel": "Data API (OpenAPI)",
+      "openApiView": "View operations",
+      "openApiHide": "Hide",
+      "openApiError": "Failed to load the data API contract"
     },
     "tab": {
       "about": {

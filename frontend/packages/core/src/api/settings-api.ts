@@ -182,6 +182,10 @@ export const settingsApi = {
     return fetchJson("/v1/settings/data-service/health");
   },
 
+  getDataServiceOpenApi(): Promise<{ paths?: Record<string, unknown> }> {
+    return fetchJson("/v1/settings/data-service/openapi");
+  },
+
   patchPreferences(
     payload: PreferencesPatchPayload,
   ): Promise<PreferencesResponse> {

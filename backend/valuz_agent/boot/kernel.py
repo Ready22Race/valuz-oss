@@ -378,3 +378,17 @@ def get_kernel_routers() -> list:
     from app.routes.usage import router as usage_router
 
     return [sessions_router, messages_router, run_router, events_router, usage_router]
+
+
+def get_data_service_openapi() -> dict:
+    """The DataService (``/rpc/{op}``) OpenAPI schema, for the settings panel.
+
+    Built from the kernel's data-service app (no store / DB needed — the schema
+    is derived from the route signatures). This is the contract the sandbox /
+    SaaS client speaks; surfacing it lets the user inspect the data API. Lives
+    in ``boot`` because that's the seam allowed to import ``app.*``.
+    """
+    from app.data_service import create_data_service_app
+    from src.core.token_verifier import NullTokenVerifier
+
+    return create_data_service_app(store=None, verifier=NullTokenVerifier()).openapi()

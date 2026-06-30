@@ -1467,7 +1467,11 @@
       "healthLabel": "后端健康",
       "healthOk": "可达",
       "healthError": "不可达",
-      "healthRefresh": "重新检测"
+      "healthRefresh": "重新检测",
+      "openApiLabel": "数据 API(OpenAPI)",
+      "openApiView": "查看操作",
+      "openApiHide": "收起",
+      "openApiError": "加载数据 API 契约失败"
     },
     "tab": {
       "about": {
