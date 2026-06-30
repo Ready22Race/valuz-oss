@@ -683,21 +683,28 @@ class SeatbeltDriver:
         mounts = host_sandbox_rw_mounts()
         env = dict(ctx.passthrough_env)  # ⑥ L1 credential injection
         # Model A: the sandbox ALWAYS keeps a local kernel.db (grant its write
-        # files in every mode). ``KERNEL_STORE=remote`` ADDITIONALLY injects the
-        # data-API coordinates (NEVER a PG DSN) so the kernel write-throughs to
-        # the durable backend over HTTP, holding only a JWT.
+        # files in every mode). When the user has configured a durable
+        # (Postgres-backed) data service, the sandbox must NOT hold the DSN — it
+        # write-throughs to the HOST-mounted DataService (/internal/data) over
+        # HTTP, carrying only a freshly minted JWT. "Who holds the credential" is
+        # resolved here: in-process holds the DSN; the sandbox holds a token.
         rw_files: tuple[str, ...] = (
             str(kernel_db),
             str(kernel_db) + "-wal",
             str(kernel_db) + "-shm",
         )
-        if settings.kernel_store == "remote":
+        if settings.kernel_store in ("pg", "remote") and ctx.host_callback_url:
+            from valuz_agent.api.deps import _secret_store
+            from valuz_agent.boot.kernel import mint_data_service_token
+            from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
+            from valuz_agent.infra.local_identity import resolve_local_user_id
+
+            owner = resolve_local_user_id()
+            secret = get_or_create_ds_secret(_secret_store(), owner)
             env["KERNEL_STORE"] = "remote"
-            env["VALUZ_DATA_API_KIND"] = settings.kernel_data_api_kind
-            if settings.kernel_data_api_url:
-                env["VALUZ_DATA_API_URL"] = settings.kernel_data_api_url
-            if settings.kernel_data_api_token:
-                env["VALUZ_DATA_API_TOKEN"] = settings.kernel_data_api_token
+            env["VALUZ_DATA_API_KIND"] = "http"
+            env["VALUZ_DATA_API_URL"] = ctx.host_callback_url.rstrip("/") + "/internal/data"
+            env["VALUZ_DATA_API_TOKEN"] = mint_data_service_token(secret, user_id=owner)
         spec = SandboxSpec(
             sandbox_id="host-kernel",
             kernel_db_path=str(kernel_db),
