@@ -80,12 +80,11 @@ install_backend() {
     # (Runtime OCR deps live in the DEFAULT dependencies, so they are not
     # pruned here and need no extra.)
     #
-    # Remote-store mode (make dev-remote) also needs the ``postgres`` extra
-    # (asyncpg) — keep it so the same ``uv sync`` doesn't prune the driver the
-    # data service connects with.
-    local extras="--extra dev"
-    [[ "${VALUZ_KERNEL_STORE:-}" == "remote" ]] && extras="$extras --extra postgres"
-    uv sync $extras
+    # Always include the ``postgres`` extra (asyncpg): the DataService backend
+    # (pg / remote) is chosen at runtime from the settings page, so the driver
+    # must be present in dev regardless of the current mode. Small dep; keeping
+    # it avoids a "driver pruned" failure when the user flips to Postgres.
+    uv sync --extra dev --extra postgres
     ok "backend deps ready"
 }
 
