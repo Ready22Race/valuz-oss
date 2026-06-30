@@ -5,7 +5,7 @@ Covers the three moving parts of the cutover:
 1. ``infra.local_identity.resolve_local_user_id`` — device-derived, stable,
    persisted once to ``installation.json``.
 2. ``infra.auth_context`` — the request-scoped owner ContextVar. Explicit-only:
-   no implicit fallback; an unset context raises ``LookupError``.
+   no implicit fallback; an unset raw context returns ``None``.
 3. ``infra.database.UserMixin`` — auto-stamps the active owner on insert.
 4. ``boot.schema.ensure_host_schema_migratable`` — preflight (never drops).
 """
@@ -73,10 +73,9 @@ class TestAuthContext:
     test runner itself) set in the ambient context.
     """
 
-    def test_unset_context_raises_lookup_error(self) -> None:
+    def test_unset_context_returns_none(self) -> None:
         def probe() -> None:
-            with pytest.raises(LookupError):
-                auth_context.get_current_user_id()
+            assert auth_context.get_current_user_id() is None
 
         contextvars.Context().run(probe)
 
@@ -85,10 +84,10 @@ class TestAuthContext:
             token = auth_context.set_current_user_id("u-42")
             assert auth_context.get_current_user_id() == "u-42"
             auth_context.reset_current_user_id(token)
-            # Reset returns to the prior (unset) state — reads fail loudly
-            # again rather than falling back to any implicit owner.
-            with pytest.raises(LookupError):
-                auth_context.get_current_user_id()
+            # Reset returns to the prior unset state without falling back to any
+            # implicit owner. The FastAPI dependency layer is what turns this into
+            # a required-owner error for request handlers.
+            assert auth_context.get_current_user_id() is None
 
         contextvars.Context().run(roundtrip)
 

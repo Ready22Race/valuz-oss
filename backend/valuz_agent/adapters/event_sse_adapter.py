@@ -225,7 +225,6 @@ def _translate_kernel_event(
         # (both callers are async), so fire-and-forget via ``create_task`` —
         # metering must never block or break the SSE stream.
         try:
-            from valuz_agent.api.deps import get_current_user_id_optional
             from valuz_agent.ports.billing import MeterEvent
             from valuz_agent.ports.extensions import ext
 

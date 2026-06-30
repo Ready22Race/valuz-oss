@@ -34,6 +34,7 @@ def _make_session(*, mcp_servers):
         permission_mode="full_access",
         status="idle",
         created_at=0,
+        user_id="local-test-owner",
         metadata={},
     )
 
@@ -92,7 +93,9 @@ async def test_restamps_stale_token_and_preserves_external(monkeypatch):
     session = _make_session(mcp_servers=(external, *_stale_trio("OLDTOKEN")))
     updates = _patch_client(monkeypatch, session)
 
-    changed = await capabilities.refresh_always_on_mcp_for_session("sess-1")
+    changed = await capabilities.refresh_always_on_mcp_for_session(
+        "sess-1", "local-test-owner"
+    )
 
     assert changed is True
     assert len(updates) == 1
@@ -111,7 +114,9 @@ async def test_noop_when_token_already_current(monkeypatch):
     session = _make_session(mcp_servers=_stale_trio("CURRENT"))
     updates = _patch_client(monkeypatch, session)
 
-    changed = await capabilities.refresh_always_on_mcp_for_session("sess-1")
+    changed = await capabilities.refresh_always_on_mcp_for_session(
+        "sess-1", "local-test-owner"
+    )
 
     assert changed is False
     assert updates == []

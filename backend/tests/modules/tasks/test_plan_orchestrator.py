@@ -17,12 +17,13 @@ import valuz_agent.boot.kernel  # noqa: F401
 from sqlalchemy import create_engine, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.tasks import orchestrator as orch_mod
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
+
+OWNER = "local-test-owner"
 
 
 def _as_async(fn):
@@ -119,6 +120,7 @@ def test_plan_task_persists_plan_and_emits_events(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead-sess",
             subtasks=[
                 {"key": "a", "title": "A", "agent": "researcher"},
@@ -138,6 +140,7 @@ def test_plan_task_rejects_when_progress_exists(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[{"key": "a", "title": "A", "agent": "x", "status": "in_progress"}],
         )
@@ -147,6 +150,7 @@ def test_plan_task_rejects_when_progress_exists(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[{"key": "z", "title": "Z"}],
         )
@@ -160,11 +164,12 @@ def test_get_plan_returns_ready_and_counts(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[{"key": "a", "title": "A", "agent": "x"}],
         )
     )
-    res = asyncio.run(planning.get_plan(task_id="t1", project_id="w1"))
+    res = asyncio.run(planning.get_plan(task_id="t1", project_id="w1", user_id=OWNER))
     assert res["ready"] == ["a"]
     assert res["counts"] == {"planned": 1}
     assert res["all_done"] is False
@@ -177,6 +182,7 @@ def test_plan_review_criteria_round_trips_and_surfaces_in_get_plan(db_factory, t
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[
                 {
@@ -188,7 +194,7 @@ def test_plan_review_criteria_round_trips_and_surfaces_in_get_plan(db_factory, t
             ],
         )
     )
-    res = asyncio.run(planning.get_plan(task_id="t1", project_id="w1"))
+    res = asyncio.run(planning.get_plan(task_id="t1", project_id="w1", user_id=OWNER))
     node = next(n for n in res["subtasks"] if n["key"] == "a")
     assert node["review_criteria"] == "covers price + %chg + 1-line takeaway"
 
@@ -199,6 +205,7 @@ def test_modify_plan_adds_and_revalidates(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[{"key": "a", "title": "A", "agent": "x"}],
         )
@@ -207,6 +214,7 @@ def test_modify_plan_adds_and_revalidates(db_factory, tmp_path) -> None:
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             add=[{"key": "b", "title": "B", "agent": "y", "depends_on": ["a"]}],
         )
@@ -222,6 +230,7 @@ def test_modify_plan_rejects_cycle(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[{"key": "a", "title": "A"}, {"key": "b", "title": "B", "depends_on": ["a"]}],
         )
@@ -230,6 +239,7 @@ def test_modify_plan_rejects_cycle(db_factory, tmp_path) -> None:
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             update=[{"key": "a", "depends_on": ["b"]}],
         )
@@ -241,7 +251,13 @@ def test_dispatch_rejects_unknown_subtask_key(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     res = asyncio.run(
-        orch.dispatch(task_id="t1", project_id="w1", lead_session_id="lead", subtask_key="ghost")
+        orch.dispatch(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead",
+            subtask_key="ghost",
+            user_id=OWNER,
+        )
     )
     assert res["status"] == "failed" and "plan_task first" in res["error"]
 
@@ -253,6 +269,7 @@ def test_dispatch_rejects_blocked_subtask(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[
                 {"key": "a", "title": "A", "agent": "x"},
@@ -261,7 +278,13 @@ def test_dispatch_rejects_blocked_subtask(db_factory, tmp_path) -> None:
         )
     )
     res = asyncio.run(
-        orch.dispatch(task_id="t1", project_id="w1", lead_session_id="lead", subtask_key="b")
+        orch.dispatch(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead",
+            subtask_key="b",
+            user_id=OWNER,
+        )
     )
     assert res["status"] == "failed" and "blocked" in res["error"]
 
@@ -277,6 +300,7 @@ def test_rework_redispatch_folds_feedback_into_brief(db_factory, tmp_path) -> No
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[{"key": "a", "title": "A", "agent": "x", "goal": "build X"}],
         )
@@ -286,6 +310,7 @@ def test_rework_redispatch_folds_feedback_into_brief(db_factory, tmp_path) -> No
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             update=[{"key": "a", "status": "in_review"}],
         )
@@ -294,6 +319,7 @@ def test_rework_redispatch_folds_feedback_into_brief(db_factory, tmp_path) -> No
         planning.review_subtask(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             decision="rework",
             subtask_key="a",
@@ -317,6 +343,7 @@ def test_review_approve_marks_done_and_unlocks(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[
                 {"key": "a", "title": "A", "agent": "x"},
@@ -328,6 +355,7 @@ def test_review_approve_marks_done_and_unlocks(db_factory, tmp_path) -> None:
         planning.review_subtask(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             decision="approve",
             subtask_key="a",
@@ -345,6 +373,7 @@ def test_review_rework_no_live_member_sets_rework(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[{"key": "a", "title": "A", "agent": "x", "status": "in_review"}],
         )
@@ -353,6 +382,7 @@ def test_review_rework_no_live_member_sets_rework(db_factory, tmp_path) -> None:
         planning.review_subtask(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             decision="rework",
             subtask_key="a",
@@ -361,7 +391,7 @@ def test_review_rework_no_live_member_sets_rework(db_factory, tmp_path) -> None:
     )
     assert res["decision"] == "rework"
     assert res["delivered_to_live_member"] is False
-    plan = asyncio.run(planning.get_plan(task_id="t1", project_id="w1"))
+    plan = asyncio.run(planning.get_plan(task_id="t1", project_id="w1", user_id=OWNER))
     node = next(n for n in plan["subtasks"] if n["key"] == "a")
     assert node["status"] == "active"  # rework maps to panel 'active'
 
@@ -375,6 +405,7 @@ def test_finish_task_stopped_emits_task_stopped(db_factory, tmp_path) -> None:
         orch.finish_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             summary="user asked to stop",
             status="stopped",
@@ -398,6 +429,7 @@ def test_finish_task_rejects_legacy_failed_status(db_factory, tmp_path) -> None:
         orch.finish_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             summary="legacy call",
             status="failed",
@@ -421,6 +453,7 @@ def test_finish_task_rejected_when_plan_has_unresolved_nodes(db_factory, tmp_pat
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[
                 {"key": "a", "title": "A", "agent": "x"},
@@ -429,7 +462,9 @@ def test_finish_task_rejected_when_plan_has_unresolved_nodes(db_factory, tmp_pat
         )
     )
     res = asyncio.run(
-        orch.finish_task(task_id="t1", project_id="w1", lead_session_id="lead", summary="done")
+        orch.finish_task(task_id="t1", project_id="w1", lead_session_id="lead", summary="done",
+            user_id=OWNER,
+)
     )
     assert res["status"] == "rejected"
     assert set(res["pending_subtasks"]) == {"a", "sum"}
@@ -449,6 +484,7 @@ def test_finish_task_allows_completion_when_all_done(db_factory, tmp_path) -> No
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[{"key": "a", "title": "A", "agent": "x"}],
         )
@@ -466,7 +502,9 @@ def test_finish_task_allows_completion_when_all_done(db_factory, tmp_path) -> No
     finally:
         db.close()
     res = asyncio.run(
-        orch.finish_task(task_id="t1", project_id="w1", lead_session_id="lead", summary="done")
+        orch.finish_task(task_id="t1", project_id="w1", lead_session_id="lead", summary="done",
+            user_id=OWNER,
+)
     )
     assert res["ok"] is True
     assert "task_completed" in _events(db_factory)
@@ -478,6 +516,7 @@ def test_render_plan_md_writes_file(db_factory, tmp_path) -> None:
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead",
             subtasks=[{"key": "a", "title": "A", "agent": "x"}],
         )
@@ -526,7 +565,11 @@ def test_auto_finalize_completes_when_no_pending_subtasks(db_factory, tmp_path) 
     orch = TaskOrchestrator()
     asyncio.run(
         orch._auto_finalize_lead_task(
-            lead_session_id="lead-sess", task_id="t1", project_id="w1", final_status="idle"
+            lead_session_id="lead-sess",
+            task_id="t1",
+            project_id="w1",
+            final_status="idle",
+            user_id=OWNER,
         )
     )
     assert _task_status(db_factory) == "completed"
@@ -540,13 +583,18 @@ def test_auto_finalize_blocks_when_plan_has_unresolved_nodes(db_factory, tmp_pat
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead-sess",
             subtasks=[{"key": "a", "title": "A", "agent": "x"}],  # status defaults to planned
         )
     )
     asyncio.run(
         orch._auto_finalize_lead_task(
-            lead_session_id="lead-sess", task_id="t1", project_id="w1", final_status="idle"
+            lead_session_id="lead-sess",
+            task_id="t1",
+            project_id="w1",
+            final_status="idle",
+            user_id=OWNER,
         )
     )
     assert _task_status(db_factory) == "blocked"
@@ -567,6 +615,7 @@ def test_auto_finalize_blocks_on_terminated_with_empty_plan(db_factory, tmp_path
             task_id="t1",
             project_id="w1",
             final_status="terminated",
+            user_id=OWNER,
         )
     )
     assert _task_status(db_factory) == "blocked"
@@ -603,6 +652,7 @@ def test_auto_finalize_blocks_on_stop_reason_error_with_empty_plan(
             task_id="t1",
             project_id="w1",
             final_status="idle",
+            user_id=OWNER,
         )
     )
     assert _task_status(db_factory) == "blocked"
@@ -636,6 +686,7 @@ def test_auto_finalize_cancel_with_empty_plan_stays_active(
             task_id="t1",
             project_id="w1",
             final_status="idle",
+            user_id=OWNER,
         )
     )
     assert _task_status(db_factory) == "active"
@@ -683,6 +734,7 @@ def test_finalize_actor_member_error_sets_rework_not_failed(
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead-sess",
             subtasks=[{"key": "a", "title": "A", "agent": "researcher"}],
         )
@@ -707,6 +759,7 @@ def test_finalize_actor_member_error_sets_rework_not_failed(
             task_id="t1",
             project_id="w1",
             via_shutdown=False,  # type: ignore[call-arg]
+            user_id=OWNER,
         )
     )
 
@@ -734,6 +787,7 @@ def test_auto_finalize_blocks_on_error_when_plan_has_unresolved_nodes(db_factory
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead-sess",
             subtasks=[{"key": "a", "title": "A", "agent": "x"}],
         )
@@ -744,6 +798,7 @@ def test_auto_finalize_blocks_on_error_when_plan_has_unresolved_nodes(db_factory
             task_id="t1",
             project_id="w1",
             final_status="terminated",
+            user_id=OWNER,
         )
     )
     assert _task_status(db_factory) == "blocked"
@@ -762,7 +817,11 @@ def test_auto_finalize_noop_when_already_finalized(db_factory, tmp_path) -> None
     orch = TaskOrchestrator()
     asyncio.run(
         orch._auto_finalize_lead_task(
-            lead_session_id="lead-sess", task_id="t1", project_id="w1", final_status="idle"
+            lead_session_id="lead-sess",
+            task_id="t1",
+            project_id="w1",
+            final_status="idle",
+            user_id=OWNER,
         )
     )
     assert _events(db_factory) == []  # no duplicate terminal event appended
@@ -774,7 +833,11 @@ def test_auto_finalize_noop_when_members_in_flight(db_factory, tmp_path) -> None
     orch._members.set_members("t1", {"m1"})  # a member is still running
     asyncio.run(
         orch._auto_finalize_lead_task(
-            lead_session_id="lead-sess", task_id="t1", project_id="w1", final_status="idle"
+            lead_session_id="lead-sess",
+            task_id="t1",
+            project_id="w1",
+            final_status="idle",
+            user_id=OWNER,
         )
     )
     assert _task_status(db_factory) == "active"  # left open for the member to finish
@@ -784,14 +847,14 @@ def test_lead_idle_with_no_pending_true_when_clean(db_factory, tmp_path) -> None
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     # No members, no plan → nothing to wait for → break the loop immediately.
-    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1")) is True
+    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1", user_id=OWNER)) is True
 
 
 def test_lead_idle_with_no_pending_false_when_member_in_flight(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
     orch._members.set_members("t1", {"m1"})
-    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1")) is False
+    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1", user_id=OWNER)) is False
 
 
 def test_lead_idle_with_no_pending_false_when_plan_unresolved(db_factory, tmp_path) -> None:
@@ -801,11 +864,12 @@ def test_lead_idle_with_no_pending_false_when_plan_unresolved(db_factory, tmp_pa
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead-sess",
             subtasks=[{"key": "a", "title": "A", "agent": "x"}],
         )
     )
-    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1")) is False
+    assert asyncio.run(orch._lead_idle_with_no_pending("t1", "w1", user_id=OWNER)) is False
 
 
 # ---------------------------------------------------------------------------
@@ -915,7 +979,7 @@ def test_recover_one_task_reconciles_members_and_redrives_lead(
     orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> None:
-        await orch._recover_one_task("t1", "w1")
+        await orch._recover_one_task("t1", "w1", user_id=OWNER)
         await asyncio.sleep(0.05)  # let create_task'd loops run
 
     try:
@@ -1023,12 +1087,13 @@ def test_stop_task_pauses_members_and_cascade_interrupts(db_factory, tmp_path, m
     orch._members.set_members("t1", {"sA", "sB"})
     interrupted: list[str] = []
 
-    async def _fake_interrupt(sid: str) -> None:
+    async def _fake_interrupt(sid: str, user_id: str | None = None) -> None:
+        assert user_id == OWNER
         interrupted.append(sid)
 
     orch._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
 
-    assert asyncio.run(orch.stop_task("t1", "w1")) is True
+    assert asyncio.run(orch.stop_task("t1", "w1", user_id=OWNER)) is True
 
     task = _task_row(db_factory)
     assert task.status == "paused"
@@ -1050,7 +1115,7 @@ def test_stop_task_noop_when_not_active(db_factory, tmp_path, monkeypatch) -> No
         raise AssertionError("should not interrupt a non-active task")
 
     orch._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
-    assert asyncio.run(orch.stop_task("t1", "w1")) is False
+    assert asyncio.run(orch.stop_task("t1", "w1", user_id=OWNER)) is False
 
 
 def test_resume_task_only_paused_flips_active_and_redrives(
@@ -1084,7 +1149,7 @@ def test_resume_task_only_paused_flips_active_and_redrives(
     orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> dict:
-        result = await orch.resume_task("t1", "w1")
+        result = await orch.resume_task("t1", "w1", user_id=OWNER)
         await asyncio.sleep(0.05)
         return result
 
@@ -1107,7 +1172,7 @@ def test_resume_task_noop_when_active(db_factory, tmp_path) -> None:
         db_factory, tmp_path, members=[("A", "backend", "sA", "in_progress")], task_status="active"
     )
     orch = TaskOrchestrator()
-    result = asyncio.run(orch.resume_task("t1", "w1"))
+    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is False
     assert result["prior_status"] == "active"
     assert "paused" in result["error"] or "blocked" in result["error"]
@@ -1136,7 +1201,7 @@ def test_resume_task_accepts_blocked(db_factory, tmp_path, monkeypatch) -> None:
         spawned.append((session_id, role))
 
     orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
-    result = asyncio.run(orch.resume_task("t1", "w1"))
+    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is True
     assert result["prior_status"] == "blocked"
     assert _task_row(db_factory).status == "active"
@@ -1167,7 +1232,7 @@ def test_resume_task_accepts_stopped(db_factory, tmp_path, monkeypatch) -> None:
         spawned.append((session_id, role))
 
     orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
-    result = asyncio.run(orch.resume_task("t1", "w1"))
+    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is True
     assert result["prior_status"] == "stopped"
     assert _task_row(db_factory).status == "active"
@@ -1198,7 +1263,7 @@ def test_resume_task_accepts_completed(db_factory, tmp_path, monkeypatch) -> Non
         spawned.append((session_id, role))
 
     orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
-    result = asyncio.run(orch.resume_task("t1", "w1"))
+    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is True
     assert result["prior_status"] == "completed"
     assert _task_row(db_factory).status == "active"
@@ -1210,7 +1275,7 @@ def test_resume_task_rejects_abandoned(db_factory, tmp_path) -> None:
     revive; the user must draft afresh."""
     _seed_lead_and_members(db_factory, tmp_path, members=[], task_status="abandoned")
     orch = TaskOrchestrator()
-    result = asyncio.run(orch.resume_task("t1", "w1"))
+    result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is False
     assert result["prior_status"] == "abandoned"
     assert _task_row(db_factory).status == "abandoned"
@@ -1226,13 +1291,14 @@ def test_stop_member_rejects_run_reworks_node_and_notifies_lead(
     orch = TaskOrchestrator()
     orch._members.set_members("t1", {"sB"})
 
-    async def _fake_interrupt(sid: str) -> None:
+    async def _fake_interrupt(sid: str, user_id: str | None = None) -> None:
+        assert user_id == OWNER
         pass
 
     orch._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
     mailbox_registry.register("lead-s")
     try:
-        assert asyncio.run(orch.stop_member("sB")) is True
+        assert asyncio.run(orch.stop_member("sB", user_id=OWNER)) is True
         runs = _runs(db_factory)
         assert runs["sB"] == "rejected"
         plan = TaskPlan.from_dict(db_factory().query(TaskRow).filter_by(id="t1").one().plan)
@@ -1275,7 +1341,9 @@ def test_heartbeat_pending_synthesizes_terminal_completed(
     orch = TaskOrchestrator()
 
     out = asyncio.run(
-        orch._heartbeat_pending(task_id="t1", project_id="w1", pending_keys={"B", "C"})
+        orch._heartbeat_pending(
+            task_id="t1", project_id="w1", pending_keys={"B", "C"}, user_id=OWNER
+        )
     )
 
     assert set(out.keys()) == {"B"}  # only the terminal member synthesized
@@ -1310,7 +1378,8 @@ def test_e2e_stop_resume_closed_loop_through_routes(db_factory, tmp_path, monkey
     interrupted: list[str] = []
     spawned: list[tuple[str, str]] = []
 
-    async def _fake_interrupt(sid: str) -> None:
+    async def _fake_interrupt(sid: str, user_id: str | None = None) -> None:
+        assert user_id == OWNER
         interrupted.append(sid)
 
     async def _fake_loop(*, session_id, role, **_kw) -> None:
@@ -1374,7 +1443,8 @@ def test_pause_distinct_from_stop_and_parks_nodes(db_factory, tmp_path, monkeypa
     orch = tasks_route.task_orchestrator
     orch._members.set_members("t1", {"sA"})
 
-    async def _noop_interrupt(_sid: str) -> None: ...
+    async def _noop_interrupt(_sid: str, user_id: str | None = None) -> None:
+        assert user_id == OWNER
 
     monkeypatch.setattr(orch, "_interrupt_kernel_session", _noop_interrupt)
 
@@ -1450,7 +1520,7 @@ def test_resume_evicts_kernel_runtime_before_respawn(db_factory, tmp_path, monke
     orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> None:
-        await orch.resume_task("t1", "w1")
+        await orch.resume_task("t1", "w1", user_id=OWNER)
         await asyncio.sleep(0.05)
 
     try:
@@ -1491,6 +1561,7 @@ def test_lead_shutdown_exit_skips_auto_finalize(monkeypatch) -> None:
         role="lead",
         task_id="t1",
         project_id="w1",
+        user_id=OWNER,
     )
     # shutdown exit → auto-finalize SKIPPED (no spurious block on resume)
     asyncio.run(orch._finalize_actor(via_shutdown=True, **common))  # type: ignore[arg-type]

@@ -31,7 +31,6 @@ from valuz_agent.adapters.agent_resolver import (
     build_member_session,
     spill_goal_brief_if_too_long,
 )
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
@@ -258,13 +257,14 @@ class DispatcherService:
             )
 
         # Flip the plan node to in_progress (attempts++, link this run).
-        await planning.mark_node_dispatched(
-            project_id=project_id,
-            task_id=task_id,
-            subtask_key=subtask_key,
-            agent=agent,
-            session_id=member_session.id,
-        )
+            await planning.mark_node_dispatched(
+                project_id=project_id,
+                task_id=task_id,
+                subtask_key=subtask_key,
+                agent=agent,
+                session_id=member_session.id,
+                user_id=user_id,
+            )
 
         # Run member as sibling asyncio task (proven non-recursive, §8)
         member_task = asyncio.create_task(
@@ -326,6 +326,7 @@ class DispatcherService:
                     plan=plan2,
                     actor=agent,
                     session_id=member_session.id,
+                    user_id=user_id,
                 )
             if failed:
                 await event_ds2.append_event(
@@ -598,6 +599,7 @@ class DispatcherService:
             subtask_key=subtask_key,
             agent=agent,
             session_id=member_session.id,
+            user_id=user_id,
         )
 
         # Track as a live member + start its actor loop (non-blocking).

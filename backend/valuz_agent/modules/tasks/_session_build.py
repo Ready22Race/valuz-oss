@@ -70,7 +70,6 @@ async def _credential_gap(session: Any, agent_slug: str, *, db: Any | None = Non
     # loading the agent and checking the pinned provider's auth_type.
     if db is not None:
         try:
-            from valuz_agent.api.deps import get_current_user_id
             from valuz_agent.modules.providers.datastore import ProviderDatastore
 
             agent = getattr(session, "agent_config", None)

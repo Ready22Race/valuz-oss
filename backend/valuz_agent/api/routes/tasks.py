@@ -494,9 +494,9 @@ async def intervene(
         # ``paused`` (resumable, 恢复 button stays); ``stop`` → ``stopped``
         # (UI-terminal, no 恢复 button — still revivable via chat/inject).
         target = "paused" if payload.action == "pause" else "stopped"
-        await task_orchestrator.stop_task(task_id, ws, target_status=target)
+        await task_orchestrator.stop_task(task_id, ws, target_status=target, user_id=user_id)
     elif payload.action == "resume":
-        await task_orchestrator.resume_task(task_id, ws)
+        await task_orchestrator.resume_task(task_id, ws, user_id=user_id)
 
     db.expire_all()  # drop cached rows so we see the orchestrator's committed write
     refreshed = await task_ds.get_task(user_id, task_id)
@@ -689,6 +689,7 @@ async def get_plan_route(
     result = await planning.get_plan(
         task_id=task_id,
         project_id=task.project_id,
+        user_id=user_id,
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -702,10 +703,13 @@ async def get_plan_route(
 
 
 @router.post("/v1/runs/{session_id}:stop", response_model=StopMemberResponse)
-async def stop_member(session_id: str) -> StopMemberResponse:
+async def stop_member(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+) -> StopMemberResponse:
     """User-initiated single-member stop: interrupt one subtask, notify the lead
     (member_done cancelled), run→rejected, node→rework. Task stays active."""
-    stopped = await task_orchestrator.stop_member(session_id)
+    stopped = await task_orchestrator.stop_member(session_id, user_id=user_id)
     if not stopped:
         raise HTTPException(status_code=404, detail=f"Subtask run not found: {session_id}")
     return StopMemberResponse(stopped=True)

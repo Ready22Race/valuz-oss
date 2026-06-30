@@ -2,8 +2,7 @@
 
 ``SessionDatastore`` (attachments) takes the caller's ``user_id`` first on
 user-facing reads and stamps it on writes. The ``project_index`` module-level
-facade sources the owner from ``auth_context`` internally (it opens its own
-unit of work), so these tests drive it under ``set_current_user_id``.
+facade receives the owner explicitly even though it opens its own unit of work.
 
 System paths stay cross-owner: ``project_index.project_of`` (by globally-unique
 kernel session id) and the by-id finalize writes
@@ -16,7 +15,6 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.sessions import project_index
 from valuz_agent.modules.sessions.datastore import SessionDatastore
@@ -73,42 +71,20 @@ class TestAttachmentOwnerScoping:
 
 class TestProjectIndexOwnerScoping:
     async def test_record_and_reads_scoped_by_owner(self, db) -> None:
-        token = set_current_user_id("user-A")
-        try:
-            await project_index.record("p1", "sa", kind="chat")
-        finally:
-            reset_current_user_id(token)
-        token = set_current_user_id("user-B")
-        try:
-            await project_index.record("p1", "sb", kind="chat")
-        finally:
-            reset_current_user_id(token)
+        await project_index.record("p1", "sa", kind="chat", user_id="user-A")
+        await project_index.record("p1", "sb", kind="chat", user_id="user-B")
 
-        token = set_current_user_id("user-A")
-        try:
-            assert await project_index.list_session_ids("p1") == ["sa"]
-            assert await project_index.count_for_project("p1") == 1
-            assert {r.session_id for r in await project_index.list_recent()} == {"sa"}
-            # project_of is a system lookup by the globally-unique session id.
-            assert await project_index.project_of("sb") == "p1"
-        finally:
-            reset_current_user_id(token)
+        assert await project_index.list_session_ids("p1", user_id="user-A") == ["sa"]
+        assert await project_index.count_for_project("p1", user_id="user-A") == 1
+        assert {
+            r.session_id for r in await project_index.list_recent(user_id="user-A")
+        } == {"sa"}
+        # project_of is a system lookup by the globally-unique session id.
+        assert await project_index.project_of("sb") == "p1"
 
     async def test_remove_owner_scoped(self, db) -> None:
         for owner, sid in (("user-A", "sa"), ("user-B", "sb")):
-            token = set_current_user_id(owner)
-            try:
-                await project_index.record("p1", sid, kind="chat")
-            finally:
-                reset_current_user_id(token)
+            await project_index.record("p1", sid, kind="chat", user_id=owner)
         # user-B's remove_for_project must not touch user-A's row.
-        token = set_current_user_id("user-B")
-        try:
-            assert await project_index.remove_for_project("p1") == ["sb"]
-        finally:
-            reset_current_user_id(token)
-        token = set_current_user_id("user-A")
-        try:
-            assert await project_index.list_session_ids("p1") == ["sa"]
-        finally:
-            reset_current_user_id(token)
+        assert await project_index.remove_for_project("p1", user_id="user-B") == ["sb"]
+        assert await project_index.list_session_ids("p1", user_id="user-A") == ["sa"]

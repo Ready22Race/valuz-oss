@@ -246,6 +246,7 @@ async def resolve_session_capabilities(
             await resolve_mcp_servers(
                 enabled_slugs=enabled_mcp_provider_slugs or [],
                 connectors=connectors,
+                user_id=user_id,
             )
         )
 
@@ -424,6 +425,7 @@ async def resolve_skill_slugs_to_paths(
     with a warning rather than passed through.
     """
     import os
+
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.skills.datastore import SkillDatastore
 

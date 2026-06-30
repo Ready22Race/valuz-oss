@@ -11,8 +11,7 @@ Usage:
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import datetime
 
 import akshare as ak
 import pandas as pd

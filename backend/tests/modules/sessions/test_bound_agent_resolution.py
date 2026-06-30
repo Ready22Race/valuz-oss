@@ -74,7 +74,7 @@ def patch_uow(db, monkeypatch):
 async def _resolve(project_id: str, agent_slug: str) -> str:
     # The resolver reads no instance state — a bare stand-in for ``self`` is fine.
     kernel_agent_id, _config = await SessionService._resolve_bound_agent(
-        SimpleNamespace(), project_id, agent_slug
+        SimpleNamespace(), project_id, agent_slug, user_id="local-test-owner"
     )
     return kernel_agent_id
 
@@ -159,7 +159,7 @@ async def test_member_resolution_builds_snapshot_from_library_row(db, patch_uow)
     )
 
     kernel_agent_id, config = await SessionService._resolve_bound_agent(
-        SimpleNamespace(), "ws-x", "researcher"
+        SimpleNamespace(), "ws-x", "researcher", user_id="local-test-owner"
     )
 
     assert kernel_agent_id == "agent:researcher"
@@ -205,7 +205,7 @@ async def test_resolution_carries_connector_types_into_mcp_servers(db, patch_uow
     )
 
     _kernel_agent_id, config = await SessionService._resolve_bound_agent(
-        SimpleNamespace(), "chat-default", "analyst"
+        SimpleNamespace(), "chat-default", "analyst", user_id="local-test-owner"
     )
 
     assert [m.name for m in config.mcp_servers] == ["my-search"]

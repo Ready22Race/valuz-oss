@@ -39,7 +39,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import messaging, planning
@@ -321,6 +320,7 @@ class CoordinationService:
                     plan=plan,
                     actor="system",
                     session_id=None,
+                    user_id=user_id,
                 )
         return out
 
@@ -328,7 +328,9 @@ class CoordinationService:
     # actor-loop role callbacks (driven by ActorRunner via the bound host)
     # ------------------------------------------------------------------
 
-    async def _notify_lead_member_idle(self, session_id: str, status: str, user_id: str | None = None) -> None:
+    async def _notify_lead_member_idle(
+        self, session_id: str, status: str, user_id: str | None = None
+    ) -> None:
         """After a member turn, push a member_done message to its lead's inbox.
 
         Also appends a ``subtask_message`` task event so the timeline shows the
@@ -373,7 +375,9 @@ class CoordinationService:
                 ),
             )
 
-    async def _lead_idle_with_no_pending(self, task_id: str, project_id: str, user_id: str | None = None) -> bool:
+    async def _lead_idle_with_no_pending(
+        self, task_id: str, project_id: str, user_id: str | None = None
+    ) -> bool:
         """True when a lead has nothing left to wait for after a turn.
 
         The actor loop normally parks on the mailbox for LEAD_IDLE_TTL_S between

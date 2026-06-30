@@ -18,7 +18,6 @@ from typing import Any
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel on sys.path
 from valuz_agent.adapters.agent_resolver import _member_agent_config, summarize_role
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.tasks.datastore import (

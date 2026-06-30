@@ -15,11 +15,10 @@ import argparse
 import json
 import os
 import sys
-import time
 import ssl
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import requests
 from requests.adapters import HTTPAdapter

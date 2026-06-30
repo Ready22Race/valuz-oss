@@ -20,7 +20,6 @@ from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.modules.memory.models import TARGETS
 from valuz_agent.modules.memory.prompts import TOOL_DESCRIPTION
 from valuz_agent.modules.memory.service import MemoryError, memory_store

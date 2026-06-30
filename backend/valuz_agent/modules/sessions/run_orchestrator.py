@@ -21,7 +21,6 @@ from typing import Any
 # resolve at call time.
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters import kernel_client
-from valuz_agent.infra import auth_context
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.modules.tasks.actor_runner import run_session_to_idle
 
@@ -35,6 +34,17 @@ logger = logging.getLogger(__name__)
 _active_drains: set[str] = set()
 
 
+def _require_user_id(user_id: str | None) -> str:
+    if user_id is None:
+        raise ValueError("user_id is required")
+    return user_id
+
+
+async def _resolve_session_owner(session_id: str) -> str | None:
+    sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
+    return sessions[0].user_id if sessions else None
+
+
 def is_draining_queue(session_id: str) -> bool:
     """True while a queue-drain chain is in flight for this session.
 
@@ -44,7 +54,7 @@ def is_draining_queue(session_id: str) -> bool:
     return session_id in _active_drains
 
 
-def _chat_billing_meter(session_id: str) -> Any:
+def _chat_billing_meter(session_id: str, user_id: str | None = None) -> Any:
     """Build the chat-path billing meter callback for a session.
 
     Shared by the initial turn and every drained queue item so each metered
@@ -55,9 +65,11 @@ def _chat_billing_meter(session_id: str) -> Any:
             from valuz_agent.ports.billing import MeterEvent
             from valuz_agent.ports.extensions import ext
 
-            uid = (after_run.metadata if after_run else {}).get(
-                "owner_user_id"
-            ) or auth_context.get_current_user_id()
+            uid = (
+                getattr(after_run, "user_id", None)
+                or (after_run.metadata if after_run else {}).get("owner_user_id")
+                or user_id
+            )
             try:
                 if uid is None:
                     raise LookupError("no owner user_id for billing meter")
@@ -99,8 +111,8 @@ async def _run_agent_background(
     ``status="running"``. This wrapper adds the chat-path billing meter and the
     post-turn queue drain (docs/design/session-input-queue.md).
     """
-    meter = _chat_billing_meter(session_id)
-    owner_user_id = user_id or auth_context.get_current_user_id()
+    owner_user_id = _require_user_id(user_id)
+    meter = _chat_billing_meter(session_id, user_id=owner_user_id)
     await run_session_to_idle(
         session_id,
         content,
@@ -138,6 +150,7 @@ async def _drain_queue_after_turn(
     from valuz_agent.modules.sessions.errors import BudgetExceeded
     from valuz_agent.modules.sessions.events import SESSION_FINISHED
 
+    owner_user_id = _require_user_id(user_id)
     if session_id in _active_drains:
         return
     _active_drains.add(session_id)
@@ -158,7 +171,6 @@ async def _drain_queue_after_turn(
             text = str(payload.get("text") or "")
             attachments = list(payload.get("attachments") or [])
 
-            owner_user_id = user_id or auth_context.get_current_user_id()
             session = await kernel_client.get_session(owner_user_id, session_id)
             if session is None:
                 return
@@ -166,7 +178,7 @@ async def _drain_queue_after_turn(
             try:
                 from valuz_agent.modules.sessions.service import _enforce_budget
 
-                await _enforce_budget(session)
+                await _enforce_budget(session, user_id=owner_user_id)
             except BudgetExceeded as exc:
                 async with async_unit_of_work() as db:
                     await SessionDatastore(db).mark_queued_status(
@@ -196,14 +208,27 @@ async def _drain_queue_after_turn(
 def schedule_drain(session_id: str, event_bus: EventBus) -> None:
     """Spawn a background queue drain for an idle session (idle-kick / resume).
 
-    ``asyncio.create_task`` copies the current contextvars, so the ambient
-    request owner (``get_current_user_id``) propagates into the drain.
+    Background path: resolve the owner from ``session_id`` before draining; do
+    not rely on request ContextVar propagation.
     A no-op if a drain is already in flight for the session.
     """
     if session_id in _active_drains:
         return
-    meter = _chat_billing_meter(session_id)
-    asyncio.create_task(_drain_queue_after_turn(session_id, event_bus, on_message=meter))
+
+    async def _spawn() -> None:
+        owner_user_id = await _resolve_session_owner(session_id)
+        if not owner_user_id:
+            logger.warning("skip queue drain for %s: unknown session owner", session_id)
+            return
+        meter = _chat_billing_meter(session_id, user_id=owner_user_id)
+        await _drain_queue_after_turn(
+            session_id,
+            event_bus,
+            on_message=meter,
+            user_id=owner_user_id,
+        )
+
+    asyncio.create_task(_spawn())
 
 
 # Strip leading skill-trigger tokens (``/<slug>``) when deriving a
@@ -241,7 +266,10 @@ async def _finalize_session(
     shows a bare "Run failed". ``stop_reason_*`` mark the terminal state as an
     error rather than a clean idle.
     """
-    owner_user_id = auth_context.get_current_user_id()
+    owner_user_id = await _resolve_session_owner(session_id)
+    if not owner_user_id:
+        logger.warning("skip finalize for %s: unknown session owner", session_id)
+        return
     session = await kernel_client.get_session(owner_user_id, session_id)
     if session is None:
         return

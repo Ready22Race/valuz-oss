@@ -15,8 +15,7 @@ Usage:
 import argparse
 import json
 import sys
-from datetime import date, datetime
-from typing import Any
+from datetime import date
 
 import akshare as ak
 import pandas as pd

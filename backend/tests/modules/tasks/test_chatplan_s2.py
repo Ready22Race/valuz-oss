@@ -16,11 +16,12 @@ import valuz_agent.boot.kernel  # noqa: F401
 from sqlalchemy import create_engine, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
-
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.tasks import planning
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
+
+OWNER = "local-test-owner"
 
 
 @pytest.fixture
@@ -96,6 +97,7 @@ def test_plan_task_bumps_plan_version_from_zero_to_one(db_factory, tmp_path):
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "Step A", "goal": "g"}],
         )
@@ -111,6 +113,7 @@ def test_plan_task_response_includes_current_version(db_factory, tmp_path):
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -123,7 +126,7 @@ def test_plan_task_response_includes_current_version(db_factory, tmp_path):
 
 def test_get_plan_returns_current_version_zero_for_unwritten_plan(db_factory, tmp_path):
     _make_draft(db_factory, tmp_path)
-    snap = asyncio.run(planning.get_plan(task_id="t1", project_id="w1"))
+    snap = asyncio.run(planning.get_plan(task_id="t1", project_id="w1", user_id=OWNER))
     assert snap["current_version"] == 0
     assert snap["subtasks"] == []
 
@@ -134,11 +137,12 @@ def test_get_plan_returns_current_version_after_plan_task(db_factory, tmp_path):
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
     )
-    snap = asyncio.run(planning.get_plan(task_id="t1", project_id="w1"))
+    snap = asyncio.run(planning.get_plan(task_id="t1", project_id="w1", user_id=OWNER))
     assert snap["current_version"] == 1
 
 
@@ -151,6 +155,7 @@ def test_modify_plan_with_matching_expected_version_succeeds(db_factory, tmp_pat
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -160,6 +165,7 @@ def test_modify_plan_with_matching_expected_version_succeeds(db_factory, tmp_pat
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
             expected_version=1,
@@ -175,6 +181,7 @@ def test_modify_plan_with_stale_expected_version_returns_cas_conflict(db_factory
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -184,6 +191,7 @@ def test_modify_plan_with_stale_expected_version_returns_cas_conflict(db_factory
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
         )
@@ -192,6 +200,7 @@ def test_modify_plan_with_stale_expected_version_returns_cas_conflict(db_factory
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             update=[{"key": "a", "title": "A new"}],
             expected_version=1,  # stale — actual is 2
@@ -210,6 +219,7 @@ def test_modify_plan_without_expected_version_skips_cas_check(db_factory, tmp_pa
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -218,6 +228,7 @@ def test_modify_plan_without_expected_version_skips_cas_check(db_factory, tmp_pa
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
         )
@@ -226,6 +237,7 @@ def test_modify_plan_without_expected_version_skips_cas_check(db_factory, tmp_pa
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             update=[{"key": "a", "title": "A2"}],
             # No expected_version — should succeed regardless.
@@ -241,6 +253,7 @@ def test_modify_plan_bumps_plan_version_on_success(db_factory, tmp_path):
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -249,6 +262,7 @@ def test_modify_plan_bumps_plan_version_on_success(db_factory, tmp_path):
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
             expected_version=1,
@@ -267,6 +281,7 @@ def test_abandon_task_flips_draft_to_abandoned(db_factory, tmp_path):
         orch.abandon_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             caller_session_id="chat-session-1",
             reason="user changed their mind",
         )
@@ -282,6 +297,7 @@ def test_abandon_task_appends_abandoned_event(db_factory, tmp_path):
         orch.abandon_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             caller_session_id="chat-session-1",
         )
     )
@@ -302,6 +318,7 @@ def test_abandon_task_rejects_non_draft(db_factory, tmp_path):
         orch.abandon_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             caller_session_id="chat-session-1",
         )
     )
@@ -316,6 +333,7 @@ def test_abandon_task_returns_error_for_missing_task(db_factory, tmp_path):
         orch.abandon_task(
             task_id="nope",
             project_id="w1",
+            user_id=OWNER,
             caller_session_id="chat-session-1",
         )
     )
@@ -333,6 +351,7 @@ def test_commit_task_rejects_empty_plan(db_factory, tmp_path):
         orch.commit_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             caller_session_id="chat-session-1",
         )
     )
@@ -352,6 +371,7 @@ def test_commit_task_rejects_non_draft(db_factory, tmp_path):
         orch.commit_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             caller_session_id="chat-session-1",
         )
     )
@@ -384,6 +404,7 @@ def test_plan_version_monotonic_across_plan_task_then_modify(db_factory, tmp_pat
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -393,6 +414,7 @@ def test_plan_version_monotonic_across_plan_task_then_modify(db_factory, tmp_pat
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
         )
@@ -402,6 +424,7 @@ def test_plan_version_monotonic_across_plan_task_then_modify(db_factory, tmp_pat
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             update=[{"key": "a", "title": "A2"}],
         )
@@ -416,6 +439,7 @@ def test_failed_cas_does_not_bump_plan_version(db_factory, tmp_path):
         planning.plan_task(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             subtasks=[{"key": "a", "title": "A", "goal": "g"}],
         )
@@ -425,6 +449,7 @@ def test_failed_cas_does_not_bump_plan_version(db_factory, tmp_path):
         planning.modify_plan(
             task_id="t1",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="chat-session-1",
             add=[{"key": "b", "title": "B", "goal": "g"}],
             expected_version=99,

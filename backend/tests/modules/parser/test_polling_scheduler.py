@@ -26,6 +26,8 @@ from valuz_agent.modules.parser.polling import (
 )
 from valuz_agent.ports.parser_backend import ParseResult
 
+OWNER = "local-test-owner"
+
 
 class _FakeHandler:
     """Scripted handler: a per-instance queue of outcomes the test enqueues
@@ -105,7 +107,11 @@ async def scheduler(_db):
 async def test_pending_then_succeeds(scheduler):
     sched, handler = scheduler
     handler.outcomes = [PollPending(next_in_s=0.01), PollSucceeded(raw={"k": "v"})]
-    task_id = await sched.enqueue("parser.fake", {"file": "x"})
+    task_id = await sched.enqueue(
+        "parser.fake",
+        {"file": "x"},
+        user_id=OWNER,
+    )
     result = await asyncio.wait_for(sched.await_task(task_id), timeout=15.0)
     assert result.markdown == "**done**"
     assert result.metadata["engine"] == "fake"
@@ -116,7 +122,11 @@ async def test_pending_then_succeeds(scheduler):
 async def test_failure_propagates_to_awaiter(scheduler):
     sched, handler = scheduler
     handler.outcomes = [PollFailed(error="upstream broke")]
-    task_id = await sched.enqueue("parser.fake", {})
+    task_id = await sched.enqueue(
+        "parser.fake",
+        {},
+        user_id=OWNER,
+    )
     with pytest.raises(RuntimeError, match="upstream broke"):
         await asyncio.wait_for(sched.await_task(task_id), timeout=15.0)
 
@@ -124,7 +134,11 @@ async def test_failure_propagates_to_awaiter(scheduler):
 async def test_unknown_kind_at_enqueue_raises(scheduler):
     sched, _ = scheduler
     with pytest.raises(KeyError):
-        await sched.enqueue("parser.does_not_exist", {})
+        await sched.enqueue(
+            "parser.does_not_exist",
+            {},
+            user_id=OWNER,
+        )
 
 
 async def test_cancel_resolves_awaiter_with_error(scheduler):
@@ -132,7 +146,11 @@ async def test_cancel_resolves_awaiter_with_error(scheduler):
     # Make poll always pending so the cancel-vs-completion race goes to cancel.
     handler.outcomes = [PollPending(next_in_s=0.05)] * 100
 
-    task_id = await sched.enqueue("parser.fake", {})
+    task_id = await sched.enqueue(
+        "parser.fake",
+        {},
+        user_id=OWNER,
+    )
 
     async def _cancel_soon():
         await asyncio.sleep(0.1)

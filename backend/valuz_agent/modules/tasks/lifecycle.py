@@ -50,7 +50,6 @@ from valuz_agent.adapters.agent_resolver import (
     embed_agent_config,
     spill_goal_brief_if_too_long,
 )
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
@@ -928,7 +927,7 @@ class LifecycleService:
                 )
                 return
 
-            summary = await self._last_assistant_summary(lead_session_id) or (
+            summary = await self._last_assistant_summary(lead_session_id, user_id=user_id) or (
                 "(auto-finalized) Lead ended its turn with no pending subtasks; "
                 "task closed automatically."
             )
@@ -951,7 +950,7 @@ class LifecycleService:
                 "auto-finalize: task %s completed (lead natural end, no explicit finish_task)",
                 task_id,
             )
-            _notify_task_memory(task_id)
+            _notify_task_memory(task_id, user_id=user_id)
 
     # ------------------------------------------------------------------
     # _finalize_actor — the run_actor_loop finally callback
@@ -1093,6 +1092,7 @@ class LifecycleService:
                                     plan=plan,
                                     actor=agent_slug,
                                     session_id=session_id,
+                                    user_id=user_id,
                                 )
                     await event_ds.append_event(
                         user_id,
@@ -1215,7 +1215,7 @@ class LifecycleService:
         # Graduate the finished task's multi-agent lessons into project memory
         # (only on a real completion, not a user-requested 'stopped').
         if final_status == "completed":
-            _notify_task_memory(task_id)
+            _notify_task_memory(task_id, user_id=user_id)
 
         # Session-modes reconciliation (task-goal-mode.md §Key decisions):
         # ``finish_task`` is the authoritative terminal. Force the lead

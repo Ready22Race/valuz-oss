@@ -55,7 +55,6 @@ import valuz_agent.boot.kernel  # noqa: F401
 
 from src.core.tools import ExecContext, ToolDef, ToolResult
 
-from valuz_agent.api.deps import get_current_user_id
 
 logger = logging.getLogger(__name__)
 

@@ -126,7 +126,7 @@ class AgentService:
     # ------------------------------------------------------------------
 
     async def _resolve_mcp_servers(
-        self, connector_bindings: list[dict[str, str]] | None
+        self, connector_bindings: list[dict[str, str]] | None, user_id: str
     ) -> tuple[Any, ...]:
         """Resolve connector bindings into kernel ``McpServerConfig`` rows.
 
@@ -148,7 +148,7 @@ class AgentService:
         )
 
         out = []
-        for cfg in await self._connectors.resolve_mcp_servers(slugs):
+        for cfg in await self._connectors.resolve_mcp_servers(slugs, user_id=user_id):
             if getattr(cfg, "transport", None) == "stdio" or hasattr(cfg, "command"):
                 out.append(
                     McpStdioServerConfig(
@@ -174,7 +174,9 @@ class AgentService:
     # Shared kernel AgentConfig (v2 live-reference)
     # ------------------------------------------------------------------
 
-    async def build_agent_config(self, row: AgentRow, agent_id: str | None = None) -> AgentConfig:
+    async def build_agent_config(
+        self, row: AgentRow, agent_id: str | None = None, user_id: str | None = None
+    ) -> AgentConfig:
         """Build an in-memory kernel ``AgentConfig`` from an AgentRow's fields.
 
         This is the single AgentRow→AgentConfig constructor: session-creation
@@ -186,6 +188,7 @@ class AgentService:
         (mcp_resolver / provider_resolver) see an identical shape.
         """
         kernel_agent_id = agent_id or f"agent:{row.slug}"[:36]
+        owner_user_id = user_id or row.user_id
         metadata: dict[str, Any] = {}
         connector_bindings = [{"type": s} for s in (row.connector_types or [])] or None
         if connector_bindings:
@@ -199,7 +202,9 @@ class AgentService:
             runtime_provider=row.runtime,
             instructions=row.instructions,
             skills=tuple(row.skills or []),
-            mcp_servers=await self._resolve_mcp_servers(connector_bindings),
+            mcp_servers=await self._resolve_mcp_servers(
+                connector_bindings, user_id=owner_user_id
+            ),
             permission_mode="full_access",
             effort=row.effort or None,
             metadata=metadata,

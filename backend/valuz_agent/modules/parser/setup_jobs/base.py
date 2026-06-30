@@ -27,7 +27,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.parser.datastore import SetupJobDatastore
 from valuz_agent.modules.parser.models import SetupJobRow

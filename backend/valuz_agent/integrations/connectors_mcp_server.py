@@ -20,18 +20,25 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from valuz_agent.modules.connectors.models import AuthType, TransportType
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.auth_context import (
     reset_current_user_id,
     set_current_user_id,
 )
+from valuz_agent.modules.connectors.models import AuthType, TransportType
 
 logger = logging.getLogger(__name__)
 
 _session_var: ContextVar[str | None] = ContextVar("valuz_connectors_mcp_session_id", default=None)
+_owner_var: ContextVar[str | None] = ContextVar("valuz_connectors_mcp_owner_id", default=None)
 
 _mcp = FastMCP("valuz-connectors")
+
+
+def _current_user_id() -> str:
+    user_id = _owner_var.get()
+    if not user_id:
+        raise RuntimeError("connectors MCP tool called outside of an owner-scoped request")
+    return user_id
 
 
 def _make_connector_service(db: Any) -> Any:
@@ -126,9 +133,10 @@ async def list_connected_mcp() -> str:
 
         async with async_unit_of_work(commit=False) as db:
             svc = _make_connector_service(db)
+            user_id = _current_user_id()
             connectors = [
                 {"id": v.id, "slug": v.slug, "display_name": v.display_name, "status": v.status}
-                for v in await svc.list_connectors(get_current_user_id())
+                for v in await svc.list_connectors(user_id)
                 if v.status == "connected"
             ]
         return json.dumps({"ok": True, "connectors": connectors}, ensure_ascii=False)
@@ -173,9 +181,8 @@ async def list_recommended_mcp() -> str:
 
         async with async_unit_of_work(commit=False) as db:
             svc = _make_connector_service(db)
-            installed_slugs = {
-                v.slug for v in await svc.list_connectors(get_current_user_id())
-            }
+            user_id = _current_user_id()
+            installed_slugs = {v.slug for v in await svc.list_connectors(user_id)}
 
         items = [
             {
@@ -305,12 +312,7 @@ async def _invoke(
 
     async with async_unit_of_work() as db:
         svc = _make_connector_service(db)
-        # The owner-scoped service / route calls below need an explicit
-        # user_id. ``create_connector`` is a FastAPI route whose ``user_id``
-        # arrives via ``Depends`` — calling it directly here skips DI, so we
-        # resolve the owner (published by AuthMiddleware for this internal
-        # request) and pass it through ourselves.
-        user_id = get_current_user_id()
+        user_id = _current_user_id()
         entry = next((e for e in CONNECTOR_DIRECTORY if e["slug"] == slug), None) if slug else None
 
         if entry:
@@ -591,11 +593,13 @@ def build_connectors_mcp_asgi() -> Any:
             return
 
         owner_token = set_current_user_id(owner_id)
+        owner_ctx_token = _owner_var.set(owner_id)
         ctx_token = _session_var.set(session_id)
         try:
             await inner(scope, receive, send)
         finally:
             _session_var.reset(ctx_token)
+            _owner_var.reset(owner_ctx_token)
             reset_current_user_id(owner_token)
 
     return _app

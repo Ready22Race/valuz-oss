@@ -32,10 +32,6 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from valuz_agent.i18n import t
-from valuz_agent.infra.auth_context import (
-    reset_current_user_id,
-    set_current_user_id,
-)
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.automations.models import AutomationRow, AutomationRunRow
 from valuz_agent.modules.automations.triggers import TriggerEvaluator
@@ -344,11 +340,8 @@ class InProcessAutomationRunner:
                 return
 
             # Owner boundary: an automation fires from the background scheduler
-            # with no request context. Publish the automation's owner so the
-            # session it creates and every owner-scoped read below attribute to
-            # the user who owns the automation (mirrors AuthMiddleware on the
-            # request path).
-            owner_token = set_current_user_id(row.user_id) if row.user_id else None
+            # with no request context. Use the automation row's stored owner and
+            # pass it explicitly through every owner-scoped call.
             self._active_ids[automation_id] = user_id
             try:
                 project_name = await self._resolve_project_name(
@@ -489,8 +482,6 @@ class InProcessAutomationRunner:
                 logger.info("Run %s completed: %s", run_id, run.status)
             finally:
                 self._active_ids.pop(automation_id, None)
-                if owner_token is not None:
-                    reset_current_user_id(owner_token)
 
     # ── Task-mode execution ────────────────────────────────────────
 
@@ -633,13 +624,14 @@ class InProcessAutomationRunner:
 
     async def _user_default_tz(self) -> str:
         """Read the user-level default timezone (loop-native async prefs)."""
-        from valuz_agent.infra.auth_context import get_current_user_id
+        from valuz_agent.infra.config import settings
         from valuz_agent.infra.db import async_unit_of_work
+        from valuz_agent.infra.local_identity import resolve_local_user_id
         from valuz_agent.modules.settings.preferences import get_default_timezone
 
-        user_id = get_current_user_id()
-        if user_id is None:
+        if settings.deployment_type != "local":
             return "UTC"
+        user_id = resolve_local_user_id()
         try:
             async with async_unit_of_work(commit=False) as s:
                 return await get_default_timezone(s, user_id=user_id)
@@ -647,7 +639,9 @@ class InProcessAutomationRunner:
             logger.exception("Falling back to UTC after preferences lookup failure")
             return "UTC"
 
-    async def _resolve_project_name(self, db: Any, project_id: str, user_id: str | None = None) -> str:
+    async def _resolve_project_name(
+        self, db: Any, project_id: str, user_id: str | None = None
+    ) -> str:
         """Look up the project's display name for ``{{project.name}}``.
 
         Falls back to the id if the project was deleted out from under the

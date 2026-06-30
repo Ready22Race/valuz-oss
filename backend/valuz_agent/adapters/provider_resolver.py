@@ -72,7 +72,6 @@ from app.schemas import (
 
 # Side-effect import — surfaces ``src.core...`` on sys.path.
 import valuz_agent.boot.kernel  # noqa: F401
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.models import ProviderRow
@@ -168,7 +167,7 @@ async def resolve_model_provider(
         # catalog hands back a live credential, gated on its own long-lived key
         # (so this also works in background automations with no request JWT).
         # Returns None for ids it doesn't own.
-        cred = await ext.llm_provider.resolve(provider_id)
+        cred = await ext.llm_provider.resolve(provider_id, user_id=user_id)
         if cred is not None:
             if cred.api_protocol not in {
                 "anthropic",

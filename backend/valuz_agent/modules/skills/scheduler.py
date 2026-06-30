@@ -89,22 +89,21 @@ def run_skill_scan() -> None:
 
 
 async def _arun_skill_scan() -> None:
-    # The skills auto-scan daemon runs as an owner-specific background job.
-    # ``startup_scan`` is fully owner-explicit (threads ``user_id`` down), so we
-    # derive owner from ambient context when present. Without owner, skip to avoid
-    # implicit local-install fallback in multi-owner deployments.
     from valuz_agent.api.deps import get_skill_service
+    from valuz_agent.infra.config import settings
     from valuz_agent.infra.eventbus import event_bus
-    from valuz_agent.api.deps import get_current_user_id_optional
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.modules.skills.events import SKILL_CHANGED
 
-    owner = get_current_user_id_optional()
-    if not owner:
+    if settings.deployment_type != "local":
         logger.info(
-            "skill auto-scan skipped: owner context is unset; "
-            "pass explicit owner in background path instead of local fallback"
+            "skill auto-scan skipped (deployment_type=%s)", settings.deployment_type
         )
         return
+    # Background path: no request context. In the OSS local profile the scan job
+    # is explicitly owned by the stable local install identity; cloud/shared
+    # deployments disable this scheduler rather than inventing a synthetic owner.
+    owner = resolve_local_user_id()
     gen = get_skill_service()
     svc = await gen.__anext__()
     try:
