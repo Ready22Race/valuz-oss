@@ -146,11 +146,38 @@ app.on("activate", () => {
   }
 });
 
-app.on("before-quit", () => {
-  desktopRuntime.stopAllServices();
-  stopLogTail();
-  if (appTray) {
-    appTray.destroy();
-    appTray = null;
-  }
+// Upper bound on quit-time cleanup so a wedged sidecar can never block the app
+// (or the updater's install-on-quit) from exiting. Comfortably above the
+// sidecar's own SIGTERM→SIGKILL grace window.
+const QUIT_CLEANUP_BUDGET_MS = 8000;
+let quitCleanupComplete = false;
+
+app.on("before-quit", (event) => {
+  // Second pass (after cleanup): let the real quit proceed so the updater's
+  // install-on-quit still runs. We re-issue app.quit() (NOT app.exit()) for
+  // exactly this reason.
+  if (quitCleanupComplete) return;
+
+  event.preventDefault();
+  void (async () => {
+    try {
+      // Await the process-tree teardown so children release their files before
+      // we exit / the installer swaps them. Windows kills the tree synchronously
+      // (taskkill /T /F); POSIX awaits the SIGTERM→SIGKILL group shutdown.
+      await Promise.race([
+        desktopRuntime.stopAllServices(),
+        new Promise((resolve) => setTimeout(resolve, QUIT_CLEANUP_BUDGET_MS)),
+      ]);
+    } catch {
+      // Never let cleanup failure trap the app in a non-quitting state.
+    } finally {
+      stopLogTail();
+      if (appTray) {
+        appTray.destroy();
+        appTray = null;
+      }
+      quitCleanupComplete = true;
+      app.quit();
+    }
+  })();
 });

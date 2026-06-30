@@ -73,10 +73,6 @@ async def test_task_kickoff_leaves_duration_unset_and_titles_summary() -> None:
             side_effect=itertools.count(1000, 100),
         ),
         patch(
-            "valuz_agent.modules.automations.in_process_runner.require_current_user_id",
-            return_value="u1",
-        ),
-        patch(
             "valuz_agent.modules.tasks.orchestrator.task_orchestrator.kickoff",
             new=AsyncMock(return_value=fake_task),
         ),
@@ -93,6 +89,7 @@ async def test_task_kickoff_leaves_duration_unset_and_titles_summary() -> None:
             run_id="run-1",
             automation_id="auto-1",
             rendered_prompt=prompt,
+            user_id="u1",
         )
 
     # Fire-and-forget kickoff: duration is left unset (UI shows "—").

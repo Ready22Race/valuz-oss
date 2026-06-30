@@ -103,6 +103,7 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -
     what actually promotes the staged slug into the library; see
     ``POST /v1/skills/submissions/{session_id}/{slug}/confirm``.
     """
+    user_id = context.user_id
     slug = args.get("slug") or "<unknown>"
     summary = args.get("summary") or ""
     change_kind = args.get("change_kind") or "create"
@@ -132,10 +133,8 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -
             is_error=True,
         )
 
-    from valuz_agent.infra.auth_context import require_current_user_id
     from valuz_agent.modules.skills.staging import staging_dir_for_session
 
-    user_id = require_current_user_id()
     staging_base = await staging_dir_for_session(user_id, session_id)
     expected_dir = staging_base / str(slug)
     project_root = str(staging_base.parent)

@@ -13,6 +13,7 @@ from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.integrations.docs_embedded import EmbeddedDocsRuntime
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.integrations.skills_official import OfficialSkillSource
+from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.automations.datastore import AutomationDatastore
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
@@ -40,26 +41,31 @@ if TYPE_CHECKING:
 
     from valuz_agent.modules.automations.service import AutomationService
     from valuz_agent.modules.decisions.aggregator import DecisionAggregator
+    from valuz_agent.modules.project_packs.service import ProjectPackService
 
 
-async def get_current_user_id() -> str | None:
-    """Resolve the current user_id from the request. OSS → ANONYMOUS."""
-    return auth_context.get_current_user_id()
+def get_current_user_id() -> str:
+    """Resolve the current request owner id; require a concrete user_id.
 
-
-async def require_current_user_id() -> str:
-    """FastAPI dependency: the request owner, required.
-
-    Routes that perform owner-scoped work inject this and thread the value down
-    as the first argument (``user_id``) of the service/datastore methods they
-    call. ``AuthMiddleware`` sets the owner once it resolves an identity; an
-    unauthenticated request (no identity resolved — e.g. the commercial overlay
-    with no/invalid bearer token) leaves it unset and this raises
-    ``OwnerContextUnsetError``, which ``ErrorHandlerMiddleware`` maps to 401 (so
-    both this injected path and routes that source the owner internally surface
-    the same auth failure uniformly).
+    This is the OSS-wide read-side entrypoint for owner-scoped service/datastore
+    calls. When context is unset it raises ``OwnerContextUnsetError`` which the
+    middleware maps to ``401``.
     """
-    return auth_context.require_current_user_id()
+    user_id = auth_context.get_current_user_id()
+    if user_id is None:
+        raise auth_context.OwnerContextUnsetError(
+            "current_user_id is unset; owner-scoped reads require an owner"
+        )
+    return user_id
+
+
+def get_current_user_id_optional() -> str | None:
+    """Resolve the current request owner id if present.
+
+    Kept for non-fatal call-sites that intentionally tolerate missing context
+    (background jobs or legacy optional fallbacks).
+    """
+    return auth_context.get_current_user_id()
 
 
 def _secret_store() -> SecretStorePort:
@@ -90,6 +96,7 @@ async def get_project_service() -> AsyncGenerator[ProjectService, None]:
             automation_datastore=AutomationDatastore(db),
             skill_datastore=SkillDatastore(db),
             connector_datastore=ConnectorDatastore(db),
+            member_datastore=ProjectMemberDatastore(db),
         )
 
 
@@ -180,7 +187,7 @@ async def build_parser_router(db: AsyncSession, user_id: str) -> ParserRouter:
     """
     from valuz_agent.modules.settings.parser_routing import load_routing_config
 
-    routing_config = await load_routing_config(db)
+    routing_config = await load_routing_config(db, user_id=user_id)
     return ParserRouter(
         registry=_parser_registry(),
         secret_resolver=_SecretStoreResolver(_secret_store(), user_id),
@@ -192,7 +199,7 @@ async def build_parser_router(db: AsyncSession, user_id: str) -> ParserRouter:
 async def get_document_service() -> AsyncGenerator[DocumentLibraryService, None]:
     from valuz_agent.infra.config import settings
 
-    user_id = auth_context.require_current_user_id()
+    user_id = get_current_user_id()
     async with async_unit_of_work() as db:
         preview_dir = settings.docs_dir / "preview"
         preview_dir.mkdir(parents=True, exist_ok=True)
@@ -247,12 +254,13 @@ async def get_automation_service() -> AsyncGenerator[AutomationService, None]:
         get_effective_default_timezone,
     )
 
+    user_id = get_current_user_id()
     async with async_unit_of_work() as db:
-        locale = await get_default_locale(db)
+        locale = await get_default_locale(db, user_id=user_id)
         # Effective default = configured tz, else the detected OS tz (so a
         # schedule created without an explicit tz lands on the user's local
         # clock, not UTC).
-        default_timezone = await get_effective_default_timezone(db)
+        default_timezone = await get_effective_default_timezone(db, user_id=user_id)
         project_svc = ProjectService(
             datastore=ProjectDatastore(db),
             event_bus=event_bus,
@@ -276,6 +284,60 @@ async def get_settings_service() -> AsyncGenerator[SettingsService, None]:
         yield SettingsService(
             datastore=SettingsDatastore(db),
             event_bus=event_bus,
+        )
+
+
+async def get_project_pack_service() -> AsyncGenerator[ProjectPackService, None]:
+    """Construct a ``ProjectPackService`` per request.
+
+    All four collaborators (``ProjectService``, ``AgentService``,
+    ``AgentPackService``, ``AutomationService``) are wired over the SAME
+    unit-of-work so the import's writes (project row + members +
+    automations + project skills + project connectors + installed
+    agents / skills / connectors) land in a single transactional view.
+    """
+    from valuz_agent.modules.agent_packs.service import AgentPackService
+    from valuz_agent.modules.agents.service import AgentService
+    from valuz_agent.modules.automations.service import AutomationService
+    from valuz_agent.modules.connectors.service import ConnectorService
+    from valuz_agent.modules.project_packs.service import ProjectPackService
+    from valuz_agent.modules.settings.preferences import (
+        get_default_locale,
+        get_effective_default_timezone,
+    )
+
+    # Mirror ``get_automation_service``: resolve owner from ambient request
+    # context up front and thread it through to the preference reads, which
+    # require an explicit ``user_id`` (see ``_read`` in ``settings.preferences``).
+    user_id = get_current_user_id()
+    async with async_unit_of_work() as db:
+        locale = await get_default_locale(db, user_id=user_id)
+        default_timezone = await get_effective_default_timezone(db, user_id=user_id)
+        project_svc = ProjectService(
+            datastore=ProjectDatastore(db),
+            event_bus=event_bus,
+            automation_datastore=AutomationDatastore(db),
+            skill_datastore=SkillDatastore(db),
+            connector_datastore=ConnectorDatastore(db),
+            session_datastore=SessionDatastore(db),
+            document_datastore=DocumentDatastore(db),
+        )
+        connector_svc = ConnectorService(datastore=ConnectorDatastore(db))
+        agent_svc = AgentService(db=db, connector_service=connector_svc)
+        agent_pack_svc = AgentPackService(agent_svc)
+        automation_svc = AutomationService(
+            db=db,
+            event_bus=event_bus,
+            project_service=project_svc,
+            agent_service=agent_svc,
+            locale=locale,
+            default_timezone=default_timezone,
+        )
+        yield ProjectPackService(
+            project_service=project_svc,
+            agent_service=agent_svc,
+            agent_pack_service=agent_pack_svc,
+            automation_service=automation_svc,
         )
 
 

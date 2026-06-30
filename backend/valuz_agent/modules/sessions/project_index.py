@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from sqlalchemy import delete, func, select, update
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.sessions.models import ProjectSessionRow
@@ -38,13 +37,16 @@ async def record(
     *,
     kind: str = "chat",
     origin: str = "user",
+    user_id: str | None = None,
 ) -> None:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Register a freshly created kernel session under its project.
 
     Idempotent on ``session_id`` (re-recording an id updates the row) so
     boot-time reconciliation and retries can't violate the unique index.
     """
-    user_id = require_current_user_id()
     async with async_unit_of_work() as db:
         existing = (
             (await db.execute(select(ProjectSessionRow).filter_by(session_id=session_id)))
@@ -70,6 +72,7 @@ async def record(
 async def list_session_ids(
     project_id: str | None = None,
     *,
+    user_id: str,
     user_only: bool = False,
     kind: str | None = None,
     limit: int = 200,
@@ -79,9 +82,11 @@ async def list_session_ids(
     (``chat``) and drops task-internal runs (lead / subtask). ``kind`` filters
     to one exact ``ProjectSessionRow.kind`` (e.g. ``"task_lead"``) and takes
     precedence over ``user_only`` when both are given."""
+    if user_id is None:
+        raise ValueError("user_id is required")
     async with async_unit_of_work(commit=False) as db:
         stmt = select(ProjectSessionRow.session_id).where(
-            ProjectSessionRow.user_id == require_current_user_id()
+            ProjectSessionRow.user_id == user_id
         )
         if project_id is not None:
             stmt = stmt.where(ProjectSessionRow.project_id == project_id)
@@ -123,29 +128,33 @@ async def set_queue_paused(session_id: str, paused: bool) -> None:
         )
 
 
-async def count_for_project(project_id: str) -> int:
+async def count_for_project(project_id: str, user_id: str) -> int:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     async with async_unit_of_work(commit=False) as db:
         stmt = select(func.count(ProjectSessionRow.id)).where(
             ProjectSessionRow.project_id == project_id,
-            ProjectSessionRow.user_id == require_current_user_id(),
+            ProjectSessionRow.user_id == user_id,
         )
         return int((await db.execute(stmt)).scalar() or 0)
 
 
-async def remove(session_id: str) -> None:
+async def remove(session_id: str, user_id: str | None = None) -> None:
     async with async_unit_of_work() as db:
         await db.execute(
             delete(ProjectSessionRow).where(
                 ProjectSessionRow.session_id == session_id,
-                ProjectSessionRow.user_id == require_current_user_id(),
+                ProjectSessionRow.user_id == user_id,
             )
         )
 
 
-async def remove_for_project(project_id: str) -> list[str]:
+async def remove_for_project(project_id: str, user_id: str | None) -> list[str]:
     """Drop every index row for ``project_id``; returns the removed session
     ids so the caller can cascade the kernel-side deletes."""
-    user_id = require_current_user_id()
+    if user_id is None:
+        raise ValueError("user_id is required")
     async with async_unit_of_work() as db:
         stmt = select(ProjectSessionRow.session_id).where(
             ProjectSessionRow.project_id == project_id,
@@ -161,13 +170,15 @@ async def remove_for_project(project_id: str) -> list[str]:
         return ids
 
 
-async def list_recent(limit: int = 200) -> list[ProjectSessionRow]:
+async def list_recent(limit: int = 200, user_id: str | None = None) -> list[ProjectSessionRow]:
     """Most recent index rows for the caller across all their projects — the
     runs-overview feed."""
+    if user_id is None:
+        raise ValueError("user_id is required")
     async with async_unit_of_work(commit=False) as db:
         stmt = (
             select(ProjectSessionRow)
-            .where(ProjectSessionRow.user_id == require_current_user_id())
+            .where(ProjectSessionRow.user_id == user_id)
             .order_by(ProjectSessionRow.created_at.desc())
             .limit(limit)
         )

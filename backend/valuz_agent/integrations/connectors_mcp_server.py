@@ -15,19 +15,23 @@ from __future__ import annotations
 
 import json
 import logging
-from contextvars import ContextVar
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.integrations._mcp_asgi import (
+    build_internal_mcp_asgi,
+    get_current_mcp_user_id,
+)
 from valuz_agent.modules.connectors.models import AuthType, TransportType
 
 logger = logging.getLogger(__name__)
 
-_session_var: ContextVar[str | None] = ContextVar("valuz_connectors_mcp_session_id", default=None)
-
 _mcp = FastMCP("valuz-connectors")
+
+
+def _current_user_id() -> str:
+    return get_current_mcp_user_id()
 
 
 def _make_connector_service(db: Any) -> Any:
@@ -122,9 +126,10 @@ async def list_connected_mcp() -> str:
 
         async with async_unit_of_work(commit=False) as db:
             svc = _make_connector_service(db)
+            user_id = _current_user_id()
             connectors = [
                 {"id": v.id, "slug": v.slug, "display_name": v.display_name, "status": v.status}
-                for v in await svc.list_connectors(require_current_user_id())
+                for v in await svc.list_connectors(user_id)
                 if v.status == "connected"
             ]
         return json.dumps({"ok": True, "connectors": connectors}, ensure_ascii=False)
@@ -169,7 +174,8 @@ async def list_recommended_mcp() -> str:
 
         async with async_unit_of_work(commit=False) as db:
             svc = _make_connector_service(db)
-            installed_slugs = {v.slug for v in await svc.list_connectors(require_current_user_id())}
+            user_id = _current_user_id()
+            installed_slugs = {v.slug for v in await svc.list_connectors(user_id)}
 
         items = [
             {
@@ -299,12 +305,7 @@ async def _invoke(
 
     async with async_unit_of_work() as db:
         svc = _make_connector_service(db)
-        # The owner-scoped service / route calls below need an explicit
-        # user_id. ``create_connector`` is a FastAPI route whose ``user_id``
-        # arrives via ``Depends`` — calling it directly here skips DI, so we
-        # resolve the owner (published by AuthMiddleware for this internal
-        # request) and pass it through ourselves.
-        user_id = require_current_user_id()
+        user_id = _current_user_id()
         entry = next((e for e in CONNECTOR_DIRECTORY if e["slug"] == slug), None) if slug else None
 
         if entry:
@@ -538,34 +539,8 @@ def connectors_mcp_session_manager_run() -> Any:
 
 
 def build_connectors_mcp_asgi() -> Any:
-    from starlette.responses import PlainTextResponse
-
-    inner = _mcp.streamable_http_app()
-
-    async def _app(scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            response = PlainTextResponse("Not Found", status_code=404)
-            await response(scope, receive, send)
-            return
-
-        from valuz_agent.infra.config import settings as _settings
-
-        headers = {
-            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []
-        }
-        if headers.get("x-valuz-internal") != _settings.internal_mcp_token:
-            response = PlainTextResponse("Forbidden", status_code=403)
-            await response(scope, receive, send)
-            return
-
-        session_id = headers.get("x-valuz-session-id") or ""
-        ctx_token = _session_var.set(session_id)
-        try:
-            await inner(scope, receive, send)
-        finally:
-            _session_var.reset(ctx_token)
-
-    return _app
+    """Return an ASGI app to mount at ``/internal/mcp/connectors``."""
+    return build_internal_mcp_asgi(_mcp.streamable_http_app())
 
 
 def connectors_mcp_url(*, base_url: str) -> str:

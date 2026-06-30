@@ -72,7 +72,6 @@ from app.schemas import (
 
 # Side-effect import — surfaces ``src.core...`` on sys.path.
 import valuz_agent.boot.kernel  # noqa: F401
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.models import ProviderRow
@@ -127,6 +126,8 @@ _RUNTIME_TO_DEFAULT_PROTOCOL: dict[RuntimeProvider, ApiProtocol] = {
     "deepagents": "openai_completion",
 }
 
+_ZHIPU_CODING_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+
 
 async def resolve_model_provider(
     *,
@@ -135,6 +136,7 @@ async def resolve_model_provider(
     providers: ProviderDatastore,
     secrets: SecretStorePort,
     runtime_provider: RuntimeProvider | None = None,
+    user_id: str,
 ) -> ModelProvider | None:
     """Translate a chosen provider + model id into a kernel ``ModelProvider``.
 
@@ -159,13 +161,13 @@ async def resolve_model_provider(
     ``base_url`` may be ``None`` in the returned ``ModelProvider`` (first-
     party SDK fallback). Only ``api_key`` is strictly required.
     """
-    provider = await providers.get_by_id(require_current_user_id(), provider_id)
+    provider = await providers.get_by_id(user_id, provider_id)
     if provider is None:
         # Not a user row — maybe an overlay-contributed channel (ADR-011). The
         # catalog hands back a live credential, gated on its own long-lived key
         # (so this also works in background automations with no request JWT).
         # Returns None for ids it doesn't own.
-        cred = await ext.llm_provider.resolve(provider_id)
+        cred = await ext.llm_provider.resolve(provider_id, user_id=user_id)
         if cred is not None:
             if cred.api_protocol not in {
                 "anthropic",
@@ -300,6 +302,8 @@ def _resolve_base_url(provider: ProviderRow, api_protocol: ApiProtocol) -> str |
         if descriptor.default_base_url:
             return f"{descriptor.default_base_url.rstrip('/')}/anthropic"
         return row_base_url
+    if provider.provider_kind == "zhipu" and row_base_url == _ZHIPU_CODING_BASE_URL:
+        return row_base_url
     return descriptor.default_base_url or row_base_url
 
 
@@ -309,6 +313,7 @@ async def resolve_runtime_provider(
     model_id: str,
     providers: ProviderDatastore,
     request_runtime_id: str | None = None,
+    user_id: str,
 ) -> RuntimeProvider:
     """Decide which kernel runtime drives this session.
 
@@ -335,7 +340,7 @@ async def resolve_runtime_provider(
             )
         return request_runtime_id  # type: ignore[return-value]
 
-    provider = await providers.get_by_id(require_current_user_id(), provider_id)
+    provider = await providers.get_by_id(user_id, provider_id)
     if provider is None:
         # Contributed (catalog) channel (ADR-011): runtime is NOT a provider
         # field. Prefer the picked model's declared ``runtimes``; otherwise

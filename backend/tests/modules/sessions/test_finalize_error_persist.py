@@ -27,7 +27,7 @@ def _as_async(fn: Any) -> Any:
 
 def _patch_common(monkeypatch: Any, captured: dict[str, Any]) -> None:
     fake_sess = SimpleNamespace(metadata={"valuz": {"name": "n"}})
-    monkeypatch.setattr(run_orch, "require_current_user_id", lambda: "owner-1")
+    monkeypatch.setattr(run_orch, "_resolve_session_owner", _as_async(lambda _sid: "owner-1"))
     monkeypatch.setattr(
         run_orch.kernel_client, "get_session", _as_async(lambda _uid, _sid: fake_sess)
     )

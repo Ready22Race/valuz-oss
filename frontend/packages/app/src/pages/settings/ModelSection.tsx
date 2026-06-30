@@ -1188,7 +1188,10 @@ export const ModelSection = () => {
             // reflects the new model_options without blocking the
             // dialog feedback.
             void loadProviders();
-            return { models: result.merged };
+            return {
+              models: result.merged,
+              model_labels: result.model_labels,
+            };
           }}
           onPing={(payload) =>
             providersApi.ping({

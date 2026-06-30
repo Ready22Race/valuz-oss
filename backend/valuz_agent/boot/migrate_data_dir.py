@@ -58,9 +58,23 @@ logger = logging.getLogger(__name__)
 # kernel ``events`` + ``messages``); v2 sweeps every text column generically.
 _MIGRATION_VERSION = 2
 
+# Name of the active log directory (mirrors ``settings.log_dir``). It holds the
+# RUNNING boot process's own open ``backend.log`` — structured logging is
+# configured before this migration runs — and on Windows an open file can be
+# neither deleted nor overwritten ([WinError 32] sharing violation; POSIX allows
+# both, which is why this only ever bit Windows upgrades). Logs are disposable
+# runtime output, not migratable data, so the cutover skips them in BOTH
+# directions: ``_COPY_IGNORE`` keeps the copy from overwriting the open
+# ``backend.log``, and ``_reset_partial_copy`` keeps rmtree from trying to
+# delete it.
+_LOGS_DIRNAME = "logs"
+
 # Lock/journal noise that must NOT ride along into the copied tree. The WAL is
-# checkpointed into the main DB before the copy, so the sidecars are redundant.
-_COPY_IGNORE = shutil.ignore_patterns(".single-writer.lock", "*.db-wal", "*.db-shm")
+# checkpointed into the main DB before the copy, so the sidecars are redundant;
+# ``logs`` is excluded for the open-file reason documented above.
+_COPY_IGNORE = shutil.ignore_patterns(
+    ".single-writer.lock", "*.db-wal", "*.db-shm", _LOGS_DIRNAME
+)
 _LOCK_FILENAME = ".single-writer.lock"
 
 _MARKER_FILENAME = ".migrated-from-valuz-app"
@@ -227,7 +241,11 @@ def _reset_partial_copy(new_root: Path) -> None:
     if not new_root.exists():
         return
     for entry in new_root.iterdir():
-        if entry.name == _LOCK_FILENAME:
+        # Both are held OPEN by the current boot process — the single-writer
+        # lock and the logging handler's ``logs/backend.log``. On Windows an
+        # open file cannot be removed ([WinError 32]); skipping them is correct
+        # anyway (neither is migratable data). See ``_LOGS_DIRNAME``.
+        if entry.name in (_LOCK_FILENAME, _LOGS_DIRNAME):
             continue
         try:
             if entry.is_symlink() or entry.is_file():

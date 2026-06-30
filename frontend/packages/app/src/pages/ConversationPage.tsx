@@ -2847,11 +2847,12 @@ export const ConversationPage = () => {
 
   const ensureSession = useCallback(async (navigateOnCreate = true) => {
     if (selectedSession) return selectedSession;
-    if (!selectedProjectId) throw new Error("No active project.");
+    const sessionProjectId = selectedProjectId ?? "chat-default";
     // For quick-chat (kind="chat"), send the ``"chat-default"`` sentinel so
     // the backend allocates a fresh, isolated chat project + cwd for this
     // session. Project conversations keep passing their real project id.
-    const isChat = activeProject?.kind === "chat";
+    const isChat =
+      sessionProjectId === "chat-default" || activeProject?.kind === "chat";
     // 09-assistant §2.1/§2.2: every session binds to an agent — project
     // conversations to the chosen 派驻 member, 临时对话 to the picked "我的"
     // agent. There is no agentless path; the backend derives
@@ -2880,7 +2881,7 @@ export const ConversationPage = () => {
       created = await sessionsApi.get(start.session_id);
     } else {
       created = await sessionsApi.create({
-        project_id: isChat ? "chat-default" : selectedProjectId,
+        project_id: isChat ? "chat-default" : sessionProjectId,
         agent_slug: selectedAgentSlug ?? undefined,
         provider_id: selectedProviderId ?? undefined,
         model_id: selectedModelId ?? undefined,
@@ -4573,9 +4574,9 @@ export const ConversationPage = () => {
         onUploadFile={handlePanelUpload}
         onRemoveUploadedFile={handleRemoveUploadedFile}
         // Agent-delivered deliverables (生成文件) — shown in both chat and
-        // project sessions; rows open the file in its OS-associated app.
+        // project sessions; rows open in the in-app artifact viewer.
         generatedFiles={generatedFiles}
-        onOpenGeneratedFile={(path) => void revealInFinder(path)}
+        onOpenGeneratedFile={(path) => void openArtifactFile(path)}
         // KB binding tree — project sessions only, **read-only**: we
         // pass ``kbTree`` + ``bindings`` (so the checkbox state shows
         // which folders/files are bound) and ``onExpandKbFolder`` (so
@@ -4758,6 +4759,10 @@ export const ConversationPage = () => {
     panelSetCollapsed,
   ]);
 
+  const artifactViewerOpen = Boolean(
+    selectedArtifactPath || artifactLoading || artifactError,
+  );
+
   return (
     <>
       <div className="relative flex h-full min-h-0 flex-col bg-surface">
@@ -4936,19 +4941,6 @@ export const ConversationPage = () => {
                   {t("conversation.goToSettings" as Parameters<typeof t>[0])}
                 </Button>
               }
-            />
-          </div>
-        ) : selectedArtifactPath || artifactLoading || artifactError ? (
-          <div className="min-h-0 flex-1 p-3">
-            <ArtifactViewerShell
-              artifact={artifact}
-              content={artifactContent}
-              loading={artifactLoading}
-              error={artifactError}
-              onReload={handleArtifactReload}
-              onClose={handleArtifactClose}
-              onCopyContent={handleArtifactCopy}
-              onOpenExternal={handleArtifactOpenExternal}
             />
           </div>
         ) : (
@@ -5395,6 +5387,24 @@ export const ConversationPage = () => {
             onCancel={() => setParsingConfirmOpen(false)}
           />
         </div>
+        {artifactViewerOpen ? (
+          <div
+            className="absolute inset-0 z-30 overflow-hidden overscroll-contain bg-surface p-3"
+            onWheel={(event) => event.stopPropagation()}
+            onTouchMove={(event) => event.stopPropagation()}
+          >
+            <ArtifactViewerShell
+              artifact={artifact}
+              content={artifactContent}
+              loading={artifactLoading}
+              error={artifactError}
+              onReload={handleArtifactReload}
+              onClose={handleArtifactClose}
+              onCopyContent={handleArtifactCopy}
+              onOpenExternal={handleArtifactOpenExternal}
+            />
+          </div>
+        ) : null}
       </div>
 
       {/* Knowledge Base file picker overlay — tree view: documents are

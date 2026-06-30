@@ -31,7 +31,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.parser.datastore import PollingTaskDatastore
 from valuz_agent.modules.parser.models import PollingTaskRow
@@ -181,7 +180,12 @@ class PollingScheduler:
 
     # ----- public API -----------------------------------------------
 
-    async def enqueue(self, kind: str, payload: Mapping[str, Any]) -> str:
+    async def enqueue(
+        self, kind: str, payload: Mapping[str, Any], user_id: str | None = None
+    ) -> str:
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         """Insert a fresh row in ``pending`` state and return its id."""
         if kind not in self._handlers:
             raise KeyError(f"no polling handler for kind: {kind}")
@@ -203,7 +207,7 @@ class PollingScheduler:
         from valuz_agent.infra.db import async_unit_of_work
 
         async with async_unit_of_work() as db:
-            await PollingTaskDatastore(db).insert(require_current_user_id(), row)
+            await PollingTaskDatastore(db).insert(user_id, row)
         return task_id
 
     async def await_task(self, task_id: str) -> ParseResult:

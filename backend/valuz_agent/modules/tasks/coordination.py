@@ -39,7 +39,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import messaging, planning
@@ -84,7 +83,11 @@ class CoordinationService:
         keys: list[str] | None = None,
         mode: str = "all",
         timeout_s: float | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         """Block (inside the lead's turn) until dispatched members finish.
 
         v0.14 real-time dispatch (see decision doc §14): the lead calls this
@@ -113,7 +116,7 @@ class CoordinationService:
         else:
             async with async_unit_of_work(commit=False) as db:
                 row = await TaskDatastore(db).get_task_by_project(
-                    require_current_user_id(), project_id, task_id
+                    user_id, project_id, task_id
                 )
                 plan = TaskPlan.from_dict(row.plan) if row else TaskPlan()
             target = {n.key for n in plan.nodes if n.status in ("in_progress", "in_review")}
@@ -219,6 +222,7 @@ class CoordinationService:
         task_id: str,
         project_id: str,
         pending_keys: set[str],
+        user_id: str | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Backstop for bad-case #3 (VALUZ-RESUME §5.4): a member whose kernel
         session went terminal but whose ``member_done`` never reached the lead's
@@ -241,19 +245,19 @@ class CoordinationService:
             event_ds = TaskEventDatastore(db)
             runs_by_key = {
                 r.subtask_key: r
-                for r in await run_ds.list_runs(require_current_user_id(), task_id)
+                for r in await run_ds.list_runs(user_id, task_id)
                 if r.kind == "subtask" and r.subtask_key and r.status == "active"
             }
             if not any(k in runs_by_key for k in pending_keys):
                 return {}  # nothing in-flight for these keys — don't touch the plan
-            task = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+            task = await task_ds.get_task_by_project(user_id, project_id, task_id)
             plan = TaskPlan.from_dict(task.plan) if task is not None else None
             plan_dirty = False
             for key in pending_keys:
                 run = runs_by_key.get(key)
                 if run is None:
                     continue
-                ks = await kernel_client.get_session(require_current_user_id(), run.session_id)
+                ks = await kernel_client.get_session(user_id, run.session_id)
                 if getattr(ks, "status", None) == "running":
                     continue  # genuinely in flight — keep waiting
                 disp = classify_member(
@@ -316,6 +320,7 @@ class CoordinationService:
                     plan=plan,
                     actor="system",
                     session_id=None,
+                    user_id=user_id,
                 )
         return out
 
@@ -323,7 +328,9 @@ class CoordinationService:
     # actor-loop role callbacks (driven by ActorRunner via the bound host)
     # ------------------------------------------------------------------
 
-    async def _notify_lead_member_idle(self, session_id: str, status: str) -> None:
+    async def _notify_lead_member_idle(
+        self, session_id: str, status: str, user_id: str | None = None
+    ) -> None:
         """After a member turn, push a member_done message to its lead's inbox.
 
         Also appends a ``subtask_message`` task event so the timeline shows the
@@ -344,7 +351,7 @@ class CoordinationService:
             manifest = await collect_manifest(session_id, run_dir, status, since_epoch=since)
             manifest["agent"] = run.agent_slug
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id=run.project_id,
                 task_id=run.task_id or "",
                 type="subtask_message",
@@ -368,7 +375,9 @@ class CoordinationService:
                 ),
             )
 
-    async def _lead_idle_with_no_pending(self, task_id: str, project_id: str) -> bool:
+    async def _lead_idle_with_no_pending(
+        self, task_id: str, project_id: str, user_id: str | None = None
+    ) -> bool:
         """True when a lead has nothing left to wait for after a turn.
 
         The actor loop normally parks on the mailbox for LEAD_IDLE_TTL_S between
@@ -381,7 +390,7 @@ class CoordinationService:
             return False  # a member is still running — keep waiting for its result
         async with async_unit_of_work(commit=False) as db:
             task = await TaskDatastore(db).get_task_by_project(
-                require_current_user_id(), project_id, task_id
+                user_id, project_id, task_id
             )
             if task is None or task.status != "active":
                 return True  # already closed (finish_task/stop) — let the loop end

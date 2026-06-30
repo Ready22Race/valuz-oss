@@ -35,7 +35,6 @@ from app.schemas import (
 # Side-effect import — surfaces ``src.core...`` on sys.path.
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters.mcp_resolver import resolve_mcp_servers
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
@@ -95,7 +94,10 @@ async def resolve_session_capabilities(
     connectors: ConnectorDatastore | None = None,
     docs: DocumentDatastore | None = None,
     session_id: str | None = None,
-) -> ResolvedCapabilities:
+ user_id: str | None = None) -> ResolvedCapabilities:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Compute kernel-shaped capabilities for a session in ``project_id``.
 
     The MCP arguments are optional so the resolver stays usable in code paths
@@ -104,7 +106,7 @@ async def resolve_session_capabilities(
     the corresponding ``McpServerConfig`` list.
     """
 
-    project = await projects.get_by_id(require_current_user_id(), project_id)
+    project = await projects.get_by_id(user_id, project_id)
     if project is None:
         raise KeyError(project_id)
 
@@ -187,7 +189,7 @@ async def resolve_session_capabilities(
     #    on top of whatever the project already enables. Look each one up in
     #    the skill index to recover its source_path.
     for skill_id in extra_skill_ids or []:
-        row = await skills.get_by_id(require_current_user_id(), skill_id)
+        row = await skills.get_by_id(user_id, skill_id)
         if row is None:
             warnings.append(f"extra skill id not found: {skill_id!r}")
             continue
@@ -244,6 +246,7 @@ async def resolve_session_capabilities(
             await resolve_mcp_servers(
                 enabled_slugs=enabled_mcp_provider_slugs or [],
                 connectors=connectors,
+                user_id=user_id,
             )
         )
 
@@ -405,7 +408,9 @@ def _resolve_to_absolute(path: str | None, project_root: str | None) -> str | No
 
 
 async def resolve_skill_slugs_to_paths(
-    skill_entries: object, project_root: str | None
+    skill_entries: object,
+    project_root: str | None,
+    user_id: str | None = None,
 ) -> list[str]:
     """Map an agent's ``skills`` entries (slugs and/or absolute paths) to
     absolute skill-directory paths — the single chokepoint for this.
@@ -424,6 +429,9 @@ async def resolve_skill_slugs_to_paths(
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.skills.datastore import SkillDatastore
 
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     entries = list(skill_entries or [])  # type: ignore[arg-type]
     if not entries:
         return []
@@ -434,7 +442,7 @@ async def resolve_skill_slugs_to_paths(
     # ``await`` this.
     by_slug: dict[str, str] = {}
     async with async_unit_of_work(commit=False) as db:
-        for row in await SkillDatastore(db).list_skills(require_current_user_id()):
+        for row in await SkillDatastore(db).list_skills(user_id):
             if row.slug and row.source_path:
                 by_slug.setdefault(row.slug, row.source_path)
 

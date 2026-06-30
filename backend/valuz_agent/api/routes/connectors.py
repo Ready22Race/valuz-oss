@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.api.deps import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work, get_async_session
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
@@ -301,7 +301,7 @@ async def _get_service(
 
 @router.get("")
 async def list_connectors(
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> dict:
@@ -324,7 +324,7 @@ async def list_connectors(
 @router.post("")
 async def create_connector(
     body: CreateConnectorRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ConnectorService = Depends(_get_service),
 ) -> CreateConnectorResponse:
     """Add a custom or recommended MCP connector.
@@ -728,7 +728,7 @@ def _localize(value: object, locale: str) -> str | None:
 
 @router.get("/recommended")
 async def list_recommended(
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> CatalogListResponse:
@@ -1143,7 +1143,7 @@ def _view_to_item(view: ConnectorView, locale: str = "zh-CN") -> ConnectorItem:
 @router.get("/{connector_id}")
 async def get_connector(
     connector_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> ConnectorItem:
@@ -1158,7 +1158,7 @@ async def get_connector(
 async def update_connector(
     connector_id: str,
     body: UpdateConnectorRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> ConnectorItem:
@@ -1233,7 +1233,7 @@ async def update_connector(
 @router.delete("/{connector_id}")
 async def delete_connector(
     connector_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ConnectorService = Depends(_get_service),
 ) -> dict[str, bool]:
     """Delete a custom or directory connector."""
@@ -1246,7 +1246,7 @@ async def delete_connector(
 @router.post("/{connector_id}/enable")
 async def enable_connector(
     connector_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> ConnectorItem:
@@ -1260,7 +1260,7 @@ async def enable_connector(
 @router.post("/{connector_id}/disable")
 async def disable_connector(
     connector_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ConnectorService = Depends(_get_service),
     accept_language: str | None = Header(default=None, alias="Accept-Language"),
 ) -> ConnectorItem:
@@ -1274,7 +1274,7 @@ async def disable_connector(
 @router.post("/{connector_id}/test")
 async def test_connector(
     connector_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ConnectorService = Depends(_get_service),
 ) -> TestConnectorResponse:
     """Test an MCP connector (HTTP, SSE, or stdio) using the MCP client library."""

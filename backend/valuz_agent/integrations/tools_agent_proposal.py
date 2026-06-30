@@ -55,8 +55,6 @@ import valuz_agent.boot.kernel  # noqa: F401
 
 from src.core.tools import ExecContext, ToolDef, ToolResult
 
-from valuz_agent.infra.auth_context import require_current_user_id
-
 logger = logging.getLogger(__name__)
 
 PROPOSE_AGENT_TOOL_NAME = "propose_agent"
@@ -209,9 +207,9 @@ async def _gather_model_options(db: Any, user_id: str) -> Any:
     items = await svc.list_providers(user_id)
     inputs = [to_option_input(it) for it in items]
     current = CurrentDefault(
-        runtime=await get_default_runtime(db),
-        provider_id=await get_default_provider_id(db),
-        model=await get_default_model(db),
+        runtime=await get_default_runtime(db, user_id=user_id),
+        provider_id=await get_default_provider_id(db, user_id=user_id),
+        model=await get_default_model(db, user_id=user_id),
     )
     return build_model_options(inputs, current)
 
@@ -347,8 +345,7 @@ async def _propose_agent_handler(args: dict[str, Any], context: ExecContext) -> 
     effort = args.get("effort")
     if effort is not None and str(effort).strip() and str(effort) not in VALID_EFFORTS:
         return _err(
-            f"propose_agent: invalid effort '{effort}' — must be one of "
-            f"{', '.join(VALID_EFFORTS)}"
+            f"propose_agent: invalid effort '{effort}' — must be one of {', '.join(VALID_EFFORTS)}"
         )
 
     model_arg = str(args.get("model") or "").strip()
@@ -364,7 +361,7 @@ async def _propose_agent_handler(args: dict[str, Any], context: ExecContext) -> 
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
     from valuz_agent.modules.skills.datastore import SkillDatastore
 
-    user_id = require_current_user_id()
+    user_id = context.user_id
     missing_skills: list[str] = []
     missing_connectors: list[str] = []
     async with async_unit_of_work(commit=False) as db:
@@ -490,8 +487,7 @@ UPDATE_AGENT_PARAMETERS: dict[str, object] = {
         "instructions": {
             "type": "string",
             "description": (
-                "New system prompt / working method. Omit to keep current; "
-                "cannot be blank."
+                "New system prompt / working method. Omit to keep current; cannot be blank."
             ),
         },
         "description": {
@@ -557,16 +553,12 @@ async def _update_agent_handler(args: dict[str, Any], context: ExecContext) -> T
     if "name" in args:
         v = str(args.get("name") or "").strip()
         if not v:
-            return _err(
-                "update_agent: 'name' cannot be blanked — omit it to keep the current name"
-            )
+            return _err("update_agent: 'name' cannot be blanked — omit it to keep the current name")
         patch["name"] = v
     if "instructions" in args:
         v = str(args.get("instructions") or "").strip()
         if not v:
-            return _err(
-                "update_agent: 'instructions' cannot be blanked — omit it to keep current"
-            )
+            return _err("update_agent: 'instructions' cannot be blanked — omit it to keep current")
         patch["instructions"] = v
     if "description" in args:
         patch["description"] = str(args.get("description") or "").strip()
@@ -611,7 +603,7 @@ async def _update_agent_handler(args: dict[str, Any], context: ExecContext) -> T
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
     from valuz_agent.modules.skills.datastore import SkillDatastore
 
-    user_id = require_current_user_id()
+    user_id = context.user_id
     needs_brain_check = "runtime" in patch or "model" in patch
     missing_skills: list[str] = []
     missing_connectors: list[str] = []
@@ -717,12 +709,11 @@ async def _list_skills_handler(args: dict[str, Any], context: ExecContext) -> To
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.skills.datastore import SkillDatastore
 
-    user_id = require_current_user_id()
+    user_id = context.user_id
     async with async_unit_of_work(commit=False) as db:
         rows = await SkillDatastore(db).list_skills(user_id)
     items = [
-        {"slug": r.slug, "name": r.name, "description": (r.description or "")[:200]}
-        for r in rows
+        {"slug": r.slug, "name": r.name, "description": (r.description or "")[:200]} for r in rows
     ]
     return ToolResult(content=json.dumps({"ok": True, "skills": items}, ensure_ascii=False))
 
@@ -740,7 +731,7 @@ async def _list_agents_handler(args: dict[str, Any], context: ExecContext) -> To
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.agents.datastore import AgentDatastore
 
-    user_id = require_current_user_id()
+    user_id = context.user_id
     async with async_unit_of_work(commit=False) as db:
         rows = await AgentDatastore(db).list_agents(user_id)
     items = [
@@ -780,7 +771,7 @@ async def _list_model_options_handler(args: dict[str, Any], context: ExecContext
     from valuz_agent.adapters.runtime_registry import is_runtime_available, list_runtimes
     from valuz_agent.infra.db import async_unit_of_work
 
-    user_id = require_current_user_id()
+    user_id = context.user_id
     async with async_unit_of_work(commit=False) as db:
         opts = await _gather_model_options(db, user_id)
 
@@ -851,14 +842,12 @@ LIST_PROJECT_MEMBERS_DESCRIPTION = (
 LIST_PROJECT_MEMBERS_PARAMETERS: dict[str, object] = {"type": "object", "properties": {}}
 
 
-async def _list_project_members_handler(
-    args: dict[str, Any], context: ExecContext
-) -> ToolResult:
+async def _list_project_members_handler(args: dict[str, Any], context: ExecContext) -> ToolResult:
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.agents.datastore import AgentDatastore, ProjectMemberDatastore
 
-    user_id = require_current_user_id()
-    project_id = await _resolve_project_id(context.session_id)
+    user_id = context.user_id
+    project_id = await _resolve_project_id(context.session_id, context.user_id)
     if not project_id:
         return _err(
             "list_project_members: this session has no project — members can "
@@ -914,7 +903,7 @@ async def _deploy_agent_handler(args: dict[str, Any], context: ExecContext) -> T
     if not slug:
         return _err("deploy_agent: 'agent_slug' is required")
 
-    project_id = await _resolve_project_id(context.session_id)
+    project_id = await _resolve_project_id(context.session_id, context.user_id)
     if not project_id:
         return _err(
             "deploy_agent: this session has no project — an agent can only be "
@@ -929,7 +918,7 @@ async def _deploy_agent_handler(args: dict[str, Any], context: ExecContext) -> T
         MemberAlreadyExistsError,
     )
 
-    user_id = require_current_user_id()
+    user_id = context.user_id
     async with async_unit_of_work() as db:
         svc = AgentService(db)
         try:
@@ -966,7 +955,7 @@ async def _deploy_agent_handler(args: dict[str, Any], context: ExecContext) -> T
     )
 
 
-async def _resolve_project_id(session_id: str) -> str | None:
+async def _resolve_project_id(session_id: str, user_id: str) -> str | None:
     """REAL project id for the calling session, or None.
 
     A session always carries ``metadata.valuz.project_id``, but a quick chat /
@@ -980,7 +969,6 @@ async def _resolve_project_id(session_id: str) -> str | None:
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-    user_id = require_current_user_id()
     sess = await kernel_client.get_session(user_id, session_id)
     if sess is None:
         return None

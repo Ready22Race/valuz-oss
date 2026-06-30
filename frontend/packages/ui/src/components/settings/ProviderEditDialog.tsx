@@ -47,7 +47,10 @@ export interface ProviderEditDialogProps {
   ) => Promise<void>;
   /** Triggered by [连接测试] — built-in channels probe ``/v1/models``
    *  to refresh the read-only preview. Returns the discovered ids. */
-  onDiscoverModels: (providerId: string) => Promise<{ models: string[] }>;
+  onDiscoverModels: (providerId: string) => Promise<{
+    models: string[];
+    model_labels?: Record<string, string>;
+  }>;
   /** Triggered by [连接测试] for custom (compatible) channels — pings
    *  every model id and returns the verified subset. ``api_key`` may
    *  be empty when ``provider_id`` is supplied (edit-mode reuses the
@@ -97,6 +100,9 @@ export const ProviderEditDialog: FC<ProviderEditDialogProps> = ({
   const [discoveredModels, setDiscoveredModels] = useState<string[] | null>(
     initialModels.length > 0 ? initialModels : null,
   );
+  const [discoveredModelLabels, setDiscoveredModelLabels] = useState<
+    Record<string, string> | null
+  >(null);
   // Editable models text for the custom (compatible) channel. Seeded
   // from the stored ``initialModels`` on open so the user sees what
   // they had before, and can add / remove freely.
@@ -178,6 +184,7 @@ export const ProviderEditDialog: FC<ProviderEditDialogProps> = ({
           setModelsText(batch.ok.join("\n"));
         }
         setDiscoveredModels(batch.ok.length > 0 ? batch.ok : null);
+        setDiscoveredModelLabels(null);
         if (batch.failed.length === 0) {
           setTestStatus("ok");
           setTestMsg(
@@ -203,6 +210,7 @@ export const ProviderEditDialog: FC<ProviderEditDialogProps> = ({
       }
       const result = await onDiscoverModels(providerId);
       setDiscoveredModels(result.models);
+      setDiscoveredModelLabels(result.model_labels ?? null);
       setTestStatus("ok");
       setTestMsg(
         t("settings.model.connectSuccessDiscovered", {
@@ -307,6 +315,7 @@ export const ProviderEditDialog: FC<ProviderEditDialogProps> = ({
               setApiKey(v);
               setTestStatus("idle");
               setDiscoveredModels(null);
+              setDiscoveredModelLabels(null);
             }}
             showApiKey={!isOAuthProvider}
             apiKeyPlaceholder={t("ui.providerEdit.apiKeyPlaceholder")}
@@ -315,17 +324,20 @@ export const ProviderEditDialog: FC<ProviderEditDialogProps> = ({
               setBaseUrl(v);
               setTestStatus("idle");
               setDiscoveredModels(null);
+              setDiscoveredModelLabels(null);
             }}
             showEndpoint={showEndpoint}
             testStatus={testStatus}
             testMsg={testMsg}
             discoveredModels={isCustom ? null : discoveredModels}
+            discoveredModelLabels={isCustom ? null : discoveredModelLabels}
             showModelsTextarea={isCustom}
             modelsText={modelsText}
             onModelsTextChange={(v) => {
               setModelsText(v);
               setTestStatus("idle");
               setDiscoveredModels(null);
+              setDiscoveredModelLabels(null);
             }}
           />
         </div>

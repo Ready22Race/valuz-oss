@@ -43,27 +43,30 @@ itself to the right project.
 from __future__ import annotations
 
 import logging
-from contextvars import ContextVar
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+
+from valuz_agent.integrations._mcp_asgi import (
+    build_internal_mcp_asgi,
+    get_current_mcp_session_id,
+    get_current_mcp_user_id,
+)
 
 logger = logging.getLogger(__name__)
 
 # Bound for the duration of one HTTP request by the ASGI wrapper in
 # ``mount_docs_mcp``. Tools read it to scope their datastore access.
-_session_var: ContextVar[str | None] = ContextVar("valuz_docs_mcp_session_id", default=None)
-
 
 def _current_session_id() -> str:
-    sid = _session_var.get()
+    sid = get_current_mcp_session_id()
     if not sid:
-        # The ASGI wrapper would have rejected the request before the tool
-        # dispatcher; this branch only triggers when the server is invoked
-        # outside the wrapper (e.g. a unit test that calls the tool fn
-        # directly without setting the var).
         raise RuntimeError("docs MCP tool called outside of a session-scoped request")
     return sid
+
+
+def _current_user_id() -> str:
+    return get_current_mcp_user_id()
 
 
 async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
@@ -128,14 +131,10 @@ async def doc_search(
     intersected with the project's bindings server-side so the agent
     cannot reach docs outside its scope by guessing ids.
     """
-    from valuz_agent.infra.auth_context import require_current_user_id
     from valuz_agent.infra.db import async_unit_of_work
 
-    # MCP request boundary: the ASGI wrapper has published the calling session's
-    # owner into the auth context. Resolve it once here and thread it explicitly
-    # into the project lookup + the owner-scoped search.
-    user_id = require_current_user_id()
     session_id = _current_session_id()
+    user_id = _current_user_id()
     project_id = await _resolve_project_id(user_id, session_id)
     if project_id is None:
         return []
@@ -175,12 +174,11 @@ async def list_doc_scope(folder_id: str | None = None) -> dict[str, Any]:
     the agent whether the user explicitly bound that node vs inheriting
     via a parent.
     """
-    from valuz_agent.infra.auth_context import require_current_user_id
     from valuz_agent.infra.db import async_unit_of_work
 
     del folder_id  # full-tree view is enough today; folder drilldown is a TODO.
-    user_id = require_current_user_id()
     session_id = _current_session_id()
+    user_id = _current_user_id()
     project_id = await _resolve_project_id(user_id, session_id)
     if project_id is None:
         return {"knowledge_bases": [], "total_documents": 0}
@@ -240,56 +238,8 @@ def docs_mcp_session_manager_run() -> Any:
 
 
 def build_docs_mcp_asgi() -> Any:
-    """Return an ASGI app to mount at ``/internal/mcp/docs``.
-
-    The wrapper does two things on each HTTP request:
-
-    1. Verifies ``X-Valuz-Internal`` matches the per-process token —
-       defence-in-depth even though the URL only resolves on loopback.
-    2. Records ``X-Valuz-Session-Id`` into a ContextVar so the tool
-       handlers can scope their datastore access to the right project.
-
-    Why headers (not the URL): FastMCP's ``streamable_http_app`` is a
-    Starlette app whose ``Route("/mcp", ...)`` is sensitive to
-    ``scope["path"]`` rewrites — once we sliced a session-id segment
-    out of the path the inner app's session manager rejected the
-    request with ``Session terminated`` on initialise. Threading the
-    session id through a header keeps FastMCP's path expectations
-    intact and is just as opaque to anything outside the process.
-    """
-    from starlette.responses import PlainTextResponse
-
-    inner = _mcp.streamable_http_app()
-
-    async def _app(scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            response = PlainTextResponse("Not Found", status_code=404)
-            await response(scope, receive, send)
-            return
-
-        from valuz_agent.infra.config import settings as _settings
-
-        headers = {
-            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []
-        }
-        if headers.get("x-valuz-internal") != _settings.internal_mcp_token:
-            response = PlainTextResponse("Forbidden", status_code=403)
-            await response(scope, receive, send)
-            return
-
-        session_id = headers.get("x-valuz-session-id") or ""
-        if not session_id:
-            response = PlainTextResponse("Missing X-Valuz-Session-Id header", status_code=400)
-            await response(scope, receive, send)
-            return
-
-        ctx_token = _session_var.set(session_id)
-        try:
-            await inner(scope, receive, send)
-        finally:
-            _session_var.reset(ctx_token)
-
-    return _app
+    """Return an ASGI app to mount at ``/internal/mcp/docs``."""
+    return build_internal_mcp_asgi(_mcp.streamable_http_app())
 
 
 def docs_mcp_url(*, base_url: str) -> str:
@@ -305,5 +255,4 @@ def docs_mcp_url(*, base_url: str) -> str:
 __all__ = [
     "build_docs_mcp_asgi",
     "docs_mcp_url",
-    "_session_var",  # exposed for tests
 ]

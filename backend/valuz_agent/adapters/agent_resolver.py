@@ -46,7 +46,6 @@ from valuz_agent.adapters.system_prompt_builder import (
     assemble_session_instructions,
     build_project_system_prompt,
 )
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 
 logger = logging.getLogger(__name__)
@@ -607,7 +606,7 @@ def summarize_role(instructions: str | None) -> str:
     return flat[:ROLE_SUMMARY_LIMIT].rstrip() + "…"
 
 
-async def _member_agent_config(member, members: ProjectMemberDatastore):  # noqa: ANN001, ANN202
+async def _member_agent_config(member, members: ProjectMemberDatastore, user_id: str):  # noqa: ANN001, ANN202
     """Build the member's AgentConfig from its source library row.
 
     The kernel has no agents table — the library AgentRow is the single
@@ -626,7 +625,7 @@ async def _member_agent_config(member, members: ProjectMemberDatastore):  # noqa
     from valuz_agent.modules.agents.service import AgentService
 
     db = members._db  # noqa: SLF001 — same unit of work as the member lookup
-    row = await AgentDatastore(db).get_agent(require_current_user_id(), member.source_agent_slug)
+    row = await AgentDatastore(db).get_agent(user_id, member.source_agent_slug)
     if row is None:
         logger.warning(
             "member %s/%s points at missing library agent %s",
@@ -643,6 +642,7 @@ async def build_member_roster(
     project_id: str,
     members: ProjectMemberDatastore,
     exclude_slug: str,
+    user_id: str,
 ) -> str:
     """Build the lead's "team members" block (§1.5 — dispatch accuracy).
 
@@ -650,12 +650,12 @@ async def build_member_roster(
     can route sub-tasks to the right agent without first calling
     ``list_members``. Excludes the lead itself.
     """
-    rows = await members.list_by_project(require_current_user_id(), project_id)
+    rows = await members.list_by_project(user_id, project_id)
     lines: list[str] = []
     for row in rows:
         if row.agent_slug == exclude_slug:
             continue
-        agent = await _member_agent_config(row, members)
+        agent = await _member_agent_config(row, members, user_id=user_id)
         if agent is None:
             continue
         summary = summarize_role(agent.instructions)
@@ -680,6 +680,7 @@ async def resolve_member_agent(
     project_id: str,
     agent_slug: str,
     members: ProjectMemberDatastore,
+    user_id: str,
 ) -> AgentConfig | None:
     """Resolve a project-local agent slug to its kernel AgentConfig.
 
@@ -689,12 +690,12 @@ async def resolve_member_agent(
 
     Callers should handle None as "agent not found" and surface a 404.
     """
-    member = await members.get(require_current_user_id(), project_id, agent_slug)
+    member = await members.get(user_id, project_id, agent_slug)
     if member is None:
         logger.debug("resolve_member_agent: no membership for %s/%s", project_id, agent_slug)
         return None
 
-    agent = await _member_agent_config(member, members)
+    agent = await _member_agent_config(member, members, user_id=user_id)
     if agent is None:
         logger.warning(
             "resolve_member_agent: member %s/%s has no resolvable library agent",
@@ -710,6 +711,7 @@ async def _resolve_agent_provider(
     model: str,
     providers: object | None,
     secrets: object | None,
+    user_id: str,
 ) -> object | None:
     """Resolve a concrete ModelProvider for an agent's pinned provider_id.
 
@@ -753,6 +755,7 @@ async def _resolve_agent_provider(
             providers=providers,  # type: ignore[arg-type]
             secrets=secrets,  # type: ignore[arg-type]
             runtime_provider=agent.runtime_provider,
+            user_id=user_id,
         )
         if resolved is None:
             # The ONLY non-raising None path in ``resolve_model_provider`` is an
@@ -810,6 +813,7 @@ async def build_member_session(
     dispatch_mode: str = "sync",
     goal_mode: bool = False,
     plan_pre_committed: bool = False,
+    user_id: str,
 ) -> CreateSessionRequest | None:
     """Construct the kernel create-session request for a dispatch member or lead.
 
@@ -838,12 +842,12 @@ async def build_member_session(
         metadata["valuz"] = {project_id, agent_slug, task_id, run_kind}
         runtime_provider, model, skills, mcp_servers, permission_mode from agent
     """
-    member_row = await members.get(require_current_user_id(), project_id, agent_slug)
+    member_row = await members.get(user_id, project_id, agent_slug)
     if member_row is None:
         logger.debug("build_member_session: no membership for %s/%s", project_id, agent_slug)
         return None
 
-    agent = await _member_agent_config(member_row, members)
+    agent = await _member_agent_config(member_row, members, user_id=user_id)
     if agent is None:
         logger.warning(
             "build_member_session: member %s/%s has no resolvable library agent",
@@ -886,7 +890,12 @@ async def build_member_session(
         else:
             playbook_block = DISPATCH_PLAYBOOK_V2 if dispatch_mode == "async" else DISPATCH_PLAYBOOK
     roster_block = (
-        await build_member_roster(project_id=project_id, members=members, exclude_slug=agent_slug)
+        await build_member_roster(
+            project_id=project_id,
+            members=members,
+            exclude_slug=agent_slug,
+            user_id=user_id,
+        )
         if is_lead
         else ""
     )
@@ -900,7 +909,7 @@ async def build_member_session(
     # Resolve the agent's skill slugs → absolute source dirs (the kernel
     # materializer needs paths, not slugs); display names stay as the slugs.
     # Shared chokepoint — same resolver the chat path uses.
-    own_skill_paths = await resolve_skill_slugs_to_paths(agent.skills, run_dir)
+    own_skill_paths = await resolve_skill_slugs_to_paths(agent.skills, run_dir, user_id=user_id)
     baseline_skill_names = [os.path.basename(p) for p in baseline_skill_paths]
     extra_skill_paths = tuple(
         p for p in baseline_skill_paths if os.path.basename(p) not in set(own_skill_names)
@@ -953,6 +962,7 @@ async def build_member_session(
         model=model_override or agent.model,
         providers=providers,
         secrets=secrets,
+        user_id=user_id,
     )
 
     # Surface the agent's pinned provider id as the session's locked provider

@@ -88,6 +88,7 @@ async def resolve_mcp_servers(
     *,
     enabled_slugs: list[str],
     connectors: ConnectorDatastore | None = None,
+    user_id: str | None = None,
 ) -> list[McpServerConfig]:
     """Translate enabled MCP-provider slugs into kernel ``McpServerConfig`` rows.
 
@@ -98,7 +99,7 @@ async def resolve_mcp_servers(
     seen_names: set[str] = set()
 
     for slug in enabled_slugs:
-        cfgs = await _resolve_connector_slug(slug, connectors)
+        cfgs = await _resolve_connector_slug(slug, connectors, user_id=user_id)
         if cfgs is None:
             logger.info("mcp resolver: slug %s unknown or has no credentials — skipping", slug)
             continue
@@ -114,12 +115,13 @@ async def resolve_mcp_servers(
 async def _resolve_connector_slug(
     slug: str,
     connectors: ConnectorDatastore | None,
-) -> list[McpServerConfig] | None:
+ user_id: str | None = None) -> list[McpServerConfig] | None:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     if connectors is None:
         return None
-    from valuz_agent.infra.auth_context import require_current_user_id
-
-    row = await connectors.get_by_slug(require_current_user_id(), slug)
+    row = await connectors.get_by_slug(user_id, slug)
     if row is None or not row.enabled:
         return None
 

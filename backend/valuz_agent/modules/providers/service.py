@@ -6,7 +6,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import httpx
@@ -24,9 +24,11 @@ from valuz_agent.modules.providers.cli_login_probe import (
 )
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.discover import (
+    ApiProtocol,
+    DiscoveredModel,
     ModelDiscoveryError,
     PingBatchResult,
-    discover_models,
+    discover_model_entries,
     ping_credentials,
     ping_credentials_batch,
 )
@@ -177,6 +179,19 @@ def _models_for(model_ids: list[str], labels: dict[str, str] | None = None) -> l
     return [LLMModel(id=m, label=labels.get(m)) for m in model_ids]
 
 
+def _encode_model_entries(models: list[DiscoveredModel]) -> str | None:
+    if not models:
+        return None
+    if any(model.label for model in models):
+        return json.dumps(
+            [
+                {"id": model.id, **({"label": model.label} if model.label else {})}
+                for model in models
+            ]
+        )
+    return json.dumps([model.id for model in models])
+
+
 # ── Provider Registry ───────────────────────────────────────────────
 
 
@@ -272,6 +287,13 @@ BUILTIN_PROVIDERS: list[ProviderDescriptor] = [
         anthropic_base_url="https://api.moonshot.cn/anthropic",
         default_model="kimi-k2-0905-preview",
         docs_url="https://platform.moonshot.cn/docs/api/chat",
+    ),
+    ProviderDescriptor(
+        kind="moonshot-kimi-coding",
+        display_name="Moonshot (Kimi Coding)",
+        default_base_url="https://api.kimi.com/coding/v1",
+        default_model="kimi-for-coding",
+        docs_url="https://api.kimi.com/coding/",
     ),
     ProviderDescriptor(
         kind="minimax",
@@ -605,23 +627,40 @@ def _resolve_model_options(row: ProviderRow) -> list[str]:
         anchors like ch-reportify); do NOT fall back.
       - otherwise               → use the parsed list.
     """
+    return [m.id for m in _resolve_models(row)]
+
+
+def _resolve_models(row: ProviderRow) -> list[LLMModel]:
     provider = _PROVIDER_MAP.get(row.provider_kind)
-    fallback = list(provider.model_options) if provider else []
+    fallback_ids = list(provider.model_options) if provider else []
+    fallback_labels = provider.model_labels if provider else {}
     if row.model_ids is None:
-        return fallback
+        return _models_for(fallback_ids, fallback_labels)
     try:
         parsed = json.loads(row.model_ids)
     except (json.JSONDecodeError, TypeError):
-        return fallback
-    if isinstance(parsed, list):
-        return [m for m in parsed if isinstance(m, str)]
-    return fallback
+        return _models_for(fallback_ids, fallback_labels)
+    if not isinstance(parsed, list):
+        return _models_for(fallback_ids, fallback_labels)
+
+    models: list[LLMModel] = []
+    for item in parsed:
+        if isinstance(item, str) and item:
+            models.append(LLMModel(id=item, label=fallback_labels.get(item)))
+            continue
+        if isinstance(item, dict):
+            mid = item.get("id")
+            if not isinstance(mid, str) or not mid:
+                continue
+            raw_label = item.get("label") or item.get("display_name")
+            label = raw_label if isinstance(raw_label, str) and raw_label.strip() else None
+            models.append(LLMModel(id=mid, label=label or fallback_labels.get(mid)))
+    return models
 
 
 def _row_to_list_item(row: ProviderRow) -> LLMChannel:
     compatible = _derive_compatible_protocols(row)
     group = _group_for(row.source, row.auth_type)
-    descriptor = _PROVIDER_MAP.get(row.provider_kind)
     return LLMChannel(
         id=row.id,
         name=row.name,
@@ -643,9 +682,7 @@ def _row_to_list_item(row: ProviderRow) -> LLMChannel:
         # matches by provider_kind.
         group=group,
         group_rank=_GROUP_RANK[group],
-        models=_models_for(
-            _resolve_model_options(row), descriptor.model_labels if descriptor else None
-        ),
+        models=_resolve_models(row),
     )
 
 
@@ -682,7 +719,6 @@ def _list_item_to_detail(it: LLMChannel) -> LLMChannelDetail:
 
 
 def _row_to_detail(row: ProviderRow) -> LLMChannelDetail:
-    provider = _PROVIDER_MAP.get(row.provider_kind)
     compatible = _derive_compatible_protocols(row)
     group = _group_for(row.source, row.auth_type)
     return LLMChannelDetail(
@@ -703,13 +739,20 @@ def _row_to_detail(row: ProviderRow) -> LLMChannelDetail:
         # models leave runtimes unset (None) → the picker derives them.
         group=group,
         group_rank=_GROUP_RANK[group],
-        models=_models_for(
-            _resolve_model_options(row), provider.model_labels if provider else None
-        ),
+        models=_resolve_models(row),
         base_url=row.base_url,
-        supports_custom_base_url=provider.supports_custom_base_url if provider else False,
+        supports_custom_base_url=(
+            _PROVIDER_MAP[row.provider_kind].supports_custom_base_url
+            if row.provider_kind in _PROVIDER_MAP
+            else False
+        ),
         supports_connection_test=(
-            (provider.supports_connection_test if provider else True) and row.auth_type != "oauth"
+            (
+                _PROVIDER_MAP[row.provider_kind].supports_connection_test
+                if row.provider_kind in _PROVIDER_MAP
+                else True
+            )
+            and row.auth_type != "oauth"
         ),
     )
 
@@ -723,6 +766,9 @@ _DISCOVERY_PROTOCOL_MAP: dict[str, str] = {
     "openai-response": "openai",
     "gemini": "openai",
 }
+
+_ZHIPU_GENERAL_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+_ZHIPU_CODING_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 
 
 def _resolve_discovery_protocol(row: ProviderRow) -> str:
@@ -743,6 +789,45 @@ def _resolve_discovery_protocol(row: ProviderRow) -> str:
     if row.provider_kind == "anthropic":
         return "anthropic"
     return "openai"
+
+
+async def _discover_models_with_endpoint_fallback(
+    *,
+    provider_kind: str,
+    base_url: str,
+    api_key: str,
+    protocol: ApiProtocol,
+) -> tuple[list[DiscoveredModel], str]:
+    """Discover models and return the endpoint that actually worked.
+
+    Zhipu's GLM Coding Plan uses the same user-facing product family and key
+    mental model as regular GLM, but its OpenAI-compatible endpoint inserts
+    ``/coding``. Keep one ``智谱 (GLM)`` card and silently fall forward when a
+    Coding Plan key is pasted into the regular GLM flow.
+    """
+    try:
+        return (
+            await discover_model_entries(base_url=base_url, api_key=api_key, protocol=protocol),
+            base_url,
+        )
+    except ModelDiscoveryError as primary_exc:
+        if (
+            provider_kind != "zhipu"
+            or protocol != "openai"
+            or base_url.rstrip("/") != _ZHIPU_GENERAL_BASE_URL
+        ):
+            raise
+        try:
+            return (
+                await discover_model_entries(
+                    base_url=_ZHIPU_CODING_BASE_URL,
+                    api_key=api_key,
+                    protocol=protocol,
+                ),
+                _ZHIPU_CODING_BASE_URL,
+            )
+        except ModelDiscoveryError:
+            raise primary_exc from None
 
 
 def _builtin_subscription_row(entry: Any) -> ProviderRow | None:
@@ -1103,24 +1188,28 @@ class ProviderService:
         except UnicodeEncodeError as exc:
             raise ModelDiscoveryError(t("backend.provider.apiKeyNonAscii")) from exc
 
-        protocol_for_discovery = _DISCOVERY_PROTOCOL_MAP.get(protocol or "") or (
-            "anthropic" if provider_kind == "anthropic" else "openai"
+        protocol_for_discovery = cast(
+            ApiProtocol,
+            _DISCOVERY_PROTOCOL_MAP.get(protocol or "")
+            or ("anthropic" if provider_kind == "anthropic" else "openai"),
         )
 
-        discovered = await discover_models(
+        discovered_models, _ = await _discover_models_with_endpoint_fallback(
+            provider_kind=provider_kind,
             base_url=effective_base_url,
             api_key=stripped_key,
             protocol=protocol_for_discovery,
         )
 
-        models = sorted(set(discovered))
+        models = [model.id for model in discovered_models]
+        labels = {model.id: model.label for model in discovered_models if model.label}
         suggested: str | None = None
         if descriptor.default_model and descriptor.default_model in models:
             suggested = descriptor.default_model
         elif models:
             suggested = models[0]
 
-        return {"models": models, "suggested_default": suggested}
+        return {"models": models, "model_labels": labels, "suggested_default": suggested}
 
     async def read_stored_api_key(self, user_id: str, provider_id: str) -> str | None:
         """Pull the persisted api_key out of secret_store for a row.
@@ -1261,6 +1350,9 @@ class ProviderService:
             model_ids_list: list[str] = []
         else:
             model_ids_list = list(user_models) if is_custom else list(fallback_models)
+        model_entries: list[DiscoveredModel] = [
+            DiscoveredModel(id=model_id) for model_id in model_ids_list
+        ]
         if api_key:
             stripped_key = api_key.strip()
             # HTTP Authorization is latin-1 only; non-ASCII (e.g. user
@@ -1275,8 +1367,10 @@ class ProviderService:
                 raise ModelDiscoveryError(t("backend.provider.apiKeyNonAscii")) from exc
             # protocol for /v1/models discovery: explicit ``protocol`` arg
             # wins, else openai for everything except plain anthropic.
-            protocol_for_discovery = _DISCOVERY_PROTOCOL_MAP.get(protocol or "") or (
-                "anthropic" if provider_kind == "anthropic" else "openai"
+            protocol_for_discovery = cast(
+                ApiProtocol,
+                _DISCOVERY_PROTOCOL_MAP.get(protocol or "")
+                or ("anthropic" if provider_kind == "anthropic" else "openai"),
             )
             if is_custom:
                 # Ping every user-supplied model — keep the ones that
@@ -1299,9 +1393,14 @@ class ProviderService:
                 # default_model resolution below.
                 model_ids_list = list(batch.ok)
                 user_models = list(batch.ok)
+                model_entries = [DiscoveredModel(id=model_id) for model_id in model_ids_list]
             else:
                 try:
-                    discovered = await discover_models(
+                    (
+                        discovered_models,
+                        effective_base_url,
+                    ) = await _discover_models_with_endpoint_fallback(
+                        provider_kind=provider_kind,
                         base_url=effective_base_url,
                         api_key=stripped_key,
                         protocol=protocol_for_discovery,
@@ -1316,10 +1415,12 @@ class ProviderService:
                 # ids, in-house labels like ``deepseek-v4-pro[1m]`` that the
                 # real API doesn't list). When the upstream returns nothing
                 # we keep the hardcoded fallback so the picker isn't empty.
-                if discovered:
-                    model_ids_list = sorted(set(discovered))
+                if discovered_models:
+                    model_entries = discovered_models
+                    model_ids_list = [model.id for model in model_entries]
                 else:
                     model_ids_list = list(fallback_models)
+                    model_entries = [DiscoveredModel(id=model_id) for model_id in model_ids_list]
 
         # Resolve default_model with sensible fallback chain:
         #   user-supplied → descriptor.default (if in list) → first in list
@@ -1349,7 +1450,7 @@ class ProviderService:
             credential_source="secret_ref" if api_key else "none",
             base_url=effective_base_url,
             default_model=effective_default,
-            model_ids=json.dumps(model_ids_list) if model_ids_list else None,
+            model_ids=_encode_model_entries(model_entries),
             secret_ref=secret_ref,
             enabled=True,
             is_default=False,
@@ -1517,15 +1618,18 @@ class ProviderService:
         if not base_url:
             raise ModelDiscoveryError("provider has no base_url configured")
 
-        protocol = _resolve_discovery_protocol(row)
+        protocol = cast(ApiProtocol, _resolve_discovery_protocol(row))
 
-        # ``discover_models`` is async; the service now runs on the event
+        # ``discover_model_entries`` is async; the service now runs on the event
         # loop, so the coroutine is awaited directly.
-        discovered = await discover_models(
+        discovered_models, effective_base_url = await _discover_models_with_endpoint_fallback(
+            provider_kind=row.provider_kind,
             base_url=base_url,
             api_key=api_key,
             protocol=protocol,
         )
+        discovered = [model.id for model in discovered_models]
+        labels = {model.id: model.label for model in discovered_models if model.label}
 
         # Authoritative replace, not union. The previous union-with-
         # existing kept stale ids around forever — including the
@@ -1534,8 +1638,10 @@ class ProviderService:
         # If the user really wants a manually-typed id to stick around,
         # the right place for that is a future "edit model list" UI;
         # silently preserving every id we've ever seen is too sticky.
-        merged = sorted(set(discovered))
-        row.model_ids = json.dumps(merged)
+        merged_entries = sorted(discovered_models, key=lambda model: model.id)
+        merged = [model.id for model in merged_entries]
+        row.model_ids = _encode_model_entries(merged_entries)
+        row.base_url = effective_base_url
         row.updated_at = now_ms()
         await self._ds.update(row)
         self._bus.publish("provider.updated", provider_id=row.id)
@@ -1544,6 +1650,7 @@ class ProviderService:
             "provider_id": row.id,
             "discovered": list(discovered),
             "merged": merged,
+            "model_labels": labels,
         }
 
     async def delete_provider(self, user_id: str, provider_id: str) -> None:
@@ -1671,10 +1778,10 @@ class ProviderService:
         )
 
         db = self._ds._db  # noqa: SLF001 — sanctioned cross-module db reuse (mirrors resolve_infer_config)
-        await set_default_provider_id(db, resolved_id)
+        await set_default_provider_id(db, resolved_id, user_id=user_id)
         effective_model = default_model if default_model is not None else row.default_model
         if effective_model:
-            await set_default_model(db, effective_model)
+            await set_default_model(db, effective_model, user_id=user_id)
 
         self._bus.publish("provider.default.changed", provider_id=resolved_id)
 

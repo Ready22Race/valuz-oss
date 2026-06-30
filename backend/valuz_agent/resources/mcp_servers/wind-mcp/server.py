@@ -29,7 +29,6 @@ import sys
 import ssl
 import threading
 from pathlib import Path
-from typing import Optional
 
 import requests
 from requests.adapters import HTTPAdapter

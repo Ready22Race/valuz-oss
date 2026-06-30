@@ -22,6 +22,9 @@ import pytest
 from valuz_agent.modules.tasks import actor_runner
 
 
+LOCAL_USER_ID = "local-test-owner"
+
+
 def _as_async(fn: Any) -> Any:
     async def _f(*a: Any, **k: Any) -> Any:
         return fn(*a, **k)
@@ -42,21 +45,21 @@ def test_restamp_calls_capabilities_helper(monkeypatch: pytest.MonkeyPatch) -> N
     import valuz_agent.modules.sessions.capabilities as caps
 
     monkeypatch.setattr(
-        caps, "refresh_always_on_mcp_for_session", _as_async(lambda sid: seen.append(sid))
+        caps, "refresh_always_on_mcp_for_session", _as_async(lambda sid, *_: seen.append(sid))
     )
-    asyncio.run(actor_runner._restamp_always_on_mcp("sess-1"))
+    asyncio.run(actor_runner._restamp_always_on_mcp("sess-1", user_id=LOCAL_USER_ID))
     assert seen == ["sess-1"]
 
 
 def test_restamp_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     import valuz_agent.modules.sessions.capabilities as caps
 
-    async def _boom(_sid: str) -> bool:
+    async def _boom(_sid: str, _user_id: str | None = None) -> bool:
         raise RuntimeError("kernel down")
 
     monkeypatch.setattr(caps, "refresh_always_on_mcp_for_session", _boom)
     # Must not raise — a re-stamp failure can never block the turn.
-    asyncio.run(actor_runner._restamp_always_on_mcp("sess-1"))
+    asyncio.run(actor_runner._restamp_always_on_mcp("sess-1", user_id=LOCAL_USER_ID))
 
 
 # ── run_session_to_idle ─────────────────────────────────────────────────
@@ -64,9 +67,8 @@ def test_restamp_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_run_session_to_idle_restamps_before_run_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
-    monkeypatch.setattr(actor_runner, "require_current_user_id", lambda: "owner-1")
     monkeypatch.setattr(
-        actor_runner, "_restamp_always_on_mcp", _as_async(lambda _sid: order.append("restamp"))
+        actor_runner, "_restamp_always_on_mcp", _as_async(lambda _sid, *_: order.append("restamp"))
     )
     sess = SimpleNamespace(status="idle", metadata={"valuz": {"run_kind": "lead"}})
     monkeypatch.setattr(actor_runner.kernel_client, "get_session", _as_async(lambda *_: sess))
@@ -81,7 +83,7 @@ def test_run_session_to_idle_restamps_before_run_turn(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(run_orch, "_finalize_session", _as_async(lambda *a, **k: None))
 
-    asyncio.run(actor_runner.run_session_to_idle("sess-1", "hi", _Bus()))
+    asyncio.run(actor_runner.run_session_to_idle("sess-1", "hi", _Bus(), user_id=LOCAL_USER_ID))
 
     assert "restamp" in order and "run_turn" in order
     assert order.index("restamp") < order.index("run_turn")
@@ -92,9 +94,8 @@ def test_run_session_to_idle_restamps_before_run_turn(monkeypatch: pytest.Monkey
 
 def test_actor_loop_turn_restamps_before_run_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
-    monkeypatch.setattr(actor_runner, "require_current_user_id", lambda: "owner-1")
     monkeypatch.setattr(
-        actor_runner, "_restamp_always_on_mcp", _as_async(lambda _sid: order.append("restamp"))
+        actor_runner, "_restamp_always_on_mcp", _as_async(lambda _sid, *_: order.append("restamp"))
     )
 
     async def _run_turn(*a: Any, **k: Any) -> Any:
@@ -108,7 +109,7 @@ def test_actor_loop_turn_restamps_before_run_turn(monkeypatch: pytest.MonkeyPatc
     )
 
     runner = actor_runner.ActorRunner()
-    status = asyncio.run(runner._run_turn_with_sink("sess-1", "hi"))
+    status = asyncio.run(runner._run_turn_with_sink("sess-1", "hi", user_id=LOCAL_USER_ID))
 
     assert status == "idle"
     assert order == ["restamp", "run_turn"]

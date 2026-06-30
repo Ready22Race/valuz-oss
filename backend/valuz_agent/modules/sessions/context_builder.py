@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 
 logger = logging.getLogger(__name__)
@@ -21,7 +20,11 @@ async def _build_additional_context(
     session_id: str,
     project_id: str,
     attachment_rows=None,  # type: ignore[no-untyped-def]
+    user_id: str | None = None,
 ) -> str:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Compose the per-turn ``<additional-context>`` block for a session.
 
     Why this is per-turn (not in the system prompt): attachments and KB
@@ -64,7 +67,7 @@ async def _build_additional_context(
                 get_effective_default_timezone,
             )
 
-            tz_name = await get_effective_default_timezone(db)
+            tz_name = await get_effective_default_timezone(db, user_id=user_id)
             now_local = datetime.now(ZoneInfo(tz_name))
             off = now_local.strftime("%z")  # e.g. "+0800"
             off_label = f"UTC{off[:3]}:{off[3:]}" if len(off) == 5 else "UTC"
@@ -87,7 +90,7 @@ async def _build_additional_context(
         attachments = (
             attachment_rows
             if attachment_rows is not None
-            else await SessionDatastore(db).list_attachments(require_current_user_id(), session_id)
+            else await SessionDatastore(db).list_attachments(user_id, session_id)
         )
         if attachments:
             lines = [f"Uploaded attachments ({len(attachments)} this turn):"]
@@ -105,7 +108,7 @@ async def _build_additional_context(
         #    them at all and biases first searches toward the right KB.
         ds = DocumentDatastore(db)
         try:
-            bindings = await ds.list_bindings(require_current_user_id(), project_id)
+            bindings = await ds.list_bindings(user_id, project_id)
         except Exception:  # noqa: BLE001 — never block a turn on docs lookup
             bindings = []
         if bindings:
@@ -122,7 +125,7 @@ async def _build_additional_context(
         try:
             from valuz_agent.modules.settings.preferences import get_memory_enabled
 
-            if await get_memory_enabled(db):
+            if await get_memory_enabled(db, user_id=user_id):
                 from valuz_agent.modules.memory.injection import injection_assembler
 
                 mem_block = injection_assembler.snapshot_for_session(
@@ -136,7 +139,7 @@ async def _build_additional_context(
     return "\n\n".join(sections)
 
 
-async def _format_kb_scope(ds, bindings) -> str:  # type: ignore[no-untyped-def]
+async def _format_kb_scope(ds, bindings, user_id: str | None = None) -> str:  # type: ignore[no-untyped-def]
     """Render the KB binding set as a compact, model-readable summary.
 
     Walks ``ProjectKbBindingRow`` rows (kb / folder / document kinds)
@@ -169,7 +172,7 @@ async def _format_kb_scope(ds, bindings) -> str:  # type: ignore[no-untyped-def]
             assert isinstance(items, list)
             items.append(f"folder: {folder.relative_path or folder.id}")
         elif b.binding_kind == "document":
-            doc = await ds.get_by_id(require_current_user_id(), b.target_id)
+            doc = await ds.get_by_id(user_id, b.target_id)
             if not doc:
                 continue
             kb = await ds.get_kb(doc.kb_id)

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from valuz_agent.api.deps import get_provider_service, require_current_user_id
+from valuz_agent.api.deps import get_provider_service, get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.discover import ModelDiscoveryError
@@ -116,6 +116,7 @@ class ProbeModelsRequest(BaseModel):
 
 class ProbeModelsResponse(BaseModel):
     models: list[str]
+    model_labels: dict[str, str] = Field(default_factory=dict)
     suggested_default: str | None = None
 
 
@@ -166,7 +167,7 @@ class SetDefaultRequest(BaseModel):
 @router.post("/validate")
 async def validate_credentials(
     body: ValidateRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> ConnectionTestResult:
     return await svc.validate_credentials(
@@ -182,7 +183,7 @@ async def validate_credentials(
 @router.post("/ping")
 async def ping_compatible(
     body: PingRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> PingResponse:
     """Ping every model in ``body.models`` and return the verified subset.
@@ -267,7 +268,7 @@ def list_provider_descriptors(
 
 @router.get("")
 async def list_providers(
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> dict[str, list[LLMChannel]]:
     return {"providers": await svc.list_providers(user_id)}
@@ -276,7 +277,7 @@ async def list_providers(
 @router.get("/{provider_id}")
 async def get_provider(
     provider_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> LLMChannelDetail:
     return await svc.get_provider(user_id, provider_id)
@@ -285,7 +286,7 @@ async def get_provider(
 @router.post("", status_code=201)
 async def create_provider(
     body: ProviderCreateRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> LLMChannelDetail:
     """Create a provider channel.
@@ -320,7 +321,7 @@ async def create_provider(
 async def update_provider(
     provider_id: str,
     body: ProviderUpdateRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> LLMChannelDetail:
     await _enforce_provider_policy(user_id, "update")
@@ -346,7 +347,7 @@ async def update_provider(
 @router.delete("/{provider_id}", status_code=204)
 async def delete_provider(
     provider_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> None:
     try:
@@ -358,7 +359,7 @@ async def delete_provider(
 @router.post("/{provider_id}/test")
 async def test_provider(
     provider_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> ConnectionTestResult:
     try:
@@ -371,12 +372,13 @@ class DiscoverModelsResponse(BaseModel):
     provider_id: str
     discovered: list[str]
     merged: list[str]
+    model_labels: dict[str, str] = Field(default_factory=dict)
 
 
 @router.post("/{provider_id}/discover-models")
 async def discover_provider_models(
     provider_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> DiscoverModelsResponse:
     """Probe the provider's upstream for the available model list.
@@ -403,7 +405,7 @@ async def discover_provider_models(
 @router.post("/{provider_id}/enable")
 async def enable_provider(
     provider_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> LLMChannelDetail:
     """Mark an OAuth/subscription provider channel as enabled.
@@ -429,7 +431,7 @@ async def enable_provider(
 @router.post("/default")
 async def set_default(
     body: SetDefaultRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProviderService = Depends(get_provider_service),
 ) -> dict[str, str]:
     try:
@@ -452,7 +454,7 @@ class ResetRequest(BaseModel):
 @router.post("/reset")
 async def reset(
     body: ResetRequest | None = None,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> dict[str, list[LLMChannel]]:
     """Reset the model provider table.
 

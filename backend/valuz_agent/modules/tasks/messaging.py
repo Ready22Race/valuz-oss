@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
@@ -26,7 +25,11 @@ async def send_to_member(
     text: str,
     project_id: str,
     task_id: str,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Deliver a free-text follow-up from the lead to a running member.
 
     Task-level isolation (dual isolation): the target must be a member of
@@ -63,7 +66,7 @@ async def send_to_member(
 
     async with async_unit_of_work() as db:
         await TaskEventDatastore(db).append_event(
-            require_current_user_id(),
+            user_id,
             project_id=project_id,
             task_id=task_id,
             type="subtask_message",
@@ -80,6 +83,7 @@ async def inject_into_task(
     project_id: str,
     text: str,
     from_session_id: str,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Inject a free-text instruction from a chat session into a running task's lead.
 
@@ -102,7 +106,7 @@ async def inject_into_task(
 
     async with async_unit_of_work(commit=False) as db:
         task_row = await TaskDatastore(db).get_task_by_project(
-            require_current_user_id(), project_id, task_id
+            user_id, project_id, task_id
         )
     if task_row is None:
         return {
@@ -118,7 +122,7 @@ async def inject_into_task(
         }
 
     async with async_unit_of_work(commit=False) as db:
-        runs = await TaskSessionDatastore(db).list_runs(require_current_user_id(), task_id)
+        runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
     lead_run = next((r for r in runs if r.kind == "lead"), None)
     if lead_run is None:
         return {
@@ -138,7 +142,7 @@ async def inject_into_task(
         event_ds = TaskEventDatastore(db)
         if delivered:
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id=project_id,
                 task_id=task_id,
                 type="user_inject",
@@ -148,7 +152,7 @@ async def inject_into_task(
             )
         else:
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id=project_id,
                 task_id=task_id,
                 type="user_inject_dropped",
@@ -169,6 +173,7 @@ async def notify_lead_goal_revised(
     task_id: str,
     project_id: str,
     new_goal: str,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Wake a running task's lead after the user revised ``task.goal``.
 
@@ -187,7 +192,7 @@ async def notify_lead_goal_revised(
     from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
     async with async_unit_of_work(commit=False) as db:
-        runs = await TaskSessionDatastore(db).list_runs(require_current_user_id(), task_id)
+        runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
     lead_run = next((r for r in runs if r.kind == "lead"), None)
     if lead_run is None:
         return {"delivered": False, "lead_session_id": None, "reason": "NO_LEAD"}

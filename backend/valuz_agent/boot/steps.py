@@ -39,13 +39,23 @@ def ensure_local_identity() -> None:
     created during boot is stamped with a real owner. Background tasks spawned
     during startup (automation runner, task runner, kernel mirrors) inherit
     this context via ``asyncio.create_task``. There is deliberately no global
-    fallback: a context that was never seeded raises ``LookupError`` on read,
-    so an unattributed insert fails loudly instead of being silently owned by
-    the install id. OSS derives the id from the device fingerprint and persists
+    fallback: a context that was never seeded reads as ``None``; required-owner
+    APIs and non-null owner columns then fail instead of silently attributing
+    work to the install id. OSS derives the id from the device fingerprint and persists
     it once to ``~/.valuz-oss/installation.json``; the commercial overlay
     overrides per-request identity by swapping ``AuthMiddleware`` (overriding
     ``resolve_user_id``) via ``ext.auth_middleware``.
     """
+    # In shared/cloud deployments the boot process runs without a stable
+    # local owner context. Leaving the owner unset makes optional-owner startup
+    # paths safe to skip owner-attribution (official seed scans, locale cache)
+    # rather than silently writing data under a synthetic install id.
+    if settings.deployment_type != "local":
+        from valuz_agent.infra.auth_context import set_current_user_id
+
+        set_current_user_id(None)
+        return
+
     from valuz_agent.infra.auth_context import set_current_user_id
     from valuz_agent.infra.local_identity import resolve_local_user_id
 
@@ -125,22 +135,24 @@ async def bootstrap_schema() -> None:
     from valuz_agent.boot.kernel_db_split import migrate_kernel_store_out_of_host_db
     from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.seeds import seed_all
 
     # NB: the ``~/.valuz/app`` → ``~/.valuz-oss`` data-dir cutover runs earlier in
     # the lifespan (``migrate_data_dir``), before identity resolution — see that
     # step's docstring for why the ordering is load-bearing.
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    if settings.deployment_type == "local":
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
 
-    # One-shot courtesy rename from the workspace→project naming cutover:
-    # managed chat cwds moved from ``data_dir/workspaces/`` to
-    # ``data_dir/projects/``. The DB is wiped by the cutover fingerprint,
-    # but the directories hold user files — carry them over instead of
-    # orphaning them. No-op once the new directory exists.
-    legacy_dir = settings.data_dir / "workspaces"
-    target_dir = settings.data_dir / "projects"
-    if legacy_dir.is_dir() and not target_dir.exists():
-        legacy_dir.rename(target_dir)
+        # One-shot courtesy rename from the workspace→project naming cutover:
+        # managed chat cwds moved from ``data_dir/workspaces/`` to
+        # ``data_dir/projects/``. The DB is wiped by the cutover fingerprint,
+        # but the directories hold user files — carry them over instead of
+        # orphaning them. No-op once the new directory exists.
+        legacy_dir = settings.data_dir / "workspaces"
+        target_dir = settings.data_dir / "projects"
+        if legacy_dir.is_dir() and not target_dir.exists():
+            legacy_dir.rename(target_dir)
 
     # 0. One-time cutover: move pre-split kernel tables (sessions/messages/
     #    events + any langgraph checkpoints + the kernel alembic stamp) out of
@@ -160,8 +172,6 @@ async def bootstrap_schema() -> None:
     # 2. Re-install logging — alembic's fileConfig clobbers handlers.
     from valuz_agent.infra.logging import configure_logging
 
-    configure_logging()
-
     # 3. Host alembic (``alembic_version_host`` row). Async env.py, driven
     #    on a dedicated thread (see ``run_host_migrations``).
     run_host_migrations()
@@ -174,17 +184,21 @@ async def bootstrap_schema() -> None:
     configure_logging()
 
     # 4. Pure-insert seeds for built-in rows.
-    async with async_unit_of_work() as db:
-        await seed_all(db)
+    # In cloud deployments, startup seeding is intentionally skipped to avoid
+    # owner-scoped seed side effects being driven by a synthetic local identity.
+    if settings.deployment_type == "local":
+        async with async_unit_of_work() as db:
+            await seed_all(db, user_id=resolve_local_user_id())
 
     # 5. One-time backfill of the connector module's legacy filesystem stores
     #    (project-config.json selection + FileSecretStore secrets) into the
-    #    connector DB tables/columns. Idempotent + marker-gated; a no-op on
-    #    fresh / shared backends.
-    from valuz_agent.boot.backfill_connector_fs import backfill_connector_fs
+    #    connector DB tables/columns. This remains local-only; cloud startup
+    #    should not run owner-context-sensitive filesystem backfill.
+    if settings.deployment_type == "local":
+        from valuz_agent.boot.backfill_connector_fs import backfill_connector_fs
 
-    async with async_unit_of_work() as db:
-        await backfill_connector_fs(db)
+        async with async_unit_of_work() as db:
+            await backfill_connector_fs(db)
 
 
 async def configure_i18n() -> None:
@@ -198,10 +212,14 @@ async def configure_i18n() -> None:
     """
     from valuz_agent.i18n import set_locale
     from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.modules.settings.preferences import get_default_locale
 
+    if settings.deployment_type != "local":
+        return
+
     async with async_unit_of_work(commit=False) as db:
-        set_locale(await get_default_locale(db))
+        set_locale(await get_default_locale(db, user_id=resolve_local_user_id()))
 
 
 async def init_kernel(app: FastAPI) -> None:
@@ -362,6 +380,9 @@ def install_binding_change_listener() -> None:
         # blocking the loop. Fire-and-forget: the lazy refresh in
         # ``send_message`` converges any missed/failed run on the next turn.
         import asyncio
+
+        if not isinstance(kwargs.get("user_id"), str):
+            return
 
         coro = refresh_docs_capabilities_for_project(**kwargs)  # type: ignore[arg-type]
         try:
@@ -578,6 +599,14 @@ def shutdown_parse_pool() -> None:
 
 
 async def start_skills(app: FastAPI) -> None:
+    from valuz_agent.infra.config import settings
+
+    if settings.deployment_type != "local":
+        logger.info(
+            "local skill indexing disabled (deployment_type=%s)", settings.deployment_type
+        )
+        return
+
     # Sync bundled official skills (e.g. skill-creator, valuz-handbook) into
     # the user's official-skills directory before scanning, so they appear
     # on first run. (Previously mis-placed in stop_polling_scheduler's
@@ -593,20 +622,22 @@ async def start_skills(app: FastAPI) -> None:
         pass
 
     from valuz_agent.api.deps import get_skill_service
-    from valuz_agent.infra.auth_context import require_current_user_id
+    from valuz_agent.infra.local_identity import resolve_local_user_id
 
-    # Boot context: ``ensure_local_identity`` has seeded the owner for the
-    # startup install id — resolve it once and thread it into the scans.
-    owner = require_current_user_id()
+    # Local startup writes are owned explicitly by the stable local install id.
+    # Shared/cloud deployments returned above, so this step never invents a
+    # synthetic owner for a multi-user backend.
+    owner = resolve_local_user_id()
     skill_gen = get_skill_service()
     skill_svc = await skill_gen.__anext__()
     try:
         # Deterministically index the bundled official skills FIRST, in the
-        # same step that just synced them to disk. The broad startup_scan below
-        # is best-effort (errors swallowed); when finance-edition official
-        # skills land on disk out-of-band it can lag, leaving an agent that
-        # references them unable to resolve the skill. This targeted upsert
-        # guarantees they are in valuz_skill_index every boot.
+        # same step that just synced them to disk. The broad startup_scan
+        # below is best-effort (errors swallowed); when finance-edition
+        # official skills land on disk out-of-band it can lag, leaving an
+        # agent that references them unable to resolve the skill. This
+        # targeted upsert guarantees they are in valuz_skill_index every
+        # boot.
         try:
             indexed = await skill_svc.index_official_skills(owner)
             logger.info("index_official_skills: indexed %d official skill(s)", indexed)
@@ -615,8 +646,8 @@ async def start_skills(app: FastAPI) -> None:
         try:
             await skill_svc.startup_scan(owner)
         except Exception:
-            # Best-effort, but no longer silent: a failed scan that leaves the
-            # index stale was exactly the bug this step hardens against.
+            # Best-effort, but no longer silent: a failed scan that leaves
+            # the index stale was exactly the bug this step hardens against.
             logger.exception("startup_scan failed")
     finally:
         try:

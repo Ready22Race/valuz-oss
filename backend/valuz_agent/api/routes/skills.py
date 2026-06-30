@@ -22,7 +22,7 @@ from sse_starlette.sse import EventSourceResponse
 from valuz_agent.api.deps import (
     get_session_service,
     get_skill_service,
-    require_current_user_id,
+    get_current_user_id,
 )
 from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.sessions.schemas import SessionModelSelection
@@ -80,7 +80,7 @@ router = APIRouter(tags=["skills"])
 async def list_skills(
     project_id: str | None = Query(default=None),
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> dict:
     target_project_id = project_id or "chat-default"
     try:
@@ -101,7 +101,7 @@ async def list_skills(
 async def create_skill(
     payload: SkillCreateRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillView:
     try:
         return await svc.create_skill(user_id, payload)
@@ -113,7 +113,7 @@ async def create_skill(
 async def list_tags(
     project_id: str | None = Query(default=None),
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillTagsResponse:
     return SkillTagsResponse(tags=await svc.list_all_tags(user_id, project_id))
 
@@ -125,7 +125,7 @@ class SkillRescanResponse(BaseModel):
 @router.post("/v1/skills/scan", response_model=SkillRescanResponse)
 async def rescan_skills(
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillRescanResponse:
     """Re-discover every skill on disk and refresh the index, then notify open
     catalogs (via ``SKILL_CHANGED``) so they re-fetch. The manual counterpart of
@@ -188,7 +188,7 @@ async def skill_events_stream(request: Request) -> EventSourceResponse:
 async def import_from_session(
     payload: SessionSkillImportConfirmRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillView:
     try:
         return await svc.import_from_session_confirm(user_id, payload)
@@ -265,7 +265,7 @@ async def _default_assistant_slug_if_present(user_id: str) -> str | None:
 async def start_create(
     body: SkillCreateStartRequest,
     session_svc: SessionService = Depends(get_session_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillCreateStartResponse:
     """Unified launcher for the skill-creator agent loop.
 
@@ -292,6 +292,7 @@ async def start_create(
         trigger_meta={"mode": "skill-creator"},
         creation_context=creation_context,
         agent_slug=body.agent_slug or await _default_assistant_slug_if_present(user_id),
+        user_id=user_id,
     )
     return SkillCreateStartResponse(
         session_id=session.id,
@@ -308,7 +309,7 @@ async def start_create(
 async def start_create_chat(
     body: SkillCreateChatStartRequest | None = None,
     session_svc: SessionService = Depends(get_session_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillCreateChatStartResponse:
     """Legacy chat-only launcher.
 
@@ -326,6 +327,7 @@ async def start_create_chat(
         trigger_meta={"mode": "skill-creator"},
         creation_context={"kind": "chat"},
         agent_slug=await _default_assistant_slug_if_present(user_id),
+        user_id=user_id,
     )
     return SkillCreateChatStartResponse(
         session_id=session.id,
@@ -358,7 +360,7 @@ def _slug_view_to_model(view) -> StagingSlugViewModel:  # type: ignore[no-untype
 )
 async def scan_staging_endpoint(
     session_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: SkillLibraryService = Depends(get_skill_service),
 ) -> StagingScanResponse:
     result = await svc.scan_staging(user_id, session_id)
@@ -382,7 +384,7 @@ async def read_staging_file_endpoint(
     session_id: str,
     slug: str = Query(..., description="Slug under the session staging dir"),
     path: str = Query(..., description="File path relative to the slug dir"),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> StagingFileContent:
     """Return the UTF-8 contents of a single file under a staging slug.
 
@@ -424,7 +426,7 @@ async def sync_staging_endpoint(
     session_id: str,
     payload: StagingSyncRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> StagingSyncResponse:
     try:
         results = await svc.sync_staging(
@@ -464,7 +466,7 @@ async def optimize_staging_endpoint(
     session_id: str,
     payload: StagingOptimizeRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> StagingOptimizeResponse:
     """Pre-stage an existing skill into the session's staging dir for editing."""
     try:
@@ -496,7 +498,7 @@ async def confirm_skill_submission(
     slug: str,
     payload: SkillSubmissionConfirmRequest | None = None,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillSubmissionConfirmResponse:
     """User accepts the skill the agent submitted via ``submit_skill``.
 
@@ -541,7 +543,7 @@ async def confirm_skill_submission(
 async def dismiss_skill_submission(
     session_id: str,
     slug: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: SkillLibraryService = Depends(get_skill_service),
 ) -> SkillSubmissionDismissResponse:
     """User discards the agent's submission.
@@ -559,7 +561,7 @@ async def import_archive_preview(
     target_scope: Annotated[str, Form()] = "user",
     project_id: Annotated[str | None, Form()] = None,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillImportArchivePreview:
     suffix = Path(file.filename or "skill.zip").suffix or ".zip"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -584,7 +586,7 @@ async def import_archive_preview(
 async def confirm_archive_import(
     payload: SkillImportArchiveConfirmRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillView:
     try:
         return await svc.confirm_archive_import(user_id, payload)
@@ -596,7 +598,7 @@ async def confirm_archive_import(
 async def import_directory_preview(
     payload: SkillImportDirectoryPreviewRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillImportArchivePreview:
     try:
         return await svc.import_directory_preview(user_id, payload)
@@ -608,7 +610,7 @@ async def import_directory_preview(
 async def import_url_preview(
     payload: SkillImportUrlPreviewRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillImportArchivePreview:
     try:
         return await svc.import_url_preview(
@@ -629,7 +631,7 @@ async def import_url_preview(
 async def confirm_url_import(
     payload: SkillImportUrlConfirmRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillView:
     try:
         return await svc.confirm_url_import(user_id, payload)
@@ -647,7 +649,7 @@ async def get_skill(
     skill_id: str,
     project_id: str | None = Query(default=None),
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillDetail:
     try:
         return await svc.get_skill_detail(user_id, skill_id, project_id=project_id)
@@ -661,7 +663,7 @@ async def update_skill(
     payload: SkillUpdateRequest,
     project_id: str | None = Query(default=None),
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillView:
     try:
         return await svc.update_skill(user_id, skill_id, payload, project_id=project_id)
@@ -678,7 +680,7 @@ async def copy_skill(
     skill_id: str,
     payload: SkillCopyRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillView:
     try:
         return await svc.copy_skill(user_id, skill_id, payload)
@@ -691,7 +693,7 @@ async def set_skill_library_state(
     skill_id: str,
     payload: SkillLibraryStateRequest,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillView:
     # SkillNotFound (NotFoundError) maps to 404 via the error middleware.
     return await svc.set_library_enabled(user_id, skill_id, payload.enabled)
@@ -707,7 +709,7 @@ async def delete_skill(
     project_id: str | None = Query(default=None),
     mode: str = Query(default="dry_run"),
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillDeletePreview | Response | None:
     if mode not in {"dry_run", "confirm"}:
         raise HTTPException(status_code=422, detail="Unsupported delete mode")
@@ -730,7 +732,7 @@ async def list_skill_files(
     skill_id: str,
     project_id: str | None = Query(default=None),
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> list[SkillFileNode]:
     try:
         return await svc.list_skill_files(user_id, skill_id, project_id=project_id)
@@ -744,7 +746,7 @@ async def get_skill_file(
     file_path: str,
     project_id: str | None = Query(default=None),
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillFileContent:
     try:
         return await svc.read_skill_file(user_id, skill_id, file_path, project_id=project_id)
@@ -762,7 +764,7 @@ async def update_skill_file(
     payload: SkillFileAction,
     project_id: str | None = Query(default=None),
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillFileContent:
     try:
         return await svc.write_skill_file(user_id, skill_id, payload, project_id=project_id)
@@ -779,7 +781,7 @@ async def update_skill_file(
 async def project_skills_catalog(
     project_id: str,
     svc: SkillLibraryService = Depends(get_skill_service),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> SkillsCatalog:
     try:
         return await svc.list_catalog(user_id, project_id)

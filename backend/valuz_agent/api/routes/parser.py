@@ -27,7 +27,7 @@ from valuz_agent.api.deps import (
     _parser_registry,
     _secret_store,
     get_setup_controller,
-    require_current_user_id,
+    get_current_user_id,
 )
 from valuz_agent.i18n import t
 from valuz_agent.infra.db import async_unit_of_work
@@ -313,12 +313,13 @@ def _plugin_to_descriptor_schema(
 @settings_router.get("/plugins", response_model=PluginsListResponse)
 async def list_parser_plugins(
     controller: SetupJobController = Depends(get_setup_controller),
+    user_id: str = Depends(get_current_user_id),
 ) -> PluginsListResponse:
     """Enumerate every plugin shipped with this build, with the
     user-visible runtime status of each capability."""
     registry = _parser_registry()
     async with async_unit_of_work(commit=False) as db:
-        configs = await get_plugin_configs(db)
+        configs = await get_plugin_configs(db, user_id=user_id)
     descriptors = [
         _plugin_to_descriptor_schema(
             plugin,
@@ -358,11 +359,11 @@ def _compute_effective_by_kind(
     return out
 
 
-async def _read_parser_routing(db: AsyncSession) -> ParserRoutingResponse:
+async def _read_parser_routing(db: AsyncSession, user_id: str) -> ParserRoutingResponse:
     registry = _parser_registry()
-    primary = await get_primary_plugin_id(db)
-    by_kind = await get_by_kind(db)
-    fallback = await get_fallback_to_local_on_error(db)
+    primary = await get_primary_plugin_id(db, user_id=user_id)
+    by_kind = await get_by_kind(db, user_id=user_id)
+    fallback = await get_fallback_to_local_on_error(db, user_id=user_id)
     return ParserRoutingResponse(
         primary_plugin_id=primary,
         by_kind=by_kind,
@@ -375,30 +376,37 @@ async def _read_parser_routing(db: AsyncSession) -> ParserRoutingResponse:
 
 
 @settings_router.get("", response_model=ParserRoutingResponse)
-async def get_parser_routing() -> ParserRoutingResponse:
+async def get_parser_routing(
+    user_id: str = Depends(get_current_user_id),
+) -> ParserRoutingResponse:
     async with async_unit_of_work(commit=False) as db:
-        return await _read_parser_routing(db)
+        return await _read_parser_routing(db, user_id)
 
 
 @settings_router.patch("", response_model=ParserRoutingResponse)
-async def patch_parser_routing(payload: ParserRoutingPatchRequest) -> ParserRoutingResponse:
+async def patch_parser_routing(
+    payload: ParserRoutingPatchRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> ParserRoutingResponse:
     registry = _parser_registry()
     try:
         async with async_unit_of_work() as db:
             if payload.primary_plugin_id is not None:
                 if registry.try_get(payload.primary_plugin_id) is None:
                     raise ValueError(f"unknown plugin id: {payload.primary_plugin_id}")
-                await set_primary_plugin_id(db, payload.primary_plugin_id)
+                await set_primary_plugin_id(db, payload.primary_plugin_id, user_id=user_id)
             if payload.by_kind is not None:
                 # Defensive: drop unknown plugin ids so a botched PATCH
                 # cannot disable parsing for that kind silently.
                 cleaned = {
                     k: v for k, v in payload.by_kind.items() if registry.try_get(v) is not None
                 }
-                await set_by_kind(db, cleaned)
+                await set_by_kind(db, cleaned, user_id=user_id)
             if payload.fallback_to_local_on_error is not None:
-                await set_fallback_to_local_on_error(db, payload.fallback_to_local_on_error)
-            return await _read_parser_routing(db)
+                await set_fallback_to_local_on_error(
+                    db, payload.fallback_to_local_on_error, user_id=user_id
+                )
+            return await _read_parser_routing(db, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -416,11 +424,14 @@ def _config_to_response(plugin_id: str, cfg: dict[str, Any]) -> PluginConfigResp
 
 
 @settings_router.get("/plugins/{plugin_id}/config", response_model=PluginConfigResponse)
-async def get_plugin_config_route(plugin_id: str) -> PluginConfigResponse:
+async def get_plugin_config_route(
+    plugin_id: str,
+    user_id: str = Depends(get_current_user_id),
+) -> PluginConfigResponse:
     if _parser_registry().try_get(plugin_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown plugin id: {plugin_id}")
     async with async_unit_of_work(commit=False) as db:
-        cfg = await get_plugin_config(db, plugin_id)
+        cfg = await get_plugin_config(db, plugin_id, user_id=user_id)
     return _config_to_response(plugin_id, cfg)
 
 
@@ -428,7 +439,7 @@ async def get_plugin_config_route(plugin_id: str) -> PluginConfigResponse:
 async def patch_plugin_config_route(
     plugin_id: str,
     payload: PluginConfigPatchRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> PluginConfigResponse:
     if _parser_registry().try_get(plugin_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown plugin id: {plugin_id}")
@@ -450,6 +461,7 @@ async def patch_plugin_config_route(
             enabled=payload.enabled,
             secret_ref_change=secret_ref_change,
             options=payload.options,
+            user_id=user_id,
         )
     return _config_to_response(plugin_id, cfg)
 
@@ -457,7 +469,7 @@ async def patch_plugin_config_route(
 @settings_router.post("/plugins/{plugin_id}/test", response_model=PluginTestResponse)
 async def test_plugin(
     plugin_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> PluginTestResponse:
     """Build the plugin's backend with the current stored config and
     run its ``health_check``. Used by the settings UI to validate API
@@ -470,7 +482,7 @@ async def test_plugin(
         raise HTTPException(status_code=404, detail=f"unknown plugin id: {plugin_id}")
 
     async with async_unit_of_work(commit=False) as db:
-        cfg_dict = await get_plugin_config(db, plugin_id)
+        cfg_dict = await get_plugin_config(db, plugin_id, user_id=user_id)
 
     secret_store = _secret_store()
 

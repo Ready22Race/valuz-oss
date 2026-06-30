@@ -2673,6 +2673,119 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+
+  /v1/projects/{project_id}/export:
+    get:
+      summary: Export a project as a downloadable .valuzpack archive
+      operationId: exportProject
+      tags: [projects]
+      description: |
+        Build a portable .valuzpack (zip) for the given project in the unified
+        pack format (schema_version 2, a `project` target) — its metadata, team
+        members (slim handles referencing the hoisted top-level agents[]
+        payload), automations, project-scoped skill configs, project-scoped
+        connector slugs (definitions in the shared connectors[] index, secrets
+        stripped), and the on-disk project memory directory. Chat projects are
+        not exportable (422).
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: The .valuzpack archive
+          content:
+            application/zip:
+              schema: {type: string, format: binary}
+        "404":
+          description: Unknown project id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: Chat projects are not exportable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/projects/import-preview:
+    post:
+      summary: Upload a .valuzpack project and stage it for import (preview)
+      operationId: importProjectPreview
+      tags: [projects]
+      description: |
+        Parse + stage an uploaded .valuzpack carrying a `project` target.
+        Returns a preview of what it
+        contains (project meta, members with library state, automations,
+        project skills, project connectors, shared skill/connector indexes)
+        plus a preview_id to confirm with. Reports a name_conflict flag when a
+        same-named project already exists for the caller. An agent collection
+        pack uploaded here is rejected (400).
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: {type: string, format: binary}
+      responses:
+        "200":
+          description: Import preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportProjectPreviewResponse"
+        "400":
+          description: Malformed or oversized archive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/projects/import/confirm:
+    post:
+      summary: Commit a staged .valuzpack project import
+      operationId: confirmProjectImport
+      tags: [projects]
+      description: |
+        Install the staged project pack's skills, register its connectors,
+        recreate its library agents de-duped by slug (runtime/model/provider
+        follow the user's defaults), create the project row (fresh id, managed
+        cwd), restore the on-disk memory, recreate the team members preserving
+        their project-local agent_slug handles, and recreate the automations +
+        project skill/connector configs. If a project of the same name already
+        exists for the caller, the import is SKIPPED (status=
+        "skipped_name_conflict") rather than overwriting it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportProjectConfirmRequest"
+      responses:
+        "200":
+          description: Import committed (status may be "created" or "skipped_name_conflict")
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportProjectConfirmResponse"
+        "400":
+          description: Preview expired or already used
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: No model channel configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "422":
           description: No model channel configured
           content:
@@ -3014,6 +3127,116 @@ components:
         roles:
           type: array
           items: {$ref: "#/components/schemas/Agent"}
+        connectors_to_configure:
+          type: array
+          items: {$ref: "#/components/schemas/ConnectorToConfigure"}
+    ImportProjectPreviewMember:
+      type: object
+      required: [agent_slug, source_agent_slug, name, description, in_library]
+      properties:
+        agent_slug: {type: string, description: "Project-local member handle the recipient preserves."}
+        source_agent_slug: {type: string, description: "Library slug the snapshot represents (de-dup key)."}
+        name: {type: string}
+        description: {type: string}
+        in_library: {type: boolean, description: "Whether a library agent of that slug already exists."}
+    ImportProjectPreviewAutomation:
+      type: object
+      required: [name, agent_slug, trigger_kind, cron_expr, interval_seconds, status]
+      properties:
+        name: {type: string}
+        agent_slug: {type: string}
+        trigger_kind: {type: string, enum: [cron, interval, manual]}
+        cron_expr: {type: string, nullable: true}
+        interval_seconds: {type: integer, nullable: true}
+        status: {type: string}
+    ImportProjectConfirmRequest:
+      type: object
+      required: [preview_id]
+      properties:
+        preview_id: {type: string}
+    ImportProjectPreviewResponse:
+      type: object
+      required: [preview_id, project, name_conflict, members, automations, project_skills, project_connectors, skills, connectors, has_memory]
+      properties:
+        preview_id: {type: string}
+        project:
+          type: object
+          required: [name, kind, icon, instructions_md]
+          properties:
+            name: {type: string}
+            kind: {type: string}
+            icon: {type: string, nullable: true}
+            instructions_md: {type: string}
+        name_conflict:
+          type: boolean
+          description: "True when a same-named project already exists for the caller — confirm will skip."
+        members:
+          type: array
+          items: {$ref: "#/components/schemas/ImportProjectPreviewMember"}
+        automations:
+          type: array
+          items: {$ref: "#/components/schemas/ImportProjectPreviewAutomation"}
+        project_skills:
+          type: array
+          items: {type: string}
+        project_connectors:
+          type: array
+          items: {type: string}
+        skills:
+          type: array
+          items: {$ref: "#/components/schemas/ImportPreviewSkill"}
+        connectors:
+          type: array
+          items: {$ref: "#/components/schemas/ImportPreviewConnector"}
+        has_memory: {type: boolean}
+    ImportProjectConfirmResponse:
+      type: object
+      required: [status, project, members_created, members_reused, agents_created, agents_skipped, automations_created, automation_errors, connectors_to_configure]
+      properties:
+        status:
+          type: string
+          enum: [created, skipped_name_conflict]
+          description: "\"created\" — the project was created; \"skipped_name_conflict\" — a same-named project existed, so nothing was written."
+        project:
+          type: object
+          nullable: true
+          description: "The created project as a ProjectListItem (id/name/kind/root_path/icon/cwd). Null on skip."
+          properties:
+            id: {type: string}
+            name: {type: string}
+            kind: {type: string}
+            root_path: {type: string, nullable: true}
+            icon: {type: string, nullable: true}
+            cwd: {type: string, nullable: true}
+        project_id: {type: string, nullable: true}
+        project_name: {type: string, nullable: true}
+        members_created: {type: integer, description: "Member rows created in the new project."}
+        members_reused: {type: integer, description: "Always 0 — members are always fresh in a new project (reuse applies to library agents, tracked in agents_skipped)."}
+        agents_created: {type: integer, description: "Library agents newly created (de-duped by slug)."}
+        agents_skipped: {type: integer, description: "Library agents reused (slug already present)."}
+        automations_created: {type: integer}
+        automation_errors:
+          type: array
+          description: "Per-automation failures (one bad automation does not sink the rest). Empty when all recreated."
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              error: {type: string}
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              agent_slug: {type: string}
+              source_agent_slug: {type: string}
+        automations:
+          type: array
+          items:
+            type: object
+            properties:
+              automation_id: {type: string}
+              name: {type: string}
         connectors_to_configure:
           type: array
           items: {$ref: "#/components/schemas/ConnectorToConfigure"}

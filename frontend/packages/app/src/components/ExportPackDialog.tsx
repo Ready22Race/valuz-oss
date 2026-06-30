@@ -13,6 +13,8 @@ import {
 } from "@valuz/ui";
 import { agentTemplatesApi, useTranslation } from "@valuz/core";
 
+import { downloadBlob, toValuzpackFilename } from "./pack-filename";
+
 type Tx = ReturnType<typeof useTranslation>["t"];
 const k = (key: string) => key as Parameters<Tx>[0];
 
@@ -63,16 +65,14 @@ export function ExportPackDialog({
     try {
       const trimmed = name.trim();
       const trimmedDesc = desc.trim();
-      const { blob, filename } = await agentTemplatesApi.exportPack(agentSlugs, {
+      const { blob } = await agentTemplatesApi.exportPack(agentSlugs, {
         name: trimmed || undefined,
         description: trimmedDesc || undefined,
       });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
+      downloadBlob(
+        blob,
+        toValuzpackFilename(name, defaultName ?? t(k("agent.pack.defaultGroupName"))),
+      );
       toast.success(t(k("agent.pack.exportDone"), { count: agentSlugs.length }));
       onOpenChange(false);
       onExported?.();
@@ -94,11 +94,14 @@ export function ExportPackDialog({
         <div className="space-y-3 py-1">
           <div className="space-y-1.5">
             <label className="text-xs text-ink-meta">{t(k("agent.pack.groupName"))}</label>
-            <Input
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoFocus
-            />
+            <div className="flex items-center gap-2">
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                autoFocus
+              />
+              <span className="shrink-0 text-xs text-ink-meta">.valuzpack</span>
+            </div>
           </div>
           <div className="space-y-1.5">
             <label className="text-xs text-ink-meta">{t(k("agent.pack.groupDesc"))}</label>

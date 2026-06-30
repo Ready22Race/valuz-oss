@@ -264,3 +264,342 @@ class TestKbListSmoke:
         refs = await lib.list(USER_ID, "kb")
         assert isinstance(refs, list)
         assert refs == []
+
+
+# ---------------------------------------------------------------------------
+# Project kind — list + get + save-raises (smoke via fake services)
+# ---------------------------------------------------------------------------
+
+
+class TestProjectFacade:
+    async def test_list_project_excludes_chat_projects(self, monkeypatch) -> None:
+        """list("project") should skip ``kind='chat'`` rows — only project-kind is exportable."""
+
+        # ProjectDatastore.list_projects returns ProjectRow ORM objects; here we
+        # stand in with simple objects exposing the same attributes.
+        class _Row:
+            def __init__(self, id: str, name: str, kind: str) -> None:
+                self.id = id
+                self.name = name
+                self.kind = kind
+
+        class _FakeDs:
+            def __init__(self, _db) -> None:  # accepts the db arg as ProjectDatastore does
+                pass
+
+            async def list_projects(self, user_id: str):
+                return [
+                    _Row("p1", "Real Project", "project"),
+                    _Row("c1", "A Chat", "chat"),
+                    _Row("p2", "Another", "project"),
+                ]
+
+        # Stub the unit-of-work so the facade doesn't need a real DB.
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _fake_uow(commit: bool = True):
+            yield object()
+
+        monkeypatch.setattr("valuz_agent.infra.db.async_unit_of_work", _fake_uow)
+        monkeypatch.setattr("valuz_agent.modules.projects.datastore.ProjectDatastore", _FakeDs)
+
+        lib = ResourceLibrary()
+        refs = await lib.list(USER_ID, "project")
+        assert [(r.kind, r.key, r.name) for r in refs] == [
+            ("project", "p1", "Real Project"),
+            ("project", "p2", "Another"),
+        ]
+
+    async def test_get_project_returns_snapshot_with_valuzpack_bundle(self, monkeypatch) -> None:
+        """get("project") should attach a base64-encoded .valuzpack bundle to ``files``."""
+        import base64
+
+        class _Detail:
+            def __init__(self) -> None:
+                self.name = "Snap Project"
+                self.kind = "project"
+                self.icon = "📁"
+                self.instructions_md = "# Notes\nhello"
+
+        class _FakeProjectService:
+            async def get_project(self, user_id, project_id):
+                return _Detail()
+
+        class _FakePackService:
+            async def export_project(self, user_id, project_id) -> bytes:
+                return b"VALUZPACK-BINARY-CONTENT"
+
+        async def _fake_get_project_service():  # type: ignore[return]
+            yield _FakeProjectService()
+
+        async def _fake_get_pack_service():  # type: ignore[return]
+            yield _FakePackService()
+
+        monkeypatch.setattr("valuz_agent.api.deps.get_project_service", _fake_get_project_service)
+        monkeypatch.setattr("valuz_agent.api.deps.get_project_pack_service", _fake_get_pack_service)
+
+        lib = ResourceLibrary()
+        snap = await lib.get(USER_ID, "project", "p1")
+        assert snap is not None
+        assert snap.kind == "project"
+        assert snap.key == "p1"
+        assert snap.name == "Snap Project"
+        assert snap.data["bundle_size"] == len(b"VALUZPACK-BINARY-CONTENT")
+        assert snap.files is not None
+        encoded = snap.files["bundle.valuzpack"]
+        assert base64.b64decode(encoded) == b"VALUZPACK-BINARY-CONTENT"
+
+    async def test_get_project_returns_none_when_missing(self, monkeypatch) -> None:
+        """get("project", missing) returns None — ProjectService.get_project raises KeyError."""
+
+        class _FakeProjectService:
+            async def get_project(self, user_id, project_id):
+                raise KeyError(project_id)
+
+        async def _fake_get_project_service():  # type: ignore[return]
+            yield _FakeProjectService()
+
+        monkeypatch.setattr("valuz_agent.api.deps.get_project_service", _fake_get_project_service)
+
+        lib = ResourceLibrary()
+        snap = await lib.get(USER_ID, "project", "nope")
+        assert snap is None
+
+    async def test_save_project_raises_not_implemented(self) -> None:
+        """save("project") raises — pull needs preview+confirm with a user-picked folder."""
+        import pytest
+
+        lib = ResourceLibrary()
+        snap = ResourceSnapshot(
+            kind="project",
+            key="p1",
+            name="Anything",
+            data={},
+            files={"bundle.valuzpack": "aGVsbG8="},
+        )
+        with pytest.raises(NotImplementedError, match="preview"):
+            await lib.save(USER_ID, snap)
+
+
+# ---------------------------------------------------------------------------
+# Automation kind — list + get + save (smoke via fake services)
+# ---------------------------------------------------------------------------
+
+
+def _fake_automation_item(automation_id: str, name: str):
+    """Minimal stand-in for ``AutomationItemResponse`` — only attrs the facade reads."""
+
+    class _Item:
+        pass
+
+    item = _Item()
+    item.automation_id = automation_id  # type: ignore[attr-defined]
+    item.name = name  # type: ignore[attr-defined]
+    return item
+
+
+def _fake_automation_detail(
+    automation_id: str = "a1",
+    name: str = "Daily Report",
+    trigger_kind: str = "cron",
+):
+    """Minimal stand-in for ``AutomationDetailResponse`` — only attrs the facade reads."""
+    from valuz_agent.modules.automations.schemas import (
+        CronTrigger,
+        IntervalTrigger,
+        ManualTrigger,
+    )
+
+    if trigger_kind == "cron":
+        trigger = CronTrigger(cron_expr="0 9 * * *", timezone="UTC")
+    elif trigger_kind == "interval":
+        trigger = IntervalTrigger(seconds=60)
+    else:
+        trigger = ManualTrigger()
+
+    class _Detail:
+        pass
+
+    d = _Detail()
+    d.automation_id = automation_id  # type: ignore[attr-defined]
+    d.name = name  # type: ignore[attr-defined]
+    d.agent_kind = "project_member"  # type: ignore[attr-defined]
+    d.agent_slug = "news-agent"  # type: ignore[attr-defined]
+    d.agent_name = "News Agent"  # type: ignore[attr-defined]
+    d.project_id = "proj-1"  # type: ignore[attr-defined]
+    d.project_name = "Daily Reports"  # type: ignore[attr-defined]
+    d.project_kind = "project"  # type: ignore[attr-defined]
+    d.action_kind = "chat"  # type: ignore[attr-defined]
+    d.prompt_template = "Summarise news"  # type: ignore[attr-defined]
+    d.trigger = trigger  # type: ignore[attr-defined]
+    d.status = "enabled"  # type: ignore[attr-defined]
+    return d
+
+
+class TestAutomationFacade:
+    async def test_list_automation_returns_refs(self, monkeypatch) -> None:
+        """list("automation") maps each AutomationItemResponse to a ResourceRef by automation_id."""
+
+        class _FakeAutomationService:
+            async def list_all_automations(self, user_id):
+                return [
+                    _fake_automation_item("a1", "Daily"),
+                    _fake_automation_item("a2", "Hourly"),
+                ]
+
+        async def _fake_get_automation_service():  # type: ignore[return]
+            yield _FakeAutomationService()
+
+        monkeypatch.setattr(
+            "valuz_agent.api.deps.get_automation_service", _fake_get_automation_service
+        )
+
+        lib = ResourceLibrary()
+        refs = await lib.list(USER_ID, "automation")
+        assert refs == [
+            ResourceRef(kind="automation", key="a1", name="Daily"),
+            ResourceRef(kind="automation", key="a2", name="Hourly"),
+        ]
+
+    async def test_get_automation_returns_snapshot_with_trigger_dict(self, monkeypatch) -> None:
+        """get("automation") should serialise the discriminated trigger union to a plain dict."""
+
+        class _FakeAutomationService:
+            async def get_automation_detail(self, automation_id, user_id=None):
+                return _fake_automation_detail(automation_id=automation_id)
+
+        async def _fake_get_automation_service():  # type: ignore[return]
+            yield _FakeAutomationService()
+
+        monkeypatch.setattr(
+            "valuz_agent.api.deps.get_automation_service", _fake_get_automation_service
+        )
+
+        lib = ResourceLibrary()
+        snap = await lib.get(USER_ID, "automation", "a1")
+        assert snap is not None
+        assert snap.kind == "automation"
+        assert snap.key == "a1"
+        assert snap.name == "Daily Report"
+        assert snap.data["agent_slug"] == "news-agent"
+        assert snap.data["project_id_ref"] == "proj-1"
+        # Discriminated union → plain dict (kind discriminator preserved)
+        assert snap.data["trigger"]["kind"] == "cron"
+        assert snap.data["trigger"]["cron_expr"] == "0 9 * * *"
+        assert snap.files is None
+
+    async def test_get_automation_returns_none_when_missing(self, monkeypatch) -> None:
+        """get("automation", missing) returns None — AutomationService raises AutomationNotFound."""
+        from valuz_agent.modules.automations.errors import AutomationNotFound
+
+        class _FakeAutomationService:
+            async def get_automation_detail(self, automation_id, user_id=None):
+                raise AutomationNotFound()
+
+        async def _fake_get_automation_service():  # type: ignore[return]
+            yield _FakeAutomationService()
+
+        monkeypatch.setattr(
+            "valuz_agent.api.deps.get_automation_service", _fake_get_automation_service
+        )
+
+        lib = ResourceLibrary()
+        snap = await lib.get(USER_ID, "automation", "missing")
+        assert snap is None
+
+    async def test_save_automation_creates_when_key_unknown(self, monkeypatch) -> None:
+        """save("automation") falls through to AutomationService.create when the key is new."""
+        from valuz_agent.modules.automations.errors import AutomationNotFound
+
+        create_called_with: dict = {}
+
+        class _FakeAutomationService:
+            async def get_automation_detail(self, automation_id, user_id=None):
+                raise AutomationNotFound()
+
+            async def create(self, payload, *, user_id=None):
+                create_called_with["payload"] = payload
+                create_called_with["user_id"] = user_id
+                return _fake_automation_detail(automation_id="created-id", name=payload.name)
+
+            async def update(self, *args, **kwargs):  # pragma: no cover — should not be called
+                raise AssertionError("update should not be called when key is unknown")
+
+        async def _fake_get_automation_service():  # type: ignore[return]
+            yield _FakeAutomationService()
+
+        monkeypatch.setattr(
+            "valuz_agent.api.deps.get_automation_service", _fake_get_automation_service
+        )
+
+        lib = ResourceLibrary()
+        snap = ResourceSnapshot(
+            kind="automation",
+            key="never-seen",
+            name="Imported Auto",
+            data={
+                "name": "Imported Auto",
+                "project_kind": "project",
+                "project_id_ref": "proj-1",
+                "agent_kind": "project_member",
+                "agent_slug": "news-agent",
+                "prompt_template": "Summarise",
+                "action_kind": "chat",
+                "trigger": {"kind": "cron", "cron_expr": "0 9 * * *", "timezone": "UTC"},
+            },
+        )
+        ref = await lib.save(USER_ID, snap)
+        assert ref.kind == "automation"
+        assert ref.key == "created-id"
+        assert ref.name == "Imported Auto"
+        # Verify the payload the facade assembled matches the snapshot
+        assert create_called_with["user_id"] == USER_ID
+        assert create_called_with["payload"].name == "Imported Auto"
+        assert create_called_with["payload"].project_id == "proj-1"
+        assert create_called_with["payload"].trigger.cron_expr == "0 9 * * *"
+
+    async def test_save_automation_updates_when_key_exists(self, monkeypatch) -> None:
+        """save("automation") routes to AutomationService.update when the key resolves locally."""
+
+        update_called_with: dict = {}
+
+        class _FakeAutomationService:
+            async def get_automation_detail(self, automation_id, user_id=None):
+                return _fake_automation_detail(automation_id=automation_id)
+
+            async def create(self, *args, **kwargs):  # pragma: no cover — should not be called
+                raise AssertionError("create should not be called when key exists")
+
+            async def update(self, automation_id, payload, *, user_id=None):
+                update_called_with["automation_id"] = automation_id
+                update_called_with["payload"] = payload
+                return _fake_automation_detail(
+                    automation_id=automation_id, name=payload.name or "x"
+                )
+
+        async def _fake_get_automation_service():  # type: ignore[return]
+            yield _FakeAutomationService()
+
+        monkeypatch.setattr(
+            "valuz_agent.api.deps.get_automation_service", _fake_get_automation_service
+        )
+
+        lib = ResourceLibrary()
+        snap = ResourceSnapshot(
+            kind="automation",
+            key="existing-id",
+            name="Updated Name",
+            data={
+                "name": "Updated Name",
+                "prompt_template": "New prompt",
+                "agent_slug": "news-agent",
+                "action_kind": "chat",
+                "trigger": {"kind": "manual"},
+            },
+        )
+        ref = await lib.save(USER_ID, snap)
+        assert ref.key == "existing-id"
+        assert update_called_with["automation_id"] == "existing-id"
+        assert update_called_with["payload"].name == "Updated Name"
+        assert update_called_with["payload"].trigger.kind == "manual"

@@ -37,11 +37,22 @@ class _RecordingBilling:
         return None
 
 
-def _session(*, owner: str = "u1", locked_provider_id: str | None = None) -> SimpleNamespace:
+def _session(
+    *,
+    owner: str | None = "u1",
+    row_user_id: str | None = None,
+    locked_provider_id: str | None = None,
+) -> SimpleNamespace:
     valuz: dict[str, object] = {}
     if locked_provider_id is not None:
         valuz["locked_provider_id"] = locked_provider_id
-    return SimpleNamespace(metadata={"owner_user_id": owner, "valuz": valuz})
+    metadata: dict[str, object] = {"valuz": valuz}
+    if owner is not None:
+        metadata["owner_user_id"] = owner
+    attrs: dict[str, object] = {"metadata": metadata}
+    if row_user_id is not None:
+        attrs["user_id"] = row_user_id
+    return SimpleNamespace(**attrs)
 
 
 async def test_passes_locked_channel_to_billing(monkeypatch):
@@ -60,6 +71,29 @@ async def test_missing_locked_channel_passes_none(monkeypatch):
     await _enforce_budget(_session(locked_provider_id=None))
 
     assert billing.calls == [("u1", None)]
+
+
+async def test_uses_persisted_session_user_id_when_metadata_owner_missing(monkeypatch):
+    billing = _RecordingBilling(BudgetStatus(allowed=True))
+    monkeypatch.setattr(ext, "billing", billing)
+
+    await _enforce_budget(
+        _session(owner=None, row_user_id="u-from-session", locked_provider_id="valuz-channel")
+    )
+
+    assert billing.calls == [("u-from-session", "valuz-channel")]
+
+
+async def test_uses_explicit_job_owner_when_session_owner_is_legacy_missing(monkeypatch):
+    billing = _RecordingBilling(BudgetStatus(allowed=True))
+    monkeypatch.setattr(ext, "billing", billing)
+
+    await _enforce_budget(
+        _session(owner=None, locked_provider_id="valuz-channel"),
+        user_id="u-from-automation-row",
+    )
+
+    assert billing.calls == [("u-from-automation-row", "valuz-channel")]
 
 
 async def test_raises_budget_exceeded_with_i18n_key(monkeypatch):

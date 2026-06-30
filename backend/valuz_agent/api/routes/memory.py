@@ -9,9 +9,10 @@ the request's auth context like the other preferences.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.memory import Target, memory_store
 from valuz_agent.modules.memory.service import MemoryError
@@ -60,11 +61,11 @@ class MemoryClear(BaseModel):
     project_id: str | None = None
 
 
-async def _view(project_id: str | None) -> MemoryView:
+async def _view(project_id: str | None, user_id: str) -> MemoryView:
     async with async_unit_of_work(commit=False) as db:
-        enabled = await get_memory_enabled(db)
-        auto_extract = await get_memory_auto_extract(db)
-        custom_instructions = await get_memory_custom_instructions(db)
+        enabled = await get_memory_enabled(db, user_id=user_id)
+        auto_extract = await get_memory_auto_extract(db, user_id=user_id)
+        custom_instructions = await get_memory_custom_instructions(db, user_id=user_id)
     entries: dict[str, list[str]] = {
         "user": memory_store.read_entries("user"),
         "global": memory_store.read_entries("global"),
@@ -80,31 +81,42 @@ async def _view(project_id: str | None) -> MemoryView:
 
 
 @router.get("")
-async def get_memory(project_id: str | None = None) -> MemoryView:
+async def get_memory(
+    project_id: str | None = None,
+    user_id: str = Depends(get_current_user_id),
+) -> MemoryView:
     """Return the memory toggles + current entries per scope."""
-    return await _view(project_id)
+    return await _view(project_id, user_id)
 
 
 @router.patch("/settings")
-async def patch_memory_settings(payload: MemorySettingsPatch) -> MemorySettings:
+async def patch_memory_settings(
+    payload: MemorySettingsPatch,
+    user_id: str = Depends(get_current_user_id),
+) -> MemorySettings:
     """Toggle memory on/off. Only sent keys are updated."""
     async with async_unit_of_work() as db:
         if payload.enabled is not None:
-            await set_memory_enabled(db, payload.enabled)
+            await set_memory_enabled(db, payload.enabled, user_id=user_id)
         if payload.auto_extract is not None:
-            await set_memory_auto_extract(db, payload.auto_extract)
+            await set_memory_auto_extract(db, payload.auto_extract, user_id=user_id)
         if payload.custom_instructions is not None:
             # Setter trims + hard-caps; sending "" disables the directives.
-            await set_memory_custom_instructions(db, payload.custom_instructions)
+            await set_memory_custom_instructions(
+                db, payload.custom_instructions, user_id=user_id
+            )
         return MemorySettings(
-            enabled=await get_memory_enabled(db),
-            auto_extract=await get_memory_auto_extract(db),
-            custom_instructions=await get_memory_custom_instructions(db),
+            enabled=await get_memory_enabled(db, user_id=user_id),
+            auto_extract=await get_memory_auto_extract(db, user_id=user_id),
+            custom_instructions=await get_memory_custom_instructions(db, user_id=user_id),
         )
 
 
 @router.delete("/entry")
-async def delete_memory_entry(payload: MemoryEntryDelete) -> MemoryView:
+async def delete_memory_entry(
+    payload: MemoryEntryDelete,
+    user_id: str = Depends(get_current_user_id),
+) -> MemoryView:
     """Delete the entry located by a unique ``old_text`` substring in ``target``."""
     try:
         result = memory_store.remove(
@@ -114,14 +126,17 @@ async def delete_memory_entry(payload: MemoryEntryDelete) -> MemoryView:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not result.get("success"):
         raise HTTPException(status_code=404, detail=str(result.get("error", "no match")))
-    return await _view(payload.project_id)
+    return await _view(payload.project_id, user_id)
 
 
 @router.delete("/scope")
-async def clear_memory_scope(payload: MemoryClear) -> MemoryView:
+async def clear_memory_scope(
+    payload: MemoryClear,
+    user_id: str = Depends(get_current_user_id),
+) -> MemoryView:
     """Clear every entry in ``target``."""
     try:
         memory_store.clear(payload.target, project_id=payload.project_id)
     except MemoryError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return await _view(payload.project_id)
+    return await _view(payload.project_id, user_id)

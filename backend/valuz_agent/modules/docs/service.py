@@ -1205,7 +1205,7 @@ class DocumentLibraryService:
         ]
         minimized = await self._minimize_bindings(user_id, rows)
         await self._ds.set_bindings(user_id, project_id, minimized)
-        self._bus.publish("project.bindings.changed", project_id=project_id)
+        self._bus.publish("project.bindings.changed", project_id=project_id, user_id=user_id)
         return await self._ds.list_bindings(user_id, project_id)
 
     async def remove_project_bindings(self, user_id: str, project_id: str) -> None:

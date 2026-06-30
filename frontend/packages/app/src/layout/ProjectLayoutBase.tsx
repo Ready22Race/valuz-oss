@@ -83,6 +83,8 @@ import { usePlatform } from "../platform";
 import { UpdateButton } from "../components/UpdateButton";
 import { useAgentDeployPicker } from "../components/agent-deploy-picker";
 import { AgentCheckboxList } from "../components/AgentDeployField";
+import { ExportProjectDialog } from "../components/ExportProjectDialog";
+import { ImportProjectDialog } from "../components/ImportProjectDialog";
 import type { ProjectOutletContext } from "./types";
 
 export type DirectoryFieldMode = "input" | "picker";
@@ -177,6 +179,15 @@ export function ProjectLayoutBase({
     id: string;
     name: string;
   } | null>(null);
+  // Project export target — owns ExportProjectDialog open state.
+  const [exportTarget, setExportTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  // Project import — owns the hidden file input + ImportProjectDialog.
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
   const [newName, setNewName] = useState("");
   const [newRootPath, setNewRootPath] = useState("");
   const [createError, setCreateError] = useState("");
@@ -810,6 +821,7 @@ export function ProjectLayoutBase({
             onPrimaryAction={refreshConnectorAlert}
             collapsed={sidebarCollapsed}
             onAddProject={() => setCreateOpen(true)}
+            onImportProject={() => importInputRef.current?.click()}
             onProjectOpenInFinder={(projectId) => {
               const ws = allProjects.find(
                 (project) => project.id === projectId,
@@ -842,6 +854,12 @@ export function ProjectLayoutBase({
                 (project) => project.id === projectId,
               );
               if (ws) setRemoveTarget({ id: ws.id, name: ws.name });
+            }}
+            onProjectExport={(projectId) => {
+              const ws = allProjects.find(
+                (project) => project.id === projectId,
+              );
+              if (ws) setExportTarget({ id: ws.id, name: ws.name });
             }}
           />
         }
@@ -989,6 +1007,46 @@ export function ProjectLayoutBase({
             })
             .catch(() => toast.error(t("sidebar.removeFailed")))
             .finally(() => setRemoveTarget(null));
+        }}
+      />
+
+      {/* Project export/import — hidden file input + the two dialogs. The input
+          is re-used for any "Import project…" entry point (sidebar, projects
+          page). Same value-reset trick as AgentsPage so re-picking the same
+          file still fires onChange. */}
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".valuzpack,.zip"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0] ?? null;
+          e.target.value = "";
+          if (f) {
+            setImportFile(f);
+            setImportOpen(true);
+          }
+        }}
+      />
+      <ExportProjectDialog
+        projectId={exportTarget?.id ?? ""}
+        projectName={exportTarget?.name ?? ""}
+        open={!!exportTarget}
+        onOpenChange={(open) => {
+          if (!open) setExportTarget(null);
+        }}
+      />
+      <ImportProjectDialog
+        file={importFile}
+        open={importOpen}
+        onOpenChange={(open) => {
+          setImportOpen(open);
+          if (!open) setImportFile(null);
+        }}
+        onImported={(project) => {
+          useProjectStore.getState().upsertProject(project);
+          void fetchProjects();
+          navigate(`/projects/${project.id}`);
         }}
       />
     </ErrorBoundary>

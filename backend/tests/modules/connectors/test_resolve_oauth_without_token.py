@@ -74,6 +74,6 @@ async def test_tokenless_oauth_connector_skips_without_crash(db) -> None:
     await _install_valuz(db)
     svc = ConnectorService.with_defaults(db)
 
-    out = await svc.resolve_mcp_servers(["valuz-search"])
+    out = await svc.resolve_mcp_servers(["valuz-search"], user_id=USER)
 
     assert out == []  # no stored OAuth token → skipped, and no crash

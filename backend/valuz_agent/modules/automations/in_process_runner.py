@@ -32,11 +32,6 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from valuz_agent.i18n import t
-from valuz_agent.infra.auth_context import (
-    require_current_user_id,
-    reset_current_user_id,
-    set_current_user_id,
-)
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.automations.models import AutomationRow, AutomationRunRow
 from valuz_agent.modules.automations.triggers import TriggerEvaluator
@@ -345,14 +340,15 @@ class InProcessAutomationRunner:
                 return
 
             # Owner boundary: an automation fires from the background scheduler
-            # with no request context. Publish the automation's owner so the
-            # session it creates and every owner-scoped read below attribute to
-            # the user who owns the automation (mirrors AuthMiddleware on the
-            # request path).
-            owner_token = set_current_user_id(row.user_id) if row.user_id else None
+            # with no request context. Use the automation row's stored owner and
+            # pass it explicitly through every owner-scoped call.
             self._active_ids[automation_id] = user_id
             try:
-                project_name = await self._resolve_project_name(db, row.project_id)
+                project_name = await self._resolve_project_name(
+                    db,
+                    row.project_id,
+                    user_id=user_id,
+                )
                 effective_tz = self._effective_tz_for(row)
                 variables = _build_template_variables(
                     row=row,
@@ -382,6 +378,7 @@ class InProcessAutomationRunner:
                         run_id=run_id,
                         automation_id=automation_id,
                         rendered_prompt=rendered_prompt,
+                        user_id=user_id,
                     )
                     return
 
@@ -395,6 +392,7 @@ class InProcessAutomationRunner:
                         origin="automation",
                         title=f"{t('backend.automation.titlePrefix')} {row.name}",
                         agent_slug=row.agent_slug,
+                        user_id=user_id,
                     )
                 except Exception as exc:
                     run.status = "failed"
@@ -417,7 +415,11 @@ class InProcessAutomationRunner:
                 logger.info("Started run %s → session %s", run_id, session.id)
 
                 try:
-                    result = await session_svc.send_message_sync(session.id, rendered_prompt)
+                    result = await session_svc.send_message_sync(
+                        session.id,
+                        rendered_prompt,
+                        user_id=user_id,
+                    )
                     # ``send_message_sync`` returns normally even when the
                     # turn errored mid-stream — provider 401s, kernel SDK
                     # failures, etc. surface as ``session_error`` events in
@@ -480,8 +482,6 @@ class InProcessAutomationRunner:
                 logger.info("Run %s completed: %s", run_id, run.status)
             finally:
                 self._active_ids.pop(automation_id, None)
-                if owner_token is not None:
-                    reset_current_user_id(owner_token)
 
     # ── Task-mode execution ────────────────────────────────────────
 
@@ -494,7 +494,11 @@ class InProcessAutomationRunner:
         run_id: str,
         automation_id: str,
         rendered_prompt: str,
+        user_id: str | None = None,
     ) -> None:
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         """Fire a project task with the bound agent as Lead.
 
         Mirrors the conversation page's Task-mode submit (PRD-PAAT §3.2):
@@ -541,7 +545,7 @@ class InProcessAutomationRunner:
             try:
                 async with async_unit_of_work(commit=False) as ts_db:
                     runs = await TaskSessionDatastore(ts_db).list_runs(
-                        require_current_user_id(), task.id
+                        user_id, task.id
                     )
                     lead_run = next(
                         (r for r in runs if r.kind == "lead"),
@@ -620,17 +624,24 @@ class InProcessAutomationRunner:
 
     async def _user_default_tz(self) -> str:
         """Read the user-level default timezone (loop-native async prefs)."""
+        from valuz_agent.infra.config import settings
         from valuz_agent.infra.db import async_unit_of_work
+        from valuz_agent.infra.local_identity import resolve_local_user_id
         from valuz_agent.modules.settings.preferences import get_default_timezone
 
+        if settings.deployment_type != "local":
+            return "UTC"
+        user_id = resolve_local_user_id()
         try:
             async with async_unit_of_work(commit=False) as s:
-                return await get_default_timezone(s)
+                return await get_default_timezone(s, user_id=user_id)
         except Exception:
             logger.exception("Falling back to UTC after preferences lookup failure")
             return "UTC"
 
-    async def _resolve_project_name(self, db: Any, project_id: str) -> str:
+    async def _resolve_project_name(
+        self, db: Any, project_id: str, user_id: str | None = None
+    ) -> str:
         """Look up the project's display name for ``{{project.name}}``.
 
         Falls back to the id if the project was deleted out from under the
@@ -640,7 +651,7 @@ class InProcessAutomationRunner:
         from valuz_agent.modules.projects.datastore import ProjectDatastore
 
         try:
-            row = await ProjectDatastore(db).get_by_id(require_current_user_id(), project_id)
+            row = await ProjectDatastore(db).get_by_id(user_id, project_id)
             if row is not None:
                 return row.name
         except Exception:

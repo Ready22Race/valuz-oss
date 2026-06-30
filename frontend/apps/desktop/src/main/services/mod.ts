@@ -17,7 +17,7 @@ const HEALTH_CHECK_INTERVAL_MS = 500;
 export interface DesktopServiceManager {
   descriptors: DescriptorRegistry;
   startAllServices(): Promise<ServiceInfo[]>;
-  stopAllServices(): ServiceInfo[];
+  stopAllServices(): Promise<ServiceInfo[]>;
   restartService(name: string): Promise<ServiceInfo[]>;
   getLogs(name: string): string[];
   getAgentServerInfo(): CraftServerInfo;
@@ -194,13 +194,18 @@ export const createServiceManager = (
 
       return [...services.values()];
     },
-    stopAllServices() {
-      for (const [name, sidecar] of sidecars.entries()) {
-        addLog(name, "Stopping sidecar...");
-        sidecar.stop();
-        setStatus(name, "stopped");
-        addLog(name, "Service stopped");
-      }
+    async stopAllServices() {
+      // Await each teardown so the process trees are actually gone before we
+      // report stopped — on quit this runs under before-quit (see index.ts), so
+      // children release their files before the app exits / the updater installs.
+      await Promise.all(
+        [...sidecars.entries()].map(async ([name, sidecar]) => {
+          addLog(name, "Stopping sidecar...");
+          await sidecar.stop();
+          setStatus(name, "stopped");
+          addLog(name, "Service stopped");
+        }),
+      );
       sidecars.clear();
 
       return [...services.values()];
@@ -209,7 +214,7 @@ export const createServiceManager = (
       const sidecar = sidecars.get(name);
       if (sidecar) {
         addLog(name, "Restarting sidecar...");
-        sidecar.stop();
+        await sidecar.stop();
         sidecars.delete(name);
       }
 

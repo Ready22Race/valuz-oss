@@ -5,6 +5,7 @@ import mimetypes
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -91,9 +92,7 @@ CODE_EXTENSIONS = frozenset(
         "astro",
     }
 )
-PLAIN_EXTENSIONS = frozenset(
-    {"txt", "log", "env", "gitignore", "dockerignore", "editorconfig"}
-)
+PLAIN_EXTENSIONS = frozenset({"txt", "log", "env", "gitignore", "dockerignore", "editorconfig"})
 HTML_EXTENSIONS = frozenset({"html", "htm"})
 DOCX_EXTENSIONS = frozenset({"docx"})
 SPREADSHEET_EXTENSIONS = frozenset({"csv", "xls", "xlsx"})
@@ -124,6 +123,10 @@ class ProjectDeletePreview:
     doc_binding_count: int
     schedule_count: int
     skill_config_count: int
+
+
+class ProjectMemberCleanup(Protocol):
+    async def delete_by_project(self, user_id: str, project_id: str) -> int: ...
 
 
 @dataclass
@@ -261,6 +264,7 @@ class ProjectService:
         automation_datastore: AutomationDatastore | None = None,
         skill_datastore: SkillDatastore | None = None,
         connector_datastore: ConnectorDatastore | None = None,
+        member_datastore: ProjectMemberCleanup | None = None,
     ) -> None:
         self._ds = datastore
         self._bus = event_bus
@@ -273,6 +277,7 @@ class ProjectService:
         self._automations = automation_datastore
         self._skills = skill_datastore
         self._connectors = connector_datastore
+        self._members = member_datastore
 
     async def ensure_chat_project(self, user_id: str) -> None:
         existing = await self._ds.get_chat_project(user_id)
@@ -340,6 +345,60 @@ class ProjectService:
         await self._ds.create(user_id, row)
         return _row_to_detail(row, cwd=self.resolve_project_cwd(row))
 
+    async def get_by_name(self, user_id: str, name: str) -> ProjectRow | None:
+        """Exact-name passthrough to the datastore (used by project import's
+        name-collision check). Returns ``None`` when no project of that name
+        exists for the caller."""
+        return await self._ds.get_by_name(user_id, name)
+
+    async def create_project_from_pack(
+        self,
+        user_id: str,
+        name: str,
+        kind: str,
+        icon: str | None,
+        instructions_md: str | None,
+        root_path: str | None = None,
+    ) -> ProjectRow:
+        """Create a project from an imported pack's metadata.
+
+        Mints a fresh id. If ``root_path`` is supplied (user picked a
+        folder in the import dialog), it is resolved + uniqueness-checked
+        against existing projects and used verbatim — same rule as
+        ``create_project``. Otherwise a managed cwd under
+        ``data_dir/projects/{id}/`` is created (cross-machine portability:
+        the source machine's ``root_path`` is never reused). Only
+        ``project`` kind is supported — chat projects are not exportable.
+        """
+        from uuid import uuid4
+
+        if kind != "project":
+            raise ValueError(f"create_project_from_pack does not support kind={kind!r}")
+        new_id = uuid4().hex
+        if root_path and root_path.strip():
+            resolved_root = str(Path(root_path).resolve())
+            existing = await self._ds.get_by_root_path(user_id, resolved_root)
+            if existing:
+                raise ValueError(f"directory already bound to a project: {resolved_root}")
+        else:
+            # Imported projects without a user-picked folder get a managed
+            # cwd under data_dir/projects/{id}/ (mirrors chat projects) so
+            # they're still cross-machine portable.
+            managed_cwd = fs_registry.data_dir() / "projects" / new_id
+            managed_cwd.mkdir(parents=True, exist_ok=True)
+            resolved_root = str(managed_cwd)
+        row = ProjectRow(
+            id=new_id,
+            name=name,
+            kind="project",
+            root_path=resolved_root,
+            icon=icon,
+            instructions_md=(instructions_md or "").strip() or None,
+            sort_order=10,
+        )
+        await self._ds.create(user_id, row)
+        return row
+
     async def rename_project(self, user_id: str, project_id: str, name: str) -> ProjectDetail:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
@@ -388,7 +447,7 @@ class ProjectService:
 
         # Session counts come from the host project↔session index.
         try:
-            session_count = await project_index.count_for_project(project_id)
+            session_count = await project_index.count_for_project(project_id, user_id=user_id)
         except Exception:  # noqa: BLE001
             session_count = 0
         doc_binding_count = (
@@ -420,7 +479,7 @@ class ProjectService:
         # Delete kernel sessions for this project (and their events) — ids
         # come from the host index, which is cleared in the same sweep.
         try:
-            for sid in await project_index.remove_for_project(project_id):
+            for sid in await project_index.remove_for_project(project_id, user_id=user_id):
                 await kernel_client.delete_session(user_id, sid)
         except Exception:  # noqa: BLE001
             pass
@@ -430,6 +489,8 @@ class ProjectService:
             await self._automations.delete_all_for_project(user_id, project_id)
         if self._skills:
             await self._skills.set_project_skills(user_id, project_id, [])
+        if self._members:
+            await self._members.delete_by_project(user_id, project_id)
         await self._ds.delete(user_id, project_id)
         # Source-driven forgetting (memory-system-design §11): a deleted project's
         # centralized memory dir is Valuz-owned (never the user's bound repo), so
@@ -585,9 +646,7 @@ class ProjectService:
             else:
                 content = ExternalArtifactContent(
                     kind="external",
-                    reason=(
-                        f"{preview_kind.upper()} is larger than the in-app parsing limit."
-                    ),
+                    reason=(f"{preview_kind.upper()} is larger than the in-app parsing limit."),
                 )
         else:
             content = ExternalArtifactContent(

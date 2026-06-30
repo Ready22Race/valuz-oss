@@ -24,7 +24,6 @@ import valuz_agent.boot.kernel  # noqa: F401
 from src.core import ToolDef, ToolResult
 from src.core.tools import ExecContext
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.adapters import kernel_client
 from valuz_agent.modules.tasks import messaging, planning, queries
 
@@ -104,7 +103,10 @@ async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
 
     Returns a ToolResult(is_error=True) when the check fails.
     """
-    sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+    # Source the caller from the per-request built-in MCP context when not
+    # passed explicitly (the toolkit MCP server publishes the session owner).
+    user_id = ctx.user_id
+    sess = await kernel_client.get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="dispatch: caller session not found", is_error=True)
 
@@ -147,7 +149,8 @@ async def _resolve_plan_writer_task(
 
     Read-only callers (get_plan) should use ``_resolve_plan_reader_task`` instead.
     """
-    sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+    user_id = ctx.user_id
+    sess = await kernel_client.get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="plan tool: caller session not found", is_error=True)
 
@@ -167,7 +170,7 @@ async def _resolve_plan_writer_task(
 
     async with async_unit_of_work(commit=False) as db:
         task_ds = TaskDatastore(db)
-        task = await task_ds.get_task(require_current_user_id(), task_id)
+        task = await task_ds.get_task(user_id, task_id)
     if task is None:
         return ToolResult(content=f"plan tool: task {task_id!r} not found", is_error=True)
 
@@ -185,7 +188,8 @@ async def _resolve_plan_reader_task(
     Permits any caller in the task's project (chat or lead). Useful for
     get_plan: knowing your own draft / a project mate's plan is fine.
     """
-    sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+    user_id = ctx.user_id
+    sess = await kernel_client.get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="plan tool: caller session not found", is_error=True)
 
@@ -199,7 +203,7 @@ async def _resolve_plan_reader_task(
 
     async with async_unit_of_work(commit=False) as db:
         task_ds = TaskDatastore(db)
-        task = await task_ds.get_task(require_current_user_id(), task_id)
+        task = await task_ds.get_task(user_id, task_id)
     if task is None:
         return ToolResult(content=f"plan tool: task {task_id!r} not found", is_error=True)
 
@@ -276,7 +280,8 @@ async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolR
     spawning nested tasks (附录 E E-3). The project must be a project (chat
     projects are ephemeral). Returns a ToolResult(is_error=True) on failure.
     """
-    sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+    user_id = ctx.user_id
+    sess = await kernel_client.get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="create_task: caller session not found", is_error=True)
 
@@ -393,6 +398,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 goal=args.get("goal"),
                 refs=args.get("refs") or [],
                 project_mode=args.get("project_mode"),
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False), is_error="error" in result
@@ -417,6 +423,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 # waiting for the slowest sibling. Loop to collect the rest.
                 mode=args.get("mode") or "any",
                 timeout_s=args.get("timeout_s"),
+                user_id=ctx.user_id,
             )
             return ToolResult(content=json.dumps(result, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
@@ -441,6 +448,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 text=text,
                 project_id=project_id,
                 task_id=task_id,
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -476,6 +484,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 originating_session_id=ctx.session_id,
                 refs=args.get("refs") or [],
                 title=args.get("title"),
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(
@@ -498,6 +507,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
     async def _commit_task_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
         # commit_task is the writer-gate-protected state transition: only the
         # draft's originator (or a same-project chat) can flip it active.
+        user_id = ctx.user_id
         resolved = await _resolve_plan_writer_task(ctx, args)
         if isinstance(resolved, ToolResult):
             return resolved
@@ -508,6 +518,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 project_id=project_id,
                 caller_session_id=ctx.session_id,
                 lead_agent_slug_override=args.get("lead_agent_slug"),
+                user_id=user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -518,6 +529,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
             return ToolResult(content=f"commit_task failed: {exc}", is_error=True)
 
     async def _abandon_task_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+        user_id = ctx.user_id
         resolved = await _resolve_plan_writer_task(ctx, args)
         if isinstance(resolved, ToolResult):
             return resolved
@@ -528,6 +540,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 project_id=project_id,
                 caller_session_id=ctx.session_id,
                 reason=(args.get("reason") or ""),
+                user_id=user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -542,6 +555,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         # than the writer gate (a chat session may not be the originator AND
         # the task is past draft) — project-member is enough because the
         # lead retains full authority over what to do with the message.
+        user_id = ctx.user_id
         task_id = (args.get("task_id") or "").strip()
         text = args.get("text") or ""
         if not task_id:
@@ -549,7 +563,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         if not text.strip():
             return ToolResult(content="inject_into_task: text is required", is_error=True)
 
-        sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+        sess = await kernel_client.get_session(user_id, ctx.session_id)
         if sess is None:
             return ToolResult(content="inject_into_task: caller session not found", is_error=True)
 
@@ -557,7 +571,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         from valuz_agent.modules.tasks.datastore import TaskDatastore
 
         async with async_unit_of_work(commit=False) as db:
-            task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
+            task = await TaskDatastore(db).get_task(user_id, task_id)
         if task is None:
             return ToolResult(
                 content=f"inject_into_task: task {task_id!r} not found", is_error=True
@@ -584,6 +598,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 project_id=task.project_id,
                 text=text,
                 from_session_id=ctx.session_id,
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -599,11 +614,12 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         # state-machine + orchestrator.resume_task already validates that the
         # task is paused/blocked (terminal/draft/active rejected with a
         # human-readable reason in the dict it returns).
+        user_id = ctx.user_id
         task_id = (args.get("task_id") or "").strip()
         if not task_id:
             return ToolResult(content="resume_task: task_id is required", is_error=True)
 
-        sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+        sess = await kernel_client.get_session(user_id, ctx.session_id)
         if sess is None:
             return ToolResult(content="resume_task: caller session not found", is_error=True)
 
@@ -611,7 +627,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         from valuz_agent.modules.tasks.datastore import TaskDatastore
 
         async with async_unit_of_work(commit=False) as db:
-            task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
+            task = await TaskDatastore(db).get_task(user_id, task_id)
         if task is None:
             return ToolResult(content=f"resume_task: task {task_id!r} not found", is_error=True)
 
@@ -635,6 +651,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 task_id=task_id,
                 project_id=task.project_id,
                 actor=ctx.session_id,
+                user_id=user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -701,6 +718,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 status=args.get("status"),
                 mine_session_id=ctx.session_id if args.get("mine_only") else None,
                 limit=int(args.get("limit") or 20),
+                user_id=ctx.user_id,
             )
             return ToolResult(content=json.dumps({"tasks": tasks}, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
@@ -716,7 +734,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         if not task_id:
             return ToolResult(content="get_task: task_id is required", is_error=True)
         try:
-            detail = await queries.get_task(task_id, project_id)
+            detail = await queries.get_task(task_id, project_id, user_id=ctx.user_id)
             if detail is None:
                 return ToolResult(
                     content=f"task {task_id!r} not found in this project", is_error=True
@@ -731,7 +749,8 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         # project-conversation launcher (so it can inspect the team before
         # create_task). NOT lead-gated; just needs a project. Resolve from
         # valuz metadata (task runs) or session.project_id (launcher).
-        sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+        user_id = ctx.user_id
+        sess = await kernel_client.get_session(user_id, ctx.session_id)
         if sess is None:
             return ToolResult(content="list_members: caller session not found", is_error=True)
         v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
@@ -740,7 +759,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
             return ToolResult(content="list_members: caller session has no project", is_error=True)
 
         try:
-            members = await queries.list_members(project_id)
+            members = await queries.list_members(project_id, user_id=user_id)
             if not members:
                 # Project-less chat fallback (see ``_bound_agent_member``):
                 # a chat project has no deployed project members, but the
@@ -774,6 +793,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 summary=summary,
                 artifacts=artifacts,
                 status=status,
+                user_id=ctx.user_id,
             )
             # Plan-completeness guard rejected the close — surface it so the
             # lead dispatches the remaining subtasks instead of stopping.
@@ -901,6 +921,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         ``orchestrator.stop_member`` (which was reachable only from the user
         ``:intervene`` HTTP route) so the lead can cancel a member from inside
         its own turn."""
+        user_id = ctx.user_id
         gate = await _check_lead_gate(ctx)
         if isinstance(gate, ToolResult):
             return gate
@@ -923,9 +944,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
             from valuz_agent.modules.tasks.plan import TaskPlan
 
             async with async_unit_of_work(commit=False) as db:
-                task = await TaskDatastore(db).get_task_by_project(
-                    require_current_user_id(), project_id, task_id
-                )
+                task = await TaskDatastore(db).get_task_by_project(user_id, project_id, task_id)
             if task is None:
                 return ToolResult(
                     content=f"stop_subtask: task {task_id!r} not found", is_error=True
@@ -948,7 +967,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
 
         reason = (args.get("reason") or "").strip()
         try:
-            ok = await orchestrator.stop_member(target_session_id)
+            ok = await orchestrator.stop_member(target_session_id, user_id=user_id)
             if not ok:
                 return ToolResult(
                     content=(
@@ -1124,9 +1143,8 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         )
     )
 
-    async def _update_deliverable_handler(
-        args: dict[str, Any], ctx: ExecContext
-    ) -> ToolResult:
+    async def _update_deliverable_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+        user_id = ctx.user_id
         gate = await _check_lead_gate(ctx)
         if isinstance(gate, ToolResult):
             return gate
@@ -1142,6 +1160,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 lead_session_id=ctx.session_id,
                 summary=summary,
                 artifacts=artifacts,
+                user_id=user_id,
             )
             if isinstance(result, dict) and result.get("status") == "rejected":
                 return ToolResult(

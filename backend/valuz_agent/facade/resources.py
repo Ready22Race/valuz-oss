@@ -24,7 +24,7 @@ from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
-ResourceKind = Literal["agent", "skill", "connector", "kb"]
+ResourceKind = Literal["agent", "skill", "connector", "kb", "project", "automation"]
 
 
 @dataclass
@@ -32,7 +32,9 @@ class ResourceRef:
     """Lightweight pointer to a resource (what ``list`` returns)."""
 
     kind: ResourceKind
-    key: str  # portable identity: slug for agent/skill/connector, name for kb
+    # portable identity: slug for agent/skill/connector, name for kb,
+    # id for project/automation
+    key: str
     name: str
 
 
@@ -117,6 +119,30 @@ class ResourceLibrary:
             async with _use(get_document_service) as svc:
                 items = await svc.list_kbs(user_id)
             return [ResourceRef(kind="kb", key=item.name, name=item.name) for item in items]
+
+        if kind == "project":
+            # Only ``project``-kind rows are exportable (chat projects skipped —
+            # see ``ProjectPackService.export_project`` / ``ProjectNotExportable``).
+            from valuz_agent.infra.db import async_unit_of_work
+            from valuz_agent.modules.projects.datastore import ProjectDatastore
+
+            async with async_unit_of_work(commit=False) as db:
+                project_rows = await ProjectDatastore(db).list_projects(user_id)
+            return [
+                ResourceRef(kind="project", key=row.id, name=row.name)
+                for row in project_rows
+                if row.kind == "project"
+            ]
+
+        if kind == "automation":
+            from valuz_agent.api.deps import get_automation_service
+
+            async with _use(get_automation_service) as svc:
+                items = await svc.list_all_automations(user_id)
+            return [
+                ResourceRef(kind="automation", key=item.automation_id, name=item.name)
+                for item in items
+            ]
 
         raise NotImplementedError(f"list({kind}) not implemented")
 
@@ -235,6 +261,78 @@ class ResourceLibrary:
                     "name": detail.name,
                     "parser_routing": detail.parser_routing,
                     "auto_discover": getattr(detail, "auto_discover", False),
+                },
+            )
+
+        if kind == "project":
+            # Export bytes are the unified ``.valuzpack`` archive
+            # (project target) produced by ``ProjectPackService.export_project``.
+            # We base64 the bytes into the text-only ``files`` dict so the
+            # snapshot stays JSON-portable for the overlay's sync path
+            # (cloud side detects base64 in ``_files`` content and stores
+            # the decoded bytes in object storage).
+            import base64
+
+            from valuz_agent.api.deps import get_project_pack_service, get_project_service
+            from valuz_agent.modules.project_packs.errors import (
+                ProjectNotExportable,
+                ProjectPackNotFound,
+            )
+
+            async with _use(get_project_service) as project_svc:
+                try:
+                    detail = await project_svc.get_project(user_id, key)
+                except KeyError:
+                    return None
+            async with _use(get_project_pack_service) as pack_svc:
+                try:
+                    pack_bytes = await pack_svc.export_project(user_id, key)
+                except (ProjectPackNotFound, ProjectNotExportable):
+                    return None
+            return ResourceSnapshot(
+                kind="project",
+                key=key,
+                name=detail.name,
+                data={
+                    "name": detail.name,
+                    "kind": detail.kind,
+                    "icon": detail.icon,
+                    "instructions_md": detail.instructions_md,
+                    "bundle_size": len(pack_bytes),
+                },
+                files={"bundle.valuzpack": base64.b64encode(pack_bytes).decode("ascii")},
+            )
+
+        if kind == "automation":
+            from valuz_agent.api.deps import get_automation_service
+            from valuz_agent.modules.automations.errors import AutomationNotFound
+
+            async with _use(get_automation_service) as svc:
+                try:
+                    detail = await svc.get_automation_detail(key, user_id=user_id)
+                except AutomationNotFound:
+                    return None
+            # ``trigger`` is a Pydantic discriminated union — dump to plain
+            # dict so the snapshot round-trips through JSON storage.
+            trigger_data: dict[str, Any] = (
+                detail.trigger.model_dump() if detail.trigger is not None else {}
+            )
+            return ResourceSnapshot(
+                kind="automation",
+                key=detail.automation_id,
+                name=detail.name,
+                data={
+                    "name": detail.name,
+                    "agent_kind": detail.agent_kind,
+                    "agent_slug": detail.agent_slug,
+                    "agent_name": detail.agent_name,
+                    "project_id_ref": detail.project_id,
+                    "project_name_ref": detail.project_name,
+                    "project_kind": detail.project_kind,
+                    "action_kind": detail.action_kind,
+                    "prompt_template": detail.prompt_template,
+                    "trigger": trigger_data,
+                    "status": detail.status,
                 },
             )
 
@@ -380,6 +478,83 @@ class ResourceLibrary:
                         raise
                     kb = await svc.get_kb(user_id, matched_item.id)
             return ResourceRef(kind="kb", key=kb.name, name=kb.name)
+
+        if snapshot.kind == "project":
+            # Project import is intentionally not exposed through ``save``:
+            # the unified-pack import flow requires a 2-stage preview /
+            # confirm exchange (the user picks a target folder, resolves
+            # connector + skill conflicts, optionally a different name).
+            # Callers should drive the OSS ``ProjectPackService.preview_import``
+            # / ``confirm_import`` path directly, or invoke the
+            # ``POST /api/v1/projects/import/{preview_id}/confirm`` route.
+            raise NotImplementedError(
+                "save(project) requires a 2-stage preview/confirm flow with a "
+                "user-picked root_path; use ProjectPackService.preview_import + "
+                "confirm_import (or the /api/v1/projects/import/* routes) instead."
+            )
+
+        if snapshot.kind == "automation":
+            from valuz_agent.api.deps import get_automation_service
+            from valuz_agent.modules.automations.errors import AutomationNotFound
+            from valuz_agent.modules.automations.schemas import (
+                AutomationCreatePayload,
+                AutomationUpdatePayload,
+                CronTrigger,
+                IntervalTrigger,
+                ManualTrigger,
+            )
+
+            data = snapshot.data
+            raw_trigger = data.get("trigger") or {}
+            trigger_kind = raw_trigger.get("kind", "manual")
+            if trigger_kind == "cron":
+                trigger: Any = CronTrigger(
+                    cron_expr=raw_trigger.get("cron_expr", ""),
+                    timezone=raw_trigger.get("timezone"),
+                )
+            elif trigger_kind == "interval":
+                trigger = IntervalTrigger(seconds=int(raw_trigger.get("seconds", 0)))
+            else:
+                trigger = ManualTrigger()
+
+            async with _use(get_automation_service) as svc:
+                # Try update if the key (automation_id) still resolves
+                # locally — same key + same row → in-place refresh.
+                # Otherwise create a fresh automation referencing the
+                # snapshot's local entities (project_id_ref / agent_slug).
+                try:
+                    await svc.get_automation_detail(snapshot.key, user_id=user_id)
+                    exists = True
+                except AutomationNotFound:
+                    exists = False
+
+                if exists:
+                    detail = await svc.update(
+                        snapshot.key,
+                        AutomationUpdatePayload(
+                            name=data.get("name"),
+                            prompt_template=data.get("prompt_template"),
+                            trigger=trigger,
+                            agent_slug=data.get("agent_slug"),
+                            action_kind=data.get("action_kind"),
+                        ),
+                        user_id=user_id,
+                    )
+                else:
+                    detail = await svc.create(
+                        AutomationCreatePayload(
+                            name=data.get("name", "Imported automation"),
+                            project_kind=data.get("project_kind", "project"),
+                            project_id=data.get("project_id_ref"),
+                            agent_kind=data.get("agent_kind", "project_member"),
+                            agent_slug=data.get("agent_slug", ""),
+                            prompt_template=data.get("prompt_template", ""),
+                            trigger=trigger,
+                            action_kind=data.get("action_kind", "chat"),
+                        ),
+                        user_id=user_id,
+                    )
+            return ResourceRef(kind="automation", key=detail.automation_id, name=detail.name)
 
         raise NotImplementedError(f"save({snapshot.kind}) not implemented")
 

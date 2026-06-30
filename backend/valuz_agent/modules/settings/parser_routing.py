@@ -29,7 +29,6 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.settings.datastore import SettingsDatastore
 from valuz_agent.modules.settings.models import AppSettingRow
@@ -57,8 +56,11 @@ LOCKED_LOCAL_KINDS: frozenset[str] = frozenset({"text"})
 # request (see ``ParserRoutingConfig``), so it never touches the DB per parse.
 
 
-async def _read_json(db: AsyncSession, key: str) -> Any | None:
-    row = await SettingsDatastore(db).get_setting(require_current_user_id(), key)
+async def _read_json(db: AsyncSession, key: str, user_id: str | None = None) -> Any | None:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
+    row = await SettingsDatastore(db).get_setting(user_id, key)
     if row is None:
         return None
     try:
@@ -70,9 +72,12 @@ async def _read_json(db: AsyncSession, key: str) -> Any | None:
     return data.get("value")
 
 
-async def _write_json(db: AsyncSession, key: str, value: Any) -> None:
+async def _write_json(db: AsyncSession, key: str, value: Any, user_id: str | None = None) -> None:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     await SettingsDatastore(db).upsert_setting(
-        require_current_user_id(),
+        user_id,
         AppSettingRow(
             key=key,
             value_json=json.dumps({"value": value}),
@@ -84,25 +89,25 @@ async def _write_json(db: AsyncSession, key: str, value: Any) -> None:
 # ----- primary plugin id ------------------------------------------------
 
 
-async def get_primary_plugin_id(db: AsyncSession) -> str:
-    raw = await _read_json(db, KEY_PRIMARY_PLUGIN_ID)
+async def get_primary_plugin_id(db: AsyncSession, user_id: str) -> str:
+    raw = await _read_json(db, KEY_PRIMARY_PLUGIN_ID, user_id=user_id)
     if isinstance(raw, str) and raw:
         return raw
     return DEFAULT_PRIMARY_PLUGIN_ID
 
 
-async def set_primary_plugin_id(db: AsyncSession, plugin_id: str) -> None:
+async def set_primary_plugin_id(db: AsyncSession, plugin_id: str, user_id: str) -> None:
     cleaned = plugin_id.strip()
     if not cleaned:
         raise ValueError("plugin_id cannot be empty")
-    await _write_json(db, KEY_PRIMARY_PLUGIN_ID, cleaned)
+    await _write_json(db, KEY_PRIMARY_PLUGIN_ID, cleaned, user_id=user_id)
 
 
 # ----- by-kind overrides ------------------------------------------------
 
 
-async def get_by_kind(db: AsyncSession) -> dict[str, str]:
-    raw = await _read_json(db, KEY_BY_KIND)
+async def get_by_kind(db: AsyncSession, user_id: str) -> dict[str, str]:
+    raw = await _read_json(db, KEY_BY_KIND, user_id=user_id)
     if not isinstance(raw, Mapping):
         return {}
     out: dict[str, str] = {}
@@ -112,7 +117,7 @@ async def get_by_kind(db: AsyncSession) -> dict[str, str]:
     return out
 
 
-async def set_by_kind(db: AsyncSession, mapping: Mapping[str, str]) -> None:
+async def set_by_kind(db: AsyncSession, mapping: Mapping[str, str], user_id: str) -> None:
     # Defensive validation: drop locked kinds the caller may have
     # accidentally included; the router enforces lock anyway but
     # round-tripping a write→read should match.
@@ -121,34 +126,36 @@ async def set_by_kind(db: AsyncSession, mapping: Mapping[str, str]) -> None:
         for k, v in mapping.items()
         if isinstance(k, str) and isinstance(v, str) and v and k not in LOCKED_LOCAL_KINDS
     }
-    await _write_json(db, KEY_BY_KIND, cleaned)
+    await _write_json(db, KEY_BY_KIND, cleaned, user_id=user_id)
 
 
 # ----- runtime fallback flag --------------------------------------------
 
 
-async def get_fallback_to_local_on_error(db: AsyncSession) -> bool:
-    raw = await _read_json(db, KEY_FALLBACK_ON_ERROR)
+async def get_fallback_to_local_on_error(db: AsyncSession, user_id: str) -> bool:
+    raw = await _read_json(db, KEY_FALLBACK_ON_ERROR, user_id=user_id)
     if isinstance(raw, bool):
         return raw
     return DEFAULT_FALLBACK_ON_ERROR
 
 
-async def set_fallback_to_local_on_error(db: AsyncSession, value: bool) -> None:
-    await _write_json(db, KEY_FALLBACK_ON_ERROR, bool(value))
+async def set_fallback_to_local_on_error(
+    db: AsyncSession, value: bool, user_id: str
+) -> None:
+    await _write_json(db, KEY_FALLBACK_ON_ERROR, bool(value), user_id=user_id)
 
 
 # ----- per-plugin configs -----------------------------------------------
 
 
-async def get_plugin_configs(db: AsyncSession) -> dict[str, dict[str, Any]]:
+async def get_plugin_configs(db: AsyncSession, user_id: str) -> dict[str, dict[str, Any]]:
     """Read the full ``{plugin_id: config}`` map.
 
     Each config has shape ``{enabled: bool, secret_ref: str | None,
     options: dict[str, Any]}``. Returns ``{}`` if unset; callers should
     not rely on every plugin_id having an entry.
     """
-    raw = await _read_json(db, KEY_PLUGIN_CONFIGS)
+    raw = await _read_json(db, KEY_PLUGIN_CONFIGS, user_id=user_id)
     if not isinstance(raw, Mapping):
         return {}
     out: dict[str, dict[str, Any]] = {}
@@ -165,8 +172,8 @@ async def get_plugin_configs(db: AsyncSession) -> dict[str, dict[str, Any]]:
     return out
 
 
-async def get_plugin_config(db: AsyncSession, plugin_id: str) -> dict[str, Any]:
-    cfg = (await get_plugin_configs(db)).get(plugin_id)
+async def get_plugin_config(db: AsyncSession, plugin_id: str, user_id: str) -> dict[str, Any]:
+    cfg = (await get_plugin_configs(db, user_id=user_id)).get(plugin_id)
     if cfg is None:
         return {"enabled": False, "secret_ref": None, "options": {}}
     return cfg
@@ -179,6 +186,7 @@ async def update_plugin_config(
     enabled: bool | None = None,
     secret_ref_change: tuple[str | None] | None = None,
     options: Mapping[str, Any] | None = None,
+    user_id: str,
 ) -> dict[str, Any]:
     """Patch one plugin's config in place.
 
@@ -195,7 +203,7 @@ async def update_plugin_config(
 
     Returns the post-update view of this plugin's config.
     """
-    all_configs = await get_plugin_configs(db)
+    all_configs = await get_plugin_configs(db, user_id=user_id)
     cfg = all_configs.get(plugin_id, {"enabled": False, "secret_ref": None, "options": {}})
 
     if enabled is not None:
@@ -206,7 +214,7 @@ async def update_plugin_config(
         cfg["options"] = dict(options)
 
     all_configs[plugin_id] = cfg
-    await _write_json(db, KEY_PLUGIN_CONFIGS, all_configs)
+    await _write_json(db, KEY_PLUGIN_CONFIGS, all_configs, user_id=user_id)
     return cfg
 
 
@@ -238,11 +246,13 @@ class ParserRoutingConfig:
 DEFAULT_ROUTING_CONFIG = ParserRoutingConfig()
 
 
-async def load_routing_config(db: AsyncSession) -> ParserRoutingConfig:
+async def load_routing_config(db: AsyncSession, user_id: str) -> ParserRoutingConfig:
     """Resolve the full routing snapshot from settings (one async read each)."""
     return ParserRoutingConfig(
-        primary_plugin_id=await get_primary_plugin_id(db),
-        by_kind=await get_by_kind(db),
-        fallback_to_local_on_error=await get_fallback_to_local_on_error(db),
-        plugin_configs=await get_plugin_configs(db),
+        primary_plugin_id=await get_primary_plugin_id(db, user_id=user_id),
+        by_kind=await get_by_kind(db, user_id=user_id),
+        fallback_to_local_on_error=await get_fallback_to_local_on_error(
+            db, user_id=user_id
+        ),
+        plugin_configs=await get_plugin_configs(db, user_id=user_id),
     )

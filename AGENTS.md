@@ -51,6 +51,13 @@ Do not consider work complete until all three pass.
 - Never skip tests or use `--no-verify`
 - Database migrations must be reversible
 - Secrets go in `.env`, never in code
+- Do not call `get_current_user_id()` outside FastAPI dependency injection. Routes
+  get `user_id` via `Depends(get_current_user_id)` and pass it explicitly into
+  services, integrations, providers, runners, and jobs. Without an API request,
+  resolve the owner from persisted data: automations/scheduled jobs use their
+  stored job row `user_id`, and MCP tools resolve the active `session_id` to the
+  session row's `user_id`. Pass that `user_id` explicitly; do not read ambient
+  request context in MCP, background runners, or schedulers.
 
 ## Escalation
 

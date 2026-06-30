@@ -34,6 +34,13 @@ def test_should_register_codex_subscription_provider() -> None:
     assert provider.display_name == "Codex · ChatGPT"
 
 
+def test_should_register_kimi_coding_as_separate_moonshot_channel() -> None:
+    provider = get_provider("moonshot-kimi-coding")
+    assert provider.display_name == "Moonshot (Kimi Coding)"
+    assert provider.default_base_url == "https://api.kimi.com/coding/v1"
+    assert provider.default_model == "kimi-for-coding"
+
+
 def test_claude_subscription_uses_oauth_auth_type() -> None:
     provider = get_provider("claude-subscription")
     assert provider.auth_type == "oauth"
@@ -133,7 +140,16 @@ def test_oauth_subscription_declares_default_protocol() -> None:
 
 def test_existing_api_key_providers_still_have_default_auth_type() -> None:
     """Adding new fields with defaults must not change existing provider shape."""
-    for kind in ("anthropic", "openai", "deepseek", "compatible"):
+    for kind in (
+        "anthropic",
+        "openai",
+        "deepseek",
+        "zhipu",
+        "moonshot",
+        "moonshot-kimi-coding",
+        "minimax",
+        "compatible",
+    ):
         provider = get_provider(kind)
         assert provider.auth_type == "api_key"
         assert provider.runtime_provider == ""

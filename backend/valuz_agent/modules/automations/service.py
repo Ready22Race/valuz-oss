@@ -28,7 +28,6 @@ from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.i18n import t
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.agents.datastore import (
@@ -139,6 +138,12 @@ class AutomationService:
         self._default_tz = default_timezone or "UTC"
         self._triggers = TriggerEvaluator(default_timezone=self._default_tz)
 
+    @staticmethod
+    def _require_user_id(user_id: str | None) -> str:
+        if user_id is None:
+            raise ValueError("user_id is required")
+        return user_id
+
     # ── Timezone resolution ────────────────────────────────────────────
 
     def _effective_tz_for(self, override: str | None) -> str:
@@ -146,11 +151,15 @@ class AutomationService:
 
     # ── Project lookup ──────────────────────────────────────────────
 
-    async def _get_project_info(self, project_id: str) -> tuple[str, str]:
+    async def _get_project_info(
+        self, project_id: str, user_id: str | None = None
+    ) -> tuple[str, str]:
+        user_id = self._require_user_id(user_id)
+
         if self._ws is None:
             raise AutomationProjectNotFound()
         try:
-            ws = await self._ws.get_project(require_current_user_id(), project_id)
+            ws = await self._ws.get_project(user_id, project_id)
             return ws.name, ws.kind
         except AutomationProjectNotFound:
             raise
@@ -229,7 +238,9 @@ class AutomationService:
 
     # ── Row → DTO ─────────────────────────────────────────────────────
 
-    async def _resolve_agent_name(self, row: AutomationRow) -> str | None:
+    async def _resolve_agent_name(
+        self, row: AutomationRow, user_id: str | None = None
+    ) -> str | None:
         """Best-effort lookup of the bound agent's display name.
 
         Returns ``None`` when the member or kernel agent has been deleted
@@ -237,20 +248,24 @@ class AutomationService:
         reference and decide to delete or rebind. The runner converts
         this same lookup failure into a failed run + ADR-012 auto-pause.
         """
-        member = await self._members.get(require_current_user_id(), row.project_id, row.agent_slug)
+        user_id = self._require_user_id(user_id)
+        member = await self._members.get(user_id, row.project_id, row.agent_slug)
         if member is None:
             return None
         try:
             from valuz_agent.adapters.agent_resolver import _member_agent_config
 
-            agent_cfg = await _member_agent_config(member, self._members)
+            agent_cfg = await _member_agent_config(member, self._members, user_id=user_id)
         except Exception:  # noqa: BLE001 — display path is non-fatal
             return None
         return agent_cfg.name if agent_cfg else None
 
-    async def _row_to_item(self, row: AutomationRow) -> AutomationItemResponse:
-        ws_name, ws_kind = await self._get_project_info(row.project_id)
-        last_run = await self._ds.last_run(require_current_user_id(), row.id)
+    async def _row_to_item(
+        self, row: AutomationRow, user_id: str | None = None
+    ) -> AutomationItemResponse:
+        user_id = self._require_user_id(user_id)
+        ws_name, ws_kind = await self._get_project_info(row.project_id, user_id)
+        last_run = await self._ds.last_run(user_id, row.id)
         return AutomationItemResponse(
             automation_id=row.id,
             project_id=row.project_id,
@@ -259,7 +274,7 @@ class AutomationService:
             name=row.name,
             agent_kind=row.agent_kind,
             agent_slug=row.agent_slug,
-            agent_name=await self._resolve_agent_name(row),
+            agent_name=await self._resolve_agent_name(row, user_id),
             action_kind=row.action_kind,
             trigger=self._row_to_trigger(row),
             trigger_human_readable=self._trigger_human(row),
@@ -269,13 +284,16 @@ class AutomationService:
             last_run_status=last_run.status if last_run else None,
         )
 
-    async def _row_to_detail(self, row: AutomationRow) -> AutomationDetailResponse:
-        item = await self._row_to_item(row)
+    async def _row_to_detail(
+        self, row: AutomationRow, user_id: str | None = None
+    ) -> AutomationDetailResponse:
+        user_id = self._require_user_id(user_id)
+        item = await self._row_to_item(row, user_id)
         return AutomationDetailResponse(
             **item.model_dump(),
             prompt_template=row.prompt_template,
-            total_runs=await self._ds.count_runs(require_current_user_id(), row.id),
-            recent_failures=await self._ds.count_recent_failures(require_current_user_id(), row.id),
+            total_runs=await self._ds.count_runs(user_id, row.id),
+            recent_failures=await self._ds.count_recent_failures(user_id, row.id),
             created_at=row.created_at or now_ms(),
             updated_at=row.updated_at or now_ms(),
         )
@@ -317,7 +335,9 @@ class AutomationService:
 
     # ── Project target picker ───────────────────────────────────────
 
-    async def list_project_targets(self) -> list[AutomationProjectTarget]:
+    async def list_project_targets(
+        self, user_id: str | None = None
+    ) -> list[AutomationProjectTarget]:
         """Projects eligible to host a new automation.
 
         - A fixed "Chat" sentinel (``project_id=None``) at the top —
@@ -339,7 +359,8 @@ class AutomationService:
         ]
         if self._ws is None:
             return targets
-        for ws in await self._ws.list_projects(require_current_user_id()):
+        user_id = self._require_user_id(user_id)
+        for ws in await self._ws.list_projects(user_id):
             if ws.kind == "project":
                 targets.append(
                     AutomationProjectTarget(
@@ -353,20 +374,27 @@ class AutomationService:
 
     # ── Listing ───────────────────────────────────────────────────────
 
-    async def list_automations_in_project(self, project_id: str) -> list[AutomationItemResponse]:
+    async def list_automations_in_project(
+        self, project_id: str, user_id: str | None = None
+    ) -> list[AutomationItemResponse]:
+        user_id = self._require_user_id(user_id)
         return [
-            await self._row_to_item(r)
-            for r in await self._ds.list_automations(require_current_user_id(), project_id)
+            await self._row_to_item(r, user_id)
+            for r in await self._ds.list_automations(user_id, project_id)
         ]
 
-    async def list_all_automations(self) -> list[AutomationItemResponse]:
+    async def list_all_automations(
+        self, user_id: str | None = None
+    ) -> list[AutomationItemResponse]:
+        user_id = self._require_user_id(user_id)
         return [
-            await self._row_to_item(r)
-            for r in await self._ds.list_automations(require_current_user_id(), project_id=None)
+            await self._row_to_item(r, user_id)
+            for r in await self._ds.list_automations(user_id, project_id=None)
         ]
 
     async def list_automation_groups(
-        self, project_id: str | None = None
+        self, project_id: str | None = None,
+        user_id: str | None = None,
     ) -> list[AutomationGroupResponse]:
         """Group automations for the automation page / per-project panel.
 
@@ -380,14 +408,15 @@ class AutomationService:
         project_id (preserves runtime isolation), and the grouping is
         purely a display rule.
         """
-        rows = await self._ds.list_automations(require_current_user_id(), project_id)
+        user_id = self._require_user_id(user_id)
+        rows = await self._ds.list_automations(user_id, project_id)
         if project_id is not None:
             groups: dict[str, list[AutomationItemResponse]] = {}
             for row in rows:
-                groups.setdefault(row.project_id, []).append(await self._row_to_item(row))
+                groups.setdefault(row.project_id, []).append(await self._row_to_item(row, user_id))
             result: list[AutomationGroupResponse] = []
             for ws_id, items in groups.items():
-                ws_name, ws_kind = await self._get_project_info(ws_id)
+                ws_name, ws_kind = await self._get_project_info(ws_id, user_id)
                 result.append(
                     AutomationGroupResponse(
                         project_id=ws_id,
@@ -402,12 +431,12 @@ class AutomationService:
         project_groups: dict[str, list[AutomationItemResponse]] = {}
         for row in rows:
             try:
-                _, ws_kind = await self._get_project_info(row.project_id)
+                _, ws_kind = await self._get_project_info(row.project_id, user_id)
             except AutomationProjectNotFound:
                 # Project was deleted out from under the row — drop from
                 # the listing rather than 500ing the whole page.
                 continue
-            item = await self._row_to_item(row)
+            item = await self._row_to_item(row, user_id)
             if ws_kind == "chat":
                 chat_items.append(item)
             else:
@@ -427,7 +456,7 @@ class AutomationService:
                 )
             )
         for ws_id, items in project_groups.items():
-            ws_name, ws_kind = await self._get_project_info(ws_id)
+            ws_name, ws_kind = await self._get_project_info(ws_id, user_id)
             result.append(
                 AutomationGroupResponse(
                     project_id=ws_id,
@@ -438,11 +467,14 @@ class AutomationService:
             )
         return result
 
-    async def get_automation_detail(self, automation_id: str) -> AutomationDetailResponse:
-        row = await self._ds.get_automation(require_current_user_id(), automation_id)
+    async def get_automation_detail(
+        self, automation_id: str, user_id: str | None = None
+    ) -> AutomationDetailResponse:
+        user_id = self._require_user_id(user_id)
+        row = await self._ds.get_automation(user_id, automation_id)
         if row is None:
             raise AutomationNotFound()
-        return await self._row_to_detail(row)
+        return await self._row_to_detail(row, user_id)
 
     # ── Project + agent resolution at create time ───────────────────
 
@@ -451,6 +483,7 @@ class AutomationService:
         payload: AutomationCreatePayload,
         *,
         calling_session_project_id: str | None,
+        user_id: str | None = None,
     ) -> tuple[str, str]:
         """Resolve ``(project_id, agent_slug)`` for the row.
 
@@ -473,6 +506,7 @@ class AutomationService:
           adds the library agent to the project via the existing
           add-agent flow first.
         """
+        user_id = self._require_user_id(user_id)
         # ── Chat path ───────────────────────────────────────────────────
         if payload.project_kind == "chat":
             if self._ws is None:
@@ -481,35 +515,35 @@ class AutomationService:
             # 1. Resolve / lazy-create the project
             if payload.project_id is not None:
                 # MCP-from-chat: caller passed its current chat ws explicitly.
-                _, ws_kind = await self._get_project_info(payload.project_id)
+                _, ws_kind = await self._get_project_info(payload.project_id, user_id)
                 if ws_kind != "chat":
                     raise AutomationProjectNotFound()
                 project_id = payload.project_id
             elif calling_session_project_id is not None:
                 # MCP-from-chat fallback: caller didn't pass project_id
                 # but we know which chat ws they're in. Use it.
-                _, ws_kind = await self._get_project_info(calling_session_project_id)
+                _, ws_kind = await self._get_project_info(calling_session_project_id, user_id)
                 if ws_kind == "chat":
                     project_id = calling_session_project_id
                 else:
                     # The calling session was a project session that asked
                     # for kind=chat — treat as "lazy create".
                     fresh = await self._ws.create_chat_project_for_session(
-                        require_current_user_id(), name=payload.name.strip()
+                        user_id, name=payload.name.strip()
                     )
                     project_id = fresh.id
             else:
                 # Automation page "Chat" picker: no calling session, no
                 # explicit ws — lazy-create one named after the automation.
                 fresh = await self._ws.create_chat_project_for_session(
-                    require_current_user_id(), name=payload.name.strip()
+                    user_id, name=payload.name.strip()
                 )
                 project_id = fresh.id
 
             # 2. Resolve the agent for that project
             if payload.agent_kind == "project_member":
                 member = await self._members.get(
-                    require_current_user_id(), project_id, payload.agent_slug
+                    user_id, project_id, payload.agent_slug
                 )
                 if member is None:
                     raise AgentNotInProject()
@@ -523,7 +557,7 @@ class AutomationService:
                     "AutomationService is missing AgentService — required to "
                     "instantiate library agents into chat projects"
                 )
-            source = await self._agents.get_agent(require_current_user_id(), payload.agent_slug)
+            source = await self._agents.get_agent(user_id, payload.agent_slug)
             if source is None:
                 raise AgentNotFound()
             # Derive a project-local slug. We hash a short prefix on so the
@@ -533,7 +567,7 @@ class AutomationService:
             # ``dedupe=False``: each automation gets its own member handle even
             # when several reference the same source agent in this project.
             await self._agent_svc.deploy_agent(
-                require_current_user_id(),
+                user_id,
                 project_id=project_id,
                 source_agent_slug=payload.agent_slug,
                 agent_slug=instance_slug,
@@ -544,7 +578,7 @@ class AutomationService:
         # ── Project path ────────────────────────────────────────────────
         if payload.project_id is None:
             raise AutomationProjectNotFound()
-        _, ws_kind = await self._get_project_info(payload.project_id)
+        _, ws_kind = await self._get_project_info(payload.project_id, user_id)
         if ws_kind != "project":
             raise AutomationProjectNotFound()
 
@@ -555,9 +589,7 @@ class AutomationService:
             # it here would duplicate that surface.
             raise AgentNotInProject()
 
-        member = await self._members.get(
-            require_current_user_id(), payload.project_id, payload.agent_slug
-        )
+        member = await self._members.get(user_id, payload.project_id, payload.agent_slug)
         if member is None:
             raise AgentNotInProject()
         return payload.project_id, payload.agent_slug
@@ -618,7 +650,8 @@ class AutomationService:
         )
 
     async def _preview_agent_name(
-        self, payload: AutomationCreatePayload, calling_session_project_id: str | None
+        self, payload: AutomationCreatePayload, calling_session_project_id: str | None,
+        user_id: str | None = None,
     ) -> str | None:
         """Resolve the bound agent's display name WITHOUT side effects.
 
@@ -627,7 +660,7 @@ class AutomationService:
         name up directly: library agents from the agent library, project members
         from the (chat or project) project they belong to.
         """
-        uid = require_current_user_id()
+        uid = self._require_user_id(user_id)
         if payload.agent_kind == "library_agent":
             agent = await self._agents.get_agent(uid, payload.agent_slug)
             if agent is None:
@@ -650,13 +683,14 @@ class AutomationService:
             trigger_kind="manual",
             status="enabled",
         )
-        return await self._resolve_agent_name(probe)
+        return await self._resolve_agent_name(probe, uid)
 
     async def preview(
         self,
         payload: AutomationCreatePayload,
         *,
         calling_session_project_id: str | None = None,
+        user_id: str | None = None,
     ) -> AutomationProposalSpec:
         """Validate a create payload and return a resolved-but-unsaved spec.
 
@@ -676,7 +710,8 @@ class AutomationService:
             raise AutomationTaskOnlyOnProject()
 
         self._validate_trigger(payload.trigger)
-        agent_name = await self._preview_agent_name(payload, calling_session_project_id)
+        user_id = self._require_user_id(user_id)
+        agent_name = await self._preview_agent_name(payload, calling_session_project_id, user_id)
 
         now = now_ms()
         row = AutomationRow(
@@ -708,10 +743,13 @@ class AutomationService:
             next_run_at=next_run,
         )
 
-    async def confirmed_origin_map(self, tool_call_ids: list[str]) -> dict[str, str]:
+    async def confirmed_origin_map(
+        self, tool_call_ids: list[str], user_id: str | None = None
+    ) -> dict[str, str]:
         """Map each already-confirmed proposing ``tool_call_id`` → its created
         automation id (owner-scoped). Backs the proposal re-entry status route."""
-        rows = await self._ds.list_by_origin_tool_call_ids(require_current_user_id(), tool_call_ids)
+        user_id = self._require_user_id(user_id)
+        rows = await self._ds.list_by_origin_tool_call_ids(user_id, tool_call_ids)
         return {r.origin_tool_call_id: r.id for r in rows if r.origin_tool_call_id}
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -722,6 +760,7 @@ class AutomationService:
         *,
         calling_session_project_id: str | None = None,
         origin_tool_call_id: str | None = None,
+        user_id: str | None = None,
     ) -> AutomationDetailResponse:
         """Create a new automation row.
 
@@ -732,6 +771,7 @@ class AutomationService:
         以当前 chat project 为准" decision). HTTP create requests pass
         ``None``, which falls back to lazy-create for chat-kind payloads.
         """
+        user_id = self._require_user_id(user_id)
         name = payload.name.strip()
         if not name:
             raise AutomationNameEmpty()
@@ -751,6 +791,7 @@ class AutomationService:
         project_id, agent_slug = await self._resolve_project_and_agent(
             payload,
             calling_session_project_id=calling_session_project_id,
+            user_id=user_id,
         )
 
         now = now_ms()
@@ -773,21 +814,136 @@ class AutomationService:
         self._apply_trigger(row, payload.trigger)
         row.next_run_at = self._triggers.initial_next_fire(row, now=now)
 
-        await self._ds.create_automation(require_current_user_id(), row)
+        await self._ds.create_automation(user_id, row)
         self._bus.publish(
             "automation.changed",
             project_id=row.project_id,
             automation_id=row.id,
         )
-        return await self._row_to_detail(row)
+        return await self._row_to_detail(row, user_id)
+
+    async def create_from_row(
+        self,
+        row: AutomationRow,
+        *,
+        owner_user_id: str | None = None,
+    ) -> AutomationDetailResponse:
+        """Persist a ``AutomationRow`` built by a peer module (project-pack
+        import) without going through ``AutomationCreatePayload`` routing.
+
+        The caller has already set ``id`` / ``project_id`` / ``agent_slug``
+        / ``name`` / ``prompt_template`` / ``action_kind`` / ``trigger_kind``
+        / ``cron_expr`` / ``timezone`` / ``interval_seconds`` / ``status``
+        on the row. This method:
+
+        - re-validates the discriminated-trigger invariants
+          (cron→``cron_expr`` set; interval→``interval_seconds >= 30``);
+        - recomputes ``next_run_at`` for enabled rows;
+        - writes via the datastore and pokes the scheduler exactly like the
+          public ``create``.
+
+        ``owner_user_id`` is threaded explicitly because the import path should
+        not depend on the ambient request ContextVar. When ``None`` the ambient
+        owner is used, matching the rest of this service.
+        """
+        uid = self._require_user_id(owner_user_id)
+        # Enforce the same invariants the DB CHECK constraints do, so a bad
+        # import surfaces a typed error instead of an IntegrityError.
+        if row.trigger_kind == "cron" and not (row.cron_expr or "").strip():
+            raise AutomationAgentRequired()  # type: ignore[misc]
+        if row.trigger_kind == "interval" and (
+            row.interval_seconds is None or row.interval_seconds < MIN_INTERVAL_SECONDS
+        ):
+            raise IntervalTooShort()
+        if row.trigger_kind == "cron":
+            tz = self._effective_tz_for(row.timezone)
+            valid, _, _, err_msg = self._cron.validate(row.cron_expr or "", tz)
+            if not valid:
+                raise InvalidCronExpression(err_msg)
+        if not row.name.strip():
+            raise AutomationNameEmpty()
+        if not row.prompt_template.strip():
+            raise AutomationPromptEmpty()
+        if not row.agent_slug:
+            raise AutomationAgentRequired()
+
+        now = now_ms()
+        row.id = row.id or uuid4().hex
+        row.user_id = uid
+        row.created_at = now
+        row.updated_at = now
+        row.origin_tool_call_id = None
+        row.last_run_at = None
+        if row.status == "enabled":
+            row.next_run_at = self._triggers.initial_next_fire(row, now=now)
+        else:
+            row.next_run_at = None
+
+        await self._ds.create_automation(uid, row)
+        self._bus.publish(
+            "automation.changed",
+            project_id=row.project_id,
+            automation_id=row.id,
+        )
+        return await self._row_to_detail_for(row, uid)
+
+    async def _row_to_detail_for(
+        self, row: AutomationRow, user_id: str
+    ) -> AutomationDetailResponse:
+        """Detail projection scoped to an explicit owner (the import path
+        threads the owner explicitly rather than reading the ambient
+        ContextVar, so this avoids surprising ContextVar dependencies)."""
+        try:
+            ws_name, ws_kind = await self._get_project_info_for(row.project_id, user_id)
+        except AutomationProjectNotFound:
+            ws_name, ws_kind = row.project_id, "project"
+        last_run = await self._ds.last_run(user_id, row.id)
+        item = AutomationItemResponse(
+            automation_id=row.id,
+            project_id=row.project_id,
+            project_name=ws_name,
+            project_kind=ws_kind,
+            name=row.name,
+            agent_kind=row.agent_kind,
+            agent_slug=row.agent_slug,
+            agent_name=None,
+            action_kind=row.action_kind,
+            trigger=self._row_to_trigger(row),
+            trigger_human_readable=self._trigger_human(row),
+            status=row.status,
+            next_run_at=row.next_run_at,
+            last_run_at=row.last_run_at,
+            last_run_status=last_run.status if last_run else None,
+        )
+        return AutomationDetailResponse(
+            **item.model_dump(),
+            prompt_template=row.prompt_template,
+            total_runs=await self._ds.count_runs(user_id, row.id),
+            recent_failures=await self._ds.count_recent_failures(user_id, row.id),
+            created_at=row.created_at or now_ms(),
+            updated_at=row.updated_at or now_ms(),
+        )
+
+    async def _get_project_info_for(self, project_id: str, user_id: str) -> tuple[str, str]:
+        """Owner-explicit variant of ``_get_project_info`` for the import path."""
+        if self._ws is None:
+            raise AutomationProjectNotFound()
+        try:
+            ws = await self._ws.get_project(user_id, project_id)
+            return ws.name, ws.kind
+        except AutomationProjectNotFound:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise AutomationProjectNotFound() from exc
 
     async def update(
-        self, automation_id: str, payload: AutomationUpdatePayload
+        self, automation_id: str, payload: AutomationUpdatePayload,
+        user_id: str | None = None,
     ) -> AutomationDetailResponse:
-        row = await self._ds.get_automation(require_current_user_id(), automation_id)
+        user_id = self._require_user_id(user_id)
+        row = await self._ds.get_automation(user_id, automation_id)
         if row is None:
             raise AutomationNotFound()
-
         if payload.name is not None:
             name = payload.name.strip()
             if not name:
@@ -807,7 +963,7 @@ class AutomationService:
             new_slug = payload.agent_slug.strip()
             if not new_slug:
                 raise AutomationAgentRequired()
-            member = await self._members.get(require_current_user_id(), row.project_id, new_slug)
+            member = await self._members.get(user_id, row.project_id, new_slug)
             if member is None:
                 raise AgentNotInProject()
             row.agent_slug = new_slug
@@ -818,7 +974,7 @@ class AutomationService:
             # trusting any cached value — projects don't change kind
             # post-create today, but the lookup is cheap.
             if payload.action_kind == "task":
-                _, ws_kind = await self._get_project_info(row.project_id)
+                _, ws_kind = await self._get_project_info(row.project_id, user_id)
                 if ws_kind != "project":
                     raise AutomationTaskOnlyOnProject()
             row.action_kind = payload.action_kind
@@ -839,10 +995,13 @@ class AutomationService:
             project_id=row.project_id,
             automation_id=row.id,
         )
-        return await self._row_to_detail(row)
+        return await self._row_to_detail(row, user_id)
 
-    async def pause(self, automation_id: str) -> AutomationDetailResponse:
-        row = await self._ds.get_automation(require_current_user_id(), automation_id)
+    async def pause(
+        self, automation_id: str, user_id: str | None = None
+    ) -> AutomationDetailResponse:
+        user_id = self._require_user_id(user_id)
+        row = await self._ds.get_automation(user_id, automation_id)
         if row is None:
             raise AutomationNotFound()
         row.status = "paused"
@@ -854,10 +1013,13 @@ class AutomationService:
             project_id=row.project_id,
             automation_id=row.id,
         )
-        return await self._row_to_detail(row)
+        return await self._row_to_detail(row, user_id)
 
-    async def resume(self, automation_id: str) -> AutomationDetailResponse:
-        row = await self._ds.get_automation(require_current_user_id(), automation_id)
+    async def resume(
+        self, automation_id: str, user_id: str | None = None
+    ) -> AutomationDetailResponse:
+        user_id = self._require_user_id(user_id)
+        row = await self._ds.get_automation(user_id, automation_id)
         if row is None:
             raise AutomationNotFound()
         row.status = "enabled"
@@ -869,14 +1031,15 @@ class AutomationService:
             project_id=row.project_id,
             automation_id=row.id,
         )
-        return await self._row_to_detail(row)
+        return await self._row_to_detail(row, user_id)
 
-    async def delete(self, automation_id: str) -> None:
-        row = await self._ds.get_automation(require_current_user_id(), automation_id)
+    async def delete(self, automation_id: str, user_id: str | None = None) -> None:
+        user_id = self._require_user_id(user_id)
+        row = await self._ds.get_automation(user_id, automation_id)
         if row is None:
             raise AutomationNotFound()
         ws_id = row.project_id
-        await self._ds.delete_automation(require_current_user_id(), automation_id)
+        await self._ds.delete_automation(user_id, automation_id)
         self._bus.publish(
             "automation.changed",
             project_id=ws_id,
@@ -889,6 +1052,7 @@ class AutomationService:
         *,
         trigger_type: Literal["manual", "agent"] = "manual",
         invoked_by_session_id: str | None = None,
+        user_id: str | None = None,
     ) -> AutomationRunAcceptedResponse:
         """Enqueue an immediate, off-schedule run for this automation.
 
@@ -908,17 +1072,18 @@ class AutomationService:
         guards against the cron-triggered path; this DB-side check guards
         against two rapid "run now" clicks racing each other.
         """
+        user_id = self._require_user_id(user_id)
         from valuz_agent.modules.automations.in_process_runner import (
             automation_runner,
         )
 
-        row = await self._ds.get_automation(require_current_user_id(), automation_id)
+        row = await self._ds.get_automation(user_id, automation_id)
         if row is None:
             raise AutomationNotFound()
         if row.status != "enabled":
             raise AutomationPaused()
 
-        existing = await self._ds.last_run(require_current_user_id(), automation_id)
+        existing = await self._ds.last_run(user_id, automation_id)
         if existing is not None:
             if existing.status == "queued":
                 raise AutomationAlreadyQueued()
@@ -935,38 +1100,41 @@ class AutomationService:
             triggered_at=now,
             invoked_by_session_id=invoked_by_session_id,
         )
-        await self._ds.create_run(require_current_user_id(), run)
+        await self._ds.create_run(user_id, run)
         self._bus.publish(
             "automation.run.queued",
             automation_id=automation_id,
             run_id=run.id,
         )
 
-        automation_runner.enqueue_threadsafe(automation_id, run.id, require_current_user_id())
+        automation_runner.enqueue_threadsafe(automation_id, run.id, user_id)
         return AutomationRunAcceptedResponse(
             run_id=run.id, automation_id=automation_id, status="queued"
         )
 
     async def list_runs(
-        self, automation_id: str, limit: int = 20, cursor: str | None = None
+        self, automation_id: str, limit: int = 20, cursor: str | None = None,
+        user_id: str | None = None,
     ) -> list[AutomationRunItemResponse]:
-        row = await self._ds.get_automation(require_current_user_id(), automation_id)
+        user_id = self._require_user_id(user_id)
+        row = await self._ds.get_automation(user_id, automation_id)
         if row is None:
             raise AutomationNotFound()
         runs = await self._ds.list_runs(
-            require_current_user_id(), automation_id, limit=limit, cursor=cursor
+            user_id, automation_id, limit=limit, cursor=cursor
         )
         # Task automations: the run row freezes to ``success`` at kickoff, so
         # resolve each lead session's spawned task (id + title + live status) and
         # let the client deep-link to it. Batched to avoid an N+1 over the page.
-        task_link_by_session = await self._resolve_task_links(runs)
+        task_link_by_session = await self._resolve_task_links(runs, user_id)
         return [
             self._run_to_item(r, task_link_by_session.get(r.session_id) if r.session_id else None)
             for r in runs
         ]
 
     async def _resolve_task_links(
-        self, runs: list[AutomationRunRow]
+        self, runs: list[AutomationRunRow],
+        user_id: str | None = None,
     ) -> dict[str, tuple[str, str, str]]:
         """Map each run's lead ``session_id`` → ``(task_id, title, status)`` of
         its spawned task.
@@ -979,8 +1147,9 @@ class AutomationService:
             return {}
         from valuz_agent.modules.tasks.datastore import TaskSessionDatastore
 
+        user_id = self._require_user_id(user_id)
         return await TaskSessionDatastore(self._db).get_task_links_by_session_ids(
-            require_current_user_id(), session_ids
+            user_id, session_ids
         )
 
     # ── Validation helpers (used by the frontend's preview UI) ────────
@@ -1010,7 +1179,9 @@ class AutomationService:
 
     # ── Recovered-skip during offline windows ─────────────────────────
 
-    async def mark_missed_runs(self, now: int) -> list[AutomationRunRow]:
+    async def mark_missed_runs(
+        self, now: int, user_id: str | None = None
+    ) -> list[AutomationRunRow]:
         """Mark every overdue automation as ``recovered_skip`` for one tick.
 
         Used by the runner at startup so the user gets exactly ONE "skipped"
@@ -1021,6 +1192,7 @@ class AutomationService:
         overdue = await self._ds.find_due_automations(now)
         skipped: list[AutomationRunRow] = []
         for row in overdue:
+            uid = row.user_id or self._require_user_id(user_id)
             run = AutomationRunRow(
                 id=uuid4().hex,
                 automation_id=row.id,
@@ -1033,7 +1205,7 @@ class AutomationService:
                 error_code="AUTOMATION_MISSED_WHILE_OFFLINE",
                 created_files="[]",
             )
-            await self._ds.create_run(require_current_user_id(), run)
+            await self._ds.create_run(uid, run)
             row.last_run_at = row.next_run_at
             row.next_run_at = self._triggers.next_fire_at(row, now)
             row.updated_at = now

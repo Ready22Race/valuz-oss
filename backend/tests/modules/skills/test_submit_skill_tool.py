@@ -30,7 +30,7 @@ import pytest
 # already imported the kernel).
 import valuz_agent.boot.kernel  # noqa: F401
 
-from src.core.tools import ExecContext
+from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
 
 from valuz_agent.integrations.tools_skill_creator import _submit_skill_handler
 
@@ -52,9 +52,7 @@ def _patch_staging_resolver(monkeypatch: pytest.MonkeyPatch, staging_base: Path)
 
     # The handler imports the symbol lazily from the staging module, so patch
     # it at the source module.
-    monkeypatch.setattr(
-        "valuz_agent.modules.skills.staging.staging_dir_for_session", _fake
-    )
+    monkeypatch.setattr("valuz_agent.modules.skills.staging.staging_dir_for_session", _fake)
 
 
 async def test_accepts_submission_when_skill_md_is_staged(
@@ -66,7 +64,9 @@ async def test_accepts_submission_when_skill_md_is_staged(
     (staged / "SKILL.md").write_text("---\nname: my-skill\n---\n", encoding="utf-8")
     _patch_staging_resolver(monkeypatch, staging_base)
 
-    result = await _submit_skill_handler(dict(_ARGS), ExecContext(session_id="s1"))
+    result = await _submit_skill_handler(
+        dict(_ARGS), HostExecContext(session_id="s1", user_id="local-test-owner")
+    )
 
     assert not result.is_error
     assert "my-skill" in result.content
@@ -78,7 +78,9 @@ async def test_rejects_with_exact_staging_path_when_not_staged(
     staging_base = tmp_path / ".skill-staging"
     _patch_staging_resolver(monkeypatch, staging_base)
 
-    result = await _submit_skill_handler(dict(_ARGS), ExecContext(session_id="s1"))
+    result = await _submit_skill_handler(
+        dict(_ARGS), HostExecContext(session_id="s1", user_id="local-test-owner")
+    )
 
     assert result.is_error
     # The error must teach the agent the exact expected location so its
@@ -87,7 +89,7 @@ async def test_rejects_with_exact_staging_path_when_not_staged(
 
 
 async def test_errors_cleanly_when_session_id_is_empty() -> None:
-    result = await _submit_skill_handler(dict(_ARGS), ExecContext())
+    result = await _submit_skill_handler(dict(_ARGS), HostExecContext(user_id="local-test-owner"))
 
     assert result.is_error
     assert "session id" in result.content

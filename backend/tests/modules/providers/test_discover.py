@@ -13,7 +13,9 @@ import httpx
 import pytest
 
 from valuz_agent.modules.providers.discover import (
+    DiscoveredModel,
     ModelDiscoveryError,
+    discover_model_entries,
     discover_models,
 )
 
@@ -53,6 +55,36 @@ def test_should_return_sorted_unique_model_ids_when_openai_responds_ok() -> None
             )
 
     assert _run(go()) == ["gpt-4o", "gpt-4o-mini"]
+
+
+def test_should_preserve_upstream_display_name_when_present() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/models")
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {"id": "kimi-for-coding", "display_name": "K2.7 Code"},
+                ],
+            },
+        )
+
+    async def go() -> list[DiscoveredModel]:
+        async with _client_with(handler) as client:
+            return await discover_model_entries(
+                base_url="https://api.kimi.com/coding/v1",
+                api_key="sk-test",
+                protocol="openai",
+                client=client,
+            )
+
+    models = _run(go())
+    assert isinstance(models, list)
+    assert len(models) == 1
+    model = models[0]
+    assert model.id == "kimi-for-coding"
+    assert model.label == "K2.7 Code"
 
 
 def test_should_strip_date_suffix_from_anthropic_model_ids() -> None:

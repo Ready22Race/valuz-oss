@@ -53,16 +53,16 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
 from collections.abc import AsyncIterator
 
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 
-from valuz_agent.infra.auth_context import (
-    require_current_user_id,
-    reset_current_user_id,
-    set_current_user_id,
+from valuz_agent.integrations._mcp_asgi import (
+    build_internal_mcp_asgi,
+    get_current_mcp_session_id,
+    get_current_mcp_user_id,
 )
 
 from mcp.server import Server
@@ -73,11 +73,22 @@ from src.core.tools import ExecContext, ToolDef
 
 logger = logging.getLogger(__name__)
 
-TOOLSET_NAMES = ("base", "lead")
 
-# Bound for the duration of one HTTP request by the ASGI wrapper. Tool
-# handlers receive it via the rebuilt ExecContext.
-_session_var: ContextVar[str | None] = ContextVar("valuz_toolkit_mcp_session_id", default=None)
+@dataclass
+class HostExecContext(ExecContext):
+    """``ExecContext`` enriched with the resolved session owner.
+
+    The kernel's ``ExecContext`` stays owner-agnostic (owner scoping is a host
+    concern). The host's built-in MCP toolkit hands its tool handlers this
+    richer context — populated once at the request boundary (``_call_tool``) —
+    so handlers read ``ctx.user_id`` instead of an ambient context var and stay
+    pure. Tests construct it directly with the owner they seed.
+    """
+
+    user_id: str = ""
+
+
+TOOLSET_NAMES = ("base", "lead")
 
 # Installed by boot (``install_toolkit_toolsets``) once the tasks
 # orchestrator exists; maps toolset name → tool defs.
@@ -100,29 +111,17 @@ def install_toolkit_toolsets(*, base: tuple[ToolDef, ...], lead: tuple[ToolDef, 
 
 
 def _current_session_id() -> str:
-    sid = _session_var.get()
+    sid = get_current_mcp_session_id()
     if not sid:
         raise RuntimeError("toolkit MCP tool called outside of a session-scoped request")
     return sid
 
 
-async def _resolve_session_owner(session_id: str) -> str | None:
-    """Owner id of the calling session, or ``None`` if it can't be resolved.
-
-    Looks the session up over the kernel seam and reads ``SessionData.user_id``.
-    ``None`` (kernel GC'd the session, or a legacy row with an empty owner)
-    leaves the owner context untouched — a handler that then needs an owner
-    fails loudly via ``require_current_user_id`` rather than reading across
-    owners.
-    """
-    from valuz_agent.adapters import kernel_client
-
-    try:
-        sess = await kernel_client.get_session(require_current_user_id(), session_id)
-    except Exception:  # noqa: BLE001 — owner resolution is best-effort; never block the tool
-        logger.warning("toolkit: failed to resolve owner for session %s", session_id, exc_info=True)
-        return None
-    return (sess.user_id or None) if sess is not None else None
+def _current_user_id() -> str:
+    uid = get_current_mcp_user_id()
+    if not uid:
+        raise RuntimeError("toolkit MCP tool called outside of a user-scoped request")
+    return uid
 
 
 def _build_server(toolset: str) -> Server:
@@ -155,21 +154,8 @@ def _build_server(toolset: str) -> Server:
         tdef = by_name.get(tool_name)
         if tdef is None or tdef.handler is None:
             raise ValueError(f"unknown tool: {tool_name}")
-        ctx = ExecContext(session_id=_current_session_id())
-        # Owner boundary for background work: the kernel runs the agent loop,
-        # so a tool handler has no HTTP request and no owner context. Resolve
-        # the calling session's owner (carried over the seam on
-        # ``SessionData.user_id``) and publish it, so the handler's
-        # owner-scoped reads attribute to whoever owns the session — and any
-        # asyncio actors it spawns inherit the same owner. Mirrors what
-        # ``AuthMiddleware`` does for the request path.
-        owner = await _resolve_session_owner(ctx.session_id)
-        token = set_current_user_id(owner) if owner else None
-        try:
-            result = await tdef.handler(dict(arguments), ctx)
-        finally:
-            if token is not None:
-                reset_current_user_id(token)
+        ctx = HostExecContext(session_id=_current_session_id(), user_id=_current_user_id())
+        result = await tdef.handler(dict(arguments), ctx)
         text = result.content if not result.is_error else f"ERROR: {result.content}"
         return [TextContent(type="text", text=text)]
 
@@ -205,40 +191,21 @@ def build_toolkit_mcp_asgi(toolset: str) -> Any:
     ``X-Valuz-Session-Id`` into the ContextVar, delegate to the toolset's
     session manager.
     """
-    from starlette.responses import PlainTextResponse
-
     if toolset not in TOOLSET_NAMES:
         raise ValueError(f"unknown toolkit toolset: {toolset}")
 
-    async def _app(scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            response = PlainTextResponse("Not Found", status_code=404)
-            await response(scope, receive, send)
-            return
+    # Resolve the session manager LAZILY, per request — do NOT bind
+    # ``_ensure_manager(toolset).handle_request`` at mount time. This app is
+    # mounted at app-build, but ``install_toolkit_toolsets`` clears the manager
+    # registry later (in the boot lifespan, once the tasks orchestrator exists),
+    # and ``toolkit_mcp_session_managers_run`` then creates + ``run()``s a fresh
+    # manager. A mount-time binding would capture the pre-install manager (empty
+    # toolset, never ``run()``) and every request would 500 with "Task group is
+    # not initialized". Resolving here always hits the started manager.
+    async def _handle(scope: Any, receive: Any, send: Any) -> None:
+        await _ensure_manager(toolset).handle_request(scope, receive, send)
 
-        from valuz_agent.infra.config import settings as _settings
-
-        headers = {
-            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []
-        }
-        if headers.get("x-valuz-internal") != _settings.internal_mcp_token:
-            response = PlainTextResponse("Forbidden", status_code=403)
-            await response(scope, receive, send)
-            return
-
-        session_id = headers.get("x-valuz-session-id") or ""
-        if not session_id:
-            response = PlainTextResponse("Missing X-Valuz-Session-Id header", status_code=400)
-            await response(scope, receive, send)
-            return
-
-        ctx_token = _session_var.set(session_id)
-        try:
-            await _ensure_manager(toolset).handle_request(scope, receive, send)
-        finally:
-            _session_var.reset(ctx_token)
-
-    return _app
+    return build_internal_mcp_asgi(_handle)
 
 
 def toolkit_mcp_url(*, base_url: str, toolset: str) -> str:
@@ -260,5 +227,4 @@ __all__ = [
     "install_toolkit_toolsets",
     "toolkit_mcp_session_managers_run",
     "toolkit_mcp_url",
-    "_session_var",  # exposed for tests
 ]

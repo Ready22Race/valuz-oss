@@ -25,7 +25,7 @@ from valuz_agent.modules.agents.seed import seed_official_agents
 from valuz_agent.seeds.providers import seed_builtin_providers
 
 
-async def seed_all(db: AsyncSession) -> None:
+async def seed_all(db: AsyncSession, *, user_id: str) -> None:
     """Run every first-boot seeder. Safe to re-run on every startup.
 
     NOTE: ``seed.json`` only holds the structural system agent (the
@@ -44,7 +44,7 @@ async def seed_all(db: AsyncSession) -> None:
     ``seed_builtin_providers`` is retained for the admin reset path
     (``reset_providers`` / the ``reset-providers`` CLI).
     """
-    await seed_official_agents(db)
+    await seed_official_agents(db, user_id)
 
 
 __all__ = ["seed_all", "seed_builtin_providers", "seed_official_agents"]
