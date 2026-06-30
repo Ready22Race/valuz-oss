@@ -463,7 +463,9 @@ class ActorRunner:
         """Bind the host handle that supplies the loop seams + per-turn run."""
         self._host = host
 
-    async def _run_turn_with_sink(self, session_id: str, content: str, user_id: str | None = None) -> str:
+    async def _run_turn_with_sink(
+        self, session_id: str, content: str, user_id: str | None = None
+    ) -> str:
         """Run ONE turn on a persistent session and return its final status.
 
         Unlike :func:`run_session_to_idle`, this does NOT finalize or clean up
@@ -494,6 +496,7 @@ class ActorRunner:
         task_id: str,
         project_id: str,
         idle_ttl: float | None = None,
+        user_id: str | None = None,
     ) -> None:
         """Persistent actor loop: run turn → idle → await mailbox → repeat.
 
@@ -530,12 +533,16 @@ class ActorRunner:
                 if is_draining():
                     exited_on_shutdown = True
                     break
-                final_status = await host._run_turn_with_sink(session_id, prompt)
+                final_status = await host._run_turn_with_sink(
+                    session_id, prompt, user_id=user_id
+                )
                 turns += 1
 
                 # A member notifies its lead after every idle (carries manifest).
                 if role == "subtask":
-                    await host._notify_lead_member_idle(session_id, final_status)
+                    await host._notify_lead_member_idle(
+                        session_id, final_status, user_id=user_id
+                    )
 
                 if final_status in ("terminated", "error"):
                     break
@@ -560,7 +567,9 @@ class ActorRunner:
                 if (
                     role == "lead"
                     and not mailbox_registry.has_pending(session_id)
-                    and await host._lead_idle_with_no_pending(task_id, project_id)
+                    and await host._lead_idle_with_no_pending(
+                        task_id, project_id, user_id=user_id
+                    )
                 ):
                     logger.info(
                         "actor loop %s (lead) idle with no in-flight members / unresolved "
@@ -586,6 +595,7 @@ class ActorRunner:
                             task_id=task_id,
                             project_id=project_id,
                             member_session_id=msg.from_session,
+                            user_id=user_id,
                         )
                     prompt = self._format_member_done(msg)
                 else:  # "message" / "revise_goal" — authoritative text → next turn
@@ -608,6 +618,7 @@ class ActorRunner:
                     task_id=task_id,
                     project_id=project_id,
                     via_shutdown=exited_on_shutdown,
+                    user_id=user_id,
                 )
 
     @staticmethod

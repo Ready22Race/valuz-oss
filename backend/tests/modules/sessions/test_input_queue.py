@@ -27,7 +27,11 @@ OWNER = "local-test-owner"  # matches tests/conftest.py autouse owner
 def _queue_db(tmp_path, monkeypatch):
     """Tmp SQLite with the queue / attachment / index tables; UoW bound to it."""
     import valuz_agent.infra.db as db_mod
+    from valuz_agent.infra.lifecycle import reset_draining
+    from valuz_agent.modules.sessions import run_orchestrator
 
+    reset_draining()
+    run_orchestrator._active_drains.clear()
     db_file = tmp_path / "queue.db"
     sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(
@@ -44,6 +48,9 @@ def _queue_db(tmp_path, monkeypatch):
         "AsyncSessionLocal",
         async_sessionmaker(bind=async_engine, expire_on_commit=False),
     )
+    yield
+    reset_draining()
+    run_orchestrator._active_drains.clear()
 
 
 def _row(session_id: str, text: str) -> QueuedInputRow:
@@ -122,7 +129,9 @@ async def test_edit_only_while_queued() -> None:
     # edit a queued row → succeeds
     async with async_unit_of_work() as db:
         ds = SessionDatastore(db)
-        updated = await ds.update_queued_input(OWNER, "s4", qid, {"text": "edited", "attachments": []})
+        updated = await ds.update_queued_input(
+            OWNER, "s4", qid, {"text": "edited", "attachments": []}
+        )
         assert updated is not None and updated.input["text"] == "edited"
 
     # dispatch it, then an edit attempt is a no-op (returns None)
@@ -211,7 +220,9 @@ async def test_promote_to_front_noop_when_not_queued() -> None:
 
 
 async def test_queue_pause_marker_roundtrip() -> None:
-    await project_index.record("proj-1", "s9", kind="chat")
+    await project_index.record("proj-1", "s9", kind="chat",
+        user_id=OWNER,
+)
     assert await project_index.get_queue_paused_at("s9") is None
 
     await project_index.set_queue_paused("s9", True)
@@ -246,7 +257,10 @@ def _patch_drain(monkeypatch, *, budget_raises=False):
 
     calls: list[str] = []
 
-    async def _fake_run(session_id, text, event_bus, on_message=None, queued_attachments=None):
+    async def _fake_run(
+        session_id, text, event_bus, on_message=None, queued_attachments=None, user_id=None
+    ):
+        assert user_id == OWNER
         calls.append(text)
         return "idle"
 
@@ -276,7 +290,9 @@ async def test_drain_runs_queued_items_fifo(monkeypatch) -> None:
         await ds.create_queued(OWNER, _row("d1", "two"))
 
     calls = _patch_drain(monkeypatch)
-    await run_orchestrator._drain_queue_after_turn("d1", _FakeBus())
+    await run_orchestrator._drain_queue_after_turn("d1", _FakeBus(),
+        user_id=OWNER,
+)
 
     assert calls == ["one", "two"]
     async with async_unit_of_work(commit=False) as db:
@@ -292,7 +308,9 @@ async def test_drain_blocks_first_item_on_budget(monkeypatch) -> None:
         await ds.create_queued(OWNER, _row("d2", "two"))
 
     calls = _patch_drain(monkeypatch, budget_raises=True)
-    await run_orchestrator._drain_queue_after_turn("d2", _FakeBus())
+    await run_orchestrator._drain_queue_after_turn("d2", _FakeBus(),
+        user_id=OWNER,
+)
 
     assert calls == []  # budget pre-check failed → nothing dispatched
     async with async_unit_of_work(commit=False) as db:
@@ -304,13 +322,17 @@ async def test_drain_blocks_first_item_on_budget(monkeypatch) -> None:
 async def test_drain_skips_when_paused(monkeypatch) -> None:
     from valuz_agent.modules.sessions import run_orchestrator
 
-    await project_index.record("proj-1", "d3", kind="chat")
+    await project_index.record("proj-1", "d3", kind="chat",
+        user_id=OWNER,
+)
     async with async_unit_of_work() as db:
         await SessionDatastore(db).create_queued(OWNER, _row("d3", "one"))
     await project_index.set_queue_paused("d3", True)
 
     calls = _patch_drain(monkeypatch)
-    await run_orchestrator._drain_queue_after_turn("d3", _FakeBus())
+    await run_orchestrator._drain_queue_after_turn("d3", _FakeBus(),
+        user_id=OWNER,
+)
 
     assert calls == []  # paused → drain returns without running
     async with async_unit_of_work(commit=False) as db:
@@ -330,7 +352,9 @@ async def test_drain_runs_promoted_item_first(monkeypatch) -> None:
         await ds.promote_to_front(OWNER, "d4", second.id)
 
     calls = _patch_drain(monkeypatch)
-    await run_orchestrator._drain_queue_after_turn("d4", _FakeBus())
+    await run_orchestrator._drain_queue_after_turn("d4", _FakeBus(),
+        user_id=OWNER,
+)
 
     assert calls == ["two", "one"]  # promoted head ran first
 
@@ -341,15 +365,20 @@ async def test_list_queue_surfaces_draining_flag() -> None:
     import valuz_agent.modules.sessions.run_orchestrator as run_orchestrator
     from valuz_agent.modules.sessions.service import SessionService
 
-    await project_index.record("proj-1", "dr1", kind="chat")
+    await project_index.record(
+        "proj-1",
+        "dr1",
+        kind="chat",
+        user_id=OWNER,
+    )
     svc = SessionService.__new__(SessionService)
 
-    not_draining = await svc.list_queue("dr1")
+    not_draining = await svc.list_queue("dr1", user_id=OWNER)
     assert not_draining.draining is False
 
     run_orchestrator._active_drains.add("dr1")
     try:
-        draining = await svc.list_queue("dr1")
+        draining = await svc.list_queue("dr1", user_id=OWNER)
     finally:
         run_orchestrator._active_drains.discard("dr1")
     assert draining.draining is True
@@ -366,7 +395,12 @@ async def test_steer_promotes_and_silently_interrupts(monkeypatch) -> None:
     import valuz_agent.modules.sessions.service as svc_mod
     from valuz_agent.modules.sessions.service import SessionService
 
-    await project_index.record("proj-1", "st1", kind="chat")
+    await project_index.record(
+        "proj-1",
+        "st1",
+        kind="chat",
+        user_id=OWNER,
+    )
     async with async_unit_of_work() as db:
         ds = SessionDatastore(db)
         await ds.create_queued(OWNER, _row("st1", "one"))
@@ -401,7 +435,11 @@ async def test_steer_promotes_and_silently_interrupts(monkeypatch) -> None:
     svc = SessionService.__new__(SessionService)
     svc._bus = _FakeBus()  # type: ignore[attr-defined]
 
-    result = await svc.steer_queued("st1", second.id)
+    result = await svc.steer_queued(
+        "st1",
+        second.id,
+        user_id=OWNER,
+    )
 
     assert interrupted == ["st1"]  # silent low-level interrupt fired
     assert drained == []  # running branch must NOT kick a competing drain

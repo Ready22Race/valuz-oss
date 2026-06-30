@@ -24,7 +24,6 @@ import valuz_agent.boot.kernel  # noqa: F401
 
 from app.schemas import SessionData as Session
 
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.decisions.schemas import DecisionEntry

@@ -24,7 +24,6 @@ import valuz_agent.boot.kernel  # noqa: F401
 from src.core import ToolDef, ToolResult
 from src.core.tools import ExecContext
 
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.adapters import kernel_client
 from valuz_agent.modules.tasks import messaging, planning, queries
 
@@ -99,7 +98,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-async def _check_lead_gate(ctx: ExecContext, user_id: str | None = None) -> tuple[str, str] | ToolResult:
+async def _check_lead_gate(
+    ctx: ExecContext, user_id: str | None = None
+) -> tuple[str, str] | ToolResult:
     if user_id is None:
         raise ValueError("user_id is required")
 
@@ -272,7 +273,9 @@ def _check_plan_writer_gate(sess: Any, task: Any) -> ToolResult | None:
     )
 
 
-async def _check_orchestration_gate(ctx: ExecContext, user_id: str | None = None) -> tuple[str, str] | ToolResult:
+async def _check_orchestration_gate(
+    ctx: ExecContext, user_id: str | None = None
+) -> tuple[str, str] | ToolResult:
     """Gate for ``create_task`` (M10 附录 E). Returns (project_id, agent_slug).
 
     Allowed only from a **plain project conversation** session: it must carry a
@@ -355,7 +358,9 @@ async def _bound_agent_member(sess: Any) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def build_task_tool_defs(orchestrator: TaskOrchestrator, user_id: str | None = None) -> tuple[ToolDef, ...]:
+def build_task_tool_defs(
+    orchestrator: TaskOrchestrator, user_id: str | None = None
+) -> tuple[ToolDef, ...]:
     """Build the full task tool set (dispatch + orchestration) with live handlers.
 
     Captures *orchestrator* in closures so the handlers can reach host
@@ -513,6 +518,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator, user_id: str | None = N
                 project_id=project_id,
                 caller_session_id=ctx.session_id,
                 lead_agent_slug_override=args.get("lead_agent_slug"),
+                user_id=user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -533,6 +539,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator, user_id: str | None = N
                 project_id=project_id,
                 caller_session_id=ctx.session_id,
                 reason=(args.get("reason") or ""),
+                user_id=user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -640,6 +647,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator, user_id: str | None = N
                 task_id=task_id,
                 project_id=task.project_id,
                 actor=ctx.session_id,
+                user_id=user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False),
@@ -762,7 +770,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator, user_id: str | None = N
             return ToolResult(content=f"list_members failed: {exc}", is_error=True)
 
     async def _finish_task_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
-        gate = await _check_lead_gate(ctx)
+        gate = await _check_lead_gate(ctx, user_id=user_id)
         if isinstance(gate, ToolResult):
             return gate
         task_id, project_id = gate
@@ -901,7 +909,9 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator, user_id: str | None = N
             logger.exception("review_subtask handler error for task %s", task_id)
             return ToolResult(content=f"review_subtask failed: {exc}", is_error=True)
 
-    async def _stop_subtask_handler(args: dict[str, Any], ctx: ExecContext, user_id: str | None = None) -> ToolResult:
+    async def _stop_subtask_handler(
+        args: dict[str, Any], ctx: ExecContext, user_id: str | None = None
+    ) -> ToolResult:
         """Lead-only HARD stop of an in-flight subtask. Wraps the existing
         ``orchestrator.stop_member`` (which was reachable only from the user
         ``:intervene`` HTTP route) so the lead can cancel a member from inside
@@ -953,7 +963,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator, user_id: str | None = N
 
         reason = (args.get("reason") or "").strip()
         try:
-            ok = await orchestrator.stop_member(target_session_id)
+            ok = await orchestrator.stop_member(target_session_id, user_id=user_id)
             if not ok:
                 return ToolResult(
                     content=(
@@ -1147,6 +1157,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator, user_id: str | None = N
                 lead_session_id=ctx.session_id,
                 summary=summary,
                 artifacts=artifacts,
+                user_id=user_id,
             )
             if isinstance(result, dict) and result.get("status") == "rejected":
                 return ToolResult(

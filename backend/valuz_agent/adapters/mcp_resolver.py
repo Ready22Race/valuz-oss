@@ -120,7 +120,6 @@ async def _resolve_connector_slug(
 
     if connectors is None:
         return None
-    from valuz_agent.api.deps import get_current_user_id
     row = await connectors.get_by_slug(user_id, slug)
     if row is None or not row.enabled:
         return None

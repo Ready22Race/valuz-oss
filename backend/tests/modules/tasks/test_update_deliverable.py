@@ -19,6 +19,8 @@ from valuz_agent.infra.database import Base
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.orchestrator import TaskOrchestrator
 
+OWNER = "local-test-owner"
+
 # ---------------------------------------------------------------------------
 # Shared db_factory / helpers (mirrors test_plan_orchestrator.py)
 # ---------------------------------------------------------------------------
@@ -131,6 +133,7 @@ def test_update_deliverable_appends_event_on_completed_task(
         orch.update_deliverable(
             task_id=completed_task["task_id"],
             project_id=completed_task["project_id"],
+            user_id=OWNER,
             lead_session_id=completed_task["lead_session_id"],
             summary="revised deliverable",
             artifacts=["report.md", "summary.pdf"],
@@ -159,6 +162,7 @@ def test_update_deliverable_rejected_on_active_task(db_factory, active_task) -> 
         orch.update_deliverable(
             task_id=active_task["task_id"],
             project_id=active_task["project_id"],
+            user_id=OWNER,
             lead_session_id=active_task["lead_session_id"],
             summary="premature update",
         )
@@ -179,6 +183,7 @@ def test_update_deliverable_rejected_when_task_not_found(db_factory) -> None:
         orch.update_deliverable(
             task_id="does-not-exist",
             project_id="w1",
+            user_id=OWNER,
             lead_session_id="lead-sess",
             summary="x",
         )

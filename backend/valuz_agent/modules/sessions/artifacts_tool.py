@@ -32,7 +32,6 @@ from src.core import ToolDef, ToolResult
 from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 

@@ -46,7 +46,6 @@ from valuz_agent.adapters.system_prompt_builder import (
     assemble_session_instructions,
     build_project_system_prompt,
 )
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 
 logger = logging.getLogger(__name__)

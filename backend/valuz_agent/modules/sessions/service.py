@@ -43,7 +43,6 @@ from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.capability_resolver import resolve_session_capabilities
 from valuz_agent.adapters.model_resolver import resolve_model
 from valuz_agent.adapters.system_prompt_builder import build_project_system_prompt
-from valuz_agent.infra import auth_context
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.secret_store import SecretStorePort
@@ -141,7 +140,7 @@ async def _enforce_budget(session: object) -> None:
     """
     from valuz_agent.ports.extensions import ext
 
-    uid = session.metadata.get("owner_user_id") or auth_context.get_current_user_id()
+    uid = session.metadata.get("owner_user_id")
     if uid is None:
         # Explicit-identity contract: budget enforcement without an owner is
         # meaningless — fail loudly rather than bill nobody.
@@ -236,7 +235,9 @@ class SessionService:
         except Exception:  # noqa: BLE001
             return False
 
-    async def _auto_default_mcp_slugs(self, project_id: str, user_id: str | None = None) -> list[str]:
+    async def _auto_default_mcp_slugs(
+        self, project_id: str, user_id: str | None = None
+    ) -> list[str]:
         if user_id is None:
             raise ValueError("user_id is required")
 
@@ -265,7 +266,9 @@ class SessionService:
     # Queries
     # ------------------------------------------------------------------ #
 
-    async def get_project_last_pick(self, project_id: str, user_id: str | None = None) -> dict[str, str | None] | None:
+    async def get_project_last_pick(
+        self, project_id: str, user_id: str | None = None
+    ) -> dict[str, str | None] | None:
         """Per-project composer memory, seeded on new-session entry.
 
         Returns two independent agent memories plus the chat-side
@@ -1358,7 +1361,7 @@ class SessionService:
                     from valuz_agent.ports.billing import MeterEvent
                     from valuz_agent.ports.extensions import ext
 
-                    uid = meta.get("owner_user_id") or auth_context.get_current_user_id()
+                    uid = meta.get("owner_user_id") or user_id
                     try:
                         if uid is None:
                             raise LookupError("no owner user_id for billing meter")
@@ -1588,7 +1591,9 @@ class SessionService:
 
         return await self.list_queue(session_id, user_id=user_id)
 
-    async def edit_queued(self, session_id: str, queue_id: str, content: str, user_id: str | None = None) -> QueuedInputList:
+    async def edit_queued(
+        self, session_id: str, queue_id: str, content: str, user_id: str | None = None
+    ) -> QueuedInputList:
         uid = user_id
         async with async_unit_of_work() as db:
             ds = SessionDatastore(db)
@@ -1602,7 +1607,9 @@ class SessionService:
             await ds.update_queued_input(uid, session_id, queue_id, payload)
         return await self.list_queue(session_id, user_id=user_id)
 
-    async def delete_queued(self, session_id: str, queue_id: str, user_id: str | None = None) -> QueuedInputList:
+    async def delete_queued(
+        self, session_id: str, queue_id: str, user_id: str | None = None
+    ) -> QueuedInputList:
         uid = user_id
         async with async_unit_of_work() as db:
             deleted = await SessionDatastore(db).delete_queued(uid, session_id, queue_id)
@@ -1621,7 +1628,9 @@ class SessionService:
             schedule_drain(session_id, self._bus)
         return await self.list_queue(session_id, user_id=user_id)
 
-    async def steer_queued(self, session_id: str, queue_id: str, user_id: str | None = None) -> QueuedInputList:
+    async def steer_queued(
+        self, session_id: str, queue_id: str, user_id: str | None = None
+    ) -> QueuedInputList:
         """Send a queued item now, interrupting the active turn (steer / send-now).
 
         Promotes the item to the FIFO head and clears any soft-pause, then — if a
@@ -1692,7 +1701,9 @@ class SessionService:
             raise SessionNotRunnable("No user message to regenerate from")
         return await self.send_message(session_id, str(last_msg), user_id=user_id)
 
-    async def rename_session(self, session_id: str, name: str, user_id: str | None = None) -> SessionDetail:
+    async def rename_session(
+        self, session_id: str, name: str, user_id: str | None = None
+    ) -> SessionDetail:
         session = await kernel_client.get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
@@ -1732,7 +1743,9 @@ class SessionService:
             return []
         return [str(s) for s in raw if isinstance(s, str)]
 
-    async def set_extra_skills(self, session_id: str, skill_ids: list[str], user_id: str | None = None) -> SessionDetail:
+    async def set_extra_skills(
+        self, session_id: str, skill_ids: list[str], user_id: str | None = None
+    ) -> SessionDetail:
         session = await kernel_client.get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
@@ -1748,7 +1761,9 @@ class SessionService:
         )
         return _session_to_detail(updated)
 
-    async def set_permission_mode(self, session_id: str, permission_mode: str, user_id: str | None = None) -> SessionDetail:
+    async def set_permission_mode(
+        self, session_id: str, permission_mode: str, user_id: str | None = None
+    ) -> SessionDetail:
         """Update the session's approval mode in the DB.
 
         Live-reconcile (kernel V5+bba3014): the new mode applies on the
@@ -1781,7 +1796,9 @@ class SessionService:
         )
         return _session_to_detail(updated)
 
-    async def set_session_effort(self, session_id: str, effort: str | None, user_id: str | None = None) -> SessionDetail:
+    async def set_session_effort(
+        self, session_id: str, effort: str | None, user_id: str | None = None
+    ) -> SessionDetail:
         """Update the session's reasoning-effort budget in the DB.
 
         Live-reconcile (kernel V5+bba3014): the new effort applies on the

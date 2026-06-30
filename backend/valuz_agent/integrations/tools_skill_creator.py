@@ -135,7 +135,6 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext, u
             is_error=True,
         )
 
-    from valuz_agent.api.deps import get_current_user_id
     from valuz_agent.modules.skills.staging import staging_dir_for_session
 
     staging_base = await staging_dir_for_session(user_id, session_id)

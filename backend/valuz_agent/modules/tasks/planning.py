@@ -22,7 +22,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.tasks.datastore import (
@@ -34,6 +33,12 @@ from valuz_agent.modules.tasks.models import TaskRow
 from valuz_agent.modules.tasks.plan import PlanError, TaskPlan
 
 logger = logging.getLogger(__name__)
+
+
+def _require_user_id(user_id: str | None) -> str:
+    if user_id is None:
+        raise ValueError("user_id is required")
+    return user_id
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +148,7 @@ async def plan_task(
             plan=plan,
             actor=lead_session_id,
             session_id=lead_session_id,
+            user_id=user_id,
         )
         render_plan_md(task_row, plan)
         return {
@@ -250,6 +256,7 @@ async def modify_plan(
             plan=plan,
             actor=lead_session_id,
             session_id=lead_session_id,
+            user_id=user_id,
         )
         render_plan_md(task_row, plan)
         return {
@@ -343,6 +350,7 @@ async def review_subtask(
                 plan=plan,
                 actor=lead_session_id,
                 session_id=lead_session_id,
+                user_id=user_id,
             )
             render_plan_md(task_row, plan)
             return {
@@ -395,6 +403,7 @@ async def review_subtask(
             plan=plan,
             actor=lead_session_id,
             session_id=lead_session_id,
+            user_id=user_id,
         )
         render_plan_md(task_row, plan)
         return {
@@ -463,10 +472,11 @@ async def mark_node_dispatched(
     user_id: str | None = None,
 ) -> None:
     """Flip a plan node to in_progress on dispatch (attempts++, link run)."""
+    user_id = _require_user_id(user_id)
     async with async_unit_of_work() as db:
         task_ds = TaskDatastore(db)
         event_ds = TaskEventDatastore(db)
-        task_row = await task_ds.get_task_by_project(get_current_user_id(), project_id, task_id)
+        task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
         if task_row is None:
             return
         plan = TaskPlan.from_dict(task_row.plan)
@@ -489,10 +499,13 @@ async def mark_node_dispatched(
             plan=plan,
             actor=agent,
             session_id=session_id,
+            user_id=user_id,
         )
 
 
-async def mark_in_review(*, task_id: str, project_id: str, member_session_id: str, user_id: str | None = None) -> None:
+async def mark_in_review(
+    *, task_id: str, project_id: str, member_session_id: str, user_id: str | None = None
+) -> None:
     """Lead-side: flip the member's plan node to in_review on member_done.
 
     Runs inside the lead's actor loop (single actor, D7) so plan writes stay
@@ -527,6 +540,7 @@ async def mark_in_review(*, task_id: str, project_id: str, member_session_id: st
                 plan=plan,
                 actor="system",
                 session_id=member_session_id,
+                user_id=user_id,
             )
     except Exception:  # noqa: BLE001
         logger.debug("mark_in_review skipped for %s", member_session_id, exc_info=True)

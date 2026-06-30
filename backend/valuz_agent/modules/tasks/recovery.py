@@ -30,7 +30,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.auth_context import (
     reset_current_user_id,
     set_current_user_id,
@@ -211,7 +210,7 @@ class RecoveryService:
         async with async_unit_of_work(commit=False) as db:
             # Cross-owner boot sweep: capture each task's owner so the per-task
             # recovery below runs under that owner's identity (the downstream
-            # datastore reads are owner-scoped via get_current_user_id()).
+            # datastore reads are owner-scoped by explicit user_id parameters).
             active = [
                 (t.id, t.project_id, t.user_id) for t in await TaskDatastore(db).list_active()
             ]
@@ -231,7 +230,9 @@ class RecoveryService:
             )
         return recovered
 
-    async def _recover_one_task(self, task_id: str, project_id: str, user_id: str | None = None) -> bool:
+    async def _recover_one_task(
+        self, task_id: str, project_id: str, user_id: str | None = None
+    ) -> bool:
         if user_id is None:
             raise ValueError("user_id is required")
 
@@ -323,6 +324,7 @@ class RecoveryService:
                     plan=plan,
                     actor="system",
                     session_id=lead_session_id,
+                    user_id=user_id,
                 )
 
         # Re-drive (outside the DB txn): register the lead mailbox, deliver any
@@ -580,6 +582,7 @@ class RecoveryService:
                             plan=plan,
                             actor="user",
                             session_id=lead_session_id or None,
+                            user_id=user_id,
                         )
             await event_ds.append_event(
                 user_id,

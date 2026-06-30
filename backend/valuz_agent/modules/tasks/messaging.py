@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
