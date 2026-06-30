@@ -222,7 +222,7 @@ async def run_session_to_idle(
         )
         try:
             additional_context = await _build_additional_context(
-                session_id, project_id, pending_attachments
+                session_id, project_id, pending_attachments, user_id=user_id
             )
         except Exception:  # noqa: BLE001
             additional_context = ""

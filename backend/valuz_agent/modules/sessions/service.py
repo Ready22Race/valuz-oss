@@ -1332,6 +1332,7 @@ class SessionService:
                 session_id,
                 project_id,
                 pending_attachments,
+                user_id=user_id,
             )
 
             try:
