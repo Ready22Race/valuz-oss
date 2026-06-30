@@ -5,12 +5,13 @@
 # docker (override with VALUZ_CONTAINER_ENGINE=podman|docker).
 #
 # This ONLY brings up a Postgres — it does not start a data service, a sandbox,
-# or the app. Everything else (turn on the data service, point at this PG,
-# sandbox or not) is driven from the OSS settings page: Settings → Data Service.
-# This decouples infra from behaviour.
+# or the app. The store tier is configured purely via environment variables,
+# loaded at boot: export KERNEL_STORE=pg + VALUZ_DURABLE_DATABASE_URL=<dsn below>
+# before launching the app (e.g. `... make dev`). This decouples infra from
+# behaviour.
 #
 # Usage:
-#   scripts/pg.sh up      # start Postgres, print the DSN to paste into settings
+#   scripts/pg.sh up      # start Postgres, print the DSN to export as env
 #   scripts/pg.sh dsn     # just print the connection strings
 #   scripts/pg.sh down    # stop the container (data is preserved)
 #   scripts/pg.sh nuke     # remove the container + its data
@@ -49,16 +50,19 @@ fi
 
 print_dsn() {
   echo ""
-  ok "Postgres ready on :$PG_PORT — paste into Settings → Data Service:"
-  echo "  pg (in-process, owner role):"
-  echo "    postgresql+asyncpg://$PG_SUPER:$PG_SUPER_PW@127.0.0.1:$PG_PORT/$PG_DB"
-  echo "  remote data service (non-owner role, RLS-enforced):"
+  ok "Postgres ready on :$PG_PORT — export these before launching the app:"
+  echo "  pg (in-process DataService, owner role):"
+  echo "    export KERNEL_STORE=pg"
+  echo "    export VALUZ_DURABLE_DATABASE_URL='postgresql+asyncpg://$PG_SUPER:$PG_SUPER_PW@127.0.0.1:$PG_PORT/$PG_DB'"
+  echo "    then: make dev   (or ./scripts/dev.sh backend)"
+  echo ""
+  echo "  remote DataService (non-owner role, RLS-enforced) — for the HTTP data API deploy:"
   echo "    postgresql://$PG_APP:$PG_APP_PW@127.0.0.1:$PG_PORT/$PG_DB"
   echo ""
 }
 
 up() {
-  info "ensuring Postgres ($PG_CONTAINER, :$PG_PORT) via $ENGINE…"
+  info "ensuring Postgres ($PG_CONTAINER, :$PG_PORT) via ${ENGINE}..."
   if "$ENGINE" ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
     ok "container already running"
   elif "$ENGINE" ps -a --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
