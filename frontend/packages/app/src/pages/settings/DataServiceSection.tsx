@@ -136,12 +136,12 @@ export const DataServiceSection = () => {
       </div>
       <Card className="mb-5 rounded-xl border-0 bg-card shadow-sm">
         <CardContent className="py-5">
-          <SettingsRow
-            className="px-0 py-0"
-            label={t("settings.dataService.modeLabel")}
-          >
+          <div className="px-0">
+            <div className="text-sm font-medium text-ink-heading">
+              {t("settings.dataService.modeLabel")}
+            </div>
             <Select value={mode} onValueChange={(v) => setMode(v as "local" | "pg")}>
-              <SelectTrigger size="sm" className="h-8 w-auto min-w-[180px] text-xs">
+              <SelectTrigger className="mt-2.5 w-full max-w-md text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -151,7 +151,7 @@ export const DataServiceSection = () => {
                 <SelectItem value="pg">{t("settings.dataService.modePg")}</SelectItem>
               </SelectContent>
             </Select>
-          </SettingsRow>
+          </div>
 
           {mode === "pg" ? (
             <>
