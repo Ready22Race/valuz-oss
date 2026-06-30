@@ -27,6 +27,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await steps.bootstrap_schema()
     await steps.configure_i18n()
     await steps.init_kernel(app)
+    await steps.bind_data_service(app)
     steps.install_binding_change_listener()
     # ── recovery（依赖 kernel store 已就绪）──
     await steps.recover_stranded_sessions()
@@ -60,4 +61,5 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     steps.shutdown_parse_pool()
     await steps.stop_polling_scheduler()
     await steps.stop_mcp_session_managers(app)
+    await steps.dispose_data_service(app)
     await steps.shutdown_kernel()

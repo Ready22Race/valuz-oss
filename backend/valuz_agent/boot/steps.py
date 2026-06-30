@@ -282,6 +282,54 @@ async def init_kernel(app: FastAPI) -> None:
     task_finish_scheduler.set_runner(run_task_finish_extraction)
 
 
+async def bind_data_service(app: FastAPI) -> None:
+    """Bind the host-mounted DataService (``/internal/data``) to its backend.
+
+    The sub-app is mounted at factory time with no store (only ``/health`` +
+    ``/openapi.json`` work until now). Here — once the host DB is up — we build a
+    store over the configured durable backend (the user's Postgres) + an HS256
+    verifier keyed by the host secret, so a sandbox can reach it over HTTP+JWT
+    without ever holding the DSN. Local-only deployments keep the DS inert (the
+    in-process store is the data layer). Guarded: a failure must not break boot.
+    """
+    ds_app = getattr(app.state, "data_service_app", None)
+    if ds_app is None:
+        return
+    try:
+        from valuz_agent.api.deps import _secret_store
+        from valuz_agent.boot import kernel as kb
+        from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
+        from valuz_agent.infra.db import async_unit_of_work
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+        from valuz_agent.modules.settings.preferences import (
+            get_durable_database_url,
+            get_kernel_store,
+        )
+
+        async with async_unit_of_work(commit=False) as db:
+            store_mode = await get_kernel_store(db)
+            dsn = await get_durable_database_url(db)
+        if store_mode == "local" or not dsn:
+            return
+        store, engine = kb.build_host_data_service_store(dsn)
+        await kb.ensure_host_data_service_schema(engine)
+        ds_app.state.store = store
+        ds_app.state.verifier = kb.make_host_data_service_verifier(
+            get_or_create_ds_secret(_secret_store(), resolve_local_user_id())
+        )
+        app.state._data_service_engine = engine
+        logging.getLogger(__name__).info("host DataService bound (backend=%s)", store_mode)
+    except Exception:  # noqa: BLE001 — DS binding must never break boot
+        logging.getLogger(__name__).warning("host DataService bind skipped", exc_info=True)
+
+
+async def dispose_data_service(app: FastAPI) -> None:
+    engine = getattr(app.state, "_data_service_engine", None)
+    if engine is not None:
+        await engine.dispose()
+        app.state._data_service_engine = None
+
+
 def install_binding_change_listener() -> None:
     """Wire ``project.bindings.changed`` → docs caps refresh.
 

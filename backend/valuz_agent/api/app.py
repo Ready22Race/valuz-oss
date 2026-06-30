@@ -172,6 +172,16 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
 
     app.mount("/internal/mcp/docs", build_docs_mcp_asgi())
 
+    # Host-mounted DataService (kernel three-table CRUD over /rpc/{op}). Mounted
+    # here as a sub-app; its store + JWT verifier are bound in the lifespan
+    # (``steps.bind_data_service``) once the backend is known. A sandbox kernel
+    # reaches this over HTTP+JWT instead of holding a DB credential. /health +
+    # /openapi.json work pre-bind; /rpc is 401 until bound.
+    from valuz_agent.boot.kernel import make_data_service_placeholder
+
+    app.state.data_service_app = make_data_service_placeholder()
+    app.mount("/internal/data", app.state.data_service_app)
+
     # In-process automations MCP server — exposes the ``automation`` tool
     # to every session. Replaces the legacy ``cronjob`` tool per ADR-021.
     from valuz_agent.integrations.automations_mcp_server import (
