@@ -1,5 +1,7 @@
 # DataService Architecture
 
+[中文版](data-service-architecture.zh-CN.md)
+
 > The **DataService** is the single CRUD layer for the kernel's three tables
 > (`sessions` / `messages` / `events`). Every read and write of kernel data
 > flows through it. This document is the source of truth for its architecture,
