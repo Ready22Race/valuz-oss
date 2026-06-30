@@ -16,6 +16,9 @@ from valuz_agent.modules.tasks.mailbox import mailbox_registry
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
 
+LOCAL_USER_ID = "local-test-owner"
+
+
 @pytest.fixture
 def db_factory(tmp_path, monkeypatch):
     import valuz_agent.infra.db as db_mod
@@ -70,7 +73,7 @@ async def test_delivers_revise_goal_message_to_registered_lead(db_factory, tmp_p
     mailbox_registry.register("lead-1")
 
     res = await messaging.notify_lead_goal_revised(
-        task_id="t1", project_id="w1", new_goal="NEW GOAL"
+        task_id="t1", project_id="w1", new_goal="NEW GOAL", user_id=LOCAL_USER_ID
     )
 
     assert res["delivered"] is True
@@ -89,7 +92,9 @@ async def test_offline_lead_returns_lead_offline_not_delivered(db_factory, tmp_p
     _seed_lead(db_factory, tmp_path, lead_session_id="lead-1")
     # lead run exists but its mailbox is NOT registered (already finished)
 
-    res = await messaging.notify_lead_goal_revised(task_id="t1", project_id="w1", new_goal="NEW")
+    res = await messaging.notify_lead_goal_revised(
+        task_id="t1", project_id="w1", new_goal="NEW", user_id=LOCAL_USER_ID
+    )
 
     assert res["delivered"] is False
     assert res["reason"] == "LEAD_OFFLINE"
@@ -99,7 +104,9 @@ async def test_offline_lead_returns_lead_offline_not_delivered(db_factory, tmp_p
 @pytest.mark.asyncio
 async def test_no_lead_run_returns_no_lead(db_factory, tmp_path):
     # no lead session seeded for the task
-    res = await messaging.notify_lead_goal_revised(task_id="t1", project_id="w1", new_goal="NEW")
+    res = await messaging.notify_lead_goal_revised(
+        task_id="t1", project_id="w1", new_goal="NEW", user_id=LOCAL_USER_ID
+    )
 
     assert res["delivered"] is False
     assert res["reason"] == "NO_LEAD"

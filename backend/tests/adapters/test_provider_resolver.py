@@ -252,12 +252,11 @@ async def test_dual_protocol_builtin_follows_runtime_to_openai_endpoint() -> Non
     assert result.api_protocol == "openai_completion"
     assert result.base_url == "https://open.bigmodel.cn/api/paas/v4"
 
-
 async def test_zhipu_provider_preserves_saved_coding_endpoint_for_openai_runtime() -> None:
     """One Zhipu card can persist the Coding Plan endpoint after discovery fallback."""
 
     class _Secrets:
-        def get(self, ref: str) -> str | None:
+        def get(self, user_id: str, ref: str) -> str | None:
             return "sk-test" if ref == "channel/glm-coding" else None
 
     provider = _FakeProvider(

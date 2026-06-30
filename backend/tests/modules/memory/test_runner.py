@@ -57,10 +57,10 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
     # Memory toggles ON (the runner imports these from preferences at call time).
     import valuz_agent.modules.settings.preferences as prefs
 
-    async def _true(_db):  # noqa: ANN001, ANN202
+    async def _true(_db, user_id=None, _user_id=None, **_kw):  # noqa: ANN001, ANN202
         return True
 
-    async def _no_custom(_db):  # noqa: ANN001, ANN202
+    async def _no_custom(_db, user_id=None, _user_id=None, **_kw):  # noqa: ANN001, ANN202
         return ""
 
     monkeypatch.setattr(prefs, "get_memory_enabled", _true)
@@ -139,7 +139,7 @@ def test_toggle_off_skips(patched):
     monkeypatch, calls = patched
     import valuz_agent.modules.settings.preferences as prefs
 
-    async def _false(_db):  # noqa: ANN001, ANN202
+    async def _false(_db, user_id=None, _user_id=None, **_kw):  # noqa: ANN001, ANN202
         return False
 
     monkeypatch.setattr(prefs, "get_memory_enabled", _false)
@@ -477,7 +477,7 @@ def test_task_finish_toggle_off_skips(patched):
     monkeypatch, calls = patched
     import valuz_agent.modules.settings.preferences as prefs
 
-    async def _false(_db):  # noqa: ANN001, ANN202
+    async def _false(_db, _user_id=None):  # noqa: ANN001, ANN202
         return False
 
     monkeypatch.setattr(prefs, "get_memory_enabled", _false)

@@ -22,6 +22,9 @@ from valuz_agent.modules.tasks import queries
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
 
+LOCAL_USER_ID = "local-test-owner"
+
+
 @pytest.fixture
 def db_factory(tmp_path, monkeypatch):
     """A tmp-SQLite sync sessionmaker; async UoW bound to the same file."""
@@ -111,7 +114,7 @@ async def test_list_tasks_returns_summaries_with_run_counts(db_factory, tmp_path
     _add_run(db_factory, tmp_path, task_id="t1", session_id="s-a", status="completed")
     _add_run(db_factory, tmp_path, task_id="t1", session_id="s-b", status="active")
 
-    out = await queries.list_tasks("w1")
+    out = await queries.list_tasks("w1", user_id=LOCAL_USER_ID)
 
     assert len(out) == 1
     item = out[0]
@@ -127,7 +130,7 @@ async def test_list_tasks_filters_by_status(db_factory, tmp_path):
     _add_task(db_factory, tmp_path, task_id="t1", status="active")
     _add_task(db_factory, tmp_path, task_id="t2", status="completed")
 
-    out = await queries.list_tasks("w1", status="completed")
+    out = await queries.list_tasks("w1", status="completed", user_id=LOCAL_USER_ID)
 
     assert [t["task_id"] for t in out] == ["t2"]
 
@@ -137,7 +140,7 @@ async def test_list_tasks_mine_only_scopes_to_originator(db_factory, tmp_path):
     _add_task(db_factory, tmp_path, task_id="t1", originator="me")
     _add_task(db_factory, tmp_path, task_id="t2", originator="someone-else")
 
-    out = await queries.list_tasks("w1", mine_session_id="me")
+    out = await queries.list_tasks("w1", mine_session_id="me", user_id=LOCAL_USER_ID)
 
     assert [t["task_id"] for t in out] == ["t1"]
     assert out[0]["originated_by_me"] is True
@@ -148,7 +151,7 @@ async def test_list_tasks_honours_limit(db_factory, tmp_path):
     for i in range(5):
         _add_task(db_factory, tmp_path, task_id=f"t{i}")
 
-    out = await queries.list_tasks("w1", limit=2)
+    out = await queries.list_tasks("w1", limit=2, user_id=LOCAL_USER_ID)
 
     assert len(out) == 2
 
@@ -161,7 +164,7 @@ async def test_get_task_projects_detail_and_runs(db_factory, tmp_path):
     _add_task(db_factory, tmp_path, task_id="t1", title="Build it")
     _add_run(db_factory, tmp_path, task_id="t1", session_id="s-a")
 
-    detail = await queries.get_task("t1", "w1")
+    detail = await queries.get_task("t1", "w1", user_id=LOCAL_USER_ID)
 
     assert detail is not None
     assert detail["task_id"] == "t1"
@@ -176,7 +179,7 @@ async def test_get_task_projects_detail_and_runs(db_factory, tmp_path):
 async def test_get_task_returns_none_for_other_project(db_factory, tmp_path):
     _add_task(db_factory, tmp_path, task_id="t1", project_id="w1")
 
-    assert await queries.get_task("t1", "w2") is None
+    assert await queries.get_task("t1", "w2", user_id=LOCAL_USER_ID) is None
 
 
 @pytest.mark.asyncio
@@ -200,7 +203,7 @@ async def test_get_task_surfaces_latest_event_summary(db_factory, tmp_path):
     finally:
         db.close()
 
-    detail = await queries.get_task("t1", "w1")
+    detail = await queries.get_task("t1", "w1", user_id=LOCAL_USER_ID)
 
     assert detail is not None
     assert detail["latest_summary"] == "latest"
@@ -230,7 +233,7 @@ async def test_list_members_degrades_when_agent_not_loadable(db_factory, tmp_pat
 
     monkeypatch.setattr(queries, "_member_agent_config", _no_agent)
 
-    out = await queries.list_members("w1")
+    out = await queries.list_members("w1", user_id=LOCAL_USER_ID)
 
     assert len(out) == 1
     member = out[0]
