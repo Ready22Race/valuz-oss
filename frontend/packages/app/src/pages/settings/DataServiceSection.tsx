@@ -139,7 +139,6 @@ export const DataServiceSection = () => {
           <SettingsRow
             className="px-0 py-0"
             label={t("settings.dataService.modeLabel")}
-            desc={t("settings.dataService.modeDesc")}
           >
             <Select value={mode} onValueChange={(v) => setMode(v as "local" | "pg")}>
               <SelectTrigger size="sm" className="h-8 w-auto min-w-[180px] text-xs">
@@ -160,9 +159,6 @@ export const DataServiceSection = () => {
               <div className="px-0">
                 <div className="text-sm font-medium text-ink-heading">
                   {t("settings.dataService.pgUrlLabel")}
-                </div>
-                <div className="mt-0.5 text-xs text-ink-body">
-                  {t("settings.dataService.pgUrlDesc")}
                 </div>
                 <Input
                   value={durableUrl}
