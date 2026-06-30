@@ -39,9 +39,9 @@ def ensure_local_identity() -> None:
     created during boot is stamped with a real owner. Background tasks spawned
     during startup (automation runner, task runner, kernel mirrors) inherit
     this context via ``asyncio.create_task``. There is deliberately no global
-    fallback: a context that was never seeded raises ``LookupError`` on read,
-    so an unattributed insert fails loudly instead of being silently owned by
-    the install id. OSS derives the id from the device fingerprint and persists
+    fallback: a context that was never seeded reads as ``None``; required-owner
+    APIs and non-null owner columns then fail instead of silently attributing
+    work to the install id. OSS derives the id from the device fingerprint and persists
     it once to ``~/.valuz-oss/installation.json``; the commercial overlay
     overrides per-request identity by swapping ``AuthMiddleware`` (overriding
     ``resolve_user_id``) via ``ext.auth_middleware``.
@@ -135,6 +135,7 @@ async def bootstrap_schema() -> None:
     from valuz_agent.boot.kernel_db_split import migrate_kernel_store_out_of_host_db
     from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.seeds import seed_all
 
     # NB: the ``~/.valuz/app`` → ``~/.valuz-oss`` data-dir cutover runs earlier in
@@ -187,7 +188,7 @@ async def bootstrap_schema() -> None:
     # owner-scoped seed side effects being driven by a synthetic local identity.
     if settings.deployment_type == "local":
         async with async_unit_of_work() as db:
-            await seed_all(db)
+            await seed_all(db, user_id=resolve_local_user_id())
 
     # 5. One-time backfill of the connector module's legacy filesystem stores
     #    (project-config.json selection + FileSecretStore secrets) into the
@@ -566,39 +567,33 @@ async def start_skills(app: FastAPI) -> None:
         pass
 
     from valuz_agent.api.deps import get_skill_service
-    from valuz_agent.api.deps import get_current_user_id_optional
+    from valuz_agent.infra.local_identity import resolve_local_user_id
 
-    # Prefer explicit owner context for all write ops in this step. Without a
-    # context (for example, a startup path that hasn't set it yet), avoid
-    # injecting machine-identity implicitly and only run file watcher setup.
+    # Local startup writes are owned explicitly by the stable local install id.
+    # Shared/cloud deployments returned above, so this step never invents a
+    # synthetic owner for a multi-user backend.
+    owner = resolve_local_user_id()
     skill_gen = get_skill_service()
     skill_svc = await skill_gen.__anext__()
     try:
-        owner = get_current_user_id_optional()
-        if owner:
-            # Deterministically index the bundled official skills FIRST, in the
-            # same step that just synced them to disk. The broad startup_scan
-            # below is best-effort (errors swallowed); when finance-edition
-            # official skills land on disk out-of-band it can lag, leaving an
-            # agent that references them unable to resolve the skill. This
-            # targeted upsert guarantees they are in valuz_skill_index every
-            # boot.
-            try:
-                indexed = await skill_svc.index_official_skills(owner)
-                logger.info("index_official_skills: indexed %d official skill(s)", indexed)
-            except Exception:
-                logger.exception("index_official_skills failed")
-            try:
-                await skill_svc.startup_scan(owner)
-            except Exception:
-                # Best-effort, but no longer silent: a failed scan that leaves
-                # the index stale was exactly the bug this step hardens against.
-                logger.exception("startup_scan failed")
-        else:
-            logger.info(
-                "start_skills: owner context is unset; skip startup scan/index "
-                "to avoid implicit local owner writes"
-            )
+        # Deterministically index the bundled official skills FIRST, in the
+        # same step that just synced them to disk. The broad startup_scan
+        # below is best-effort (errors swallowed); when finance-edition
+        # official skills land on disk out-of-band it can lag, leaving an
+        # agent that references them unable to resolve the skill. This
+        # targeted upsert guarantees they are in valuz_skill_index every
+        # boot.
+        try:
+            indexed = await skill_svc.index_official_skills(owner)
+            logger.info("index_official_skills: indexed %d official skill(s)", indexed)
+        except Exception:
+            logger.exception("index_official_skills failed")
+        try:
+            await skill_svc.startup_scan(owner)
+        except Exception:
+            # Best-effort, but no longer silent: a failed scan that leaves
+            # the index stale was exactly the bug this step hardens against.
+            logger.exception("startup_scan failed")
     finally:
         try:
             await skill_gen.__anext__()

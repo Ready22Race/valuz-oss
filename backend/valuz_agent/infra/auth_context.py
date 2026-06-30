@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar, Token
 
-_current_user_id: ContextVar[str | None] = ContextVar("valuz_current_user_id")
+_current_user_id: ContextVar[str | None] = ContextVar("valuz_current_user_id", default=None)
 
 
 class OwnerContextUnsetError(LookupError):

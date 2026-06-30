@@ -48,7 +48,7 @@ def _load_agent_definitions() -> list[dict[str, Any]]:
 _OFFICIAL_AGENTS: list[dict[str, Any]] = _load_agent_definitions()
 
 
-async def seed_official_agents(db: AsyncSession) -> None:
+async def seed_official_agents(db: AsyncSession, owner: str) -> None:
     """Insert official Agent rows if absent.
 
     Insert-if-absent (not upsert): agents are now user-editable, so a boot
@@ -60,12 +60,6 @@ async def seed_official_agents(db: AsyncSession) -> None:
     only; the ``readonly`` / ``deletable`` flags are kept on the column so older
     rows continue to type-check, but new seeds default to fully mutable.
     """
-
-    from valuz_agent.api.deps import get_current_user_id_optional
-
-    owner = get_current_user_id_optional()
-    if not owner:
-        return
 
     ds = AgentDatastore(db)
     created = 0
