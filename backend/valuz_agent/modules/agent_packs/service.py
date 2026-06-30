@@ -250,7 +250,7 @@ class AgentPackService:
             # emit a sanitized slug everywhere portable — the archive dir, the
             # manifest, and the agent references — so a path-shaped local slug
             # never reaches the recipient.
-            paths = await resolve_skill_slugs_to_paths([slug], None)
+            paths = await resolve_skill_slugs_to_paths([slug], None, user_id=user_id)
             path = Path(paths[0]).resolve() if paths else None
             clean = sanitize_skill_slug(slug)
             if path is not None and path.is_dir():

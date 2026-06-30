@@ -114,12 +114,14 @@ async def resolve_mcp_servers(
 async def _resolve_connector_slug(
     slug: str,
     connectors: ConnectorDatastore | None,
-) -> list[McpServerConfig] | None:
+ user_id: str | None = None) -> list[McpServerConfig] | None:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     if connectors is None:
         return None
-    from valuz_agent.infra.auth_context import require_current_user_id
-
-    row = await connectors.get_by_slug(require_current_user_id(), slug)
+    from valuz_agent.api.deps import get_current_user_id
+    row = await connectors.get_by_slug(user_id, slug)
     if row is None or not row.enabled:
         return None
 

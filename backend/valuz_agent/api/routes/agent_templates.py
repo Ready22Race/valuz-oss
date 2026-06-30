@@ -20,7 +20,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.api.deps import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.api.routes.agents import AgentResponse
 from valuz_agent.api.routes.onboarding import _resolve_deploy_target
 from valuz_agent.infra.db import get_async_session
@@ -97,7 +97,7 @@ class AddAgentTemplateResponse(BaseModel):
 
 @router.get("/v1/agent-templates", response_model=AgentTemplateListResponse)
 async def list_agent_templates(
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentPackService = Depends(_get_pack_service),
 ) -> AgentTemplateListResponse:
     """List the built-in team packs, annotated with per-agent/per-pack library
@@ -109,7 +109,7 @@ async def list_agent_templates(
 @router.post("/v1/agent-templates/{template_id}:add", response_model=AddAgentTemplateResponse)
 async def add_agent_template(
     template_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentPackService = Depends(_get_pack_service),
     db: AsyncSession = Depends(get_async_session),
 ) -> AddAgentTemplateResponse:
@@ -118,8 +118,8 @@ async def add_agent_template(
     Runtime / model / provider / effort follow the user's global defaults — the
     same resolver onboarding uses (raises 422 when no model channel is wired).
     """
-    runtime, provider_id, model = await _resolve_deploy_target(db)
-    effort = await get_default_effort(db)
+    runtime, provider_id, model = await _resolve_deploy_target(db, user_id)
+    effort = await get_default_effort(db, user_id=user_id)
     try:
         result = await svc.import_pack(
             user_id,
@@ -222,7 +222,7 @@ def _safe_filename(name: str) -> str:
 @router.post("/v1/agent-packs/export")
 async def export_agent_pack(
     body: ExportPackRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentPackService = Depends(_get_pack_service),
 ) -> StreamingResponse:
     """Export the chosen library agents (with their skills + connector
@@ -252,7 +252,7 @@ async def export_agent_pack(
 @router.post("/v1/agent-packs/import", response_model=ImportPackPreviewResponse)
 async def import_agent_pack(
     file: Annotated[UploadFile, File(...)],
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentPackService = Depends(_get_pack_service),
 ) -> ImportPackPreviewResponse:
     """Upload a ``.valuzpack`` and stage it — returns a preview (what's inside,
@@ -269,14 +269,14 @@ async def import_agent_pack(
 @router.post("/v1/agent-packs/import/confirm", response_model=ImportPackConfirmResponse)
 async def confirm_agent_pack_import(
     body: ImportPackConfirmRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentPackService = Depends(_get_pack_service),
     db: AsyncSession = Depends(get_async_session),
 ) -> ImportPackConfirmResponse:
     """Commit a staged import: install skills, register connectors, create the
     agents (runtime/model/provider follow the user's defaults, like ``:add``)."""
-    runtime, provider_id, model = await _resolve_deploy_target(db)
-    effort = await get_default_effort(db)
+    runtime, provider_id, model = await _resolve_deploy_target(db, user_id)
+    effort = await get_default_effort(db, user_id=user_id)
     try:
         result = await svc.confirm_import(
             user_id,

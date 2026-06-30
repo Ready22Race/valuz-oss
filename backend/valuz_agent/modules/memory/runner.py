@@ -160,9 +160,12 @@ async def run_extraction_for_session(session_id: str, user_id: str | None) -> No
                 get_memory_enabled,
             )
 
-            if not (await get_memory_enabled(db) and await get_memory_auto_extract(db)):
+            if not (
+                await get_memory_enabled(db, user_id=user_id)
+                and await get_memory_auto_extract(db, user_id=user_id)
+            ):
                 return
-            custom_instructions = await get_memory_custom_instructions(db)
+            custom_instructions = await get_memory_custom_instructions(db, user_id=user_id)
 
         provider_id = valuz.get("locked_provider_id")
         if not provider_id or not source.model:
@@ -195,6 +198,7 @@ async def run_extraction_for_session(session_id: str, user_id: str | None) -> No
                 providers=ProviderDatastore(db),
                 secrets=ext.secret_store,
                 runtime_provider=source.runtime_provider,
+                user_id=user_id,
             )
         # ``mp is None`` is EXPECTED for OAuth/subscription channels (Codex/Claude
         # login) — they self-authenticate in the runtime, so we proceed and let
@@ -299,9 +303,12 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
                 get_memory_enabled,
             )
 
-            if not (await get_memory_enabled(db) and await get_memory_auto_extract(db)):
+            if not (
+                await get_memory_enabled(db, user_id=user_id)
+                and await get_memory_auto_extract(db, user_id=user_id)
+            ):
                 return
-            custom_instructions = await get_memory_custom_instructions(db)
+            custom_instructions = await get_memory_custom_instructions(db, user_id=user_id)
 
         # Tasks live on real projects; bail if the project is missing/chat-kind.
         project_id = task.project_id or None
@@ -337,6 +344,7 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
                 providers=ProviderDatastore(db),
                 secrets=ext.secret_store,
                 runtime_provider=source.runtime_provider,
+                user_id=user_id,
             )
         logger.info("task memory: reviewing finished task %s (project=%s)", task_id, project_id)
         completer = _make_completer(

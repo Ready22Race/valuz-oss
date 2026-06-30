@@ -8,7 +8,7 @@ from valuz_agent.api.deps import (
     get_project_pack_service,
     get_project_service,
     get_session_service,
-    require_current_user_id,
+    get_current_user_id,
 )
 from valuz_agent.api.routes.onboarding import _resolve_deploy_target
 from valuz_agent.infra.db import get_async_session
@@ -54,7 +54,7 @@ class LastSessionPickResponse(BaseModel):
 
 @router.get("")
 async def list_projects(
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> dict[str, list[ProjectListItem]]:
     return {"projects": await svc.list_projects(user_id)}
@@ -63,7 +63,7 @@ async def list_projects(
 @router.get("/{project_id}")
 async def get_project(
     project_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> ProjectDetail:
     try:
@@ -75,7 +75,7 @@ async def get_project(
 @router.post("", status_code=201)
 async def create_project(
     payload: ProjectCreateRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> ProjectDetail:
     try:
@@ -88,7 +88,7 @@ async def create_project(
 async def rename_project(
     project_id: str,
     name: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> ProjectDetail:
     try:
@@ -103,7 +103,7 @@ async def rename_project(
 async def update_instructions(
     project_id: str,
     instructions_md: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> dict[str, bool]:
     try:
@@ -118,7 +118,7 @@ async def list_files(
     project_id: str,
     depth: int = 2,
     include_hidden: bool = False,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> dict[str, list[dict[str, object]]]:
     try:
@@ -135,7 +135,7 @@ async def list_files(
 async def read_file(
     project_id: str,
     file_path: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> ArtifactFileResponse:
     try:
@@ -154,7 +154,7 @@ async def read_file(
 async def read_raw_file(
     project_id: str,
     file_path: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> FileResponse:
     try:
@@ -178,7 +178,7 @@ async def read_raw_file(
 @router.get("/{project_id}/delete-preview")
 async def delete_preview(
     project_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> ProjectDeletePreview:
     try:
@@ -192,7 +192,7 @@ async def delete_preview(
 @router.delete("/{project_id}", status_code=204)
 async def delete_project(
     project_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> None:
     try:
@@ -210,6 +210,7 @@ class McpServersPayload(BaseModel):
 @router.get("/{project_id}/last-session-pick")
 async def get_last_session_pick(
     project_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> LastSessionPickResponse:
     """Return the (runtime, provider, model) from this project's most
@@ -219,7 +220,7 @@ async def get_last_session_pick(
     session in this project pre-fills the picker with whatever the
     user last picked here, rather than the global Settings default.
     """
-    pick = await svc.get_project_last_pick(project_id)
+    pick = await svc.get_project_last_pick(project_id, user_id=user_id)
     if pick is None:
         return LastSessionPickResponse(
             runtime_provider=None,
@@ -238,7 +239,7 @@ async def get_last_session_pick(
 @router.get("/{project_id}/connectors")
 async def get_connectors(
     project_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> dict[str, list[str]]:
     try:
@@ -251,7 +252,7 @@ async def get_connectors(
 async def set_connectors(
     project_id: str,
     payload: McpServersPayload,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> dict[str, bool]:
     try:

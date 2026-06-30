@@ -64,7 +64,7 @@ def test_restamp_swallows_errors(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_run_session_to_idle_restamps_before_run_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
-    monkeypatch.setattr(actor_runner, "require_current_user_id", lambda: "owner-1")
+    monkeypatch.setattr(actor_runner, "get_current_user_id", lambda: "owner-1")
     monkeypatch.setattr(
         actor_runner, "_restamp_always_on_mcp", _as_async(lambda _sid: order.append("restamp"))
     )
@@ -92,7 +92,7 @@ def test_run_session_to_idle_restamps_before_run_turn(monkeypatch: pytest.Monkey
 
 def test_actor_loop_turn_restamps_before_run_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     order: list[str] = []
-    monkeypatch.setattr(actor_runner, "require_current_user_id", lambda: "owner-1")
+    monkeypatch.setattr(actor_runner, "get_current_user_id", lambda: "owner-1")
     monkeypatch.setattr(
         actor_runner, "_restamp_always_on_mcp", _as_async(lambda _sid: order.append("restamp"))
     )

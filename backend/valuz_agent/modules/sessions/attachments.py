@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 
 
@@ -33,7 +32,10 @@ def _resolve_asset_path(user_id: str, ref: str | None) -> str | None:
     return str(p) if p is not None else None
 
 
-async def _load_pending_attachments(session_id: str):  # type: ignore[no-untyped-def]
+async def _load_pending_attachments(session_id: str, user_id: str):
+    if not user_id:
+        raise ValueError("user_id is required")
+
     """Load the **pending** attachment rows for a session.
 
     Pending = ``consumed_at IS NULL`` = staged for the next turn.
@@ -53,7 +55,7 @@ async def _load_pending_attachments(session_id: str):  # type: ignore[no-untyped
     from valuz_agent.modules.sessions.datastore import SessionDatastore
 
     async with async_unit_of_work() as db:
-        return await SessionDatastore(db).list_attachments(require_current_user_id(), session_id)
+        return await SessionDatastore(db).list_attachments(user_id, session_id)
 
 
 def _attachment_specs(rows, user_id: str) -> tuple[tuple[str | None, str | None], ...]:  # type: ignore[no-untyped-def]

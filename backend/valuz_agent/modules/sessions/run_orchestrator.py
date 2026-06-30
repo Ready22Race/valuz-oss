@@ -14,13 +14,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Mapping
 from typing import Any
 
 # Side-effect: puts the kernel on sys.path so ``src.core`` / ``app.*``
 # resolve at call time.
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters import kernel_client
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.infra import auth_context
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.modules.tasks.actor_runner import run_session_to_idle
 
@@ -49,16 +50,14 @@ def _chat_billing_meter(session_id: str) -> Any:
     Shared by the initial turn and every drained queue item so each metered
     turn bills identically.
     """
-
     async def _meter(message: Any, after_run: Any) -> None:
         if message.input_tokens is not None or message.output_tokens is not None:
-            from valuz_agent.infra.auth_context import get_current_user_id
             from valuz_agent.ports.billing import MeterEvent
             from valuz_agent.ports.extensions import ext
 
             uid = (after_run.metadata if after_run else {}).get(
                 "owner_user_id"
-            ) or get_current_user_id()
+            ) or auth_context.get_current_user_id()
             try:
                 if uid is None:
                     raise LookupError("no owner user_id for billing meter")
@@ -88,6 +87,7 @@ async def _run_agent_background(
     session_id: str,
     content: str,
     event_bus: EventBus,
+    user_id: str | None = None,
 ) -> None:
     """Drive one agent turn in the background, then drain any queued follow-ups.
 
@@ -100,14 +100,27 @@ async def _run_agent_background(
     post-turn queue drain (docs/design/session-input-queue.md).
     """
     meter = _chat_billing_meter(session_id)
-    await run_session_to_idle(session_id, content, event_bus, on_message=meter)
-    await _drain_queue_after_turn(session_id, event_bus, on_message=meter)
+    owner_user_id = user_id or auth_context.get_current_user_id()
+    await run_session_to_idle(
+        session_id,
+        content,
+        event_bus,
+        on_message=meter,
+        user_id=owner_user_id,
+    )
+    await _drain_queue_after_turn(
+        session_id,
+        event_bus,
+        on_message=meter,
+        user_id=owner_user_id,
+    )
 
 
 async def _drain_queue_after_turn(
     session_id: str,
     event_bus: EventBus,
     on_message: Any | None = None,
+    user_id: str | None = None,
 ) -> None:
     """Run queued follow-up inputs FIFO after a turn finishes (host-driven).
 
@@ -145,7 +158,8 @@ async def _drain_queue_after_turn(
             text = str(payload.get("text") or "")
             attachments = list(payload.get("attachments") or [])
 
-            session = await kernel_client.get_session(require_current_user_id(), session_id)
+            owner_user_id = user_id or auth_context.get_current_user_id()
+            session = await kernel_client.get_session(owner_user_id, session_id)
             if session is None:
                 return
 
@@ -173,6 +187,7 @@ async def _drain_queue_after_turn(
                 event_bus,
                 on_message=on_message,
                 queued_attachments=attachments,
+                user_id=owner_user_id,
             )
     finally:
         _active_drains.discard(session_id)
@@ -182,7 +197,7 @@ def schedule_drain(session_id: str, event_bus: EventBus) -> None:
     """Spawn a background queue drain for an idle session (idle-kick / resume).
 
     ``asyncio.create_task`` copies the current contextvars, so the ambient
-    request owner (``require_current_user_id``) propagates into the drain.
+    request owner (``get_current_user_id``) propagates into the drain.
     A no-op if a drain is already in flight for the session.
     """
     if session_id in _active_drains:
@@ -226,7 +241,8 @@ async def _finalize_session(
     shows a bare "Run failed". ``stop_reason_*`` mark the terminal state as an
     error rather than a clean idle.
     """
-    session = await kernel_client.get_session(require_current_user_id(), session_id)
+    owner_user_id = auth_context.get_current_user_id()
+    session = await kernel_client.get_session(owner_user_id, session_id)
     if session is None:
         return
 
@@ -250,9 +266,29 @@ async def _finalize_session(
         )
         stop_reason_type = "error"
         stop_reason_message = message
+    elif final_status == "terminated":
+        stop_reason = getattr(session, "stop_reason", None)
+        category = None
+        message = None
+        if isinstance(stop_reason, Mapping):
+            category = stop_reason.get("category") or stop_reason.get("type")
+            message = stop_reason.get("message")
+        else:
+            category = getattr(stop_reason, "category", None) or getattr(
+                stop_reason, "type", None
+            )
+            message = getattr(stop_reason, "message", None)
+        if category is not None or message is not None:
+            error_event = EventPayload(
+                type="session_error",
+                data={
+                    "category": str(category or "Error"),
+                    "message": str(message or "agent turn failed"),
+                },
+            )
 
     await kernel_client.finalize_session(
-        require_current_user_id(),
+        owner_user_id,
         session_id,
         FinalizeSessionRequest(
             status=final_status,  # type: ignore[arg-type]
@@ -269,6 +305,6 @@ async def _finalize_session(
     try:
         from valuz_agent.modules.memory.scheduler import idle_scheduler
 
-        idle_scheduler.notify_turn(session_id, require_current_user_id())
+        idle_scheduler.notify_turn(session_id, owner_user_id)
     except Exception:  # noqa: BLE001 — memory triggering must never fail a turn
         logger.debug("memory idle trigger skipped for %s", session_id, exc_info=True)

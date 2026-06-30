@@ -55,7 +55,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 
 from src.core.tools import ExecContext, ToolDef, ToolResult
 
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -209,9 +209,9 @@ async def _gather_model_options(db: Any, user_id: str) -> Any:
     items = await svc.list_providers(user_id)
     inputs = [to_option_input(it) for it in items]
     current = CurrentDefault(
-        runtime=await get_default_runtime(db),
-        provider_id=await get_default_provider_id(db),
-        model=await get_default_model(db),
+        runtime=await get_default_runtime(db, user_id=user_id),
+        provider_id=await get_default_provider_id(db, user_id=user_id),
+        model=await get_default_model(db, user_id=user_id),
     )
     return build_model_options(inputs, current)
 
@@ -326,7 +326,10 @@ def _runtime_availability_warning(runtime: str) -> str | None:
     return f"runtime '{runtime}' is not available on this host: {reason}"
 
 
-async def _propose_agent_handler(args: dict[str, Any], context: ExecContext) -> ToolResult:
+async def _propose_agent_handler(args: dict[str, Any], context: ExecContext, user_id: str | None = None) -> ToolResult:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Validate the proposed agent spec; never write. The frontend renders a
     confirmation card from the ``tool_use`` event and the user's confirm call
     does the actual create + deploy."""
@@ -364,7 +367,7 @@ async def _propose_agent_handler(args: dict[str, Any], context: ExecContext) -> 
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
     from valuz_agent.modules.skills.datastore import SkillDatastore
 
-    user_id = require_current_user_id()
+    user_id = user_id
     missing_skills: list[str] = []
     missing_connectors: list[str] = []
     async with async_unit_of_work(commit=False) as db:
@@ -540,7 +543,7 @@ UPDATE_AGENT_PARAMETERS: dict[str, object] = {
 }
 
 
-async def _update_agent_handler(args: dict[str, Any], context: ExecContext) -> ToolResult:
+async def _update_agent_handler(args: dict[str, Any], context: ExecContext, user_id: str | None = None) -> ToolResult:
     """Apply a partial edit to an existing library agent and write it straight
     away. Mirrors ``propose_agent``'s validation (skills indexed, connectors
     exist, runtime/model compatible) but — unlike propose — there is no confirm
@@ -611,7 +614,7 @@ async def _update_agent_handler(args: dict[str, Any], context: ExecContext) -> T
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
     from valuz_agent.modules.skills.datastore import SkillDatastore
 
-    user_id = require_current_user_id()
+    user_id = user_id
     needs_brain_check = "runtime" in patch or "model" in patch
     missing_skills: list[str] = []
     missing_connectors: list[str] = []
@@ -713,11 +716,11 @@ LIST_SKILLS_DESCRIPTION = (
 LIST_SKILLS_PARAMETERS: dict[str, object] = {"type": "object", "properties": {}}
 
 
-async def _list_skills_handler(args: dict[str, Any], context: ExecContext) -> ToolResult:
+async def _list_skills_handler(args: dict[str, Any], context: ExecContext, user_id: str | None = None) -> ToolResult:
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.skills.datastore import SkillDatastore
 
-    user_id = require_current_user_id()
+    user_id = user_id
     async with async_unit_of_work(commit=False) as db:
         rows = await SkillDatastore(db).list_skills(user_id)
     items = [
@@ -736,11 +739,11 @@ LIST_AGENTS_DESCRIPTION = (
 LIST_AGENTS_PARAMETERS: dict[str, object] = {"type": "object", "properties": {}}
 
 
-async def _list_agents_handler(args: dict[str, Any], context: ExecContext) -> ToolResult:
+async def _list_agents_handler(args: dict[str, Any], context: ExecContext, user_id: str | None = None) -> ToolResult:
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.agents.datastore import AgentDatastore
 
-    user_id = require_current_user_id()
+    user_id = user_id
     async with async_unit_of_work(commit=False) as db:
         rows = await AgentDatastore(db).list_agents(user_id)
     items = [
@@ -776,11 +779,11 @@ LIST_MODEL_OPTIONS_DESCRIPTION = (
 LIST_MODEL_OPTIONS_PARAMETERS: dict[str, object] = {"type": "object", "properties": {}}
 
 
-async def _list_model_options_handler(args: dict[str, Any], context: ExecContext) -> ToolResult:
+async def _list_model_options_handler(args: dict[str, Any], context: ExecContext, user_id: str | None = None) -> ToolResult:
     from valuz_agent.adapters.runtime_registry import is_runtime_available, list_runtimes
     from valuz_agent.infra.db import async_unit_of_work
 
-    user_id = require_current_user_id()
+    user_id = user_id
     async with async_unit_of_work(commit=False) as db:
         opts = await _gather_model_options(db, user_id)
 
@@ -853,11 +856,10 @@ LIST_PROJECT_MEMBERS_PARAMETERS: dict[str, object] = {"type": "object", "propert
 
 async def _list_project_members_handler(
     args: dict[str, Any], context: ExecContext
-) -> ToolResult:
+, user_id: str | None = None) -> ToolResult:
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.agents.datastore import AgentDatastore, ProjectMemberDatastore
-
-    user_id = require_current_user_id()
+    user_id = user_id
     project_id = await _resolve_project_id(context.session_id)
     if not project_id:
         return _err(
@@ -909,7 +911,7 @@ DEPLOY_AGENT_PARAMETERS: dict[str, object] = {
 }
 
 
-async def _deploy_agent_handler(args: dict[str, Any], context: ExecContext) -> ToolResult:
+async def _deploy_agent_handler(args: dict[str, Any], context: ExecContext, user_id: str | None = None) -> ToolResult:
     slug = str(args.get("agent_slug") or "").strip()
     if not slug:
         return _err("deploy_agent: 'agent_slug' is required")
@@ -929,7 +931,7 @@ async def _deploy_agent_handler(args: dict[str, Any], context: ExecContext) -> T
         MemberAlreadyExistsError,
     )
 
-    user_id = require_current_user_id()
+    user_id = user_id
     async with async_unit_of_work() as db:
         svc = AgentService(db)
         try:
@@ -966,7 +968,7 @@ async def _deploy_agent_handler(args: dict[str, Any], context: ExecContext) -> T
     )
 
 
-async def _resolve_project_id(session_id: str) -> str | None:
+async def _resolve_project_id(session_id: str, user_id: str | None = None) -> str | None:
     """REAL project id for the calling session, or None.
 
     A session always carries ``metadata.valuz.project_id``, but a quick chat /
@@ -980,7 +982,7 @@ async def _resolve_project_id(session_id: str) -> str | None:
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-    user_id = require_current_user_id()
+    user_id = user_id
     sess = await kernel_client.get_session(user_id, session_id)
     if sess is None:
         return None

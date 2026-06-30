@@ -30,7 +30,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from valuz_agent.adapters import kernel_client
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.sse import shielded
 
 POLL_INTERVAL_SECONDS = 0.3
@@ -226,11 +225,11 @@ def _translate_kernel_event(
         # (both callers are async), so fire-and-forget via ``create_task`` —
         # metering must never block or break the SSE stream.
         try:
-            from valuz_agent.infra.auth_context import get_current_user_id
+            from valuz_agent.api.deps import get_current_user_id_optional
             from valuz_agent.ports.billing import MeterEvent
             from valuz_agent.ports.extensions import ext
 
-            uid = data.get("user_id") or get_current_user_id()
+            uid = data.get("user_id")
             if uid is None:
                 # Explicitly-anonymous context — nothing to attribute the
                 # usage to; surfaces via the best-effort except below.
@@ -518,6 +517,7 @@ _EVENTS_PAGE = 1000
 async def list_events_after(
     session_id: str,
     *,
+    user_id: str,
     after_seq: int = 0,
     limit: int = 200,
 ) -> list[SessionEventFrame]:
@@ -527,7 +527,6 @@ async def list_events_after(
     kernel's per-call cap returns the full set (not a silently truncated
     first page) over both transports.
     """
-    user_id = require_current_user_id()
     items: list = []
     cursor = after_seq
     while len(items) < limit:
@@ -547,6 +546,7 @@ async def list_events_after(
 async def list_events_window(
     session_id: str,
     *,
+    user_id: str,
     before_seq: int | None = None,
     turn_limit: int = 20,
 ) -> TurnWindow:
@@ -571,14 +571,16 @@ async def list_events_window(
     if turn_limit <= 0:
         return TurnWindow(items=[], has_more=False)
 
+    owner_id = user_id
     window = await kernel_client.get_events_window(
-        require_current_user_id(), session_id, before_seq=before_seq, turn_limit=turn_limit
+        owner_id, session_id, before_seq=before_seq, turn_limit=turn_limit
     )
     return TurnWindow(items=_items_to_frames(window.items), has_more=window.has_more)
 
 
 async def iter_events_sse(
     session_id: str,
+    user_id: str,
     *,
     after_seq: int = 0,
     is_disconnected: callable[[], bool] | None = None,
@@ -599,7 +601,8 @@ async def iter_events_sse(
     # ``shielded``: a client disconnect cancels this generator; landing that
     # cancellation inside an in-flight DB read would tear the pooled
     # connection down mid-checkin (see ``infra.sse.shielded``).
-    frames = await shielded(list_events_after(session_id, after_seq=cursor))
+    owner_id = user_id
+    frames = await shielded(list_events_after(session_id, user_id=owner_id, after_seq=cursor))
     for frame in frames:
         yield {"event": frame.event_type, "data": frame.to_sse_data()}
         cursor = frame.seq
@@ -611,9 +614,7 @@ async def iter_events_sse(
     queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=4096)
 
     async def _pump() -> None:
-        async for item in kernel_client.subscribe_session_events(
-            require_current_user_id(), session_id
-        ):
+        async for item in kernel_client.subscribe_session_events(owner_id, session_id):
             await queue.put(item)
 
     pump_task = asyncio.create_task(_pump(), name=f"sse-pump-{session_id}")
@@ -632,7 +633,9 @@ async def iter_events_sse(
                 # Queue timeout. Poll DB for any events we might have
                 # missed (covers the subscribe/backfill race), then
                 # heartbeat if idle.
-                db_frames = await shielded(list_events_after(session_id, after_seq=cursor))
+                db_frames = await shielded(
+                    list_events_after(session_id, user_id=owner_id, after_seq=cursor)
+                )
                 for frame in db_frames:
                     yield {"event": frame.event_type, "data": frame.to_sse_data()}
                     cursor = frame.seq

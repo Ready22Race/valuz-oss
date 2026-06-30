@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.api.deps import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import get_async_session
 from valuz_agent.modules.agents.service import (
     AgentNotDeletableError,
@@ -179,7 +179,7 @@ def _member_with_agent(row: dict[str, Any]) -> MemberWithAgentResponse:
 @router.get("/v1/agents")
 async def list_agents(
     source: str | None = None,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> dict:
     """List agents, optionally filtered by source (official|custom)."""
@@ -194,7 +194,7 @@ async def list_agents(
 @router.get("/v1/agents/{slug}", response_model=AgentResponse)
 async def get_agent(
     slug: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> AgentResponse:
     """Get a single agent by slug."""
@@ -208,7 +208,7 @@ async def get_agent(
 @router.get("/v1/agents/{slug}/deployments")
 async def list_agent_deployments(
     slug: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> dict:
     """List the projects (projects) this agent is派驻'd into (live-reference).
@@ -254,7 +254,7 @@ class UpdateAgentRequest(BaseModel):
 @router.post("/v1/agents", status_code=201, response_model=AgentResponse)
 async def create_agent(
     payload: CreateAgentRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> AgentResponse:
     """Create a user-defined agent."""
@@ -269,7 +269,7 @@ async def create_agent(
 async def update_agent(
     slug: str,
     payload: UpdateAgentRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> AgentResponse:
     """Patch an agent (official or custom)."""
@@ -284,7 +284,7 @@ async def update_agent(
 async def delete_agent(
     slug: str,
     cascade: bool = False,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> None:
     """Delete an agent.
@@ -312,7 +312,7 @@ async def delete_agent(
 )
 async def list_members(
     project_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> dict[str, list[MemberWithAgentResponse]]:
     """List all agent members in a project."""
@@ -328,7 +328,7 @@ async def list_members(
 async def create_blank_agent(
     project_id: str,
     payload: CreateBlankAgentRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> MemberWithAgentResponse:
     """Create a blank (source-agent-free) agent in a project."""
@@ -362,7 +362,7 @@ async def create_blank_agent(
 async def deploy_agent(
     project_id: str,
     payload: DeployAgentRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> MemberWithAgentResponse:
     """派驻: deploy (live-reference) a library agent into a project."""
@@ -441,7 +441,7 @@ async def _resolve_session_project_id(
 async def confirm_agent_proposal(
     session_id: str,
     payload: ProposeAgentConfirmRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
     db: AsyncSession = Depends(get_async_session),
 ) -> ProposeAgentConfirmResponse:
@@ -522,7 +522,7 @@ async def confirm_agent_proposal(
 async def delete_member(
     project_id: str,
     agent_slug: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: AgentService = Depends(_get_agent_service),
 ) -> None:
     """Delete a project agent and its kernel AgentConfig."""

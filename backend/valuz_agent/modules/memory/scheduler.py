@@ -42,6 +42,9 @@ class IdleExtractionScheduler:
         self._runner = runner
 
     def notify_turn(self, session_id: str, user_id: str | None = None) -> None:
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         """Call after a turn finalizes: (re)arm the session's idle timer. Cheap,
         non-blocking, no-op when no runner is wired or there's no running loop."""
         if self._runner is None or not session_id:

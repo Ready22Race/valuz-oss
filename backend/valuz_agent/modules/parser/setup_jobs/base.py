@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.parser.datastore import SetupJobDatastore
 from valuz_agent.modules.parser.models import SetupJobRow
@@ -128,14 +128,17 @@ class SetupJobController:
 
     # ----- status -----------------------------------------------------
 
-    async def get(self, setup_id: str) -> SetupJobStatus:
+    async def get(self, setup_id: str, user_id: str | None = None) -> SetupJobStatus:
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         if setup_id not in self._jobs:
             raise SetupJobNotFound(setup_id)
 
         from valuz_agent.infra.db import async_unit_of_work
 
         async with async_unit_of_work(commit=False) as db:
-            row = await SetupJobDatastore(db).get(require_current_user_id(), setup_id)
+            row = await SetupJobDatastore(db).get(user_id, setup_id)
 
         if row is None:
             # Lazy: a setup_id known to the registry but never started yet.
@@ -281,13 +284,14 @@ class SetupJobController:
         return _cb
 
     async def _update_progress(
-        self, setup_id: str, downloaded_bytes: int, total_bytes: int | None
+        self, setup_id: str, downloaded_bytes: int, total_bytes: int | None,
+        user_id: str | None = None,
     ) -> None:
         from valuz_agent.infra.db import async_unit_of_work
 
         async with async_unit_of_work() as db:
             await SetupJobDatastore(db).update_progress(
-                require_current_user_id(),
+                user_id,
                 setup_id,
                 downloaded_bytes=downloaded_bytes,
                 total_bytes=total_bytes,
@@ -304,12 +308,13 @@ class SetupJobController:
         source: str | None = None,
         started_at: int | None = None,
         completed_at: int | None = None,
+        user_id: str | None = None,
     ) -> None:
         from valuz_agent.infra.db import async_unit_of_work
 
         async with async_unit_of_work() as db:
             ds = SetupJobDatastore(db)
-            current = await ds.get(require_current_user_id(), setup_id)
+            current = await ds.get(user_id, setup_id)
             row = current or SetupJobRow(setup_id=setup_id)
             row.status = status
             if downloaded_bytes is not None:
@@ -323,7 +328,7 @@ class SetupJobController:
                 row.started_at = started_at
             if completed_at is not None:
                 row.completed_at = completed_at
-            await ds.upsert(require_current_user_id(), row)
+            await ds.upsert(user_id, row)
 
 
 def _short_error(exc: BaseException) -> str:

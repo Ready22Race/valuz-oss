@@ -73,7 +73,7 @@ async def test_task_kickoff_leaves_duration_unset_and_titles_summary() -> None:
             side_effect=itertools.count(1000, 100),
         ),
         patch(
-            "valuz_agent.modules.automations.in_process_runner.require_current_user_id",
+            "valuz_agent.modules.automations.in_process_runner.get_current_user_id",
             return_value="u1",
         ),
         patch(

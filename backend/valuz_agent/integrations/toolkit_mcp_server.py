@@ -60,7 +60,6 @@ from collections.abc import AsyncIterator
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 
 from valuz_agent.infra.auth_context import (
-    require_current_user_id,
     reset_current_user_id,
     set_current_user_id,
 )
@@ -112,17 +111,17 @@ async def _resolve_session_owner(session_id: str) -> str | None:
     Looks the session up over the kernel seam and reads ``SessionData.user_id``.
     ``None`` (kernel GC'd the session, or a legacy row with an empty owner)
     leaves the owner context untouched — a handler that then needs an owner
-    fails loudly via ``require_current_user_id`` rather than reading across
-    owners.
+    fails loudly via ``get_current_user_id`` rather than reading
+    across owners.
     """
     from valuz_agent.adapters import kernel_client
 
     try:
-        sess = await kernel_client.get_session(require_current_user_id(), session_id)
+        sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
     except Exception:  # noqa: BLE001 — owner resolution is best-effort; never block the tool
         logger.warning("toolkit: failed to resolve owner for session %s", session_id, exc_info=True)
         return None
-    return (sess.user_id or None) if sess is not None else None
+    return sessions[0].user_id if sessions else None
 
 
 def _build_server(toolset: str) -> Server:
@@ -232,11 +231,19 @@ def build_toolkit_mcp_asgi(toolset: str) -> Any:
             await response(scope, receive, send)
             return
 
+        owner_id = await _resolve_session_owner(session_id)
+        if not owner_id:
+            response = PlainTextResponse("Unknown session owner", status_code=401)
+            await response(scope, receive, send)
+            return
+
+        owner_token = set_current_user_id(owner_id)
         ctx_token = _session_var.set(session_id)
         try:
             await _ensure_manager(toolset).handle_request(scope, receive, send)
         finally:
             _session_var.reset(ctx_token)
+            reset_current_user_id(owner_token)
 
     return _app
 

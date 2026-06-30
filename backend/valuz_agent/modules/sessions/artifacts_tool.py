@@ -32,7 +32,7 @@ from src.core import ToolDef, ToolResult
 from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 
@@ -99,7 +99,10 @@ def _coerce_size(raw: Any) -> int | None:
     return None
 
 
-async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext, user_id: str | None = None) -> ToolResult:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     items = args.get("attachments")
     if not isinstance(items, list) or not items:
         return ToolResult(
@@ -112,7 +115,6 @@ async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext) -> 
             is_error=True,
         )
 
-    user_id = require_current_user_id()
     delivered: list[str] = []
     skipped: list[dict[str, str]] = []
 

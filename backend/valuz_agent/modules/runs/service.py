@@ -159,7 +159,7 @@ class RunsService:
         # project-agnostic). The pool is generous (automation runs accrue
         # fast); the per-group ``_FINISHED_LIMIT`` budget below is what bounds
         # the response, not this fetch.
-        index_rows = await project_index.list_recent(limit=_INDEX_POOL)
+        index_rows = await project_index.list_recent(limit=_INDEX_POOL, user_id=user_id)
         proj_by_session = {r.session_id: r.project_id for r in index_rows}
         sessions: list[KernelSession] = await kernel_client.list_sessions(
             user_id, ids=[r.session_id for r in index_rows], limit=_INDEX_POOL

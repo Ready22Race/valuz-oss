@@ -24,7 +24,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 from src.core import ToolDef, ToolResult
 from src.core.tools import ExecContext
 
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.adapters import kernel_client
 from valuz_agent.modules.tasks import messaging, planning, queries
 
@@ -99,12 +99,15 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
+async def _check_lead_gate(ctx: ExecContext, user_id: str | None = None) -> tuple[str, str] | ToolResult:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Verify the caller is a lead session and return (task_id, project_id).
 
     Returns a ToolResult(is_error=True) when the check fails.
     """
-    sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+    sess = await kernel_client.get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="dispatch: caller session not found", is_error=True)
 
@@ -127,6 +130,7 @@ async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
 
 async def _resolve_plan_writer_task(
     ctx: ExecContext, args: dict[str, Any]
+    , user_id: str | None = None
 ) -> tuple[Any, str, str] | ToolResult:
     """Resolve the target task for a plan-writing call + verify the caller may write it.
 
@@ -147,7 +151,7 @@ async def _resolve_plan_writer_task(
 
     Read-only callers (get_plan) should use ``_resolve_plan_reader_task`` instead.
     """
-    sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+    sess = await kernel_client.get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="plan tool: caller session not found", is_error=True)
 
@@ -167,7 +171,7 @@ async def _resolve_plan_writer_task(
 
     async with async_unit_of_work(commit=False) as db:
         task_ds = TaskDatastore(db)
-        task = await task_ds.get_task(require_current_user_id(), task_id)
+        task = await task_ds.get_task(user_id, task_id)
     if task is None:
         return ToolResult(content=f"plan tool: task {task_id!r} not found", is_error=True)
 
@@ -179,13 +183,14 @@ async def _resolve_plan_writer_task(
 
 async def _resolve_plan_reader_task(
     ctx: ExecContext, args: dict[str, Any]
+    , user_id: str | None = None
 ) -> tuple[Any, str, str] | ToolResult:
     """Loose variant of ``_resolve_plan_writer_task`` for read-only plan calls.
 
     Permits any caller in the task's project (chat or lead). Useful for
     get_plan: knowing your own draft / a project mate's plan is fine.
     """
-    sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+    sess = await kernel_client.get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="plan tool: caller session not found", is_error=True)
 
@@ -199,7 +204,7 @@ async def _resolve_plan_reader_task(
 
     async with async_unit_of_work(commit=False) as db:
         task_ds = TaskDatastore(db)
-        task = await task_ds.get_task(require_current_user_id(), task_id)
+        task = await task_ds.get_task(user_id, task_id)
     if task is None:
         return ToolResult(content=f"plan tool: task {task_id!r} not found", is_error=True)
 
@@ -267,7 +272,7 @@ def _check_plan_writer_gate(sess: Any, task: Any) -> ToolResult | None:
     )
 
 
-async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
+async def _check_orchestration_gate(ctx: ExecContext, user_id: str | None = None) -> tuple[str, str] | ToolResult:
     """Gate for ``create_task`` (M10 附录 E). Returns (project_id, agent_slug).
 
     Allowed only from a **plain project conversation** session: it must carry a
@@ -276,7 +281,7 @@ async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolR
     spawning nested tasks (附录 E E-3). The project must be a project (chat
     projects are ephemeral). Returns a ToolResult(is_error=True) on failure.
     """
-    sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+    sess = await kernel_client.get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="create_task: caller session not found", is_error=True)
 
@@ -350,7 +355,7 @@ async def _bound_agent_member(sess: Any) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
-def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
+def build_task_tool_defs(orchestrator: TaskOrchestrator, user_id: str | None = None) -> tuple[ToolDef, ...]:
     """Build the full task tool set (dispatch + orchestration) with live handlers.
 
     Captures *orchestrator* in closures so the handlers can reach host
@@ -540,7 +545,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
     async def _inject_into_task_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
         # VALUZ-CHATPLAN S4: chat → running-lead intervention. Auth is looser
         # than the writer gate (a chat session may not be the originator AND
-        # the task is past draft) — project-member is enough because the
+        # the task is past draft, user_id: str | None = None) — project-member is enough because the
         # lead retains full authority over what to do with the message.
         task_id = (args.get("task_id") or "").strip()
         text = args.get("text") or ""
@@ -549,7 +554,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         if not text.strip():
             return ToolResult(content="inject_into_task: text is required", is_error=True)
 
-        sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+        sess = await kernel_client.get_session(user_id, ctx.session_id)
         if sess is None:
             return ToolResult(content="inject_into_task: caller session not found", is_error=True)
 
@@ -557,7 +562,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         from valuz_agent.modules.tasks.datastore import TaskDatastore
 
         async with async_unit_of_work(commit=False) as db:
-            task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
+            task = await TaskDatastore(db).get_task(user_id, task_id)
         if task is None:
             return ToolResult(
                 content=f"inject_into_task: task {task_id!r} not found", is_error=True
@@ -598,12 +603,12 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         # be the task's originator OR a session in the same project —
         # state-machine + orchestrator.resume_task already validates that the
         # task is paused/blocked (terminal/draft/active rejected with a
-        # human-readable reason in the dict it returns).
+        # human-readable reason in the dict it returns, user_id: str | None = None).
         task_id = (args.get("task_id") or "").strip()
         if not task_id:
             return ToolResult(content="resume_task: task_id is required", is_error=True)
 
-        sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+        sess = await kernel_client.get_session(user_id, ctx.session_id)
         if sess is None:
             return ToolResult(content="resume_task: caller session not found", is_error=True)
 
@@ -611,7 +616,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         from valuz_agent.modules.tasks.datastore import TaskDatastore
 
         async with async_unit_of_work(commit=False) as db:
-            task = await TaskDatastore(db).get_task(require_current_user_id(), task_id)
+            task = await TaskDatastore(db).get_task(user_id, task_id)
         if task is None:
             return ToolResult(content=f"resume_task: task {task_id!r} not found", is_error=True)
 
@@ -730,8 +735,8 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         # Read-only roster query — allowed for BOTH a task lead AND a plain
         # project-conversation launcher (so it can inspect the team before
         # create_task). NOT lead-gated; just needs a project. Resolve from
-        # valuz metadata (task runs) or session.project_id (launcher).
-        sess = await kernel_client.get_session(require_current_user_id(), ctx.session_id)
+        # valuz metadata (task runs) or session.project_id (launcher, user_id: str | None = None).
+        sess = await kernel_client.get_session(user_id, ctx.session_id)
         if sess is None:
             return ToolResult(content="list_members: caller session not found", is_error=True)
         v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})
@@ -896,7 +901,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
             logger.exception("review_subtask handler error for task %s", task_id)
             return ToolResult(content=f"review_subtask failed: {exc}", is_error=True)
 
-    async def _stop_subtask_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+    async def _stop_subtask_handler(args: dict[str, Any], ctx: ExecContext, user_id: str | None = None) -> ToolResult:
         """Lead-only HARD stop of an in-flight subtask. Wraps the existing
         ``orchestrator.stop_member`` (which was reachable only from the user
         ``:intervene`` HTTP route) so the lead can cancel a member from inside
@@ -924,7 +929,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
 
             async with async_unit_of_work(commit=False) as db:
                 task = await TaskDatastore(db).get_task_by_project(
-                    require_current_user_id(), project_id, task_id
+                    user_id, project_id, task_id
                 )
             if task is None:
                 return ToolResult(

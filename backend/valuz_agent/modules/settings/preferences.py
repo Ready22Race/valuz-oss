@@ -18,7 +18,6 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.settings.datastore import SettingsDatastore
 from valuz_agent.modules.settings.models import AppSettingRow
@@ -94,8 +93,11 @@ ALLOWED_FONT_SIZES = {"compact", "default", "comfortable"}
 # ``{"value": ...}`` (de)serialization + validation, never a raw ``Session``.
 
 
-async def _read(db: AsyncSession, key: str) -> str | None:
-    row = await SettingsDatastore(db).get_setting(require_current_user_id(), key)
+async def _read(db: AsyncSession, key: str, user_id: str | None = None) -> str | None:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
+    row = await SettingsDatastore(db).get_setting(user_id, key)
     if row is None:
         return None
     try:
@@ -108,9 +110,11 @@ async def _read(db: AsyncSession, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-async def _write(db: AsyncSession, key: str, value: str) -> None:
+async def _write(db: AsyncSession, key: str, value: str, user_id: str | None = None) -> None:
+    if user_id is None:
+        raise ValueError("user_id is required")
     await SettingsDatastore(db).upsert_setting(
-        require_current_user_id(),
+        user_id,
         AppSettingRow(
             key=key,
             value_json=json.dumps({"value": value}),
@@ -119,7 +123,7 @@ async def _write(db: AsyncSession, key: str, value: str) -> None:
     )
 
 
-async def get_default_timezone(db: AsyncSession) -> str:
+async def get_default_timezone(db: AsyncSession, user_id: str | None = None) -> str:
     """Return the user's configured default timezone, or ``UTC`` if unset.
 
     Resolution order (first match wins):
@@ -131,10 +135,10 @@ async def get_default_timezone(db: AsyncSession) -> str:
     install/first-run wizard should call ``detect_system_timezone()`` and
     persist the value explicitly, so the runtime path stays a pure DB read.
     """
-    return await _read(db, KEY_DEFAULT_TIMEZONE) or FALLBACK_TIMEZONE
+    return await _read(db, KEY_DEFAULT_TIMEZONE, user_id=user_id) or FALLBACK_TIMEZONE
 
 
-async def get_effective_default_timezone(db: AsyncSession) -> str:
+async def get_effective_default_timezone(db: AsyncSession, user_id: str | None = None) -> str:
     """Create-time default timezone for schedules: configured value, else the
     *detected* OS timezone, else UTC.
 
@@ -146,10 +150,10 @@ async def get_effective_default_timezone(db: AsyncSession) -> str:
     is always *persisted* on the row (see ``AutomationService._apply_trigger``)
     so it stays visible/editable rather than an invisible UTC fallback.
     """
-    return await _read(db, KEY_DEFAULT_TIMEZONE) or detect_system_timezone()
+    return await _read(db, KEY_DEFAULT_TIMEZONE, user_id=user_id) or detect_system_timezone()
 
 
-async def set_default_timezone(db: AsyncSession, value: str) -> None:
+async def set_default_timezone(db: AsyncSession, value: str, user_id: str | None = None) -> None:
     """Persist the user's default timezone preference.
 
     The IANA name is validated by ``zoneinfo.ZoneInfo`` before write —
@@ -162,18 +166,18 @@ async def set_default_timezone(db: AsyncSession, value: str) -> None:
         ZoneInfo(value)
     except ZoneInfoNotFoundError as exc:
         raise ValueError(f"Unknown timezone: {value!r}") from exc
-    await _write(db, KEY_DEFAULT_TIMEZONE, value)
+    await _write(db, KEY_DEFAULT_TIMEZONE, value, user_id=user_id)
 
 
-async def get_default_locale(db: AsyncSession) -> str:
-    return await _read(db, KEY_DEFAULT_LOCALE) or FALLBACK_LOCALE
+async def get_default_locale(db: AsyncSession, user_id: str | None = None) -> str:
+    return await _read(db, KEY_DEFAULT_LOCALE, user_id=user_id) or FALLBACK_LOCALE
 
 
-async def set_default_locale(db: AsyncSession, value: str) -> None:
+async def set_default_locale(db: AsyncSession, value: str, user_id: str | None = None) -> None:
     cleaned = value.strip()
     if not cleaned:
         raise ValueError("locale cannot be empty")
-    await _write(db, KEY_DEFAULT_LOCALE, cleaned)
+    await _write(db, KEY_DEFAULT_LOCALE, cleaned, user_id=user_id)
     # Push the new locale into the i18n in-memory cache so the sync ``t()``
     # path picks it up immediately without any DB read.
     from valuz_agent.i18n import set_locale
@@ -181,7 +185,7 @@ async def set_default_locale(db: AsyncSession, value: str) -> None:
     set_locale(cleaned)
 
 
-async def get_default_effort(db: AsyncSession) -> str:
+async def get_default_effort(db: AsyncSession, user_id: str | None = None) -> str:
     """Return the user's configured default reasoning-effort budget.
 
     Always one of ``low`` / ``medium`` / ``high`` / ``xhigh`` / ``max``.
@@ -195,13 +199,13 @@ async def get_default_effort(db: AsyncSession) -> str:
     (``off`` / ``low`` / ``medium`` / ``high``) maps to the new enum:
     ``off`` → fallback; the rest pass through unchanged.
     """
-    raw = await _read(db, KEY_DEFAULT_EFFORT)
+    raw = await _read(db, KEY_DEFAULT_EFFORT, user_id=user_id)
     if raw is None:
         # Legacy key fallback for one-time graceful upgrade. ``"off"``
         # was the old "no override" sentinel and now resolves to the
         # explicit fallback (matches what every other unset / corrupt
         # path returns below).
-        legacy = await _read(db, KEY_DEFAULT_THINKING_LEGACY)
+        legacy = await _read(db, KEY_DEFAULT_THINKING_LEGACY, user_id=user_id)
         if legacy in (None, "", "off"):
             return FALLBACK_EFFORT
         raw = legacy
@@ -213,7 +217,9 @@ async def get_default_effort(db: AsyncSession) -> str:
     return FALLBACK_EFFORT
 
 
-async def set_default_effort(db: AsyncSession, value: str | None) -> None:
+async def set_default_effort(
+    db: AsyncSession, value: str | None, user_id: str | None = None
+) -> None:
     """Persist the user's default effort budget.
 
     ``None`` (or empty string) was the legacy "clear override" path —
@@ -224,24 +230,24 @@ async def set_default_effort(db: AsyncSession, value: str | None) -> None:
     the route layer surfaces a 400 to the UI.
     """
     if value is None or value.strip() == "":
-        await _write(db, KEY_DEFAULT_EFFORT, FALLBACK_EFFORT)
+        await _write(db, KEY_DEFAULT_EFFORT, FALLBACK_EFFORT, user_id=user_id)
         return
     cleaned = value.strip().lower()
     if cleaned not in EFFORT_VALUES:
         raise ValueError(f"default effort must be one of {EFFORT_VALUES}, got {value!r}")
-    await _write(db, KEY_DEFAULT_EFFORT, cleaned)
+    await _write(db, KEY_DEFAULT_EFFORT, cleaned, user_id=user_id)
 
 
-async def get_default_runtime(db: AsyncSession) -> str:
+async def get_default_runtime(db: AsyncSession, user_id: str | None = None) -> str:
     """Return the user's configured default runtime id."""
-    return await _read(db, KEY_DEFAULT_RUNTIME) or FALLBACK_RUNTIME
+    return await _read(db, KEY_DEFAULT_RUNTIME, user_id=user_id) or FALLBACK_RUNTIME
 
 
-async def set_default_runtime(db: AsyncSession, value: str) -> None:
+async def set_default_runtime(db: AsyncSession, value: str, user_id: str | None = None) -> None:
     cleaned = value.strip()
     if cleaned not in RUNTIME_VALUES:
         raise ValueError(f"runtime must be one of {RUNTIME_VALUES}, got {value!r}")
-    await _write(db, KEY_DEFAULT_RUNTIME, cleaned)
+    await _write(db, KEY_DEFAULT_RUNTIME, cleaned, user_id=user_id)
 
 
 # ── default model selection ──────────────────────────────────────────
@@ -262,82 +268,95 @@ async def set_default_runtime(db: AsyncSession, value: str) -> None:
 # compatible with the new one.
 
 
-async def get_default_provider_id(db: AsyncSession) -> str | None:
-    return await _read(db, KEY_DEFAULT_PROVIDER_ID) or None
+async def get_default_provider_id(db: AsyncSession, user_id: str | None = None) -> str | None:
+    return await _read(db, KEY_DEFAULT_PROVIDER_ID, user_id=user_id) or None
 
 
-async def set_default_provider_id(db: AsyncSession, value: str | None) -> None:
-    await _write(db, KEY_DEFAULT_PROVIDER_ID, value or "")
+async def set_default_provider_id(
+    db: AsyncSession, value: str | None, user_id: str | None = None
+) -> None:
+    await _write(db, KEY_DEFAULT_PROVIDER_ID, value or "", user_id=user_id)
 
 
-async def get_default_model(db: AsyncSession) -> str | None:
-    return await _read(db, KEY_DEFAULT_MODEL) or None
+async def get_default_model(db: AsyncSession, user_id: str | None = None) -> str | None:
+    return await _read(db, KEY_DEFAULT_MODEL, user_id=user_id) or None
 
 
-async def set_default_model(db: AsyncSession, value: str | None) -> None:
-    await _write(db, KEY_DEFAULT_MODEL, value or "")
+async def set_default_model(
+    db: AsyncSession, value: str | None, user_id: str | None = None
+) -> None:
+    await _write(db, KEY_DEFAULT_MODEL, value or "", user_id=user_id)
 
 
-async def get_theme(db: AsyncSession) -> str:
-    return await _read(db, KEY_THEME) or FALLBACK_THEME
+async def get_theme(db: AsyncSession, user_id: str | None = None) -> str:
+    return await _read(db, KEY_THEME, user_id=user_id) or FALLBACK_THEME
 
 
-async def set_theme(db: AsyncSession, value: str) -> None:
+async def set_theme(db: AsyncSession, value: str, user_id: str | None = None) -> None:
     if value not in ALLOWED_THEMES:
         raise ValueError(f"Invalid theme: {value!r}. Allowed: {sorted(ALLOWED_THEMES)}")
-    await _write(db, KEY_THEME, value)
+    await _write(db, KEY_THEME, value, user_id=user_id)
 
 
-async def get_font_size(db: AsyncSession) -> str:
-    return await _read(db, KEY_FONT_SIZE) or FALLBACK_FONT_SIZE
+async def get_font_size(db: AsyncSession, user_id: str | None = None) -> str:
+    return await _read(db, KEY_FONT_SIZE, user_id=user_id) or FALLBACK_FONT_SIZE
 
 
-async def set_font_size(db: AsyncSession, value: str) -> None:
+async def set_font_size(db: AsyncSession, value: str, user_id: str | None = None) -> None:
     if value not in ALLOWED_FONT_SIZES:
         raise ValueError(f"Invalid font_size: {value!r}. Allowed: {sorted(ALLOWED_FONT_SIZES)}")
-    await _write(db, KEY_FONT_SIZE, value)
+    await _write(db, KEY_FONT_SIZE, value, user_id=user_id)
 
 
-async def _read_bool(db: AsyncSession, key: str, default: bool) -> bool:
-    raw = await _read(db, key)
+async def _read_bool(
+    db: AsyncSession, key: str, default: bool, user_id: str | None = None
+) -> bool:
+    raw = await _read(db, key, user_id=user_id)
     if raw is None:
         return default
     return raw == "true"
 
 
-async def get_memory_enabled(db: AsyncSession) -> bool:
+async def get_memory_enabled(db: AsyncSession, user_id: str | None = None) -> bool:
     """Memory master switch (default ON). Gates injection + tool + extractor."""
-    return await _read_bool(db, KEY_MEMORY_ENABLED, True)
+    return await _read_bool(db, KEY_MEMORY_ENABLED, True, user_id=user_id)
 
 
-async def set_memory_enabled(db: AsyncSession, value: bool) -> None:
-    await _write(db, KEY_MEMORY_ENABLED, "true" if value else "false")
+async def set_memory_enabled(
+    db: AsyncSession, value: bool, user_id: str | None = None
+) -> None:
+    await _write(db, KEY_MEMORY_ENABLED, "true" if value else "false", user_id=user_id)
 
 
-async def get_memory_auto_extract(db: AsyncSession) -> bool:
+async def get_memory_auto_extract(db: AsyncSession, user_id: str | None = None) -> bool:
     """Background-extractor switch (default ON). Independent of the foreground
     tool: turning this off keeps manual/agent memory but stops the automatic
     (LLM-spending) review."""
-    return await _read_bool(db, KEY_MEMORY_AUTO_EXTRACT, True)
+    return await _read_bool(db, KEY_MEMORY_AUTO_EXTRACT, True, user_id=user_id)
 
 
-async def set_memory_auto_extract(db: AsyncSession, value: bool) -> None:
-    await _write(db, KEY_MEMORY_AUTO_EXTRACT, "true" if value else "false")
+async def set_memory_auto_extract(
+    db: AsyncSession, value: bool, user_id: str | None = None
+) -> None:
+    await _write(db, KEY_MEMORY_AUTO_EXTRACT, "true" if value else "false", user_id=user_id)
 
 
-async def get_memory_custom_instructions(db: AsyncSession) -> str:
+async def get_memory_custom_instructions(db: AsyncSession, user_id: str | None = None) -> str:
     """Global reviewer guidance (default empty = off). See
     ``KEY_MEMORY_CUSTOM_INSTRUCTIONS``."""
-    return (await _read(db, KEY_MEMORY_CUSTOM_INSTRUCTIONS)) or ""
+    return (await _read(db, KEY_MEMORY_CUSTOM_INSTRUCTIONS, user_id=user_id)) or ""
 
 
-async def set_memory_custom_instructions(db: AsyncSession, value: str) -> None:
+async def set_memory_custom_instructions(
+    db: AsyncSession, value: str, user_id: str | None = None
+) -> None:
     """Persist global reviewer guidance, trimmed and hard-capped to
     ``MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS`` so the review prompt stays bounded."""
     await _write(
         db,
         KEY_MEMORY_CUSTOM_INSTRUCTIONS,
         value.strip()[:MEMORY_CUSTOM_INSTRUCTIONS_MAX_CHARS],
+        user_id=user_id,
     )
 
 

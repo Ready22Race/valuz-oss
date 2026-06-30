@@ -447,7 +447,7 @@ class ProjectService:
 
         # Session counts come from the host project↔session index.
         try:
-            session_count = await project_index.count_for_project(project_id)
+            session_count = await project_index.count_for_project(project_id, user_id=user_id)
         except Exception:  # noqa: BLE001
             session_count = 0
         doc_binding_count = (
@@ -479,7 +479,7 @@ class ProjectService:
         # Delete kernel sessions for this project (and their events) — ids
         # come from the host index, which is cleared in the same sweep.
         try:
-            for sid in await project_index.remove_for_project(project_id):
+            for sid in await project_index.remove_for_project(project_id, user_id=user_id):
                 await kernel_client.delete_session(user_id, sid)
         except Exception:  # noqa: BLE001
             pass

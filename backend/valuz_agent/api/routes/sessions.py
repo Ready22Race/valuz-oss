@@ -10,7 +10,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.event_sse_adapter import iter_events_sse
-from valuz_agent.api.deps import get_session_service, require_current_user_id
+from valuz_agent.api.deps import get_current_user_id, get_session_service
 from valuz_agent.infra.db import get_async_session
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
@@ -184,22 +184,25 @@ class SessionEventWindowResponse(BaseModel):
 async def list_sessions(
     project_id: str | None = None,
     q: str | None = None,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> dict[str, list[SessionListItem]]:
-    return {"sessions": await svc.list_sessions(project_id=project_id, query=q)}
+    return {"sessions": await svc.list_sessions(project_id=project_id, query=q, user_id=user_id)}
 
 
 @router.get("/{session_id}")
 async def get_session(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return await svc.get_session(session_id)
+    return await svc.get_session(session_id, user_id=user_id)
 
 
 @router.post("", status_code=201)
 async def create_session(
     body: SessionCreateRequest,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
     return await svc.create_session(
@@ -212,22 +215,25 @@ async def create_session(
         permission_mode=body.permission_mode,
         effort=body.effort,
         agent_slug=body.agent_slug,
+        user_id=user_id,
     )
 
 
 @router.get("/{session_id}/events")
 async def list_events(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     after_seq: int = 0,
     svc: SessionService = Depends(get_session_service),
 ) -> SessionEventsResponse:
-    items = await svc.list_events(session_id, after_seq=after_seq)
+    items = await svc.list_events(session_id, user_id=user_id, after_seq=after_seq)
     return SessionEventsResponse(session_id=session_id, items=items)
 
 
 @router.get("/{session_id}/events/window")
 async def list_events_window(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     before_seq: int | None = None,
     turn_limit: int = 20,
     svc: SessionService = Depends(get_session_service),
@@ -243,6 +249,7 @@ async def list_events_window(
     """
     items, has_more = await svc.list_events_window(
         session_id,
+        user_id=user_id,
         before_seq=before_seq,
         turn_limit=turn_limit,
     )
@@ -254,6 +261,7 @@ async def subscribe_events(
     session_id: str,
     request: Request,
     after_seq: int = 0,
+    user_id: str = Depends(get_current_user_id),
 ) -> EventSourceResponse:
     """Reconnectable SSE subscription for session events.
 
@@ -279,7 +287,7 @@ async def subscribe_events(
     # client drops, which fires the ``finally`` block in
     # ``iter_events_sse`` and unsubscribes cleanly.
     del request  # disconnect handled by EventSourceResponse cancel scope
-    return EventSourceResponse(iter_events_sse(session_id, after_seq=after_seq))
+    return EventSourceResponse(iter_events_sse(session_id, user_id=user_id, after_seq=after_seq))
 
 
 @router.post("/{session_id}/messages")
@@ -287,15 +295,16 @@ async def send_message(
     session_id: str,
     body: SessionMessageRequest,
     svc: SessionService = Depends(get_session_service),
+    user_id: str = Depends(get_current_user_id),
 ) -> SessionDetail:
     """Start agent execution in background. Returns immediately with running status."""
-    from valuz_agent.infra.auth_context import get_current_user_id
-
-    if get_current_user_id() is None:
-        raise HTTPException(status_code=401, detail="Unauthenticated")
     try:
         return await svc.send_message(
-            session_id, body.prompt, provider_id=body.provider_id, model_id=body.model_id
+            session_id,
+            body.prompt,
+            provider_id=body.provider_id,
+            model_id=body.model_id,
+            user_id=user_id,
         )
     except BudgetExceeded as exc:
         # The session service runs a channel-aware wallet pre-check before the
@@ -317,18 +326,20 @@ async def send_message(
 async def send_message_sync(
     session_id: str,
     body: SessionMessageRequest,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionRunResponse:
     """Synchronous variant — blocks until execution completes. For tests."""
-    return await svc.send_message_sync(session_id, body.prompt)
+    return await svc.send_message_sync(session_id, body.prompt, user_id=user_id)
 
 
 @router.post("/{session_id}/interrupt")
 async def interrupt(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return await svc.interrupt(session_id)
+    return await svc.interrupt(session_id, user_id=user_id)
 
 
 class QueuedInputCreate(BaseModel):
@@ -344,16 +355,18 @@ class QueuedInputPatch(BaseModel):
 @router.get("/{session_id}/queue")
 async def list_session_queue(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> QueuedInputList:
     """List a session's queued follow-up inputs (FIFO) + paused flag."""
-    return await svc.list_queue(session_id)
+    return await svc.list_queue(session_id, user_id=user_id)
 
 
 @router.post("/{session_id}/queue")
 async def enqueue_session_input(
     session_id: str,
     body: QueuedInputCreate,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> QueuedInputList:
     """Enqueue a follow-up input. Drains immediately if idle, else after the
@@ -363,6 +376,7 @@ async def enqueue_session_input(
         body.prompt,
         provider_id=body.provider_id,
         model_id=body.model_id,
+        user_id=user_id,
     )
 
 
@@ -371,77 +385,86 @@ async def edit_session_queued_input(
     session_id: str,
     queue_id: str,
     body: QueuedInputPatch,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> QueuedInputList:
-    return await svc.edit_queued(session_id, queue_id, body.prompt)
+    return await svc.edit_queued(session_id, queue_id, body.prompt, user_id=user_id)
 
 
 @router.delete("/{session_id}/queue/{queue_id}")
 async def delete_session_queued_input(
     session_id: str,
     queue_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> QueuedInputList:
-    return await svc.delete_queued(session_id, queue_id)
+    return await svc.delete_queued(session_id, queue_id, user_id=user_id)
 
 
 @router.post("/{session_id}/queue/resume")
 async def resume_session_queue(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> QueuedInputList:
     """Resume draining a queue paused by an interrupt."""
-    return await svc.resume_queue(session_id)
+    return await svc.resume_queue(session_id, user_id=user_id)
 
 
 @router.post("/{session_id}/queue/{queue_id}/steer")
 async def steer_session_queued_input(
     session_id: str,
     queue_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> QueuedInputList:
     """Steer — send a queued input now, silently interrupting the active turn."""
-    return await svc.steer_queued(session_id, queue_id)
+    return await svc.steer_queued(session_id, queue_id, user_id=user_id)
 
 
 @router.post("/{session_id}/cancel")
 async def cancel(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return await svc.cancel(session_id)
+    return await svc.cancel(session_id, user_id=user_id)
 
 
 @router.post("/{session_id}/regenerate")
 async def regenerate(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
     """Regenerate re-sends the last user message. Returns immediately."""
-    return await svc.regenerate(session_id)
+    return await svc.regenerate(session_id, user_id=user_id)
 
 
 @router.patch("/{session_id}")
 async def rename_session(
     session_id: str,
     name: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
-    return await svc.rename_session(session_id, name)
+    return await svc.rename_session(session_id, name, user_id=user_id)
 
 
 @router.delete("/{session_id}", status_code=204)
 async def delete_session(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> None:
-    await svc.delete_session(session_id)
+    await svc.delete_session(session_id, user_id=user_id)
 
 
 @router.patch("/{session_id}/permission-mode")
 async def update_permission_mode(
     session_id: str,
     body: SessionPermissionModeRequest,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
     """Change the approval mode for an existing session.
@@ -457,7 +480,7 @@ async def update_permission_mode(
     only the Claude tier ships the LLM classifier today).
     """
     try:
-        return await svc.set_permission_mode(session_id, body.permission_mode)
+        return await svc.set_permission_mode(session_id, body.permission_mode, user_id=user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -466,6 +489,7 @@ async def update_permission_mode(
 async def update_session_effort(
     session_id: str,
     body: SessionEffortRequest,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionDetail:
     """Change the reasoning-effort budget for an existing session.
@@ -487,7 +511,7 @@ async def update_session_effort(
     ``effort=null`` resets to the SDK default.
     """
     try:
-        return await svc.set_session_effort(session_id, body.effort)
+        return await svc.set_session_effort(session_id, body.effort, user_id=user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -496,6 +520,7 @@ async def update_session_effort(
 async def submit_session_action(
     session_id: str,
     body: SessionActionRequest,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionActionResponse:
     """Resolve a pending ``requires_action`` with a user decision.
@@ -526,6 +551,7 @@ async def submit_session_action(
             message=body.message,
             answers=body.answers,
             modified_input=body.modified_input,
+            user_id=user_id,
         )
     except KernelClientError as exc:
         # The kernel seam already shaped the error HTTP-wise (the kernel
@@ -554,23 +580,29 @@ class SessionExtraSkillsResponse(BaseModel):
 @router.get("/{session_id}/skills")
 async def get_session_extra_skills(
     session_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionExtraSkillsResponse:
-    return SessionExtraSkillsResponse(skill_ids=await svc.get_extra_skills(session_id))
+    return SessionExtraSkillsResponse(
+        skill_ids=await svc.get_extra_skills(session_id, user_id=user_id),
+    )
 
 
 @router.put("/{session_id}/skills")
 async def set_session_extra_skills(
     session_id: str,
     body: SessionExtraSkillsRequest,
+    user_id: str = Depends(get_current_user_id),
     svc: SessionService = Depends(get_session_service),
 ) -> SessionExtraSkillsResponse:
     """Replace the per-session list of attached skills.
 
     skill-creator is always active and does not need to be listed here.
     """
-    await svc.set_extra_skills(session_id, body.skill_ids)
-    return SessionExtraSkillsResponse(skill_ids=await svc.get_extra_skills(session_id))
+    await svc.set_extra_skills(session_id, body.skill_ids, user_id=user_id)
+    return SessionExtraSkillsResponse(
+        skill_ids=await svc.get_extra_skills(session_id, user_id=user_id),
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -642,7 +674,7 @@ def _row_to_item(row: SessionAttachmentRow) -> AttachmentItem:
 async def list_attachments(
     session_id: str,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> AttachmentListResponse:
     """Return every attachment ever uploaded to ``session_id``.
 
@@ -663,7 +695,7 @@ async def upload_attachment(
     session_id: str,
     file: UploadFile,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> AttachmentItem:
     """Stream-write *file* into the session's attachment dir and persist a row.
 
@@ -911,7 +943,7 @@ async def add_kb_attachments(
     session_id: str,
     body: AddKbAttachmentsRequest,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> AttachmentListResponse:
     """Attach one or more KB documents to the session.
 
@@ -1013,7 +1045,7 @@ async def delete_attachment(
     session_id: str,
     attachment_id: str,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> Response:
     """Remove a session attachment.
 
@@ -1087,7 +1119,7 @@ class ArtifactListResponse(BaseModel):
 async def list_artifacts(
     session_id: str,
     db: AsyncSession = Depends(get_async_session),
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> ArtifactListResponse:
     """Return the files the agent delivered for ``session_id``.
 

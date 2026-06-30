@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.api.deps import _secret_store, get_settings_service, require_current_user_id
+from valuz_agent.api.deps import _secret_store, get_settings_service, get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.providers.datastore import ProviderDatastore
@@ -65,18 +65,20 @@ class PreferencesPatchPayload(BaseModel):
     font_size: str | None = Field(default=None)
 
 
-async def _read_preferences(db: AsyncSession) -> PreferencesResponse:
+async def _read_preferences(db: AsyncSession, user_id: str) -> PreferencesResponse:
     return PreferencesResponse(
-        default_timezone=await get_default_timezone(db),
-        default_locale=await get_default_locale(db),
+        default_timezone=await get_default_timezone(db, user_id=user_id),
+        default_locale=await get_default_locale(db, user_id=user_id),
         detected_timezone=detect_system_timezone(),
-        theme=await get_theme(db),
-        font_size=await get_font_size(db),
+        theme=await get_theme(db, user_id=user_id),
+        font_size=await get_font_size(db, user_id=user_id),
     )
 
 
 @router.get("/preferences")
-async def get_preferences() -> PreferencesResponse:
+async def get_preferences(
+    user_id: str = Depends(get_current_user_id),
+) -> PreferencesResponse:
     """Return user-level preferences that drive schedule + UI behavior.
 
     ``detected_timezone`` is a UX hint, not a contract — the frontend
@@ -84,23 +86,26 @@ async def get_preferences() -> PreferencesResponse:
     first-run.
     """
     async with async_unit_of_work(commit=False) as db:
-        return await _read_preferences(db)
+        return await _read_preferences(db, user_id)
 
 
 @router.patch("/preferences")
-async def patch_preferences(payload: PreferencesPatchPayload) -> PreferencesResponse:
+async def patch_preferences(
+    payload: PreferencesPatchPayload,
+    user_id: str = Depends(get_current_user_id),
+) -> PreferencesResponse:
     """Update user preferences. Only sent keys are updated."""
     try:
         async with async_unit_of_work() as db:
             if payload.default_timezone is not None:
-                await set_default_timezone(db, payload.default_timezone)
+                await set_default_timezone(db, payload.default_timezone, user_id=user_id)
             if payload.default_locale is not None:
-                await set_default_locale(db, payload.default_locale)
+                await set_default_locale(db, payload.default_locale, user_id=user_id)
             if payload.theme is not None:
-                await set_theme(db, payload.theme)
+                await set_theme(db, payload.theme, user_id=user_id)
             if payload.font_size is not None:
-                await set_font_size(db, payload.font_size)
-            return await _read_preferences(db)
+                await set_font_size(db, payload.font_size, user_id=user_id)
+            return await _read_preferences(db, user_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -134,12 +139,12 @@ class ModelDefaultsPatchPayload(BaseModel):
     default_effort: str | None = None
 
 
-async def _read_model_defaults(db: AsyncSession) -> ModelDefaultsResponse:
+async def _read_model_defaults(db: AsyncSession, user_id: str) -> ModelDefaultsResponse:
     return ModelDefaultsResponse(
-        default_runtime=await get_default_runtime(db),
-        default_provider_id=await get_default_provider_id(db),
-        default_model=await get_default_model(db),
-        default_effort=await get_default_effort(db),
+        default_runtime=await get_default_runtime(db, user_id=user_id),
+        default_provider_id=await get_default_provider_id(db, user_id=user_id),
+        default_model=await get_default_model(db, user_id=user_id),
+        default_effort=await get_default_effort(db, user_id=user_id),
     )
 
 
@@ -170,26 +175,28 @@ async def _mirror_to_default_assistant(
 
 
 async def _finish_model_defaults(user_id: str, db: AsyncSession) -> ModelDefaultsResponse:
-    defaults = await _read_model_defaults(db)
+    defaults = await _read_model_defaults(db, user_id)
     await _mirror_to_default_assistant(user_id, db, defaults)
     return defaults
 
 
 @router.get("/model-defaults")
-async def get_model_defaults() -> ModelDefaultsResponse:
+async def get_model_defaults(
+    user_id: str = Depends(get_current_user_id),
+) -> ModelDefaultsResponse:
     """Return the global model-default tuple that drives quick-chat and
     scheduled tasks. The four fields together pin one specific
     (runtime, provider, model, effort) combination — the frontend
     "Default" card writes back any subset on change.
     """
     async with async_unit_of_work(commit=False) as db:
-        return await _read_model_defaults(db)
+        return await _read_model_defaults(db, user_id)
 
 
 @router.patch("/model-defaults")
 async def patch_model_defaults(
     payload: ModelDefaultsPatchPayload,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> ModelDefaultsResponse:
     """Update the global model-default tuple.
 
@@ -207,15 +214,15 @@ async def patch_model_defaults(
     try:
         async with async_unit_of_work() as db:
             if payload.default_runtime is not None:
-                await set_default_runtime(db, payload.default_runtime)
+                await set_default_runtime(db, payload.default_runtime, user_id=user_id)
 
             if payload.default_provider_id is not None:
                 if payload.default_provider_id == "":
                     # Clear: wipe is_default on all rows + clear app-setting keys.
                     ds = ProviderDatastore(db)
                     await ds.clear_default(user_id)
-                    await set_default_provider_id(db, None)
-                    await set_default_model(db, None)
+                    await set_default_provider_id(db, None, user_id=user_id)
+                    await set_default_model(db, None, user_id=user_id)
                 elif any(
                     it.id == payload.default_provider_id for it in await ext.llm_provider.list()
                 ):
@@ -228,9 +235,13 @@ async def patch_model_defaults(
                     # any builtin row's ``is_default`` so model_resolver doesn't see
                     # two defaults.
                     await ProviderDatastore(db).clear_default(user_id)
-                    await set_default_provider_id(db, payload.default_provider_id)
+                    await set_default_provider_id(
+                        db, payload.default_provider_id, user_id=user_id
+                    )
                     if payload.default_model is not None:
-                        await set_default_model(db, payload.default_model or None)
+                        await set_default_model(
+                            db, payload.default_model or None, user_id=user_id
+                        )
                 else:
                     # Set: delegate to ProviderService so is_default +
                     # default_model row + app-setting keys all update together.
@@ -251,13 +262,13 @@ async def patch_model_defaults(
                 # Provider not being changed — still honour a standalone
                 # default_model update (e.g. user picks a different model
                 # on the same provider).
-                await set_default_model(db, payload.default_model or None)
+                await set_default_model(db, payload.default_model or None, user_id=user_id)
 
             if payload.default_effort is not None:
                 # Empty string is treated as "reset to FALLBACK_EFFORT"
                 # by ``set_default_effort``; concrete values are
                 # validated against EFFORT_VALUES.
-                await set_default_effort(db, payload.default_effort or None)
+                await set_default_effort(db, payload.default_effort or None, user_id=user_id)
             return await _finish_model_defaults(user_id, db)
     except SystemProviderImmutable as exc:
         raise HTTPException(
@@ -280,7 +291,7 @@ async def patch_model_defaults(
 
 @router.get("/model-options")
 async def get_model_options(
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> ModelOptionsResponse:
     """Return the grouped, fully-resolved model options for the default-model
     pickers (onboarding's ConnectStep + Settings default-config card).
@@ -296,7 +307,7 @@ async def get_model_options(
     client fills availability in from its own ``checkCliLogin`` probe.
     """
     async with async_unit_of_work(commit=False) as db:
-        defaults = await _read_model_defaults(db)
+        defaults = await _read_model_defaults(db, user_id)
         svc = ProviderService(
             datastore=ProviderDatastore(db),
             secret_store=_secret_store(),

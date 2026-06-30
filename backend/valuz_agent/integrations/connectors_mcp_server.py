@@ -20,8 +20,12 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.modules.connectors.models import AuthType, TransportType
+from valuz_agent.api.deps import get_current_user_id
+from valuz_agent.infra.auth_context import (
+    reset_current_user_id,
+    set_current_user_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +128,7 @@ async def list_connected_mcp() -> str:
             svc = _make_connector_service(db)
             connectors = [
                 {"id": v.id, "slug": v.slug, "display_name": v.display_name, "status": v.status}
-                for v in await svc.list_connectors(require_current_user_id())
+                for v in await svc.list_connectors(get_current_user_id())
                 if v.status == "connected"
             ]
         return json.dumps({"ok": True, "connectors": connectors}, ensure_ascii=False)
@@ -169,7 +173,9 @@ async def list_recommended_mcp() -> str:
 
         async with async_unit_of_work(commit=False) as db:
             svc = _make_connector_service(db)
-            installed_slugs = {v.slug for v in await svc.list_connectors(require_current_user_id())}
+            installed_slugs = {
+                v.slug for v in await svc.list_connectors(get_current_user_id())
+            }
 
         items = [
             {
@@ -304,7 +310,7 @@ async def _invoke(
         # arrives via ``Depends`` — calling it directly here skips DI, so we
         # resolve the owner (published by AuthMiddleware for this internal
         # request) and pass it through ourselves.
-        user_id = require_current_user_id()
+        user_id = get_current_user_id()
         entry = next((e for e in CONNECTOR_DIRECTORY if e["slug"] == slug), None) if slug else None
 
         if entry:
@@ -537,6 +543,20 @@ def connectors_mcp_session_manager_run() -> Any:
     return _mcp.session_manager.run()
 
 
+async def _resolve_session_owner(session_id: str) -> str | None:
+    """Resolve the session owner from a raw session token (no owner required)."""
+    from valuz_agent.adapters import kernel_client
+
+    try:
+        sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
+    except Exception:  # noqa: BLE001 — owner resolution is best effort
+        logger.warning(
+            "connectors MCP: failed to resolve owner for session %s", session_id, exc_info=True
+        )
+        return None
+    return sessions[0].user_id if sessions else None
+
+
 def build_connectors_mcp_asgi() -> Any:
     from starlette.responses import PlainTextResponse
 
@@ -559,11 +579,24 @@ def build_connectors_mcp_asgi() -> Any:
             return
 
         session_id = headers.get("x-valuz-session-id") or ""
+        if not session_id:
+            response = PlainTextResponse("Missing X-Valuz-Session-Id header", status_code=400)
+            await response(scope, receive, send)
+            return
+
+        owner_id = await _resolve_session_owner(session_id)
+        if not owner_id:
+            response = PlainTextResponse("Unknown session owner", status_code=401)
+            await response(scope, receive, send)
+            return
+
+        owner_token = set_current_user_id(owner_id)
         ctx_token = _session_var.set(session_id)
         try:
             await inner(scope, receive, send)
         finally:
             _session_var.reset(ctx_token)
+            reset_current_user_id(owner_token)
 
     return _app
 

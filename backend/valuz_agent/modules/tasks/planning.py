@@ -22,7 +22,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.tasks.datastore import (
@@ -49,10 +49,14 @@ async def emit_plan_update(
     plan: TaskPlan,
     actor: str,
     session_id: str | None,
+    user_id: str | None = None,
 ) -> None:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Append a ``task_plan_update`` snapshot event (frontend Todo panel)."""
     await event_ds.append_event(
-        require_current_user_id(),
+        user_id,
         project_id=project_id,
         task_id=task_id,
         type="task_plan_update",
@@ -92,6 +96,7 @@ async def plan_task(
     project_id: str,
     lead_session_id: str,
     subtasks: list[dict[str, Any]],
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Lay down the structured subtask plan (DAG) before any dispatch.
 
@@ -106,7 +111,7 @@ async def plan_task(
     async with async_unit_of_work() as db:
         task_ds = TaskDatastore(db)
         event_ds = TaskEventDatastore(db)
-        task_row = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+        task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
         if task_row is None:
             return {"error": f"task {task_id!r} not found"}
         existing = TaskPlan.from_dict(task_row.plan)
@@ -123,7 +128,7 @@ async def plan_task(
         task_row.plan_version = (task_row.plan_version or 0) + 1
         await task_ds.update_task(task_row)
         await event_ds.append_event(
-            require_current_user_id(),
+            user_id,
             project_id=project_id,
             task_id=task_id,
             type="task_planned",
@@ -147,7 +152,7 @@ async def plan_task(
         }
 
 
-async def get_plan(*, task_id: str, project_id: str) -> dict[str, Any]:
+async def get_plan(*, task_id: str, project_id: str, user_id: str | None = None) -> dict[str, Any]:
     """Return the plan snapshot + ready keys + status counts (read-only).
 
     Includes ``current_version`` so the caller knows what to pass as
@@ -155,7 +160,7 @@ async def get_plan(*, task_id: str, project_id: str) -> dict[str, Any]:
     """
     async with async_unit_of_work(commit=False) as db:
         task_ds = TaskDatastore(db)
-        task_row = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+        task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
         if task_row is None:
             return {"error": f"task {task_id!r} not found"}
         plan = TaskPlan.from_dict(task_row.plan)
@@ -176,6 +181,7 @@ async def modify_plan(
     add: list[dict[str, Any]] | None = None,
     update: list[dict[str, Any]] | None = None,
     expected_version: int | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Mutate the plan: add nodes / patch nodes (by key).
 
@@ -197,7 +203,7 @@ async def modify_plan(
     async with async_unit_of_work() as db:
         task_ds = TaskDatastore(db)
         event_ds = TaskEventDatastore(db)
-        task_row = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+        task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
         if task_row is None:
             return {"error": f"task {task_id!r} not found"}
         current_version = task_row.plan_version or 0
@@ -225,7 +231,7 @@ async def modify_plan(
         task_row.plan_version = current_version + 1
         await task_ds.update_task(task_row)
         await event_ds.append_event(
-            require_current_user_id(),
+            user_id,
             project_id=project_id,
             task_id=task_id,
             type="plan_revised",
@@ -262,6 +268,7 @@ async def review_subtask(
     subtask_key: str | None = None,
     session_id: str | None = None,
     feedback: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Lead quality gate on a subtask: approve (→done) or rework (→re-run).
 
@@ -277,7 +284,7 @@ async def review_subtask(
     async with async_unit_of_work(commit=False) as db:
         task_ds = TaskDatastore(db)
         run_ds = TaskSessionDatastore(db)
-        task_row = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+        task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
         if task_row is None:
             return {"error": f"task {task_id!r} not found"}
         plan = TaskPlan.from_dict(task_row.plan)
@@ -298,7 +305,7 @@ async def review_subtask(
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
             task_row = await task_ds.get_task_by_project(
-                require_current_user_id(), project_id, task_id
+                user_id, project_id, task_id
             )
             plan = TaskPlan.from_dict(task_row.plan)
             node = plan.get(key)
@@ -310,7 +317,7 @@ async def review_subtask(
                     ended_at=now_ms(),
                 )
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id=project_id,
                 task_id=task_id,
                 type="subtask_reviewed",
@@ -319,7 +326,7 @@ async def review_subtask(
                 payload={"subtask_key": key, "decision": "approve", "feedback": feedback or ""},
             )
             await event_ds.append_event(
-                require_current_user_id(),
+                user_id,
                 project_id=project_id,
                 task_id=task_id,
                 type="subtask_completed",
@@ -363,7 +370,7 @@ async def review_subtask(
     async with async_unit_of_work() as db:
         task_ds = TaskDatastore(db)
         event_ds = TaskEventDatastore(db)
-        task_row = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+        task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
         plan = TaskPlan.from_dict(task_row.plan)
         plan.update_node(
             key,
@@ -371,7 +378,7 @@ async def review_subtask(
             review_feedback=feedback,
         )
         await event_ds.append_event(
-            require_current_user_id(),
+            user_id,
             project_id=project_id,
             task_id=task_id,
             type="subtask_reviewed",
@@ -453,12 +460,13 @@ async def mark_node_dispatched(
     subtask_key: str,
     agent: str,
     session_id: str,
+    user_id: str | None = None,
 ) -> None:
     """Flip a plan node to in_progress on dispatch (attempts++, link run)."""
     async with async_unit_of_work() as db:
         task_ds = TaskDatastore(db)
         event_ds = TaskEventDatastore(db)
-        task_row = await task_ds.get_task_by_project(require_current_user_id(), project_id, task_id)
+        task_row = await task_ds.get_task_by_project(get_current_user_id(), project_id, task_id)
         if task_row is None:
             return
         plan = TaskPlan.from_dict(task_row.plan)
@@ -484,7 +492,7 @@ async def mark_node_dispatched(
         )
 
 
-async def mark_in_review(*, task_id: str, project_id: str, member_session_id: str) -> None:
+async def mark_in_review(*, task_id: str, project_id: str, member_session_id: str, user_id: str | None = None) -> None:
     """Lead-side: flip the member's plan node to in_review on member_done.
 
     Runs inside the lead's actor loop (single actor, D7) so plan writes stay
@@ -501,7 +509,7 @@ async def mark_in_review(*, task_id: str, project_id: str, member_session_id: st
             if not key:
                 return
             task_row = await task_ds.get_task_by_project(
-                require_current_user_id(), project_id, task_id
+                user_id, project_id, task_id
             )
             if task_row is None:
                 return

@@ -23,7 +23,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from valuz_agent.api.deps import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.i18n import t
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
@@ -74,7 +74,10 @@ def _resolve_project_name() -> str:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_deploy_target(db) -> tuple[str, str, str]:  # type: ignore[no-untyped-def]
+async def _resolve_deploy_target(
+    db,
+    user_id: str,
+) -> tuple[str, str, str]:  # type: ignore[no-untyped-def]
     """Return ``(runtime, provider_id, model)`` to assign to onboarding's deployed agents.
 
     Resolution order (see endpoint comment for rationale):
@@ -92,21 +95,19 @@ async def _resolve_deploy_target(db) -> tuple[str, str, str]:  # type: ignore[no
          runtime/model that wouldn't match a non-Claude setup.
       3. 422 when no provider is configured at all.
     """
-    default_provider_id = await get_default_provider_id(db)
-    default_model = await get_default_model(db)
+    default_provider_id = await get_default_provider_id(db, user_id=user_id)
+    default_model = await get_default_model(db, user_id=user_id)
     if default_provider_id and default_model:
         # ConnectStep / Settings → Models always persist the runtime alongside
         # the provider+model, so the user's chosen runtime is authoritative
         # here. Without this the team's agents silently landed on claude_agent.
-        runtime = await get_default_runtime(db)
+        runtime = await get_default_runtime(db, user_id=user_id)
         return runtime, default_provider_id, default_model
 
     # Fallback to the first enabled provider. Order is by created_at so we
     # pick the user's earliest deliberate choice, not whatever the seeder
     # happened to insert last.
-    from valuz_agent.infra.auth_context import require_current_user_id as _require_uid
-
-    rows = await ProviderDatastore(db).list_providers(_require_uid())
+    rows = await ProviderDatastore(db).list_providers(user_id)
     enabled = [r for r in rows if r.enabled]
     if not enabled:
         raise HTTPException(
@@ -246,10 +247,10 @@ async def _ensure_valuz_helper(user_id: str, db) -> str:  # type: ignore[no-unty
     # is snapshotted, so the model resolver fills in the user's default (or the
     # global default) at session time and the user can set the model later.
     try:
-        runtime, provider_id, model = await _resolve_deploy_target(db)
+            runtime, provider_id, model = await _resolve_deploy_target(db, user_id)
     except HTTPException:
         runtime, provider_id, model = "claude_agent", None, None
-    effort = await get_default_effort(db)
+    effort = await get_default_effort(db, user_id=user_id)
     payload: dict[str, Any] = {
         "slug": _VALUZ_HELPER_SLUG,
         "name": t("onboarding.valuzHelper.name"),
@@ -299,7 +300,7 @@ class AssistantResponse(BaseModel):
 @router.post("/example-project", response_model=ExampleProjectResponse)
 async def create_example_project(
     body: ExampleProjectRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> ExampleProjectResponse:
     """Create (or reuse) the onboarding example project and its team's agents.
 
@@ -373,8 +374,10 @@ async def create_example_project(
             #      from that provider — picks whatever the user actually wired up
             #   3. 422 if no provider is configured at all (the TeamStep guard
             #      catches this first; this is the authoritative fallback)
-            default_runtime, default_provider_id, default_model = await _resolve_deploy_target(db)
-            effort = await get_default_effort(db)
+            default_runtime, default_provider_id, default_model = await _resolve_deploy_target(
+                db, user_id
+            )
+            effort = await get_default_effort(db, user_id=user_id)
             logger.info(
                 "onboarding: importing team pack %r with runtime=%r model=%r provider=%r",
                 body.team_id,
@@ -431,7 +434,7 @@ async def create_example_project(
 
 @router.post("/assistant", response_model=AssistantResponse)
 async def create_assistant(
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
 ) -> AssistantResponse:
     """Create (or reuse) only the Valuz Helper in the user's library.
 

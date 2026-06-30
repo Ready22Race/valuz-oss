@@ -48,6 +48,11 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from valuz_agent.api.deps import get_current_user_id
+from valuz_agent.infra.auth_context import (
+    reset_current_user_id,
+    set_current_user_id,
+)
 logger = logging.getLogger(__name__)
 
 # Bound for the duration of one HTTP request by the ASGI wrapper in
@@ -75,6 +80,18 @@ async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
         return None
     project_id = ((session.metadata or {}).get("valuz", {}) or {}).get("project_id")
     return str(project_id) if project_id else None
+
+
+async def _resolve_session_owner(session_id: str) -> str | None:
+    """Resolve the session owner from a raw session token (no owner required)."""
+    from valuz_agent.adapters import kernel_client
+
+    try:
+        sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
+    except Exception:  # noqa: BLE001 — owner resolution is best effort
+        logger.warning("docs MCP: failed to resolve owner for session %s", session_id, exc_info=True)
+        return None
+    return sessions[0].user_id if sessions else None
 
 
 def _build_doc_service(db: Any) -> Any:  # type: ignore[no-untyped-def]
@@ -117,7 +134,11 @@ async def doc_search(
     folder_ids: list[str] | None = None,
     document_ids: list[str] | None = None,
     top_k: int = 5,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Search the project's bound documents for ``query`` (keyword, ranked).
 
     Returns up to ``top_k`` hits, each ``{document_id, filename, score,
@@ -128,13 +149,11 @@ async def doc_search(
     intersected with the project's bindings server-side so the agent
     cannot reach docs outside its scope by guessing ids.
     """
-    from valuz_agent.infra.auth_context import require_current_user_id
     from valuz_agent.infra.db import async_unit_of_work
 
     # MCP request boundary: the ASGI wrapper has published the calling session's
     # owner into the auth context. Resolve it once here and thread it explicitly
     # into the project lookup + the owner-scoped search.
-    user_id = require_current_user_id()
     session_id = _current_session_id()
     project_id = await _resolve_project_id(user_id, session_id)
     if project_id is None:
@@ -163,7 +182,7 @@ async def doc_search(
 
 
 @_mcp.tool()
-async def list_doc_scope(folder_id: str | None = None) -> dict[str, Any]:
+async def list_doc_scope(folder_id: str | None = None, user_id: str | None = None) -> dict[str, Any]:
     """Return the document tree bound to this project.
 
     With no argument: a flat-ish view of every KB / folder / document
@@ -175,11 +194,9 @@ async def list_doc_scope(folder_id: str | None = None) -> dict[str, Any]:
     the agent whether the user explicitly bound that node vs inheriting
     via a parent.
     """
-    from valuz_agent.infra.auth_context import require_current_user_id
     from valuz_agent.infra.db import async_unit_of_work
 
     del folder_id  # full-tree view is enough today; folder drilldown is a TODO.
-    user_id = require_current_user_id()
     session_id = _current_session_id()
     project_id = await _resolve_project_id(user_id, session_id)
     if project_id is None:
@@ -282,12 +299,19 @@ def build_docs_mcp_asgi() -> Any:
             response = PlainTextResponse("Missing X-Valuz-Session-Id header", status_code=400)
             await response(scope, receive, send)
             return
+        owner_id = await _resolve_session_owner(session_id)
+        if not owner_id:
+            response = PlainTextResponse("Unknown session owner", status_code=401)
+            await response(scope, receive, send)
+            return
 
+        owner_token = set_current_user_id(owner_id)
         ctx_token = _session_var.set(session_id)
         try:
             await inner(scope, receive, send)
         finally:
             _session_var.reset(ctx_token)
+            reset_current_user_id(owner_token)
 
     return _app
 

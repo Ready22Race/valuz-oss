@@ -13,7 +13,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-from valuz_agent.infra.auth_context import require_current_user_id
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.infra.database import Base
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
@@ -61,7 +61,7 @@ async def test_automation_taken_as_is(bind_db):
 async def test_automation_invoked_by_agent_also_links_origin_task(bind_db):
     """An agent (in a task) that runs an automation → the spawned task keeps
     type=automation but ALSO records the originating task so it nests under it."""
-    uid = require_current_user_id()
+    uid = get_current_user_id()
     async with async_unit_of_work() as db:
         db.add(
             TaskSessionRow(
@@ -98,7 +98,7 @@ async def test_conversation_session_is_chat(bind_db):
 
 @pytest.mark.asyncio
 async def test_task_session_is_agent_with_parent_and_agent(bind_db):
-    uid = require_current_user_id()
+    uid = get_current_user_id()
     async with async_unit_of_work() as db:
         db.add(
             TaskSessionRow(

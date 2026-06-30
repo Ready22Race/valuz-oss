@@ -35,7 +35,6 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
-from valuz_agent.infra.auth_context import require_current_user_id
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
@@ -44,7 +43,7 @@ from valuz_agent.infra.lifecycle import is_draining
 logger = logging.getLogger(__name__)
 
 
-async def _restamp_always_on_mcp(session_id: str) -> None:
+async def _restamp_always_on_mcp(session_id: str, user_id: str | None = None) -> None:
     """Refresh the always-on in-process MCP token before driving a turn.
 
     A session re-driven after a backend restart — task **resume / recovery**,
@@ -72,7 +71,10 @@ async def _restamp_always_on_mcp(session_id: str) -> None:
             refresh_always_on_mcp_for_session,
         )
 
-        await refresh_always_on_mcp_for_session(session_id)
+        if user_id is None:
+            return
+
+        await refresh_always_on_mcp_for_session(session_id, user_id)
     except Exception:  # noqa: BLE001 — never block a turn on a re-stamp failure
         logger.warning("always-on MCP re-stamp failed for session %s", session_id, exc_info=True)
 
@@ -110,6 +112,15 @@ def _resolve_turn_status(session: Any) -> str:
     return status
 
 
+def _is_error_turn(message: Any, session: Any) -> bool:
+    """True when the runtime returned normally but the turn itself failed."""
+    if str(getattr(message, "status", "") or "").lower() in {"errored", "failed"}:
+        return True
+    sr = getattr(session, "stop_reason", None)
+    sr_type = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
+    return isinstance(sr_type, str) and "error" in sr_type
+
+
 async def run_session_to_idle(
     session_id: str,
     content: str,
@@ -117,7 +128,10 @@ async def run_session_to_idle(
     on_message: Any | None = None,
     *,
     queued_attachments: list[dict[str, Any]] | None = None,
-) -> str:
+    user_id: str | None = None) -> str:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Drive one agent turn to completion and return the final session status.
 
     Equivalent to _run_agent_background but awaitable — callers get back the
@@ -153,7 +167,6 @@ async def run_session_to_idle(
     turn_error: BaseException | None = None
 
     consumed_attachment_ids: list[str] = []
-
     try:
         # Dispatch sessions have no pending attachments (they are built
         # fresh by build_member_session), so the pending attachment block
@@ -186,17 +199,17 @@ async def run_session_to_idle(
                     for a in queued_attachments
                 ]
                 consumed_attachment_ids = []
-                attachment_specs = _attachment_specs(pending_attachments, require_current_user_id())
+                attachment_specs = _attachment_specs(pending_attachments, user_id)
             else:
-                pending_attachments = await _load_pending_attachments(session_id)
+                pending_attachments = await _load_pending_attachments(session_id, user_id)
                 consumed_attachment_ids = [row.id for row in pending_attachments]
-                attachment_specs = _attachment_specs(pending_attachments, require_current_user_id())
+                attachment_specs = _attachment_specs(pending_attachments, user_id)
         except Exception:  # noqa: BLE001
             pending_attachments = []
             consumed_attachment_ids = []
             attachment_specs = ()
 
-        loaded_session = await kernel_client.get_session(require_current_user_id(), session_id)
+        loaded_session = await kernel_client.get_session(user_id, session_id)
         # Kernel ``run_turn`` persists ``session.status="running"`` to the DB
         # before handing off to the runtime (agent-harness 3e742fc), so the
         # detail fetch returns ``running`` and the frontend live view engages
@@ -218,11 +231,11 @@ async def run_session_to_idle(
         # turn — see ``_restamp_always_on_mcp``. Load-bearing for task lead /
         # member runs re-driven after a backend restart, which otherwise lose
         # the whole ``harness`` toolset to a 403.
-        await _restamp_always_on_mcp(session_id)
+        await _restamp_always_on_mcp(session_id, user_id)
 
         try:
             message = await kernel_client.run_turn(
-                require_current_user_id(),
+                user_id,
                 session_id,
                 content,
                 attachments=[
@@ -231,8 +244,10 @@ async def run_session_to_idle(
                 ],
                 additional_context=additional_context,
             )
-            after_run = await kernel_client.get_session(require_current_user_id(), session_id)
+            after_run = await kernel_client.get_session(user_id, session_id)
             final_status = _resolve_turn_status(after_run)
+            if _is_error_turn(message, after_run):
+                encountered_error = True
             if on_message is not None:
                 await on_message(message, after_run)
         except Exception as exc:  # noqa: BLE001
@@ -246,7 +261,7 @@ async def run_session_to_idle(
             turn_error = exc
             try:
                 await kernel_client.emit_live_event(
-                    require_current_user_id(),
+                    user_id,
                     session_id,
                     "session_error",
                     {
@@ -326,7 +341,7 @@ async def collect_manifest(
     run_dir: Path,
     status: str,
     since_epoch: float = 0.0,
-) -> dict[str, Any]:
+    user_id: str | None = None) -> dict[str, Any]:
     """Build a SubtaskResult manifest after a member session completes.
 
     summary    — text of the last assistant message (best-effort)
@@ -342,7 +357,7 @@ async def collect_manifest(
     # Extract summary from the last assistant event
     summary = ""
     try:
-        events = await kernel_client.get_events(require_current_user_id(), session_id, limit=200)
+        events = await kernel_client.get_events(user_id, session_id, limit=200)
         # Walk backwards: find last assistant_message text
         for event in reversed(events):
             payload = event.data if hasattr(event, "data") else {}
@@ -448,7 +463,7 @@ class ActorRunner:
         """Bind the host handle that supplies the loop seams + per-turn run."""
         self._host = host
 
-    async def _run_turn_with_sink(self, session_id: str, content: str) -> str:
+    async def _run_turn_with_sink(self, session_id: str, content: str, user_id: str | None = None) -> str:
         """Run ONE turn on a persistent session and return its final status.
 
         Unlike :func:`run_session_to_idle`, this does NOT finalize or clean up
@@ -459,12 +474,12 @@ class ActorRunner:
         # is the path a recovered / resumed lead+member loop runs on after a
         # backend restart, where the persisted ``harness`` token is stale and
         # would otherwise 403 (hiding dispatch / review_subtask / finish_task).
-        await _restamp_always_on_mcp(session_id)
+        await _restamp_always_on_mcp(session_id, user_id)
         try:
             # Kernel ``run_turn`` persists ``status="running"`` to the DB
             # itself (agent-harness 3e742fc) — no host pre-persist needed.
-            await kernel_client.run_turn(require_current_user_id(), session_id, content)
-            loaded = await kernel_client.get_session(require_current_user_id(), session_id)
+            await kernel_client.run_turn(user_id, session_id, content)
+            loaded = await kernel_client.get_session(user_id, session_id)
             return _resolve_turn_status(loaded)
         except Exception as exc:  # noqa: BLE001
             logger.warning("actor turn failed for session %s: %s", session_id, exc)

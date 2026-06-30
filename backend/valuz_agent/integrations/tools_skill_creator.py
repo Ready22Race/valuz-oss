@@ -86,7 +86,10 @@ SUBMIT_SKILL_PARAMETERS: dict[str, object] = {
 }
 
 
-async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -> ToolResult:
+async def _submit_skill_handler(args: dict[str, object], context: ExecContext, user_id: str | None = None) -> ToolResult:
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     """Acknowledge the submission, but only if the slug is actually staged.
 
     Validates that the agent wrote ``SKILL.md`` to
@@ -132,10 +135,9 @@ async def _submit_skill_handler(args: dict[str, object], context: ExecContext) -
             is_error=True,
         )
 
-    from valuz_agent.infra.auth_context import require_current_user_id
+    from valuz_agent.api.deps import get_current_user_id
     from valuz_agent.modules.skills.staging import staging_dir_for_session
 
-    user_id = require_current_user_id()
     staging_base = await staging_dir_for_session(user_id, session_id)
     expected_dir = staging_base / str(slug)
     project_root = str(staging_base.parent)
