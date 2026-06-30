@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Local Postgres (podman) helper for the DataService "remote sync" backend.
+# Local Postgres helper for the DataService "remote sync" backend.
+#
+# Uses whichever container engine is available — prefers podman, falls back to
+# docker (override with VALUZ_CONTAINER_ENGINE=podman|docker).
 #
 # This ONLY brings up a Postgres — it does not start a data service, a sandbox,
-# or the app. Everything else (turn on remote sync, point at this PG, sandbox or
-# not) is driven from the OSS settings page: Settings → Data Service (revealed by
-# tapping About 9×). This decouples infra from behaviour.
+# or the app. Everything else (turn on the data service, point at this PG,
+# sandbox or not) is driven from the OSS settings page: Settings → Data Service.
+# This decouples infra from behaviour.
 #
 # Usage:
 #   scripts/pg.sh up      # start Postgres, print the DSN to paste into settings
@@ -27,6 +30,23 @@ info() { printf "${CYAN}[pg]${NC} %s\n" "$*"; }
 ok()   { printf "${GREEN}[pg]${NC} %s\n" "$*"; }
 err()  { printf "${RED}[pg]${NC} %s\n" "$*" >&2; }
 
+# Container engine: prefer podman, fall back to docker. Override via
+# VALUZ_CONTAINER_ENGINE.
+ENGINE="${VALUZ_CONTAINER_ENGINE:-}"
+if [[ -z "$ENGINE" ]]; then
+  if command -v podman >/dev/null 2>&1; then
+    ENGINE=podman
+  elif command -v docker >/dev/null 2>&1; then
+    ENGINE=docker
+  else
+    err "no container engine found — install podman or docker (or set VALUZ_CONTAINER_ENGINE)"
+    exit 1
+  fi
+elif ! command -v "$ENGINE" >/dev/null 2>&1; then
+  err "VALUZ_CONTAINER_ENGINE=$ENGINE not found on PATH"
+  exit 1
+fi
+
 print_dsn() {
   echo ""
   ok "Postgres ready on :$PG_PORT — paste into Settings → Data Service:"
@@ -38,28 +58,29 @@ print_dsn() {
 }
 
 up() {
-  info "ensuring Postgres ($PG_CONTAINER, :$PG_PORT)…"
-  if podman ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
+  info "ensuring Postgres ($PG_CONTAINER, :$PG_PORT) via $ENGINE…"
+  if "$ENGINE" ps --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
     ok "container already running"
-  elif podman ps -a --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
-    podman start "$PG_CONTAINER" >/dev/null
+  elif "$ENGINE" ps -a --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
+    "$ENGINE" start "$PG_CONTAINER" >/dev/null
     ok "started existing container"
   else
-    podman machine start >/dev/null 2>&1 || true
-    podman run -d --name "$PG_CONTAINER" \
+    # podman on macOS needs its VM running; docker has no equivalent (no-op).
+    [[ "$ENGINE" == "podman" ]] && podman machine start >/dev/null 2>&1 || true
+    "$ENGINE" run -d --name "$PG_CONTAINER" \
       -e POSTGRES_DB="$PG_DB" -e POSTGRES_USER="$PG_SUPER" -e POSTGRES_PASSWORD="$PG_SUPER_PW" \
       -p "$PG_PORT:5432" "$PG_IMAGE" >/dev/null
     ok "created container ($PG_IMAGE)"
   fi
   for _ in $(seq 1 30); do
-    podman exec "$PG_CONTAINER" pg_isready -U "$PG_SUPER" -d "$PG_DB" >/dev/null 2>&1 && break
+    "$ENGINE" exec "$PG_CONTAINER" pg_isready -U "$PG_SUPER" -d "$PG_DB" >/dev/null 2>&1 && break
     sleep 1
   done
-  podman exec "$PG_CONTAINER" pg_isready -U "$PG_SUPER" -d "$PG_DB" >/dev/null 2>&1 \
+  "$ENGINE" exec "$PG_CONTAINER" pg_isready -U "$PG_SUPER" -d "$PG_DB" >/dev/null 2>&1 \
     || { err "Postgres not ready"; exit 1; }
   # Non-owner login role so the remote data service enforces RLS (the owner role
   # bypasses it). Idempotent.
-  podman exec -i -e PGPASSWORD="$PG_SUPER_PW" "$PG_CONTAINER" \
+  "$ENGINE" exec -i -e PGPASSWORD="$PG_SUPER_PW" "$PG_CONTAINER" \
     psql -U "$PG_SUPER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null <<SQL
 DO \$\$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='$PG_APP') THEN
@@ -76,7 +97,7 @@ SQL
 case "${1:-up}" in
   up) up ;;
   dsn) print_dsn ;;
-  down) podman stop "$PG_CONTAINER" >/dev/null && ok "stopped (data preserved)" ;;
-  nuke) podman rm -f "$PG_CONTAINER" >/dev/null 2>&1 && ok "removed container + data" || ok "no container" ;;
+  down) "$ENGINE" stop "$PG_CONTAINER" >/dev/null && ok "stopped (data preserved)" ;;
+  nuke) "$ENGINE" rm -f "$PG_CONTAINER" >/dev/null 2>&1 && ok "removed container + data" || ok "no container" ;;
   *) err "usage: scripts/pg.sh {up|dsn|down|nuke}"; exit 2 ;;
 esac

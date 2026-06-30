@@ -18,7 +18,7 @@ dev: ## Start backend + frontend (foreground; Ctrl+C stops both)
 dev-sandbox: ## Like dev, but run the kernel in a Seatbelt sandbox (macOS)
 	VALUZ_SANDBOX_DRIVER=seatbelt bash scripts/dev.sh $(or $(TARGET),all)
 
-pg: ## Start local Postgres (podman) for the DataService remote-sync backend; prints the DSN to paste into Settings
+pg: ## Start local Postgres (podman or docker) for the DataService backend; prints the DSN to paste into Settings
 	bash scripts/pg.sh up
 
 pg-down: ## Stop the local Postgres container (data preserved)
