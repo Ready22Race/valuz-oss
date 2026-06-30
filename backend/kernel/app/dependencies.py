@@ -11,7 +11,6 @@ from app.config import AppConfig
 from fastapi import Header, HTTPException
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
-from src.adapters.durable_outbox import DurableOutbox
 from src.adapters.remote_store import build_remote_store
 from src.adapters.sqlalchemy_store.engine import create_engine, create_session_factory
 from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
@@ -74,8 +73,8 @@ async def init_dependencies(config: AppConfig) -> None:
     # subprocesses; see SessionOrchestrator). Safe before the orphan scan's
     # possible early return so it runs regardless of migration state.
     _orchestrator.start()
-    # Drive the write-through lifecycle uniformly — the store decides internally
-    # whether it has a backlog to drain (best-effort) or nothing to do (strict).
+    # Drive the write-through lifecycle (currently a no-op for the durable-
+    # authority store; kept for the dormant outbox-drainer path).
     if _write_through is not None:
         _write_through.start()
     # Orphan scans run against the always-present local store.
@@ -98,9 +97,7 @@ async def shutdown_dependencies() -> None:
     global _engine, _durable_engine, _session_factory, _store, _orchestrator  # noqa: PLW0603
     global _write_through  # noqa: PLW0603
     if _write_through is not None:
-        # Stop the write-through drainer (no-op in strict mode). Any backlog
-        # stays durable in the local DB and is re-pushed on next startup.
-        await _write_through.aclose()
+        await _write_through.aclose()  # stop the outbox drainer if one is running
     if _orchestrator is not None:
         # Cancel the idle sweeper and close every warm runtime — terminates all
         # live claude/codex subprocesses deterministically on shutdown.
@@ -247,19 +244,12 @@ def _wrap_durable(
     """
     if durable is None:
         return None
-    if config.kernel_store == "pg":
-        # OSS resident + own Postgres: LOCAL is authoritative (read local, seq
-        # local); durable is a best-effort mirror with outbox compensation.
-        assert _session_factory is not None  # set just above in init
-        return WriteThroughStore(
-            local,
-            durable,
-            authority="local",
-            outbox=DurableOutbox(_session_factory),
-            drain_interval_s=_env_float("VALUZ_OUTBOX_DRAIN_INTERVAL_S") or 30.0,
-        )
-    # remote (SaaS ephemeral sandbox): the DURABLE DataService is the system of
-    # record — read + seq + fail-loud write go there; local is a write buffer.
+    # ``pg`` and ``remote`` are the SAME behaviour — both are "durable is the
+    # system of record" (read + central seq + fail-loud write go to the durable;
+    # local is a best-effort write buffer). ``pg`` is just a remote whose durable
+    # backend is an in-process Postgres; ``remote`` reaches the durable over the
+    # HTTP DataService. The only difference is the transport, decided in
+    # ``_build_durable_store``.
     return WriteThroughStore(local, durable, authority="durable")
 
 

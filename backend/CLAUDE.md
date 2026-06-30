@@ -50,39 +50,36 @@ explicit `database_url` (Postgres) co-locates both instead. A one-time boot step
 `kernel.db`. Both layers run **async** SQLAlchemy on aiosqlite; WAL +
 per-connection `busy_timeout` make concurrent access safe.
 
-**Kernel store — model A (local-first + optional write-through).** The kernel
-ALWAYS binds the local `SQLAlchemyStore` on `database_url` (local-first reads +
-availability). `KERNEL_STORE` selects an OPTIONAL **durable** target every write
-is *also* mirrored to, via `WriteThroughStore` (`src/adapters/`):
+**Kernel store.** The kernel ALWAYS binds the local `SQLAlchemyStore` on
+`database_url`. `KERNEL_STORE` then selects whether a **durable** store fronts it:
 
-| `KERNEL_STORE` | Durable | Notes |
-|----------------|---------|-------|
-| `local` (default) | none | single write; zero behaviour change |
-| `pg` | in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL` | OSS "configure a Postgres"; same process, no HTTP. Schema auto-created (`_ensure_durable_schema`, checkfirst) |
-| `remote` | `RemoteStoreHttp` → trusted data service | sandbox/SaaS; holds ONLY a JWT (`VALUZ_DATA_API_*`) — never a DB DSN |
+| `KERNEL_STORE` | Durable backend (transport) |
+|----------------|------------------------------|
+| `local` (default) | none — local sqlite only, single write |
+| `pg` | in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL` (schema auto-created, `_ensure_durable_schema`) |
+| `remote` | `RemoteStoreHttp` → the HTTP DataService; the sandbox holds ONLY a JWT (`VALUZ_DATA_API_*`), never a DSN |
 
-**`WriteThroughStore` has a per-tier *authority*** (the read source + seq source);
-writes always hit BOTH stores. Each store owns its own `events` autoincrement —
-the two seqs are **independent and need not match** (`event_uid` bridges identity).
-NEVER force one store's seq onto the other's PK: the local `kernel.db` usually
-holds overlapping ids, so forcing collides and silently drops events (the bug
-that emptied remote-mode sessions). `append_event` returns the AUTHORITY's seq so
-persist→broadcast and the read cursor agree.
+**`pg` and `remote` are the SAME behaviour** — both wrap the local store in a
+`WriteThroughStore(authority="durable")`: the **durable is the system of record**
+(reads + the central event seq come from it; the durable write is **fail-loud**),
+and the local store is a best-effort write **buffer**, never the read source.
+`pg` is simply a `remote` whose durable backend is an in-process Postgres instead
+of the HTTP DataService — the difference is purely transport, decided in
+`_build_durable_store`. Each store owns its own `events` autoincrement (the seqs
+are independent; `event_uid` bridges identity) — NEVER force one store's seq onto
+the other's PK (collides with overlapping local ids and drops events).
 
-- `pg` → **`authority="local"`**: read local, seq local; the durable (Postgres)
-  is a best-effort mirror. A durable failure is queued in `durable_outbox` (local
-  DB) and re-pushed on recovery (`WriteThroughStore.drain_outbox` / `DurableOutbox`,
-  idempotent via `event_uid`/UUID PKs) — a PG outage never blocks local writes.
-- `remote` → **`authority="durable"`**: the central DataService is the system of
-  record (the SaaS sandbox is **ephemeral** — nothing may live only in
-  sandbox-local storage). Read + seq come from durable; the durable write is
-  **fail-loud**; the local store is a best-effort write **buffer**, never the read
-  source. The host reads history straight from the DataService when the sandbox
-  is gone (see the read-routing in `event_sse_adapter`).
-The data service (`kernel/app/data_service.py`, `POST /rpc/{op}` per StorePort
-method) is the durable end for `remote`; its route↔client↔StorePort contract is
-pinned by `test_data_service_contract.py`. Sandbox always keeps a local
-`kernel.db`; `remote` only *adds* the write-through.
+Because the SaaS sandbox is **ephemeral**, in `remote` mode the host reads event
+history straight from the DataService (`DataServiceReadClient`, routed in
+`event_sse_adapter._history_reader`) so a dead sandbox still serves history; live
+deltas still come from the kernel SSE when the sandbox is alive. The data service
+(`kernel/app/data_service.py`, `POST /rpc/{op}` per StorePort method) has its
+route↔client↔StorePort contract pinned by `test_data_service_contract.py`.
+
+> Note: `WriteThroughStore` still carries a dormant `authority="local"` +
+> `DurableOutbox` best-effort path (local-first read, queued durable
+> compensation). It is currently unused — no tier wires it — and is a candidate
+> for removal.
 
 ## The two boundary contracts
 
