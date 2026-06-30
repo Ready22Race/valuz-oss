@@ -167,7 +167,7 @@ async def resolve_model_provider(
         # catalog hands back a live credential, gated on its own long-lived key
         # (so this also works in background automations with no request JWT).
         # Returns None for ids it doesn't own.
-        cred = await ext.llm_provider.resolve(provider_id)
+        cred = await ext.llm_provider.resolve(provider_id, user_id=user_id)
         if cred is not None:
             if cred.api_protocol not in {
                 "anthropic",

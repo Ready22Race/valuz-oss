@@ -41,11 +41,15 @@ class _FakeCatalog:
     ) -> None:
         self._rows = rows or []
         self._creds = creds or {}
+        self.resolve_calls: list[tuple[str, str | None]] = []
 
     async def list(self) -> list[LLMChannel]:
         return list(self._rows)
 
-    async def resolve(self, provider_id: str) -> ResolvedCredential | None:
+    async def resolve(
+        self, provider_id: str, *, user_id: str | None = None
+    ) -> ResolvedCredential | None:
+        self.resolve_calls.append((provider_id, user_id))
         return self._creds.get(provider_id)
 
 
@@ -95,6 +99,7 @@ class TestResolveModelProviderViaLLMProvider:
             model_id="claude-sonnet-4-6",
             providers=_NoProviders(),  # type: ignore[arg-type]
             secrets=_UnusedSecrets(),  # type: ignore[arg-type]
+            user_id="u1",
         )
         assert mp is not None
         assert mp.base_url == "https://cloud.test/v1"
@@ -115,6 +120,7 @@ class TestResolveModelProviderViaLLMProvider:
                 model_id="m",
                 providers=_NoProviders(),  # type: ignore[arg-type]
                 secrets=_UnusedSecrets(),  # type: ignore[arg-type]
+                user_id="u1",
             )
 
     async def test_empty_api_base_becomes_none(self) -> None:
@@ -124,6 +130,7 @@ class TestResolveModelProviderViaLLMProvider:
             model_id="m",
             providers=_NoProviders(),  # type: ignore[arg-type]
             secrets=_UnusedSecrets(),  # type: ignore[arg-type]
+            user_id="u1",
         )
         assert mp is not None
         assert mp.base_url is None
@@ -134,9 +141,26 @@ class TestResolveModelProviderViaLLMProvider:
             await resolve_model_provider(
                 provider_id="unknown",
                 model_id="m",
-                providers=_NoProviders(),  # type: ignore[arg-type]
-                secrets=_UnusedSecrets(),  # type: ignore[arg-type]
-            )
+            providers=_NoProviders(),  # type: ignore[arg-type]
+            secrets=_UnusedSecrets(),  # type: ignore[arg-type]
+            user_id="u1",
+        )
+
+    async def test_passes_explicit_user_id_to_llm_provider(self) -> None:
+        catalog = _FakeCatalog(
+            creds={"valuz-channel": ResolvedCredential("https://cloud.test/v1", "abc", "anthropic")}
+        )
+        ext.llm_provider = catalog
+
+        await resolve_model_provider(
+            provider_id="valuz-channel",
+            model_id="m",
+            providers=_NoProviders(),  # type: ignore[arg-type]
+            secrets=_UnusedSecrets(),  # type: ignore[arg-type]
+            user_id="u-from-automation-row",
+        )
+
+        assert catalog.resolve_calls == [("valuz-channel", "u-from-automation-row")]
 
 
 class TestResolveRuntimeProviderViaLLMProvider:
@@ -148,6 +172,7 @@ class TestResolveRuntimeProviderViaLLMProvider:
             provider_id="valuz-channel",
             model_id="m",
             providers=_NoProviders(),  # type: ignore[arg-type]
+            user_id="u1",
         )
         assert rt == "deepagents"
 
@@ -159,6 +184,7 @@ class TestResolveRuntimeProviderViaLLMProvider:
             provider_id="valuz-channel",
             model_id="m",
             providers=_NoProviders(),  # type: ignore[arg-type]
+            user_id="u1",
         )
         assert rt == "codex"
 
@@ -169,6 +195,7 @@ class TestResolveRuntimeProviderViaLLMProvider:
             model_id="m",
             providers=_NoProviders(),  # type: ignore[arg-type]
             request_runtime_id="codex",
+            user_id="u1",
         )
         assert rt == "codex"
 
@@ -177,5 +204,6 @@ class TestResolveRuntimeProviderViaLLMProvider:
             provider_id="unknown",
             model_id="m",
             providers=_NoProviders(),  # type: ignore[arg-type]
+            user_id="u1",
         )
         assert rt == "deepagents"

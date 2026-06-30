@@ -15,7 +15,8 @@ Two methods, two lifecycles:
   enumeration hits the network once.
 * ``resolve`` — invoke path. Called once per real LLM call to turn a row id into
   a live credential. May run with no request JWT (background automations), so
-  the implementation must gate on a long-lived credential, not the user session.
+  the implementation must gate on a long-lived credential for the explicit
+  ``user_id``, not the user session.
 
 OSS binds :class:`NoopLLMProvider` by default (``list → []``,
 ``resolve → None``); the overlay replaces it at app-factory time.
@@ -54,7 +55,9 @@ class LLMProvider(Protocol):
 
     async def list(self) -> list[LLMChannel]: ...
 
-    async def resolve(self, provider_id: str) -> ResolvedCredential | None: ...
+    async def resolve(
+        self, provider_id: str, *, user_id: str | None = None
+    ) -> ResolvedCredential | None: ...
 
 
 class NoopLLMProvider:
@@ -63,7 +66,9 @@ class NoopLLMProvider:
     async def list(self) -> list[LLMChannel]:
         return []
 
-    async def resolve(self, provider_id: str) -> ResolvedCredential | None:
+    async def resolve(
+        self, provider_id: str, *, user_id: str | None = None
+    ) -> ResolvedCredential | None:
         return None
 
 

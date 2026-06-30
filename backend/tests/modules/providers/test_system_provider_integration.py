@@ -59,7 +59,9 @@ class _FakeCatalog:
     async def list(self) -> list[LLMChannel]:
         return list(self._rows)
 
-    async def resolve(self, provider_id: str) -> ResolvedCredential | None:
+    async def resolve(
+        self, provider_id: str, *, user_id: str | None = None
+    ) -> ResolvedCredential | None:
         return self._creds.get(provider_id)
 
 
