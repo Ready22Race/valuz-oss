@@ -98,9 +98,8 @@ def _coerce_size(raw: Any) -> int | None:
     return None
 
 
-async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext, user_id: str | None = None) -> ToolResult:
-    if user_id is None:
-        raise ValueError("user_id is required")
+async def _deliver_artifacts_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+    user_id = ctx.user_id
 
     items = args.get("attachments")
     if not isinstance(items, list) or not items:

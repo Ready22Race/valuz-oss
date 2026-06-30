@@ -94,6 +94,8 @@ async def _call_tool(server: Any, name: str, arguments: dict[str, Any]) -> Any:
 
 
 def test_call_tool_rebuilds_exec_context_from_session_header() -> None:
+    from valuz_agent.integrations import _mcp_asgi
+
     tk.install_toolkit_toolsets(base=(_echo_tool(),), lead=())
     server = tk._build_server("base")
 
@@ -108,14 +110,24 @@ def test_call_tool_rebuilds_exec_context_from_session_header() -> None:
 
 
 def test_call_tool_outside_session_scope_fails() -> None:
+    from valuz_agent.integrations import _mcp_asgi
+
     tk.install_toolkit_toolsets(base=(_echo_tool(),), lead=())
     server = tk._build_server("base")
-    result = asyncio.run(_call_tool(server, "echo", {}))
+    # The autouse ``_seed_mcp_context`` fixture publishes a context for every
+    # test; clear it here so we genuinely exercise the no-session-scope path.
+    token = _mcp_asgi._mcp_context.set(None)
+    try:
+        result = asyncio.run(_call_tool(server, "echo", {}))
+    finally:
+        _mcp_asgi._mcp_context.reset(token)
     # The lowlevel server converts handler exceptions into an error result.
     assert result.root.isError
 
 
 def test_tool_result_is_error_projected_as_text_prefix() -> None:
+    from valuz_agent.integrations import _mcp_asgi
+
     tk.install_toolkit_toolsets(base=(_failing_tool(),), lead=())
     server = tk._build_server("base")
     token = _mcp_asgi.set_current_mcp_context(session_id="sess-1", user_id="u1")

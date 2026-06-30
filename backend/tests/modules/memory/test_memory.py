@@ -9,7 +9,7 @@ import json
 import pytest
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
-from src.core.tools import ExecContext
+from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
 from valuz_agent.modules.memory import CHAR_LIMITS, MemoryStore
 from valuz_agent.modules.memory.injection import InjectionAssembler
 from valuz_agent.modules.memory.models import ENTRY_DELIMITER
@@ -141,7 +141,7 @@ def test_tool_closed_loop_and_scope(store, monkeypatch):
     monkeypatch.setattr(t, "memory_store", store)
     monkeypatch.setattr(t, "_resolve_project_id", _async_const("p1"))
 
-    ctx = ExecContext(session_id="proj")
+    ctx = HostExecContext(session_id="proj", user_id="local-test-owner")
     r = asyncio.run(
         t._memory_handler(
             {"action": "add", "target": "project", "content": "use PG"}, ctx, "u1"
@@ -153,7 +153,7 @@ def test_tool_closed_loop_and_scope(store, monkeypatch):
 
     # chat session (no project) cannot write project, can write global
     monkeypatch.setattr(t, "_resolve_project_id", _async_const(None))
-    chat = ExecContext(session_id="chat")
+    chat = HostExecContext(session_id="chat", user_id="local-test-owner")
     assert asyncio.run(
         t._memory_handler({"action": "add", "target": "project", "content": "x"}, chat, "u1")
     ).is_error

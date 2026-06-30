@@ -19,7 +19,7 @@ from sqlalchemy.pool import StaticPool
 # Side-effect import — surfaces ``src.*`` on sys.path before importing it.
 import valuz_agent.boot.kernel  # noqa: F401
 
-from src.core.tools import ExecContext
+from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
 
 from valuz_agent.infra.database import Base
 from valuz_agent.integrations import tools_agent_proposal as tap
@@ -108,8 +108,8 @@ async def seeded_db(monkeypatch):
     await engine.dispose()
 
 
-def _ctx() -> ExecContext:
-    return ExecContext(session_id="sess-1")
+def _ctx() -> HostExecContext:
+    return HostExecContext(session_id="sess-1", user_id=USER_ID)
 
 
 def _empty_catalog():
@@ -176,9 +176,7 @@ def _stub_model_catalog(monkeypatch):
 
 
 async def test_propose_minimal_ok(seeded_db) -> None:
-    res = await _propose_agent_handler(
-        {"name": "Helper", "instructions": "Be helpful."}, _ctx()
-    )
+    res = await _propose_agent_handler({"name": "Helper", "instructions": "Be helpful."}, _ctx())
     assert not res.is_error
     payload = json.loads(res.content)
     assert payload["ok"] is True
@@ -245,9 +243,7 @@ async def test_list_skills_returns_indexed(seeded_db) -> None:
 
 @pytest.mark.parametrize("effort", ["low", "max"])
 async def test_valid_effort_ok(seeded_db, effort) -> None:
-    res = await _propose_agent_handler(
-        {"name": "H", "instructions": "i", "effort": effort}, _ctx()
-    )
+    res = await _propose_agent_handler({"name": "H", "instructions": "i", "effort": effort}, _ctx())
     assert not res.is_error
     assert json.loads(res.content)["spec"]["effort"] == effort
 
@@ -260,7 +256,7 @@ async def test_list_agents_returns_library(seeded_db) -> None:
 
 
 async def test_list_members_requires_project(seeded_db, monkeypatch) -> None:
-    async def _no_project(_sid):
+    async def _no_project(_sid, _uid):
         return None
 
     monkeypatch.setattr(tap, "_resolve_project_id", _no_project)
@@ -270,7 +266,7 @@ async def test_list_members_requires_project(seeded_db, monkeypatch) -> None:
 
 
 async def test_list_members_with_project(seeded_db, monkeypatch) -> None:
-    async def _project(_sid):
+    async def _project(_sid, _uid):
         return "p1"
 
     monkeypatch.setattr(tap, "_resolve_project_id", _project)
@@ -299,7 +295,7 @@ async def test_list_members_with_project(seeded_db, monkeypatch) -> None:
 async def test_deploy_requires_project(seeded_db, monkeypatch) -> None:
     from valuz_agent.integrations.tools_agent_proposal import _deploy_agent_handler
 
-    async def _no_project(_sid):
+    async def _no_project(_sid, _uid):
         return None
 
     monkeypatch.setattr(tap, "_resolve_project_id", _no_project)
@@ -412,9 +408,7 @@ async def test_update_agent_changes_instructions(seeded_db) -> None:
 
 
 async def test_update_agent_unknown_slug(seeded_db) -> None:
-    res = await _update_agent_handler(
-        {"agent_slug": "ghost", "instructions": "x"}, _ctx()
-    )
+    res = await _update_agent_handler({"agent_slug": "ghost", "instructions": "x"}, _ctx())
     assert res.is_error
     assert "ghost" in res.content
 
@@ -426,9 +420,7 @@ async def test_update_agent_no_fields(seeded_db) -> None:
 
 
 async def test_update_agent_blank_name_rejected(seeded_db) -> None:
-    res = await _update_agent_handler(
-        {"agent_slug": "research-helper", "name": "  "}, _ctx()
-    )
+    res = await _update_agent_handler({"agent_slug": "research-helper", "name": "  "}, _ctx())
     assert res.is_error
     assert "name" in res.content
     # The agent's name is untouched.
@@ -482,22 +474,16 @@ async def test_update_agent_empty_list_clears(seeded_db) -> None:
     await _update_agent_handler(
         {"agent_slug": "research-helper", "skills": ["market-research"]}, _ctx()
     )
-    res = await _update_agent_handler(
-        {"agent_slug": "research-helper", "skills": []}, _ctx()
-    )
+    res = await _update_agent_handler({"agent_slug": "research-helper", "skills": []}, _ctx())
     assert not res.is_error
     assert (await _get_agent_row("research-helper")).skills == []
 
 
 async def test_update_agent_clears_effort_with_empty_string(seeded_db) -> None:
     # Set an effort, then clear it.
-    await _update_agent_handler(
-        {"agent_slug": "research-helper", "effort": "high"}, _ctx()
-    )
+    await _update_agent_handler({"agent_slug": "research-helper", "effort": "high"}, _ctx())
     assert (await _get_agent_row("research-helper")).effort == "high"
-    res = await _update_agent_handler(
-        {"agent_slug": "research-helper", "effort": ""}, _ctx()
-    )
+    res = await _update_agent_handler({"agent_slug": "research-helper", "effort": ""}, _ctx())
     assert not res.is_error
     assert (await _get_agent_row("research-helper")).effort is None
 
@@ -509,9 +495,7 @@ async def test_update_agent_runtime_only_validated_against_existing_model(
     model is rejected — the effective pair is checked, not just the field
     passed."""
     _set_catalog(monkeypatch, _catalog(("claude-sonnet-4-6", ["claude_agent", "deepagents"])))
-    res = await _update_agent_handler(
-        {"agent_slug": "research-helper", "runtime": "codex"}, _ctx()
-    )
+    res = await _update_agent_handler({"agent_slug": "research-helper", "runtime": "codex"}, _ctx())
     assert res.is_error
     assert "update_agent:" in res.content
     assert "codex" in res.content
@@ -553,8 +537,6 @@ async def test_list_model_options_returns_runtimes_and_models(seeded_db, monkeyp
     payload = json.loads(res.content)
     runtime_ids = {r["id"] for r in payload["runtimes"]}
     assert {"claude_agent", "codex", "deepagents"} <= runtime_ids
-    model_ids = {
-        m["model_id"] for p in payload["providers"] for m in p["models"]
-    }
+    model_ids = {m["model_id"] for p in payload["providers"] for m in p["models"]}
     assert "claude-sonnet-4-6" in model_ids
     assert "current_default" in payload
