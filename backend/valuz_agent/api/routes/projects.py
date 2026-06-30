@@ -5,10 +5,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from valuz_agent.api.deps import (
+    get_current_user_id,
     get_project_pack_service,
     get_project_service,
     get_session_service,
-    get_current_user_id,
 )
 from valuz_agent.api.routes.onboarding import _resolve_deploy_target
 from valuz_agent.infra.db import get_async_session
@@ -350,7 +350,7 @@ def _safe_project_filename(name: str) -> str:
 @router.get("/{project_id}/export")
 async def export_project(
     project_id: str,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectPackService = Depends(get_project_pack_service),
     project_svc: ProjectService = Depends(get_project_service),
 ) -> StreamingResponse:
@@ -384,7 +384,7 @@ async def export_project(
 )
 async def import_project_preview(
     file: Annotated[UploadFile, File(...)],
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectPackService = Depends(get_project_pack_service),
 ) -> ImportProjectPreviewResponse:
     """Stage an uploaded ``.valuzpack`` project archive and return what's
@@ -404,7 +404,7 @@ async def import_project_preview(
 )
 async def import_project_confirm(
     body: ImportProjectConfirmRequest,
-    user_id: str = Depends(require_current_user_id),
+    user_id: str = Depends(get_current_user_id),
     svc: ProjectPackService = Depends(get_project_pack_service),
     db: Any = Depends(get_async_session),
 ) -> ImportProjectConfirmResponse:
@@ -413,8 +413,8 @@ async def import_project_confirm(
     members + automations + project skill/connector configs. If a project
     with the same name exists for the caller, SKIP (return
     ``status="skipped_name_conflict"``)."""
-    runtime, provider_id, model = await _resolve_deploy_target(db)
-    effort = await get_default_effort(db)
+    runtime, provider_id, model = await _resolve_deploy_target(db, user_id)
+    effort = await get_default_effort(db, user_id=user_id)
     try:
         result = await svc.confirm_import(
             user_id,

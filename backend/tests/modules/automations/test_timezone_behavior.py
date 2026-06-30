@@ -138,7 +138,7 @@ class TestEffectiveDefaultFallback:
         (never UTC-by-accident)."""
         from valuz_agent.modules.settings import preferences as p
 
-        async def _no_pref(db, key):  # type: ignore[no-untyped-def]
+        async def _no_pref(db, key, user_id=None):  # type: ignore[no-untyped-def]
             return None
 
         monkeypatch.setattr(p, "_read", _no_pref)
@@ -148,7 +148,7 @@ class TestEffectiveDefaultFallback:
     async def test_prefers_configured_pref_over_detection(self, monkeypatch) -> None:
         from valuz_agent.modules.settings import preferences as p
 
-        async def _pref(db, key):  # type: ignore[no-untyped-def]
+        async def _pref(db, key, user_id=None):  # type: ignore[no-untyped-def]
             return "Asia/Tokyo"
 
         # Detection must NOT win when an explicit pref exists.

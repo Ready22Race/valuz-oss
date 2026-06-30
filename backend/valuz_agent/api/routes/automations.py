@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from valuz_agent.api.deps import get_automation_service
+from valuz_agent.api.deps import get_automation_service, get_current_user_id
 from valuz_agent.modules.automations.schemas import (
     AutomationCreatePayload,
     AutomationDetailResponse,
@@ -45,6 +45,7 @@ router = APIRouter(prefix="/v1/automations", tags=["automations"])
 @router.get("")
 async def list_automations(
     project_id: str | None = None,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> dict[str, list[AutomationGroupResponse]]:
     """List automations grouped by project.
@@ -54,12 +55,13 @@ async def list_automations(
     the consolidation is purely a display rule). Filtered view (per
     project) keeps one group per project.
     """
-    return {"groups": await svc.list_automation_groups(project_id)}
+    return {"groups": await svc.list_automation_groups(project_id, user_id=user_id)}
 
 
 @router.post("", status_code=201)
 async def create_automation(
     payload: AutomationCreatePayload,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> AutomationDetailResponse:
     """Create an automation.
@@ -69,13 +71,14 @@ async def create_automation(
     as ``None`` here — that field is reserved for the ``automation`` MCP
     tool, which knows the caller's chat project.
     """
-    return await svc.create(payload)
+    return await svc.create(payload, user_id=user_id)
 
 
 @router.post("/proposals/{session_id}/confirm", status_code=201)
 async def confirm_automation_proposal(
     session_id: str,
     payload: AutomationProposalConfirmRequest,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> AutomationItemResponse:
     """Create the automation a ``create`` tool call proposed.
@@ -90,7 +93,9 @@ async def confirm_automation_proposal(
     """
     from valuz_agent.integrations.automations_mcp_server import _resolve_session_context
 
-    project_id, project_kind, bound_agent_slug = await _resolve_session_context(session_id)
+    project_id, project_kind, bound_agent_slug = await _resolve_session_context(
+        session_id, user_id
+    )
     create_payload = AutomationService.build_create_payload(
         name=payload.name,
         prompt_template=payload.prompt_template,
@@ -108,6 +113,7 @@ async def confirm_automation_proposal(
         create_payload,
         calling_session_project_id=calling_ws,
         origin_tool_call_id=payload.tool_call_id,
+        user_id=user_id,
     )
 
 
@@ -115,6 +121,7 @@ async def confirm_automation_proposal(
 async def automation_proposal_status(
     session_id: str,
     payload: AutomationProposalStatusRequest,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> AutomationProposalStatusResponse:
     """Map proposing ``tool_call_id``s → already-created automations.
@@ -125,7 +132,7 @@ async def automation_proposal_status(
     the persisted ``origin_tool_call_id`` (globally unique per user).
     """
     _ = session_id
-    mapping = await svc.confirmed_origin_map(payload.tool_call_ids)
+    mapping = await svc.confirmed_origin_map(payload.tool_call_ids, user_id=user_id)
     return AutomationProposalStatusResponse(
         confirmed={
             tid: AutomationProposalStatusEntry(automation_id=aid)
@@ -162,6 +169,7 @@ async def validate_interval(
 
 @router.get("/project-targets")
 async def list_project_targets(
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> AutomationProjectTargetsResponse:
     """List projects eligible as the target of a new automation.
@@ -170,22 +178,26 @@ async def list_project_targets(
     projects, no ephemeral chat rows" stays adjacent to the create logic
     that consumes it. The frontend renders the response verbatim.
     """
-    return AutomationProjectTargetsResponse(targets=await svc.list_project_targets())
+    return AutomationProjectTargetsResponse(
+        targets=await svc.list_project_targets(user_id=user_id)
+    )
 
 
 @router.get("/{automation_id}")
 async def get_automation(
     automation_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> AutomationDetailResponse:
     """Fetch a single automation's detail."""
-    return await svc.get_automation_detail(automation_id)
+    return await svc.get_automation_detail(automation_id, user_id=user_id)
 
 
 @router.patch("/{automation_id}")
 async def update_automation(
     automation_id: str,
     payload: AutomationUpdatePayload,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> AutomationDetailResponse:
     """Patch fields on an automation.
@@ -194,42 +206,46 @@ async def update_automation(
     only (cross-project / cross-kind changes require delete + recreate
     — see ADR-021 §6).
     """
-    return await svc.update(automation_id, payload)
+    return await svc.update(automation_id, payload, user_id=user_id)
 
 
 @router.delete("/{automation_id}", status_code=204)
 async def delete_automation(
     automation_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> None:
     """Delete an automation and cascade its run history."""
-    await svc.delete(automation_id)
+    await svc.delete(automation_id, user_id=user_id)
 
 
 @router.post("/{automation_id}/pause")
 async def pause_automation(
     automation_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> AutomationDetailResponse:
     """Pause an automation. Clears ``next_run_at`` so the tick skips it
     until resumed."""
-    return await svc.pause(automation_id)
+    return await svc.pause(automation_id, user_id=user_id)
 
 
 @router.post("/{automation_id}/resume")
 async def resume_automation(
     automation_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> AutomationDetailResponse:
     """Resume a paused automation. Recomputes ``next_run_at`` from the
     current time so cron rows align to the next scheduled tick and
     interval rows wait one full cadence before the next fire."""
-    return await svc.resume(automation_id)
+    return await svc.resume(automation_id, user_id=user_id)
 
 
 @router.post("/{automation_id}/run-now", status_code=202)
 async def run_automation_now(
     automation_id: str,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> AutomationRunAcceptedResponse:
     """Enqueue an immediate run.
@@ -237,7 +253,7 @@ async def run_automation_now(
     Single-flight: returns 409 if the latest run is still ``queued`` or
     ``running`` so two rapid clicks don't burn double tokens.
     """
-    return await svc.run_now(automation_id)
+    return await svc.run_now(automation_id, user_id=user_id)
 
 
 @router.get("/{automation_id}/runs")
@@ -245,7 +261,12 @@ async def list_automation_runs(
     automation_id: str,
     limit: int = 20,
     cursor: str | None = None,
+    user_id: str = Depends(get_current_user_id),
     svc: AutomationService = Depends(get_automation_service),
 ) -> dict[str, list[AutomationRunItemResponse]]:
     """List execution history for an automation."""
-    return {"runs": await svc.list_runs(automation_id, limit=limit, cursor=cursor)}
+    return {
+        "runs": await svc.list_runs(
+            automation_id, limit=limit, cursor=cursor, user_id=user_id
+        )
+    }

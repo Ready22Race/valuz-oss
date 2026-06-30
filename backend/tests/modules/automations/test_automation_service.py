@@ -51,6 +51,8 @@ from valuz_agent.modules.automations.schemas import (
 )
 from valuz_agent.modules.automations.service import AutomationService
 
+TEST_USER_ID = "local-test-owner"
+
 
 def _ms(dt: datetime) -> int:
     """Datetime → Unix epoch ms (UTC). Instant columns are epoch-ms ints now."""
@@ -319,22 +321,24 @@ def _chat_lib_payload(**overrides: Any) -> AutomationCreatePayload:
 
 class TestProjectCreateResolution:
     async def test_should_bind_to_project(self, service: AutomationService) -> None:
-        detail = await service.create(_project_payload())
+        detail = await service.create(_project_payload(), user_id=TEST_USER_ID)
         assert detail.project_id == "ws-proj"
 
     async def test_should_reject_missing_project(self, service: AutomationService) -> None:
         with pytest.raises(AutomationProjectNotFound):
-            await service.create(_project_payload(project_id="ghost"))
+            await service.create(_project_payload(project_id="ghost"), user_id=TEST_USER_ID)
 
     async def test_should_reject_when_project_id_omitted(self, service: AutomationService) -> None:
         with pytest.raises(AutomationProjectNotFound):
-            await service.create(_project_payload(project_id=None))
+            await service.create(_project_payload(project_id=None), user_id=TEST_USER_ID)
 
     async def test_should_reject_chat_project_under_project_kind(
         self, service: AutomationService
     ) -> None:
         with pytest.raises(AutomationProjectNotFound):
-            await service.create(_project_payload(project_id="ws-chat-existing"))
+            await service.create(
+                _project_payload(project_id="ws-chat-existing"), user_id=TEST_USER_ID
+            )
 
     async def test_should_reject_library_agent_under_project_kind(
         self, service: AutomationService
@@ -344,12 +348,13 @@ class TestProjectCreateResolution:
         # so the user can configure provider / model overrides per project.
         with pytest.raises(AgentNotInProject):
             await service.create(
-                _project_payload(agent_kind="library_agent", agent_slug="qa-engineer")
+                _project_payload(agent_kind="library_agent", agent_slug="qa-engineer"),
+                user_id=TEST_USER_ID,
             )
 
     async def test_should_reject_unknown_agent_slug(self, service: AutomationService) -> None:
         with pytest.raises(AgentNotInProject):
-            await service.create(_project_payload(agent_slug="ghost-agent"))
+            await service.create(_project_payload(agent_slug="ghost-agent"), user_id=TEST_USER_ID)
 
 
 # ── Resolution: chat + library_agent ────────────────────────────────
@@ -359,7 +364,7 @@ class TestChatLibraryAgentCreate:
     async def test_should_lazy_create_chat_project_when_no_calling_session(
         self, service: AutomationService, agent_svc: FakeAgentService
     ) -> None:
-        detail = await service.create(_chat_lib_payload())
+        detail = await service.create(_chat_lib_payload(), user_id=TEST_USER_ID)
         assert detail.project_id.startswith("chat-ws-")
         # Library agent was materialized into the lazy-created project.
         assert len(agent_svc.instantiations) == 1
@@ -380,6 +385,7 @@ class TestChatLibraryAgentCreate:
         detail = await service.create(
             _chat_lib_payload(),
             calling_session_project_id="ws-chat-existing",
+            user_id=TEST_USER_ID,
         )
         assert detail.project_id == "ws-chat-existing"
         # And the lazy-create counter wasn't incremented.
@@ -397,6 +403,7 @@ class TestChatLibraryAgentCreate:
         detail = await service.create(
             _chat_lib_payload(),
             calling_session_project_id="ws-proj",
+            user_id=TEST_USER_ID,
         )
         assert detail.project_id.startswith("chat-ws-")
 
@@ -404,20 +411,22 @@ class TestChatLibraryAgentCreate:
         self, service: AutomationService
     ) -> None:
         with pytest.raises(AgentNotFound):
-            await service.create(_chat_lib_payload(agent_slug="ghost-agent"))
+            await service.create(_chat_lib_payload(agent_slug="ghost-agent"), user_id=TEST_USER_ID)
 
     async def test_should_bind_to_explicit_chat_project_when_set(
         self,
         service: AutomationService,
     ) -> None:
-        detail = await service.create(_chat_lib_payload(project_id="ws-chat-existing"))
+        detail = await service.create(
+            _chat_lib_payload(project_id="ws-chat-existing"), user_id=TEST_USER_ID
+        )
         assert detail.project_id == "ws-chat-existing"
 
     async def test_should_reject_explicit_project_when_it_is_project_kind(
         self, service: AutomationService
     ) -> None:
         with pytest.raises(AutomationProjectNotFound):
-            await service.create(_chat_lib_payload(project_id="ws-proj"))
+            await service.create(_chat_lib_payload(project_id="ws-proj"), user_id=TEST_USER_ID)
 
 
 # ── Trigger validation ──────────────────────────────────────────────
@@ -426,31 +435,40 @@ class TestChatLibraryAgentCreate:
 class TestTriggerValidation:
     async def test_should_reject_invalid_cron_expression(self, service: AutomationService) -> None:
         with pytest.raises(InvalidCronExpression):
-            await service.create(_project_payload(trigger=CronTrigger(cron_expr="not a cron")))
+            await service.create(
+                _project_payload(trigger=CronTrigger(cron_expr="not a cron")),
+                user_id=TEST_USER_ID,
+            )
 
     async def test_should_accept_interval_at_floor(self, service: AutomationService) -> None:
-        detail = await service.create(_project_payload(trigger=IntervalTrigger(seconds=30)))
+        detail = await service.create(
+            _project_payload(trigger=IntervalTrigger(seconds=30)), user_id=TEST_USER_ID
+        )
         assert detail.trigger.kind == "interval"
 
     async def test_should_set_next_run_at_for_interval_trigger(
         self, service: AutomationService
     ) -> None:
-        detail = await service.create(_project_payload(trigger=IntervalTrigger(seconds=60)))
+        detail = await service.create(
+            _project_payload(trigger=IntervalTrigger(seconds=60)), user_id=TEST_USER_ID
+        )
         # Interval rows align to ``now + N`` so the first fire respects
         # the cadence rather than firing immediately on create.
         assert detail.next_run_at is not None
 
     async def test_manual_trigger_leaves_next_run_at_null(self, service: AutomationService) -> None:
-        detail = await service.create(_project_payload(trigger=ManualTrigger()))
+        detail = await service.create(
+            _project_payload(trigger=ManualTrigger()), user_id=TEST_USER_ID
+        )
         assert detail.next_run_at is None
 
     async def test_should_reject_empty_name(self, service: AutomationService) -> None:
         with pytest.raises(AutomationNameEmpty):
-            await service.create(_project_payload(name="   "))
+            await service.create(_project_payload(name="   "), user_id=TEST_USER_ID)
 
     async def test_should_reject_empty_prompt(self, service: AutomationService) -> None:
         with pytest.raises(AutomationPromptEmpty):
-            await service.create(_project_payload(prompt_template="   "))
+            await service.create(_project_payload(prompt_template="   "), user_id=TEST_USER_ID)
 
 
 # ── action_kind validation (chat vs task) ───────────────────────────
@@ -458,26 +476,27 @@ class TestTriggerValidation:
 
 class TestActionKind:
     async def test_create_should_default_to_chat_mode(self, service: AutomationService) -> None:
-        detail = await service.create(_project_payload())
+        detail = await service.create(_project_payload(), user_id=TEST_USER_ID)
         assert detail.action_kind == "chat"
 
     async def test_create_task_on_project_should_succeed(self, service: AutomationService) -> None:
-        detail = await service.create(_project_payload(action_kind="task"))
+        detail = await service.create(_project_payload(action_kind="task"), user_id=TEST_USER_ID)
         assert detail.action_kind == "task"
 
     async def test_create_task_on_chat_should_reject(self, service: AutomationService) -> None:
         # Chat projects don't support task mode — the project task
         # protocol needs project context the chat project doesn't have.
         with pytest.raises(AutomationTaskOnlyOnProject):
-            await service.create(_chat_lib_payload(action_kind="task"))
+            await service.create(_chat_lib_payload(action_kind="task"), user_id=TEST_USER_ID)
 
     async def test_update_should_persist_action_kind_change(
         self, service: AutomationService
     ) -> None:
-        detail = await service.create(_project_payload())  # chat
+        detail = await service.create(_project_payload(), user_id=TEST_USER_ID)  # chat
         updated = await service.update(
             detail.automation_id,
             AutomationUpdatePayload(action_kind="task"),
+            user_id=TEST_USER_ID,
         )
         assert updated.action_kind == "task"
 
@@ -485,11 +504,12 @@ class TestActionKind:
         self,
         service: AutomationService,
     ) -> None:
-        detail = await service.create(_chat_lib_payload())
+        detail = await service.create(_chat_lib_payload(), user_id=TEST_USER_ID)
         with pytest.raises(AutomationTaskOnlyOnProject):
             await service.update(
                 detail.automation_id,
                 AutomationUpdatePayload(action_kind="task"),
+                user_id=TEST_USER_ID,
             )
 
 
@@ -500,12 +520,16 @@ class TestCRUDLifecycle:
     async def test_update_should_recompute_next_run_at_on_trigger_change(
         self, service: AutomationService
     ) -> None:
-        detail = await service.create(_project_payload(trigger=CronTrigger(cron_expr="0 9 * * *")))
+        detail = await service.create(
+            _project_payload(trigger=CronTrigger(cron_expr="0 9 * * *")),
+            user_id=TEST_USER_ID,
+        )
         original_next = detail.next_run_at
 
         updated = await service.update(
             detail.automation_id,
             AutomationUpdatePayload(trigger=IntervalTrigger(seconds=120)),
+            user_id=TEST_USER_ID,
         )
         # Trigger kind switched + next_run_at recomputed against the new
         # interval — original cron-anchored timestamp is gone.
@@ -514,42 +538,47 @@ class TestCRUDLifecycle:
         assert updated.next_run_at != original_next
 
     async def test_pause_should_clear_next_run_at(self, service: AutomationService) -> None:
-        detail = await service.create(_project_payload())
-        paused = await service.pause(detail.automation_id)
+        detail = await service.create(_project_payload(), user_id=TEST_USER_ID)
+        paused = await service.pause(detail.automation_id, user_id=TEST_USER_ID)
         assert paused.status == "paused"
         assert paused.next_run_at is None
 
     async def test_resume_should_recompute_next_run_at(self, service: AutomationService) -> None:
-        detail = await service.create(_project_payload())
-        await service.pause(detail.automation_id)
-        resumed = await service.resume(detail.automation_id)
+        detail = await service.create(_project_payload(), user_id=TEST_USER_ID)
+        await service.pause(detail.automation_id, user_id=TEST_USER_ID)
+        resumed = await service.resume(detail.automation_id, user_id=TEST_USER_ID)
         assert resumed.status == "enabled"
         assert resumed.next_run_at is not None
 
     async def test_delete_should_remove_row(self, service: AutomationService) -> None:
-        detail = await service.create(_project_payload())
-        await service.delete(detail.automation_id)
+        detail = await service.create(_project_payload(), user_id=TEST_USER_ID)
+        await service.delete(detail.automation_id, user_id=TEST_USER_ID)
         with pytest.raises(AutomationNotFound):
-            await service.get_automation_detail(detail.automation_id)
+            await service.get_automation_detail(detail.automation_id, user_id=TEST_USER_ID)
 
     async def test_update_should_reject_empty_agent_slug(self, service: AutomationService) -> None:
-        detail = await service.create(_project_payload())
+        detail = await service.create(_project_payload(), user_id=TEST_USER_ID)
         with pytest.raises(AutomationAgentRequired):
-            await service.update(detail.automation_id, AutomationUpdatePayload(agent_slug="   "))
+            await service.update(
+                detail.automation_id,
+                AutomationUpdatePayload(agent_slug="   "),
+                user_id=TEST_USER_ID,
+            )
 
     async def test_update_should_reject_non_member_agent_slug(
         self, service: AutomationService
     ) -> None:
-        detail = await service.create(_project_payload())
+        detail = await service.create(_project_payload(), user_id=TEST_USER_ID)
         with pytest.raises(AgentNotInProject):
             await service.update(
                 detail.automation_id,
                 AutomationUpdatePayload(agent_slug="ghost-agent"),
+                user_id=TEST_USER_ID,
             )
 
     async def test_get_should_raise_when_missing(self, service: AutomationService) -> None:
         with pytest.raises(AutomationNotFound):
-            await service.get_automation_detail("ghost-id")
+            await service.get_automation_detail("ghost-id", user_id=TEST_USER_ID)
 
 
 # ── Project target picker ─────────────────────────────────────────
@@ -557,18 +586,18 @@ class TestCRUDLifecycle:
 
 class TestProjectTargets:
     async def test_should_put_chat_sentinel_first(self, service: AutomationService) -> None:
-        targets = await service.list_project_targets()
+        targets = await service.list_project_targets(user_id=TEST_USER_ID)
         assert targets[0].kind == "chat"
         assert targets[0].project_id is None
 
     async def test_should_exclude_chat_kind_projects(self, service: AutomationService) -> None:
-        targets = await service.list_project_targets()
+        targets = await service.list_project_targets(user_id=TEST_USER_ID)
         chat_entries = [t for t in targets if t.kind == "chat"]
         # Only the sentinel — the seeded "ws-chat-existing" is excluded.
         assert len(chat_entries) == 1
 
     async def test_should_include_projects(self, service: AutomationService) -> None:
-        targets = await service.list_project_targets()
+        targets = await service.list_project_targets(user_id=TEST_USER_ID)
         project_ids = [t.project_id for t in targets if t.kind == "project"]
         assert "ws-proj" in project_ids
 
@@ -651,7 +680,7 @@ class TestProposeConfirmPlumbing:
     async def test_preview_returns_spec_without_persisting(
         self, service: AutomationService, datastore: FakeAutomationDatastore
     ) -> None:
-        spec = await service.preview(_project_payload())
+        spec = await service.preview(_project_payload(), user_id=TEST_USER_ID)
         assert spec.name == "Daily report"
         assert spec.action_kind == "chat"
         assert spec.trigger.kind == "cron"
@@ -663,31 +692,42 @@ class TestProposeConfirmPlumbing:
 
     async def test_preview_rejects_task_on_chat(self, service: AutomationService) -> None:
         with pytest.raises(AutomationTaskOnlyOnProject):
-            await service.preview(_project_payload(project_kind="chat", action_kind="task"))
+            await service.preview(
+                _project_payload(project_kind="chat", action_kind="task"),
+                user_id=TEST_USER_ID,
+            )
 
     async def test_create_stamps_origin_tool_call_id(
         self, service: AutomationService, datastore: FakeAutomationDatastore
     ) -> None:
-        detail = await service.create(_project_payload(), origin_tool_call_id="tc-123")
+        detail = await service.create(
+            _project_payload(), origin_tool_call_id="tc-123", user_id=TEST_USER_ID
+        )
         row = datastore.rows[detail.automation_id]
         assert row.origin_tool_call_id == "tc-123"
 
     async def test_create_without_origin_leaves_it_null(
         self, service: AutomationService, datastore: FakeAutomationDatastore
     ) -> None:
-        detail = await service.create(_project_payload())
+        detail = await service.create(_project_payload(), user_id=TEST_USER_ID)
         assert datastore.rows[detail.automation_id].origin_tool_call_id is None
 
     async def test_confirmed_origin_map_maps_tool_call_to_automation(
         self, service: AutomationService, datastore: FakeAutomationDatastore
     ) -> None:
-        d1 = await service.create(_project_payload(), origin_tool_call_id="tc-a")
-        d2 = await service.create(_project_payload(), origin_tool_call_id="tc-b")
-        mapping = await service.confirmed_origin_map(["tc-a", "tc-b", "tc-missing"])
+        d1 = await service.create(
+            _project_payload(), origin_tool_call_id="tc-a", user_id=TEST_USER_ID
+        )
+        d2 = await service.create(
+            _project_payload(), origin_tool_call_id="tc-b", user_id=TEST_USER_ID
+        )
+        mapping = await service.confirmed_origin_map(
+            ["tc-a", "tc-b", "tc-missing"], user_id=TEST_USER_ID
+        )
         assert mapping == {"tc-a": d1.automation_id, "tc-b": d2.automation_id}
 
     async def test_confirmed_origin_map_empty_input(self, service: AutomationService) -> None:
-        assert await service.confirmed_origin_map([]) == {}
+        assert await service.confirmed_origin_map([], user_id=TEST_USER_ID) == {}
 
 
 class TestBuildCreatePayload:
