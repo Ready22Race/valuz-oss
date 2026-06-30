@@ -471,6 +471,8 @@
     "generatedFile": "Generated file (",
     "hour": "Hour",
     "instruction": "Instruction",
+    "instructionCollapse": "Collapse editor",
+    "instructionExpand": "Expand editor",
     "instructionPlaceholder": "Describe the task for Agent...",
     "lastRunColumn": "Last run",
     "loadFailed": "Failed to load scheduled tasks",
