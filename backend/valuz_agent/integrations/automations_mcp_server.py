@@ -66,7 +66,6 @@ from valuz_agent.infra.auth_context import (
     reset_current_user_id,
     set_current_user_id,
 )
-from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.modules.automations.schemas import (
     AutomationToolPayload,
     AutomationToolResult,
@@ -94,10 +93,9 @@ def _current_session_id() -> str:
     return sid
 
 
-async def _resolve_session_context(session_id: str, user_id: str | None = None) -> tuple[str | None, str, str | None]:
-    if user_id is None:
-        raise ValueError("user_id is required")
-
+async def _resolve_session_context(
+    session_id: str, user_id: str | None = None
+) -> tuple[str | None, str, str | None]:
     """Resolve ``(project_id, project_kind, bound_agent_slug)`` for the call.
 
     ``bound_agent_slug`` is the agent the calling conversation is bound to —
@@ -118,8 +116,10 @@ async def _resolve_session_context(session_id: str, user_id: str | None = None) 
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-    uid = user_id
-    kernel_session = await kernel_client.get_session(uid, session_id)
+    if user_id is None:
+        raise ValueError("user_id is required")
+
+    kernel_session = await kernel_client.get_session(user_id, session_id)
     if kernel_session is None:
         return None, "chat", None
 
@@ -154,7 +154,11 @@ async def _resolve_session_owner(session_id: str) -> str | None:
     try:
         sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
     except Exception:  # noqa: BLE001 — owner resolution is best effort
-        logger.warning("automations MCP: failed resolving owner for session %s", session_id, exc_info=True)
+        logger.warning(
+            "automations MCP: failed resolving owner for session %s",
+            session_id,
+            exc_info=True,
+        )
         return None
     return sessions[0].user_id if sessions else None
 
@@ -241,6 +245,7 @@ async def _handle_create(
     payload: AutomationToolPayload,
     project_kind: str,
     project_id: str | None,
+    user_id: str,
     session_agent_slug: str | None = None,
 ) -> AutomationToolResult:
     """Validate + PREVIEW the proposed automation — never persist.
@@ -333,7 +338,11 @@ async def _handle_create(
     calling_ws = project_id if project_kind == "chat" else None
 
     try:
-        spec = await svc.preview(create_payload, calling_session_project_id=calling_ws)
+        spec = await svc.preview(
+            create_payload,
+            calling_session_project_id=calling_ws,
+            user_id=user_id,
+        )
     except (
         InvalidCronExpression,
         IntervalTooShort,
@@ -356,13 +365,17 @@ async def _handle_create(
     )
 
 
-async def _handle_list(*, svc: Any, project_id: str | None, scope: str) -> AutomationToolResult:
+async def _handle_list(
+    *, svc: Any, project_id: str | None, scope: str, user_id: str
+) -> AutomationToolResult:
     if scope == "all":
-        items = await svc.list_all_automations()
+        items = await svc.list_all_automations(user_id=user_id)
     else:
         # Chat sessions narrowed to ``this`` use the singleton chat-default
         # sentinel; project sessions pass their project_id directly.
-        items = await svc.list_automations_in_project(project_id or "chat-default")
+        items = await svc.list_automations_in_project(
+            project_id or "chat-default", user_id=user_id
+        )
     if not items:
         return AutomationToolResult(
             action="list",
@@ -387,7 +400,8 @@ async def _handle_update(
     payload: AutomationToolPayload,
     project_id: str | None,
     scope: str,
- user_id: str | None = None) -> AutomationToolResult:
+    user_id: str,
+) -> AutomationToolResult:
     from valuz_agent.modules.automations.errors import (
         AgentNotInProject,
         AutomationAgentRequired,
@@ -401,8 +415,7 @@ async def _handle_update(
 
     if not payload.automation_id:
         return _err("update", "automation_id is required for update.", code="MISSING_AUTOMATION_ID")
-    uid = user_id
-    row = await svc._ds.get_automation(uid, payload.automation_id)  # noqa: SLF001
+    row = await svc._ds.get_automation(user_id, payload.automation_id)  # noqa: SLF001
     if row is None:
         return _err("update", "No such automation.", code="AutomationNotFound")
     if scope == "this" and project_id is not None and row.project_id != project_id:
@@ -420,7 +433,7 @@ async def _handle_update(
         agent_slug=payload.agent_slug,
     )
     try:
-        detail = await svc.update(payload.automation_id, update_payload)
+        detail = await svc.update(payload.automation_id, update_payload, user_id=user_id)
     except (
         InvalidCronExpression,
         IntervalTooShort,
@@ -432,7 +445,8 @@ async def _handle_update(
     ) as exc:
         return _err("update", str(exc.message), code=exc.__class__.__name__)
     fresh = await svc._row_to_item(  # noqa: SLF001
-        await svc._ds.get_automation(uid, detail.automation_id)  # noqa: SLF001
+        await svc._ds.get_automation(user_id, detail.automation_id),  # noqa: SLF001
+        user_id,
     )
     return AutomationToolResult(
         action="update",
@@ -450,7 +464,8 @@ async def _handle_status_change(
     payload: AutomationToolPayload,
     project_id: str | None,
     scope: str,
- user_id: str | None = None) -> AutomationToolResult:
+    user_id: str,
+) -> AutomationToolResult:
     """Shared handler for pause / resume / remove / run — all single-verb
     actions with the same scope check."""
     from valuz_agent.modules.automations.errors import (
@@ -463,8 +478,7 @@ async def _handle_status_change(
         return _err(
             action, f"automation_id is required for {action}.", code="MISSING_AUTOMATION_ID"
         )
-    uid = user_id
-    row = await svc._ds.get_automation(uid, payload.automation_id)  # noqa: SLF001
+    row = await svc._ds.get_automation(user_id, payload.automation_id)  # noqa: SLF001
     if row is None:
         return _err(action, "No such automation.", code="AutomationNotFound")
     if scope == "this" and project_id is not None and row.project_id != project_id:
@@ -476,14 +490,14 @@ async def _handle_status_change(
 
     try:
         if action == "pause":
-            detail = await svc.pause(payload.automation_id)
+            detail = await svc.pause(payload.automation_id, user_id=user_id)
             msg = f"Paused '{detail.name}'."
         elif action == "resume":
-            detail = await svc.resume(payload.automation_id)
+            detail = await svc.resume(payload.automation_id, user_id=user_id)
             msg = f"Resumed '{detail.name}'."
         elif action == "remove":
             name = row.name
-            await svc.delete(payload.automation_id)
+            await svc.delete(payload.automation_id, user_id=user_id)
             return AutomationToolResult(
                 action="remove",
                 ok=True,
@@ -499,6 +513,7 @@ async def _handle_status_change(
                 payload.automation_id,
                 trigger_type="agent",
                 invoked_by_session_id=_current_session_id(),
+                user_id=user_id,
             )
             return AutomationToolResult(
                 action="run",
@@ -507,7 +522,7 @@ async def _handle_status_change(
                     f"Queued automation for immediate execution (run_id={run.run_id}). "
                     "The session it spawns will appear in the project shortly."
                 ),
-                automation=await svc._row_to_item(row),  # noqa: SLF001
+                automation=await svc._row_to_item(row, user_id),  # noqa: SLF001
             )
         else:  # pragma: no cover — guarded above
             return _err(action, f"Unknown action {action!r}.")
@@ -519,7 +534,8 @@ async def _handle_status_change(
     ) as exc:
         return _err(action, str(exc.message), code=exc.__class__.__name__)
     fresh = await svc._row_to_item(  # noqa: SLF001
-        await svc._ds.get_automation(uid, detail.automation_id)  # noqa: SLF001
+        await svc._ds.get_automation(user_id, detail.automation_id),  # noqa: SLF001
+        user_id,
     )
     return AutomationToolResult(
         action=action,
@@ -540,14 +556,20 @@ async def _dispatch(payload: AutomationToolPayload) -> AutomationToolResult:
     from valuz_agent.infra.db import async_unit_of_work
 
     session_id = _current_session_id()
-    project_id, project_kind, session_agent_slug = await _resolve_session_context(session_id)
+    user_id = await _resolve_session_owner(session_id)
+    if not user_id:
+        return _err(payload.action, "Unknown session owner.", code="UNKNOWN_SESSION_OWNER")
+    project_id, project_kind, session_agent_slug = await _resolve_session_context(
+        session_id, user_id
+    )
     scope = _coerce_scope(payload, project_kind)
-    user_id = get_current_user_id()
 
     async with async_unit_of_work() as db:
         svc = await _build_automation_service(db, user_id)
         if payload.action == "list":
-            return await _handle_list(svc=svc, project_id=project_id, scope=scope)
+            return await _handle_list(
+                svc=svc, project_id=project_id, scope=scope, user_id=user_id
+            )
         if payload.action == "create":
             return await _handle_create(
                 svc=svc,
@@ -555,10 +577,15 @@ async def _dispatch(payload: AutomationToolPayload) -> AutomationToolResult:
                 project_kind=project_kind,
                 project_id=project_id,
                 session_agent_slug=session_agent_slug,
+                user_id=user_id,
             )
         if payload.action == "update":
             return await _handle_update(
-                svc=svc, payload=payload, project_id=project_id, scope=scope
+                svc=svc,
+                payload=payload,
+                project_id=project_id,
+                scope=scope,
+                user_id=user_id,
             )
         return await _handle_status_change(
             svc=svc,
@@ -566,6 +593,7 @@ async def _dispatch(payload: AutomationToolPayload) -> AutomationToolResult:
             payload=payload,
             project_id=project_id,
             scope=scope,
+            user_id=user_id,
         )
 
 

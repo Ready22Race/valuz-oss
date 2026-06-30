@@ -171,8 +171,12 @@ class ProjectPackService:
         # prompt travels in the archive — without it every automation
         # would fail ``AutomationPromptEmpty`` on import.
         automations: list[PackAutomation] = []
-        for a in await self._automations.list_automations_in_project(project_row.id):
-            detail = await self._automations.get_automation_detail(a.automation_id)
+        for a in await self._automations.list_automations_in_project(
+            project_row.id, user_id=user_id
+        ):
+            detail = await self._automations.get_automation_detail(
+                a.automation_id, user_id=user_id
+            )
             trigger = detail.trigger
             cron_expr: str | None = None
             timezone: str | None = None

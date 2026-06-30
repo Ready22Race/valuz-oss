@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -48,11 +49,14 @@ class StubService:
     def _record(self, method: str, **kwargs: Any) -> None:
         self.calls.append((method, kwargs))
 
-    async def create(self, payload, *, calling_session_project_id=None):  # type: ignore[no-untyped-def]
+    async def create(
+        self, payload, *, calling_session_project_id=None, user_id=None
+    ):  # type: ignore[no-untyped-def]
         self._record(
             "create",
             payload=payload,
             calling_session_project_id=calling_session_project_id,
+            user_id=user_id,
         )
         self._next_id += 1
         automation_id = f"auto-{self._next_id}"
@@ -89,7 +93,9 @@ class StubService:
         )()
         return detail
 
-    async def preview(self, payload, *, calling_session_project_id=None):  # type: ignore[no-untyped-def]
+    async def preview(
+        self, payload, *, calling_session_project_id=None, user_id=None
+    ):  # type: ignore[no-untyped-def]
         """``create`` action now PROPOSES (validate + preview, no persist) —
         the dispatcher calls ``preview`` instead of ``create``. Record the call
         so routing/defaulting asserts still inspect the resolved payload."""
@@ -97,6 +103,7 @@ class StubService:
             "preview",
             payload=payload,
             calling_session_project_id=calling_session_project_id,
+            user_id=user_id,
         )
         return AutomationProposalSpec(
             name=payload.name,
@@ -110,32 +117,44 @@ class StubService:
             next_run_at=None,
         )
 
-    async def list_all_automations(self):
-        self._record("list_all_automations")
+    async def list_all_automations(self, *, user_id=None):
+        self._record("list_all_automations", user_id=user_id)
         return list(self._rows.values())
 
-    async def list_automations_in_project(self, project_id):  # type: ignore[no-untyped-def]
-        self._record("list_automations_in_project", project_id=project_id)
+    async def list_automations_in_project(self, project_id, *, user_id=None):  # type: ignore[no-untyped-def]
+        self._record("list_automations_in_project", project_id=project_id, user_id=user_id)
         return [r for r in self._rows.values() if r.project_id == project_id]
 
-    async def pause(self, automation_id):  # type: ignore[no-untyped-def]
-        self._record("pause", automation_id=automation_id)
+    async def pause(self, automation_id, *, user_id=None):  # type: ignore[no-untyped-def]
+        self._record("pause", automation_id=automation_id, user_id=user_id)
         return _detail(automation_id, "paused")
 
-    async def resume(self, automation_id):  # type: ignore[no-untyped-def]
-        self._record("resume", automation_id=automation_id)
+    async def resume(self, automation_id, *, user_id=None):  # type: ignore[no-untyped-def]
+        self._record("resume", automation_id=automation_id, user_id=user_id)
         return _detail(automation_id, "resumed")
 
-    async def delete(self, automation_id):  # type: ignore[no-untyped-def]
-        self._record("delete", automation_id=automation_id)
+    async def delete(self, automation_id, *, user_id=None):  # type: ignore[no-untyped-def]
+        self._record("delete", automation_id=automation_id, user_id=user_id)
         self._rows.pop(automation_id, None)
 
-    async def run_now(self, automation_id, *, trigger_type="manual", invoked_by_session_id=None):  # type: ignore[no-untyped-def]
-        self._record("run_now", automation_id=automation_id, trigger_type=trigger_type)
+    async def run_now(
+        self,
+        automation_id,
+        *,
+        trigger_type="manual",
+        invoked_by_session_id=None,
+        user_id=None,
+    ):  # type: ignore[no-untyped-def]
+        self._record(
+            "run_now",
+            automation_id=automation_id,
+            trigger_type=trigger_type,
+            user_id=user_id,
+        )
         return type("Run", (), {"run_id": f"run-{automation_id}"})()
 
-    async def update(self, automation_id, payload):  # type: ignore[no-untyped-def]
-        self._record("update", automation_id=automation_id, payload=payload)
+    async def update(self, automation_id, payload, *, user_id=None):  # type: ignore[no-untyped-def]
+        self._record("update", automation_id=automation_id, payload=payload, user_id=user_id)
         return _detail(automation_id, "updated")
 
     # The dispatcher reaches into ``_ds.get_automation`` and ``_row_to_item``
@@ -154,7 +173,7 @@ class StubService:
     def _ds(self):  # type: ignore[no-untyped-def]
         return StubService._FakeDS(self)
 
-    async def _row_to_item(self, row):  # type: ignore[no-untyped-def]
+    async def _row_to_item(self, row, user_id=None):  # type: ignore[no-untyped-def]
         return row if isinstance(row, AutomationItemResponse) else _row(row.automation_id)
 
 
@@ -204,10 +223,12 @@ def patched_dispatch(monkeypatch: pytest.MonkeyPatch, stub_service: StubService)
     project_kind = {"value": "project"}
     session_agent_slug = {"value": None}
 
-    async def _fake_session_context(session_id: str):  # noqa: ARG001
+    async def _fake_session_context(
+        session_id: str, user_id: str | None = None
+    ):  # noqa: ARG001
         return project_id["value"], project_kind["value"], session_agent_slug["value"]
 
-    async def _fake_build_service(db):  # noqa: ARG001
+    async def _fake_build_service(db, user_id: str | None = None):  # noqa: ARG001
         return stub_service
 
     async def _fake_uow():  # pragma: no cover — overridden via context manager below
@@ -224,6 +245,7 @@ def patched_dispatch(monkeypatch: pytest.MonkeyPatch, stub_service: StubService)
         return _UoW()
 
     monkeypatch.setattr(mod, "_resolve_session_context", _fake_session_context)
+    monkeypatch.setattr(mod, "_resolve_session_owner", AsyncMock(return_value="user-1"))
     monkeypatch.setattr(mod, "_build_automation_service", _fake_build_service)
     monkeypatch.setattr(mod, "_current_session_id", lambda: "sess-1")
     # The dispatch imports async_unit_of_work locally; patch where it's used.
@@ -609,7 +631,16 @@ class TestScopeAndCrossProject:
         assert decoded["ok"] is True
         assert decoded["action"] == "run"
         run_calls = [c for c in stub_service.calls if c[0] == "run_now"]
-        assert run_calls == [("run_now", {"automation_id": "auto-run", "trigger_type": "agent"})]
+        assert run_calls == [
+            (
+                "run_now",
+                {
+                    "automation_id": "auto-run",
+                    "trigger_type": "agent",
+                    "user_id": "user-1",
+                },
+            )
+        ]
 
 
 # ── Decorated ``automation`` thin wrapper trigger coercion ─────────
@@ -703,7 +734,6 @@ def patched_resolver(monkeypatch: pytest.MonkeyPatch):
         async def __aexit__(self, *args):  # noqa: ANN002
             return None
 
-    monkeypatch.setattr(mod, "get_current_user_id", lambda: "user-1")
     monkeypatch.setattr("valuz_agent.adapters.kernel_client.get_session", _fake_get_session)
     monkeypatch.setattr("valuz_agent.infra.db.async_unit_of_work", lambda commit=True: _UoW())
     monkeypatch.setattr(
@@ -721,7 +751,9 @@ class TestResolveSessionContext:
             user_id="user-1",
             metadata={"valuz": {"project_id": "ws-42", "agent_slug": "qa"}},
         )
-        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context("sess-1")
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context(
+            "sess-1", "user-1"
+        )
         assert project_id == "ws-42"
         assert project_kind == "project"
         assert bound_agent_slug == "qa"
@@ -733,7 +765,9 @@ class TestResolveSessionContext:
             user_id="user-1",
             metadata={"valuz": {"agent_slug": "default-assistant"}},
         )
-        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context("sess-1")
+        project_id, project_kind, bound_agent_slug = await mod._resolve_session_context(
+            "sess-1", "user-1"
+        )
         assert project_id is None
         assert project_kind == "chat"
         assert bound_agent_slug == "default-assistant"
@@ -742,4 +776,8 @@ class TestResolveSessionContext:
         self, patched_resolver: dict[str, Any]
     ) -> None:
         patched_resolver["value"] = None
-        assert await mod._resolve_session_context("sess-1") == (None, "chat", None)
+        assert await mod._resolve_session_context("sess-1", "user-1") == (
+            None,
+            "chat",
+            None,
+        )

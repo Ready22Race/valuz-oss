@@ -162,7 +162,7 @@ async def _build_app(tmp_path: Path) -> tuple[FastAPI, _Deps]:
 
     app.include_router(projects_routes.router)
     app.dependency_overrides[get_async_session] = _override_session
-    app.dependency_overrides[projects_routes.require_current_user_id] = _override_user
+    app.dependency_overrides[projects_routes.get_current_user_id] = _override_user
     app.dependency_overrides[projects_routes.get_project_pack_service] = _override_pack
     app.dependency_overrides[projects_routes.get_project_service] = _override_project
     return app, deps
