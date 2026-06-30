@@ -101,7 +101,7 @@ async def be(tmp_path):
     durable = FlakyDurable(durable_inner)
     # The outbox lives in the LOCAL db (same engine/session factory).
     outbox = DurableOutbox(local._session_factory)  # type: ignore[attr-defined]
-    store = WriteThroughStore(local, durable, durable_required=False, outbox=outbox)
+    store = WriteThroughStore(local, durable, authority="local", outbox=outbox)
     yield store, local, durable, durable_inner, outbox, str(tmp_path)
     await le.dispose()
     await de.dispose()
@@ -179,20 +179,22 @@ async def test_partial_drain_stops_at_first_failure(be):
     assert await outbox.pending_count() == 0
 
 
-async def test_strict_mode_is_fail_loud(tmp_path):
+async def test_durable_authority_is_fail_loud(tmp_path):
+    """remote tier: the durable (authoritative) write is fail-loud, so a sandbox
+    never returns success with data left only in ephemeral local storage."""
     local, le = await _mk_store(tmp_path / "l.db")
     durable_inner, de = await _mk_store(tmp_path / "d.db")
     durable = FlakyDurable(durable_inner)
     try:
-        strict = WriteThroughStore(local, durable, durable_required=True)
+        store = WriteThroughStore(local, durable, authority="durable")
         durable.fail = True
         with pytest.raises(RuntimeError, match="durable down"):
-            await strict.save_session(_sess(uuid.uuid4().hex, "u", str(tmp_path)))
+            await store.save_session(_sess(uuid.uuid4().hex, "u", str(tmp_path)))
     finally:
         await le.dispose()
         await de.dispose()
 
 
-def test_best_effort_requires_outbox(tmp_path):
+def test_local_authority_requires_outbox(tmp_path):
     with pytest.raises(ValueError, match="requires a DurableOutbox"):
-        WriteThroughStore(object(), object(), durable_required=False)  # type: ignore[arg-type]
+        WriteThroughStore(object(), object(), authority="local")  # type: ignore[arg-type]

@@ -248,15 +248,19 @@ def _wrap_durable(
     if durable is None:
         return None
     if config.kernel_store == "pg":
+        # OSS resident + own Postgres: LOCAL is authoritative (read local, seq
+        # local); durable is a best-effort mirror with outbox compensation.
         assert _session_factory is not None  # set just above in init
         return WriteThroughStore(
             local,
             durable,
-            durable_required=False,
+            authority="local",
             outbox=DurableOutbox(_session_factory),
             drain_interval_s=_env_float("VALUZ_OUTBOX_DRAIN_INTERVAL_S") or 30.0,
         )
-    return WriteThroughStore(local, durable, durable_required=True)
+    # remote (SaaS ephemeral sandbox): the DURABLE DataService is the system of
+    # record — read + seq + fail-loud write go there; local is a write buffer.
+    return WriteThroughStore(local, durable, authority="durable")
 
 
 async def _ensure_durable_schema(engine: AsyncEngine) -> None:

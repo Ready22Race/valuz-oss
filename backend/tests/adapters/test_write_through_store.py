@@ -17,6 +17,7 @@ import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect for src.*
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from src.adapters.durable_outbox import DurableOutbox
 from src.adapters.sqlalchemy_store.models import Base
 from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
 from src.adapters.write_through_store import WriteThroughStore
@@ -34,9 +35,13 @@ async def _mk_store(path):
 
 @pytest.fixture
 async def wt(tmp_path):
+    """Local-authority (pg-tier) store: read local, durable mirror + outbox."""
     local, le = await _mk_store(tmp_path / "local.db")
     durable, de = await _mk_store(tmp_path / "durable.db")
-    yield WriteThroughStore(local, durable), local, durable
+    store = WriteThroughStore(
+        local, durable, authority="local", outbox=DurableOutbox(local._session_factory)
+    )
+    yield store, local, durable
     await le.dispose()
     await de.dispose()
 
@@ -111,7 +116,9 @@ async def test_local_preexisting_ids_never_drop_events(tmp_path):
         assert len(await local.get_events("u", sid)) == 5
         # Durable is fresh (its autoincrement starts at 1) — the exact overlap
         # that used to collide. Append through the write-through store.
-        store = WriteThroughStore(local, durable)
+        store = WriteThroughStore(
+            local, durable, authority="local", outbox=DurableOutbox(local._session_factory)
+        )
         s = await store.append_event("u", sid, mid, Event(type="user_message", data={}))
         # The new event is in BOTH stores — none dropped.
         assert s is not None and s > 5  # local autoincrement continued
@@ -131,6 +138,32 @@ async def test_append_idempotent_across_both(wt, tmp_path):
     assert a == b
     assert len(await local.get_events("u", sid)) == 1
     assert len(await durable.get_events("u", sid)) == 1
+
+
+async def test_durable_authority_reads_from_durable(tmp_path):
+    """remote tier: durable is the system of record — reads + seq come from it,
+    and the local buffer is never the read source (the ephemeral-sandbox case)."""
+    local, le = await _mk_store(tmp_path / "local.db")
+    durable, de = await _mk_store(tmp_path / "durable.db")
+    try:
+        store = WriteThroughStore(local, durable, authority="durable")
+        sid, mid = await _seed(store, "u", tmp_path)
+        s = await store.append_event("u", sid, mid, Event(type="user_message", data={}))
+        # Returned seq is the DURABLE seq; the durable holds the event…
+        durable_seqs = [e.seq for e in await durable.get_events_after("u", sid, after_seq=0)]
+        assert durable_seqs == [s]
+        # …and the store reads from durable (buffer also got it, best-effort).
+        assert len(await store.get_events("u", sid)) == 1
+        assert len(await local.get_events("u", sid)) == 1  # buffer copy
+
+        # Prove the READ source is durable: write an event ONLY to durable;
+        # the store must surface it even though local never saw it.
+        await durable.append_event("u", sid, mid, Event(type="assistant_message", data={}))
+        assert len(await store.get_events("u", sid)) == 2
+        assert len(await local.get_events("u", sid)) == 1
+    finally:
+        await le.dispose()
+        await de.dispose()
 
 
 async def test_reads_are_local_first(wt, tmp_path):

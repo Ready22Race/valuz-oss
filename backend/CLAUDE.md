@@ -61,26 +61,24 @@ is *also* mirrored to, via `WriteThroughStore` (`src/adapters/`):
 | `pg` | in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL` | OSS "configure a Postgres"; same process, no HTTP. Schema auto-created (`_ensure_durable_schema`, checkfirst) |
 | `remote` | `RemoteStoreHttp` → trusted data service | sandbox/SaaS; holds ONLY a JWT (`VALUZ_DATA_API_*`) — never a DB DSN |
 
-**Event seq is LOCAL-authoritative.** Each store owns its own `events` PK
-autoincrement; the two are **independent and need not match** (`event_uid` bridges
-identity across stores). `append_event` writes LOCAL first — its autoincrement
-assigns the seq it returns, so the orchestrator's persist→broadcast and the
-local-first read cursor agree — then mirrors to the durable with the durable's
-OWN autoincrement. **Never force the durable's seq onto the local PK**: the local
-`kernel.db` usually already holds events at overlapping ids, so forcing collides
-and silently drops every mirrored event (the bug that emptied remote-mode
-sessions).
+**`WriteThroughStore` has a per-tier *authority*** (the read source + seq source);
+writes always hit BOTH stores. Each store owns its own `events` autoincrement —
+the two seqs are **independent and need not match** (`event_uid` bridges identity).
+NEVER force one store's seq onto the other's PK: the local `kernel.db` usually
+holds overlapping ids, so forcing collides and silently drops events (the bug
+that emptied remote-mode sessions). `append_event` returns the AUTHORITY's seq so
+persist→broadcast and the read cursor agree.
 
-**Per-tier failure policy** (durability vs. availability):
-- `remote`/sandbox = **strict** — the durable mirror must land before returning;
-  a failure is **fail-loud**, so a sandbox never dies with un-persisted data.
-- `pg` = **best-effort** — a durable failure is queued in the `durable_outbox`
-  table (local DB) instead of blocking, so a Postgres outage never takes down
-  local-first writes. A background drainer (`WriteThroughStore.drain_outbox` /
-  `DurableOutbox`) re-pushes the backlog on recovery — idempotent
-  (`event_uid`/UUID PKs), stops at the first failure to preserve ordering.
-
-`event_uid` + `request_id` make the durable+local pair idempotent in both tiers.
+- `pg` → **`authority="local"`**: read local, seq local; the durable (Postgres)
+  is a best-effort mirror. A durable failure is queued in `durable_outbox` (local
+  DB) and re-pushed on recovery (`WriteThroughStore.drain_outbox` / `DurableOutbox`,
+  idempotent via `event_uid`/UUID PKs) — a PG outage never blocks local writes.
+- `remote` → **`authority="durable"`**: the central DataService is the system of
+  record (the SaaS sandbox is **ephemeral** — nothing may live only in
+  sandbox-local storage). Read + seq come from durable; the durable write is
+  **fail-loud**; the local store is a best-effort write **buffer**, never the read
+  source. The host reads history straight from the DataService when the sandbox
+  is gone (see the read-routing in `event_sse_adapter`).
 The data service (`kernel/app/data_service.py`, `POST /rpc/{op}` per StorePort
 method) is the durable end for `remote`; its route↔client↔StorePort contract is
 pinned by `test_data_service_contract.py`. Sandbox always keeps a local
