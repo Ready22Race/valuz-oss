@@ -457,12 +457,9 @@ export const CreateAutomationDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="max-w-xl gap-0 p-0"
-        showCloseButton={!promptFullscreen}
-      >
+      <DialogContent className="h-[min(640px,85vh)] max-w-xl gap-0 overflow-hidden p-0">
         {promptFullscreen ? (
-          <div className="flex h-[68vh] flex-col">
+          <div className="flex min-h-0 flex-1 flex-col">
             <DialogHeader className="px-[18px] pt-[18px] pb-2">
               <DialogTitle className="text-sm leading-5">
                 {t("cron.instruction" as Parameters<typeof t>[0])}
@@ -510,7 +507,7 @@ export const CreateAutomationDialog = ({
               <DialogDescription>{description}</DialogDescription>
             </DialogHeader>
 
-        <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
+        <div className="flex min-h-0 flex-1 flex-col gap-[14px] overflow-y-auto px-[18px] py-[14px]">
           <FormField label={t("cron.taskName" as Parameters<typeof t>[0])}>
             <Input
               value={name}
