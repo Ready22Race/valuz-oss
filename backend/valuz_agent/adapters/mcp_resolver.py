@@ -88,6 +88,7 @@ async def resolve_mcp_servers(
     *,
     enabled_slugs: list[str],
     connectors: ConnectorDatastore | None = None,
+    user_id: str | None = None,
 ) -> list[McpServerConfig]:
     """Translate enabled MCP-provider slugs into kernel ``McpServerConfig`` rows.
 
@@ -98,7 +99,7 @@ async def resolve_mcp_servers(
     seen_names: set[str] = set()
 
     for slug in enabled_slugs:
-        cfgs = await _resolve_connector_slug(slug, connectors)
+        cfgs = await _resolve_connector_slug(slug, connectors, user_id=user_id)
         if cfgs is None:
             logger.info("mcp resolver: slug %s unknown or has no credentials — skipping", slug)
             continue

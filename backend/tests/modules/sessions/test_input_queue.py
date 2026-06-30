@@ -245,6 +245,7 @@ class _FakeBus:
 
 
 class _FakeSession:
+    user_id = OWNER
     status = "idle"
     metadata = {"valuz": {"project_id": "proj-1"}}
 
@@ -267,7 +268,9 @@ def _patch_drain(monkeypatch, *, budget_raises=False):
     async def _fake_get_session(uid, sid):
         return _FakeSession()
 
-    async def _budget(session):
+    async def _budget(session, user_id=None):
+        assert session.user_id == OWNER
+        assert user_id == OWNER
         if budget_raises:
             from valuz_agent.modules.sessions.errors import BudgetExceeded
 

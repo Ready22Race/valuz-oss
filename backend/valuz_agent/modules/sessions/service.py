@@ -128,7 +128,20 @@ def _queued_input_to_dto(row: QueuedInputRow) -> QueuedInput:
     )
 
 
-async def _enforce_budget(session: object) -> None:
+def _session_owner_user_id(session: object, fallback_user_id: str | None = None) -> str | None:
+    """Resolve a session owner from persisted session data, not ambient context."""
+    owner = getattr(session, "user_id", None) or getattr(session, "owner_user_id", None)
+    if owner:
+        return str(owner)
+    metadata = getattr(session, "metadata", None) or {}
+    if isinstance(metadata, dict):
+        owner = metadata.get("owner_user_id")
+        if owner:
+            return str(owner)
+    return fallback_user_id
+
+
+async def _enforce_budget(session: object, user_id: str | None = None) -> None:
     """Channel-aware wallet pre-check before a turn runs.
 
     Resolves the session's owner and its **locked channel** (``locked_provider_id``)
@@ -140,7 +153,7 @@ async def _enforce_budget(session: object) -> None:
     """
     from valuz_agent.ports.extensions import ext
 
-    uid = session.metadata.get("owner_user_id")
+    uid = _session_owner_user_id(session, user_id)
     if uid is None:
         # Explicit-identity contract: budget enforcement without an owner is
         # meaningless — fail loudly rather than bill nobody.
@@ -1189,7 +1202,7 @@ class SessionService:
         if status in ("cancelled", "archived"):
             raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
 
-        await _enforce_budget(session)
+        await _enforce_budget(session, user_id=user_id)
 
         old_status = status
 
@@ -1274,7 +1287,7 @@ class SessionService:
         if status in ("cancelled", "archived"):
             raise SessionNotRunnable(f"Session is {status} and cannot accept messages")
 
-        await _enforce_budget(session)
+        await _enforce_budget(session, user_id=user_id)
 
         # Mirror ``send_message``: flip the session to ``status="running"``
         # before driving the turn. The frontend's auto-resume effect on

@@ -68,7 +68,7 @@ async def test_project_session_resolves_config_connectors(session) -> None:
     project_row = SimpleNamespace(kind="project", root_path="/anywhere")
     svc = _service(connectors, _FakeProjects(project_row))
 
-    slugs = await svc._auto_default_mcp_slugs("p1")
+    slugs = await svc._auto_default_mcp_slugs("p1", user_id="local-test-owner")
 
     assert sorted(slugs) == ["github", "slack"]
 
@@ -78,4 +78,4 @@ async def test_project_without_config_returns_empty(session) -> None:
     project_row = SimpleNamespace(kind="project", root_path="/anywhere")
     connectors = ConnectorDatastore(session)
     svc = _service(connectors, _FakeProjects(project_row))
-    assert await svc._auto_default_mcp_slugs("p1") == []
+    assert await svc._auto_default_mcp_slugs("p1", user_id="local-test-owner") == []

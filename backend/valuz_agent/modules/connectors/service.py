@@ -208,7 +208,9 @@ class ConnectorService:
         except Exception:
             return local
 
-    async def resolve_mcp_servers(self, slugs: list[str]) -> list[Any]:
+    async def resolve_mcp_servers(
+        self, slugs: list[str], user_id: str | None = None
+    ) -> list[Any]:
         """Materialise enabled connector slugs into kernel ``McpServerConfig``.
 
         Cohesion seam: the connector module owns credential/header injection
@@ -226,6 +228,7 @@ class ConnectorService:
         return await resolve_mcp_servers(
             enabled_slugs=slugs,
             connectors=self._ds,
+            user_id=user_id,
         )
 
     async def get_connector(self, user_id: str, connector_id: str) -> ConnectorView | None:

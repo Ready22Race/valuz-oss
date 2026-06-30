@@ -54,7 +54,7 @@ def is_draining_queue(session_id: str) -> bool:
     return session_id in _active_drains
 
 
-def _chat_billing_meter(session_id: str) -> Any:
+def _chat_billing_meter(session_id: str, user_id: str | None = None) -> Any:
     """Build the chat-path billing meter callback for a session.
 
     Shared by the initial turn and every drained queue item so each metered
@@ -65,7 +65,11 @@ def _chat_billing_meter(session_id: str) -> Any:
             from valuz_agent.ports.billing import MeterEvent
             from valuz_agent.ports.extensions import ext
 
-            uid = (after_run.metadata if after_run else {}).get("owner_user_id")
+            uid = (
+                getattr(after_run, "user_id", None)
+                or (after_run.metadata if after_run else {}).get("owner_user_id")
+                or user_id
+            )
             try:
                 if uid is None:
                     raise LookupError("no owner user_id for billing meter")
@@ -107,8 +111,8 @@ async def _run_agent_background(
     ``status="running"``. This wrapper adds the chat-path billing meter and the
     post-turn queue drain (docs/design/session-input-queue.md).
     """
-    meter = _chat_billing_meter(session_id)
     owner_user_id = _require_user_id(user_id)
+    meter = _chat_billing_meter(session_id, user_id=owner_user_id)
     await run_session_to_idle(
         session_id,
         content,
@@ -174,7 +178,7 @@ async def _drain_queue_after_turn(
             try:
                 from valuz_agent.modules.sessions.service import _enforce_budget
 
-                await _enforce_budget(session)
+                await _enforce_budget(session, user_id=owner_user_id)
             except BudgetExceeded as exc:
                 async with async_unit_of_work() as db:
                     await SessionDatastore(db).mark_queued_status(
@@ -216,7 +220,7 @@ def schedule_drain(session_id: str, event_bus: EventBus) -> None:
         if not owner_user_id:
             logger.warning("skip queue drain for %s: unknown session owner", session_id)
             return
-        meter = _chat_billing_meter(session_id)
+        meter = _chat_billing_meter(session_id, user_id=owner_user_id)
         await _drain_queue_after_turn(
             session_id,
             event_bus,
