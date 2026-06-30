@@ -32,7 +32,9 @@ class ResourceRef:
     """Lightweight pointer to a resource (what ``list`` returns)."""
 
     kind: ResourceKind
-    key: str  # portable identity: slug for agent/skill/connector, name for kb, id for project/automation
+    # portable identity: slug for agent/skill/connector, name for kb,
+    # id for project/automation
+    key: str
     name: str
 
 
@@ -125,10 +127,10 @@ class ResourceLibrary:
             from valuz_agent.modules.projects.datastore import ProjectDatastore
 
             async with async_unit_of_work(commit=False) as db:
-                rows = await ProjectDatastore(db).list_projects(user_id)
+                project_rows = await ProjectDatastore(db).list_projects(user_id)
             return [
                 ResourceRef(kind="project", key=row.id, name=row.name)
-                for row in rows
+                for row in project_rows
                 if row.kind == "project"
             ]
 
