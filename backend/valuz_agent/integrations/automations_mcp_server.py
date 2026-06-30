@@ -57,14 +57,14 @@ from __future__ import annotations
 
 import json
 import logging
-from contextvars import ContextVar
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from valuz_agent.infra.auth_context import (
-    reset_current_user_id,
-    set_current_user_id,
+from valuz_agent.integrations._mcp_asgi import (
+    build_internal_mcp_asgi,
+    get_current_mcp_session_id,
+    get_current_mcp_user_id,
 )
 from valuz_agent.modules.automations.schemas import (
     AutomationToolPayload,
@@ -78,16 +78,13 @@ from valuz_agent.modules.automations.schemas import (
 logger = logging.getLogger(__name__)
 
 
-_session_var: ContextVar[str | None] = ContextVar("valuz_automations_mcp_session_id", default=None)
-
-
 # ---------------------------------------------------------------------------
 # Session resolution
 # ---------------------------------------------------------------------------
 
 
 def _current_session_id() -> str:
-    sid = _session_var.get()
+    sid = get_current_mcp_session_id()
     if not sid:
         raise RuntimeError("automation tool called outside of a session-scoped request")
     return sid
@@ -145,22 +142,6 @@ async def _resolve_session_context(
     if ws is None:
         return None, "chat", bound_agent_slug
     return ws.id, ws.kind, bound_agent_slug
-
-
-async def _resolve_session_owner(session_id: str) -> str | None:
-    """Resolve the session owner from a raw session token (no owner required)."""
-    from valuz_agent.adapters import kernel_client
-
-    try:
-        sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
-    except Exception:  # noqa: BLE001 — owner resolution is best effort
-        logger.warning(
-            "automations MCP: failed resolving owner for session %s",
-            session_id,
-            exc_info=True,
-        )
-        return None
-    return sessions[0].user_id if sessions else None
 
 
 # ---------------------------------------------------------------------------
@@ -556,8 +537,9 @@ async def _dispatch(payload: AutomationToolPayload) -> AutomationToolResult:
     from valuz_agent.infra.db import async_unit_of_work
 
     session_id = _current_session_id()
-    user_id = await _resolve_session_owner(session_id)
-    if not user_id:
+    try:
+        user_id = get_current_mcp_user_id()
+    except RuntimeError:
         return _err(payload.action, "Unknown session owner.", code="UNKNOWN_SESSION_OWNER")
     project_id, project_kind, session_agent_slug = await _resolve_session_context(
         session_id, user_id
@@ -729,52 +711,8 @@ def automations_mcp_session_manager_run() -> Any:
 
 
 def build_automations_mcp_asgi() -> Any:
-    """Return an ASGI app to mount at ``/internal/mcp/automations``.
-
-    Same gating as docs MCP: per-process ``X-Valuz-Internal`` token plus
-    ``X-Valuz-Session-Id`` recorded into the ContextVar so the tool sees
-    the calling session.
-    """
-    from starlette.responses import PlainTextResponse
-
-    inner = _mcp.streamable_http_app()
-
-    async def _app(scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            response = PlainTextResponse("Not Found", status_code=404)
-            await response(scope, receive, send)
-            return
-
-        from valuz_agent.infra.config import settings as _settings
-
-        headers = {
-            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []
-        }
-        if headers.get("x-valuz-internal") != _settings.internal_mcp_token:
-            response = PlainTextResponse("Forbidden", status_code=403)
-            await response(scope, receive, send)
-            return
-
-        session_id = headers.get("x-valuz-session-id") or ""
-        if not session_id:
-            response = PlainTextResponse("Missing X-Valuz-Session-Id header", status_code=400)
-            await response(scope, receive, send)
-            return
-        owner_id = await _resolve_session_owner(session_id)
-        if not owner_id:
-            response = PlainTextResponse("Unknown session owner", status_code=401)
-            await response(scope, receive, send)
-            return
-
-        owner_token = set_current_user_id(owner_id)
-        ctx_token = _session_var.set(session_id)
-        try:
-            await inner(scope, receive, send)
-        finally:
-            _session_var.reset(ctx_token)
-            reset_current_user_id(owner_token)
-
-    return _app
+    """Return an ASGI app to mount at ``/internal/mcp/automations``."""
+    return build_internal_mcp_asgi(_mcp.streamable_http_app())
 
 
 def automations_mcp_url(*, base_url: str) -> str:
@@ -783,7 +721,6 @@ def automations_mcp_url(*, base_url: str) -> str:
 
 __all__ = [
     "_dispatch",
-    "_session_var",
     "automation",
     "automation_invoke",
     "automations_mcp_session_manager_run",
