@@ -213,7 +213,9 @@ export const CreateAutomationDialog = ({
   const [prompt, setPrompt] = useState("");
 
   // Trigger state — discriminated union driven by the tab.
-  const [triggerKind, setTriggerKind] = useState<"cron" | "interval">("cron");
+  const [triggerKind, setTriggerKind] = useState<
+    "cron" | "interval" | "manual"
+  >("cron");
   const [cron, setCron] = useState("0 9 * * *");
   // Scheduling timezone — the IANA zone the cron rule is read in. Defaults to
   // the live BROWSER timezone (the user's real local zone, correct for desktop
@@ -341,9 +343,10 @@ export const CreateAutomationDialog = ({
           setIntervalUnit("seconds");
         }
       } else {
-        // ``manual`` triggers aren't exposed in the UI yet — fall through
-        // to the default cron view so editing still works.
-        setTriggerKind("cron");
+        // Manual: no schedule — the automation only runs on demand
+        // (``run_now``). Keep the other tabs' fields at sensible defaults so
+        // switching away lands on a valid value.
+        setTriggerKind("manual");
         setCron("0 9 * * *");
         setIntervalValue(5);
         setIntervalUnit("minutes");
@@ -404,6 +407,10 @@ export const CreateAutomationDialog = ({
         // never null/UTC.
         timezone: timezone || browserTimezone(),
       };
+    }
+    if (triggerKind === "manual") {
+      // No schedule — fires only via ``run_now`` (or a future webhook).
+      return { kind: "manual" };
     }
     return {
       kind: "interval",
@@ -661,7 +668,9 @@ export const CreateAutomationDialog = ({
           <FormField label={t("cron.period" as Parameters<typeof t>[0])}>
             <Tabs
               value={triggerKind}
-              onValueChange={(v) => setTriggerKind(v as "cron" | "interval")}
+              onValueChange={(v) =>
+                setTriggerKind(v as "cron" | "interval" | "manual")
+              }
             >
               <TabsList>
                 <TabsTrigger value="cron">
@@ -669,6 +678,9 @@ export const CreateAutomationDialog = ({
                 </TabsTrigger>
                 <TabsTrigger value="interval">
                   {t("automation.triggerInterval" as Parameters<typeof t>[0])}
+                </TabsTrigger>
+                <TabsTrigger value="manual">
+                  {t("automation.triggerManual" as Parameters<typeof t>[0])}
                 </TabsTrigger>
               </TabsList>
               <TabsContent value="cron" className="pt-3 space-y-2">
@@ -782,6 +794,11 @@ export const CreateAutomationDialog = ({
                         seconds: intervalSeconds,
                         min: MIN_INTERVAL_SECONDS,
                       })}
+                </p>
+              </TabsContent>
+              <TabsContent value="manual" className="pt-3">
+                <p className="text-xs leading-5 text-ink-meta">
+                  {t("automation.manualHint" as Parameters<typeof t>[0])}
                 </p>
               </TabsContent>
             </Tabs>

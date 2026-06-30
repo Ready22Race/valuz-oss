@@ -604,6 +604,13 @@ interface TurnRowProps {
    * Used by the conversation page to render the SkillSubmissionCard
    * for ``submit_skill`` tool_use events. */
   renderToolCall?: (tool: PrototypeToolCall) => ReactNode | null;
+  /** Predicate marking an overridden tool card as *foldable* — it collapses
+   * away with the process trail when the turn ends (visible while running or
+   * when the turn is expanded), instead of staying pinned at its position.
+   * Returns ``false``/omitted → the card stays pinned (the default for
+   * proposals, skill submissions, workflow & task cards). The conversation
+   * page marks ``AskUserQuestion`` cards foldable. */
+  isToolCardFoldable?: (tool: PrototypeToolCall) => boolean;
   /** Reveal a file in the host OS (Finder on macOS, Explorer on
    * Windows). Wired by the desktop app to the ``open_in_finder`` IPC;
    * webui omits this and the per-row external-link icon hides. */
@@ -620,6 +627,7 @@ const TurnRow = memo(
     onSwitchModel,
     retryCount,
     renderToolCall,
+    isToolCardFoldable,
     onRevealFile,
   }: TurnRowProps) {
     const inFlight = sending && isLatest;
@@ -686,6 +694,11 @@ const TurnRow = memo(
         // The compaction divider is meta — always visible, never folded —
         // so it must be transparent to this walk (same as the diff summary).
         if (b.kind === "compaction") continue;
+        // A caller-overridden card (AskUserQuestion, agent/automation proposals,
+        // SkillSubmission, workflow & task cards…) is NOT transparent here: it
+        // acts as a fold boundary so the narration/process *before* it folds
+        // away, leaving just the card. The card itself is never hidden — it is
+        // rendered before the fold check below.
         if (b.kind !== "segment") return i + 1;
         if (b.header === null) return i + 1;
         if (b.items.some((item) => item.kind === "tool")) return i + 1;
@@ -816,20 +829,29 @@ const TurnRow = memo(
                   <CompactionDivider key={`compaction-${turn.id}-${blockIndex}`} />
                 );
               }
+              if (
+                block.kind === "tool-overridden" &&
+                !isToolCardFoldable?.(block.tool)
+              ) {
+                // Pinned caller card (agent/automation proposals, SkillSubmission,
+                // workflow & task cards…). It appears mid-process but must stay at
+                // its original position after the turn ends — render BEFORE the
+                // fold check (like the compaction divider) so the auto-fold never
+                // hides it.
+                return <div key={`tool-${block.tool.id}`}>{block.node}</div>;
+              }
               // When the turn-level header is folded, hide every block
-              // before ``trailingContentStart`` — that's the process
-              // work (tool calls + their narration). Blocks at or after
-              // it are "answer content": one or more trailing assistant
-              // messages, possibly with a small thinking block between
-              // them. The whole tail stays visible so a long report +
-              // closing remark both survive the fold.
+              // before ``trailingContentStart`` — that's the process work
+              // (tool calls + their narration). Blocks at or after it are
+              // "answer content" and stay visible.
               if (turnFolded && blockIndex < trailingContentStart) {
                 return null;
               }
               if (block.kind === "tool-overridden") {
-                // Caller-supplied node (e.g. SkillSubmissionCard for the
-                // ``submit_skill`` tool) — stays visible at the top level
-                // instead of being folded into a segment body.
+                // Foldable caller card (e.g. AskUserQuestion) — rendered AFTER
+                // the fold check, so it collapses away with the process trail
+                // once the turn ends; visible while running or when the user
+                // expands the turn.
                 return <div key={`tool-${block.tool.id}`}>{block.node}</div>;
               }
               if (block.kind === "turn-diff-summary") {
@@ -934,6 +956,8 @@ interface ConversationTurnListProps {
   ) => void;
   /** See ``TurnRowProps.renderToolCall``. */
   renderToolCall?: (tool: PrototypeToolCall) => ReactNode | null;
+  /** See ``TurnRowProps.isToolCardFoldable``. */
+  isToolCardFoldable?: (tool: PrototypeToolCall) => boolean;
   /** See ``TurnRowProps.onRevealFile``. */
   onRevealFile?: (filePath: string) => void;
   emptyTitle?: string;
@@ -954,6 +978,7 @@ export function ConversationTurnList({
   skillsBySlug,
   onVirtualApiReady,
   renderToolCall,
+  isToolCardFoldable,
   onRevealFile,
   emptyTitle,
   emptySuggestions,
@@ -1099,6 +1124,7 @@ export function ConversationTurnList({
                     onSwitchModel={onSwitchModel}
                     retryCount={retryCounts?.[turn.id] ?? 0}
                     renderToolCall={renderToolCall}
+                    isToolCardFoldable={isToolCardFoldable}
                     onRevealFile={onRevealFile}
                   />
                 </div>

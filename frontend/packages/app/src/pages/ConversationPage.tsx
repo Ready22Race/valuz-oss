@@ -444,13 +444,17 @@ function parseAutomationCreateInput(input: unknown): {
   };
 }
 
-/** Compact, locale-agnostic schedule summary from a trigger — a fallback for
- *  when the server's ``trigger_human_readable`` isn't available (the tool output
- *  wasn't parseable on this runtime). */
+/** Localized schedule summary from a trigger — a fallback for when the server's
+ *  ``trigger_human_readable`` isn't available (the tool output wasn't parseable
+ *  on this runtime). Mirrors the activity/automation list cadence localization
+ *  (每 30 分钟 / Every 30 minutes / 手动 / Manual) via the shared
+ *  ``automation.intervalEvery*`` / ``triggerManual`` keys. */
 function automationTriggerSummary(
   trigger: import("@valuz/core").Trigger | null,
+  t: ReturnType<typeof useTranslation>["t"],
 ): string | undefined {
   if (!trigger) return undefined;
+  const tk = (key: string) => key as Parameters<typeof t>[0];
   if (trigger.kind === "cron") {
     return trigger.timezone
       ? `${trigger.cron_expr} · ${trigger.timezone}`
@@ -458,12 +462,13 @@ function automationTriggerSummary(
   }
   if (trigger.kind === "interval") {
     const s = trigger.seconds;
-    if (s % 86400 === 0) return `every ${s / 86400}d`;
-    if (s % 3600 === 0) return `every ${s / 3600}h`;
-    if (s % 60 === 0) return `every ${s / 60}m`;
-    return `every ${s}s`;
+    if (s % 3600 === 0)
+      return t(tk("automation.intervalEveryHours"), { count: s / 3600 });
+    if (s % 60 === 0)
+      return t(tk("automation.intervalEveryMinutes"), { count: s / 60 });
+    return t(tk("automation.intervalEverySeconds"), { count: s });
   }
-  return "Manual";
+  return t(tk("automation.triggerManual"));
 }
 
 export const ConversationPage = () => {
@@ -1766,6 +1771,26 @@ export const ConversationPage = () => {
     };
   }, [selectedSessionId, turns, sending]);
 
+  // Mark an AskUserQuestion card as *foldable* so it collapses away with the
+  // process trail once the turn ends — but ONLY after it's been answered. An
+  // unanswered, still-pending question stays pinned/visible (the run parks and
+  // ``sending`` flips to false while awaiting the answer, which would otherwise
+  // auto-fold and hide the card the user needs to act on). Other overridden
+  // cards (proposals, skill submission, workflow/task) are never foldable.
+  const isToolCardFoldable = useCallback(
+    (tool: { id: string; title?: string }): boolean => {
+      const name = tool.title ?? "";
+      const isAsk =
+        name === "AskUserQuestion" || name.endsWith("__AskUserQuestion");
+      if (!isAsk) return false;
+      return Boolean(
+        askUserQuestionAnswersByToolId[tool.id] ??
+          askUserQuestionLocalAnswers[tool.id],
+      );
+    },
+    [askUserQuestionAnswersByToolId, askUserQuestionLocalAnswers],
+  );
+
   const renderToolCall = useCallback(
     (tool: { id: string; title: string; input?: string; output?: string }) => {
       const name = tool.title || "";
@@ -1828,7 +1853,7 @@ export const ConversationPage = () => {
           const confirmTrigger = proposal?.trigger ?? inputSpec?.trigger ?? null;
           const cardTriggerHuman =
             proposal?.trigger_human_readable ??
-            automationTriggerSummary(confirmTrigger);
+            automationTriggerSummary(confirmTrigger, t);
           const cardActionKind =
             proposal?.action_kind ?? inputSpec?.action_kind ?? "chat";
           const cardAgentName = proposal?.agent_name ?? inputSpec?.agent_slug ?? null;
@@ -5005,6 +5030,7 @@ export const ConversationPage = () => {
                 skillsBySlug={skillsBySlug}
                 onVirtualApiReady={handleTurnListVirtualApiReady}
                 renderToolCall={renderToolCall}
+                isToolCardFoldable={isToolCardFoldable}
                 onRevealFile={revealInFinder}
                 emptySuggestions={[
                   t(

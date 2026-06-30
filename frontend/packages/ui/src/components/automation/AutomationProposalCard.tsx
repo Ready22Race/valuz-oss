@@ -12,7 +12,7 @@
  * the proposal (``ok === false`` — e.g. a bad cron / task-in-chat): the card
  * renders the message and offers no Confirm button.
  */
-import { memo } from "react";
+import { memo, useCallback, useState } from "react";
 import { AlarmClock, Check, Loader2, Sparkles, User, X } from "lucide-react";
 import { cn } from "@valuz/ui/lib/utils";
 import { useI18n } from "../../hooks/use-i18n";
@@ -55,6 +55,21 @@ export const AutomationProposalCard = memo(function AutomationProposalCard({
   onDismiss,
 }: AutomationProposalCardProps) {
   const { t } = useI18n();
+  const [promptExpanded, setPromptExpanded] = useState(false);
+  const [promptOverflowing, setPromptOverflowing] = useState(false);
+  // Measure in the collapsed (line-clamp-3) state: only offer the expand toggle
+  // when the instruction actually overflows 3 lines. A callback ref keeps the
+  // measurement out of an effect (no cascading-render lint); it re-runs when the
+  // template streams in.
+  const measurePromptRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      // Re-attaches (re-measures) whenever ``promptTemplate`` changes — e.g. as
+      // the tool input streams in — so the toggle appears once it overflows.
+      if (el && promptTemplate)
+        setPromptOverflowing(el.scrollHeight > el.clientHeight + 1);
+    },
+    [promptTemplate],
+  );
 
   // The create tool rejected the proposal outright — render a terminal error
   // with no actions (there's nothing to confirm).
@@ -114,26 +129,57 @@ export const AutomationProposalCard = memo(function AutomationProposalCard({
             </span>
           </div>
 
-          {triggerHuman ? (
-            <p className="mt-1 flex items-center gap-1 text-xs text-ink-body">
-              <Sparkles className="h-3 w-3 shrink-0 text-ink-label" />
-              {triggerHuman}
-            </p>
-          ) : null}
-
-          {agentName ? (
-            <p className="mt-1 flex items-center gap-1 text-[11px] text-ink-meta">
-              <User className="h-3 w-3 shrink-0 text-ink-label" />
-              {actionKind === "task"
-                ? `${t("automation.proposalLead")}: ${agentName}`
-                : `${t("automation.agentLabel")}: ${agentName}`}
-            </p>
+          {triggerHuman || agentName ? (
+            <div className="mt-1 flex items-center gap-3 text-xs">
+              {triggerHuman ? (
+                <span className="flex shrink-0 items-center gap-1 text-ink-body">
+                  <Sparkles className="h-3 w-3 shrink-0 text-ink-label" />
+                  {triggerHuman}
+                </span>
+              ) : null}
+              {agentName ? (
+                <span className="flex min-w-0 items-center gap-1 text-ink-meta">
+                  <User className="h-3 w-3 shrink-0 text-ink-label" />
+                  <span className="truncate">
+                    {actionKind === "task"
+                      ? `${t("automation.proposalLead")}: ${agentName}`
+                      : `${t("automation.agentLabel")}: ${agentName}`}
+                  </span>
+                </span>
+              ) : null}
+            </div>
           ) : null}
 
           {promptTemplate ? (
-            <p className="mt-2 line-clamp-3 text-xs leading-snug text-ink-body">
-              {promptTemplate}
-            </p>
+            <div className="relative mt-2">
+              {/* Collapsed: the original 3-line clamp. Expanded: full text in a
+                  fixed-height scroll region so a long prompt scrolls in place
+                  instead of stretching the card (newlines preserved). The
+                  toggle sits INLINE at the bottom-right (end of the clamped 3rd
+                  line), masked by the card background — never on its own line. */}
+              <div
+                ref={measurePromptRef}
+                className={cn(
+                  "text-xs leading-snug text-ink-body",
+                  promptExpanded
+                    ? "max-h-40 overflow-y-auto whitespace-pre-wrap break-words"
+                    : "line-clamp-3",
+                )}
+              >
+                {promptTemplate}
+              </div>
+              {promptOverflowing || promptExpanded ? (
+                <button
+                  type="button"
+                  onClick={() => setPromptExpanded((v) => !v)}
+                  className="absolute bottom-0 right-0 bg-surface-soft pl-4 text-2xs font-medium text-brand hover:underline"
+                >
+                  {promptExpanded
+                    ? t("automation.proposalCollapse")
+                    : t("automation.proposalExpand")}
+                </button>
+              ) : null}
+            </div>
           ) : null}
 
           {state === "confirmed" ? (
