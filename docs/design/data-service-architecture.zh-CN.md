@@ -192,9 +192,10 @@ SaaS 即 **form 4,无新代码路径**:云沙箱驱动(执行旋钮)+ 中心 PG 
 > **已落地:** host 持久化 DS 密钥 + token 签发;DataService 挂为 host router
 > `/internal/data`(store + verifier 在 lifespan 绑定);沙箱经 HTTP+JWT 指向它、
 > 不持 DSN;设置页有健康 + OpenAPI;OSS 两档 `仅本地 | 数据服务·Postgres`;
-> `make pg` 取代 `make dev-remote`。已由 `scripts/e2e_host_data_service.py` 验证
-> (host DS over 真实 PG,JWT 往返)。**剩余:** host 直接进程内读自己挂载的 DS
-> store,使**死沙箱**也完全可读(目前 host 经活沙箱 kernel 读);live seatbelt E2E。
+> `make pg` 取代 `make dev-remote`。**读已统一走 DataService**——host 进程内直读
+> 自己挂载的 DS store,与沙箱死活无关(无 alive/dead 分支),**死沙箱也完全可读**。
+> 已由 `scripts/e2e_host_data_service.py` 验证(host DS over 真实 PG,JWT 往返)。
+> **剩余:** live seatbelt E2E。
 
 > 本节是承接本文之后实现工作的桥梁。
 

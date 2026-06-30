@@ -32,7 +32,6 @@ from typing import Any
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.auth_context import require_current_user_id
-from valuz_agent.infra.config import settings
 from valuz_agent.infra.sse import shielded
 
 logger = logging.getLogger(__name__)
@@ -40,30 +39,19 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SECONDS = 0.3
 IDLE_HEARTBEAT_SECONDS = 15.0
 
-# History read-routing (remote/SaaS tier). The kernel runs in an EPHEMERAL
-# sandbox there, so its event HISTORY lives in the central DataService, not in
-# (disposable) sandbox-local storage. History reads (cursor fetch + window
-# pagination + the SSE backfill/poll) therefore go STRAIGHT to the DataService,
-# so they work even when the sandbox kernel is gone. Live deltas still come from
-# the kernel's live SSE (when the sandbox is alive). For local/pg tiers the
-# reader is just the in-process/kernel seam.
-_data_service_reader: Any = None
-
-
+# History read-routing. Reads are UNIFIED through the DataService: whenever a
+# durable DataService is configured (any non-local mode), the host reads event
+# HISTORY straight from it (in-process), independent of whether the sandbox
+# kernel is alive — the sandbox owns execution + live deltas, the DataService
+# owns history. In local mode there is no DataService, so reads go through the
+# kernel seam (the in-process kernel store).
 def _history_reader() -> Any:
-    """The transport for reading event HISTORY: the DataService directly in
-    remote mode, else the ``KernelClient`` seam."""
-    global _data_service_reader  # noqa: PLW0603
-    if settings.kernel_store == "remote" and settings.kernel_data_api_url:
-        if _data_service_reader is None:
-            from valuz_agent.adapters.data_service_client import DataServiceReadClient
+    """The transport for reading event HISTORY: the in-process host-mounted
+    DataService store when one is bound, else the ``KernelClient`` seam."""
+    from valuz_agent.adapters.data_service_local import get_local_reader
 
-            _data_service_reader = DataServiceReadClient(
-                base_url=settings.kernel_data_api_url,
-                token=settings.kernel_data_api_token,
-            )
-        return _data_service_reader
-    return kernel_client
+    reader = get_local_reader()
+    return reader if reader is not None else kernel_client
 
 
 @dataclass(frozen=True)

@@ -97,59 +97,63 @@ async def test_client_maps_get_events_window():
     assert len(window.items) == 1 and window.items[0].seq == 1
 
 
+# ── reader routing: reads are unified through the in-process DataService ──
+# (sandbox-agnostic — no "is the sandbox alive?" branch). The host reads its
+# bound DataService store directly; in local mode it falls back to the kernel.
+
+from src.core.store_port import StoredEvent  # noqa: E402
+
+from valuz_agent.adapters import data_service_local  # noqa: E402
+from valuz_agent.adapters.data_service_local import LocalDataServiceReader  # noqa: E402
+
+
+class _FakeStore:
+    """Minimal StorePort read surface for the local-reader routing tests."""
+
+    async def get_events_after(self, user_id, session_id, *, after_seq, limit):
+        return [
+            StoredEvent(
+                seq=5,
+                session_id=session_id,
+                message_id="m",
+                type="user_message",
+                data={"text": "yo"},
+                timestamp=9,
+            )
+        ]
+
+    async def get_events_window(self, user_id, session_id, *, before_seq=None, turn_limit=20):
+        return ([], False)
+
+
 @pytest.fixture
 def reset_reader():
-    sse._data_service_reader = None
+    data_service_local.bind_local_reader(None)
     yield
-    sse._data_service_reader = None
+    data_service_local.bind_local_reader(None)
 
 
-def test_reader_routes_to_kernel_in_local_mode(reset_reader, monkeypatch):
-    monkeypatch.setattr(sse.settings, "kernel_store", "local", raising=False)
+def test_local_mode_reads_via_kernel(reset_reader):
+    # No DataService bound → history reads go through the kernel seam.
     assert sse._history_reader() is sse.kernel_client
 
 
-def test_reader_routes_to_data_service_in_remote_mode(reset_reader, monkeypatch):
-    monkeypatch.setattr(sse.settings, "kernel_store", "remote", raising=False)
-    monkeypatch.setattr(sse.settings, "kernel_data_api_url", "http://127.0.0.1:8400", raising=False)
-    reader = sse._history_reader()
-    assert isinstance(reader, DataServiceReadClient)
+def test_durable_mode_reads_via_local_data_service(reset_reader):
+    # A bound DataService store → reads go straight to it, in-process.
+    data_service_local.bind_local_reader(_FakeStore())  # type: ignore[arg-type]
+    assert isinstance(sse._history_reader(), LocalDataServiceReader)
 
 
-async def test_list_events_after_uses_data_service(reset_reader, monkeypatch):
-    """End-to-end: in remote mode, list_events_after pulls + translates frames
-    from the DataService even though the kernel seam is never touched."""
+async def test_list_events_after_reads_from_data_service(reset_reader):
+    """End-to-end: with a DataService bound, list_events_after reads + translates
+    frames straight from it — the kernel seam is never touched (sandbox-agnostic)."""
     from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/rpc/get_events_after"
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "seq": 5,
-                        "session_id": "s",
-                        "message_id": "m",
-                        "type": "user_message",
-                        "data": {"text": "yo"},
-                        "timestamp": 9,
-                    }
-                ]
-            },
-        )
-
-    monkeypatch.setattr(sse.settings, "kernel_store", "remote", raising=False)
-    monkeypatch.setattr(sse.settings, "kernel_data_api_url", "http://ds", raising=False)
-    sse._data_service_reader = DataServiceReadClient(
-        base_url="http://ds", token="t", http_client=_mock_client(handler)
-    )
+    data_service_local.bind_local_reader(_FakeStore())  # type: ignore[arg-type]
     tok = set_current_user_id("u")
     try:
         frames = await sse.list_events_after("s", after_seq=0, limit=10)
     finally:
         reset_current_user_id(tok)
-        await sse._data_service_reader.aclose()
-    # The user_message event was fetched from the DataService and translated.
     assert len(frames) == 1
     assert frames[0].seq == 5

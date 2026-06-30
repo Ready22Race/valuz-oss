@@ -222,11 +222,11 @@ nothing in the kernel or the data layer changes.
 > is mounted as a host router at `/internal/data` (store + verifier bound in the
 > lifespan); the sandbox is pointed at it over HTTP+JWT with no DSN; settings
 > expose health + OpenAPI; OSS modes are `local | data service·Postgres`; the
-> `make pg` helper replaces `make dev-remote`. Validated by
-> `scripts/e2e_host_data_service.py` (host DS over real PG, JWT round-trip).
-> **Remaining:** host reads its own mounted DS store *directly* in-process so a
-> *dead* sandbox is fully read-safe (today the host reads via the live kernel);
-> live seatbelt E2E.
+> `make pg` helper replaces `make dev-remote`. **Reads are unified through the
+> DataService** — the host reads its mounted DS store directly in-process,
+> sandbox-agnostic (no alive/dead branch), so a destroyed sandbox is fully
+> read-safe. Validated by `scripts/e2e_host_data_service.py` (host DS over real
+> PG, JWT round-trip). **Remaining:** live seatbelt E2E.
 
 > This section is the bridge to the implementation work that follows this doc.
 
