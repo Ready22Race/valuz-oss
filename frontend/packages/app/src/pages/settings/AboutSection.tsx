@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   UNLOCK_TAP_COUNT,
   isDataServiceUnlocked,
+  registerDataServiceSection,
   unlockDataService,
 } from "./data-service-unlock";
 
@@ -54,7 +55,14 @@ export const AboutSection = () => {
   // Hidden reveal: tap the version card 9× to unlock the Data Service section.
   const tapCountRef = useRef(0);
   const handleAboutTap = useCallback(() => {
-    if (isDataServiceUnlocked()) return;
+    if (isDataServiceUnlocked()) {
+      // Already unlocked — re-register (self-heal: surface it even if a prior
+      // session's registration was lost) and give feedback, instead of a
+      // silent no-op that reads as "nothing happened".
+      registerDataServiceSection();
+      toast.success(t("settings.dataService.unlocked"));
+      return;
+    }
     tapCountRef.current += 1;
     if (tapCountRef.current >= UNLOCK_TAP_COUNT) {
       tapCountRef.current = 0;
