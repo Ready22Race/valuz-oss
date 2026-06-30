@@ -690,6 +690,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 title=args.get("title"),
                 dispatch_mode=dispatch_mode,  # type: ignore[arg-type]
                 originating_session_id=ctx.session_id,
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(

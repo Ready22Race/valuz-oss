@@ -249,7 +249,11 @@ class PlanResponse(BaseModel):
 
 
 @router.post("/v1/projects/{project_id}/tasks", status_code=201, response_model=TaskResponse)
-async def kickoff_task(project_id: str, payload: KickoffTaskRequest) -> TaskResponse:
+async def kickoff_task(
+    project_id: str,
+    payload: KickoffTaskRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> TaskResponse:
     """Create a task and start its lead session (lead self-dispatches sub-runs)."""
     try:
         row = await task_orchestrator.kickoff(
@@ -260,6 +264,7 @@ async def kickoff_task(project_id: str, payload: KickoffTaskRequest) -> TaskResp
             created_by=payload.created_by,
             title=payload.title,
             dispatch_mode=payload.dispatch_mode,
+            user_id=user_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

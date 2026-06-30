@@ -201,6 +201,7 @@ class TaskOrchestrator:
         originating_session_id: str | None = None,
         trigger_type: str | None = None,
         trigger_automation_id: str | None = None,
+        user_id: str | None = None,
     ) -> TaskRow:
         """Create a task and start its lead session in the background.
 
@@ -216,6 +217,10 @@ class TaskOrchestrator:
         An over-long ``goal`` is spilled to a doc and the lead receives a short
         pointer to read (see ``spill_goal_brief_if_too_long``) rather than
         crashing the ``/goal`` payload mid-turn.
+
+        ``user_id`` is the owning caller; it MUST be threaded through to the
+        project / member lookups (owner-scoped queries return None for the wrong
+        owner — a missing ``user_id`` reads as "project not found").
 
         Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
         Kept on the orchestrator so its existing callers (REST routes,
@@ -233,6 +238,7 @@ class TaskOrchestrator:
             originating_session_id=originating_session_id,
             trigger_type=trigger_type,
             trigger_automation_id=trigger_automation_id,
+            user_id=user_id,
         )
 
     # ------------------------------------------------------------------

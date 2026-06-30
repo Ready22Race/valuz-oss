@@ -536,6 +536,7 @@ class InProcessAutomationRunner:
                 # task also chains back to the originating task (transitive
                 # task→automation→task nesting in the task tree).
                 originating_session_id=run.invoked_by_session_id,
+                user_id=user_id,
             )
             # ``kickoff`` returns the ``TaskRow``; the lead session id lives
             # on the matching ``TaskSessionRow`` (kind="lead"). Fetch it
