@@ -1445,47 +1445,10 @@
       "title": "服务日志",
       "unavailable": "日志流不可用：仅在桌面 Electron 环境下能实时显示，WebUI 模式下可直接查看日志文件"
     },
-    "dataService": {
-      "title": "数据服务",
-      "desc": "内核持久化会话、消息、事件的唯一数据层。三种模式都经数据服务读写,区别只是它的后端与可达方式。下次后端重启后生效。",
-      "modeLabel": "数据服务后端",
-      "modeDesc": "",
-      "modeLocal": "仅本地 · SQLite",
-      "modePg": "数据服务 · Postgres",
-      "modeRemote": "数据服务 · 远端(HTTP + JWT)",
-      "pgUrlLabel": "Postgres 连接串(DSN)",
-      "pgUrlDesc": "",
-      "remoteUrlLabel": "数据服务 URL",
-      "tokenLabel": "Bearer 令牌(JWT)",
-      "tokenDesc": "提交给远端数据服务。仅本地保存,不会回显。",
-      "tokenSet": "已保存令牌。输入新令牌可替换。",
-      "restartRequired": "已保存。重启后端以应用新的存储配置。",
-      "save": "保存",
-      "saved": "数据服务设置已保存",
-      "saveFailed": "保存数据服务设置失败",
-      "unlocked": "已解锁「数据服务」设置",
-      "healthLabel": "后端健康",
-      "healthOk": "可达",
-      "healthError": "不可达",
-      "healthRefresh": "重新检测",
-      "backendLocal": "本地 SQLite",
-      "backendPg": "Postgres",
-      "backendRemote": "远端数据服务",
-      "configTitle": "配置",
-      "statusTitle": "状态",
-      "openApiLabel": "数据 API(OpenAPI)",
-      "openApiView": "查看操作",
-      "openApiHide": "收起",
-      "openApiError": "加载数据 API 契约失败"
-    },
     "tab": {
       "about": {
         "desc": "版本、更新、协议",
         "label": "关于"
-      },
-      "dataService": {
-        "desc": "持久化存储(高级)",
-        "label": "数据服务"
       },
       "account": {
         "desc": "账户、订阅、同步",

@@ -1445,47 +1445,10 @@
       "title": "System Logs",
       "unavailable": "Log stream unavailable: real-time display is only supported in the desktop Electron environment. In webui mode, you can view log files directly"
     },
-    "dataService": {
-      "title": "Data Service",
-      "desc": "The single data layer for the kernel's sessions, messages, and events. All modes read/write through the data service — they differ only in its backend and how it's reached. Applies on the next backend restart.",
-      "modeLabel": "Data service backend",
-      "modeDesc": "",
-      "modeLocal": "Local only · SQLite",
-      "modePg": "Data service · Postgres",
-      "modeRemote": "Data service · remote (HTTP + JWT)",
-      "pgUrlLabel": "Postgres connection (DSN)",
-      "pgUrlDesc": "",
-      "remoteUrlLabel": "Data service URL",
-      "tokenLabel": "Bearer token (JWT)",
-      "tokenDesc": "Presented to the remote data service. Stored locally; never echoed back.",
-      "tokenSet": "A token is already saved. Enter a new one to replace it.",
-      "restartRequired": "Saved. Restart the backend to apply the new store configuration.",
-      "save": "Save",
-      "saved": "Data service settings saved",
-      "saveFailed": "Failed to save data service settings",
-      "unlocked": "Data Service settings unlocked",
-      "healthLabel": "Backend health",
-      "healthOk": "Reachable",
-      "healthError": "Unreachable",
-      "healthRefresh": "Re-check",
-      "backendLocal": "Local SQLite",
-      "backendPg": "Postgres",
-      "backendRemote": "Remote data service",
-      "configTitle": "Configuration",
-      "statusTitle": "Status",
-      "openApiLabel": "Data API (OpenAPI)",
-      "openApiView": "View operations",
-      "openApiHide": "Hide",
-      "openApiError": "Failed to load the data API contract"
-    },
     "tab": {
       "about": {
         "desc": "Version, updates, license",
         "label": "About"
-      },
-      "dataService": {
-        "desc": "Durable store (advanced)",
-        "label": "Data Service"
       },
       "account": {
         "desc": "Account, subscription, sync",

@@ -693,7 +693,11 @@ class SeatbeltDriver:
             str(kernel_db) + "-wal",
             str(kernel_db) + "-shm",
         )
-        if settings.kernel_store in ("pg", "remote") and ctx.host_callback_url:
+        # Store tier comes purely from the environment (KERNEL_STORE), loaded at
+        # boot — same source the kernel's AppConfig reads. A Postgres-backed data
+        # service (pg/remote) means the sandbox reaches the host DataService over
+        # HTTP+JWT and never holds the DSN.
+        if os.environ.get("KERNEL_STORE", "local") in ("pg", "remote") and ctx.host_callback_url:
             from valuz_agent.api.deps import _secret_store
             from valuz_agent.boot.kernel import mint_data_service_token
             from valuz_agent.infra.data_service_secret import get_or_create_ds_secret

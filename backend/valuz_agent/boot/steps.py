@@ -289,26 +289,25 @@ async def bind_data_service(app: FastAPI) -> None:
     ``/openapi.json`` work until now). Here — once the host DB is up — we build a
     store over the configured durable backend (the user's Postgres) + an HS256
     verifier keyed by the host secret, so a sandbox can reach it over HTTP+JWT
-    without ever holding the DSN. Local-only deployments keep the DS inert (the
-    in-process store is the data layer). Guarded: a failure must not break boot.
+    without ever holding the DSN. The store tier is read **purely from the
+    environment** (``KERNEL_STORE`` / ``VALUZ_DURABLE_DATABASE_URL``), loaded at
+    boot — the same env the kernel's ``AppConfig`` reads. Local-only deployments
+    keep the DS inert (the in-process store is the data layer). Guarded: a
+    failure must not break boot.
     """
     ds_app = getattr(app.state, "data_service_app", None)
     if ds_app is None:
         return
     try:
+        import os
+
         from valuz_agent.api.deps import _secret_store
         from valuz_agent.boot import kernel as kb
         from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
-        from valuz_agent.infra.db import async_unit_of_work
         from valuz_agent.infra.local_identity import resolve_local_user_id
-        from valuz_agent.modules.settings.preferences import (
-            get_durable_database_url,
-            get_kernel_store,
-        )
 
-        async with async_unit_of_work(commit=False) as db:
-            store_mode = await get_kernel_store(db)
-            dsn = await get_durable_database_url(db)
+        store_mode = os.environ.get("KERNEL_STORE", "local")
+        dsn = os.environ.get("VALUZ_DURABLE_DATABASE_URL", "")
         if store_mode == "local" or not dsn:
             return
         store, engine = kb.build_host_data_service_store(dsn)
