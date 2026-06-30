@@ -152,6 +152,12 @@ const SKILL_CHIP_ATTR = "data-skill-slug";
 const isImeCompositionEvent = (e: React.KeyboardEvent<HTMLElement>): boolean =>
   e.nativeEvent.isComposing || e.keyCode === 229;
 
+const getClipboardImageFiles = (items: DataTransferItemList): File[] =>
+  Array.from(items)
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null);
+
 /** Walk the contenteditable's children and serialise to a plain string,
  * mapping each chip back to its ``/slug`` token. The serialised form is
  * what the parent gets via ``onChange`` and ultimately sends to the
@@ -769,6 +775,28 @@ export const Composer = ({
     [onAttachmentsChange],
   );
 
+  const acceptLocalFiles = useCallback(
+    (files: File[], onAccept?: (files: File[]) => void) => {
+      if (files.length === 0) return;
+      const slotsLeft =
+        MAX_SESSION_ATTACHMENTS - existingAttachmentCount - attachments.length;
+      if (slotsLeft <= 0) return;
+      const accepted = files.slice(0, slotsLeft);
+      if (uploadOnAttach) {
+        onAccept?.(accepted);
+        return;
+      }
+      updateAttachments([...attachments, ...accepted]);
+      onAccept?.(accepted);
+    },
+    [
+      attachments,
+      existingAttachmentCount,
+      updateAttachments,
+      uploadOnAttach,
+    ],
+  );
+
   // Editor input handler — runs on every keystroke / IME composition
   // / paste. Re-serialises the contenteditable into the value string
   // and re-evaluates the ``/`` skill trigger and ``@`` KB trigger on
@@ -837,8 +865,15 @@ export const Composer = ({
   // text/plain at the caret as a single text node so ``white-space:
   // pre-wrap`` preserves newlines and ``serializeEditor`` round-trips
   // them; then re-run the input handler to sync value + ``/``/``@`` triggers.
+  // Image files are different: treat them like a file-picker selection so
+  // screenshots and copied images flow through the existing attachment path.
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
     e.preventDefault();
+    const imageFiles = getClipboardImageFiles(e.clipboardData.items);
+    if (imageFiles.length > 0) {
+      acceptLocalFiles(imageFiles, onLocalUpload);
+      return;
+    }
     const text = e.clipboardData.getData("text/plain");
     if (!text) return;
     const sel = window.getSelection();
@@ -1040,58 +1075,20 @@ export const Composer = ({
       e.stopPropagation();
       setDragOver(false);
       const files = Array.from(e.dataTransfer.files);
-      if (files.length === 0) return;
-      // Clamp to the session-wide cap. ``existingAttachmentCount`` is
-      // the server-persisted count; ``attachments`` is this composer's
-      // not-yet-uploaded queue. Anything past the cap is silently
-      // dropped — the menu is already greyed in this state, drag-drop
-      // is the one path that can still over-fill.
-      const slotsLeft =
-        MAX_SESSION_ATTACHMENTS - existingAttachmentCount - attachments.length;
-      if (slotsLeft <= 0) return;
-      const accepted = files.slice(0, slotsLeft);
-      // Upload-on-attach: hand the host the File list and let it upload +
-      // track parse progress; don't keep a local queue (would double-render).
-      if (uploadOnAttach) {
-        onFileDrop?.(accepted);
-        return;
-      }
-      updateAttachments([...attachments, ...accepted]);
-      onFileDrop?.(accepted);
+      acceptLocalFiles(files, onFileDrop);
     },
-    [
-      attachments,
-      existingAttachmentCount,
-      onFileDrop,
-      updateAttachments,
-      uploadOnAttach,
-    ],
+    [acceptLocalFiles, onFileDrop],
   );
 
   const handleFileInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = e.target.files;
-      if (!files || files.length === 0) return;
-      const slotsLeft =
-        MAX_SESSION_ATTACHMENTS - existingAttachmentCount - attachments.length;
-      if (slotsLeft > 0) {
-        const accepted = Array.from(files).slice(0, slotsLeft);
-        if (uploadOnAttach) {
-          onLocalUpload?.(accepted);
-        } else {
-          updateAttachments([...attachments, ...accepted]);
-          onLocalUpload?.(accepted);
-        }
+      if (files) {
+        acceptLocalFiles(Array.from(files), onLocalUpload);
       }
       e.target.value = "";
     },
-    [
-      attachments,
-      existingAttachmentCount,
-      onLocalUpload,
-      updateAttachments,
-      uploadOnAttach,
-    ],
+    [acceptLocalFiles, onLocalUpload],
   );
 
   const handleRemoveAttachment = useCallback(

@@ -2,6 +2,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { MAX_SESSION_ATTACHMENTS } from "@valuz/shared";
 import { Composer, type RuntimeSelectorItem } from "./Composer";
 import type { SkillSearchItem } from "./conversation/SkillSearchMenu";
 
@@ -234,5 +235,83 @@ describe("Composer ``/`` picker decoupled from the toolbar skill button", () => 
     // Picker open with a match → Enter is captured, not sent.
     fireEvent.keyDown(editor, { key: "Enter" });
     expect(onSend).not.toHaveBeenCalled();
+  });
+});
+
+describe("Composer pasted image attachments", () => {
+  const pasteImage = (editor: HTMLElement, files: File[]) => {
+    fireEvent.paste(editor, {
+      clipboardData: {
+        getData: vi.fn(() => "clipboard text that should not be inserted"),
+        items: files.map((file) => ({
+          kind: "file",
+          type: file.type,
+          getAsFile: () => file,
+        })),
+      },
+    });
+  };
+
+  it("hands pasted images to upload-on-attach instead of inserting clipboard text", () => {
+    const onLocalUpload = vi.fn();
+    const file = new File(["png"], "screenshot.png", { type: "image/png" });
+    render(<Composer uploadOnAttach onLocalUpload={onLocalUpload} />);
+    const editor = screen.getByRole("textbox");
+
+    pasteImage(editor, [file]);
+
+    expect(onLocalUpload).toHaveBeenCalledWith([file]);
+    expect(editor.textContent).not.toContain("clipboard text");
+  });
+
+  it("clamps pasted images to the remaining attachment slots", () => {
+    const onLocalUpload = vi.fn();
+    const first = new File(["a"], "first.png", { type: "image/png" });
+    const second = new File(["b"], "second.png", { type: "image/png" });
+    render(
+      <Composer
+        uploadOnAttach
+        existingAttachmentCount={MAX_SESSION_ATTACHMENTS - 1}
+        onLocalUpload={onLocalUpload}
+      />,
+    );
+    const editor = screen.getByRole("textbox");
+
+    pasteImage(editor, [first, second]);
+
+    expect(onLocalUpload).toHaveBeenCalledWith([first]);
+  });
+});
+
+describe("Composer local attachment inputs", () => {
+  it("keeps file-picker uploads on the existing onLocalUpload path", () => {
+    const onLocalUpload = vi.fn();
+    const file = new File(["txt"], "notes.txt", { type: "text/plain" });
+    const { container } = render(
+      <Composer uploadOnAttach onLocalUpload={onLocalUpload} />,
+    );
+    const input = container.querySelector<HTMLInputElement>(
+      "input[type='file']",
+    );
+
+    expect(input).not.toBeNull();
+    fireEvent.change(input!, { target: { files: [file] } });
+
+    expect(onLocalUpload).toHaveBeenCalledWith([file]);
+  });
+
+  it("keeps dropped files on the existing onFileDrop path", () => {
+    const onFileDrop = vi.fn();
+    const file = new File(["txt"], "dropped.txt", { type: "text/plain" });
+    render(<Composer uploadOnAttach onFileDrop={onFileDrop} />);
+    const editor = screen.getByRole("textbox");
+
+    fireEvent.drop(editor, {
+      dataTransfer: {
+        files: [file],
+      },
+    });
+
+    expect(onFileDrop).toHaveBeenCalledWith([file]);
   });
 });
