@@ -32,10 +32,6 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from valuz_agent.i18n import t
-from valuz_agent.infra.auth_context import (
-    reset_current_user_id,
-    set_current_user_id,
-)
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.automations.models import AutomationRow, AutomationRunRow
 from valuz_agent.modules.automations.triggers import TriggerEvaluator
@@ -344,11 +340,8 @@ class InProcessAutomationRunner:
                 return
 
             # Owner boundary: an automation fires from the background scheduler
-            # with no request context. Publish the automation's owner so the
-            # session it creates and every owner-scoped read below attribute to
-            # the user who owns the automation (mirrors AuthMiddleware on the
-            # request path).
-            owner_token = set_current_user_id(row.user_id) if row.user_id else None
+            # with no request context. Use the automation row's stored owner and
+            # pass it explicitly through every owner-scoped call.
             self._active_ids[automation_id] = user_id
             try:
                 project_name = await self._resolve_project_name(
@@ -489,8 +482,6 @@ class InProcessAutomationRunner:
                 logger.info("Run %s completed: %s", run_id, run.status)
             finally:
                 self._active_ids.pop(automation_id, None)
-                if owner_token is not None:
-                    reset_current_user_id(owner_token)
 
     # ── Task-mode execution ────────────────────────────────────────
 

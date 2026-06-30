@@ -83,9 +83,8 @@ async def _arun_auto_discovery_scan() -> None:
     # Background scan across ALL owners. ``list_auto_discover_kbs`` enumerates
     # every owner's auto-discover KBs (owner-agnostic system read); each is then
     # rescanned via ``service.rescan_kb(kb_id)``, which derives the owner from the
-    # KB row itself and publishes it for the rescan. The per-KB loop below also
-    # publishes that owner on the ContextVar so owner-scoped reads done BEFORE
-    # rescan_kb (e.g. ``load_routing_config``'s settings lookups) resolve too.
+    # KB row itself. The per-KB loop below passes that owner explicitly to
+    # owner-scoped reads done BEFORE rescan_kb (e.g. load_routing_config).
     # The old ``resolve_local_user_id()`` seed only ever scanned the single
     # device id.
     #
@@ -99,10 +98,6 @@ async def _arun_auto_discovery_scan() -> None:
         _secret_store,
         _SecretStoreResolver,
         _setup_controller,
-    )
-    from valuz_agent.infra.auth_context import (
-        reset_current_user_id,
-        set_current_user_id,
     )
     from valuz_agent.infra.config import settings
     from valuz_agent.infra.db import async_unit_of_work
@@ -137,15 +132,13 @@ async def _arun_auto_discovery_scan() -> None:
         len(kb_refs),
     )
     for kb_id, kb_name, owner in kb_refs:
-        # Background path: no request context. Publish the KB's owner so the
-        # owner-scoped reads in this iteration (load_routing_config's settings
-        # lookups, rescan_kb) resolve against the right user.
+        # Background path: no request context. Use the KB row's stored owner and
+        # pass it explicitly to all owner-scoped work in this iteration.
         if owner is None:
             logger.warning(
                 "KB auto-discovery skipping ownerless KB %s (%s)", kb_id, kb_name
             )
             continue
-        owner_token = set_current_user_id(owner)
         try:
             async with async_unit_of_work(commit=False) as db:
                 routing_config = await load_routing_config(db, user_id=owner)
@@ -162,7 +155,7 @@ async def _arun_auto_discovery_scan() -> None:
                     event_bus=event_bus,
                     scan_state_dir=settings.docs_dir / "scan_state",
                 )
-                # rescan_kb derives the owner from the KB row and publishes it.
+                # rescan_kb derives the owner from the KB row.
                 result = await svc.rescan_kb(kb_id)
             logger.info(
                 "Auto-rescan completed: %s (%s) — %d new/changed files",
@@ -174,9 +167,6 @@ async def _arun_auto_discovery_scan() -> None:
             # The failed unit-of-work already rolled back + closed; the next
             # KB starts from a fresh session.
             logger.exception("Auto-rescan failed: %s (%s)", kb_name, kb_id)
-        finally:
-            if owner_token is not None:
-                reset_current_user_id(owner_token)
 
 
 _scheduler: KbAutoDiscoveryScheduler | None = None
