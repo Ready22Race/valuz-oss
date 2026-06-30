@@ -40,14 +40,13 @@ logger = logging.getLogger(__name__)
 DELIVER_ARTIFACTS_TOOL_NAME = "deliver_artifacts"
 
 TOOL_DESCRIPTION = (
-    "Deliver finished output files as session artifacts — they appear in the "
-    "user's '生成文件' (Generated Files) panel. Call this when you have produced "
-    "deliverables (reports, HTML, documents, data files, …) the user should be "
-    "able to find and open. Pass an 'attachments' array; each entry needs a "
-    "'filePath' (absolute path to a file you already wrote). 'fileName', "
-    "'fileSize' and 'mimeType' are optional — they are derived from the file on "
-    "disk when omitted. Re-delivering the same path updates the existing entry "
-    "instead of duplicating it."
+    "Register finished output files as session artifacts — they show up in the "
+    "user's '生成文件' (Generated Files) panel as a curated, read-only list the "
+    "user can open. Pass an 'attachments' array; each entry needs a 'filePath' "
+    "(absolute path to a file you already wrote). 'fileName', 'fileSize' and "
+    "'mimeType' are optional — they are derived from the file on disk when "
+    "omitted. Re-delivering the same path updates the existing entry instead of "
+    "duplicating it."
 )
 
 _PARAMS = {
