@@ -1052,7 +1052,7 @@ def test_recover_one_task_reconciles_members_and_redrives_lead(
     async def _fake_loop(*, session_id, role, **_kw) -> None:
         spawned.append((session_id, role))
 
-    orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
+    orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> None:
         await orch._recover_one_task("t1", "w1", user_id=OWNER)
@@ -1167,7 +1167,7 @@ def test_stop_task_pauses_members_and_cascade_interrupts(db_factory, tmp_path, m
         assert user_id == OWNER
         interrupted.append(sid)
 
-    orch._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
+    orch._recovery._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
 
     assert asyncio.run(orch.stop_task("t1", "w1", user_id=OWNER)) is True
 
@@ -1190,7 +1190,7 @@ def test_stop_task_noop_when_not_active(db_factory, tmp_path, monkeypatch) -> No
     async def _fake_interrupt(sid: str) -> None:
         raise AssertionError("should not interrupt a non-active task")
 
-    orch._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
+    orch._recovery._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
     assert asyncio.run(orch.stop_task("t1", "w1", user_id=OWNER)) is False
 
 
@@ -1222,7 +1222,7 @@ def test_resume_task_only_paused_flips_active_and_redrives(
     async def _fake_loop(*, session_id, role, **_kw) -> None:
         spawned.append((session_id, role))
 
-    orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
+    orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> dict:
         result = await orch.resume_task("t1", "w1", user_id=OWNER)
@@ -1276,7 +1276,7 @@ def test_resume_task_accepts_blocked(db_factory, tmp_path, monkeypatch) -> None:
     async def _fake_loop(*, session_id, role, **_kw) -> None:
         spawned.append((session_id, role))
 
-    orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
+    orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
     result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is True
     assert result["prior_status"] == "blocked"
@@ -1307,7 +1307,7 @@ def test_resume_task_accepts_stopped(db_factory, tmp_path, monkeypatch) -> None:
     async def _fake_loop(*, session_id, role, **_kw) -> None:
         spawned.append((session_id, role))
 
-    orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
+    orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
     result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is True
     assert result["prior_status"] == "stopped"
@@ -1338,7 +1338,7 @@ def test_resume_task_accepts_completed(db_factory, tmp_path, monkeypatch) -> Non
     async def _fake_loop(*, session_id, role, **_kw) -> None:
         spawned.append((session_id, role))
 
-    orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
+    orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
     result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
     assert result["ok"] is True
     assert result["prior_status"] == "completed"
@@ -1371,7 +1371,7 @@ def test_stop_member_rejects_run_reworks_node_and_notifies_lead(
         assert user_id == OWNER
         pass
 
-    orch._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
+    orch._recovery._interrupt_kernel_session = _fake_interrupt  # type: ignore[method-assign]
     mailbox_registry.register("lead-s")
     try:
         assert asyncio.run(orch.stop_member("sB", user_id=OWNER)) is True
@@ -1461,8 +1461,8 @@ def test_e2e_stop_resume_closed_loop_through_routes(db_factory, tmp_path, monkey
     async def _fake_loop(*, session_id, role, **_kw) -> None:
         spawned.append((session_id, role))
 
-    monkeypatch.setattr(orch, "_interrupt_kernel_session", _fake_interrupt)
-    monkeypatch.setattr(orch, "run_actor_loop", _fake_loop)
+    monkeypatch.setattr(orch._recovery, "_interrupt_kernel_session", _fake_interrupt)
+    monkeypatch.setattr(orch._actor, "run_actor_loop", _fake_loop)
     # On resume, paused members read as interrupted-idle → resumable.
     monkeypatch.setattr(
         orch_mod.kernel_client,
@@ -1522,7 +1522,7 @@ def test_pause_distinct_from_stop_and_parks_nodes(db_factory, tmp_path, monkeypa
     async def _noop_interrupt(_sid: str, user_id: str | None = None) -> None:
         assert user_id == OWNER
 
-    monkeypatch.setattr(orch, "_interrupt_kernel_session", _noop_interrupt)
+    monkeypatch.setattr(orch._recovery, "_interrupt_kernel_session", _noop_interrupt)
 
     async def _run() -> None:
         # pause → paused; node parked; member run paused.
@@ -1572,7 +1572,7 @@ def test_intervene_noop_raises_409_instead_of_false_success(
     async def _noop_interrupt(_sid: str, user_id: str | None = None) -> None:
         assert user_id == OWNER
 
-    monkeypatch.setattr(orch, "_interrupt_kernel_session", _noop_interrupt)
+    monkeypatch.setattr(orch._recovery, "_interrupt_kernel_session", _noop_interrupt)
 
     async def _run() -> None:
         # 1) resume on an ACTIVE task → not a resumable source → 409, no mutation.
@@ -1651,7 +1651,7 @@ def test_resume_evicts_kernel_runtime_before_respawn(db_factory, tmp_path, monke
         assert session_id in evicted, f"{session_id} respawned without runtime eviction"
         spawned.append(session_id)
 
-    orch.run_actor_loop = _fake_loop  # type: ignore[method-assign]
+    orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
 
     async def _run() -> None:
         await orch.resume_task("t1", "w1", user_id=OWNER)
