@@ -1493,7 +1493,11 @@ export const TaskDetailPage = () => {
                 aria-label={t("task.followUp.placeholder")}
                 rows={2}
                 disabled={followUp.sending}
-                className="resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:border-transparent"
+                // ``disabled:bg-transparent`` overrides the Textarea's default
+                // ``disabled:bg-surface-muted`` so the disabled (in-flight) state
+                // keeps the wrapper's background instead of painting a mismatched
+                // grey box over just the textarea.
+                className="resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:border-transparent disabled:bg-transparent"
               />
               <div className="flex items-center justify-end px-2 pb-2">
                 <Button
