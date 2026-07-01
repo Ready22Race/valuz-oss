@@ -1,5 +1,8 @@
 .PHONY: dev dev-sandbox pg pg-down test typecheck lint seed help
 
+PNPM_SHIM = $(CURDIR)/scripts
+PNPM_FRONTEND = cd frontend && PATH="$(PNPM_SHIM):$$PATH" corepack pnpm
+
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
@@ -42,7 +45,7 @@ ifndef F
 	$(error F is required. Usage: make test F=tests/test_cache.py)
 endif
 	@if echo "$(F)" | grep -q "^frontend\|\.tsx\|\.ts"; then \
-		cd frontend && pnpm test $(F) $(ARGS); \
+		$(PNPM_FRONTEND) test $(F) $(ARGS); \
 	else \
 		cd backend && uv run pytest $(F) $(if $(K),-k $(K),) $(ARGS); \
 	fi
@@ -53,11 +56,11 @@ test-backend: ## Run all backend tests
 	cd backend && uv run pytest $(ARGS)
 
 test-frontend: ## Run all frontend tests
-	cd frontend && pnpm test $(ARGS)
+	$(PNPM_FRONTEND) test $(ARGS)
 
 test-unit: ## Run unit tests only (no dependencies needed)
 	cd backend && uv run pytest -m "not integration" --no-header -q $(if $(F),$(F),) $(if $(K),-k $(K),)
-	cd frontend && pnpm test --reporter=dot $(if $(F),$(F),)
+	$(PNPM_FRONTEND) test --reporter=dot $(if $(F),$(F),)
 
 test-integration: ## Run integration tests (require external services, e.g. DATABASE_URL=postgresql://…)
 	cd backend && uv run pytest -m "integration" --no-header -q $(if $(F),$(F),) $(if $(K),-k $(K),)
@@ -65,18 +68,18 @@ test-integration: ## Run integration tests (require external services, e.g. DATA
 # ─── Code Quality ───────────────────────────────────────────────────
 
 typecheck: ## Run type checks on both frontend and backend
-	cd frontend && pnpm typecheck
+	$(PNPM_FRONTEND) typecheck
 	cd backend && uv run mypy valuz_agent/
 
 check-boundaries: ## Enforce the module boundary contract (no cross-module datastore imports)
 	cd backend && uv run python scripts/check_module_boundaries.py
 
 lint: check-boundaries ## Run linters on both frontend and backend
-	cd frontend && pnpm lint
+	$(PNPM_FRONTEND) lint
 	cd backend && uv run ruff check valuz_agent/ kernel/ alembic/
 
 format: ## Format all code
-	cd frontend && pnpm exec prettier --write "src/**/*.{ts,tsx}"
+	$(PNPM_FRONTEND) exec prettier --write "src/**/*.{ts,tsx}"
 	cd backend && uv run ruff format valuz_agent/ kernel/ alembic/ tests/
 
 # ─── Database ───────────────────────────────────────────────────────
@@ -93,7 +96,7 @@ migrate-down: ## Rollback last host migration
 # ─── API ────────────────────────────────────────────────────────────
 
 generate-types: ## Regenerate frontend types from OpenAPI spec
-	cd frontend && pnpm run generate-types
+	$(PNPM_FRONTEND) run generate-types
 
 # ─── i18n ───────────────────────────────────────────────────────────
 
