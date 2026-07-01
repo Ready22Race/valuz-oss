@@ -67,7 +67,7 @@ export const WelcomeStep = ({ onStart }: { onStart: () => void }) => {
           <button
             type="button"
             onClick={onStart}
-            className="mt-9 inline-flex w-[180px] items-center justify-center gap-2 rounded-xl bg-brand px-9 py-3 text-[14px] font-medium text-white transition-all hover:bg-brand-hover active:scale-[0.99]"
+            className="mt-9 inline-flex w-[180px] items-center justify-center gap-2 rounded-md bg-brand px-9 py-3 text-[14px] font-medium text-white transition-all hover:bg-brand-hover focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50 active:scale-[0.99]"
           >
             {t("onboarding.startButton" as Parameters<typeof t>[0])}
             <span aria-hidden className="text-[15px]">
