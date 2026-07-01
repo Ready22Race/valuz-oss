@@ -4,12 +4,12 @@
  * entities interleaved by time bucket, with a keyset "load more". The caller
  * owns the feed (``useActivityFeed``); this component only renders it.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useTranslation } from "@valuz/core";
 import type { ActivityFeed, ActivityItem } from "@valuz/core";
 import { StatusPill } from "@valuz/ui";
-import { Clock3, ListChecks, MessageSquare } from "lucide-react";
+import { Clock3, ListChecks, Loader2, MessageSquare } from "lucide-react";
 
 import { BUCKET_KEY, groupByTimeBucket } from "../lib/time-buckets";
 import { RenameInput } from "./RenameInput";
@@ -63,6 +63,25 @@ export const ActivityFeedList = ({
   const { t } = useTranslation();
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const { items, loading, loadingMore, hasMore, loadMore } = feed;
+
+  // Infinite scroll: auto-load the next page when the bottom sentinel scrolls
+  // into view (pre-fetched via ``rootMargin``). ``loadMore`` no-ops while a page
+  // is already in flight, so repeated hits are safe; re-observing on
+  // ``items.length`` re-fires if the sentinel is still visible after a page
+  // lands (so short content keeps filling until exhausted).
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !hasMore) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) loadMore();
+      },
+      { rootMargin: "300px" },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [hasMore, loadMore, items.length]);
 
   if (loading && items.length === 0) {
     return (
@@ -183,17 +202,16 @@ export const ActivityFeedList = ({
         </div>
       ))}
       {hasMore && (
-        <div className="px-3">
-          <button
-            type="button"
-            onClick={loadMore}
-            disabled={loadingMore}
-            className="w-full rounded-lg border border-surface-border py-2 text-xs text-ink-body transition-colors hover:bg-surface-soft disabled:opacity-50"
-          >
-            {loadingMore
-              ? t("common.loading" as Parameters<typeof t>[0])
-              : t("conversation.showMore" as Parameters<typeof t>[0])}
-          </button>
+        <div
+          ref={sentinelRef}
+          className="flex items-center justify-center py-4 text-xs text-ink-meta"
+        >
+          {loadingMore && (
+            <span className="inline-flex items-center gap-2">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              {t("common.loading" as Parameters<typeof t>[0])}
+            </span>
+          )}
         </div>
       )}
     </div>
