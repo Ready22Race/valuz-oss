@@ -188,26 +188,34 @@ def set_token_verifier(verifier: TokenVerifier) -> None:
 
 
 def _build_durable_store(config: AppConfig) -> StorePort | None:
-    """The durable write-through target (model A), or ``None`` for local-only.
+    """The durable write-through target (the DataService backend), or ``None``.
 
-    ``kernel_store=pg`` → an in-process ``SQLAlchemyStore`` on
-    ``durable_database_url`` (same process, no HTTP; the OSS "configure a
-    Postgres" path). Its engine is stashed on ``_durable_engine`` so the
-    lifespan shutdown disposes it.
+    One config→backend factory, no per-tier special case:
 
-    ``kernel_store=remote`` + ``data_api_url`` → a client to the remote
-    DataService (sandbox/SaaS); the local store is mirrored to it. No engine /
-    DSN here — only the data-API URL + a bearer-token hook (the concrete
-    backend ``data_api_kind`` self-registers on import).
+    - ``local`` / ``pg`` → an **in-process ``SQLAlchemyStore`` on
+      ``durable_database_url``** (same process, no HTTP). The only difference is
+      the DSN: for ``pg`` it is the user's Postgres; for the OSS default
+      (``local``) the host injects the host sqlite (``valuz.db``) so the
+      DataService is still the data layer (DataService design §3 form 1). Its
+      engine is stashed on ``_durable_engine`` for lifespan disposal.
+    - ``remote`` → a client to the remote HTTP DataService (sandbox/SaaS); no
+      DSN here, only the data-API URL + bearer-token hook.
 
-    Returns ``None`` (``kernel_store=local``) when no durable backend is
-    configured — the kernel runs local-only.
+    Returns ``None`` only when no durable is resolvable — an unconfigured
+    ``local`` (no ``durable_database_url``; unit tests / bare kernel), or when the
+    durable DSN **equals the local ``database_url``** (already one file — the
+    dual-write collapses to a single write).
     """
     global _durable_engine  # noqa: PLW0603
-    if config.kernel_store == "pg":
-        if not config.durable_database_url:
-            raise RuntimeError("KERNEL_STORE=pg requires VALUZ_DURABLE_DATABASE_URL")
-        _durable_engine = create_engine(config.durable_database_url)
+    if config.kernel_store in ("local", "pg"):
+        dsn = config.durable_database_url
+        if not dsn:
+            if config.kernel_store == "pg":
+                raise RuntimeError("KERNEL_STORE=pg requires VALUZ_DURABLE_DATABASE_URL")
+            return None  # bare local (tests / no DataService backend) → single write
+        if dsn == config.database_url:
+            return None  # collapse: durable == local file → single write
+        _durable_engine = create_engine(dsn)
         return SQLAlchemyStore(create_session_factory(_durable_engine))
     if config.kernel_store != "remote":
         return None
