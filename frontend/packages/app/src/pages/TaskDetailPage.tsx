@@ -1441,22 +1441,23 @@ export const TaskDetailPage = () => {
           ``sinceTs``), so the user gets a clean conversation surface to request
           deliverable tweaks without the orchestration history bleeding in. */}
         {isCompleted && (
-          // ``flex-1 min-h-0 flex-col``: claim all the height the reading
-          // column has left, so the conversation is the page's main body and
-          // the composer pins to the very bottom of the viewport.
-          <section className="mt-6 flex w-full min-h-0 flex-1 flex-col">
+          // Natural height (NOT ``flex-1``): the deliverable card + the
+          // expanded completion summary can already fill the reading column, so
+          // a ``flex-1`` follow-up would get 0 leftover and collapse the turns to
+          // an invisible 0-height scroll box. Sizing to content lets the turns
+          // render and the page scroll instead.
+          <section className="mt-6 flex w-full flex-col">
             <div className="mb-3 flex shrink-0 items-center gap-2 text-[12px] font-medium text-ink-heading">
               <span className="h-px flex-1 bg-surface-border" />
               {t("task.followUp.heading")}
               <span className="h-px flex-1 bg-surface-border" />
             </div>
-            {/* Scroll region is ALWAYS present (a ``flex-1`` spacer when empty)
-              so the composer stays anchored to the bottom from the first
-              render — no max-height cap; the turns scroll within the leftover
-              viewport height as the conversation grows. */}
+            {/* Turns render at natural height, capped so a long conversation
+              scrolls within the box instead of pushing the composer off-screen.
+              (Empty when there are no follow-up turns — the gate below.) */}
             <div
               ref={followUpScrollRef}
-              className="min-h-0 flex-1 overflow-y-auto"
+              className="max-h-[55vh] overflow-y-auto"
             >
               {followUp.turns.length > 0 && (
                 <ConversationTurnList
