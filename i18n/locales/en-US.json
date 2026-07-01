@@ -1049,7 +1049,7 @@
     "alreadyHave": "Already present",
     "needsKey": "Needs a key",
     "needsSetup": "Needs local setup",
-    "created": "Imported · {members} member(s), {automations} automation(s), {agents} agent(s) added",
+    "importCreated": "Imported · {members} member(s), {automations} automation(s), {agents} agent(s) added",
     "skipped": "Skipped — a project with this name already exists"
   },
   "schedule": {

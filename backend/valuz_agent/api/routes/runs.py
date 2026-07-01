@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 
-from valuz_agent.api.deps import get_runs_service, get_current_user_id
+from valuz_agent.api.deps import get_current_user_id, get_runs_service
 from valuz_agent.modules.runs.service import RunsService
 
 router = APIRouter(prefix="/v1/runs", tags=["runs"])

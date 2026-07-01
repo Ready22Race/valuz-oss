@@ -43,7 +43,6 @@ from openai_codex.generated.v2_all import (
     TurnPlanUpdatedNotification,
 )
 from openai_codex.models import Notification
-
 from src.core.events import Event
 
 

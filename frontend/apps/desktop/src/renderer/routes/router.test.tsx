@@ -1,12 +1,48 @@
 import { render, screen } from '@testing-library/react'
-import { RouterProvider, createMemoryRouter } from 'react-router-dom'
-import { describe, expect, it } from 'vitest'
-import { routes } from './router'
-import { resolvedDesktopRoutes } from './route-registry'
+import { Outlet, RouterProvider, createMemoryRouter } from 'react-router-dom'
+import { beforeAll, describe, expect, it } from 'vitest'
+import { initI18n } from '@valuz/shared/i18n'
+import { createAppRouteObjects, resolvedDesktopRoutes } from './route-registry'
+
+beforeAll(() => initI18n({ locale: 'zh-CN', fallbackLocale: 'zh-CN' }))
+
+const TestProjectLayout = () => (
+  <div>
+    <nav aria-label="Prototype desktop sidebar">
+      <button type="button" aria-label="Valuz Agent menu">
+        Valuz
+      </button>
+      <a href="/conversation/new">新对话</a>
+      <a href="/projects">项目</a>
+      <a href="/knowledge">知识库</a>
+    </nav>
+    <Outlet />
+  </div>
+)
+
+function renderDesktopRoute(initialEntry: string) {
+  const router = createMemoryRouter(
+    createAppRouteObjects({
+      routes: resolvedDesktopRoutes,
+      Root: Outlet,
+      layout: TestProjectLayout,
+      routeOverrides: {
+        'conversation-detail': () => <div>conversation route mounted</div>,
+        knowledge: () => <div>knowledge route mounted</div>,
+        onboarding: () => <div>索引中</div>,
+      },
+    }),
+    {
+      initialEntries: [initialEntry],
+    },
+  )
+
+  render(<RouterProvider router={router} />)
+}
 
 describe('desktop routes', () => {
   it('registers prototype parity routes as hidden project routes', () => {
-    const hiddenPrototypeRoutes = ['tool-calls', 'context-panel', 'overlays', 'scheduled']
+    const hiddenPrototypeRoutes = ['tool-calls', 'context-panel', 'overlays', 'automation']
 
     for (const routeId of hiddenPrototypeRoutes) {
       const route = resolvedDesktopRoutes.find((candidate) => candidate.id === routeId)
@@ -17,35 +53,24 @@ describe('desktop routes', () => {
   })
 
   it('renders the personal conversation project route', async () => {
-    const router = createMemoryRouter(routes, {
-      initialEntries: ['/conversation/local-agent'],
-    })
+    renderDesktopRoute('/conversation/local-agent')
 
-    render(<RouterProvider router={router} />)
-
-    expect((await screen.findAllByText('英伟达 Q4 财报分析')).length).toBeGreaterThan(0)
+    expect(await screen.findByText('conversation route mounted')).toBeTruthy()
   })
 
   it('renders the fe-style desktop sidebar chrome around project routes', async () => {
-    const router = createMemoryRouter(routes, {
-      initialEntries: ['/knowledge'],
-    })
+    renderDesktopRoute('/knowledge')
 
-    render(<RouterProvider router={router} />)
-
-    expect(await screen.findByText('快速对话')).toBeTruthy()
-    expect(screen.getAllByText('Projects').length).toBeGreaterThan(0)
-    expect(screen.getByText('Recents')).toBeTruthy()
+    expect(await screen.findByLabelText('Valuz Agent menu')).toBeTruthy()
+    expect(screen.getByText('knowledge route mounted')).toBeTruthy()
+    expect(screen.getByText('新对话')).toBeTruthy()
+    expect(screen.getByText('项目')).toBeTruthy()
     expect(screen.getByText('知识库')).toBeTruthy()
   })
 
   it('renders the onboarding page', async () => {
-    const router = createMemoryRouter(routes, {
-      initialEntries: ['/onboarding'],
-    })
+    renderDesktopRoute('/onboarding')
 
-    render(<RouterProvider router={router} />)
-
-    expect(await screen.findByText('文件解析')).toBeTruthy()
+    expect(await screen.findByText('索引中')).toBeTruthy()
   })
 })

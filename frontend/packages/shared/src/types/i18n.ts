@@ -1114,6 +1114,7 @@ export type KnownI18nKey =
   | "project.folderHint"
   | "project.folderSection"
   | "project.import"
+  | "project.importCreated"
   | "project.importDone"
   | "project.importFailed"
   | "project.importSub"

@@ -107,7 +107,7 @@ export function ImportProjectDialog({
       setResult(res);
       if (res.status === "created") {
         toast.success(
-          t(k("project.created"), {
+          t(k("project.importCreated"), {
             members: (res.members_created ?? 0) + (res.members_reused ?? 0),
             automations: res.automations_created ?? 0,
             agents: res.agents_created ?? 0,
@@ -357,7 +357,7 @@ function ImportResultView({
     <div className="flex-1 space-y-4 overflow-y-auto py-1">
       <div className="flex items-center gap-2 rounded-md bg-success-light px-3 py-2 text-sm text-success-text">
         <Check className="h-4 w-4 shrink-0" />
-        {t(k("project.created"), {
+        {t(k("project.importCreated"), {
           members: result.members_created + result.members_reused,
           automations: result.automations_created,
           agents: result.agents_created,

@@ -27,11 +27,16 @@ import {
 } from "@valuz/core";
 import { usePlatform } from "@valuz/app/platform";
 import { useProjectOutlet } from "@valuz/app/layout";
+import type { DirectoryFieldMode } from "../layout";
 import { useAgentDeployPicker } from "../components/agent-deploy-picker";
 import { AgentCheckboxList } from "../components/AgentDeployField";
 import { ImportProjectDialog } from "../components/ImportProjectDialog";
 
-export const ProjectsPage = () => {
+export const ProjectsPage = ({
+  directoryFieldMode = "picker",
+}: {
+  directoryFieldMode?: DirectoryFieldMode;
+} = {}) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -55,6 +60,7 @@ export const ProjectsPage = () => {
   const [importOpen, setImportOpen] = useState(false);
   // Initial members for the create dialog (shared with the sidebar entry).
   const memberPicker = useAgentDeployPicker();
+  const managedDirectory = directoryFieldMode === "managed";
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -133,14 +139,15 @@ export const ProjectsPage = () => {
   const handleCreate = async () => {
     const trimmedName = newName.trim();
     const trimmedPath = newRootPath.trim();
-    if (!trimmedName || !trimmedPath) return;
+    if (!trimmedName || (!managedDirectory && !trimmedPath)) return;
     setCreateError("");
     setBusy(true);
     try {
-      const created = await projectsApi.create({
-        name: trimmedName,
-        root_path: trimmedPath,
-      });
+      const created = await projectsApi.create(
+        managedDirectory
+          ? { name: trimmedName }
+          : { name: trimmedName, root_path: trimmedPath },
+      );
       const failed = await memberPicker.deploy(created.id);
       if (failed > 0) {
         toast.warning(
@@ -263,21 +270,32 @@ export const ProjectsPage = () => {
             onChange={(e) => setNewName(e.target.value)}
           />
         </FormField>
-        <FormField
-          label={t("project.fileTree" as Parameters<typeof t>[0])}
-          error={createError || undefined}
-        >
-          <DirectoryPicker
-            value={newRootPath}
-            placeholder={t(
-              "knowledge.selectDir" as Parameters<typeof t>[0],
-            )}
-            onBrowse={() => void handleSelectDirectory()}
-          />
-          <p className="text-xs text-muted-foreground">
-            {t("project.fileTree" as Parameters<typeof t>[0])}
-          </p>
-        </FormField>
+        {managedDirectory ? (
+          <FormField
+            label={t("project.projectDir" as Parameters<typeof t>[0])}
+            error={createError || undefined}
+          >
+            <p className="text-xs text-muted-foreground">
+              {t("project.managedDirHint" as Parameters<typeof t>[0])}
+            </p>
+          </FormField>
+        ) : (
+          <FormField
+            label={t("project.fileTree" as Parameters<typeof t>[0])}
+            error={createError || undefined}
+          >
+            <DirectoryPicker
+              value={newRootPath}
+              placeholder={t(
+                "knowledge.selectDir" as Parameters<typeof t>[0],
+              )}
+              onBrowse={() => void handleSelectDirectory()}
+            />
+            <p className="text-xs text-muted-foreground">
+              {t("project.fileTree" as Parameters<typeof t>[0])}
+            </p>
+          </FormField>
+        )}
         <FormField
           label={t("project.deployAgents" as Parameters<typeof t>[0])}
         >

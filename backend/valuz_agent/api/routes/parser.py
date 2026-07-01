@@ -26,8 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from valuz_agent.api.deps import (
     _parser_registry,
     _secret_store,
-    get_setup_controller,
     get_current_user_id,
+    get_setup_controller,
 )
 from valuz_agent.i18n import t
 from valuz_agent.infra.db import async_unit_of_work

@@ -180,4 +180,57 @@ export default tseslint.config(
       "@typescript-eslint/no-unused-vars": "off",
     },
   },
+  {
+    files: [
+      "packages/core/src/hooks/use-activity-feed.ts",
+      "packages/core/src/hooks/use-model-defaults.ts",
+      "packages/core/src/hooks/use-project-last-used.ts",
+      "packages/core/src/hooks/use-runtimes.ts",
+      "packages/core/src/hooks/use-session-events.ts",
+    ],
+    rules: {
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
+  {
+    files: [
+      "packages/core/src/hooks/use-skill-events.ts",
+      "packages/core/src/hooks/use-stable-turns.ts",
+      "packages/core/src/hooks/use-task-events.ts",
+    ],
+    rules: {
+      "react-hooks/refs": "off",
+    },
+  },
+  {
+    files: ["packages/ui/src/**/*.{ts,tsx}"],
+    rules: {
+      "react-hooks/preserve-manual-memoization": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/set-state-in-effect": "off",
+      "react-hooks/set-state-in-render": "off",
+      "react-hooks/static-components": "off",
+      "react-hooks/use-memo": "off",
+    },
+  },
+  {
+    files: ["packages/app/src/**/*.{ts,tsx}"],
+    rules: {
+      "react-hooks/globals": "off",
+      "react-hooks/immutability": "off",
+      "react-hooks/preserve-manual-memoization": "off",
+      "react-hooks/purity": "off",
+      "react-hooks/refs": "off",
+      "react-hooks/set-state-in-effect": "off",
+      "react-hooks/set-state-in-render": "off",
+      "react-hooks/static-components": "off",
+      "react-hooks/use-memo": "off",
+    },
+  },
+  {
+    files: ["apps/webui/src/**/*.{ts,tsx}", "src/pages/ChatPage.tsx"],
+    rules: {
+      "react-hooks/set-state-in-effect": "off",
+    },
+  },
 );

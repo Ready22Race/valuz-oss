@@ -38,7 +38,6 @@ from fastapi import FastAPI
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
-
 from src.core.mcp_bridge import get_session_record
 
 logger = logging.getLogger(__name__)

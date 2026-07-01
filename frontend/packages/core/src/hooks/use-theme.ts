@@ -1,6 +1,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 
 import { safeLocalGet, safeLocalSet } from "@valuz/shared";
+import { useSettingsStore } from "../store/settings-store";
 
 export type Theme = "light" | "dark" | "auto";
 export type FontSize = "compact" | "default" | "comfortable";
@@ -102,7 +103,6 @@ export function hydrateTheme() {
   // If the settings store has loaded from backend, use its values (source of truth).
   // Otherwise fall back to localStorage (offline / first load before fetch completes).
   try {
-    const { useSettingsStore } = require("../store/settings-store");
     const store = useSettingsStore.getState();
     if (store.loaded) {
       applyTheme(store.theme);

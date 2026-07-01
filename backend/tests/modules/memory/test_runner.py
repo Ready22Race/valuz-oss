@@ -46,8 +46,6 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
 
     monkeypatch.setattr(fsmod.FsRegistry, "data_dir", lambda self: tmp_path / "app")
     monkeypatch.setattr(r, "async_unit_of_work", lambda *_a, **_k: _UOW())
-    monkeypatch.setattr(r, "ProviderDatastore", lambda _db: object())
-    monkeypatch.setattr(r.ext, "secret_store", object())
 
     async def _resolve(**_kw):  # noqa: ANN003, ANN202
         return SimpleNamespace(base_url=None, api_key="k", api_protocol="anthropic")
@@ -347,22 +345,13 @@ def test_lead_provider_id_chat_then_agent_config_fallback():
 
 
 def _wire_task(monkeypatch, *, task, runs):  # noqa: ANN001, ANN202
-    class _TaskDS:
-        def __init__(self, _db):  # noqa: ANN001
-            pass
+    async def _get_task_with_runs(_uid, _tid):  # noqa: ANN001, ANN202
+        return task, runs
 
-        async def get_task(self, _uid, _tid):  # noqa: ANN001, ANN202
-            return task
-
-    class _RunDS:
-        def __init__(self, _db):  # noqa: ANN001
-            pass
-
-        async def list_runs(self, _uid, _tid):  # noqa: ANN001, ANN202
-            return runs
-
-    monkeypatch.setattr("valuz_agent.modules.tasks.datastore.TaskDatastore", _TaskDS)
-    monkeypatch.setattr("valuz_agent.modules.tasks.datastore.TaskSessionDatastore", _RunDS)
+    monkeypatch.setattr(
+        "valuz_agent.modules.tasks.queries.get_task_with_runs",
+        _get_task_with_runs,
+    )
 
 
 def _wire_lead(monkeypatch, *, payload, seen=None):  # noqa: ANN001, ANN202

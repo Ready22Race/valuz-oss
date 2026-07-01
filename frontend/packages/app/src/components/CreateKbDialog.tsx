@@ -38,6 +38,7 @@ export const CreateKbDialog = ({
 }: CreateKbDialogProps) => {
   const { t } = useTranslation();
   const { selectDirectory } = usePlatform();
+  const managed = directoryFieldMode === "managed";
 
   const [name, setName] = useState("");
   const [rootPath, setRootPath] = useState("");
@@ -45,7 +46,6 @@ export const CreateKbDialog = ({
   const [creating, setCreating] = useState(false);
 
   const handleCreate = async () => {
-    const managed = directoryFieldMode === "managed";
     if (!name.trim() || (!managed && !rootPath.trim())) return;
     setCreating(true);
     try {
@@ -73,7 +73,9 @@ export const CreateKbDialog = ({
             {t("knowledge.newKb" as Parameters<typeof t>[0])}
           </DialogTitle>
           <DialogDescription>
-            {t("knowledge.linkLocalDir" as Parameters<typeof t>[0])}
+            {managed
+              ? t("knowledge.managedKbHint" as Parameters<typeof t>[0])
+              : t("knowledge.linkLocalDir" as Parameters<typeof t>[0])}
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
@@ -86,7 +88,7 @@ export const CreateKbDialog = ({
               )}
             />
           </FormField>
-          {directoryFieldMode === "managed" ? (
+          {managed ? (
             <FormField
               label={t("knowledge.sourcePath" as Parameters<typeof t>[0])}
             >
@@ -134,7 +136,7 @@ export const CreateKbDialog = ({
             loading={creating}
             disabled={
               !name.trim() ||
-              (directoryFieldMode !== "managed" && !rootPath.trim())
+              (!managed && !rootPath.trim())
             }
           >
             {t("common.create" as Parameters<typeof t>[0])}

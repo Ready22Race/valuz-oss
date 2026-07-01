@@ -4,6 +4,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { ConversationTurn } from "@valuz/shared";
 import { ConversationTurnList } from "./ConversationTurnList";
 
+const processedElapsedName =
+  /已处理 (?:\d+ 秒|\d+ 分(?: \d+ 秒)?)/;
+
 const virtualState = {
   start: 0,
   windowSize: 10,
@@ -80,12 +83,13 @@ describe("ConversationTurnList virtualization", () => {
     expect(renderedTurns.length).toBe(10);
   });
 
-  it("can scroll to a target turn via virtual API", () => {
+  it("can scroll to a target turn via virtual API", async () => {
     virtualState.start = 0;
     const turns = Array.from({ length: 220 }, (_, i) => buildTurn(i));
 
     const { getApi, rerender } = renderList(turns);
     getApi()?.scrollToTurnTop(120);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
     const scrollContainerRef = createRef<HTMLDivElement>();
     rerender(
@@ -133,16 +137,19 @@ describe("ConversationTurnList virtualization", () => {
     renderList(turns);
 
     const processingToggle = screen.getByRole("button", {
-      name: "已处理 85 秒",
+      name: "已处理 1 分 25 秒",
     });
     expect(processingToggle).toBeTruthy();
     expect(screen.queryByText("first thinking text")).toBeNull();
     expect(screen.queryByText("second thinking text")).toBeNull();
     expect(screen.queryByText("tool-title")).toBeNull();
     expect(
-      screen.getAllByRole("button", { name: "已处理 85 秒" }),
+      screen.getAllByRole("button", { name: "已处理 1 分 25 秒" }),
     ).toHaveLength(1);
     fireEvent.click(processingToggle);
+    fireEvent.click(
+      screen.getByRole("button", { name: /调用了 1 次工具/ }),
+    );
     expect(screen.getByText(/first thinking text/)).toBeTruthy();
     expect(screen.getByText(/second thinking text/)).toBeTruthy();
     expect(screen.getByText("tool-title")).toBeTruthy();
@@ -178,13 +185,16 @@ describe("ConversationTurnList virtualization", () => {
     renderList(turns);
 
     const indicators = screen.getAllByRole("button", {
-      name: /已处理 \d+ 秒/,
+      name: processedElapsedName,
     });
     expect(indicators).toHaveLength(1);
-    expect(indicators[0].textContent).toContain("已处理 90 秒");
+    expect(indicators[0].textContent).toContain("已处理 1 分 30 秒");
 
     expect(screen.queryByText("tool-title")).toBeNull();
     fireEvent.click(indicators[0]);
+    fireEvent.click(
+      screen.getByRole("button", { name: /调用了 1 次工具/ }),
+    );
     expect(screen.getByText("tool-title")).toBeTruthy();
     expect(screen.getByText(/before tool/)).toBeTruthy();
     expect(screen.getByText(/after tool/)).toBeTruthy();
@@ -218,9 +228,9 @@ describe("ConversationTurnList virtualization", () => {
     renderList(turns);
 
     const indicators = screen.getAllByRole("button", {
-      name: /已处理 \d+ 秒/,
+      name: processedElapsedName,
     });
     expect(indicators).toHaveLength(1);
-    expect(indicators[0].textContent).toContain("已处理 120 秒");
+    expect(indicators[0].textContent).toContain("已处理 2 分");
   });
 });

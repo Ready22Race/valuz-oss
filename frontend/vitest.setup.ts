@@ -6,3 +6,29 @@ import '@testing-library/jest-dom/vitest'
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {}
 }
+
+if (!Element.prototype.scrollTo) {
+  Element.prototype.scrollTo = () => {}
+}
+
+if (!window.matchMedia) {
+  window.matchMedia = () =>
+    ({
+      matches: false,
+      media: "",
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }) as MediaQueryList
+}
+
+if (!globalThis.ResizeObserver) {
+  globalThis.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+}

@@ -13,7 +13,15 @@ import {
   resolvedDesktopRoutes,
   type ResolvedRoute,
 } from "@valuz/app/routes";
+import { KnowledgePage, ProjectsPage } from "@valuz/app/pages";
 import { WebProjectLayout } from "./project-layout";
+
+const WebProjectsPage = () => <ProjectsPage directoryFieldMode="managed" />;
+const WebKnowledgePage = () => <KnowledgePage directoryFieldMode="managed" />;
+const routeOverrides = {
+  projects: WebProjectsPage,
+  knowledge: WebKnowledgePage,
+};
 
 export const buildRouteObjects = (
   resolved: ResolvedRoute[] = resolvedDesktopRoutes,
@@ -22,6 +30,7 @@ export const buildRouteObjects = (
     routes: resolved,
     Root: AppSetupRoot,
     layout: WebProjectLayout,
+    routeOverrides,
   });
 
 export const routes: RouteObject[] = buildRouteObjects();
@@ -30,6 +39,7 @@ export const router = createAppRouter({
   routes: resolvedDesktopRoutes,
   Root: AppSetupRoot,
   layout: WebProjectLayout,
+  routeOverrides,
 });
 
 export const AppRouter = () => {
@@ -41,6 +51,7 @@ export const AppRouter = () => {
           routes: resolveRoutes(desktopRoutes),
           Root: AppSetupRoot,
           layout: WebProjectLayout,
+          routeOverrides,
         }),
       ),
     [desktopRoutes],

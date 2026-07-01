@@ -4,7 +4,7 @@ export function WebProjectLayout() {
   return (
     <ProjectLayoutBase
       logoSrc="/logo.png"
-      directoryFieldMode="input"
+      directoryFieldMode="managed"
       mascotSrc={null}
     />
   );

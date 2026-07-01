@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import { initI18n } from "@valuz/shared/i18n";
@@ -41,11 +41,13 @@ const platform: PlatformCapabilities = {
   isMac: false,
 };
 
-function renderKnowledgePage() {
+function renderKnowledgePage(
+  props: Parameters<typeof KnowledgePage>[0] = {},
+) {
   latestHeader = null;
   return render(
     <PlatformProvider value={platform}>
-      <KnowledgePage />
+      <KnowledgePage {...props} />
       <div data-testid="page-header">{latestHeader}</div>
     </PlatformProvider>,
   );
@@ -115,5 +117,37 @@ describe("KnowledgePage", () => {
     expect(header.textContent).toContain("14 文档");
     expect(header.textContent).toContain("0 已就绪");
     expect(header.textContent).toContain("14 索引中");
+  });
+
+  it("hides the local directory picker when creating a managed knowledge base", async () => {
+    initI18n({ locale: "en-US", fallbackLocale: "en-US" });
+    vi.spyOn(kbApi, "list").mockResolvedValue({ knowledge_bases: [] });
+    vi.spyOn(docsApi, "health").mockResolvedValue({
+      status: "healthy",
+      total_documents: 0,
+      ready_count: 0,
+      processing_count: 0,
+      failed_count: 0,
+      missing_count: 0,
+    });
+
+    const { rerender } = renderKnowledgePage({
+      directoryFieldMode: "managed",
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Create new knowledge base")).toBeTruthy();
+    });
+    rerender(
+      <PlatformProvider value={platform}>
+        <KnowledgePage directoryFieldMode="managed" />
+        <div data-testid="page-header">{latestHeader}</div>
+      </PlatformProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add knowledge base" }));
+
+    expect(screen.getAllByText(/managed directory/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Select directory")).toBeNull();
   });
 });

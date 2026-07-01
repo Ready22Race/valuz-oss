@@ -6,9 +6,8 @@ import json
 import logging
 
 from fastapi import WebSocket
-from starlette.websockets import WebSocketDisconnect, WebSocketState
-
 from src.core.events import Event, EventSink
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 logger = logging.getLogger(__name__)
 

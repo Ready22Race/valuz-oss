@@ -454,8 +454,8 @@ class SessionOrchestrator:
         what makes reconnect-with-replay correct.
         """
         from src.adapters.database_sink import DatabaseEventSink
-        from src.adapters.persist_then_broadcast_sink import PersistThenBroadcastSink
         from src.adapters.delta_coalescing_sink import DeltaCoalescingSink
+        from src.adapters.persist_then_broadcast_sink import PersistThenBroadcastSink
 
         session, agent = await self._load_session(user_id, session_id)
 

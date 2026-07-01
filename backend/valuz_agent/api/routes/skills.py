@@ -20,9 +20,9 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from valuz_agent.api.deps import (
+    get_current_user_id,
     get_session_service,
     get_skill_service,
-    get_current_user_id,
 )
 from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.sessions.schemas import SessionModelSelection

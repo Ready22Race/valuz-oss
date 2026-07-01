@@ -254,6 +254,28 @@ async def project_cwd_by_id(user_id: str, project_id: str) -> str | None:
     return str(fs_registry.project_cwd(row.id, kind, row.root_path))  # type: ignore[arg-type]
 
 
+async def project_name_map(user_id: str) -> dict[str, str]:
+    """Return project id -> display name without exposing the project datastore."""
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
+
+    async with async_unit_of_work(commit=False) as db:
+        rows = await ProjectDatastore(db).list_projects(user_id)
+    return {row.id: row.name for row in rows}
+
+
+async def project_brief_by_id(user_id: str, project_id: str) -> tuple[str, str, str | None] | None:
+    """Return ``(kind, name, instructions_md)`` for project-scoped collaborators."""
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
+
+    async with async_unit_of_work(commit=False) as db:
+        row = await ProjectDatastore(db).get_by_id(user_id, project_id)
+    if row is None:
+        return None
+    return (row.kind, row.name, row.instructions_md)
+
+
 class ProjectService:
     def __init__(
         self,
