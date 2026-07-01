@@ -358,6 +358,7 @@
     "reviewDiff": "Review · {count} files",
     "reviewDiffDesc": "Review code diffs from this turn.",
     "runFailed": "Run failed",
+    "userCancelled": "You cancelled this conversation",
     "runtimeLocked": "Runtime locked at session creation. Start a new chat to switch.",
     "saveSkillSuccess": "Saved {name} to skill library",
     "searchSkill": "Search skills...",

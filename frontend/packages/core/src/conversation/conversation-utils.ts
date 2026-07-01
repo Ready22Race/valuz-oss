@@ -123,6 +123,7 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
         userText: "",
         blocks: [],
         failedMessage: null,
+        cancelled: false,
       };
       turns.push(currentTurn);
     }
@@ -285,6 +286,7 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
         userText,
         blocks: [],
         failedMessage: null,
+        cancelled: false,
         attachments: payload.attachments
           ? parseTurnAttachments(payload.attachments)
           : undefined,
@@ -494,9 +496,15 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     }
 
     if (eventType === "run.failed") {
-      turn.failedMessage =
-        payload.message ??
-        t("conversation.runFailed" as Parameters<typeof t>[0]);
+      if (payload.category === "user_interrupt") {
+        // User cancelled the run — render a quiet grey line, not the
+        // ``ErrorMessageCard`` (with retry / switch-model) a real failure gets.
+        turn.cancelled = true;
+      } else {
+        turn.failedMessage =
+          payload.message ??
+          t("conversation.runFailed" as Parameters<typeof t>[0]);
+      }
     }
   }
 

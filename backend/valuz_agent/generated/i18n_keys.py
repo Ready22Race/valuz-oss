@@ -661,6 +661,7 @@ I18nKey = Literal[
     "conversation.uploadedFilesCount",
     "conversation.uploading",
     "conversation.usedServer",
+    "conversation.userCancelled",
     "conversation.viewDetails",
     "conversation.viewSession",
     "conversation.workDir",

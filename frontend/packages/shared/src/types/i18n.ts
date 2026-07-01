@@ -655,6 +655,7 @@ export type KnownI18nKey =
   | "conversation.uploadedFilesCount"
   | "conversation.uploading"
   | "conversation.usedServer"
+  | "conversation.userCancelled"
   | "conversation.viewDetails"
   | "conversation.viewSession"
   | "conversation.workDir"

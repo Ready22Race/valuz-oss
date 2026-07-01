@@ -630,6 +630,7 @@ const TurnRow = memo(
     isToolCardFoldable,
     onRevealFile,
   }: TurnRowProps) {
+    const { t } = useI18n();
     const inFlight = sending && isLatest;
     const lastBlock = turn.blocks[turn.blocks.length - 1];
     const showStreamingCaret = inFlight && lastBlock?.kind === "assistant";
@@ -915,6 +916,12 @@ const TurnRow = memo(
                   .join("\n\n")}
                 onRetry={onRetry ? () => onRetry(turn.id) : undefined}
               />
+            ) : null}
+
+            {turn.cancelled ? (
+              <div className="py-1.5 text-[13px] text-ink-meta">
+                {t("conversation.userCancelled")}
+              </div>
             ) : null}
 
             {turn.failedMessage ? (

@@ -53,6 +53,11 @@ export interface ConversationTurn {
   userText: string;
   blocks: ConversationBlock[];
   failedMessage: string | null;
+  /** The run ended because the user cancelled it (``run.failed`` with
+   *  ``category === "user_interrupt"``). Rendered as a quiet grey line rather
+   *  than the ``ErrorMessageCard`` a genuine failure gets. Optional: absent is
+   *  treated as ``false``. */
+  cancelled?: boolean;
   attachments?: ConversationTurnAttachment[];
   /** Unix epoch milliseconds (UTC). */
   userTimestamp?: number;
