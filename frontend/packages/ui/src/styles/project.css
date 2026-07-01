@@ -258,6 +258,8 @@
   --shadow-dropdown: var(--shadow-3);
   --shadow-popover: var(--shadow-3);
   --shadow-sidebar-active: var(--shadow-2);
+  --color-shadow-outline: var(--shadow-outline);
+  --shadow-button: var(--shadow-outline);
   --shadow-tweaks: var(--shadow-4);
 
   --color-sidebar: transparent;

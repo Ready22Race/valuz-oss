@@ -21,6 +21,10 @@
 # Logs: backend writes to .ai/dev/backend.log, frontend to .ai/dev/frontend.log.
 # Both also tee to the foreground so Ctrl+C surfaces failures fast.
 
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,17 +41,22 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-info() { echo -e "${CYAN}[dev]${NC} $*"; }
-ok()   { echo -e "${GREEN}[ok ]${NC} $*"; }
-warn() { echo -e "${YELLOW}[warn]${NC} $*"; }
-err()  { echo -e "${RED}[err]${NC} $*"; }
+info() { printf "%b[dev]%b %s\n" "$CYAN" "$NC" "$*"; }
+ok()   { printf "%b[ok ]%b %s\n" "$GREEN" "$NC" "$*"; }
+warn() { printf "%b[warn]%b %s\n" "$YELLOW" "$NC" "$*"; }
+err()  { printf "%b[err]%b %s\n" "$RED" "$NC" "$*"; }
 
 mkdir -p "$LOG_DIR"
 
 # ── Prerequisites ──────────────────────────────────────────────────────────
 need() { command -v "$1" >/dev/null 2>&1 || { err "$1 not found"; exit 1; }; }
 need uv
-need pnpm
+need corepack
+
+pnpm_frontend() {
+    cd "$FRONTEND_DIR"
+    corepack pnpm "$@"
+}
 
 # ── Trap teardown ──────────────────────────────────────────────────────────
 PIDS=()
@@ -111,16 +120,17 @@ start_backend() {
 
 install_frontend() {
     info "installing frontend deps…"
-    cd "$FRONTEND_DIR"
-    pnpm install
+    # Use the version pinned by frontend/package.json. If a global pnpm from a
+    # different major version created node_modules, pnpm may need to rebuild the
+    # modules directory; --force makes that non-interactive for the dev launcher.
+    pnpm_frontend install --force
     ok "frontend deps ready"
 }
 
 start_frontend() {
     local log_file="$LOG_DIR/frontend.log"
     info "frontend desktop dev (log: $log_file)"
-    cd "$FRONTEND_DIR"
-    pnpm --filter @valuz/desktop dev \
+    pnpm_frontend --filter @valuz/desktop dev \
         2>&1 | python3 "$ROOT_DIR/scripts/devlog.py" "$log_file" &
     PIDS+=("$!")
 }
