@@ -28,6 +28,7 @@ from valuz_agent.ports.cache import CachePort, FileCache
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
+from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
 
 
 class Extensions:
@@ -40,6 +41,12 @@ class Extensions:
         # contributes nothing.
         self.llm_provider: LLMProvider = NoopLLMProvider()
         self.policy: ProviderPolicyPort = AllowAllProviderPolicy()
+        # Gate for kernel-sandbox provisioning (plan entitlement + org
+        # concurrency caps on the shared cloud host). OSS default allows every
+        # provision (single-user desktop); the commercial overlay binds a
+        # fail-closed policy. Separate from ``billing`` on purpose — gating is
+        # not metering (see commercial ADR-012).
+        self.sandbox_policy: SandboxPolicyPort = AllowAllSandboxPolicy()
         self.resource_list_hook: ResourceListHook = NoopResourceListHook()
         # Generic ephemeral cache (e.g. the connector OAuth PKCE handoff). OSS
         # default is a local file cache (single desktop process); the commercial

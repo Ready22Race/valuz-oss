@@ -471,12 +471,21 @@ class SeatbeltSandboxProvider:
             self._terminate(proc)
 
     async def bind_workspace(
-        self, sandbox_id: str, host_path: str, mode: Literal["rw", "ro"] = "rw"
+        self,
+        sandbox_id: str,
+        host_path: str,
+        mode: Literal["rw", "ro"] = "rw",
+        *,
+        owner_user_id: str = "",
     ) -> MountGrant:
         """Issue a sandbox-extension token for ``host_path`` and have the
         running kernel consume it — extending the live sandbox to that path
         without a restart. ``kernel_cwd == host_path`` (host and sandbox
         share a filesystem locally), so the caller need not rewrite cwd.
+
+        ``owner_user_id`` is unused locally (host and sandbox share one
+        filesystem and one user); it is part of the protocol for cloud drivers
+        that stage files under the owner's subtree.
         """
         ep = self._endpoints.get(sandbox_id)
         if ep is None:
@@ -716,6 +725,9 @@ class SeatbeltDriver:
             rw_files=rw_files,
             env=env,
             host_callback_url=ctx.host_callback_url,
+            # Empty on the local boot path (single-user); a multi-tenant driver
+            # threads the request principal here (see SandboxBootContext).
+            owner_user_id=ctx.owner_user_id,
             # RED LINE: host business DB (+ wal/shm) and secret store.
             deny_paths=(
                 str(host_db),

@@ -135,6 +135,25 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
         log.warning("%s — running the kernel IN-PROCESS (UNSANDBOXED)", msg)
         return
 
+    # ① supply face is gated by the sandbox policy (fail-closed). OSS boots a
+    # single host-wide sandbox with an empty owner, so the default allow-all
+    # policy passes unchanged; a commercial policy bound before boot can refuse
+    # (plan entitlement / org concurrency). The per-owner, on-demand provision
+    # path calls the same ``authorize_sandbox_provision`` with a real principal
+    # (see ports/sandbox_policy.py + commercial ADR-012).
+    from valuz_agent.ports.sandbox_policy import authorize_sandbox_provision
+
+    decision = asyncio.run(authorize_sandbox_provision(ctx.owner_user_id))
+    if not decision.allowed:
+        reason = decision.reason or "not allowed"
+        msg = f"{driver_name} sandbox provision denied by policy: {reason}"
+        if os.environ.get("VALUZ_SANDBOX_STRICT") == "1":
+            raise SystemExit(
+                f"{msg}\nRefusing to start: VALUZ_SANDBOX_STRICT=1 requires the sandbox."
+            )
+        log.warning("%s — running the kernel IN-PROCESS (UNSANDBOXED)", msg)
+        return
+
     result = asyncio.run(driver.provision_for_boot(ctx))
     log.warning("kernel running in %s sandbox at %s", driver_name, result.endpoint.base_url)
     _wire(result.provider, result.endpoint.base_url, result.endpoint.token, result.static_roots)
