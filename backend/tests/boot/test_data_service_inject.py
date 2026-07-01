@@ -66,3 +66,58 @@ def test_token_is_owner_scoped_and_verifiable(monkeypatch: pytest.MonkeyPatch) -
     # verify() takes the raw token (data_service `_owner_dep` strips "Bearer " first).
     claims = HmacTokenVerifier(secret).verify(env["VALUZ_DATA_API_TOKEN"])
     assert claims is not None and claims.user_id == "owner-9"
+
+
+# ── per-owner verifier (PR-6 S2: multi-tenant data-service auth) ──────────
+
+
+def test_per_owner_verifies_the_right_owner() -> None:
+    from valuz_agent.boot.kernel import (
+        make_host_data_service_verifier_per_owner,
+        mint_data_service_token,
+    )
+    from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
+
+    store = _FakeStore()
+    tok_a = mint_data_service_token(get_or_create_ds_secret(store, "A"), user_id="A")
+    tok_b = mint_data_service_token(get_or_create_ds_secret(store, "B"), user_id="B")
+    v = make_host_data_service_verifier_per_owner(store)
+    assert v.verify(tok_a).user_id == "A"  # each owner's token resolves its own secret
+    assert v.verify(tok_b).user_id == "B"
+
+
+def test_per_owner_rejects_unknown_owner() -> None:
+    from src.core.token_signer import InvalidTokenError
+
+    from valuz_agent.boot.kernel import (
+        make_host_data_service_verifier_per_owner,
+        mint_data_service_token,
+    )
+
+    tok = mint_data_service_token("some-secret", user_id="ghost")  # ghost has no stored secret
+    v = make_host_data_service_verifier_per_owner(_FakeStore())
+    with pytest.raises(InvalidTokenError):
+        v.verify(tok)
+
+
+def test_per_owner_rejects_forged_sub() -> None:
+    from src.core.token_signer import InvalidTokenError
+
+    from valuz_agent.boot.kernel import (
+        make_host_data_service_verifier_per_owner,
+        mint_data_service_token,
+    )
+    from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
+
+    store = _FakeStore()
+    get_or_create_ds_secret(store, "victim")  # victim has a real secret
+    forged = mint_data_service_token("attacker-secret", user_id="victim")  # signed with wrong key
+    v = make_host_data_service_verifier_per_owner(store)
+    with pytest.raises(InvalidTokenError):  # sub picks victim's real secret → bad signature
+        v.verify(forged)
+
+
+def test_per_owner_none_token_returns_none() -> None:
+    from valuz_agent.boot.kernel import make_host_data_service_verifier_per_owner
+
+    assert make_host_data_service_verifier_per_owner(_FakeStore()).verify(None) is None
