@@ -182,7 +182,7 @@ class SetupJobController:
 
     # ----- lifecycle --------------------------------------------------
 
-    async def start(self, setup_id: str) -> SetupJobStatus:
+    async def start(self, setup_id: str, user_id: str | None = None) -> SetupJobStatus:
         """Kick off the job as an asyncio task.
 
         Idempotency: if a task for this ``setup_id`` is already running, raise
@@ -190,6 +190,9 @@ class SetupJobController:
         filesystem state already satisfies ``is_complete()`` we short-circuit
         to ``succeeded`` without starting a task.
         """
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         if setup_id not in self._jobs:
             raise SetupJobNotFound(setup_id)
         job = self._jobs[setup_id]
@@ -205,8 +208,9 @@ class SetupJobController:
                 downloaded_bytes=0,
                 total_bytes=None,
                 completed_at=now_ms(),
+                user_id=user_id,
             )
-            return await self.get(setup_id)
+            return await self.get(setup_id, user_id)
 
         cancel_event = threading.Event()
         self._cancel_events[setup_id] = cancel_event
@@ -219,39 +223,51 @@ class SetupJobController:
             started_at=now_ms(),
             error=None,
             completed_at=None,
+            user_id=user_id,
         )
 
         self._tasks[setup_id] = asyncio.create_task(
-            self._run_job(setup_id, cancel_event), name=f"setup-job-{setup_id}"
+            self._run_job(setup_id, cancel_event, user_id), name=f"setup-job-{setup_id}"
         )
-        return await self.get(setup_id)
+        return await self.get(setup_id, user_id)
 
-    async def cancel(self, setup_id: str) -> SetupJobStatus:
+    async def cancel(self, setup_id: str, user_id: str | None = None) -> SetupJobStatus:
         """Request cancellation. Returns immediately — the worker observes the
         event on its next chunk-loop iteration."""
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         if setup_id not in self._jobs:
             raise SetupJobNotFound(setup_id)
         event = self._cancel_events.get(setup_id)
         if event is not None:
             event.set()
-        return await self.get(setup_id)
+        return await self.get(setup_id, user_id)
 
     # ----- internal ---------------------------------------------------
 
-    async def _run_job(self, setup_id: str, cancel_event: threading.Event) -> None:
+    async def _run_job(
+        self, setup_id: str, cancel_event: threading.Event, user_id: str
+    ) -> None:
         job = self._jobs[setup_id]
-        progress_cb = self._make_progress_cb(setup_id)
+        progress_cb = self._make_progress_cb(setup_id, user_id)
         try:
             # The blocking download runs off the loop; progress_cb bridges back.
             await asyncio.to_thread(job.run, progress_cb=progress_cb, cancel_event=cancel_event)
             if cancel_event.is_set():
-                await self._write_row(setup_id=setup_id, status="cancelled", completed_at=now_ms())
+                await self._write_row(
+                    setup_id=setup_id,
+                    status="cancelled",
+                    completed_at=now_ms(),
+                    user_id=user_id,
+                )
             else:
                 await self._write_row(
                     setup_id=setup_id,
                     status="succeeded",
                     completed_at=now_ms(),
                     error=None,
+                    user_id=user_id,
                 )
         except Exception as exc:  # noqa: BLE001 — capture everything
             logger.exception("setup job %s failed", setup_id)
@@ -260,12 +276,13 @@ class SetupJobController:
                 status="failed",
                 error=_short_error(exc),
                 completed_at=now_ms(),
+                user_id=user_id,
             )
         finally:
             self._tasks.pop(setup_id, None)
             self._cancel_events.pop(setup_id, None)
 
-    def _make_progress_cb(self, setup_id: str) -> ProgressCallback:
+    def _make_progress_cb(self, setup_id: str, user_id: str) -> ProgressCallback:
         """A progress callback bound to ``setup_id``. Invoked from the
         ``to_thread`` download worker, it bridges the persist coroutine back to
         the loop via ``run_coroutine_threadsafe``."""
@@ -273,7 +290,7 @@ class SetupJobController:
 
         def _cb(downloaded_bytes: int, total_bytes: int | None) -> None:
             fut = asyncio.run_coroutine_threadsafe(
-                self._update_progress(setup_id, downloaded_bytes, total_bytes), loop
+                self._update_progress(setup_id, downloaded_bytes, total_bytes, user_id), loop
             )
             try:
                 fut.result(timeout=15.0)
@@ -286,6 +303,9 @@ class SetupJobController:
         self, setup_id: str, downloaded_bytes: int, total_bytes: int | None,
         user_id: str | None = None,
     ) -> None:
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         from valuz_agent.infra.db import async_unit_of_work
 
         async with async_unit_of_work() as db:
@@ -309,6 +329,9 @@ class SetupJobController:
         completed_at: int | None = None,
         user_id: str | None = None,
     ) -> None:
+        if user_id is None:
+            raise ValueError("user_id is required")
+
         from valuz_agent.infra.db import async_unit_of_work
 
         async with async_unit_of_work() as db:

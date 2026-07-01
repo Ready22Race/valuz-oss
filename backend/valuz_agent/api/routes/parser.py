@@ -134,6 +134,7 @@ def _status_to_schema(*, status: Any, requirement: Any | None) -> SetupJobStatus
 @system_router.get("/setup", response_model=SetupJobListResponse)
 async def list_setup_jobs(
     controller: SetupJobController = Depends(get_setup_controller),
+    user_id: str = Depends(get_current_user_id),
 ) -> SetupJobListResponse:
     """Snapshot of every known setup_id + its current status.
 
@@ -143,7 +144,7 @@ async def list_setup_jobs(
     registry = _parser_registry()
     jobs = []
     for setup_id in controller.known_setup_ids():
-        status = await controller.get(setup_id)
+        status = await controller.get(setup_id, user_id)
         requirement = _find_requirement_for_setup_id(registry, setup_id)
         jobs.append(_status_to_schema(status=status, requirement=requirement))
     return SetupJobListResponse(jobs=jobs)
@@ -153,9 +154,10 @@ async def list_setup_jobs(
 async def get_setup_job(
     setup_id: str,
     controller: SetupJobController = Depends(get_setup_controller),
+    user_id: str = Depends(get_current_user_id),
 ) -> SetupJobStatusSchema:
     try:
-        status = await controller.get(setup_id)
+        status = await controller.get(setup_id, user_id)
     except SetupJobNotFound as exc:
         raise HTTPException(status_code=404, detail=f"unknown setup_id: {setup_id}") from exc
     registry = _parser_registry()
@@ -169,6 +171,7 @@ async def start_setup_job(
     setup_id: str,
     payload: StartSetupJobRequest,
     controller: SetupJobController = Depends(get_setup_controller),
+    user_id: str = Depends(get_current_user_id),
 ) -> SetupJobStatusSchema:
     """Authorize and start a setup job.
 
@@ -185,7 +188,7 @@ async def start_setup_job(
     if not payload.confirmed_source.strip():
         raise HTTPException(status_code=400, detail="confirmed_source must be non-empty")
     try:
-        status = await controller.start(setup_id)
+        status = await controller.start(setup_id, user_id)
     except SetupJobNotFound as exc:
         raise HTTPException(status_code=404, detail=f"unknown setup_id: {setup_id}") from exc
     except SetupJobAlreadyRunning as exc:
@@ -200,9 +203,10 @@ async def start_setup_job(
 async def cancel_setup_job(
     setup_id: str,
     controller: SetupJobController = Depends(get_setup_controller),
+    user_id: str = Depends(get_current_user_id),
 ) -> SetupJobStatusSchema:
     try:
-        status = await controller.cancel(setup_id)
+        status = await controller.cancel(setup_id, user_id)
     except SetupJobNotFound as exc:
         raise HTTPException(status_code=404, detail=f"unknown setup_id: {setup_id}") from exc
     registry = _parser_registry()
