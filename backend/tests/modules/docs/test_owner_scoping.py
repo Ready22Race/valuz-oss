@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from valuz_agent.infra.database import Base
@@ -63,6 +64,21 @@ class TestDocsOwnerScoping:
             ds = DocumentDatastore(db)
             assert {r.name for r in await ds.list_kbs("user-A")} == {"A"}
             assert {r.name for r in await ds.list_kbs("user-B")} == {"B"}
+
+    async def test_kb_root_path_uniqueness_is_owner_scoped(self, sessionmaker_) -> None:
+        await _create_kb(sessionmaker_, "user-A", "A", "/tmp/shared")
+        await _create_kb(sessionmaker_, "user-B", "B", "/tmp/shared")
+
+        async with sessionmaker_() as db:
+            ds = DocumentDatastore(db)
+            assert {r.name for r in await ds.list_kbs("user-A")} == {"A"}
+            assert {r.name for r in await ds.list_kbs("user-B")} == {"B"}
+
+    async def test_kb_root_path_still_unique_within_owner(self, sessionmaker_) -> None:
+        await _create_kb(sessionmaker_, "user-A", "A", "/tmp/shared")
+
+        with pytest.raises(IntegrityError):
+            await _create_kb(sessionmaker_, "user-A", "A2", "/tmp/shared")
 
     async def test_delete_kb_owner_scoped(self, sessionmaker_) -> None:
         kid = await _create_kb(sessionmaker_, "user-A", "A", "/tmp/a")
