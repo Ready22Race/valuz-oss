@@ -23,8 +23,9 @@ class AgentRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     """Stateless Agent — blueprint layer, global + official-only for MVP."""
 
     __tablename__ = "valuz_agent"
+    __table_args__ = (UniqueConstraint("user_id", "slug", name="uq_valuz_agent_user_slug"),)
 
-    slug: Mapped[str] = mapped_column(String(128), unique=True)
+    slug: Mapped[str] = mapped_column(String(128))
     name: Mapped[str] = mapped_column(String(256))
     description: Mapped[str] = mapped_column(Text, default="")
     instructions: Mapped[str] = mapped_column(Text, default="")
