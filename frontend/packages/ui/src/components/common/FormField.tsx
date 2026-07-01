@@ -8,6 +8,9 @@ export interface FormFieldProps {
   htmlFor?: string;
   /** Error message displayed below the field */
   error?: string;
+  /** Optional control rendered right-aligned on the label row (e.g. an
+   *  expand/maximize button). */
+  labelAction?: ReactNode;
   /** The input/control element */
   children: ReactNode;
   /** Extra class on the wrapper */
@@ -22,16 +25,20 @@ export const FormField = ({
   label,
   htmlFor,
   error,
+  labelAction,
   children,
   className,
 }: FormFieldProps) => (
   <div className={cn("flex flex-col", className)}>
-    <label
-      htmlFor={htmlFor}
-      className="mb-[5px] block text-xs font-medium text-ink-label"
-    >
-      {label}
-    </label>
+    <div className="mb-[5px] flex min-h-4 items-center justify-between gap-2">
+      <label
+        htmlFor={htmlFor}
+        className="block text-xs font-medium text-ink-label"
+      >
+        {label}
+      </label>
+      {labelAction}
+    </div>
     {children}
     {error && <p className="mt-[3px] text-xs text-error-text">{error}</p>}
   </div>

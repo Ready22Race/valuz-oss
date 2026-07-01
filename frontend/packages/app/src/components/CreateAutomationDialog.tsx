@@ -16,6 +16,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { Maximize2 } from "lucide-react";
 import type { ActionKind, AutomationProjectTarget, Trigger } from "@valuz/core";
 import { automationsApi } from "@valuz/core";
 import {
@@ -211,9 +212,16 @@ export const CreateAutomationDialog = ({
 
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
+  // When true the whole dialog turns into a large, focused instruction editor.
+  const [promptFullscreen, setPromptFullscreen] = useState(false);
+  // Snapshot of the instruction taken when the fullscreen editor opened, so
+  // Cancel can discard the in-editor edits and restore the form's prior value.
+  const promptBeforeFullscreenRef = useRef("");
 
   // Trigger state — discriminated union driven by the tab.
-  const [triggerKind, setTriggerKind] = useState<"cron" | "interval">("cron");
+  const [triggerKind, setTriggerKind] = useState<
+    "cron" | "interval" | "manual"
+  >("cron");
   const [cron, setCron] = useState("0 9 * * *");
   // Scheduling timezone — the IANA zone the cron rule is read in. Defaults to
   // the live BROWSER timezone (the user's real local zone, correct for desktop
@@ -297,6 +305,7 @@ export const CreateAutomationDialog = ({
     }
     if (wasOpenRef.current) return; // already initialised for this open cycle
     wasOpenRef.current = true;
+    setPromptFullscreen(false);
     if (initial) {
       setName(initial.name);
       setPrompt(initial.prompt_template);
@@ -341,9 +350,10 @@ export const CreateAutomationDialog = ({
           setIntervalUnit("seconds");
         }
       } else {
-        // ``manual`` triggers aren't exposed in the UI yet — fall through
-        // to the default cron view so editing still works.
-        setTriggerKind("cron");
+        // Manual: no schedule — the automation only runs on demand
+        // (``run_now``). Keep the other tabs' fields at sensible defaults so
+        // switching away lands on a valid value.
+        setTriggerKind("manual");
         setCron("0 9 * * *");
         setIntervalValue(5);
         setIntervalUnit("minutes");
@@ -405,6 +415,10 @@ export const CreateAutomationDialog = ({
         timezone: timezone || browserTimezone(),
       };
     }
+    if (triggerKind === "manual") {
+      // No schedule — fires only via ``run_now`` (or a future webhook).
+      return { kind: "manual" };
+    }
     return {
       kind: "interval",
       seconds: Math.max(intervalSeconds, MIN_INTERVAL_SECONDS),
@@ -443,13 +457,57 @@ export const CreateAutomationDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl gap-0 p-0">
-        <DialogHeader className="px-[18px] pt-[18px] pb-1">
-          <DialogTitle className="text-sm leading-5">{title}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
+      <DialogContent className="h-[min(640px,85vh)] max-w-xl gap-0 overflow-hidden p-0">
+        {promptFullscreen ? (
+          <div className="flex min-h-0 flex-1 flex-col">
+            <DialogHeader className="px-[18px] pt-[18px] pb-2">
+              <DialogTitle className="text-sm leading-5">
+                {t("cron.instruction" as Parameters<typeof t>[0])}
+              </DialogTitle>
+              <DialogDescription className="sr-only">
+                {t("cron.instruction" as Parameters<typeof t>[0])}
+              </DialogDescription>
+            </DialogHeader>
+            {/* Padded wrapper so the ``w-full`` Textarea doesn't overflow the
+                dialog (a horizontal margin on a w-full field clips the right
+                edge). */}
+            <div className="flex min-h-0 flex-1 flex-col px-[18px]">
+              <Textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                placeholder={t(
+                  "cron.instructionPlaceholder" as Parameters<typeof t>[0],
+                )}
+                autoFocus
+                // Override the Textarea's content-sizing defaults so it fills
+                // the dialog instead of shrinking to its text / the 40vh cap.
+                className="min-h-0 max-h-none flex-1 resize-none field-sizing-fixed"
+              />
+            </div>
+            <DialogFooter className="px-[18px] pt-3 pb-4">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  // Discard the in-editor changes; restore the form's value.
+                  setPrompt(promptBeforeFullscreenRef.current);
+                  setPromptFullscreen(false);
+                }}
+              >
+                {t("common.cancel" as Parameters<typeof t>[0])}
+              </Button>
+              <Button onClick={() => setPromptFullscreen(false)}>
+                {t("common.done" as Parameters<typeof t>[0])}
+              </Button>
+            </DialogFooter>
+          </div>
+        ) : (
+          <>
+            <DialogHeader className="px-[18px] pt-[18px] pb-1">
+              <DialogTitle className="text-sm leading-5">{title}</DialogTitle>
+              <DialogDescription>{description}</DialogDescription>
+            </DialogHeader>
 
-        <div className="flex flex-col gap-[14px] px-[18px] py-[14px]">
+        <div className="flex min-h-0 flex-1 flex-col gap-[14px] overflow-y-auto px-[18px] py-[14px]">
           <FormField label={t("cron.taskName" as Parameters<typeof t>[0])}>
             <Input
               value={name}
@@ -642,7 +700,23 @@ export const CreateAutomationDialog = ({
             </div>
           </div>
 
-          <FormField label={t("cron.instruction" as Parameters<typeof t>[0])}>
+          <FormField
+            label={t("cron.instruction" as Parameters<typeof t>[0])}
+            labelAction={
+              <button
+                type="button"
+                onClick={() => {
+                  promptBeforeFullscreenRef.current = prompt;
+                  setPromptFullscreen(true);
+                }}
+                className="flex h-5 w-5 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-body"
+                title={t("cron.instructionExpand" as Parameters<typeof t>[0])}
+                aria-label={t("cron.instructionExpand" as Parameters<typeof t>[0])}
+              >
+                <Maximize2 className="h-3.5 w-3.5" />
+              </button>
+            }
+          >
             <Textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
@@ -661,7 +735,9 @@ export const CreateAutomationDialog = ({
           <FormField label={t("cron.period" as Parameters<typeof t>[0])}>
             <Tabs
               value={triggerKind}
-              onValueChange={(v) => setTriggerKind(v as "cron" | "interval")}
+              onValueChange={(v) =>
+                setTriggerKind(v as "cron" | "interval" | "manual")
+              }
             >
               <TabsList>
                 <TabsTrigger value="cron">
@@ -669,6 +745,9 @@ export const CreateAutomationDialog = ({
                 </TabsTrigger>
                 <TabsTrigger value="interval">
                   {t("automation.triggerInterval" as Parameters<typeof t>[0])}
+                </TabsTrigger>
+                <TabsTrigger value="manual">
+                  {t("automation.triggerManual" as Parameters<typeof t>[0])}
                 </TabsTrigger>
               </TabsList>
               <TabsContent value="cron" className="pt-3 space-y-2">
@@ -784,6 +863,11 @@ export const CreateAutomationDialog = ({
                       })}
                 </p>
               </TabsContent>
+              <TabsContent value="manual" className="pt-3">
+                <p className="text-xs leading-5 text-ink-meta">
+                  {t("automation.manualHint" as Parameters<typeof t>[0])}
+                </p>
+              </TabsContent>
             </Tabs>
           </FormField>
         </div>
@@ -796,6 +880,8 @@ export const CreateAutomationDialog = ({
             {t("common.save" as Parameters<typeof t>[0])}
           </Button>
         </DialogFooter>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );

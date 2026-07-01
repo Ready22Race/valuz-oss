@@ -1338,21 +1338,21 @@ export const ProjectDetailContextPanel = ({
             // Cap the member list so a large team doesn't push the sections
             // below it (Files / Automations) out of view on a short window —
             // it scrolls internally instead. ``vh`` keeps it window-relative:
-            // tall windows show the whole list, short ones scroll. The inner
-            // ``w-[301px]`` wrapper sits inside so the row's ``-inset-x-1.5``
-            // hover bleed has horizontal room and doesn't trip an x-scrollbar.
+            // tall windows show the whole list, short ones scroll. The list
+            // fills the (symmetric) scroll content box so the row hover bg is
+            // padded equally on both sides.
             <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
-              <div className="mx-auto w-[301px]">
+              <div>
                 {members.map((member, index) => {
                   const isOrphan = member.orphan === true;
                   return (
                     <div key={member.id}>
                       {index > 0 ? (
-                        <div className="h-px w-[301px] bg-[#f7f8fa]" />
+                        <div className="h-px w-full bg-[#f7f8fa]" />
                       ) : null}
                       <div className="group relative rounded-lg bg-card">
-                        <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
-                        <div className="relative z-10 flex items-center gap-2.5 py-2.5">
+                        <div className="pointer-events-none absolute inset-0 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
+                        <div className="relative z-10 flex items-center gap-2.5 px-2 py-2.5">
                           {/* Row body opens the shared agent (global edit). */}
                           <button
                             type="button"
@@ -1629,7 +1629,7 @@ export const ProjectDetailContextPanel = ({
         >
           {(scheduledTasks ?? []).length > 0 ? (
             <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
-              <div className="mx-auto w-[301px] divide-y divide-[#f3f4f6]">
+              <div className="divide-y divide-[#f3f4f6]">
                 {(scheduledTasks ?? []).map((task) => (
                   <div
                     key={task.id}
@@ -1654,8 +1654,8 @@ export const ProjectDetailContextPanel = ({
                         : undefined
                     }
                   >
-                    <div className="pointer-events-none absolute inset-y-0 -inset-x-1.5 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
-                    <div className="relative z-10 py-2.5">
+                    <div className="pointer-events-none absolute inset-0 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
+                    <div className="relative z-10 px-2 py-2.5">
                       <div className="flex items-center gap-2">
                         <span className="min-w-0 flex-1 truncate text-xs font-medium text-ink-heading">
                           {task.name}

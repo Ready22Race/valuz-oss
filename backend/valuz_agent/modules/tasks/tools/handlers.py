@@ -838,6 +838,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 project_id=project_id,
                 lead_session_id=ctx.session_id,
                 subtasks=subtasks,
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False), is_error="error" in result
@@ -853,7 +854,9 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
             return resolved
         _task, project_id, task_id = resolved
         try:
-            result = await planning.get_plan(task_id=task_id, project_id=project_id)
+            result = await planning.get_plan(
+                task_id=task_id, project_id=project_id, user_id=ctx.user_id
+            )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False), is_error="error" in result
             )
@@ -877,6 +880,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 expected_version=(
                     int(expected_version_arg) if expected_version_arg is not None else None
                 ),
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False), is_error="error" in result
@@ -909,6 +913,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 subtask_key=args.get("subtask_key"),
                 session_id=args.get("session_id"),
                 feedback=args.get("feedback"),
+                user_id=ctx.user_id,
             )
             return ToolResult(
                 content=json.dumps(result, ensure_ascii=False), is_error="error" in result

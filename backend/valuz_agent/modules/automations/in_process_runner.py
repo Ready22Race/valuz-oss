@@ -331,6 +331,12 @@ class InProcessAutomationRunner:
         from valuz_agent.modules.automations.datastore import AutomationDatastore
 
         assert self._triggers is not None
+        # Chat-mode runs hand their (possibly minutes-long) turn off to a
+        # background task so the serial FIFO worker is freed immediately. This
+        # carries ``(session_id, rendered_prompt)`` out of the worker's unit of
+        # work; the spawn happens only AFTER the ``running`` status is committed
+        # (below, outside the ``async with``).
+        handoff_args: tuple[str, str] | None = None
         async with async_unit_of_work() as db:
             ds = AutomationDatastore(db)
             row = await ds.get_automation(user_id, automation_id)
@@ -356,6 +362,11 @@ class InProcessAutomationRunner:
                     effective_tz=effective_tz,
                 )
                 rendered_prompt = _render_template(row.prompt_template, variables)
+                # Per-run extra input (e.g. an agent firing ``run`` with an
+                # ``input`` argument carrying a discovered task id) is appended
+                # to the instruction for THIS run only.
+                if run.extra_input:
+                    rendered_prompt = f"{rendered_prompt}\n\n{run.extra_input}"
 
                 # Two execution modes per ADR-021 follow-up:
                 #
@@ -414,9 +425,70 @@ class InProcessAutomationRunner:
                 await ds.replace_run(run)
                 logger.info("Started run %s → session %s", run_id, session.id)
 
+                # Defer the turn: a chat agent turn can run for minutes, and
+                # blocking the single FIFO worker here would queue EVERY other
+                # automation behind it — and deadlock a chat automation that
+                # fires another via the ``run`` tool and then waits for it. Hand
+                # ``(session_id, rendered_prompt)`` out so the worker spawns the
+                # turn AFTER this unit of work commits the ``running`` status
+                # (the background task re-reads a consistent, committed row).
+                handoff_args = (session.id, rendered_prompt)
+            finally:
+                # The background task owns the single-flight release for a
+                # handed-off chat turn; only clear it here for the inline paths
+                # (task kickoff, or a chat run that failed before handoff).
+                if handoff_args is None:
+                    self._active_ids.pop(automation_id, None)
+
+        if handoff_args is not None:
+            session_id, prompt = handoff_args
+            asyncio.create_task(
+                self._finish_chat_run(
+                    user_id=user_id,
+                    automation_id=automation_id,
+                    run_id=run_id,
+                    session_id=session_id,
+                    rendered_prompt=prompt,
+                )
+            )
+
+    async def _finish_chat_run(
+        self,
+        *,
+        user_id: str,
+        automation_id: str,
+        run_id: str,
+        session_id: str,
+        rendered_prompt: str,
+    ) -> None:
+        """Run the chat turn and finalize the run OFF the serial worker.
+
+        Backgrounded so a long agent turn never blocks the single FIFO worker
+        (which would queue every other automation behind it — and deadlock a
+        chat automation that fires another via the ``run`` tool and waits for
+        it). Owns the turn, the run-row finalization, the automation reschedule,
+        and releasing the ``_active_ids`` single-flight guard.
+        """
+        from valuz_agent.infra.db import async_unit_of_work
+        from valuz_agent.modules.automations.datastore import AutomationDatastore
+
+        assert self._triggers is not None
+        try:
+            async with async_unit_of_work() as db:
+                ds = AutomationDatastore(db)
+                row = await ds.get_automation(user_id, automation_id)
+                run = await ds.last_run(user_id, automation_id)
+                if not row or not run or run.id != run_id:
+                    logger.warning(
+                        "Background run %s for automation %s vanished",
+                        run_id,
+                        automation_id,
+                    )
+                    return
+                session_svc = self._build_session_service(db)
                 try:
                     result = await session_svc.send_message_sync(
-                        session.id,
+                        session_id,
                         rendered_prompt,
                         user_id=user_id,
                     )
@@ -451,14 +523,14 @@ class InProcessAutomationRunner:
                         logger.warning(
                             "Run %s session %s ended with session_error: %s",
                             run_id,
-                            session.id,
+                            session_id,
                             session_error_msg[:200],
                         )
                     else:
                         run.status = "success"
                         if summary_parts:
                             run.result_summary = summary_parts[-1]
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     run.status = "failed"
                     run.error_code = type(exc).__name__
                     run.error_message_key = getattr(exc, "message_key", None)
@@ -480,8 +552,10 @@ class InProcessAutomationRunner:
                 await ds.trim_runs(row.user_id, automation_id, keep=100)
 
                 logger.info("Run %s completed: %s", run_id, run.status)
-            finally:
-                self._active_ids.pop(automation_id, None)
+        except Exception:
+            logger.exception("Background chat run %s crashed", run_id)
+        finally:
+            self._active_ids.pop(automation_id, None)
 
     # ── Task-mode execution ────────────────────────────────────────
 
@@ -528,6 +602,11 @@ class InProcessAutomationRunner:
                 title=title or row.name,
                 dispatch_mode="async",
                 created_by="automation",
+                # The background runner has no request auth context, so the
+                # project lookup in kickoff would otherwise fall back to
+                # user_id=None and fail ("project not found"). Pass the
+                # automation owner explicitly.
+                user_id=user_id,
                 # Record the back-link so the spawned task shows "由 自动化 … 触发"
                 # and the reverse "what did this automation spawn?" is queryable.
                 trigger_type="automation",
@@ -536,7 +615,6 @@ class InProcessAutomationRunner:
                 # task also chains back to the originating task (transitive
                 # task→automation→task nesting in the task tree).
                 originating_session_id=run.invoked_by_session_id,
-                user_id=user_id,
             )
             # ``kickoff`` returns the ``TaskRow``; the lead session id lives
             # on the matching ``TaskSessionRow`` (kind="lead"). Fetch it

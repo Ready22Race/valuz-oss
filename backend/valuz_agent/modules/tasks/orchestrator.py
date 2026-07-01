@@ -485,7 +485,9 @@ class TaskOrchestrator:
             if lead_clone is not None:
                 lead_session = embed_agent_config(lead_session, lead_clone)
 
-            gap = await _credential_gap(lead_session, lead_slug, db=db)
+            gap = await _credential_gap(
+                lead_session, lead_slug, db=db, user_id=user_id
+            )
             if gap is not None:
                 return {"error": f"commit_task: {gap}"}
 
@@ -554,6 +556,7 @@ class TaskOrchestrator:
                 role="lead",
                 task_id=task_id,
                 project_id=project_id,
+                user_id=user_id,
             )
         )
 
@@ -681,14 +684,18 @@ class TaskOrchestrator:
     # v2 actor dispatch (M10 附录 B) — persistent lead + member actors
     # ==================================================================
 
-    async def _run_turn_with_sink(self, session_id: str, content: str) -> str:
+    async def _run_turn_with_sink(
+        self, session_id: str, content: str, user_id: str | None = None
+    ) -> str:
         """Run ONE turn on a persistent session and return its final status.
 
         Thin delegator onto the shared :class:`ActorRunner` runtime engine
         (ADR-023). Kept as a method so the actor loop drives it via ``self``
         (and tests can stub ``orch._run_turn_with_sink``).
         """
-        return await self._actor._run_turn_with_sink(session_id, content)
+        return await self._actor._run_turn_with_sink(
+            session_id, content, user_id=user_id
+        )
 
     async def run_actor_loop(
         self,
@@ -847,7 +854,10 @@ class TaskOrchestrator:
                 if rec.disposition == "completed":
                     try:
                         manifest = await collect_manifest(
-                            run.session_id, Path(run.run_dir) if run.run_dir else Path(), "idle"
+                            run.session_id,
+                            Path(run.run_dir) if run.run_dir else Path(),
+                            "idle",
+                            user_id=user_id,
                         )
                     except Exception:  # noqa: BLE001
                         manifest = {
@@ -943,6 +953,7 @@ class TaskOrchestrator:
                     role="subtask",
                     task_id=task_id,
                     project_id=project_id,
+                    user_id=user_id,
                 )
             )
         await _evict_runtime(lead_session_id)
@@ -959,6 +970,7 @@ class TaskOrchestrator:
                 role="lead",
                 task_id=task_id,
                 project_id=project_id,
+                user_id=user_id,
             )
         )
         return True

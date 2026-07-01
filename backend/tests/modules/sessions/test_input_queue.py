@@ -451,3 +451,35 @@ async def test_steer_promotes_and_silently_interrupts(monkeypatch) -> None:
     async with async_unit_of_work(commit=False) as db:
         head = await SessionDatastore(db).peek_next_queued("st1")
     assert head is not None and head.input["text"] == "two"
+
+
+async def test_steer_missing_item_is_idempotent(monkeypatch) -> None:
+    """Steer racing the post-turn drain: the item already left the queue (the
+    drain dispatched it the instant the user hit "Send now"), so steer returns
+    the current queue instead of a 404 for a message that actually went out."""
+    import valuz_agent.adapters.kernel_client as kc
+    import valuz_agent.modules.sessions.service as svc_mod
+    from valuz_agent.modules.sessions.service import SessionService
+
+    await project_index.record("proj-1", "st2", kind="chat", user_id=OWNER)
+    async with async_unit_of_work() as db:
+        await SessionDatastore(db).create_queued(OWNER, _row("st2", "still-queued"))
+
+    class _Idle:
+        status = "idle"
+        metadata = {"valuz": {"project_id": "proj-1"}}
+
+    async def _get_session(uid, sid):
+        return _Idle()
+
+    monkeypatch.setattr(kc, "get_session", _get_session)
+    monkeypatch.setattr(svc_mod, "is_draining_queue", lambda sid: False)
+    monkeypatch.setattr(svc_mod, "schedule_drain", lambda sid, bus: None)
+
+    svc = SessionService.__new__(SessionService)
+    svc._bus = _FakeBus()  # type: ignore[attr-defined]
+
+    # ``gone`` was never promotable (stand-in for an item the drain already
+    # dispatched) — steer must NOT raise, just return the live queue.
+    result = await svc.steer_queued("st2", "gone", user_id=OWNER)
+    assert len(result.items) == 1  # the genuinely-queued item is untouched

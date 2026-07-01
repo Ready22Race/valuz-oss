@@ -137,6 +137,11 @@ class LifecycleService:
         trigger_automation_id: str | None = None,
         user_id: str | None = None,
     ) -> TaskRow:
+        # Fail loud rather than silently looking the project up under
+        # ``user_id=None`` (which always misses → a misleading "project not
+        # found"). Every caller must thread the owner explicitly.
+        if user_id is None:
+            raise ValueError("user_id is required")
         """Create a task and start its lead session in the background.
 
         ``dispatch_mode`` selects the dispatch architecture (M10):
@@ -300,7 +305,9 @@ class LifecycleService:
 
             # Fail fast: don't spawn a lead that has no usable credentials —
             # it would only fail mid-turn with a cryptic "Not logged in".
-            gap = await _credential_gap(lead_session, lead_agent_slug, db=db)
+            gap = await _credential_gap(
+                lead_session, lead_agent_slug, db=db, user_id=user_id
+            )
             if gap is not None:
                 await task_ds.update_task_status(user_id, task_id, "failed")
                 await event_ds.append_event(
@@ -369,6 +376,7 @@ class LifecycleService:
                     role="lead",
                     task_id=task_id,
                     project_id=project_id,
+                    user_id=user_id,
                 )
             )
         else:
@@ -392,6 +400,7 @@ class LifecycleService:
                         task_id=task_id,
                         project_id=project_id,
                         final_status=final_status,
+                        user_id=user_id,
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("sync kickoff: auto-finalize failed for task %s", task_id)
@@ -630,7 +639,9 @@ class LifecycleService:
             if lead_clone is not None:
                 lead_session = embed_agent_config(lead_session, lead_clone)
 
-            gap = await _credential_gap(lead_session, lead_slug, db=db)
+            gap = await _credential_gap(
+                lead_session, lead_slug, db=db, user_id=user_id
+            )
             if gap is not None:
                 return {"error": f"commit_task: {gap}"}
 
@@ -699,6 +710,7 @@ class LifecycleService:
                 role="lead",
                 task_id=task_id,
                 project_id=project_id,
+                user_id=user_id,
             )
         )
 
@@ -800,6 +812,12 @@ class LifecycleService:
           - plan has unresolved nodes (no error) → ``blocked``;
           - else → ``completed`` (summary = lead's last assistant message).
         """
+        # Fail loud: a missing owner silently misses the owner-scoped task
+        # lookup below (``get_task_by_project`` filters ``user_id``), which would
+        # no-op this finalize and orphan the task ``active`` forever — the exact
+        # bug this fallback exists to prevent. Every caller must thread the owner.
+        if user_id is None:
+            raise ValueError("user_id is required")
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
@@ -1022,6 +1040,7 @@ class LifecycleService:
                 task_id=task_id,
                 project_id=project_id,
                 final_status=final_status,
+                user_id=user_id,
             )
             return
 
@@ -1039,7 +1058,7 @@ class LifecycleService:
                 # Manifest is best-effort — never let it block the terminal write.
                 try:
                     manifest = await collect_manifest(
-                        session_id, run_dir, final_status, since_epoch=since
+                        session_id, run_dir, final_status, since_epoch=since, user_id=user_id
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception("_finalize_actor: manifest failed for %s", session_id)

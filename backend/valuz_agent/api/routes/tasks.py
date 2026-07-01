@@ -528,7 +528,11 @@ class StopMemberResponse(BaseModel):
     status_code=201,
     response_model=DraftTaskResponse,
 )
-async def draft_task(project_id: str, payload: DraftTaskRequest) -> DraftTaskResponse:
+async def draft_task(
+    project_id: str,
+    payload: DraftTaskRequest,
+    user_id: str = Depends(get_current_user_id),
+) -> DraftTaskResponse:
     """Open a draft task (status=draft, plan_version=0). No lead session is
     started — the originating chat session is recorded as the plan writer."""
     try:
@@ -539,6 +543,7 @@ async def draft_task(project_id: str, payload: DraftTaskRequest) -> DraftTaskRes
             originating_session_id=payload.originating_session_id,
             refs=payload.refs,
             title=payload.title,
+            user_id=user_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -567,6 +572,7 @@ async def commit_task(
         project_id=task.project_id,
         caller_session_id=payload.caller_session_id,
         lead_agent_slug_override=payload.lead_agent_slug,
+        user_id=user_id,
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -589,6 +595,7 @@ async def abandon_task(
         project_id=task.project_id,
         caller_session_id=payload.caller_session_id,
         reason=payload.reason or "",
+        user_id=user_id,
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -614,6 +621,7 @@ async def inject_into_task(
         project_id=task.project_id,
         text=payload.text,
         from_session_id=payload.from_session_id,
+        user_id=user_id,
     )
     return InjectTaskResponse(
         delivered=bool(result.get("delivered")),
@@ -640,6 +648,7 @@ async def plan_task_route(
         project_id=task.project_id,
         lead_session_id=payload.lead_session_id,
         subtasks=payload.subtasks,
+        user_id=user_id,
     )
     if "error" in result:
         raise HTTPException(status_code=400, detail=result["error"])
@@ -669,6 +678,7 @@ async def modify_plan_route(
         add=payload.add,
         update=payload.update,
         expected_version=payload.expected_version,
+        user_id=user_id,
     )
     if result.get("error") == "PLAN_VERSION_CONFLICT":
         raise HTTPException(status_code=409, detail=result)

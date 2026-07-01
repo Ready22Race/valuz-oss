@@ -197,7 +197,7 @@ async def _build_automation_service(db: Any, user_id: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-_VALID_ACTIONS = {"create", "list", "update", "pause", "resume", "run", "remove"}
+_VALID_ACTIONS = {"create", "get", "list", "update", "pause", "resume", "run", "remove"}
 
 
 def _err(action: str, message: str, code: str | None = None) -> AutomationToolResult:
@@ -378,6 +378,35 @@ async def _handle_list(
     )
 
 
+async def _handle_get(
+    *,
+    svc: Any,
+    payload: AutomationToolPayload,
+    project_id: str | None,
+    scope: str,
+    user_id: str,
+) -> AutomationToolResult:
+    """Return the full detail of a single automation by id (read-only)."""
+    if not payload.automation_id:
+        return _err("get", "automation_id is required for get.", code="MISSING_AUTOMATION_ID")
+    row = await svc._ds.get_automation(user_id, payload.automation_id)  # noqa: SLF001
+    if row is None:
+        return _err("get", "No such automation.", code="AutomationNotFound")
+    if scope == "this" and project_id is not None and row.project_id != project_id:
+        return _err(
+            "get",
+            "Automation belongs to a different project.",
+            code="CROSS_PROJECT_DENIED",
+        )
+    item = await svc._row_to_item(row, user_id)  # noqa: SLF001
+    return AutomationToolResult(
+        action="get",
+        ok=True,
+        message=f"'{item.name}' — {item.trigger_human_readable}.",
+        automation=item,
+    )
+
+
 async def _handle_update(
     *,
     svc: Any,
@@ -497,6 +526,7 @@ async def _handle_status_change(
                 payload.automation_id,
                 trigger_type="agent",
                 invoked_by_session_id=_current_session_id(),
+                extra_input=payload.input,
                 user_id=user_id,
             )
             return AutomationToolResult(
@@ -562,6 +592,14 @@ async def _dispatch(payload: AutomationToolPayload) -> AutomationToolResult:
                 project_kind=project_kind,
                 project_id=project_id,
                 session_agent_slug=session_agent_slug,
+                user_id=user_id,
+            )
+        if payload.action == "get":
+            return await _handle_get(
+                svc=svc,
+                payload=payload,
+                project_id=project_id,
+                scope=scope,
                 user_id=user_id,
             )
         if payload.action == "update":
@@ -636,8 +674,13 @@ Actions
 - list: returns existing automations. In a chat session, lists across all
   projects by default (set scope="this" to narrow to the current chat).
   In a project session, always scoped to the current project.
+- get: returns the full detail of ONE automation by automation_id (read-only;
+  prompt_template, trigger, agent, next run, status). Use it to inspect a
+  single automation before update / pause / resume.
 - update / pause / resume / run / remove: require automation_id (get one
-  from a prior list).
+  from a prior list). For ``run`` you may also pass ``input`` — extra text
+  appended to the automation's instruction for THAT single run (e.g. a task id
+  you just discovered). It does NOT modify the saved automation.
 
 Execution identity follows the bound agent — there is NO model_id or
 provider_id input. The agent's configured model / provider / runtime is
@@ -667,6 +710,7 @@ async def automation(
     trigger: dict[str, Any] | None = None,
     action_kind: str | None = None,
     scope: str | None = None,
+    input: str | None = None,  # noqa: A002 — MCP wire arg name; intentional
 ) -> str:
     """Unified entrypoint — see ``_AUTOMATION_DESCRIPTION`` for usage.
 
@@ -698,6 +742,7 @@ async def automation(
             trigger=coerced_trigger,
             action_kind=action_kind,
             scope=scope,
+            input=input,
         )
     )
 
