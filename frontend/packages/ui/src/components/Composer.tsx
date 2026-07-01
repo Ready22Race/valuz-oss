@@ -196,7 +196,7 @@ const buildChipNode = (skill: SkillSearchItem): HTMLElement => {
   chip.contentEditable = "false";
   chip.dataset.skillName = skill.name;
   chip.className =
-    "mr-0.5 inline-flex items-center gap-1 rounded-full bg-[#f3f2ff] px-2 py-0.5 text-2xs text-brand align-middle select-none";
+    "mr-0.5 inline-flex items-center gap-1 rounded-full bg-brand-light px-2 py-0.5 text-2xs text-brand align-middle select-none";
   chip.innerHTML = `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>${skill.name}</span>`;
   return chip;
 };
@@ -1546,7 +1546,7 @@ export const Composer = ({
                         "flex h-6 items-center rounded-md px-2 font-medium transition-colors duration-[120ms]",
                         active
                           ? m === "task"
-                            ? "bg-[#725cf9] text-white shadow-sm"
+                            ? "bg-brand text-white shadow-button"
                             : "bg-card text-ink-heading shadow-sm"
                           : "text-ink-body hover:text-ink-heading",
                       )}
@@ -2092,7 +2092,7 @@ export const Composer = ({
                               the task detail page uses (TaskContextPanel
                               + sub-sidebar). */}
                           {mode === "task" && (
-                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-[#725cf9]/10 px-1 text-[10px] leading-none font-normal text-[#725cf9]">
+                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand-light px-1 text-[10px] leading-none font-normal text-brand">
                               {t("task.runLead" as Parameters<typeof t>[0])}
                             </span>
                           )}
@@ -2911,7 +2911,7 @@ export const Composer = ({
                 )}
               </div>
             )}
-            {/* Spec 5.6 发送按钮: 28×28 / radius 8 / accent bg / arrow 13px.
+            {/* Send button: 28×28 / radius 6 / accent bg / arrow 13px.
                 Doubles as the stop button while a turn is in flight —
                 clicking it routes to ``onStop`` (the page maps to its
                 interrupt handler). */}
@@ -2921,9 +2921,9 @@ export const Composer = ({
                   <button
                     type="button"
                     className={cn(
-                      "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
+                      "flex h-7 w-7 items-center justify-center rounded-md transition-colors duration-[120ms]",
                       hasContent && !sendDisabled
-                        ? "bg-brand text-white"
+                        ? "bg-brand text-white hover:bg-brand-hover"
                         : "bg-brand/40 text-white/60",
                     )}
                     onClick={handleSend}
@@ -2936,7 +2936,7 @@ export const Composer = ({
                 )}
                 <button
                   type="button"
-                  className="flex h-7 w-7 items-center justify-center rounded-lg bg-brand text-white transition-opacity duration-[120ms] hover:opacity-90"
+                  className="flex h-7 w-7 items-center justify-center rounded-md bg-brand text-white transition-colors duration-[120ms] hover:bg-brand-hover focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50"
                   onClick={() => onStop?.()}
                   title={t("conversation.stop")}
                   aria-label={t("conversation.stop")}
@@ -2956,11 +2956,11 @@ export const Composer = ({
               <button
                 type="button"
                 className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
+                  "flex h-7 w-7 items-center justify-center rounded-md transition-colors duration-[120ms]",
                   "@min-[500px]/composer:w-auto @min-[500px]/composer:gap-1 @min-[500px]/composer:px-2 @min-[500px]/composer:text-xs @min-[500px]/composer:font-medium",
                   hasContent && !sendDisabled
-                    ? "bg-[#725cf9] text-white"
-                    : "bg-[#725cf9]/40 text-white/70",
+                    ? "bg-brand text-white hover:bg-brand-hover"
+                    : "bg-brand/40 text-white/70",
                 )}
                 onClick={handleSend}
                 disabled={!hasContent || sendDisabled}
@@ -2976,9 +2976,9 @@ export const Composer = ({
               <button
                 type="button"
                 className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-lg transition-opacity duration-[120ms] hover:opacity-90",
+                  "flex h-7 w-7 items-center justify-center rounded-md transition-colors duration-[120ms]",
                   hasContent && !sendDisabled
-                    ? "bg-brand text-white"
+                    ? "bg-brand text-white hover:bg-brand-hover"
                     : "bg-brand/40 text-white/60",
                 )}
                 onClick={handleSend}

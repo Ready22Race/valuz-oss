@@ -11,16 +11,14 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "border border-transparent bg-primary text-primary-foreground hover:bg-primary/90",
+          "border border-transparent bg-brand text-primary-foreground hover:bg-brand-hover",
         destructive:
-          "border border-transparent bg-destructive text-white hover:bg-destructive/90 focus-visible:ring-destructive/20 dark:bg-destructive/60 dark:focus-visible:ring-destructive/40",
+          "border border-transparent bg-error-strong text-white hover:bg-error-hover focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40",
         outline:
-          "border border-surface-border bg-surface text-ink-label shadow-xs hover:bg-surface-2 hover:text-ink-heading dark:border-surface-border-strong dark:bg-surface-soft dark:hover:bg-surface-2 dark:hover:text-ink-heading",
-        secondary:
-          "border border-transparent bg-secondary text-secondary-foreground hover:bg-surface-muted hover:text-ink-heading dark:border-surface-border dark:bg-surface-soft dark:text-ink-label dark:hover:border-surface-border-strong dark:hover:bg-surface-2 dark:hover:text-ink-heading",
+          "border border-surface-border bg-surface text-ink-label shadow-button hover:bg-surface-2 hover:text-ink-heading dark:border-surface-border-strong dark:bg-surface-soft dark:hover:bg-surface-2 dark:hover:text-ink-heading",
         ghost:
-          "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
-        link: "text-primary underline-offset-4 hover:underline",
+          "text-ink-label hover:bg-surface-2 hover:text-ink-heading",
+        link: "text-brand underline-offset-4 hover:underline",
       },
       size: {
         default: "h-9 px-4 py-2 has-[>svg]:px-3",
