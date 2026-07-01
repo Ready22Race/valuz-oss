@@ -7,6 +7,7 @@ from src.core.prompt_builder import build_user_prompt
 from src.core.runtime_port import RuntimePort
 from src.core.skills import Skill, SkillLoader
 from src.core.store_port import StorePort
+from src.core.token_verifier import NullTokenVerifier, OwnerClaims, TokenVerifier
 from src.core.tool_registry import (
     build_toolkit_for_config,
     clear_registered_tools,
@@ -58,7 +59,9 @@ __all__ = [
     "MessageStatus",
     "ModelProvider",
     "ModelSettings",
+    "NullTokenVerifier",
     "OutboundEventType",
+    "OwnerClaims",
     "RuntimePort",
     "RuntimeProvider",
     "Session",
@@ -67,6 +70,7 @@ __all__ = [
     "StopReason",
     "StorePort",
     "SubAgentDef",
+    "TokenVerifier",
     "ToolDef",
     "ToolKit",
     "ToolResult",

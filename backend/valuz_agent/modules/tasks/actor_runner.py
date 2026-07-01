@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from valuz_agent.adapters import kernel_client
+from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.lifecycle import is_draining
@@ -209,7 +210,7 @@ async def run_session_to_idle(
             consumed_attachment_ids = []
             attachment_specs = ()
 
-        loaded_session = await kernel_client.get_session(user_id, session_id)
+        loaded_session = await data_reader().get_session(user_id, session_id)
         # Kernel ``run_turn`` persists ``session.status="running"`` to the DB
         # before handing off to the runtime (agent-harness 3e742fc), so the
         # detail fetch returns ``running`` and the frontend live view engages
@@ -244,7 +245,7 @@ async def run_session_to_idle(
                 ],
                 additional_context=additional_context,
             )
-            after_run = await kernel_client.get_session(user_id, session_id)
+            after_run = await data_reader().get_session(user_id, session_id)
             final_status = _resolve_turn_status(after_run)
             if _is_error_turn(message, after_run):
                 encountered_error = True
@@ -481,7 +482,7 @@ class ActorRunner:
             # Kernel ``run_turn`` persists ``status="running"`` to the DB
             # itself (agent-harness 3e742fc) — no host pre-persist needed.
             await kernel_client.run_turn(user_id, session_id, content)
-            loaded = await kernel_client.get_session(user_id, session_id)
+            loaded = await data_reader().get_session(user_id, session_id)
             return _resolve_turn_status(loaded)
         except Exception as exc:  # noqa: BLE001
             logger.warning("actor turn failed for session %s: %s", session_id, exc)

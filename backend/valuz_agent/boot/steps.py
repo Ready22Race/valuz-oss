@@ -132,7 +132,6 @@ async def bootstrap_schema() -> None:
        (providers today; more later). Safe to re-run on every boot.
     """
     from valuz_agent.boot.kernel import run_kernel_migrations
-    from valuz_agent.boot.kernel_db_split import migrate_kernel_store_out_of_host_db
     from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.infra.local_identity import resolve_local_user_id
@@ -162,13 +161,12 @@ async def bootstrap_schema() -> None:
     if legacy_dir.is_dir() and not target_dir.exists():
         legacy_dir.rename(target_dir)
 
-    # 0. One-time cutover: move pre-split kernel tables (sessions/messages/
-    #    events + any langgraph checkpoints + the kernel alembic stamp) out of
-    #    the shared valuz.db into the kernel's own kernel.db. Runs in BOTH
-    #    modes (a host-side SQLite file move, before any engine opens the
-    #    files) and BEFORE the kernel alembic so the upgrade lands on the
-    #    just-migrated kernel.db. No-op once split / on a fresh install.
-    migrate_kernel_store_out_of_host_db()
+    # NB: the legacy ``kernel_db_split`` cutover (move kernel tables *out* of
+    #    valuz.db into kernel.db) is RETIRED. It contradicts the DataService
+    #    co-locate model, where sessions/messages/events live in valuz.db as the
+    #    durable/read source (design §3 form 1); evicting them is wrong and its
+    #    PK-based copy corrupted the dual-write buffer. Seeding now flows the
+    #    other way (kernel.db → valuz.db) via ``colocate_kernel_history``.
 
     # 1. Kernel alembic (its own ``alembic_version`` row). SKIPPED in
     #    http mode — the standalone kernel owns its own database and
@@ -221,6 +219,24 @@ async def configure_i18n() -> None:
 
     async with async_unit_of_work(commit=False) as db:
         set_locale(await get_default_locale(db, user_id=resolve_local_user_id()))
+
+
+async def colocate_kernel_history() -> None:
+    """One-time seed of the DataService durable (valuz.db) from kernel.db.
+
+    Runs after schema bootstrap and before the durable store is read, so an
+    install created before the "DataService always the data layer" flip keeps its
+    history visible. In-process (sqlite) only — a remote/http kernel or a shared
+    DB has nothing to co-locate. Guarded: a failure must not break boot.
+    """
+    if settings.is_http_kernel:
+        return
+    try:
+        from valuz_agent.boot.kernel_db_colocate import colocate_kernel_history_into_host_db
+
+        await colocate_kernel_history_into_host_db()
+    except Exception:  # noqa: BLE001 — insert-only migration must never break boot
+        logging.getLogger(__name__).warning("kernel-history co-locate skipped", exc_info=True)
 
 
 async def init_kernel(app: FastAPI) -> None:
@@ -299,6 +315,70 @@ async def init_kernel(app: FastAPI) -> None:
     # Task-finish trigger (§7.1): when a multi-agent task completes, graduate its
     # durable multi-agent lessons + project progress into project memory.
     task_finish_scheduler.set_runner(run_task_finish_extraction)
+
+
+async def bind_data_service(app: FastAPI) -> None:
+    """Bind the host-mounted DataService (``/internal/data``) to its backend.
+
+    The sub-app is mounted at factory time with no store (only ``/health`` +
+    ``/openapi.json`` work until now). Here — once the host DB is up — we build a
+    store over the configured durable backend (the user's Postgres) + an HS256
+    verifier keyed by the host secret, so a sandbox can reach it over HTTP+JWT
+    without ever holding the DSN. The store tier is read **purely from the
+    environment** (``KERNEL_STORE`` / ``VALUZ_DURABLE_DATABASE_URL``), loaded at
+    boot — the same env the kernel's ``AppConfig`` reads. Local-only deployments
+    keep the DS inert (the in-process store is the data layer). Guarded: a
+    failure must not break boot.
+    """
+    ds_app = getattr(app.state, "data_service_app", None)
+    if ds_app is None:
+        return
+    try:
+        import os
+
+        from valuz_agent.api.deps import _secret_store
+        from valuz_agent.boot import kernel as kb
+        from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
+        store_mode = os.environ.get("KERNEL_STORE", "local")
+        dsn = os.environ.get("VALUZ_DURABLE_DATABASE_URL", "")
+        # OSS default (local): the DataService backend is the host sqlite
+        # (valuz.db). Resolve it here too so binding isn't ordering-dependent on
+        # ``_set_kernel_env``. pg/remote provide the DSN via env.
+        if store_mode == "local" and not dsn:
+            from valuz_agent.infra.config import settings
+
+            dsn = settings.db_url_async
+        if not dsn:
+            return
+        store, engine = kb.build_host_data_service_store(dsn)
+        await kb.ensure_host_data_service_schema(engine)
+        ds_app.state.store = store
+        ds_app.state.verifier = kb.make_host_data_service_verifier(
+            get_or_create_ds_secret(_secret_store(), resolve_local_user_id())
+        )
+        app.state._data_service_engine = engine
+        # Unify host reads (sessions + events) through the DataService
+        # (in-process), so reads never depend on the sandbox being alive. Bind
+        # the in-process reader into the typed DataReader port.
+        from valuz_agent.adapters.data_reader import bind_data_reader
+        from valuz_agent.adapters.data_service_local import LocalDataServiceReader
+
+        bind_data_reader(LocalDataServiceReader(store))
+        logging.getLogger(__name__).info("host DataService bound (backend=%s)", store_mode)
+    except Exception:  # noqa: BLE001 — DS binding must never break boot
+        logging.getLogger(__name__).warning("host DataService bind skipped", exc_info=True)
+
+
+async def dispose_data_service(app: FastAPI) -> None:
+    from valuz_agent.adapters.data_reader import bind_data_reader
+
+    bind_data_reader(None)
+    engine = getattr(app.state, "_data_service_engine", None)
+    if engine is not None:
+        await engine.dispose()
+        app.state._data_service_engine = None
 
 
 def install_binding_change_listener() -> None:

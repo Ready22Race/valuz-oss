@@ -217,6 +217,10 @@ class TaskOrchestrator:
         pointer to read (see ``spill_goal_brief_if_too_long``) rather than
         crashing the ``/goal`` payload mid-turn.
 
+        ``user_id`` is the owning caller; it MUST be threaded through to the
+        project / member lookups (owner-scoped queries return None for the wrong
+        owner — a missing ``user_id`` reads as "project not found").
+
         Thin delegator onto :class:`LifecycleService` (ADR-023 Step 3c).
         Kept on the orchestrator so its existing callers (REST routes,
         in-process automation runner, the ``create_task`` MCP handler) keep

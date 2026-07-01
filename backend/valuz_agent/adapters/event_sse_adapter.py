@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -32,8 +33,23 @@ from typing import Any
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.sse import shielded
 
+logger = logging.getLogger(__name__)
+
 POLL_INTERVAL_SECONDS = 0.3
 IDLE_HEARTBEAT_SECONDS = 15.0
+
+# History read-routing. Reads are UNIFIED through the DataService: whenever a
+# durable DataService is configured (any non-local mode), the host reads event
+# HISTORY straight from it (in-process), independent of whether the sandbox
+# kernel is alive — the sandbox owns execution + live deltas, the DataService
+# owns history. In local mode there is no DataService, so reads go through the
+# kernel seam (the in-process kernel store). History reads share the one typed
+# DataReader port with session reads.
+def _history_reader() -> Any:
+    """The transport for reading event HISTORY — the shared ``DataReader`` port."""
+    from valuz_agent.adapters.data_reader import data_reader
+
+    return data_reader()
 
 
 @dataclass(frozen=True)
@@ -530,7 +546,7 @@ async def list_events_after(
     cursor = after_seq
     while len(items) < limit:
         want = min(_EVENTS_PAGE, limit - len(items))
-        page = await kernel_client.get_events(user_id, session_id, after_seq=cursor, limit=want)
+        page = await _history_reader().get_events(user_id, session_id, after_seq=cursor, limit=want)
         if not page:
             break
         items.extend(page)
@@ -570,9 +586,8 @@ async def list_events_window(
     if turn_limit <= 0:
         return TurnWindow(items=[], has_more=False)
 
-    owner_id = user_id
-    window = await kernel_client.get_events_window(
-        owner_id, session_id, before_seq=before_seq, turn_limit=turn_limit
+    window = await _history_reader().get_events_window(
+        user_id, session_id, before_seq=before_seq, turn_limit=turn_limit
     )
     return TurnWindow(items=_items_to_frames(window.items), has_more=window.has_more)
 
@@ -613,8 +628,17 @@ async def iter_events_sse(
     queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=4096)
 
     async def _pump() -> None:
-        async for item in kernel_client.subscribe_session_events(owner_id, session_id):
-            await queue.put(item)
+        # Live deltas always come from the kernel's live bus (never persisted).
+        # In remote mode the sandbox may be GONE — then the subscription fails
+        # and we degrade to history-only (the poll loop below serves it from the
+        # DataService). Swallow so a dead sandbox never breaks the stream.
+        try:
+            async for item in kernel_client.subscribe_session_events(owner_id, session_id):
+                await queue.put(item)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — unreachable sandbox → history-only
+            logger.debug("live event subscription unavailable; serving history only", exc_info=True)
 
     pump_task = asyncio.create_task(_pump(), name=f"sse-pump-{session_id}")
     try:

@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     kernel_url: str = "http://127.0.0.1:8400"
     kernel_token: str | None = None
 
+    # The kernel data-service store tier is configured purely via the
+    # environment, loaded at boot — ``KERNEL_STORE`` (local|pg|remote) +
+    # ``VALUZ_DURABLE_DATABASE_URL`` (pg) / ``VALUZ_DATA_API_*`` (remote), read
+    # directly by the kernel's ``AppConfig``, the boot DataService binding, and
+    # the sandbox provisioner. There is no host-DB / GUI config surface.
+
     @property
     def is_http_kernel(self) -> bool:
         """True when the kernel runs as a SEPARATE process (subprocess /

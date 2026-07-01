@@ -901,7 +901,10 @@ class TestManagedKbRoot:
 
         # Managed root lives under <data_dir>/kb/<kb_id>; point data_dir at
         # tmp so the test never touches the real ~/.valuz-oss tree.
-        monkeypatch.setattr(fs_registry.fs_registry, "data_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            type(fs_registry.fs_registry), "data_dir", lambda self: tmp_path
+        )  # patch the CLASS method — patching the singleton instance leaves a
+        # shadowing instance attr on teardown that breaks later tests' data_dir patches
 
         kb = await svc.create_kb("local-test-owner", name="Managed")
         await _drain(svc)
@@ -915,7 +918,10 @@ class TestManagedKbRoot:
     ) -> None:
         from valuz_agent.infra import fs_registry
 
-        monkeypatch.setattr(fs_registry.fs_registry, "data_dir", lambda: tmp_path)
+        monkeypatch.setattr(
+            type(fs_registry.fs_registry), "data_dir", lambda self: tmp_path
+        )  # patch the CLASS method — patching the singleton instance leaves a
+        # shadowing instance attr on teardown that breaks later tests' data_dir patches
 
         kb = await svc.create_kb("local-test-owner", name="Managed")
         await _drain(svc)

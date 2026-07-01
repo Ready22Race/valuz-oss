@@ -79,7 +79,12 @@ install_backend() {
     # ``uv run pytest`` after every startup (ModuleNotFoundError: pytest).
     # (Runtime OCR deps live in the DEFAULT dependencies, so they are not
     # pruned here and need no extra.)
-    uv sync --extra dev
+    #
+    # Always include the ``postgres`` extra (asyncpg): the DataService backend
+    # (pg / remote) is chosen at runtime from the settings page, so the driver
+    # must be present in dev regardless of the current mode. Small dep; keeping
+    # it avoids a "driver pruned" failure when the user flips to Postgres.
+    uv sync --extra dev --extra postgres
     ok "backend deps ready"
 }
 

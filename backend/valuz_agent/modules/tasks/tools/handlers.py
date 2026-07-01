@@ -24,7 +24,7 @@ import valuz_agent.boot.kernel  # noqa: F401
 from src.core import ToolDef, ToolResult
 from src.core.tools import ExecContext
 
-from valuz_agent.adapters import kernel_client
+from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.modules.tasks import messaging, planning, queries
 
 from valuz_agent.modules.tasks.tools.declarations import (
@@ -106,7 +106,7 @@ async def _check_lead_gate(ctx: ExecContext) -> tuple[str, str] | ToolResult:
     # Source the caller from the per-request built-in MCP context when not
     # passed explicitly (the toolkit MCP server publishes the session owner).
     user_id = ctx.user_id
-    sess = await kernel_client.get_session(user_id, ctx.session_id)
+    sess = await data_reader().get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="dispatch: caller session not found", is_error=True)
 
@@ -150,7 +150,7 @@ async def _resolve_plan_writer_task(
     Read-only callers (get_plan) should use ``_resolve_plan_reader_task`` instead.
     """
     user_id = ctx.user_id
-    sess = await kernel_client.get_session(user_id, ctx.session_id)
+    sess = await data_reader().get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="plan tool: caller session not found", is_error=True)
 
@@ -189,7 +189,7 @@ async def _resolve_plan_reader_task(
     get_plan: knowing your own draft / a project mate's plan is fine.
     """
     user_id = ctx.user_id
-    sess = await kernel_client.get_session(user_id, ctx.session_id)
+    sess = await data_reader().get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="plan tool: caller session not found", is_error=True)
 
@@ -281,7 +281,7 @@ async def _check_orchestration_gate(ctx: ExecContext) -> tuple[str, str] | ToolR
     projects are ephemeral). Returns a ToolResult(is_error=True) on failure.
     """
     user_id = ctx.user_id
-    sess = await kernel_client.get_session(user_id, ctx.session_id)
+    sess = await data_reader().get_session(user_id, ctx.session_id)
     if sess is None:
         return ToolResult(content="create_task: caller session not found", is_error=True)
 
@@ -563,7 +563,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         if not text.strip():
             return ToolResult(content="inject_into_task: text is required", is_error=True)
 
-        sess = await kernel_client.get_session(user_id, ctx.session_id)
+        sess = await data_reader().get_session(user_id, ctx.session_id)
         if sess is None:
             return ToolResult(content="inject_into_task: caller session not found", is_error=True)
 
@@ -619,7 +619,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         if not task_id:
             return ToolResult(content="resume_task: task_id is required", is_error=True)
 
-        sess = await kernel_client.get_session(user_id, ctx.session_id)
+        sess = await data_reader().get_session(user_id, ctx.session_id)
         if sess is None:
             return ToolResult(content="resume_task: caller session not found", is_error=True)
 
@@ -751,7 +751,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         # create_task). NOT lead-gated; just needs a project. Resolve from
         # valuz metadata (task runs) or session.project_id (launcher).
         user_id = ctx.user_id
-        sess = await kernel_client.get_session(user_id, ctx.session_id)
+        sess = await data_reader().get_session(user_id, ctx.session_id)
         if sess is None:
             return ToolResult(content="list_members: caller session not found", is_error=True)
         v: dict[str, Any] = (sess.metadata or {}).get("valuz", {})

@@ -71,6 +71,14 @@ def _set_kernel_env() -> None:
     """
     os.environ["DATABASE_URL"] = settings.kernel_db_url_async
     os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.kernel_db_path))
+    # OSS default (KERNEL_STORE local/unset): the DataService backend is the host
+    # sqlite (valuz.db). Inject it as the durable so the kernel dual-writes
+    # kernel.db → valuz.db and reads are served from the DataService (design §3
+    # form 1) — the DataService is always the data layer, not a bypass. A shared-DB
+    # deployment (database_url set) makes this equal the kernel's own DSN → the
+    # factory collapses it to a single write. pg/remote bring their own durable.
+    if os.environ.get("KERNEL_STORE", "local") == "local":
+        os.environ.setdefault("VALUZ_DURABLE_DATABASE_URL", settings.db_url_async)
 
 
 def _known_kernel_revisions() -> set[str]:
@@ -235,11 +243,14 @@ def run_kernel_migrations() -> None:
         raise error[0]
 
 
+
 async def init_kernel_dependencies() -> None:
     """Initialize the kernel's engine/session/store/orchestrator singletons.
 
-    Mirrors ``app.dependencies.init_dependencies`` but drives it from valuz
-    settings instead of the kernel's own AppConfig defaults.
+    Mirrors ``app.dependencies.init_dependencies``. The store tier
+    (``KERNEL_STORE`` / ``VALUZ_DURABLE_DATABASE_URL`` / ``VALUZ_DATA_API_*``) is
+    read straight from the environment by the kernel's ``AppConfig`` — OSS
+    configures the data service purely via env vars, loaded at boot.
     """
     _set_kernel_env()
     import app.dependencies as kernel_deps
@@ -312,3 +323,75 @@ def get_kernel_routers() -> list:
     from app.routes.usage import router as usage_router
 
     return [sessions_router, messages_router, run_router, events_router, usage_router]
+
+
+def make_data_service_placeholder():
+    """Create the host-mounted DataService sub-app. Store + verifier are bound
+    later in the lifespan (once the backend DSN + secret are known); until then
+    ``/health`` and ``/openapi.json`` work and ``/rpc`` returns 401. Mounted at
+    ``/internal/data`` by the host app factory."""
+    from app.data_service import create_data_service_app
+    from src.core.token_verifier import NullTokenVerifier
+
+    return create_data_service_app(store=None, verifier=NullTokenVerifier())
+
+
+def build_host_data_service_store(backend_dsn: str):
+    """Build a ``(StorePort, AsyncEngine)`` over the host DataService backend.
+
+    The host owns the DB credential here; a sandbox reaches this DataService
+    over HTTP+JWT and never sees the DSN. RLS GUC is installed (no-op on SQLite).
+    """
+    from app.data_service import install_rls_guc
+    from src.adapters.sqlalchemy_store.engine import create_engine, create_session_factory
+    from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
+
+    engine = create_engine(backend_dsn)
+    install_rls_guc(engine)
+    return SQLAlchemyStore(create_session_factory(engine)), engine
+
+
+async def ensure_host_data_service_schema(engine) -> None:
+    """Create the kernel DATA schema on the host DataService backend if absent
+    (checkfirst; idempotent vs. an already-migrated PG).
+
+    Excludes ``durable_outbox`` — it is the LOCAL store's compensation queue
+    (pending durable writes), so it belongs only on the kernel's local engine
+    (kernel.db), never on the durable itself.
+    """
+    from src.adapters.sqlalchemy_store.models import Base
+
+    durable_tables = [t for n, t in Base.metadata.tables.items() if n != "durable_outbox"]
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=durable_tables))
+
+
+def make_host_data_service_verifier(secret: str):
+    """HS256 verifier for the host-mounted DataService (sandbox tokens)."""
+    from src.core.token_signer import HmacTokenVerifier
+
+    return HmacTokenVerifier(secret)
+
+
+def mint_data_service_token(
+    secret: str, *, user_id: str, session_id: str | None = None, ttl_s: int = 86400
+) -> str:
+    """Mint a short-lived HS256 token for a sandbox to call the host DataService.
+    The sandbox carries only this token — never the DB credential."""
+    from src.core.token_signer import TokenSigner
+
+    return TokenSigner(secret).sign(user_id=user_id, session_id=session_id, ttl_s=ttl_s)
+
+
+def get_data_service_openapi() -> dict:
+    """The DataService (``/rpc/{op}``) OpenAPI schema, for the settings panel.
+
+    Built from the kernel's data-service app (no store / DB needed — the schema
+    is derived from the route signatures). This is the contract the sandbox /
+    SaaS client speaks; surfacing it lets the user inspect the data API. Lives
+    in ``boot`` because that's the seam allowed to import ``app.*``.
+    """
+    from app.data_service import create_data_service_app
+    from src.core.token_verifier import NullTokenVerifier
+
+    return create_data_service_app(store=None, verifier=NullTokenVerifier()).openapi()

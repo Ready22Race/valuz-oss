@@ -45,6 +45,11 @@ async def split_db(tmp_path, monkeypatch):
     kernel_db = tmp_path / "kernel-probe.db"
     host_db = tmp_path / "host-probe.db"
     monkeypatch.setenv("VALUZ_KERNEL_DATABASE_URL", f"sqlite:///{kernel_db}")
+    # This probe exercises the SEPARATED-kernel, NO-durable seam (host stays
+    # clean of kernel tables). Pin the durable OFF so ``_set_kernel_env``'s
+    # default co-locate injection (durable = host valuz.db) doesn't apply here —
+    # the co-locate path has its own coverage.
+    monkeypatch.setenv("VALUZ_DURABLE_DATABASE_URL", "")
 
     saved_modules = {
         name: mod for name, mod in sys.modules.items() if name.startswith(_REIMPORT_PREFIXES)

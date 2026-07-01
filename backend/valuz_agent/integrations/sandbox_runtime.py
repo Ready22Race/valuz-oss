@@ -28,11 +28,14 @@ is a no-op returning the cwd unchanged.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from valuz_agent.ports.sandbox_provider import MountGrant, SandboxProvider
+
+logger = logging.getLogger("valuz_agent.sandbox")
 
 
 @dataclass
@@ -129,25 +132,29 @@ async def ensure_workspace_granted(cwd: str) -> str:
     """
     state = _lazy_activate()
     if state is None:
+        logger.debug("ensure_workspace_granted(%s): no active sandbox — no-op", cwd)
         return cwd
     real = os.path.realpath(str(Path(cwd).expanduser()))
     if _under_static_root(real, state.static_roots):
+        logger.info("workspace %s is under a static rw mount — no grant needed", real)
         return cwd
     async with state.lock:
         existing = state.granted.get(real)
         if existing is not None:
+            logger.info("workspace %s already granted to this sandbox", real)
             return existing.kernel_cwd
         try:
             binding = await state.provider.bind_workspace(state.sandbox_id, real, "rw")
         except Exception:  # noqa: BLE001 — degrade, don't block session creation
-            import logging
-
-            logging.getLogger("valuz_agent.sandbox").warning(
-                "dynamic workspace grant failed for %s — agent may hit "
+            logger.warning(
+                "dynamic workspace grant FAILED for %s — agent may hit "
                 "Operation not permitted",
                 real,
                 exc_info=True,
             )
             return cwd
         state.granted[real] = binding
+        logger.info(
+            "dynamic workspace grant issued for %s (kernel_cwd=%s)", real, binding.kernel_cwd
+        )
         return binding.kernel_cwd

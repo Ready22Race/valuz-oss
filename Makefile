@@ -1,4 +1,4 @@
-.PHONY: dev test typecheck lint seed help
+.PHONY: dev dev-sandbox pg pg-down test typecheck lint seed help
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -17,6 +17,12 @@ dev: ## Start backend + frontend (foreground; Ctrl+C stops both)
 
 dev-sandbox: ## Like dev, but run the kernel in a Seatbelt sandbox (macOS)
 	VALUZ_SANDBOX_DRIVER=seatbelt bash scripts/dev.sh $(or $(TARGET),all)
+
+pg: ## Start local Postgres (podman or docker) for the DataService backend; prints the DSN to paste into Settings
+	bash scripts/pg.sh up
+
+pg-down: ## Stop the local Postgres container (data preserved)
+	bash scripts/pg.sh down
 
 seed: ## Load seed data into database
 	cd backend && uv run python -m scripts.seed

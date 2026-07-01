@@ -146,9 +146,16 @@ safe.
   its sync engine to remove an event-loop deadlock.
 - Schema is created and migrated at boot: host migrations (Alembic + seed) and
   kernel migrations (kernel-owned Alembic) run in `boot/`. A one-time boot step
-  (`boot/kernel_db_split.py`) moves a pre-split install's kernel tables out of
-  `valuz.db` into `kernel.db` (back up → copy → verify → drop), so upgrading
-  preserves existing history.
+  (`boot/kernel_db_colocate.py`) seeds the DataService durable (`valuz.db`) from
+  the kernel's `kernel.db` (back up → copy → verify), so an install created
+  before the DataService became the default read layer keeps its history
+  visible. (The earlier reverse step `kernel_db_split.py`, which moved kernel
+  tables *out* of `valuz.db`, is retired — it contradicts co-location.)
+
+The kernel's three tables are accessed through a single **DataService** layer
+(host-mounted router; backend swappable between host SQLite and a remote
+Postgres; sandbox access is JWT-authenticated). See
+[design/data-service-architecture.md](design/data-service-architecture.md).
 
 ---
 

@@ -4,7 +4,7 @@ The data root was flattened and renamed: the old ``~/.valuz/app`` tree (with
 its sibling ``~/.valuz/kb``) becomes the new flat ``~/.valuz-oss`` root (``kb``
 folds in as ``~/.valuz-oss/kb``). This step carries an existing install across
 that cutover ONCE, with the same checkpoint/copy/verify discipline as
-``kernel_db_split.py``:
+``kernel_db_colocate.py``:
 
 1. BAIL — no-op when the store does not live in the local SQLite files this
    step manipulates (``database_url`` / ``kernel_database_url`` configured, e.g.

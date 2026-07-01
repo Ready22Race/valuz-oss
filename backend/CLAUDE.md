@@ -45,10 +45,49 @@ own `kernel.db` (the 3 unprefixed kernel tables `sessions` / `messages` /
 `events`, its langgraph checkpoint tables, and `alembic_version`). The split
 (config `kernel_db_url`, default-on for SQLite) lets a sandboxed/remote kernel
 own its file and gives `make dev` + `make dev-sandbox` one shared history; an
-explicit `database_url` (Postgres) co-locates both instead. A one-time boot step
-(`boot/kernel_db_split.py`) migrates a pre-split `valuz.db`'s kernel tables into
-`kernel.db`. Both layers run **async** SQLAlchemy on aiosqlite; WAL +
+explicit `database_url` (Postgres) co-locates both instead. `kernel.db` is the
+kernel's execution-local store; the DataService **durable** copy of
+`sessions`/`messages`/`events` lives in the host `valuz.db` (design §3 form 1),
+and a one-time boot step (`boot/kernel_db_colocate.py`) seeds `valuz.db` from
+`kernel.db` on upgrade. (The legacy reverse step `kernel_db_split.py` — evicting
+kernel tables *out* of `valuz.db` — is retired; it contradicts co-location.)
+Both layers run **async** SQLAlchemy on aiosqlite; WAL +
 per-connection `busy_timeout` make concurrent access safe.
+
+**Kernel store.** The kernel ALWAYS binds the local `SQLAlchemyStore` on
+`database_url`. `KERNEL_STORE` then selects whether a **durable** store fronts it:
+
+| `KERNEL_STORE` | Durable backend (transport) |
+|----------------|------------------------------|
+| `local` (default) | in-process `SQLAlchemyStore` on the **host `valuz.db`** (the host injects it as `VALUZ_DURABLE_DATABASE_URL` in `_set_kernel_env`) — the DataService IS the data layer, not a bypass (design §3 form 1) |
+| `pg` | in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL` (schema auto-created, `_ensure_durable_schema`) |
+| `remote` | `RemoteStoreHttp` → the HTTP DataService; the sandbox holds ONLY a JWT (`VALUZ_DATA_API_*`), never a DSN |
+
+**All three tiers are the SAME behaviour** — one config→backend factory
+(`_build_durable_store`), no per-tier branch. Each wraps the local store
+(`kernel.db`) in a `WriteThroughStore(authority="durable")`: the **durable is the
+system of record** (reads + the central event seq come from it; the durable write
+is **fail-loud**), and `kernel.db` is the execution-local write **buffer**, never
+the read source. The only difference is the durable backend: `local` → host
+`valuz.db` sqlite, `pg` → in-process Postgres, `remote` → HTTP DataService. If the
+durable DSN equals the kernel's own `database_url` (a shared/co-located DB) the
+dual-write **collapses** to a single write. A one-time boot step
+(`boot/kernel_db_colocate.py`) seeds `valuz.db` from a pre-flip `kernel.db` so
+existing history stays visible. Each store owns its own `events` autoincrement (the seqs
+are independent; `event_uid` bridges identity) — NEVER force one store's seq onto
+the other's PK (collides with overlapping local ids and drops events).
+
+Because the SaaS sandbox is **ephemeral**, in `remote` mode the host reads event
+history straight from the DataService (`DataServiceReadClient`, routed in
+`event_sse_adapter._history_reader`) so a dead sandbox still serves history; live
+deltas still come from the kernel SSE when the sandbox is alive. The data service
+(`kernel/app/data_service.py`, `POST /rpc/{op}` per StorePort method) has its
+route↔client↔StorePort contract pinned by `test_data_service_contract.py`.
+
+> Note: `WriteThroughStore` still carries a dormant `authority="local"` +
+> `DurableOutbox` best-effort path (local-first read, queued durable
+> compensation). It is currently unused — no tier wires it — and is a candidate
+> for removal.
 
 ## The two boundary contracts
 

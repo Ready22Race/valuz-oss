@@ -1,0 +1,136 @@
+<svg viewBox="0 0 1200 960" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif" role="img" aria-labelledby="ttl desc">
+  <title id="ttl">DataService architecture — all deployment forms: interactions and module dependencies</title>
+  <desc id="desc">The DataService is a host-mounted router that is the single CRUD layer for the kernel's three tables. Two orthogonal knobs — execution location (in-process or sandbox) and backend (host sqlite or remote Postgres) — generate the four deployment forms.</desc>
+  <defs>
+    <marker id="an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#8A93A3"/></marker>
+    <marker id="ab" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2563EB"/></marker>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#DC4B43"/></marker>
+  </defs>
+  <style>
+    .lk { fill:none; stroke-linecap:round; stroke-linejoin:round; }
+    .neutral { stroke:#8A93A3; stroke-width:1.4; }
+    .blue { stroke:#2563EB; stroke-width:1.8; }
+    .red  { stroke:#DC4B43; stroke-width:1.8; }
+    .dash { stroke-dasharray:6 4; }
+    .lbl { font-size:11px; fill:#6B7280; }
+    .lblb { font-size:11px; fill:#2563EB; }
+    .lblr { font-size:11px; fill:#DC4B43; }
+  </style>
+
+  <rect x="0" y="0" width="1200" height="960" fill="#FFFFFF"/>
+  <text x="40" y="38" font-size="19" font-weight="700" fill="#1F2430">DataService — 所有形态的交互与模块依赖</text>
+  <text x="40" y="60" font-size="13" fill="#6B7280">唯一数据层 = host 挂载的 router;两个正交旋钮(执行位置 × 后端)生成 4 种形态。</text>
+
+  <!-- line-style key -->
+  <g transform="translate(792,30)">
+    <line x1="0" y1="0" x2="22" y2="0" class="lk blue"/><text x="28" y="4" class="lbl">数据流 读+写</text>
+    <line x1="0" y1="16" x2="22" y2="16" class="lk red dash"/><text x="28" y="20" class="lbl">沙箱 HTTP+JWT</text>
+    <line x1="180" y1="0" x2="202" y2="0" class="lk neutral"/><text x="208" y="4" class="lbl">控制 / 驱动</text>
+    <line x1="180" y1="16" x2="202" y2="16" class="lk neutral dash"/><text x="208" y="20" class="lbl">供给 / 配置</text>
+  </g>
+
+  <!-- ===== Clients ===== -->
+  <rect x="470" y="84" width="120" height="42" rx="8" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="530" y="110" font-size="13" fill="#1F2430" text-anchor="middle">Electron 桌面</text>
+  <rect x="610" y="84" width="120" height="42" rx="8" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="670" y="110" font-size="13" fill="#1F2430" text-anchor="middle">Browser WebUI</text>
+  <path d="M 600 126 L 600 150" class="lk neutral" marker-end="url(#an)"/>
+  <text x="612" y="143" class="lbl">HTTP / SSE</text>
+
+  <!-- ===== Host container ===== -->
+  <rect x="40" y="150" width="1120" height="300" rx="12" fill="#F6F7F9" stroke="#CDD3DD"/>
+  <text x="58" y="174" font-size="14" font-weight="700" fill="#374151">Host · valuz-server (FastAPI)</text>
+
+  <!-- host modules row -->
+  <rect x="60" y="190" width="210" height="62" rx="9" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="165" y="216" font-size="13" font-weight="600" fill="#1F2430" text-anchor="middle">API 路由 / SSE</text>
+  <text x="165" y="234" font-size="11" fill="#6B7280" text-anchor="middle">event_sse_adapter</text>
+
+  <rect x="290" y="190" width="210" height="62" rx="9" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="395" y="216" font-size="13" font-weight="600" fill="#1F2430" text-anchor="middle">设置 · 数据服务</text>
+  <text x="395" y="234" font-size="11" fill="#6B7280" text-anchor="middle">模式 · 健康 · OpenAPI</text>
+
+  <rect x="520" y="190" width="190" height="62" rx="9" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="615" y="216" font-size="13" font-weight="600" fill="#1F2430" text-anchor="middle">DataServiceReadClient</text>
+  <text x="615" y="234" font-size="11" fill="#6B7280" text-anchor="middle">host 历史读</text>
+
+  <rect x="730" y="190" width="190" height="62" rx="9" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="825" y="216" font-size="13" font-weight="600" fill="#1F2430" text-anchor="middle">kernel_client seam</text>
+  <text x="825" y="234" font-size="11" fill="#6B7280" text-anchor="middle">InProcess · HTTP</text>
+
+  <rect x="940" y="190" width="200" height="62" rx="9" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="1040" y="216" font-size="13" font-weight="600" fill="#1F2430" text-anchor="middle">SandboxProvider</text>
+  <text x="1040" y="234" font-size="11" fill="#6B7280" text-anchor="middle">seatbelt / cloud 驱动</text>
+
+  <!-- DataService hub -->
+  <rect x="430" y="340" width="340" height="86" rx="11" fill="#E8F0FE" stroke="#2563EB" stroke-width="2"/>
+  <text x="600" y="372" font-size="16" font-weight="700" fill="#1E40AF" text-anchor="middle">DataService router  ◆ 唯一数据层</text>
+  <text x="600" y="394" font-size="12" fill="#2B4A8B" text-anchor="middle">POST /rpc/{op} · StorePort(13 ops)</text>
+  <text x="600" y="412" font-size="11" fill="#2B4A8B" text-anchor="middle">JWT 验签 → owner · 同文件时塌缩为单写</text>
+
+  <!-- host internal wiring (orthogonal, rounded) -->
+  <path d="M 615 252 L 615 340" class="lk blue" marker-end="url(#ab)"/>
+  <text x="624" y="300" class="lblb">历史读</text>
+  <path d="M 395 252 L 395 340 Q 395 350 405 350 L 430 350" class="lk neutral dash" marker-end="url(#an)"/>
+  <text x="300" y="306" class="lbl">配置后端 / 模式</text>
+
+  <!-- ===== knob 1: execution ===== -->
+  <text x="60" y="508" font-size="13" font-weight="700" fill="#374151">① 执行旋钮</text>
+  <rect x="60" y="516" width="300" height="92" rx="10" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="210" y="544" font-size="13.5" font-weight="600" fill="#1F2430" text-anchor="middle">进程内 kernel</text>
+  <text x="210" y="566" font-size="11" fill="#6B7280" text-anchor="middle">WriteThroughStore</text>
+  <text x="210" y="584" font-size="11" fill="#6B7280" text-anchor="middle">本地 sqlite + durable 客户端 + outbox</text>
+
+  <rect x="60" y="624" width="300" height="98" rx="10" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="210" y="652" font-size="13.5" font-weight="600" fill="#1F2430" text-anchor="middle">沙箱 kernel(seatbelt / cloud)</text>
+  <text x="210" y="674" font-size="11" fill="#6B7280" text-anchor="middle">WriteThroughStore</text>
+  <text x="210" y="692" font-size="11" fill="#6B7280" text-anchor="middle">本地 sqlite + durable 客户端 + outbox</text>
+  <text x="210" y="710" font-size="11" fill="#DC4B43" text-anchor="middle">凭证隔离:只持 JWT</text>
+
+  <!-- kernel_client drives in-process kernel (down → left → down) -->
+  <path d="M 825 252 L 825 476 Q 825 486 815 486 L 220 486 Q 210 486 210 496 L 210 516" class="lk neutral" marker-end="url(#an)"/>
+  <text x="470" y="480" class="lbl">驱动 run / 实时 SSE</text>
+  <!-- SandboxProvider provisions the sandbox (down → left margin → down → in) -->
+  <path d="M 1040 252 L 1040 456 Q 1040 466 1030 466 L 34 466 Q 24 466 24 476 L 24 650 Q 24 660 34 660 L 60 660" class="lk neutral dash" marker-end="url(#an)"/>
+  <text x="40" y="459" class="lbl">供给沙箱</text>
+
+  <!-- execution → DataService (read+write) -->
+  <path d="M 360 560 L 450 560 Q 460 560 460 550 L 460 426" class="lk blue" marker-end="url(#ab)"/>
+  <text x="372" y="500" class="lblb">进程内调用 · 读+写</text>
+  <path d="M 360 672 L 530 672 Q 540 672 540 662 L 540 426" class="lk red dash" marker-end="url(#ar)"/>
+  <text x="548" y="556" class="lblr">HTTP + JWT · 读+写</text>
+
+  <!-- ===== knob 2: backend ===== -->
+  <text x="840" y="508" font-size="13" font-weight="700" fill="#374151">② 后端旋钮</text>
+  <rect x="840" y="516" width="300" height="70" rx="10" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="990" y="548" font-size="13.5" font-weight="600" fill="#1F2430" text-anchor="middle">host sqlite(默认)</text>
+  <text x="990" y="568" font-size="11" fill="#6B7280" text-anchor="middle">host 托管</text>
+
+  <rect x="840" y="606" width="300" height="78" rx="10" fill="#FFFFFF" stroke="#C8CED8"/>
+  <text x="990" y="638" font-size="13.5" font-weight="600" fill="#1F2430" text-anchor="middle">remote PG</text>
+  <text x="990" y="658" font-size="11" fill="#6B7280" text-anchor="middle">RLS 兜底 · 凭证仅在 host</text>
+  <text x="990" y="675" font-size="11" fill="#6B7280" text-anchor="middle">开启「remote 同步」</text>
+
+  <!-- DataService → backend (one of two), parallel rounded lanes -->
+  <path d="M 770 372 L 800 372 Q 810 372 810 382 L 810 541 Q 810 551 820 551 L 840 551" class="lk blue" marker-end="url(#ab)"/>
+  <path d="M 770 398 L 815 398 Q 825 398 825 408 L 825 635 Q 825 645 835 645 L 840 645" class="lk blue" marker-end="url(#ab)"/>
+  <text x="838" y="476" class="lblb">后端(二选一)</text>
+
+  <!-- ===== legend: form matrix ===== -->
+  <rect x="40" y="760" width="1120" height="172" rx="12" fill="#FAFBFC" stroke="#CDD3DD"/>
+  <text x="58" y="786" font-size="14" font-weight="700" fill="#374151">形态矩阵(同一机制,翻动两个旋钮)</text>
+
+  <text x="64" y="812" font-size="12" font-weight="700" fill="#6B7280">形态</text>
+  <text x="200" y="812" font-size="12" font-weight="700" fill="#6B7280">执行位置</text>
+  <text x="420" y="812" font-size="12" font-weight="700" fill="#6B7280">后端</text>
+  <text x="640" y="812" font-size="12" font-weight="700" fill="#6B7280">到 DataService 的传输</text>
+  <text x="900" y="812" font-size="12" font-weight="700" fill="#6B7280">说明</text>
+  <line x1="58" y1="820" x2="1142" y2="820" stroke="#E2E6EC"/>
+
+  <g font-size="12" fill="#1F2430">
+    <text x="64" y="842">1</text><text x="200" y="842">进程内 kernel</text><text x="420" y="842">host sqlite</text><text x="640" y="842" fill="#2563EB">进程内调用</text><text x="900" y="842" fill="#6B7280">OSS 默认;塌缩为单写</text>
+    <text x="64" y="866">2</text><text x="200" y="866">seatbelt 沙箱</text><text x="420" y="866">host sqlite</text><text x="640" y="866" fill="#DC4B43">HTTP + JWT</text><text x="900" y="866" fill="#6B7280">行为同 #1;沙箱另写本地缓冲</text>
+    <text x="64" y="890">3</text><text x="200" y="890">进程内 或 沙箱</text><text x="420" y="890">remote PG</text><text x="640" y="890">进程内 或 HTTP+JWT</text><text x="900" y="890" fill="#6B7280">remote 同步;PG 凭证不进沙箱</text>
+    <text x="64" y="914">4 (SaaS)</text><text x="200" y="914">云沙箱</text><text x="420" y="914">remote PG</text><text x="640" y="914" fill="#DC4B43">HTTP + JWT</text><text x="900" y="914" fill="#6B7280">= #3 + 云沙箱;即配即用,无新代码</text>
+  </g>
+</svg>

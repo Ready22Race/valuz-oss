@@ -420,13 +420,12 @@ async def _resolve_session_project_id(
     metadata and then confirm the project is ``kind == "project"``; a chat /
     temp project (or a missing one) resolves to None, so confirm creates the
     library agent only (no派驻)."""
-    from valuz_agent.adapters import kernel_client
     from valuz_agent.modules.projects.datastore import ProjectDatastore
+    from valuz_agent.modules.sessions import project_index
 
-    sess = await kernel_client.get_session(user_id, session_id)
-    if sess is None:
-        return None
-    project_id = ((sess.metadata or {}).get("valuz", {}) or {}).get("project_id") or None
+    # session→project is a host fact (``valuz_project_session``) — no kernel
+    # round-trip (DataService design §5). Then confirm ``kind == "project"``.
+    project_id = await project_index.project_of(session_id)
     if not project_id:
         return None
     row = await ProjectDatastore(db).get_by_id(user_id, project_id)

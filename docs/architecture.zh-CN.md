@@ -125,8 +125,10 @@ OAuth 页面，以及对外的 HTTP 接口。宿主自有的表以 `valuz_*` 为
   绝不在自己的引擎上查询内核表——内核状态一律经 `KernelClient` seam 访问。
 - 同步 DB 调用绝不可运行在事件循环上——宿主已从同步引擎迁出，以消除事件循环死锁。
 - schema 在启动时创建并迁移：宿主迁移（Alembic + seed）与内核迁移（内核自有 Alembic）在
-  `boot/` 中运行。一个一次性启动步骤（`boot/kernel_db_split.py`）会把旧版 `valuz.db` 中的
-  内核表迁移进 `kernel.db`（备份 → 拷贝 → 校验 → 删除），升级时保留既有历史。
+  `boot/` 中运行。一个一次性启动步骤（`boot/kernel_db_colocate.py`）把内核的 `kernel.db`
+  播种进 DataService 的 durable（`valuz.db`）（备份 → 拷贝 → 校验），让在 DataService 成为
+  默认读层之前建立的安装仍能看到历史。（早期方向相反的 `kernel_db_split.py`——把内核表移出
+  `valuz.db`——已退役，与同库共置相冲突。）
 
 ---
 

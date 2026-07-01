@@ -163,6 +163,14 @@ dev = [
     "jsonschema>=4.23",
     "httpx[socks]>=0.27",
 ]
+# PostgreSQL async driver for the remote data-service deployment (SaaS / B-real).
+# Opt-in: OSS local-first runs on SQLite (aiosqlite) and never needs this, so the
+# desktop bundle stays lean. The data service syncs it explicitly
+# (``uv sync --extra postgres``). ``config._to_async_url`` maps
+# ``postgresql://…`` → ``postgresql+asyncpg://…`` so SQLAlchemy picks this driver.
+postgres = [
+    "asyncpg>=0.29",
+]
 
 [tool.uv]
 # ``openai-codex-cli-bin`` — the version-pinned codex binary that

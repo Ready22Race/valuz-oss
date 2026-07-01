@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from src.adapters.sqlalchemy_store.converters import (
     event_to_model,
@@ -144,12 +145,39 @@ class SQLAlchemyStore:
     # -- Event log --
 
     async def append_event(
-        self, user_id: str, session_id: str, message_id: str, event: Event
+        self,
+        user_id: str,
+        session_id: str,
+        message_id: str,
+        event: Event,
+        *,
+        request_id: str | None = None,
+        seq: int | None = None,
     ) -> int | None:
         async with self._session_factory() as db:
-            model = event_to_model(user_id, session_id, message_id, event)
+            model = event_to_model(
+                user_id, session_id, message_id, event, event_uid=request_id, seq=seq
+            )
             db.add(model)
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError:
+                # Idempotent replay: a retried remote append reused its
+                # request_id; the unique (user_id, event_uid) index rejected the
+                # duplicate. Return the ORIGINAL row's seq — never insert twice.
+                await db.rollback()
+                if request_id is not None:
+                    existing = (
+                        await db.execute(
+                            select(EventModel.id).where(
+                                EventModel.user_id == user_id,
+                                EventModel.event_uid == request_id,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if existing is not None:
+                        return int(existing)
+                raise
             # The autoincrement PK is always populated after a successful
             # commit; the assert narrows the Optional for type checkers.
             assert model.id is not None
