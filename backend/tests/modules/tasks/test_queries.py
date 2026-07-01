@@ -21,7 +21,6 @@ from valuz_agent.modules.agents.models import ProjectMemberRow
 from valuz_agent.modules.tasks import queries
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
-
 LOCAL_USER_ID = "local-test-owner"
 
 
@@ -228,7 +227,7 @@ async def test_list_members_degrades_when_agent_not_loadable(db_factory, tmp_pat
     finally:
         db.close()
 
-    async def _no_agent(_member, _ds):
+    async def _no_agent(_member, _ds, **_kw):
         return None
 
     monkeypatch.setattr(queries, "_member_agent_config", _no_agent)

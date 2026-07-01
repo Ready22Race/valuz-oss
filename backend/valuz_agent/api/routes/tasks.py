@@ -499,9 +499,27 @@ async def intervene(
         # ``paused`` (resumable, 恢复 button stays); ``stop`` → ``stopped``
         # (UI-terminal, no 恢复 button — still revivable via chat/inject).
         target = "paused" if payload.action == "pause" else "stopped"
-        await task_orchestrator.stop_task(task_id, ws, target_status=target, user_id=user_id)
+        applied = await task_orchestrator.stop_task(
+            task_id, ws, target_status=target, user_id=user_id
+        )
+        # ``stop_task`` returns False on an illegal transition (e.g. the task is
+        # already terminal). Surface it instead of swallowing it — otherwise the
+        # client toasts "已停止/已暂停" on a no-op while the badge keeps the old
+        # status, the exact "状态有误" symptom the user hit.
+        if not applied:
+            raise HTTPException(
+                status_code=409,
+                detail=f"cannot {payload.action} task in status {task.status!r}",
+            )
     elif payload.action == "resume":
-        await task_orchestrator.resume_task(task_id, ws, user_id=user_id)
+        result = await task_orchestrator.resume_task(task_id, ws, user_id=user_id)
+        # ``resume_task`` returns ``{ok: False, error}`` on an illegal source
+        # state (e.g. resuming an ``active`` task). Same rationale as stop above.
+        if not result.get("ok"):
+            raise HTTPException(
+                status_code=409,
+                detail=result.get("error") or "cannot resume task",
+            )
 
     db.expire_all()  # drop cached rows so we see the orchestrator's committed write
     refreshed = await task_ds.get_task(user_id, task_id)

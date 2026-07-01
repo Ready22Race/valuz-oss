@@ -25,7 +25,6 @@ from valuz_agent.modules.tasks.orchestrator import (
     collect_manifest,
 )
 
-
 LOCAL_USER_ID = "local-test-owner"
 
 
@@ -325,7 +324,7 @@ def test_build_member_session_injects_skill_scoping(
     )
     fake_members = SimpleNamespace(get=_async_member_get())
     monkeypatch.setattr(
-        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds, **_kw: fake_agent)
     )
     # Hermetic: don't resolve skill slugs against the real skill-index DB — this
     # test only asserts the prompt-scoping block (built from the agent's own
@@ -377,7 +376,7 @@ def test_build_member_session_carries_agent_effort(
     )
     fake_members = SimpleNamespace(get=_async_member_get())
     monkeypatch.setattr(
-        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds, **_kw: fake_agent)
     )
 
     session = asyncio.run(
@@ -418,7 +417,7 @@ def test_build_member_session_no_effort_leaves_model_settings_unset(
     )
     fake_members = SimpleNamespace(get=_async_member_get())
     monkeypatch.setattr(
-        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds, **_kw: fake_agent)
     )
 
     session = asyncio.run(
@@ -456,7 +455,7 @@ def _fake_goal_mode_setup(monkeypatch: pytest.MonkeyPatch, runtime_provider: str
     )
     fake_members = SimpleNamespace(get=_async_member_get())
     monkeypatch.setattr(
-        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds, **_kw: fake_agent)
     )
     return agent_resolver, fake_members
 
@@ -599,7 +598,7 @@ def test_create_task_gate_rejects_task_sessions(
     def _sess(valuz: dict) -> SimpleNamespace:
         return SimpleNamespace(metadata={"valuz": valuz})
 
-    ctx = SimpleNamespace(session_id="s1")
+    ctx = SimpleNamespace(session_id="s1", user_id="u1")
 
     # run_kind="lead" → rejected before any DB lookup.
     monkeypatch.setattr(
@@ -801,7 +800,7 @@ def test_build_member_session_carries_effort_for_deepagents(
     )
     fake_members = SimpleNamespace(get=_async_member_get("da-1"))
     monkeypatch.setattr(
-        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _member, _ds, **_kw: fake_agent)
     )
 
     session = asyncio.run(

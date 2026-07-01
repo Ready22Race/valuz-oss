@@ -28,6 +28,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from valuz_agent.infra.db import async_commit_with_retry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.task_state import (
+    TaskStateError,
+    assert_transition,
+    is_valid_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +139,35 @@ class TaskDatastore:
         return row
 
     async def update_task_status(self, user_id: str, task_id: str, status: str) -> bool:
-        """Update task status. Returns True when the row was updated."""
+        """Update task status, enforcing the ``task_state`` state machine.
+
+        Refuses to persist an out-of-enum target (e.g. the legacy ``"failed"``)
+        and rejects illegal transitions from a known source — so the state
+        machine in ``task_state.py`` is a real guard, not just documentation.
+
+        Tolerances (logged, not raised): a same-status write is a no-op, and a
+        legacy/unknown *source* status (a row written before this enforcement)
+        is allowed through so it can still be recovered (e.g. → ``active`` on
+        resume) instead of being bricked.
+
+        Returns True when the row was updated.
+        """
+        if not is_valid_status(status):
+            raise TaskStateError(f"refusing to write invalid task status {status!r}")
+        current = await self._db.scalar(
+            select(TaskRow.status).where(TaskRow.id == task_id, TaskRow.user_id == user_id)
+        )
+        if current is not None and current != status:
+            if is_valid_status(current):
+                assert_transition(current, status)  # raises TaskStateError if illegal
+            else:
+                logger.warning(
+                    "update_task_status: legacy/unknown source status %r for task %s "
+                    "→ %r (allowed without transition check)",
+                    current,
+                    task_id,
+                    status,
+                )
         res = await self._db.execute(
             update(TaskRow)
             .where(TaskRow.id == task_id, TaskRow.user_id == user_id)
