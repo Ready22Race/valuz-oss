@@ -33,8 +33,41 @@ def test_default_kernel_store_is_local():
 
 
 def test_local_store_has_no_durable():
-    # Model A default: local-only, no durable write-through target.
-    assert deps._build_durable_store(AppConfig(kernel_store="local")) is None
+    # A bare ``local`` config (no durable DSN) is a single write — the factory
+    # returns None. (In real boot the host injects valuz.db as the durable via
+    # ``_set_kernel_env``; the explicit ``durable_database_url=None`` here pins
+    # the unit-level behaviour regardless of any env leaked by another test.)
+    cfg = AppConfig(kernel_store="local", durable_database_url=None)
+    assert deps._build_durable_store(cfg) is None
+
+
+def test_local_store_with_durable_builds_sqlalchemy():
+    # OSS default at boot: ``local`` WITH a durable DSN (the host's valuz.db)
+    # builds an in-process SQLAlchemyStore — the DataService IS the data layer.
+    from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
+
+    cfg = AppConfig(
+        kernel_store="local",
+        database_url="sqlite+aiosqlite:///:memory:",
+        durable_database_url="sqlite+aiosqlite:///file:durable?mode=memory&cache=shared&uri=true",
+    )
+    try:
+        durable = deps._build_durable_store(cfg)
+        assert isinstance(durable, SQLAlchemyStore)
+        assert deps._durable_engine is not None
+    finally:
+        deps._durable_engine = None
+
+
+def test_local_store_collapses_when_durable_equals_local():
+    # Durable DSN == the kernel's own database_url (shared/co-located DB) →
+    # the dual-write collapses to a single write → None.
+    cfg = AppConfig(
+        kernel_store="local",
+        database_url="sqlite+aiosqlite:///:memory:",
+        durable_database_url="sqlite+aiosqlite:///:memory:",
+    )
+    assert deps._build_durable_store(cfg) is None
 
 
 def test_build_durable_store_pg_requires_url():

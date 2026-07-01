@@ -55,17 +55,21 @@ per-connection `busy_timeout` make concurrent access safe.
 
 | `KERNEL_STORE` | Durable backend (transport) |
 |----------------|------------------------------|
-| `local` (default) | none — local sqlite only, single write |
+| `local` (default) | in-process `SQLAlchemyStore` on the **host `valuz.db`** (the host injects it as `VALUZ_DURABLE_DATABASE_URL` in `_set_kernel_env`) — the DataService IS the data layer, not a bypass (design §3 form 1) |
 | `pg` | in-process `SQLAlchemyStore` on `VALUZ_DURABLE_DATABASE_URL` (schema auto-created, `_ensure_durable_schema`) |
 | `remote` | `RemoteStoreHttp` → the HTTP DataService; the sandbox holds ONLY a JWT (`VALUZ_DATA_API_*`), never a DSN |
 
-**`pg` and `remote` are the SAME behaviour** — both wrap the local store in a
-`WriteThroughStore(authority="durable")`: the **durable is the system of record**
-(reads + the central event seq come from it; the durable write is **fail-loud**),
-and the local store is a best-effort write **buffer**, never the read source.
-`pg` is simply a `remote` whose durable backend is an in-process Postgres instead
-of the HTTP DataService — the difference is purely transport, decided in
-`_build_durable_store`. Each store owns its own `events` autoincrement (the seqs
+**All three tiers are the SAME behaviour** — one config→backend factory
+(`_build_durable_store`), no per-tier branch. Each wraps the local store
+(`kernel.db`) in a `WriteThroughStore(authority="durable")`: the **durable is the
+system of record** (reads + the central event seq come from it; the durable write
+is **fail-loud**), and `kernel.db` is the execution-local write **buffer**, never
+the read source. The only difference is the durable backend: `local` → host
+`valuz.db` sqlite, `pg` → in-process Postgres, `remote` → HTTP DataService. If the
+durable DSN equals the kernel's own `database_url` (a shared/co-located DB) the
+dual-write **collapses** to a single write. A one-time boot step
+(`boot/kernel_db_colocate.py`) seeds `valuz.db` from a pre-flip `kernel.db` so
+existing history stays visible. Each store owns its own `events` autoincrement (the seqs
 are independent; `event_uid` bridges identity) — NEVER force one store's seq onto
 the other's PK (collides with overlapping local ids and drops events).
 

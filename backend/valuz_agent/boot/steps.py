@@ -222,6 +222,24 @@ async def configure_i18n() -> None:
         set_locale(await get_default_locale(db, user_id=resolve_local_user_id()))
 
 
+async def colocate_kernel_history() -> None:
+    """One-time seed of the DataService durable (valuz.db) from kernel.db.
+
+    Runs after schema bootstrap and before the durable store is read, so an
+    install created before the "DataService always the data layer" flip keeps its
+    history visible. In-process (sqlite) only — a remote/http kernel or a shared
+    DB has nothing to co-locate. Guarded: a failure must not break boot.
+    """
+    if settings.is_http_kernel:
+        return
+    try:
+        from valuz_agent.boot.kernel_db_colocate import colocate_kernel_history_into_host_db
+
+        await colocate_kernel_history_into_host_db()
+    except Exception:  # noqa: BLE001 — insert-only migration must never break boot
+        logging.getLogger(__name__).warning("kernel-history co-locate skipped", exc_info=True)
+
+
 async def init_kernel(app: FastAPI) -> None:
     # In-process kernel singletons (store + orchestrator) are NOT created
     # in http mode — the kernel runs as a separate process and the host
@@ -326,7 +344,14 @@ async def bind_data_service(app: FastAPI) -> None:
 
         store_mode = os.environ.get("KERNEL_STORE", "local")
         dsn = os.environ.get("VALUZ_DURABLE_DATABASE_URL", "")
-        if store_mode == "local" or not dsn:
+        # OSS default (local): the DataService backend is the host sqlite
+        # (valuz.db). Resolve it here too so binding isn't ordering-dependent on
+        # ``_set_kernel_env``. pg/remote provide the DSN via env.
+        if store_mode == "local" and not dsn:
+            from valuz_agent.infra.config import settings
+
+            dsn = settings.db_url_async
+        if not dsn:
             return
         store, engine = kb.build_host_data_service_store(dsn)
         await kb.ensure_host_data_service_schema(engine)

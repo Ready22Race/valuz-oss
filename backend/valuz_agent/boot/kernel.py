@@ -71,6 +71,14 @@ def _set_kernel_env() -> None:
     """
     os.environ["DATABASE_URL"] = settings.kernel_db_url_async
     os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.kernel_db_path))
+    # OSS default (KERNEL_STORE local/unset): the DataService backend is the host
+    # sqlite (valuz.db). Inject it as the durable so the kernel dual-writes
+    # kernel.db → valuz.db and reads are served from the DataService (design §3
+    # form 1) — the DataService is always the data layer, not a bypass. A shared-DB
+    # deployment (database_url set) makes this equal the kernel's own DSN → the
+    # factory collapses it to a single write. pg/remote bring their own durable.
+    if os.environ.get("KERNEL_STORE", "local") == "local":
+        os.environ.setdefault("VALUZ_DURABLE_DATABASE_URL", settings.db_url_async)
 
 
 def _known_kernel_revisions() -> set[str]:

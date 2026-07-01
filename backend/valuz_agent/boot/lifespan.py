@@ -26,6 +26,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     steps.ensure_local_identity()  # seed owner ctx before any insert
     await steps.bootstrap_schema()
     await steps.configure_i18n()
+    await steps.colocate_kernel_history()  # seed valuz.db durable from kernel.db (one-time)
     await steps.init_kernel(app)
     await steps.bind_data_service(app)
     steps.install_binding_change_listener()
