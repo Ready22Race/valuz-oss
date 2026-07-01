@@ -305,7 +305,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     # all known application + runtime namespaces. Loggers that
     # legitimately want to stay quiet should set their *level*
     # higher, not rely on ``disabled``.
-    _APP_NAMESPACES = (
+    app_namespaces = (
         "valuz_agent",
         # Kernel uses bare ``src.*`` because of the ``backend/kernel``
         # ``__init__.py`` sys.path injection.
@@ -328,7 +328,7 @@ def configure_logging(level: int = logging.INFO) -> None:
     )
 
     def _under(name: str) -> bool:
-        return any(name == ns or name.startswith(ns + ".") for ns in _APP_NAMESPACES)
+        return any(name == ns or name.startswith(ns + ".") for ns in app_namespaces)
 
     for name, lg in list(logging.Logger.manager.loggerDict.items()):
         if isinstance(lg, logging.Logger) and lg.disabled and _under(name):

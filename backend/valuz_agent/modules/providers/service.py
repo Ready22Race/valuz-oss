@@ -139,6 +139,28 @@ class ConnectionTestResult:
     error_message: str | None = None
 
 
+async def resolve_model_provider_for_user(
+    *,
+    user_id: str,
+    provider_id: str,
+    model_id: str,
+    runtime_provider: str | None = None,
+) -> Any:
+    """Resolve a provider row through the providers module boundary."""
+    from valuz_agent.adapters.provider_resolver import resolve_model_provider
+    from valuz_agent.infra.db import async_unit_of_work
+
+    async with async_unit_of_work() as db:
+        return await resolve_model_provider(
+            provider_id=provider_id,
+            model_id=model_id,
+            providers=ProviderDatastore(db),
+            secrets=ext.secret_store,
+            runtime_provider=runtime_provider,  # type: ignore[arg-type]
+            user_id=user_id,
+        )
+
+
 # ``LLMChannel`` / ``LLMModel`` / ``LLMChannelDetail`` now live in
 # ``modules.providers.schemas`` — the shared contract OSS / overlay / frontend
 # all speak (ADR-011). The helpers below judge OSS's OWN rows onto that shape;

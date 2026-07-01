@@ -1049,7 +1049,7 @@
     "alreadyHave": "已存在",
     "needsKey": "需要密钥",
     "needsSetup": "需要本地配置",
-    "created": "已导入 · {members} 个成员、{automations} 个自动化，新增 {agents} 个 Agent",
+    "importCreated": "已导入 · {members} 个成员、{automations} 个自动化，新增 {agents} 个 Agent",
     "skipped": "已跳过——已存在同名项目"
   },
   "schedule": {

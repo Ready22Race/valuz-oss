@@ -137,7 +137,7 @@ describe("ProjectDetailContextPanel — Todos section", () => {
       />,
     );
 
-    expect(screen.getByRole("tab", { name: "Session Context" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "项目" })).toBeTruthy();
     const filesTab = screen.getByRole("tab", { name: "项目文件" });
     expect(filesTab).toBeTruthy();
     expect(screen.queryByText("/tmp/project")).toBeNull();
@@ -250,7 +250,7 @@ describe("ProjectDetailContextPanel — Todos section", () => {
     );
 
     const instructionsButton = screen
-      .getAllByRole("button", { name: /提示词/ })
+      .getAllByRole("button", { name: /项目说明/ })
       .find((button) => button.hasAttribute("aria-expanded"));
     const scheduledButton = screen.getByRole("button", { name: /定时任务/ });
 
@@ -286,7 +286,7 @@ describe("ProjectDetailContextPanel — Todos section", () => {
     );
 
     await userEvent.click(screen.getByTitle("定时任务操作"));
-    await userEvent.click(screen.getByText("禁用"));
+    await userEvent.click(screen.getByText("暂停"));
     expect(onToggleScheduledTask).toHaveBeenCalledWith("task-1", "off");
 
     await userEvent.click(screen.getByTitle("定时任务操作"));

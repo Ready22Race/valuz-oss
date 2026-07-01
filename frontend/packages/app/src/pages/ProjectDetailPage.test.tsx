@@ -1,5 +1,6 @@
 /** @vitest-environment jsdom */
 import { fireEvent, render, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initI18n } from "@valuz/shared/i18n";
 import type { Task } from "@valuz/core";
@@ -21,6 +22,13 @@ vi.mock("react-router-dom", async (orig) => {
     ...actual,
     useParams: () => ({ id: h.currentId }),
     useNavigate: () => navigate,
+    useLocation: () => ({
+      pathname: `/projects/${h.currentId}`,
+      search: "",
+      hash: "",
+      state: null,
+      key: h.currentId,
+    }),
   };
 });
 
@@ -55,6 +63,44 @@ vi.mock("@valuz/app/hooks", () => ({
   useKbDocTree: () => ({ kbTree: [], loading: false, expandFolder: vi.fn() }),
 }));
 vi.mock("@valuz/app/components", () => ({
+  ActivityFeedList: () => {
+    const sessions = h.sessions
+      .filter((s) => (s as SessionListItem).project_id === h.currentId)
+      .map((s) => {
+        const row = s as SessionListItem;
+        return {
+          id: row.id,
+          title: row.name ?? row.last_user_message_text ?? row.id,
+          kind: "chat",
+          status: row.status,
+          sortAt: row.updated_at,
+        };
+      });
+    const tasks = (h.tasksByProject.get(h.currentId) ?? []).map((t) => {
+      const row = t as Task;
+      return {
+        id: row.id,
+        title: row.title,
+        kind: "task",
+        status: row.status,
+        sortAt: row.updated_at,
+      };
+    });
+    return (
+      <div>
+        {[...sessions, ...tasks]
+          .sort((a, b) => b.sortAt - a.sortAt)
+          .map((item) => (
+            <div
+              key={`${item.kind}-${item.id}`}
+              data-anchor-key={`${item.kind}-${item.id}`}
+            >
+              {item.title} {item.status}
+            </div>
+          ))}
+      </div>
+    );
+  },
   CreateAutomationDialog: () => null,
   DeployAgentsDialog: () => null,
   RenameInput: () => null,
@@ -183,6 +229,16 @@ vi.mock("../../../core/src/hooks/use-model-defaults", () => ({
 vi.mock("../../../core/src/hooks/use-project-last-used", () => ({
   useProjectLastUsed: () => ({ pick: null, loading: false }),
 }));
+vi.mock("../../../core/src/hooks/use-activity-feed", () => ({
+  useActivityFeed: () => ({
+    items: [],
+    loading: false,
+    loadingMore: false,
+    hasMore: false,
+    loadMore: vi.fn(),
+    refresh: vi.fn(),
+  }),
+}));
 vi.mock("../../../core/src/hooks/use-runtimes", () => ({
   useRuntimes: () => ({ runtimes: [] }),
 }));
@@ -225,9 +281,11 @@ function renderPage() {
   // Wrap in an explicit scroll container so the anchor hook's
   // ``findScrollParent`` resolves to a real scroller (plan review P2 wiring).
   return render(
-    <div style={{ overflowY: "auto" }}>
-      <ProjectDetailPage />
-    </div>,
+    <MemoryRouter initialEntries={[`/projects/${h.currentId}`]}>
+      <div style={{ overflowY: "auto" }}>
+        <ProjectDetailPage />
+      </div>
+    </MemoryRouter>,
   );
 }
 
@@ -274,7 +332,7 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
   });
 
   it("auto-refresh adds a newly-appearing task without duplicating existing rows", async () => {
-    const { container } = renderPage();
+    const { container, rerender } = renderPage();
     await waitFor(() => expect(container.textContent).toContain("Alpha"));
 
     // A new task appears elsewhere; the poller's online catch-up pulls it in.
@@ -283,6 +341,13 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
       task({ id: "t2", title: "Beta", created_at: 20, updated_at: 20 }),
     ]);
     fireEvent(window, new Event("online"));
+    rerender(
+      <MemoryRouter initialEntries={[`/projects/${h.currentId}`]}>
+        <div style={{ overflowY: "auto" }}>
+          <ProjectDetailPage />
+        </div>
+      </MemoryRouter>,
+    );
 
     await waitFor(() => expect(container.textContent).toContain("Beta"));
     // No duplicate rows for the pre-existing task.
@@ -292,7 +357,7 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
   });
 
   it("reflects a task status change in place and re-sorts the all tab (no dup)", async () => {
-    const { container } = renderPage();
+    const { container, rerender } = renderPage();
     await waitFor(() => expect(container.textContent).toContain("Alpha"));
 
     // Status flips running→completed and updated_at bumps → all-tab reorders.
@@ -300,6 +365,13 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
       task({ id: "t1", title: "Alpha", status: "completed", updated_at: 99 }),
     ]);
     fireEvent(window, new Event("online"));
+    rerender(
+      <MemoryRouter initialEntries={[`/projects/${h.currentId}`]}>
+        <div style={{ overflowY: "auto" }}>
+          <ProjectDetailPage />
+        </div>
+      </MemoryRouter>,
+    );
 
     await waitFor(() =>
       expect(container.textContent?.toLowerCase()).toContain("complete"),
@@ -320,9 +392,11 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
     ]);
     h.sessions = [];
     rerender(
-      <div style={{ overflowY: "auto" }}>
-        <ProjectDetailPage />
-      </div>,
+      <MemoryRouter initialEntries={[`/projects/${h.currentId}`]}>
+        <div style={{ overflowY: "auto" }}>
+          <ProjectDetailPage />
+        </div>
+      </MemoryRouter>,
     );
 
     await waitFor(() => expect(container.textContent).toContain("BravoTask"));

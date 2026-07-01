@@ -19,13 +19,13 @@ from uuid import uuid4
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
-from valuz_agent.adapters.provider_resolver import resolve_model_provider
 from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.memory.extraction import Completer, MemoryExtractor
-from valuz_agent.modules.providers.datastore import ProviderDatastore
-from valuz_agent.ports.extensions import ext
+from valuz_agent.modules.providers.service import (
+    resolve_model_provider_for_user as resolve_model_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,13 +61,9 @@ async def _resolve_project_brief(
     """Return ``(kind, name, instructions_md)`` for a project, or None if missing.
     Used to gate project extraction to real projects (design §2) and to anchor the
     reviewer's project routing with the project's identity (design §7.2)."""
-    from valuz_agent.modules.projects.datastore import ProjectDatastore
+    from valuz_agent.modules.projects.service import project_brief_by_id
 
-    async with async_unit_of_work(commit=False) as db:
-        row = await ProjectDatastore(db).get_by_id(user_id, project_id)
-    if row is None:
-        return None
-    return (row.kind, row.name, row.instructions_md)
+    return await project_brief_by_id(user_id, project_id)
 
 
 def _format_project_context(name: str, instructions: str | None) -> str:
@@ -191,15 +187,12 @@ async def run_extraction_for_session(session_id: str, user_id: str | None) -> No
         if len(transcript) < _MIN_TRANSCRIPT_CHARS:
             return  # triviality gate
 
-        async with async_unit_of_work() as db:
-            mp = await resolve_model_provider(
-                provider_id=str(provider_id),
-                model_id=source.model,
-                providers=ProviderDatastore(db),
-                secrets=ext.secret_store,
-                runtime_provider=source.runtime_provider,
-                user_id=user_id,
-            )
+        mp = await resolve_model_provider(
+            user_id=user_id,
+            provider_id=str(provider_id),
+            model_id=source.model,
+            runtime_provider=source.runtime_provider,
+        )
         # ``mp is None`` is EXPECTED for OAuth/subscription channels (Codex/Claude
         # login) — they self-authenticate in the runtime, so we proceed and let
         # the ephemeral session run with model_provider=None (mirroring the source).
@@ -287,11 +280,9 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
         return
     token = set_current_user_id(user_id)
     try:
-        from valuz_agent.modules.tasks.datastore import TaskDatastore, TaskSessionDatastore
+        from valuz_agent.modules.tasks import queries
 
-        async with async_unit_of_work(commit=False) as db:
-            task = await TaskDatastore(db).get_task(user_id, task_id)
-            runs = await TaskSessionDatastore(db).list_runs(user_id, task_id) if task else []
+        task, runs = await queries.get_task_with_runs(user_id, task_id)
         # Only graduate lessons from a successfully completed task.
         if task is None or task.status != "completed":
             return
@@ -337,15 +328,12 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
         transcript = build_transcript(messages)
         digest = build_task_digest(task, runs)
 
-        async with async_unit_of_work() as db:
-            mp = await resolve_model_provider(
-                provider_id=provider_id,
-                model_id=source.model,
-                providers=ProviderDatastore(db),
-                secrets=ext.secret_store,
-                runtime_provider=source.runtime_provider,
-                user_id=user_id,
-            )
+        mp = await resolve_model_provider(
+            user_id=user_id,
+            provider_id=provider_id,
+            model_id=source.model,
+            runtime_provider=source.runtime_provider,
+        )
         logger.info("task memory: reviewing finished task %s (project=%s)", task_id, project_id)
         completer = _make_completer(
             user_id=user_id,

@@ -34,8 +34,6 @@ def _copy_session(session: KernelSession, /, **overrides: object) -> KernelSessi
     update silently demotes the session back to ``full_access`` and the
     approval bridge for the next turn never wires.
     """
-    from src.core.types import Session as KS
-
     fields: dict[str, object] = {
         "id": session.id,
         "agent_config": session.agent_config,
@@ -56,7 +54,7 @@ def _copy_session(session: KernelSession, /, **overrides: object) -> KernelSessi
         "todos": getattr(session, "todos", None),
     }
     fields.update(overrides)
-    return KS(**fields)  # type: ignore[arg-type]
+    return KernelSession(**fields)  # type: ignore[arg-type]
 
 
 def _valuz_meta(session: KernelSession) -> dict[str, object]:

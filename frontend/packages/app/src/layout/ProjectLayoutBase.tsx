@@ -93,10 +93,8 @@ export interface ProjectLayoutBaseProps {
   logoSrc: string;
   logoMenuContentStyle?: CSSProperties;
   directoryFieldMode?: DirectoryFieldMode;
-  /** When ``directoryFieldMode="managed"``, invoked after a project is
-   * created so the host can offer an upload flow into the managed cwd
-   * (overlay editions wire this to their multipart upload UI). OSS leaves
-   * it unset — an empty managed project. */
+  /** When ``directoryFieldMode="managed"``, invoked after a project is created
+   * so the host can decide how to handle initial managed-cwd content. */
   onUploadInitialContent?: (projectId: string) => Promise<void>;
   /** Rendered at the very top of the sidebar, above "新对话". Overlay
    * editions inject an org / account switcher here. */

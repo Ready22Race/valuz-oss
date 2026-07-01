@@ -227,8 +227,7 @@ export const SkillsPage = () => {
 
   // Delete
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [_deletePreview, setDeletePreview] =
-    useState<SkillDeletePreview | null>(null);
+  const [, setDeletePreview] = useState<SkillDeletePreview | null>(null);
 
   /* ── Data loading ──────────────────────────────────────────── */
 

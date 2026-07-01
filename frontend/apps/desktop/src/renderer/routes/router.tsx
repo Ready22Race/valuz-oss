@@ -28,18 +28,17 @@ const DeepLinkRoot = () => {
 
   // Deep-link listener
   useEffect(() => {
-    const desktopApi = (
-      window as Window & {
-        valuzDesktop?: {
-          on: (event: string, handler: (payload: unknown) => void) => void;
-          off: (event: string, handler: (payload: unknown) => void) => void;
-        };
-      }
-    ).valuzDesktop;
+    const typedWindow = window as Window & {
+      valuzDesktop?: {
+        on: (event: string, handler: (payload: unknown) => void) => void;
+        off: (event: string, handler: (payload: unknown) => void) => void;
+      };
+    };
+    const desktopApi = typedWindow.valuzDesktop;
     if (!desktopApi) {
       console.log(
         "[DeepLink] no desktopApi available, window.valuzDesktop =",
-        (window as any).valuzDesktop,
+        typedWindow.valuzDesktop,
         "keys:",
         Object.keys(window).filter(
           (k) =>

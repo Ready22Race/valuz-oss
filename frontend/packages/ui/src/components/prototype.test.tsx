@@ -25,7 +25,9 @@ describe('prototype desktop components', () => {
   it('renders the prototype composer prompt and send affordance', () => {
     render(<Composer />)
 
-    expect(screen.getByPlaceholderText('输入消息... 输入 / 调用 Skill，@ 引用文档')).toBeTruthy()
-    expect(screen.getByText('Enter 发送')).toBeTruthy()
+    expect(screen.getByRole('textbox').getAttribute('data-placeholder')).toBe(
+      '输入指令... / 引用技能，@ 引用文档',
+    )
+    expect(screen.getByRole('button', { name: '发送' })).toBeTruthy()
   })
 })

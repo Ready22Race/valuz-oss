@@ -16,7 +16,7 @@ let updateWindow: BrowserWindow | null = null;
 
 export const getUpdateWindow = () => updateWindow;
 
-export const createUpdateWindow = (_version: string) => {
+export const createUpdateWindow = (version: string) => {
   if (updateWindow) {
     updateWindow.focus();
     return updateWindow;
@@ -25,7 +25,7 @@ export const createUpdateWindow = (_version: string) => {
   const url = getUpdateWindowUrl();
 
   updateWindow = new BrowserWindow({
-    title: "Valuz Update",
+    title: `Valuz Update ${version}`,
     width: 400,
     height: 320,
     resizable: false,

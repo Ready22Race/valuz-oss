@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import os
 
-from fastapi import HTTPException
-
 from app.schemas import (
     McpHttpServerConfigSchema,
     McpServerConfigSchema,
     McpStdioServerConfigSchema,
 )
+from fastapi import HTTPException
 from src.core import (
     McpHttpServerConfig,
     McpServerConfig,

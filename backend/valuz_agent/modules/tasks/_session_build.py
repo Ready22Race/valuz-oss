@@ -38,7 +38,13 @@ def _provider_resolver_deps(db: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def _credential_gap(session: Any, agent_slug: str, *, db: Any | None = None, user_id: str | None = None) -> str | None:
+async def _credential_gap(
+    session: Any,
+    agent_slug: str,
+    *,
+    db: Any | None = None,
+    user_id: str | None = None,
+) -> str | None:
     if user_id is None:
         raise ValueError("user_id is required")
 

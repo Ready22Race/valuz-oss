@@ -226,7 +226,8 @@ async def test_tokenless_requests_are_rejected(kernel_proc) -> None:
         await bare.aclose()
 
     # Health stays open for supervisors.
-    assert httpx.get(f"{kernel_proc}/health", timeout=5.0).status_code == 200
+    with httpx.Client() as client:
+        assert client.get(f"{kernel_proc}/health", timeout=5.0).status_code == 200
 
 
 @pytest.mark.asyncio
@@ -383,8 +384,14 @@ def _wait_exit_or_healthy(proc, deadline_s=30):
             deadline = time.monotonic() + deadline_s
             while time.monotonic() < deadline:
                 try:
-                    if httpx.get(f"http://127.0.0.1:{port}/health", timeout=1.0).status_code == 200:
-                        return "healthy", port
+                    with httpx.Client() as client:
+                        if (
+                            client.get(
+                                f"http://127.0.0.1:{port}/health", timeout=1.0
+                            ).status_code
+                            == 200
+                        ):
+                            return "healthy", port
                 except Exception:  # noqa: BLE001
                     pass
                 time.sleep(0.1)
@@ -441,11 +448,12 @@ def test_unauthenticated_optin_on_loopback_starts_open(tmp_path):
         # No token middleware installed — a tokenless request reaches the
         # route and SUCCEEDS (migrated schema: a 500 would fail the test).
         # The owner header is still required (auth-off ≠ owner-less reads).
-        resp = httpx.get(
-            f"http://127.0.0.1:{port}/api/v1/sessions",
-            headers={"X-Valuz-Owner-Id": "owner-a"},
-            timeout=5.0,
-        )
+        with httpx.Client() as client:
+            resp = client.get(
+                f"http://127.0.0.1:{port}/api/v1/sessions",
+                headers={"X-Valuz-Owner-Id": "owner-a"},
+                timeout=5.0,
+            )
         assert resp.status_code == 200
     finally:
         proc.terminate()
@@ -460,10 +468,11 @@ async def test_wrong_bearer_is_rejected_on_mutation_route(kernel_proc) -> None:
     """Symmetric to the open-path test: with KERNEL_AUTH_TOKEN set, the
     bearer middleware IS installed — a wrong token must be rejected on a
     session-mutation route before any handler runs."""
-    resp = httpx.post(
-        f"{kernel_proc}/api/v1/sessions",
-        json={"id": "x", "agent_config": {"name": "a"}, "cwd": "/tmp/x"},
-        headers={"Authorization": "Bearer WRONG"},
-        timeout=5.0,
-    )
+    with httpx.Client() as client:
+        resp = client.post(
+            f"{kernel_proc}/api/v1/sessions",
+            json={"id": "x", "agent_config": {"name": "a"}, "cwd": "/tmp/x"},
+            headers={"Authorization": "Bearer WRONG"},
+            timeout=5.0,
+        )
     assert resp.status_code == 401

@@ -22,6 +22,18 @@ vi.mock("./routes/router", () => ({
   AppRouter: () => <div>Desktop app ready</div>,
 }));
 
+vi.mock("./components/UpdaterListener", () => ({
+  UpdaterListener: () => null,
+}));
+
+vi.mock("./components/UpdateToast", () => ({
+  UpdateToast: () => null,
+}));
+
+vi.mock("@valuz/app/lib/onboarding", () => ({
+  isOnboarded: () => true,
+}));
+
 describe("desktop app startup flow", () => {
   beforeEach(() => {
     invokeMock.mockReset();
@@ -35,12 +47,23 @@ describe("desktop app startup flow", () => {
   });
 
   it("shows the startup screen while the initial runtime snapshot is loading", async () => {
-    invokeMock.mockImplementation(
-      () =>
-        new Promise(() => {
+    invokeMock.mockImplementation((command) => {
+      if (command === "get_services_status") {
+        return Promise.resolve([
+          {
+            name: "agent-server",
+            status: "stopped",
+            port: 19100,
+            pid: null,
+            detail: "Pending",
+          },
+        ]);
+      }
+
+      return new Promise(() => {
           // Keep the runtime bootstrap pending so the startup shell stays visible.
-        }),
-    );
+        });
+    });
 
     render(<App />);
 

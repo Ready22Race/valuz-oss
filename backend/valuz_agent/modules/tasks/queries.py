@@ -14,6 +14,7 @@ agent-facing tools expect.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import valuz_agent.boot.kernel  # noqa: F401 — puts kernel on sys.path
@@ -26,6 +27,54 @@ from valuz_agent.modules.tasks.datastore import (
     TaskSessionDatastore,
 )
 from valuz_agent.modules.tasks.plan import TaskPlan
+
+
+@dataclass(frozen=True)
+class TaskActivitySummary:
+    id: str
+    updated_at: int
+    project_id: str
+    trigger_automation_id: str | None
+    title: str
+    status: str
+
+
+async def list_activity_tasks_page(
+    user_id: str,
+    *,
+    project_id: str | None = None,
+    before_ts: int | None = None,
+    automation: bool | None = None,
+    limit: int = 20,
+) -> list[TaskActivitySummary]:
+    """Return task rows projected for the unified activity feed."""
+    async with async_unit_of_work(commit=False) as db:
+        rows = await TaskDatastore(db).list_tasks_page(
+            user_id,
+            project_id=project_id,
+            before_ts=before_ts,
+            automation=automation,
+            limit=limit,
+        )
+    return [
+        TaskActivitySummary(
+            id=row.id,
+            updated_at=row.updated_at,
+            project_id=row.project_id,
+            trigger_automation_id=row.trigger_automation_id,
+            title=row.title,
+            status=row.status,
+        )
+        for row in rows
+    ]
+
+
+async def get_task_with_runs(user_id: str, task_id: str) -> tuple[Any | None, list[Any]]:
+    """Return a task and its runs for cross-module read-only consumers."""
+    async with async_unit_of_work(commit=False) as db:
+        task = await TaskDatastore(db).get_task(user_id, task_id)
+        runs = await TaskSessionDatastore(db).list_runs(user_id, task_id) if task else []
+    return task, runs
 
 
 async def list_members(project_id: str, user_id: str | None = None) -> list[dict[str, Any]]:
@@ -106,7 +155,11 @@ async def list_tasks(
         return result
 
 
-async def get_task(task_id: str, project_id: str, user_id: str | None = None) -> dict[str, Any] | None:
+async def get_task(
+    task_id: str,
+    project_id: str,
+    user_id: str | None = None,
+) -> dict[str, Any] | None:
     """Return one task's status + per-run states + latest summary.
 
     Scoped to *project_id* (cross-project lookups return ``None``).

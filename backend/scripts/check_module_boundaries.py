@@ -116,6 +116,12 @@ FORBIDDEN_KERNEL_PREFIXES = (
     "kernel.app",
 )
 
+# Kernel lifecycle composition can instantiate the local SQLAlchemy DataService
+# store/schema. Runtime/business modules still must go through kernel_client.
+FORBIDDEN_KERNEL_ALLOWLIST = {
+    "boot/kernel.py",
+}
+
 # Kernel singletons / route functions / stream plumbing: the seam + boot only.
 SEAM_ONLY_PREFIXES = ("app.dependencies", "app.routes", "app.event_stream")
 SEAM_ONLY_ALLOWLIST = {
@@ -140,10 +146,17 @@ SRC_CORE_ALLOWLIST = {
     # it over MCP in-process and remote alike.
     "modules/tasks/tools/handlers.py",
     "modules/tasks/tools/declarations.py",
+    "modules/projects/tools.py",
+    "modules/sessions/artifacts_tool.py",
     "modules/memory/tools.py",
     "modules/browser/tools.py",
     "integrations/tools_skill_creator.py",
+    "integrations/tools_agent_proposal.py",
     "integrations/toolkit_mcp_server.py",
+    # Host DataService bridge and one-time sqlite colocate migration adapt the
+    # kernel store/domain objects into host read surfaces during boot.
+    "adapters/data_service_local.py",
+    "boot/kernel_db_colocate.py",
 }
 
 
@@ -153,7 +166,10 @@ def check_kernel_boundary() -> list[str]:
         rel = py.relative_to(HOST_ROOT).as_posix()
         tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         for dotted, lineno in _imported_dotted_paths(tree):
-            if any(dotted == p or dotted.startswith(p + ".") for p in FORBIDDEN_KERNEL_PREFIXES):
+            if (
+                any(dotted == p or dotted.startswith(p + ".") for p in FORBIDDEN_KERNEL_PREFIXES)
+                and rel not in FORBIDDEN_KERNEL_ALLOWLIST
+            ):
                 problems.append(
                     f"  valuz_agent/{rel}:{lineno}  imports {dotted} "
                     "(kernel internals — use the kernel_client seam)"

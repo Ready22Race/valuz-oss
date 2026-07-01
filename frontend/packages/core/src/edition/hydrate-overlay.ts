@@ -26,7 +26,7 @@ export async function hydrateOverlayIfPresent(): Promise<void> {
  */
 async function loadOverlayProfile(): Promise<EditionProfile | null> {
   try {
-    // @ts-ignore — virtual module resolved by Vite at build time; not present in TS resolution
+    // @ts-expect-error — virtual module resolved by Vite at build time; not present in TS resolution
     const mod = await import(/* @vite-ignore */ "virtual:edition-overlay");
     return (mod.overlayProfile as EditionProfile | null) ?? null;
   } catch {

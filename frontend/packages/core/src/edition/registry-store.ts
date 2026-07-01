@@ -96,6 +96,7 @@ export const useRegistryStore = create<RegistryState>((set) => ({
   // 如果将来引入 enterprise overlay，调用方应改为直接 hydrate(overlayProfile)。
   // TODO Slice 4: Edition 改 opaque string 后，这个函数签名也要收窄或彻底重做。
   setEdition: (_edition) => {
+    void _edition;
     set({
       edition: personalProfile.edition,
       features: personalProfile.features,

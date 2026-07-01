@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from valuz_agent.api.deps import get_provider_service, get_current_user_id
+from valuz_agent.api.deps import get_current_user_id, get_provider_service
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.discover import ModelDiscoveryError

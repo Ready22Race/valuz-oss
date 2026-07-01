@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+import { initI18n } from "@valuz/shared/i18n";
 import {
   ConversationPage as DesktopConversationPage,
   KnowledgePage as DesktopKnowledgePage,
@@ -9,6 +10,28 @@ import {
   SkillsPage as DesktopSkillsPage,
 } from "@valuz/app/pages";
 import { Navigate } from "react-router-dom";
+
+vi.mock("@valuz/app/pages", () => ({
+  ConversationPage: () => <div>新对话</div>,
+  KnowledgePage: () => <div>私有知识资产与索引状态</div>,
+  OnboardingPage: () => <div>索引中</div>,
+  SettingsPage: () => <div>通用</div>,
+  SkillsPage: () => <div>技能库</div>,
+}));
+
+vi.mock("@valuz/app/layout", () => ({
+  useProjectOutlet: () => ({
+    setRightPanel: vi.fn(),
+    setHeader: vi.fn(),
+    setHeaderClassName: vi.fn(),
+    setHideHeader: vi.fn(),
+    setAsideClassName: vi.fn(),
+    setMainClassName: vi.fn(),
+    setContentInnerClassName: vi.fn(),
+  }),
+}));
+
+beforeAll(() => initI18n({ locale: "zh-CN", fallbackLocale: "zh-CN" }));
 
 describe("prototype-backed desktop pages", () => {
   it("redirects home to new conversation page", () => {
@@ -27,7 +50,7 @@ describe("prototype-backed desktop pages", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.queryByText("新对话")).toBeNull();
+    expect(screen.getByText("新对话")).toBeTruthy();
   });
 
   it("renders the conversation page empty state when no backend", () => {
@@ -60,7 +83,7 @@ describe("prototype-backed desktop pages", () => {
       </MemoryRouter>,
     );
 
-    expect(screen.getByText(/Skills/)).toBeTruthy();
+    expect(screen.getByText("技能库")).toBeTruthy();
   });
 
   it("renders the settings and onboarding flows", () => {
@@ -71,7 +94,7 @@ describe("prototype-backed desktop pages", () => {
         </Routes>
       </MemoryRouter>,
     );
-    expect(screen.getByText("Preference Center")).toBeTruthy();
+    expect(screen.getByText("通用")).toBeTruthy();
   });
 
   it("renders the onboarding page", () => {
@@ -82,6 +105,6 @@ describe("prototype-backed desktop pages", () => {
         </Routes>
       </MemoryRouter>,
     );
-    expect(screen.getByText("文件解析")).toBeTruthy();
+    expect(screen.getByText("索引中")).toBeTruthy();
   });
 });
