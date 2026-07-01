@@ -55,6 +55,15 @@ from valuz_agent.ports.provider_policy import (
     get_provider_policy,
     set_provider_policy,
 )
+from valuz_agent.ports.sandbox_policy import (
+    AllowAllSandboxPolicy,
+    SandboxDecision,
+    SandboxPolicyPort,
+    SandboxProvisionContext,
+    authorize_sandbox_provision,
+    get_sandbox_policy,
+    set_sandbox_policy,
+)
 from valuz_agent.ports.skill_registry import SkillRegistryPort
 from valuz_agent.ports.tool_provider import ToolProvider
 
@@ -78,18 +87,25 @@ __all__ = [
     "PluginCapability",
     "PolicyDecision",
     "AllowAllProviderPolicy",
+    "AllowAllSandboxPolicy",
     "LLMProvider",
     "ProviderPolicyPort",
     "ProviderWriteContext",
     "ResolvedCredential",
+    "SandboxDecision",
+    "SandboxPolicyPort",
+    "SandboxProvisionContext",
     "SecretResolver",
     "SetupRequirement",
     "SkillRegistryPort",
     "SplitPolicy",
     "SystemProviderImmutable",
     "ToolProvider",
+    "authorize_sandbox_provision",
     "get_billing_port",
     "get_provider_policy",
+    "get_sandbox_policy",
     "set_billing_port",
     "set_provider_policy",
+    "set_sandbox_policy",
 ]

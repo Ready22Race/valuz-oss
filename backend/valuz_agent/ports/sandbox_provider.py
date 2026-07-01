@@ -81,6 +81,12 @@ class SandboxSpec:
     deny_paths: tuple[str, ...] = ()
     """Paths the sandbox must NOT read — the host business DB dir and
     secret store. Drivers translate to explicit deny rules."""
+    owner_user_id: str = ""
+    """The authenticated principal this sandbox is provisioned for. Empty on
+    the OSS single-user boot path; the shared multi-tenant host threads the
+    request principal here (never ambient) so a cloud driver can scope the
+    sandbox / object-store subtree to the owner and the fleet can key reuse by
+    ``(owner_user_id, project)``. See the commercial ADR-012."""
 
 
 @dataclass(frozen=True)
@@ -159,7 +165,12 @@ class SandboxProvider(Protocol):
         ...
 
     async def bind_workspace(
-        self, sandbox_id: str, host_path: str, mode: Literal["rw", "ro"] = "rw"
+        self,
+        sandbox_id: str,
+        host_path: str,
+        mode: Literal["rw", "ro"] = "rw",
+        *,
+        owner_user_id: str = "",
     ) -> MountGrant:
         """Make ``host_path`` reachable inside an ALREADY-RUNNING sandbox.
 
@@ -169,6 +180,11 @@ class SandboxProvider(Protocol):
         extension (no restart, no copy); a cloud driver stages the files.
         Idempotent per ``(sandbox_id, host_path)``. Raises
         ``SandboxProvisionError`` if the grant cannot be delivered.
+
+        ``owner_user_id`` (keyword-only, defaults empty for the local
+        single-user path) is the authenticated principal; a cloud driver uses
+        it to stage the files under the owner's object-store subtree. Threaded
+        explicitly by the caller — never read from ambient context.
         """
         ...
 
@@ -199,6 +215,10 @@ class SandboxBootContext:
     port: int
     host_callback_url: str = ""
     passthrough_env: dict[str, str] = field(default_factory=dict)
+    owner_user_id: str = ""
+    """The principal a per-owner provision is for (empty on the OSS boot path).
+    Carried into the ``SandboxSpec`` the driver builds so the supply face and
+    the policy gate agree on who the sandbox belongs to."""
 
 
 @dataclass(frozen=True)

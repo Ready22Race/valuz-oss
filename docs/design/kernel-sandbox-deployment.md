@@ -397,6 +397,8 @@ egress sidecar；microVM → 网关。CMA 的「cloud sandbox 网络默认关闭
 | 抽象 | 位置 | S 线交付 | C 线扩展 |
 |------|------|----------|----------|
 | `SandboxProvider` | `ports/sandbox_provider.py` | 协议 + `local-process`（Seatbelt）+ `docker` 驱动 | `opensandbox` / `e2b-compatible` 驱动 |
+| `SandboxPolicyPort`（provision 前授权门） | `ports/sandbox_policy.py` | 协议 + `AllowAllSandboxPolicy` 默认 + `ext.sandbox_policy` + `authorize_sandbox_provision`（**fail-closed**） | overlay 绑真策略：plan 门禁 + org 并发上限（§3.10 多租户） |
+| `owner_user_id` 贯穿（provision 归属） | `SandboxSpec` / `SandboxBootContext` / `bind_workspace`（keyword） | 字段（默认空，本地单用户不变） | 云端驱动按 owner 隔离对象存储子树 + fleet 按 `(owner, project)` 键控复用 |
 | `Environment` | `api/openapi.yaml` + `valuz_environment` 表 + `modules/environments/` | 契约、CRUD、会话创建链路解析 | 云端 environment 类型 |
 | `KernelClient` 双模 | 已有（P0.4） | 驱动产出喂 `HttpKernelClient`；`VALUZ_KERNEL_MODE` 按 environment 解析 | 不变 |
 | toolkit MCP transport | 已有协议（P0.3） | 直连（host gateway URL 注入） | loopback stub + 队列/隧道 |
