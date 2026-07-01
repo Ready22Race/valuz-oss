@@ -136,23 +136,31 @@ async def bootstrap_schema() -> None:
     from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.infra.local_identity import resolve_local_user_id
+    from valuz_agent.infra.logging import configure_logging
     from valuz_agent.seeds import seed_all
+
+    if settings.deployment_type == "cloud":
+        configure_logging()
+        logger.info(
+            "schema bootstrap skipped (deployment_type=cloud); "
+            "run `python -m valuz_commercial migrate` before starting workers"
+        )
+        return
 
     # NB: the ``~/.valuz/app`` → ``~/.valuz-oss`` data-dir cutover runs earlier in
     # the lifespan (``migrate_data_dir``), before identity resolution — see that
     # step's docstring for why the ordering is load-bearing.
-    if settings.deployment_type == "local":
-        settings.data_dir.mkdir(parents=True, exist_ok=True)
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # One-shot courtesy rename from the workspace→project naming cutover:
-        # managed chat cwds moved from ``data_dir/workspaces/`` to
-        # ``data_dir/projects/``. The DB is wiped by the cutover fingerprint,
-        # but the directories hold user files — carry them over instead of
-        # orphaning them. No-op once the new directory exists.
-        legacy_dir = settings.data_dir / "workspaces"
-        target_dir = settings.data_dir / "projects"
-        if legacy_dir.is_dir() and not target_dir.exists():
-            legacy_dir.rename(target_dir)
+    # One-shot courtesy rename from the workspace→project naming cutover:
+    # managed chat cwds moved from ``data_dir/workspaces/`` to
+    # ``data_dir/projects/``. The DB is wiped by the cutover fingerprint,
+    # but the directories hold user files — carry them over instead of
+    # orphaning them. No-op once the new directory exists.
+    legacy_dir = settings.data_dir / "workspaces"
+    target_dir = settings.data_dir / "projects"
+    if legacy_dir.is_dir() and not target_dir.exists():
+        legacy_dir.rename(target_dir)
 
     # 0. One-time cutover: move pre-split kernel tables (sessions/messages/
     #    events + any langgraph checkpoints + the kernel alembic stamp) out of
@@ -169,9 +177,6 @@ async def bootstrap_schema() -> None:
     if not settings.is_http_kernel:
         run_kernel_migrations()
 
-    # 2. Re-install logging — alembic's fileConfig clobbers handlers.
-    from valuz_agent.infra.logging import configure_logging
-
     # 3. Host alembic (``alembic_version_host`` row). Async env.py, driven
     #    on a dedicated thread (see ``run_host_migrations``).
     run_host_migrations()
@@ -184,21 +189,17 @@ async def bootstrap_schema() -> None:
     configure_logging()
 
     # 4. Pure-insert seeds for built-in rows.
-    # In cloud deployments, startup seeding is intentionally skipped to avoid
-    # owner-scoped seed side effects being driven by a synthetic local identity.
-    if settings.deployment_type == "local":
-        async with async_unit_of_work() as db:
-            await seed_all(db, user_id=resolve_local_user_id())
+    async with async_unit_of_work() as db:
+        await seed_all(db, user_id=resolve_local_user_id())
 
     # 5. One-time backfill of the connector module's legacy filesystem stores
     #    (project-config.json selection + FileSecretStore secrets) into the
     #    connector DB tables/columns. This remains local-only; cloud startup
     #    should not run owner-context-sensitive filesystem backfill.
-    if settings.deployment_type == "local":
-        from valuz_agent.boot.backfill_connector_fs import backfill_connector_fs
+    from valuz_agent.boot.backfill_connector_fs import backfill_connector_fs
 
-        async with async_unit_of_work() as db:
-            await backfill_connector_fs(db)
+    async with async_unit_of_work() as db:
+        await backfill_connector_fs(db)
 
 
 async def configure_i18n() -> None:
