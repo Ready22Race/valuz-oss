@@ -48,10 +48,16 @@ combination of those two knobs. There is no separate code path per form.
 | Knob | Values | Chosen by | Effect |
 |------|--------|-----------|--------|
 | **Execution location** | in-process kernel · seatbelt sandbox · (future) cloud sandbox | deployment / `VALUZ_SANDBOX_DRIVER` | *where the agent loop runs* and therefore the **transport** to the DataService (in-process call vs HTTP) |
-| **DataService backend** | host sqlite (default) · remote PG | the **OSS settings page** ("Data Service" → remote sync) | *where kernel data is durably stored*; remote PG turns on the **JWT auth boundary** |
+| **DataService backend** | host sqlite (default, → `valuz.db`) · remote PG · remote HTTP | **environment variables** (`KERNEL_STORE` + `VALUZ_DURABLE_DATABASE_URL` / `VALUZ_DATA_API_*`), loaded at boot | *where kernel data is durably stored*; remote PG/HTTP turns on the **JWT auth boundary** |
 
 These are **independent**. Sandboxing does not imply remote PG; remote PG does
 not imply a sandbox. Any combination is valid.
+
+> **Config is env-driven, not a GUI.** The OSS build has no Data-Service settings
+> page — the backend is selected purely from the environment at boot (a
+> config→backend factory, one code path). The `KERNEL_STORE` value names the
+> backend implementation; there is **no `local` special case that bypasses the
+> DataService** — `local` simply means "backend = host sqlite (`valuz.db`)".
 
 ---
 
@@ -59,8 +65,8 @@ not imply a sandbox. Any combination is valid.
 
 | # | Execution | Backend | Transport to DataService | Notes |
 |---|-----------|---------|--------------------------|-------|
-| 1 | in-process kernel (no sandbox) | host sqlite | **in-process** call | OSS default. Kernel's 3 tables land in the host-managed sqlite *through* the DataService. |
-| 2 | seatbelt sandbox | host sqlite | **HTTP** (sandbox → host callback URL, JWT) | Behaviour identical to #1 from the user's view. Sandbox also writes its own local sqlite (buffer); the outbox guarantees the host sqlite converges. |
+| 1 | in-process kernel (no sandbox) | host sqlite (`valuz.db`) | **in-process** call | OSS default. The kernel keeps writing its execution-local `kernel.db` (invariant, post kernel-DB-split); the DataService **dual-writes** the 3 tables into the host `valuz.db` and reads are served from there. |
+| 2 | seatbelt sandbox | host sqlite (`valuz.db`) | **HTTP** (sandbox → host callback URL, JWT) | Behaviour identical to #1 from the user's view. Sandbox writes its own local sqlite (buffer); the DataService converges the host `valuz.db`. |
 | 3 | in-process **or** sandbox | **remote PG** | in-process or HTTP | "Remote sync" configured. Data additionally lands in the remote PG via the DataService. With a sandbox the **JWT boundary** ensures the **PG credentials never enter the sandbox**. |
 | 4 (SaaS) | cloud sandbox | remote PG | HTTP, JWT | The same as #3 with an ephemeral cloud sandbox + central PG — **config-and-go** because the mechanism is identical. |
 
@@ -91,10 +97,14 @@ UUID PKs for sessions/messages), so at-least-once redelivery is safe. This is
 the role `durable_outbox` was built for: **eventual consistency of the
 dual-write into the DataService.**
 
-**Collapse optimization.** When the execution-local sqlite and the DataService's
-backend resolve to the **same file** (pure in-process + sqlite backend, form 1),
-the dual-write collapses to a **single write** and reads are a direct call — no
-self-mirroring, no outbox needed.
+**Collapse optimization (now rarely applies).** When the execution-local sqlite
+and the DataService's backend resolve to the **same file**, the dual-write
+collapses to a single write. Historically this was form 1 — but after the
+**kernel-DB split** (`kernel.db` separate from the host `valuz.db`), the OSS
+default has **two distinct files** (`kernel.db` execution-local, `valuz.db`
+DataService backend), so form 1 is now a genuine dual-write. Collapse applies
+only when an explicit shared `database_url` co-locates the kernel's own store and
+the DataService backend in one store.
 
 **Event seq.** Each physical store owns its own `events` autoincrement; the
 sequences are **independent** and bridged by `event_uid`. The seq a reader sees
@@ -188,20 +198,24 @@ reads → DataService (in-process) → host sqlite
 
 ## 9. Control plane
 
-**All behaviour is controlled from the OSS settings page** — there are no
-bespoke launch scripts per form.
+**All behaviour is controlled by environment variables, loaded at boot** — a
+config→backend factory with one code path, no GUI and no bespoke launch script
+per form. (An earlier iteration exposed a Data-Service settings page; the OSS
+build dropped it in favour of pure env config — simpler, and the right shape for
+consuming OSS as a SaaS submodule.)
 
-- **Settings → Data Service** (a regular settings tab, between Parsing and System Logs):
-  - **Mode / backend**: default (host sqlite) vs **remote sync** (PG DSN), and
-    (when sandboxed/remote) the DataService URL + token.
-  - **Health**: a live health indicator for the DataService + its backend.
-  - **OpenAPI**: surface the DataService's OpenAPI (the `/rpc/*` contract) so the
-    schema is inspectable.
-- **No `make dev-remote`.** It conflated "start PG", "start a data service", and
-  "run a sandbox" into one script. Replace it with a thin **`make pg` / PG-podman
-  helper** that only brings up a local Postgres; everything else (turn on remote
-  sync, point at the PG, sandbox or not) is driven from the settings page. This
-  decouples infra from behaviour.
+| Env | Values | Meaning |
+|-----|--------|---------|
+| `KERNEL_STORE` | `local` (default) · `pg` · `remote` | names the DataService backend implementation |
+| `VALUZ_DURABLE_DATABASE_URL` | asyncpg DSN | PG backend (`pg`) |
+| `VALUZ_DATA_API_URL` / `VALUZ_DATA_API_TOKEN` / `VALUZ_DATA_API_KIND` | URL + JWT | remote HTTP DataService (`remote`) |
+
+- `local` → backend = host sqlite (`valuz.db`). **The DataService is still fully
+  in the path** — `local` is a backend choice, not a bypass.
+- **No `make dev-remote`.** A thin **`make pg` / PG-podman helper** only brings up
+  a local Postgres; it prints the `export KERNEL_STORE=pg` +
+  `VALUZ_DURABLE_DATABASE_URL=…` lines to run before `make dev`. Infra is
+  decoupled from behaviour.
 
 ---
 
@@ -216,49 +230,54 @@ nothing in the kernel or the data layer changes.
 
 ---
 
-## 11. Delta from the current implementation
+## 11. Implementation status & the remaining refactor
 
-> **Status (landed):** host-persistent DS secret + token minting; the DataService
-> is mounted as a host router at `/internal/data` (store + verifier bound in the
-> lifespan); the sandbox is pointed at it over HTTP+JWT with no DSN; settings
-> expose health + OpenAPI; OSS modes are `local | data service·Postgres`; the
-> `make pg` helper replaces `make dev-remote`. **Reads are unified through the
-> DataService** — the host reads its mounted DS store directly in-process,
-> sandbox-agnostic (no alive/dead branch), so a destroyed sandbox is fully
-> read-safe. Validated by `scripts/e2e_host_data_service.py` (host DS over real
-> PG, JWT round-trip). **Remaining:** live seatbelt E2E.
-
-> This section is the bridge to the implementation work that follows this doc.
-
-**Already in place:** the `/rpc/{op}` DataService app + StorePort surface
+**Landed:** the `/rpc/{op}` DataService app + StorePort surface
 (`kernel/app/data_service.py`), the `store_wire` codec, JWT signer/verifier +
 `TokenVerifier` port, RLS migration, `event_uid` idempotency, the
-`durable_outbox` table + `DurableOutbox` drainer, the host `DataServiceReadClient`
-+ SSE read-routing, the in-process PG `WriteThroughStore`, and the settings page
-+ `/v1/settings/data-service` config.
+`durable_outbox` table + `DurableOutbox` drainer; **env-var config**
+(`KERNEL_STORE` + `VALUZ_DURABLE_DATABASE_URL` / `VALUZ_DATA_API_*`) replacing the
+former settings page; the host DataService mounted as a router at
+`/internal/data`; the **typed `DataReader` port** (`adapters/data_reader.py`)
+bound at the composition root, with **session + event reads routed through it**
+(`data_reader()` — host reads its mounted store in-process, sandbox-agnostic);
+the `make pg` helper replacing `make dev-remote`. Validated by
+`scripts/e2e_host_data_service.py` (host DS over real PG, JWT round-trip).
 
-**Must change to match this doc:**
+**The remaining gap — DataService not yet *always* the data layer.** Today
+`bind_data_service` / `_build_durable_store` short-circuit `KERNEL_STORE=local`
+(early return → no durable, `data_reader()` falls back to the kernel seam). So the
+OSS default does **not** run form 1 as designed. Closing this is the current
+refactor, decided as follows:
 
-1. **DataService is always the data layer, mounted as a host router.** Today
-   `local` mode binds a direct `SQLAlchemyStore` (bypassing the DataService) and
-   the DataService app is only used standalone for `remote`. Mount the
-   DataService router on the host FastAPI and route the in-process kernel through
-   it (with the collapse optimization for the same-file case).
-2. **Re-frame the knobs.** Replace the `local | pg | remote` *store-mode* with
-   two independent settings: **backend** (host sqlite | remote PG DSN) and the
-   sandbox execution choice. "Remote sync" = backend is PG; it composes with or
-   without a sandbox.
-3. **Restore dual-write + outbox as the write consistency mechanism** for the
-   sandbox/HTTP path (the local-authority + `durable_outbox` machinery that was
-   recently parked is the right tool here — un-park it, now driven by "is there a
-   DataService hop?", not by a `pg` tier).
-4. **Reads always via the DataService** (host router), in every form — including
-   form 1 (in-process), where it is a direct in-process call.
-5. **Settings page**: fix the 9-tap reveal (currently not surfacing the section),
-   and add **health status** + **OpenAPI** surfacing to the Data Service panel.
-6. **Drop `make dev-remote`**; add a minimal **PG-podman** helper; drive remote
-   sync from the settings page.
+1. **Config→backend factory, one code path.** `_build_durable_store(config)`
+   returns a store for **every** tier and never `None`:
+   `local` → in-process `SQLAlchemyStore` over **host sqlite (`valuz.db`)**;
+   `pg` → PG; `remote` → HTTP. Delete the `if local: return` special cases in
+   `dependencies.py` and `boot/steps.bind_data_service`; boot **always**
+   `bind_data_reader(LocalDataServiceReader(store))`. `_KernelClientReader` stays
+   only as the out-of-process fallback (an http kernel the host can't read
+   in-process).
+2. **OSS default = sqlite DataService over `valuz.db`** (co-locate — decision "a").
+   `kernel.db` remains the kernel's execution-local store (invariant); the
+   DataService dual-writes to `valuz.db` and reads are served from it.
+3. **Authority = durable.** Reads come from the DataService backend
+   (`valuz.db` / PG); `kernel.db` is the execution-local buffer. Uniform across
+   tiers (matches `pg`≡`remote`). The `durable_outbox` local-authority path stays
+   dormant.
+4. **Schema handling — no new alembic migration for the co-located tables.** The
+   durable's kernel tables are built by `_ensure_durable_schema` (`create_all`,
+   idempotent) — the same mechanism `pg` uses, now pointed at `valuz.db`. Kernel
+   tables (create_all) coexist with host `valuz_*` tables (host alembic) in
+   `valuz.db`; the kernel alembic chain keeps managing `kernel.db`.
+5. **Data migration — mandatory, one-time, at boot.** Existing installs have
+   kernel history only in `kernel.db`; once reads come from `valuz.db` it must be
+   seeded. A boot step (sibling to `boot/kernel_db_split.py`) copies `kernel.db`'s
+   3 tables → `valuz.db` (backup → copy → verify, idempotent via `event_uid` /
+   UUID PKs). Reuses the `scripts/backfill_durable_sessions.py` logic with a
+   sqlite target.
 
-Each item lands incrementally behind the contract tests
+Each item lands incrementally behind the contract test
 (`test_data_service_contract.py` pins route↔client↔StorePort) and the full
-suite.
+suite. Two engines opening the one `valuz.db` (host + DataService) is safe under
+WAL + `busy_timeout` (verified at boot).
