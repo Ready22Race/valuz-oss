@@ -56,6 +56,7 @@ describe("ProjectsPage", () => {
       root_path: null,
       cwd: null,
       icon: null,
+      instructions_md: "",
     });
 
     render(
