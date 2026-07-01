@@ -228,15 +228,17 @@ async def remove_for_project(project_id: str, user_id: str | None) -> list[str]:
 
 
 async def list_recent(limit: int = 200, user_id: str | None = None) -> list[ProjectSessionRow]:
-    """Most recent index rows for the caller across all their projects — the
-    runs-overview feed."""
+    """Most-recently-active index rows for the caller across all their projects —
+    the runs-overview / sidebar RECENTS pool. Ordered by ``updated_at`` (bumped
+    each turn by ``touch_activity``) so a chat with a new message is in the pool
+    and floats to the top, not pinned to when it was first created."""
     if user_id is None:
         raise ValueError("user_id is required")
     async with async_unit_of_work(commit=False) as db:
         stmt = (
             select(ProjectSessionRow)
             .where(ProjectSessionRow.user_id == user_id)
-            .order_by(ProjectSessionRow.created_at.desc())
+            .order_by(ProjectSessionRow.updated_at.desc())
             .limit(limit)
         )
         return list((await db.execute(stmt)).scalars().all())

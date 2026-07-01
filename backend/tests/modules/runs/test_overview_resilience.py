@@ -39,7 +39,12 @@ async def test_list_runs_skips_a_session_that_fails_to_build(monkeypatch):
     monkeypatch.setattr(
         svc_mod.project_index,
         "list_recent",
-        _async_return([SimpleNamespace(session_id=s.id, project_id="") for s in sessions]),
+        _async_return(
+            [
+                SimpleNamespace(session_id=s.id, project_id="", updated_at=s.created_at)
+                for s in sessions
+            ]
+        ),
     )
     monkeypatch.setattr(svc_mod.kernel_client, "list_sessions", _async_return(sessions))
 
