@@ -1200,7 +1200,10 @@ export const TaskDetailPage = () => {
           backdrop, but its inner action row mirrors the same width. */}
       <div
         className={cn(
-          "mx-auto w-full max-w-[760px] px-6",
+          // ``break-words`` (inherited) breaks long unbreakable runs — API-error
+          // JSON, URLs, hashes in timeline events / instruction / failure text —
+          // so they wrap instead of overflowing the 760px reading column.
+          "mx-auto w-full max-w-[760px] px-6 break-words",
           // Completed: become a flex column that fills the locked-height
           // wrapper so the follow-up chat section can claim the leftover space
           // (``flex-1``) and the composer pins to the bottom.
@@ -1411,6 +1414,7 @@ export const TaskDetailPage = () => {
               )}
 
               <details
+                open
                 className={cn(
                   "group/d overflow-hidden bg-white",
                   completionInfo.artifacts.length > 0 && "border-t border-[#f3f4f6]",
@@ -1469,7 +1473,7 @@ export const TaskDetailPage = () => {
               already locked to the session. A plain textarea + send/stop button
               keeps the surface honest: no dead selectors, no fake "Model" pill.
               Enter sends; Shift+Enter inserts a newline. */}
-            <div className="mt-3 shrink-0 rounded-md border border-surface-border bg-surface focus-within:border-ring focus-within:ring-[1px] focus-within:ring-ring/50">
+            <div className="mt-3 shrink-0 rounded-md border border-surface-border bg-surface">
               <Textarea
                 value={followUpDraft}
                 onChange={(e) => setFollowUpDraft(e.target.value)}
@@ -1501,6 +1505,11 @@ export const TaskDetailPage = () => {
                 </Button>
               </div>
             </div>
+            {/* Bottom gap matching the conversation composer's ``pb-4``. A real
+              box (not a margin) so the scroll container counts it — a trailing
+              bottom margin is dropped from ``scrollHeight`` and the composer
+              ends up flush with the panel's bottom border. */}
+            <div aria-hidden className="h-4 shrink-0" />
           </section>
         )}
 
