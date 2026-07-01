@@ -133,7 +133,7 @@ export const ScheduledTaskTable = ({
   );
 
   return (
-    <Card className="gap-0 overflow-hidden py-0">
+    <Card className="gap-0 overflow-hidden border-0 py-0 shadow-[var(--shadow-1)]">
       <CardContent className="px-0 py-0">
         {title && (
           <button
