@@ -551,7 +551,7 @@ class ProjectPackService:
         embedded = [s.slug for s in manifest.skills if s.source == "embedded"]
         if not embedded:
             return out
-        paths = await resolve_skill_slugs_to_paths(embedded, None)
+        paths = await resolve_skill_slugs_to_paths(embedded, None, user_id=user_id)
         for slug, path_str in zip(embedded, paths, strict=False):
             if not path_str:
                 continue
@@ -570,7 +570,7 @@ class ProjectPackService:
         skill_dirs: dict[str, Path] = {}
         for slug in skill_slugs:
             clean = sanitize_skill_slug(slug)
-            paths = await resolve_skill_slugs_to_paths([slug], None)
+            paths = await resolve_skill_slugs_to_paths([slug], None, user_id=user_id)
             path = Path(paths[0]).resolve() if paths and paths[0] else None
             if path is not None and path.is_dir():
                 skills_idx.append(PackSkill(slug=clean, source="embedded"))
