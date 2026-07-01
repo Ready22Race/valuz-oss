@@ -37,6 +37,7 @@ import {
 } from "react";
 import * as XLSX from "xlsx";
 import { MarkdownContent } from "../conversation/MarkdownContent";
+import { Badge } from "../ui/badge";
 
 export type ArtifactPreviewKind =
   | "markdown"
@@ -1594,9 +1595,9 @@ export function ArtifactViewerShell({
                 <span className="min-w-0 max-w-full truncate">{artifact.path}</span>
               ) : null}
               {metadata.map((item) => (
-                <span key={item} className="rounded-full bg-surface-soft px-2 py-0.5">
+                <Badge key={item} variant="outline">
                   {item}
-                </span>
+                </Badge>
               ))}
             </div>
           </div>

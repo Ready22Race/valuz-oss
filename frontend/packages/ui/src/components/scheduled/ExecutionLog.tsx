@@ -1,4 +1,5 @@
 import { useI18n } from "../../hooks/use-i18n";
+import { Badge } from "../ui/badge";
 import { Card, CardContent } from "../ui/card";
 
 export type ExecutionLogTriggerType =
@@ -43,14 +44,11 @@ export interface ExecutionLogProps {
   onSessionClick?: (sessionId: string) => void;
 }
 
-function cnStatus(status: string) {
-  if (status === "ok")
-    return "bg-success-light text-success-text [&_[data-slot=status-dot]]:bg-success";
-  if (status === "err")
-    return "bg-error-light text-error-text [&_[data-slot=status-dot]]:bg-error";
-  if (status === "pending")
-    return "bg-info-light text-info-text [&_[data-slot=status-dot]]:bg-brand";
-  return "bg-surface-soft text-ink-meta";
+function statusVariant(status: string): "success" | "error" | "brand" | "outline" {
+  if (status === "ok") return "success";
+  if (status === "err") return "error";
+  if (status === "pending") return "brand";
+  return "outline";
 }
 
 export const ExecutionLog = ({ rows, onSessionClick }: ExecutionLogProps) => {
@@ -118,15 +116,13 @@ export const ExecutionLog = ({ rows, onSessionClick }: ExecutionLogProps) => {
                       </span>
                     )}
 
-                    <span
-                      className={`inline-flex shrink-0 items-center justify-start rounded-full px-2 py-0.5 text-[11px] font-medium ${cnStatus(row.status)}`}
-                    >
-                      <span>{labelForStatus(row.status)}</span>
-                    </span>
+                    <Badge variant={statusVariant(row.status)} className="shrink-0">
+                      {labelForStatus(row.status)}
+                    </Badge>
 
-                    <span className="inline-flex shrink-0 items-center rounded-full bg-surface-muted px-2 py-0.5 text-[11px] font-medium text-ink-meta">
+                    <Badge variant="outline" className="shrink-0">
                       {labelForTrigger(row.triggerType)}
-                    </span>
+                    </Badge>
                   </div>
 
                   {row.taskTitle ? (

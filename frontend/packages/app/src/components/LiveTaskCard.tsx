@@ -29,6 +29,7 @@ import {
   type PlanSubtask,
   type TaskEvent,
 } from "@valuz/core";
+import { Badge } from "@valuz/ui";
 
 // Backend ``TaskPlan.to_panel()`` (plan.py:_PANEL_MAP) collapses the
 // 6 internal subtask statuses into a 4-state UI vocabulary —
@@ -74,6 +75,15 @@ interface Meta {
   status: string;
   planVersion: number;
 }
+
+const taskStatusVariant = (
+  status: string,
+): "brand" | "success" | "error" | "outline" => {
+  if (status === "active") return "brand";
+  if (status === "completed") return "success";
+  if (status === "failed" || status === "blocked") return "error";
+  return "outline";
+};
 
 export interface LiveTaskCardProps {
   taskId: string;
@@ -293,17 +303,6 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
     status === "blocked" ||
     status === "failed";
 
-  const statusToneClass =
-    status === "active"
-      ? "bg-brand/10 text-brand ring-1 ring-brand/20"
-      : status === "completed"
-        ? "bg-success-light text-success-text ring-1 ring-success-border"
-        : status === "failed" || status === "blocked"
-          ? "bg-error-light text-error-text ring-1 ring-error-border"
-          : status === "abandoned" || status === "stopped"
-            ? "bg-surface-soft text-ink-muted ring-1 ring-surface-border"
-            : "bg-surface-soft text-ink-body ring-1 ring-surface-border";
-
   const progressPct =
     counts.total > 0 ? Math.round((counts.done / counts.total) * 100) : 0;
 
@@ -321,11 +320,12 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
             <span className="truncate font-semibold text-ink-heading">
               {meta.title}
             </span>
-            <span
-              className={`shrink-0 rounded-md px-1.5 py-0.5 text-2xs font-medium uppercase tracking-wide ${statusToneClass}`}
+            <Badge
+              variant={taskStatusVariant(status)}
+              className="shrink-0 uppercase tracking-wide"
             >
               {status}
-            </span>
+            </Badge>
             {meta.planVersion > 0 && (
               <span className="shrink-0 rounded bg-surface-soft px-1.5 py-0.5 text-2xs text-ink-muted">
                 v{meta.planVersion}

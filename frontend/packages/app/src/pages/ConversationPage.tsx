@@ -77,6 +77,7 @@ import {
   AskUserQuestionCard,
   ArtifactViewerShell,
   AutomationToolCard,
+  Badge,
   Button,
   DeleteConfirmDialog,
   DropdownMenu,
@@ -4816,10 +4817,10 @@ export const ConversationPage = () => {
                 </>
               ) : null}
               {isSkillCreatorMode ? (
-                <span className="flex shrink-0 items-center gap-1 rounded-md bg-brand/10 px-2 py-0.5 text-2xs text-brand">
+                <Badge variant="brand" className="shrink-0">
                   <Sparkles className="h-3 w-3" />
                   Skill Creator
-                </span>
+                </Badge>
               ) : null}
               {headerTitle ? (
                 titleRenaming ? (
@@ -4934,15 +4935,15 @@ export const ConversationPage = () => {
               ) : null}
               <SessionStatusPill status={selectedSession?.status} />
               {sessionAgentSlug ? (
-                <span className="flex shrink-0 items-center gap-1 rounded-md bg-brand/10 px-2 py-0.5 text-2xs text-brand">
+                <Badge variant="brand" className="shrink-0">
                   <Bot className="h-3 w-3" />
                   {agentNameBySlug.get(sessionAgentSlug) ?? sessionAgentSlug}
-                </span>
+                </Badge>
               ) : null}
               {activeProject?.name && !isSkillCreatorMode ? (
-                <span className="shrink-0 rounded-md bg-surface-soft px-2 py-0.5 text-2xs text-ink-meta">
+                <Badge variant="outline" className="shrink-0">
                   {activeProject.name}
-                </span>
+                </Badge>
               ) : null}
             </div>
           </div>

@@ -31,6 +31,7 @@ import {
 import {
   ArtifactViewerShell,
   BackLink,
+  Badge,
   Button,
   ConversationTurnList,
   Dialog,
@@ -1113,9 +1114,12 @@ export const TaskDetailPage = () => {
                     {t("task.needsConfirm" as Parameters<typeof t>[0])}
                   </span>
                   {taskPending.length > 1 && (
-                    <span className="rounded-full bg-amber-200/80 px-1.5 text-[10px] font-medium leading-4 text-amber-800">
+                    <Badge
+                      variant="warning"
+                      className="px-1.5 py-0 text-[10px] leading-4"
+                    >
                       {taskPending.length}
-                    </span>
+                    </Badge>
                   )}
                 </span>
                 {pendingQuestionText(taskPending[0]) && (

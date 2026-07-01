@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { useTranslation } from "@valuz/core";
 import type { ActivityFeed, ActivityItem } from "@valuz/core";
-import { StatusPill } from "@valuz/ui";
+import { Badge } from "@valuz/ui";
 import { Clock3, ListChecks, Loader2, MessageSquare } from "lucide-react";
 
 import { BUCKET_KEY, groupByTimeBucket } from "../lib/time-buckets";
@@ -16,8 +16,7 @@ import { RenameInput } from "./RenameInput";
 import { RowActionsMenu } from "./RowActionsMenu";
 import { formatCreatedAt } from "./format-created-at";
 
-// Session status -> i18n key for the right-edge StatusPill on chat rows. The
-// pill draws its color tone from the same status string via ``status-tone``.
+// Session status -> i18n key for the right-edge Badge on chat rows.
 const SESSION_STATUS_KEY: Record<string, string> = {
   running: "activity.statusRunning",
   idle: "activity.statusIdle",
@@ -35,6 +34,17 @@ const TASK_STATUS_KEY: Record<string, string> = {
   completed: "task.statusCompleted",
   failed: "task.statusFailed",
   blocked: "task.statusBlocked",
+};
+
+const activityStatusVariant = (
+  status: string,
+): "brand" | "success" | "warning" | "error" | "outline" => {
+  if (status === "running" || status === "active" || status === "draft")
+    return "brand";
+  if (status === "completed" || status === "idle") return "success";
+  if (status === "failed") return "error";
+  if (status === "blocked" || status === "paused") return "warning";
+  return "outline";
 };
 
 export interface ActivityFeedListProps {
@@ -169,15 +179,16 @@ export const ActivityFeedList = ({
           </span>
           <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
             {statusKey && (
-              <StatusPill
-                status={item.status}
-                label={t(statusKey as Parameters<typeof t>[0])}
+              <Badge
+                variant={activityStatusVariant(item.status)}
                 className={
                   item.kind === "chat"
                     ? "transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
                     : undefined
                 }
-              />
+              >
+                {t(statusKey as Parameters<typeof t>[0])}
+              </Badge>
             )}
             {item.kind === "chat" && (
               <RowActionsMenu
