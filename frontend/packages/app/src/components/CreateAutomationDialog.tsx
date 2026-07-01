@@ -376,6 +376,10 @@ export const CreateAutomationDialog = ({
   // clear it. The cancel flag drops stale responses if cron/tz change again
   // before the request returns.
   useEffect(() => {
+    // Don't hit the network while the dialog is closed. The project home mounts
+    // this dialog permanently (``open={createDialogOpen}``), so an ungated cron
+    // preview fired a ``validate-cron`` POST on every project-home load.
+    if (!open) return;
     let cancelled = false;
     // All state writes live inside the debounce callback (async), so they
     // don't trip react-hooks/set-state-in-effect and don't cascade renders.
@@ -403,7 +407,7 @@ export const CreateAutomationDialog = ({
       cancelled = true;
       clearTimeout(handle);
     };
-  }, [triggerKind, cron, timezone]);
+  }, [open, triggerKind, cron, timezone]);
 
   const buildTrigger = (): Trigger => {
     if (triggerKind === "cron") {

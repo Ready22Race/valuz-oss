@@ -73,7 +73,6 @@ import {
   type ArtifactDescriptor,
   type ArtifactContent,
   type LLMChannelDetail,
-  type LLMChannel,
   type ConnectorItem,
   type Task,
   type Agent,
@@ -1195,58 +1194,80 @@ export const ProjectDetailPage = () => {
   }, [id]);
 
   const fetchData = useCallback(async () => {
+    // Unblock the full-page ``loading`` gate as soon as the project itself
+    // lands. The gate previously waited for EVERY list — files, providers +
+    // one ``providers/{id}`` detail per channel, automations, connectors, mcp —
+    // so the spinner stayed up for the slowest of them (~1s+). None of those are
+    // needed to paint the shell; fetch them in the background below, each
+    // section keeps its own empty state until its data merges in.
+    let ws;
     try {
-      const ws = await projectsApi.get(id);
-      setProject(ws);
-      setInstructions(ws.instructions_md ?? "");
+      ws = await projectsApi.get(id);
+    } catch {
+      toast.error(t("project.loadFailed" as Parameters<typeof t>[0]));
+      setLoading(false);
+      return;
+    }
+    setProject(ws);
+    setInstructions(ws.instructions_md ?? "");
+    setLoading(false);
 
-      const [filesRes, chListRes] = await Promise.all([
+    // Secondary data — all independent, fetched concurrently and merged as it
+    // arrives (no waterfall). Only the per-provider model details depend on the
+    // provider list, so they run in a second parallel batch. Non-fatal: the
+    // shell has already rendered.
+    try {
+      const [filesRes, schedRes, connRes, mcpRes] = await Promise.all([
         projectsApi
           .listFiles(id, { depth: 3 })
           .catch(() => ({ files: [] as ProjectFileNode[] })),
-        providersApi.list().catch(() => ({ providers: [] as LLMChannel[] })),
+        automationsApi.listGroups(id).catch(() => null),
+        connectorsApi.list().catch(() => null),
+        projectsApi.getMcpServers(id).catch(() => ({ slugs: [] as string[] })),
       ]);
       setFileTree(toFileTree(filesRes.files));
       // Skills are bound on the Agent now (08-agents-module), not the
-      // project — no per-project skill catalog fetch here.
-      // KB tree + bindings are owned by ``useProjectKbBindings``.
-
-      const details = await Promise.all(
-        chListRes.providers
-          .filter((c) => c.enabled)
-          .map((c) => providersApi.get(c.id).catch(() => null)),
-      );
-      setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
-
-      // Load automations for this project
-      try {
-        const schedRes = await automationsApi.listGroups(id);
-        const projectTasks = schedRes.groups.flatMap((g) => g.automations);
-        setScheduledTasks(projectTasks);
-      } catch (err) {
-        console.warn("[ProjectDetail] Failed to load automations:", err);
+      // project. KB tree + bindings are owned by ``useProjectKbBindings``.
+      if (schedRes) {
+        setScheduledTasks(schedRes.groups.flatMap((g) => g.automations));
       }
-
-      // Load MCP connectors for the right panel
-      try {
-        const [connRes, mcpRes] = await Promise.all([
-          connectorsApi.list(),
-          projectsApi
-            .getMcpServers(id)
-            .catch(() => ({ slugs: [] as string[] })),
-        ]);
-        const active = connRes.connectors.filter((c) => c.enabled);
-        setConnectors(active);
-        setSelectedMcpSlugs(mcpRes.slugs);
-      } catch {
-        /* non-fatal */
+      if (connRes) {
+        setConnectors(connRes.connectors.filter((c) => c.enabled));
       }
+      setSelectedMcpSlugs(mcpRes.slugs);
+      // NB: provider model details (``/v1/providers`` + one ``/v1/providers/{id}``
+      // per channel) are NOT fetched here. This page selects by AGENT (no raw
+      // model picker) and the default (provider, model) comes from
+      // last-session-pick / model-defaults, so Send works without them. They only
+      // validate the composer's model against the live channel list, so we defer
+      // them to ``ensureProviderDetails`` (first compose) instead of firing 5
+      // requests on every project-home load.
     } catch {
-      toast.error(t("project.loadFailed" as Parameters<typeof t>[0]));
-    } finally {
-      setLoading(false);
+      /* secondary data is non-fatal — the shell already rendered */
     }
   }, [id]);
+
+  // Lazy provider-details load (see ``fetchData``): one-shot, triggered the
+  // first time the user actually composes. ``autoFocus`` rules out an onFocus
+  // trigger (it would fire on mount), so we hang it off the first keystroke.
+  const providersLoadedRef = useRef(false);
+  const ensureProviderDetails = useCallback(() => {
+    if (providersLoadedRef.current) return;
+    providersLoadedRef.current = true;
+    void (async () => {
+      try {
+        const list = await providersApi.list();
+        const details = await Promise.all(
+          list.providers
+            .filter((c) => c.enabled)
+            .map((c) => providersApi.get(c.id).catch(() => null)),
+        );
+        setProviders(details.filter((d): d is LLMChannelDetail => d !== null));
+      } catch {
+        providersLoadedRef.current = false; // let the next keystroke retry
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     void fetchData();
@@ -1846,7 +1867,10 @@ export const ProjectDetailPage = () => {
               autoFocus
               wrapperClassName="px-0"
               value={composerValue}
-              onChange={setComposerValue}
+              onChange={(v) => {
+                setComposerValue(v);
+                ensureProviderDetails(); // lazy-load provider details on first compose
+              }}
               mode={composerMode}
               onModeChange={setComposerMode}
               onSend={() => {
