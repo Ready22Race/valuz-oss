@@ -445,6 +445,49 @@ def test_finish_task_rejects_legacy_failed_status(db_factory, tmp_path) -> None:
         db.close()
 
 
+def test_update_task_status_enforces_state_machine(db_factory, tmp_path) -> None:
+    """``update_task_status`` is the enforcement point for ``task_state.py``:
+    out-of-enum targets and illegal transitions raise; legal ones pass; a
+    legacy/unknown *source* row is tolerated so it can still be recovered."""
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.tasks.datastore import TaskDatastore
+    from valuz_agent.modules.tasks.task_state import TaskStateError
+
+    _make_task(db_factory, tmp_path)  # status="active"
+
+    async def _run() -> None:
+        # 1) out-of-enum target → raise (the old ``"failed"`` corruption).
+        async with async_unit_of_work() as db:
+            with pytest.raises(TaskStateError):
+                await TaskDatastore(db).update_task_status(OWNER, "t1", "failed")
+        # 2) illegal transition from a valid source → raise (active↛draft).
+        async with async_unit_of_work() as db:
+            with pytest.raises(TaskStateError):
+                await TaskDatastore(db).update_task_status(OWNER, "t1", "draft")
+        # 3) legal transition → succeeds.
+        async with async_unit_of_work() as db:
+            assert await TaskDatastore(db).update_task_status(OWNER, "t1", "blocked") is True
+        assert _task_status(db_factory) == "blocked"
+
+    asyncio.run(_run())
+
+    # 4) legacy/unknown source status is tolerated (logged, not raised) so a
+    # pre-enforcement ``"failed"`` row can still be recovered to ``active``.
+    db = db_factory()
+    try:
+        db.get(TaskRow, "t1").status = "failed"  # simulate a legacy row
+        db.commit()
+    finally:
+        db.close()
+
+    async def _recover_legacy() -> None:
+        async with async_unit_of_work() as db:
+            assert await TaskDatastore(db).update_task_status(OWNER, "t1", "active") is True
+
+    asyncio.run(_recover_legacy())
+    assert _task_status(db_factory) == "active"
+
+
 def test_finish_task_rejected_when_plan_has_unresolved_nodes(db_factory, tmp_path) -> None:
     """v0.14 guard: a 'completed' finish is rejected while planned nodes remain."""
     _make_task(db_factory, tmp_path)
@@ -462,9 +505,13 @@ def test_finish_task_rejected_when_plan_has_unresolved_nodes(db_factory, tmp_pat
         )
     )
     res = asyncio.run(
-        orch.finish_task(task_id="t1", project_id="w1", lead_session_id="lead", summary="done",
+        orch.finish_task(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead",
+            summary="done",
             user_id=OWNER,
-)
+        )
     )
     assert res["status"] == "rejected"
     assert set(res["pending_subtasks"]) == {"a", "sum"}
@@ -502,9 +549,13 @@ def test_finish_task_allows_completion_when_all_done(db_factory, tmp_path) -> No
     finally:
         db.close()
     res = asyncio.run(
-        orch.finish_task(task_id="t1", project_id="w1", lead_session_id="lead", summary="done",
+        orch.finish_task(
+            task_id="t1",
+            project_id="w1",
+            lead_session_id="lead",
+            summary="done",
             user_id=OWNER,
-)
+        )
     )
     assert res["ok"] is True
     assert "task_completed" in _events(db_factory)
@@ -1470,6 +1521,64 @@ def test_pause_distinct_from_stop_and_parks_nodes(db_factory, tmp_path, monkeypa
     finally:
         mailbox_registry.unregister("lead-s")
         orch._members.set_members("t1", set())
+
+
+def test_intervene_noop_raises_409_instead_of_false_success(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """A stop/resume the state machine rejects must surface a 409, not a silent
+    200. Regression for the "点停止后状态有误" report: the route used to swallow
+    ``stop_task``'s ``False`` / ``resume_task``'s ``{ok: False}``, so the client
+    toasted "已停止/已恢复" on a no-op while the badge kept the old status.
+
+    Both no-op branches are exercised on one task via a real sequence:
+      - ``resume`` on an ``active`` task — ``active`` is not a resumable source.
+      - ``stop`` on an already-``stopped`` task — only ``active`` / ``paused``
+        can be stopped, so a second stop is a no-op."""
+    from fastapi import HTTPException
+
+    from valuz_agent.api.routes import tasks as tasks_route
+    from valuz_agent.infra.db import async_unit_of_work
+    from valuz_agent.modules.tasks.mailbox import mailbox_registry
+
+    _seed_lead_and_members(db_factory, tmp_path, members=[], task_status="active")
+    orch = tasks_route.task_orchestrator
+
+    async def _noop_interrupt(_sid: str, user_id: str | None = None) -> None:
+        assert user_id == OWNER
+
+    monkeypatch.setattr(orch, "_interrupt_kernel_session", _noop_interrupt)
+
+    async def _run() -> None:
+        # 1) resume on an ACTIVE task → not a resumable source → 409, no mutation.
+        async with async_unit_of_work() as db:
+            with pytest.raises(HTTPException) as ei:
+                await tasks_route.intervene(
+                    "t1", tasks_route.InterveneRequest(action="resume"), db, "local-test-owner"
+                )
+            assert ei.value.status_code == 409
+        assert _task_status(db_factory) == "active"
+
+        # 2) stop on the ACTIVE task is legal → 200, status flips to stopped.
+        async with async_unit_of_work() as db:
+            resp = await tasks_route.intervene(
+                "t1", tasks_route.InterveneRequest(action="stop"), db, "local-test-owner"
+            )
+        assert resp.status == "stopped"
+
+        # 3) stop AGAIN on the now-stopped task → no-op → 409 (not a false 200).
+        async with async_unit_of_work() as db:
+            with pytest.raises(HTTPException) as ei:
+                await tasks_route.intervene(
+                    "t1", tasks_route.InterveneRequest(action="stop"), db, "local-test-owner"
+                )
+            assert ei.value.status_code == 409
+        assert _task_status(db_factory) == "stopped"
+
+    try:
+        asyncio.run(_run())
+    finally:
+        mailbox_registry.unregister("lead-s")
 
 
 def test_resume_evicts_kernel_runtime_before_respawn(db_factory, tmp_path, monkeypatch) -> None:

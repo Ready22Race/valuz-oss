@@ -615,6 +615,7 @@ export const TaskDetailPage = () => {
         fileTree={fileTree}
         rootPath={rootPath}
         plannedSubtasks={plannedSubtasks}
+        taskStatus={detail.task.status}
         onRefreshFiles={refreshFileTree}
         onOpenInFinder={rootPath ? handleOpenProjectInFinder : undefined}
         onPreviewFile={projectId ? (path) => void openArtifactFile(path) : undefined}

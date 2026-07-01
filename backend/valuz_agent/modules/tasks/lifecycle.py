@@ -301,7 +301,13 @@ class LifecycleService:
             # it would only fail mid-turn with a cryptic "Not logged in".
             gap = await _credential_gap(lead_session, lead_agent_slug, db=db)
             if gap is not None:
-                await task_ds.update_task_status(user_id, task_id, "failed")
+                # ``failed`` is NOT in the task status enum (task_state.py) —
+                # task-level failure folds into ``blocked`` (recoverable: the
+                # user adds the missing credential, then resume_task rebuilds
+                # the lead). The ``kickoff_failed`` event below still records
+                # the cause. The old ``"failed"`` write left an out-of-enum,
+                # un-resumable status stuck forever.
+                await task_ds.update_task_status(user_id, task_id, "blocked")
                 await event_ds.append_event(
                     user_id,
                     project_id=project_id,
