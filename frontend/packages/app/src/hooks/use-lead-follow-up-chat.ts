@@ -11,6 +11,9 @@ export interface LeadFollowUpChat {
   turns: ConversationTurn[];
   sending: boolean;
   send: (text: string) => Promise<void>;
+  /** Raw lead-session events (list + live SSE) — drives tool-card renderers
+   *  such as ``useAskUserQuestionCards`` that need the event stream. */
+  events: SessionEventDTO[];
 }
 
 /**
@@ -116,5 +119,5 @@ export function useLeadFollowUpChat(params: {
     [leadSessionId],
   );
 
-  return { turns, sending: sending || streaming, send };
+  return { turns, sending: sending || streaming, send, events };
 }

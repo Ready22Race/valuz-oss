@@ -67,7 +67,7 @@ import {
 } from "../components/TaskContextPanel";
 import { toFileTree } from "../lib/file-tree";
 import { TaskStatusLabel } from "../components/TaskStatusLabel";
-import { useLeadFollowUpChat } from "../hooks";
+import { useLeadFollowUpChat, useAskUserQuestionCards } from "../hooks";
 import { deriveDeliverable } from "./task-detail/deliverable";
 
 interface EventMeta {
@@ -685,6 +685,12 @@ export const TaskDetailPage = () => {
   const followUp = useLeadFollowUpChat({
     leadSessionId: isCompleted ? leadSessionId : null,
     sinceTs: completionInfo?.completedAt ?? null,
+  });
+  // Render the Lead's ``AskUserQuestion`` tool as the interactive question card
+  // (matching the main chat), driven by the follow-up event stream.
+  const askCards = useAskUserQuestionCards({
+    events: followUp.events,
+    sessionId: isCompleted ? leadSessionId : null,
   });
 
   // Completed tasks stop polling (the 3s poll above is active-only), so the
@@ -1470,6 +1476,7 @@ export const TaskDetailPage = () => {
                   sending={followUp.sending}
                   loading={false}
                   error={null}
+                  renderToolCall={askCards.renderToolCall}
                 />
               )}
             </div>
