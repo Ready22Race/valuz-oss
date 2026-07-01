@@ -45,9 +45,13 @@ own `kernel.db` (the 3 unprefixed kernel tables `sessions` / `messages` /
 `events`, its langgraph checkpoint tables, and `alembic_version`). The split
 (config `kernel_db_url`, default-on for SQLite) lets a sandboxed/remote kernel
 own its file and gives `make dev` + `make dev-sandbox` one shared history; an
-explicit `database_url` (Postgres) co-locates both instead. A one-time boot step
-(`boot/kernel_db_split.py`) migrates a pre-split `valuz.db`'s kernel tables into
-`kernel.db`. Both layers run **async** SQLAlchemy on aiosqlite; WAL +
+explicit `database_url` (Postgres) co-locates both instead. `kernel.db` is the
+kernel's execution-local store; the DataService **durable** copy of
+`sessions`/`messages`/`events` lives in the host `valuz.db` (design §3 form 1),
+and a one-time boot step (`boot/kernel_db_colocate.py`) seeds `valuz.db` from
+`kernel.db` on upgrade. (The legacy reverse step `kernel_db_split.py` — evicting
+kernel tables *out* of `valuz.db` — is retired; it contradicts co-location.)
+Both layers run **async** SQLAlchemy on aiosqlite; WAL +
 per-connection `busy_timeout` make concurrent access safe.
 
 **Kernel store.** The kernel ALWAYS binds the local `SQLAlchemyStore` on

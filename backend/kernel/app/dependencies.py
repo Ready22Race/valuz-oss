@@ -262,15 +262,19 @@ def _wrap_durable(
 
 
 async def _ensure_durable_schema(engine: AsyncEngine) -> None:
-    """Create the kernel schema on the in-process durable engine if missing.
+    """Create the kernel DATA schema on the in-process durable engine if missing.
 
-    Idempotent (``create_all`` is checkfirst). Used only for ``kernel_store=pg``;
-    the HTTP-remote durable owns its own (externally migrated) schema.
+    Idempotent (``create_all`` is checkfirst). The durable holds the system of
+    record: ``sessions`` / ``messages`` / ``events``. It does NOT get
+    ``durable_outbox`` — that is the LOCAL store's compensation queue (pending
+    durable writes when the durable is unreachable), so it belongs only on the
+    local (kernel.db) engine, never on the durable itself.
     """
     from src.adapters.sqlalchemy_store.models import Base
 
+    durable_tables = [t for n, t in Base.metadata.tables.items() if n != "durable_outbox"]
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=durable_tables))
 
 
 def _ensure_remote_backend(kind: str) -> None:

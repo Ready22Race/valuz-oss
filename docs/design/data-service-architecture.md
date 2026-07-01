@@ -272,9 +272,11 @@ refactor, decided as follows:
    `valuz.db`; the kernel alembic chain keeps managing `kernel.db`.
 5. **Data migration — mandatory, one-time, at boot.** Existing installs have
    kernel history only in `kernel.db`; once reads come from `valuz.db` it must be
-   seeded. A boot step (sibling to `boot/kernel_db_split.py`) copies `kernel.db`'s
+   seeded. The boot step `boot/kernel_db_colocate.py` copies `kernel.db`'s
    3 tables → `valuz.db` (backup → copy → verify, idempotent via `event_uid` /
-   UUID PKs). Reuses the `scripts/backfill_durable_sessions.py` logic with a
+   UUID PKs). It **replaces** the retired `kernel_db_split.py` (which moved
+   tables the opposite way and is incompatible with co-location).
+   Reuses the `scripts/backfill_durable_sessions.py` logic with a
    sqlite target.
 
 Each item lands incrementally behind the contract test

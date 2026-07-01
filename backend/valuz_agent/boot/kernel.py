@@ -352,12 +352,18 @@ def build_host_data_service_store(backend_dsn: str):
 
 
 async def ensure_host_data_service_schema(engine) -> None:
-    """Create the kernel schema on the host DataService backend if absent
-    (checkfirst; idempotent vs. an already-migrated PG)."""
+    """Create the kernel DATA schema on the host DataService backend if absent
+    (checkfirst; idempotent vs. an already-migrated PG).
+
+    Excludes ``durable_outbox`` — it is the LOCAL store's compensation queue
+    (pending durable writes), so it belongs only on the kernel's local engine
+    (kernel.db), never on the durable itself.
+    """
     from src.adapters.sqlalchemy_store.models import Base
 
+    durable_tables = [t for n, t in Base.metadata.tables.items() if n != "durable_outbox"]
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=durable_tables))
 
 
 def make_host_data_service_verifier(secret: str):
