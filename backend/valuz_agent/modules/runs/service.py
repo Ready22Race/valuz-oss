@@ -161,6 +161,9 @@ class RunsService:
         # the response, not this fetch.
         index_rows = await project_index.list_recent(limit=_INDEX_POOL, user_id=user_id)
         proj_by_session = {r.session_id: r.project_id for r in index_rows}
+        # Last-activity per session (index ``updated_at``, bumped each turn) — the
+        # sort key that floats a chat with a new message to the top.
+        activity_by_session = {r.session_id: r.updated_at for r in index_rows}
         sessions: list[KernelSession] = await kernel_client.list_sessions(
             user_id, ids=[r.session_id for r in index_rows], limit=_INDEX_POOL
         )
@@ -203,6 +206,7 @@ class RunsService:
                     task_map,
                     effective,
                     project_id=proj_by_session.get(sess.id, ""),
+                    last_activity=activity_by_session.get(sess.id, sess.created_at),
                     automation_session_ids=automation_session_ids,
                 )
             except Exception:
@@ -248,6 +252,7 @@ class RunsService:
         effective_status: str,
         *,
         project_id: str,
+        last_activity: int,
         automation_session_ids: set[str],
     ) -> RunSummary:
         meta: dict[str, Any] = (sess.metadata or {}).get("valuz") or {}
@@ -292,7 +297,12 @@ class RunsService:
             origin=own_origin,
             title=str(title),
             status=effective_status,
-            updated_at=sess.created_at,
+            # Last-activity (host index ``updated_at``, bumped each turn by
+            # ``project_index.touch_activity``) — NOT ``sess.created_at`` — so a
+            # chat with a new message floats to the top of the sidebar RECENTS,
+            # consistent with the activity feed. Also drives the running card's
+            # elapsed = now − last_activity (current-turn runtime).
+            updated_at=last_activity,
             current_todo=_pick_todo(getattr(sess, "todos", None)),
             last_message=meta.get("last_user_message_text") or None,
             last_output=last_output,

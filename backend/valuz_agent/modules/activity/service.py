@@ -110,7 +110,10 @@ async def list_activity(
                 _Cand(
                     kind="chat",
                     id=r.session_id,
-                    sort_at=r.created_at,
+                    # ``updated_at`` = last-activity (bumped each turn), so a chat
+                    # with a new message floats to the top; ``created_at`` would
+                    # pin it to when it was first opened.
+                    sort_at=r.updated_at,
                     project_id=r.project_id,
                     is_auto=(r.origin == "automation"),
                 )
