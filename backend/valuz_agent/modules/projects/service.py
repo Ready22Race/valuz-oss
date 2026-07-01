@@ -336,12 +336,43 @@ class ProjectService:
             cwd=self.resolve_project_cwd(row),
         )
 
-    async def create_project(self, user_id: str, name: str, root_path: str) -> ProjectDetail:
-        abs_path = str(Path(root_path).resolve())
-        existing = await self._ds.get_by_root_path(user_id, abs_path)
-        if existing:
-            raise ValueError(f"Directory already bound to project '{existing.name}'")
-        row = ProjectRow(name=name, kind="project", root_path=abs_path, sort_order=10)
+    async def create_project(
+        self,
+        user_id: str,
+        name: str,
+        root_path: str | None = None,
+    ) -> ProjectDetail:
+        """Create a project.
+
+        A non-empty ``root_path`` is resolved and uniqueness-checked against
+        existing projects (legacy behaviour — the project's cwd is that
+        caller-supplied local directory).
+
+        An empty/None ``root_path`` allocates a managed cwd under
+        ``data_dir/projects/{id}/`` instead, mirroring
+        ``create_project_from_pack``. This is the cloud/managed path: the
+        project works without a caller-supplied local directory, which a
+        remote backend could not reach anyway.
+        """
+        if root_path and root_path.strip():
+            abs_path = str(Path(root_path).resolve())
+            existing = await self._ds.get_by_root_path(user_id, abs_path)
+            if existing:
+                raise ValueError(f"Directory already bound to project '{existing.name}'")
+            row = ProjectRow(name=name, kind="project", root_path=abs_path, sort_order=10)
+        else:
+            from uuid import uuid4
+
+            new_id = uuid4().hex
+            managed_cwd = fs_registry.data_dir() / "projects" / new_id
+            managed_cwd.mkdir(parents=True, exist_ok=True)
+            row = ProjectRow(
+                id=new_id,
+                name=name,
+                kind="project",
+                root_path=str(managed_cwd),
+                sort_order=10,
+            )
         await self._ds.create(user_id, row)
         return _row_to_detail(row, cwd=self.resolve_project_cwd(row))
 
@@ -548,6 +579,38 @@ class ProjectService:
             return []
         nodes = _walk_dir(root, depth=depth, include_hidden=include_hidden)
         return [_node_to_dict(n) for n in nodes]
+
+    async def write_file(
+        self,
+        user_id: str,
+        project_id: str,
+        file_path: str,
+        data: bytes,
+    ) -> str:
+        """Write ``data`` to ``file_path`` (relative) inside the project cwd.
+
+        Returns the resolved relative posix path. Rejects absolute paths,
+        parent-traversal, and anything escaping the project root — but,
+        unlike ``_resolve_project_file``, does NOT require the target to
+        exist (it is a write). Powers ``POST /v1/projects/{id}/files`` so a
+        cloud-managed project can receive files without a caller-supplied
+        local directory.
+        """
+        row = await self._ds.get_by_id(user_id, project_id)
+        if not row:
+            raise KeyError(project_id)
+        root = _project_root(row, project_id)
+        rel = Path(file_path)
+        if rel.is_absolute() or any(part in {"", "."} for part in rel.parts):
+            raise ValueError("Invalid file path")
+        if any(part == ".." for part in rel.parts):
+            raise ValueError("Invalid file path")
+        target = (root / rel).resolve()
+        if root != target and root not in target.parents:
+            raise ValueError("File path escapes project root")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return target.relative_to(root).as_posix()
 
     async def read_file(
         self,

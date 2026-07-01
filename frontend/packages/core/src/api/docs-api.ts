@@ -43,11 +43,7 @@ export interface BindingItem {
 // ── Document types ──────────────────────────────────────────────────
 
 export type DocStatus =
-  | "queued"
-  | "processing"
-  | "ready"
-  | "failed"
-  | "missing";
+  "queued" | "processing" | "ready" | "failed" | "missing";
 
 export interface DocListItem {
   id: string;
@@ -147,7 +143,8 @@ const jsonPut = (body: unknown): RequestInit => ({
 export const kbApi = {
   create(params: {
     name: string;
-    root_path: string;
+    /** Omit/empty to allocate a backend-managed root (cloud / headless). */
+    root_path?: string;
     parser_routing?: string;
     auto_discover?: boolean;
   }): Promise<KbDetail> {

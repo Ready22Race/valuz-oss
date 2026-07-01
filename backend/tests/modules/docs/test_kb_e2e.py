@@ -8,6 +8,7 @@ these tests exercise the async service/datastore surface directly.
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -888,3 +889,42 @@ class TestAutoDiscoveryScheduler:
 
         assert "new_auto.txt" in auto_names
         assert "new_manual.txt" not in manual_names
+
+
+class TestManagedKbRoot:
+    """Cloud/headless parity: KB created and filled without a caller root."""
+
+    async def test_create_kb_without_root_allocates_managed_root(
+        self, svc, monkeypatch, tmp_path
+    ) -> None:
+        from valuz_agent.infra import fs_registry
+
+        # Managed root lives under <data_dir>/kb/<kb_id>; point data_dir at
+        # tmp so the test never touches the real ~/.valuz-oss tree.
+        monkeypatch.setattr(fs_registry.fs_registry, "data_dir", lambda: tmp_path)
+
+        kb = await svc.create_kb("local-test-owner", name="Managed")
+        await _drain(svc)
+
+        assert kb.root_path
+        assert Path(kb.root_path).is_dir()
+        assert str(kb.root_path).startswith(str(tmp_path / "kb"))
+
+    async def test_write_file_into_managed_kb_and_rejects_traversal(
+        self, svc, monkeypatch, tmp_path
+    ) -> None:
+        from valuz_agent.infra import fs_registry
+
+        monkeypatch.setattr(fs_registry.fs_registry, "data_dir", lambda: tmp_path)
+
+        kb = await svc.create_kb("local-test-owner", name="Managed")
+        await _drain(svc)
+
+        rel = await svc.write_file("local-test-owner", kb.id, "notes.md", b"# Hi")
+        assert rel == "notes.md"
+        assert (Path(kb.root_path) / "notes.md").read_bytes() == b"# Hi"
+
+        with pytest.raises(ValueError):
+            await svc.write_file("local-test-owner", kb.id, "../escape.md", b"x")
+        with pytest.raises(ValueError):
+            await svc.write_file("local-test-owner", kb.id, "/abs.md", b"x")

@@ -12,6 +12,7 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.eventbus import EventBus
+from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.docs.datastore import DocumentDatastore
 from valuz_agent.modules.docs.errors import (
@@ -369,19 +370,27 @@ class DocumentLibraryService:
         self,
         user_id: str,
         name: str,
-        root_path: str,
+        root_path: str | None = None,
         parser_routing: str = "local_only",
         auto_discover: bool = False,
     ) -> KbDetail:
-        root = Path(root_path).expanduser().resolve()
-        if not root.is_dir():
-            raise KbRootInaccessible()
+        kb_id = uuid.uuid4().hex
+        if root_path and root_path.strip():
+            root = Path(root_path).expanduser().resolve()
+            if not root.is_dir():
+                raise KbRootInaccessible()
+        else:
+            # Managed root (cloud / headless parity): allocate
+            # ``kb_root/{id}/`` so the KB works without a caller-supplied
+            # local directory, which a remote backend could not reach.
+            root = fs_registry.kb_root() / kb_id
+            root.mkdir(parents=True, exist_ok=True)
         root_str = str(root)
         if await self._ds.kb_root_path_exists(user_id, root_str):
             raise KbRootDuplicated()
 
         kb = KnowledgeBaseRow(
-            id=uuid.uuid4().hex,
+            id=kb_id,
             name=name,
             root_path=root_str,
             parser_routing=parser_routing,
@@ -396,6 +405,37 @@ class DocumentLibraryService:
         # separate ``_initial_scan`` code path.
         await self.start_rescan_kb(user_id, kb.id)
         return await self._kb_to_detail(user_id, kb)
+
+    async def write_file(
+        self,
+        user_id: str,
+        kb_id: str,
+        file_path: str,
+        data: bytes,
+    ) -> str:
+        """Write ``data`` to ``file_path`` (relative) inside the KB root.
+
+        Returns the resolved relative posix path. Rejects absolute paths,
+        parent-traversal, and anything escaping the KB root; does NOT
+        require the target to exist. Powers ``POST /v1/kb/{id}/files`` so
+        a cloud-managed KB can receive documents without a caller-supplied
+        local directory. The caller triggers a rescan after a batch.
+        """
+        row = await self._ds.get_kb(user_id, kb_id)
+        if not row:
+            raise KbNotFound()
+        root = Path(row.root_path).resolve()
+        rel = Path(file_path)
+        if rel.is_absolute() or any(part in {"", "."} for part in rel.parts):
+            raise ValueError("Invalid file path")
+        if any(part == ".." for part in rel.parts):
+            raise ValueError("Invalid file path")
+        target = (root / rel).resolve()
+        if root != target and root not in target.parents:
+            raise ValueError("File path escapes KB root")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        return target.relative_to(root).as_posix()
 
     async def list_kbs(self, user_id: str) -> list[KbListItem]:
         rows = await self._ds.list_kbs(user_id)
