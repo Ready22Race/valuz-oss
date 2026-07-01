@@ -64,6 +64,32 @@ class TaskDatastore:
             .all()
         )
 
+    async def list_tasks_page(
+        self,
+        user_id: str,
+        *,
+        project_id: str | None = None,
+        before_ts: int | None = None,
+        automation: bool | None = None,
+        limit: int = 20,
+    ) -> list[TaskRow]:
+        """Keyset page of tasks (newest ``updated_at`` first) for the unified
+        activity feed. ``project_id=None`` spans every project (global 动态
+        scope). ``automation`` filters by trigger: ``True`` → automation-fired
+        only, ``False`` → user only, ``None`` → both. ``before_ts`` is the keyset
+        cursor (strictly older ``updated_at``)."""
+        stmt = select(TaskRow).where(TaskRow.user_id == user_id)
+        if project_id is not None:
+            stmt = stmt.where(TaskRow.project_id == project_id)
+        if automation is True:
+            stmt = stmt.where(TaskRow.trigger_automation_id.is_not(None))
+        elif automation is False:
+            stmt = stmt.where(TaskRow.trigger_automation_id.is_(None))
+        if before_ts is not None:
+            stmt = stmt.where(TaskRow.updated_at < before_ts)
+        stmt = stmt.order_by(TaskRow.updated_at.desc()).limit(limit)
+        return list((await self._db.execute(stmt)).scalars().all())
+
     async def get_task(self, user_id: str, task_id: str) -> TaskRow | None:
         return (
             (

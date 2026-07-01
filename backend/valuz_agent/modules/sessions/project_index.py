@@ -98,6 +98,44 @@ async def list_session_ids(
         return list((await db.execute(stmt)).scalars().all())
 
 
+async def list_chat_index_rows(
+    project_id: str | None,
+    *,
+    user_id: str,
+    before_ts: int | None = None,
+    automation: bool | None = None,
+    limit: int = 20,
+) -> list[ProjectSessionRow]:
+    """Chat-kind index rows (newest first) for the unified activity feed.
+
+    Host-side keyset page: everything the merge needs — ``created_at`` (the sort
+    key + cursor), ``origin`` (the automation filter), ``project_id`` — lives on
+    the index, so no kernel round-trip is needed just to rank/filter. The top-N
+    winners are enriched with title/status from the kernel by the caller.
+
+    ``project_id=None`` spans every project (incl. the ``chat-default`` sentinel
+    for non-project quick chats) — the global 动态 scope. ``automation`` filters
+    by trigger: ``True`` → automation only, ``False`` → user only, ``None`` →
+    both. ``before_ts`` is the keyset cursor (strictly older ``created_at``)."""
+    if user_id is None:
+        raise ValueError("user_id is required")
+    async with async_unit_of_work(commit=False) as db:
+        stmt = select(ProjectSessionRow).where(
+            ProjectSessionRow.user_id == user_id,
+            ProjectSessionRow.kind == "chat",
+        )
+        if project_id is not None:
+            stmt = stmt.where(ProjectSessionRow.project_id == project_id)
+        if automation is True:
+            stmt = stmt.where(ProjectSessionRow.origin == "automation")
+        elif automation is False:
+            stmt = stmt.where(ProjectSessionRow.origin != "automation")
+        if before_ts is not None:
+            stmt = stmt.where(ProjectSessionRow.created_at < before_ts)
+        stmt = stmt.order_by(ProjectSessionRow.created_at.desc()).limit(limit)
+        return list((await db.execute(stmt)).scalars().all())
+
+
 async def project_of(session_id: str) -> str | None:
     # SYSTEM lookup by the globally-unique kernel ``session_id`` — returns only
     # the project id; not owner-scoped.

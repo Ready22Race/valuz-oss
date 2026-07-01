@@ -1,16 +1,8 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { Clock3, Inbox, ListChecks, MessageSquare } from "lucide-react";
+import { Clock3, ListChecks, MessageSquare } from "lucide-react";
 import {
   DeleteConfirmDialog,
-  EmptyState,
   PageHeader,
   StatusPill,
   Tabs,
@@ -19,13 +11,13 @@ import {
 } from "@valuz/ui";
 import {
   buildTurns,
-  runsApi,
   sessionsApi,
   useRunningRuns,
   useSessionEvents,
   useSessionStore,
   useTranslation,
   useProjectStore,
+  useActivityFeed,
   type RunSummary,
 } from "@valuz/core";
 import {
@@ -33,45 +25,13 @@ import {
   summarizeSegmentPhrase,
   type SessionEventDTO,
 } from "@valuz/shared";
-import { toast } from "sonner";
-import {
-  RenameInput,
-  RowActionsMenu,
-  formatCreatedAt,
-} from "@valuz/app/components";
+import { ActivityFeedList } from "@valuz/app/components";
 import { useProjectOutlet } from "@valuz/app/layout";
 
 type SourceFilter = "all" | "chat" | "task" | "automation";
-type TimeBucket = "today" | "yesterday" | "thisWeek" | "earlier";
 
 const tk = (key: string) =>
   key as Parameters<ReturnType<typeof useTranslation>["t"]>[0];
-
-const bucketOf = (ms: number, now: Date): TimeBucket => {
-  const d = new Date(ms);
-  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const startYesterday = new Date(startToday);
-  startYesterday.setDate(startYesterday.getDate() - 1);
-  const startWeek = new Date(startToday);
-  startWeek.setDate(startWeek.getDate() - 7);
-  if (d >= startToday) return "today";
-  if (d >= startYesterday) return "yesterday";
-  if (d >= startWeek) return "thisWeek";
-  return "earlier";
-};
-
-const BUCKET_ORDER: TimeBucket[] = [
-  "today",
-  "yesterday",
-  "thisWeek",
-  "earlier",
-];
-const BUCKET_KEY: Record<TimeBucket, string> = {
-  today: "activity.today",
-  yesterday: "activity.yesterday",
-  thisWeek: "activity.thisWeek",
-  earlier: "activity.earlier",
-};
 
 // Label key per run status; colors/style come from the shared StatusPill.
 const STATUS_LABEL_KEY: Record<string, string> = {
@@ -280,16 +240,18 @@ export const ActivityPage = () => {
   const renameSession = useSessionStore((s) => s.renameSession);
 
   const [filter, setFilter] = useState<SourceFilter>("all");
-  const [finished, setFinished] = useState<RunSummary[]>([]);
-  // The row currently up for delete-confirmation. ``null`` when no dialog
-  // is open. Only chat rows can populate this — tasks have no DELETE
-  // endpoint (see openapi.yaml) so we don't expose a trash affordance on
-  // task rows in the first place.
-  const [deletingChat, setDeletingChat] = useState<RunSummary | null>(null);
+  // The chat row up for delete-confirmation ({id,title}); null when closed.
+  // Only chat rows populate this — tasks have no DELETE endpoint (openapi.yaml).
+  const [deletingChat, setDeletingChat] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
   const [deleteInFlight, setDeleteInFlight] = useState(false);
-  // Inline rename (RenameInput, mirroring the sidebar): which row's title is
-  // being edited. ``null`` = none.
-  const [renamingId, setRenamingId] = useState<string | null>(null);
+
+  // Global activity history (chats + tasks), cursor-paginated — the same feed
+  // the project-home tabs use, minus the project scope. The live "running" cards
+  // above stay on ``useRunningRuns``; this is the quiet scannable history below.
+  const historyFeed = useActivityFeed({ tab: filter, pollMs: 4000 });
 
   useEffect(() => {
     setHeader(<PageHeader title={t(tk("nav.activity"))} />);
@@ -306,60 +268,6 @@ export const ActivityPage = () => {
       setContentInnerClassName(undefined);
     };
   }, [setHeader, setHeaderClassName, setContentInnerClassName, t]);
-
-  // Load finished runs on mount + refresh whenever a session leaves the
-  // running set (i.e., a run just finished). Without this, a run that
-  // completes in front of the user stays invisible until the page is
-  // re-opened.
-  const refreshFinished = useCallback(() => {
-    void runsApi
-      .list({ status: "finished" })
-      .then((res) => setFinished(res.runs))
-      .catch(() => undefined);
-  }, []);
-  useEffect(() => {
-    refreshFinished();
-  }, [refreshFinished]);
-  const prevRunningIdsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const currentIds = new Set(running.map((r) => r.session_id));
-    // Any change to the running set should pull a fresh history — not just
-    // "someone left". The narrower check missed two real cases:
-    //   • Backend lag: a run leaves the running pool before its DB row's
-    //     ``status`` actually flips to finished, so the refresh fires once
-    //     against stale data and never retries.
-    //   • Short turns: chats that complete inside the 2.5s ``useRunningRuns``
-    //     polling window are never seen as running, so ``prevSet`` stays
-    //     empty and the shrink check never fires — the finished row only
-    //     surfaces on a manual reload.
-    let changed = currentIds.size !== prevRunningIdsRef.current.size;
-    if (!changed) {
-      for (const id of currentIds) {
-        if (!prevRunningIdsRef.current.has(id)) {
-          changed = true;
-          break;
-        }
-      }
-    }
-    prevRunningIdsRef.current = currentIds;
-    if (changed) {
-      refreshFinished();
-      // Delayed retry to cover the case where the run leaves the running
-      // pool a tick before its DB row commits the finished status. ~1.5s is
-      // enough breathing room for the orchestrator's finalize path.
-      const handle = window.setTimeout(refreshFinished, 1500);
-      return () => window.clearTimeout(handle);
-    }
-  }, [running, refreshFinished]);
-
-  // Background safety net — re-pull the finished list every 5s while the
-  // page is mounted, in case both the change-detect and the delayed retry
-  // miss a transition. Cheap (one HTTP request, response is just session
-  // metadata) and means a stale history can never persist past one tick.
-  useEffect(() => {
-    const handle = window.setInterval(refreshFinished, 5000);
-    return () => window.clearInterval(handle);
-  }, [refreshFinished]);
 
   // Label: ``<project> · <kind>`` for project-scoped runs, bare ``<kind>``
   // for the default project. Prefixing the default chats with the
@@ -403,12 +311,6 @@ export const ActivityPage = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [running, filter],
   );
-  const filteredFinished = useMemo(
-    () => finished.filter(matchesFilter),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [finished, filter],
-  );
-
   const displayRunning = filteredRunning;
 
   const openRun = (r: RunSummary): void => {
@@ -417,6 +319,20 @@ export const ActivityPage = () => {
     } else {
       navigate(`/conversation/${encodeURIComponent(r.session_id)}`);
     }
+  };
+
+  // Activity-feed row handlers (history list below).
+  const openSession = (id: string): void => {
+    navigate(`/conversation/${encodeURIComponent(id)}`);
+  };
+  const openTask = (id: string): void => {
+    navigate(`/tasks/${encodeURIComponent(id)}`);
+  };
+  const handleRenameConfirm = (id: string, name: string): void => {
+    void (async () => {
+      await renameSession(id, name);
+      historyFeed.refresh();
+    })();
   };
 
   const renderStatusChip = (run: RunSummary) => {
@@ -432,100 +348,14 @@ export const ActivityPage = () => {
   // ``button``) because chat rows nest a ``RowActionsMenu`` trigger
   // ``button``, and nested buttons are invalid HTML. Keyboard accessibility:
   // ``role="button"`` + ``tabIndex`` + Enter / Space.
-  const historyRow = (run: RunSummary) => {
-    const ScopeIcon =
-      run.origin === "automation"
-        ? Clock3
-        : run.source_kind === "task"
-          ? ListChecks
-          : MessageSquare;
-    const canDelete = run.source_kind !== "task";
-    if (canDelete && renamingId === run.session_id) {
-      return (
-        <div
-          key={run.session_id}
-          className="flex w-full items-center gap-2 rounded-xl px-3 py-3"
-        >
-          <RenameInput
-            initial={run.title}
-            onConfirm={(v) => {
-              void handleRenameRunConfirm(run, v);
-              setRenamingId(null);
-            }}
-            onCancel={() => setRenamingId(null)}
-          />
-        </div>
-      );
-    }
-    return (
-      <div
-        key={run.session_id}
-        role="button"
-        tabIndex={0}
-        onClick={() => openRun(run)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            openRun(run);
-          }
-        }}
-        className="group flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left transition-colors hover:bg-surface-soft"
-      >
-        <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
-          <ScopeIcon className="h-3 w-3" strokeWidth={2} />
-          {sourceLabel(run)}
-        </span>
-        <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
-          {run.title}
-        </span>
-        <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
-          {run.updated_at ? formatCreatedAt(run.updated_at, t) : ""}
-        </span>
-        <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
-          {STATUS_LABEL_KEY[run.status] && (
-            <StatusPill
-              status={run.status}
-              label={t(tk(STATUS_LABEL_KEY[run.status]))}
-              className={
-                canDelete
-                  ? "transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
-                  : undefined
-              }
-            />
-          )}
-          {canDelete && (
-            <RowActionsMenu
-              onRename={() => setRenamingId(run.session_id)}
-              onDelete={() => setDeletingChat(run)}
-            />
-          )}
-        </span>
-      </div>
-    );
-  };
-
-  const handleRenameRunConfirm = async (run: RunSummary, name: string) => {
-    try {
-      await renameSession(run.session_id, name);
-      refreshFinished();
-      toast.success(t(tk("sidebar.renamed")));
-    } catch {
-      toast.error(t(tk("sidebar.renameFailed")));
-    }
-  };
-
   const handleDeleteChat = async () => {
     const target = deletingChat;
     if (!target) return;
     setDeleteInFlight(true);
     try {
-      await sessionsApi.delete(target.session_id);
-      // Optimistic local removal so the row disappears immediately. The 5s
-      // periodic refresh will reconcile if the backend disagrees.
-      setFinished((prev) =>
-        prev.filter((r) => r.session_id !== target.session_id),
-      );
+      await sessionsApi.delete(target.id);
       setDeletingChat(null);
+      historyFeed.refresh();
     } catch {
       // Leave the dialog open on failure so the user can retry / read the
       // error from the underlying API call's console log.
@@ -533,10 +363,6 @@ export const ActivityPage = () => {
       setDeleteInFlight(false);
     }
   };
-
-  const renderHistory = (runs: RunSummary[]) => (
-    <div className="flex flex-col">{runs.map(historyRow)}</div>
-  );
 
   // Running: always card-shaped (regardless of view toggle); each card
   // subscribes to its own session's SSE stream so the dashboard auto-updates.
@@ -557,18 +383,6 @@ export const ActivityPage = () => {
     </div>
   );
 
-  const groupedHistory = useMemo(() => {
-    const now = new Date();
-    const groups = new Map<TimeBucket, RunSummary[]>();
-    for (const r of filteredFinished) {
-      const b = bucketOf(r.updated_at, now);
-      const list = groups.get(b) ?? [];
-      list.push(r);
-      groups.set(b, list);
-    }
-    return groups;
-  }, [filteredFinished]);
-
   // ──────────────────────────────────────────────────────────────
   // Toolbar pieces
   // ──────────────────────────────────────────────────────────────
@@ -584,7 +398,6 @@ export const ActivityPage = () => {
   // Render
   // ──────────────────────────────────────────────────────────────
 
-  const isEmpty = displayRunning.length === 0 && filteredFinished.length === 0;
 
   return (
     <div className="mx-auto max-w-[760px] pb-12 pt-4">
@@ -625,28 +438,18 @@ export const ActivityPage = () => {
         </section>
       )}
 
-      {/* History — grouped by time bucket; always rendered (no tab gate). */}
+      {/* History — the unified activity feed (chats + tasks), cursor-paginated,
+          global scope. The live "running" cards sit above. */}
       <section className={displayRunning.length > 0 ? "" : "mt-5"}>
-        {filteredFinished.length === 0 ? (
-          isEmpty ? (
-            <EmptyState
-              message={t(tk("activity.noHistory"))}
-              icon={<Inbox strokeWidth={1.5} />}
-              className="mx-auto px-3 py-12"
-            />
-          ) : null
-        ) : (
-          <div className="flex flex-col gap-5">
-            {BUCKET_ORDER.filter((b) => groupedHistory.has(b)).map((b) => (
-              <div key={b}>
-                <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
-                  {t(tk(BUCKET_KEY[b]))}
-                </div>
-                {renderHistory(groupedHistory.get(b) ?? [])}
-              </div>
-            ))}
-          </div>
-        )}
+        <ActivityFeedList
+          feed={historyFeed}
+          showProjectName
+          onOpenSession={openSession}
+          onOpenTask={openTask}
+          onRenameConfirm={handleRenameConfirm}
+          onDeleteSession={(id, title) => setDeletingChat({ id, title })}
+          emptyLabel={t(tk("activity.noHistory"))}
+        />
       </section>
       <DeleteConfirmDialog
         open={deletingChat !== null}

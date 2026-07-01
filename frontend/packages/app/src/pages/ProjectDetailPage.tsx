@@ -1,21 +1,8 @@
-import {
-  useState,
-  useEffect,
-  useLayoutEffect,
-  useCallback,
-  useMemo,
-  useRef,
-} from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import {
-  Button,
   Composer,
   type ComposerAgentItem,
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuTrigger,
   DeleteConfirmDialog,
   ArtifactViewerShell,
   ProjectDetailContextPanel,
@@ -23,7 +10,6 @@ import {
   type ProjectMemberItem,
   KnowledgeFileTreePicker,
   KnowledgeBaseAddDialog,
-  StatusPill,
   Tabs,
   TabsContent,
   TabsList,
@@ -32,19 +18,9 @@ import {
 import {
   CreateAutomationDialog,
   DeployAgentsDialog,
-  RenameInput,
-  RowActionsMenu,
-  formatCreatedAt,
+  ActivityFeedList,
+  type ActivityFeedListProps,
 } from "@valuz/app/components";
-import {
-  Clock3,
-  FilePenLine,
-  ChevronRight,
-  ListChecks,
-  MessageSquare,
-  Plus,
-  Trash2,
-} from "lucide-react";
 import { toast } from "sonner";
 import {
   projectsApi,
@@ -62,8 +38,8 @@ import {
   useRuntimes,
   useSessionAttachments,
   useSessionStore,
-  useProjectListAutoRefresh,
-  useListScrollAnchor,
+  useActivityFeed,
+  type ActivityTab,
   type ActionKind,
   type AutomationItem,
   type RuntimeId,
@@ -74,7 +50,6 @@ import {
   type ArtifactContent,
   type LLMChannelDetail,
   type ConnectorItem,
-  type Task,
   type Agent,
   type MemberWithAgent,
   skillsApi,
@@ -82,7 +57,6 @@ import {
 } from "@valuz/core";
 import { modelLabel } from "@valuz/shared";
 import { t as _t } from "@valuz/shared/i18n";
-import type { SessionListItem } from "@valuz/shared";
 import { useProjectOutlet } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
 import { useProjectKbBindings, useKbDocTree } from "@valuz/app/hooks";
@@ -92,521 +66,34 @@ import {
   type AgentSkillItem,
 } from "../lib/agent-skill-items";
 import { toFileTree } from "../lib/file-tree";
-import { BUCKET_KEY, groupByTimeBucket } from "../lib/time-buckets";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 
-// Volatile fields that decide whether a polled task row differs from the one
-// already on screen — if equal we reuse the old object reference so unaffected
-// rows update in place (stable DOM nodes for the scroll anchor).
-function taskEqual(a: Task, b: Task): boolean {
-  return (
-    a.id === b.id &&
-    a.title === b.title &&
-    a.status === b.status &&
-    a.created_at === b.created_at &&
-    a.updated_at === b.updated_at
-  );
-}
-
-/**
- * Id-keyed in-place merge of a fresh full task list into the previous one
- * (plan §5 — replaces ``setTasks(res.tasks)`` whole-table overwrite). The
- * incoming list is the authoritative ``created_at``-DESC snapshot, so following
- * its order keeps existing rows in place (``created_at`` is immutable),
- * positions new rows by ``created_at``, drops rows that disappeared, and never
- * duplicates an id. Unchanged rows keep their previous reference.
- */
-function mergeTasks(prev: Task[], incoming: Task[]): Task[] {
-  const prevById = new Map(prev.map((t) => [t.id, t]));
-  return incoming.map((t) => {
-    const old = prevById.get(t.id);
-    return old && taskEqual(old, t) ? old : t;
-  });
-}
-
-/**
- * Walk up from ``el`` to the nearest ancestor that actually scrolls. The
- * project-detail page has no list-level scroller; the real one is the layout's
- * ``overflow-y-auto`` content container (plan review P2). An explicit
- * auto/scroll container is the intended scroller even before it overflows.
- */
-function findScrollParent(el: HTMLElement | null): HTMLElement | null {
-  let node = el?.parentElement ?? null;
-  while (node) {
-    const overflowY = getComputedStyle(node).overflowY;
-    if (overflowY === "auto" || overflowY === "scroll") return node;
-    node = node.parentElement;
-  }
-  return null;
-}
-
-/* ── Project Recents (PRD §03 2) ────────────────────────────── */
-
-// Session status -> i18n key for the right-edge ``StatusPill`` on
-// chat rows. The pill itself draws its color tone from the same
-// status string via the shared ``status-tone`` palette.
-const SESSION_STATUS_KEY: Record<string, string> = {
-  running: "activity.statusRunning",
-  idle: "activity.statusIdle",
-  failed: "activity.statusFailed",
-  cancelled: "activity.statusStopped",
-  archived: "activity.statusStopped",
-};
-
-interface ProjectRecentsProps {
-  sessions: SessionListItem[];
-  onOpen: (sessionId: string) => void;
-  onRenameConfirm: (sessionId: string, name: string) => void;
-  onDelete: (sessionId: string, label: string) => void;
-}
-
-const ProjectRecents = ({
-  sessions,
-  onOpen,
-  onRenameConfirm,
-  onDelete,
-}: ProjectRecentsProps) => {
-  const { t } = useTranslation();
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  if (sessions.length === 0) {
-    return (
-      <div className="px-3 py-12 text-center text-sm text-ink-meta">
-        {t("project.noSessions" as Parameters<typeof t>[0])}
-      </div>
-    );
-  }
-
-  const grouped = groupByTimeBucket(sessions, (s) => s.updated_at);
-
-  const renderRow = (s: SessionListItem) => {
-    const fallback = t("sidebar.newChat" as Parameters<typeof t>[0]);
-    const title = s.name ?? s.last_user_message_text ?? fallback;
-    if (renamingId === s.id) {
-      return (
-        <li key={s.id} data-anchor-key={`chat-${s.id}`}>
-          <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
-            <RenameInput
-              initial={title}
-              onConfirm={(v) => {
-                onRenameConfirm(s.id, v);
-                setRenamingId(null);
-              }}
-              onCancel={() => setRenamingId(null)}
-            />
-          </div>
-        </li>
-      );
-    }
-    return (
-      <li key={s.id} data-anchor-key={`chat-${s.id}`} className="group relative">
-        <ContextMenu>
-          <ContextMenuTrigger asChild>
-            <div
-              role="button"
-              tabIndex={0}
-              onClick={() => onOpen(s.id)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onOpen(s.id);
-                }
-              }}
-              className="flex w-full cursor-default items-center gap-2 rounded-xl bg-transparent px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
-            >
-              <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
-                {title}
-              </span>
-              <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
-                {formatCreatedAt(s.updated_at, t)}
-              </span>
-              <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
-                {SESSION_STATUS_KEY[s.status] && (
-                  <StatusPill
-                    status={s.status}
-                    label={t(
-                      SESSION_STATUS_KEY[s.status] as Parameters<typeof t>[0],
-                    )}
-                    className="transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
-                  />
-                )}
-                <RowActionsMenu
-                  onRename={() => setRenamingId(s.id)}
-                  onDelete={() => onDelete(s.id, title)}
-                />
-              </span>
-            </div>
-          </ContextMenuTrigger>
-          <ContextMenuContent className="min-w-[140px]">
-            <ContextMenuItem onSelect={() => setRenamingId(s.id)}>
-              <FilePenLine />
-              {t("sidebar.rename" as Parameters<typeof t>[0])}
-            </ContextMenuItem>
-            <ContextMenuSeparator />
-            <ContextMenuItem
-              variant="destructive"
-              onSelect={() => onDelete(s.id, title)}
-            >
-              <Trash2 />
-              {t("common.delete" as Parameters<typeof t>[0])}
-            </ContextMenuItem>
-          </ContextMenuContent>
-        </ContextMenu>
-      </li>
-    );
-  };
-
-  return (
-    <div className="flex flex-col gap-5">
-      {grouped.map(([bucket, bucketSessions]) => (
-        <div key={bucket}>
-          <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
-            {t(BUCKET_KEY[bucket] as Parameters<typeof t>[0])}
-          </div>
-          <ul className="flex flex-col">{bucketSessions.map(renderRow)}</ul>
-        </div>
-      ))}
-    </div>
-  );
-};
-
-/* ── Project Tasks (PRD-NEXT §3.4 — lead-dispatch tasks) ─────── */
-
-const TASK_STATUS_KEY: Record<string, string> = {
-  draft: "task.statusDraft",
-  active: "task.statusActive",
-  paused: "task.statusPaused",
-  stopped: "task.statusStopped",
-  completed: "task.statusCompleted",
-  failed: "task.statusFailed",
-  blocked: "task.statusBlocked",
-};
-
-function taskStatusLabel(
-  task: Task,
-  t: ReturnType<typeof useTranslation>["t"],
-) {
-  return TASK_STATUS_KEY[task.status]
-    ? t(TASK_STATUS_KEY[task.status] as Parameters<typeof t>[0])
-    : task.status;
-}
-
-/** "由 … 触发" provenance line under a task title; null for direct user actions. */
-function taskTriggerLabel(
-  task: Task,
-  t: ReturnType<typeof useTranslation>["t"],
-): string | null {
-  const trig = task.trigger;
-  if (!trig) return null;
-  const k = (key: string) => key as Parameters<typeof t>[0];
-  switch (trig.type) {
-    case "automation":
-      return t(k("task.triggeredByAutomation"), { name: trig.source_automation_name ?? "…" });
-    case "agent":
-      return trig.source_agent_slug
-        ? t(k("task.triggeredByTask"), {
-            title: trig.source_task_title ?? "…",
-            agent: trig.source_agent_slug,
-          })
-        : t(k("task.triggeredByTaskNoAgent"), { title: trig.source_task_title ?? "…" });
-    case "chat":
-      return t(k("task.triggeredByChat"));
-    default:
-      return null; // "user" → no provenance line
-  }
-}
-
-interface ProjectTasksProps {
-  tasks: Task[];
-  onOpen: (taskId: string) => void;
-  onAddTask: () => void;
-}
-
-const ProjectTasks = ({ tasks, onOpen, onAddTask }: ProjectTasksProps) => {
-  const { t } = useTranslation();
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
-
-  // Build the agent (task→task) dependency tree from the flat list: a task
-  // triggered by another task that is also in the list nests UNDER that parent.
-  // Everything else — chat / automation / user, or an agent-child whose parent
-  // isn't loaded — stays a root and keeps its flat "由 … 触发" line.
-  const { roots, childrenOf } = useMemo(() => {
-    const present = new Set(tasks.map((tk) => tk.id));
-    const kids = new Map<string, Task[]>();
-    const rootList: Task[] = [];
-    for (const tk of tasks) {
-      // Nest under the originating task whenever one is recorded — directly
-      // (agent create_task) OR transitively (an agent ran an automation that
-      // spawned this task; trigger.type stays "automation" but source_task_id
-      // points at the task whose agent invoked it).
-      const parentId = tk.trigger?.source_task_id ?? null;
-      if (parentId && present.has(parentId)) {
-        const arr = kids.get(parentId) ?? [];
-        arr.push(tk);
-        kids.set(parentId, arr);
-      } else {
-        rootList.push(tk);
-      }
-    }
-    return { roots: rootList, childrenOf: kids };
-  }, [tasks]);
-
-  if (tasks.length === 0) {
-    return (
-      <div className="flex flex-col items-center px-3 pt-7 pb-12 text-center">
-        <p className="max-w-[360px] text-sm text-ink-meta">
-          {t("project.noTasksHint" as Parameters<typeof t>[0])}
-        </p>
-        <Button className="mt-4" size="sm" onClick={onAddTask}>
-          <Plus className="h-3.5 w-3.5" />
-          {t("project.addTaskBtn" as Parameters<typeof t>[0])}
-        </Button>
-      </div>
-    );
-  }
-
-  const toggle = (id: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-
-  const renderNode = (task: Task, depth: number) => {
-    const kids = childrenOf.get(task.id) ?? [];
-    const hasKids = kids.length > 0;
-    const isCollapsed = collapsed.has(task.id);
-    // Flat provenance line: always on roots; and keep the "由自动化…" line even
-    // when nested (it explains HOW the parent task spawned this — via the
-    // automation). Suppress the redundant "由任务…" on nested agent children
-    // (the nesting itself already conveys the parent).
-    const flatLabel =
-      depth === 0 || task.trigger?.type === "automation"
-        ? taskTriggerLabel(task, t)
-        : null;
-    return (
-      <li key={task.id}>
-        <div className="flex items-center">
-          {hasKids ? (
-            <button
-              type="button"
-              onClick={() => toggle(task.id)}
-              aria-label={task.title}
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-meta transition-colors hover:bg-surface-soft"
-            >
-              <ChevronRight
-                className={`h-3.5 w-3.5 transition-transform ${isCollapsed ? "" : "rotate-90"}`}
-              />
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={() => onOpen(task.id)}
-            className="flex min-w-0 flex-1 cursor-default items-center gap-2 rounded-xl px-2 py-3 text-left transition-colors hover:bg-surface-soft"
-          >
-            <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium text-ink-heading">{task.title}</div>
-              {flatLabel ? (
-                <div className="mt-0.5 truncate text-[11px] text-ink-meta">{flatLabel}</div>
-              ) : null}
-            </div>
-            <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
-              {formatCreatedAt(task.created_at, t)}
-            </span>
-            <StatusPill status={task.status} label={taskStatusLabel(task, t)} />
-          </button>
-        </div>
-        {hasKids && !isCollapsed ? (
-          <ul className="ml-[18px] flex flex-col border-l border-surface-border pl-1">
-            {kids.map((kid) => renderNode(kid, depth + 1))}
-          </ul>
-        ) : null}
-      </li>
-    );
-  };
-
-  const grouped = groupByTimeBucket(roots, (task) => task.updated_at);
-
-  return (
-    <div className="flex flex-col gap-5">
-      {grouped.map(([bucket, bucketRoots]) => (
-        <div key={bucket}>
-          <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
-            {t(BUCKET_KEY[bucket] as Parameters<typeof t>[0])}
-          </div>
-          <ul className="flex flex-col">
-            {bucketRoots.map((task) => renderNode(task, 0))}
-          </ul>
-        </div>
-      ))}
-    </div>
-  );
-};
-
-/* ── Project home "All" — sessions + tasks merged, icon-prefixed ─── */
-
-const ProjectAllList = ({
-  sessions,
-  tasks,
+/** One tab body: owns its own cursor-paginated feed. Radix unmounts inactive
+ *  ``TabsContent``, so only the active tab's feed polls / paginates. */
+const ActivityTabPanel = ({
+  projectId,
+  tab,
   onOpenSession,
   onOpenTask,
   onRenameConfirm,
   onDeleteSession,
-  hideScopeTag = false,
+  hideScopeTag,
+  emptyLabel,
 }: {
-  sessions: SessionListItem[];
-  tasks: Task[];
-  onOpenSession: (id: string) => void;
-  onOpenTask: (id: string) => void;
-  onRenameConfirm: (id: string, name: string) => void;
-  onDeleteSession: (id: string, label: string) => void;
-  /** Hide the leading icon + 对话/任务/自动化 chip — used by the 自动化 tab
-   * where every row is automation, so the chip would be pure noise. */
-  hideScopeTag?: boolean;
-}) => {
-  const { t } = useTranslation();
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const items = useMemo(() => {
-    const merged = [
-      ...sessions.map((s) => ({
-        kind: "chat" as const,
-        id: s.id,
-        title:
-          s.name ??
-          s.last_user_message_text ??
-          t("sidebar.newChat" as Parameters<typeof t>[0]),
-        status: s.status as string,
-        statusKey: SESSION_STATUS_KEY[s.status],
-        // A session's list ``updated_at`` is its creation time (see
-        // ``formatCreatedAt``) — used for both the displayed time and sorting.
-        created: s.updated_at,
-        sortAt: s.updated_at,
-        isAuto: s.origin === "automation",
-      })),
-      ...tasks.map((tk) => ({
-        kind: "task" as const,
-        id: tk.id,
-        title: tk.title,
-        status: tk.status,
-        statusKey: TASK_STATUS_KEY[tk.status],
-        created: tk.created_at,
-        sortAt: tk.updated_at,
-        isAuto: tk.trigger?.type === "automation",
-      })),
-    ];
-    // Most-recently-active first, matching the per-tab lists.
-    return merged.sort((a, b) => b.sortAt - a.sortAt);
-  }, [sessions, tasks, t]);
-
-  if (items.length === 0) {
-    return (
-      <div className="px-3 py-12 text-center text-sm text-ink-meta">
-        {t("project.noSessions" as Parameters<typeof t>[0])}
-      </div>
-    );
-  }
-
-  const grouped = groupByTimeBucket(items, (item) => item.sortAt);
-
-  const renderItem = (item: (typeof items)[number]) => {
-    // Leading icon + scope tag. Automation-triggered runs read as 自动化
-    // (clock) in the 全部 list, marking provenance over surface type.
-    const Icon = item.isAuto
-      ? Clock3
-      : item.kind === "task"
-        ? ListChecks
-        : MessageSquare;
-    if (item.kind === "chat" && renamingId === item.id) {
-      return (
-        <li
-          key={`${item.kind}-${item.id}`}
-          data-anchor-key={`${item.kind}-${item.id}`}
-        >
-          <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
-            <RenameInput
-              initial={item.title}
-              onConfirm={(v) => {
-                onRenameConfirm(item.id, v);
-                setRenamingId(null);
-              }}
-              onCancel={() => setRenamingId(null)}
-            />
-          </div>
-        </li>
-      );
-    }
-    return (
-      <li
-        key={`${item.kind}-${item.id}`}
-        data-anchor-key={`${item.kind}-${item.id}`}
-        className="group relative"
-      >
-        <div
-          role="button"
-          tabIndex={0}
-          onClick={() =>
-            item.kind === "task" ? onOpenTask(item.id) : onOpenSession(item.id)
-          }
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              if (item.kind === "task") onOpenTask(item.id);
-              else onOpenSession(item.id);
-            }
-          }}
-          className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
-        >
-          {!hideScopeTag && (
-            <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
-              <Icon className="h-3 w-3" strokeWidth={2} />
-              {item.isAuto
-                ? t("activity.automationTag" as Parameters<typeof t>[0])
-                : item.kind === "task"
-                  ? t("project.tasksColumn" as Parameters<typeof t>[0])
-                  : t("project.chatTab" as Parameters<typeof t>[0])}
-            </span>
-          )}
-          <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
-            {item.title}
-          </span>
-          <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
-            {formatCreatedAt(item.created, t)}
-          </span>
-          <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
-            {item.statusKey && (
-              <StatusPill
-                status={item.status}
-                label={t(item.statusKey as Parameters<typeof t>[0])}
-                className={
-                  item.kind === "chat"
-                    ? "transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
-                    : undefined
-                }
-              />
-            )}
-            {item.kind === "chat" && (
-              <RowActionsMenu
-                onRename={() => setRenamingId(item.id)}
-                onDelete={() => onDeleteSession(item.id, item.title)}
-              />
-            )}
-          </span>
-        </div>
-      </li>
-    );
-  };
-
+  projectId: string;
+  tab: ActivityTab;
+} & Omit<ActivityFeedListProps, "feed" | "showProjectName">) => {
+  const feed = useActivityFeed({ projectId, tab });
   return (
-    <div className="flex flex-col gap-5">
-      {grouped.map(([bucket, bucketItems]) => (
-        <div key={bucket}>
-          <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
-            {t(BUCKET_KEY[bucket] as Parameters<typeof t>[0])}
-          </div>
-          <ul className="flex flex-col">{bucketItems.map(renderItem)}</ul>
-        </div>
-      ))}
-    </div>
+    <ActivityFeedList
+      feed={feed}
+      onOpenSession={onOpenSession}
+      onOpenTask={onOpenTask}
+      onRenameConfirm={onRenameConfirm}
+      onDeleteSession={onDeleteSession}
+      hideScopeTag={hideScopeTag}
+      emptyLabel={emptyLabel}
+    />
   );
 };
 
@@ -627,27 +114,9 @@ export const ProjectDetailPage = () => {
   const panelCollapsed = usePanelStore((s) => s.collapsed);
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
 
-  // Global sessions list — already fetched + kept fresh by
-  // ``DesktopProjectLayout``. Filter to this project to render the
-  // per-project Recents below the composer (PRD §03 2).
-  const allSessions = useSessionStore((s) => s.sessions);
+  // Rename / delete a chat session — used by the activity feed's row actions.
   const renameSession = useSessionStore((s) => s.renameSession);
   const deleteSession = useSessionStore((s) => s.deleteSession);
-  // Hide zombie sessions (a create that never sent a first turn) —
-  // ``status === "created"`` is exactly that. Also hide task-internal
-  // sessions (lead / dispatched sub-Runs, identified by
-  // ``task_id != null``): they're an implementation detail of the
-  // task run and live behind the task detail page, not on the
-  // project's conversation list. Same filter pair as the sidebar
-  // RECENTS in DesktopProjectLayout.
-  const projectSessions = useMemo(
-    () =>
-      allSessions.filter(
-        (s) =>
-          s.project_id === id && s.status !== "created" && s.task_id == null,
-      ),
-    [allSessions, id],
-  );
 
   // Project detail page always has meaningful panel content
   // (instructions / skills / KB / file tree). Layout defaults the
@@ -660,9 +129,6 @@ export const ProjectDetailPage = () => {
   }, [id, panelSetCollapsed]);
 
   const [project, setProject] = useState<ProjectDetail | null>(null);
-  // Lead-dispatch tasks for this project, shown in the centre history area
-  // below Recents (PRD-NEXT §3.4). Non-critical for the project home.
-  const [tasks, setTasks] = useState<Task[]>([]);
   // Member agents for the config panel's "Agents" section (PRD-NEXT §3.4).
   const [members, setMembers] = useState<ProjectMemberItem[]>([]);
 
@@ -867,75 +333,6 @@ export const ProjectDetailPage = () => {
     }
   }, [id, memberDeleteTarget, loadMembers, t]);
 
-  // Load this project's tasks. Failures are swallowed — non-critical here.
-  // First load uses the same id-keyed in-place merge as the auto-refresh
-  // poller (plan §4A.7) so the two paths are idempotent.
-  useEffect(() => {
-    if (!id) return;
-    let cancelled = false;
-    tasksApi
-      .listTasks(id)
-      .then((res) => {
-        if (!cancelled) setTasks((prev) => mergeTasks(prev, res.tasks));
-      })
-      .catch(() => {
-        if (!cancelled) setTasks([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [id]);
-
-  // Automation-triggered subset for this project. Both signals are
-  // authoritative and complete (no "recent runs" limit): the session carries
-  // origin for chats, and the task list endpoint resolves origin for tasks
-  // (lead session ∈ automation run index). The non-automation lists feed the
-  // 全部/对话/任务 tabs; the automation subset feeds the dedicated 自动化 tab.
-  const userSessions = useMemo(
-    () => projectSessions.filter((s) => s.origin !== "automation"),
-    [projectSessions],
-  );
-  const automationSessions = useMemo(
-    () => projectSessions.filter((s) => s.origin === "automation"),
-    [projectSessions],
-  );
-  const userTasks = useMemo(
-    () => tasks.filter((tk) => tk.trigger?.type !== "automation"),
-    [tasks],
-  );
-  const automationTasks = useMemo(
-    () => tasks.filter((tk) => tk.trigger?.type === "automation"),
-    [tasks],
-  );
-
-  // While the page stays mounted and the tab is visible, re-pull the two
-  // already user_id+project_id-filtered list endpoints every 4s (+ on
-  // visible/online) and merge the full snapshot back: sessions through the
-  // store's ``mergeProjectSessions`` (subset merge, other projects untouched),
-  // tasks through the id-keyed ``mergeTasks`` below.
-  const mergeTasksInPlace = useCallback((incoming: Task[]) => {
-    setTasks((prev) => mergeTasks(prev, incoming));
-  }, []);
-  useProjectListAutoRefresh(id, { onTasks: mergeTasksInPlace });
-
-  // Scroll-position anchoring (plan §4B / §7.4). The real scroller is the
-  // layout content container, found by walking up from this sentinel. A
-  // fingerprint of the two lists (ids + the volatile updated_at/status) keys
-  // the correction layout effect so a poll-driven reorder doesn't jump the
-  // first visible row.
-  const listRootRef = useRef<HTMLDivElement>(null);
-  const scrollContainerRef = useRef<HTMLElement | null>(null);
-  useLayoutEffect(() => {
-    scrollContainerRef.current = findScrollParent(listRootRef.current);
-  }, []);
-  const anchorDataKey = useMemo(() => {
-    const s = projectSessions
-      .map((x) => `${x.id}:${x.updated_at}:${x.status}`)
-      .join(",");
-    const tk = tasks.map((x) => `${x.id}:${x.updated_at}:${x.status}`).join(",");
-    return `${s}|${tk}`;
-  }, [projectSessions, tasks]);
-  useListScrollAnchor(scrollContainerRef, anchorDataKey);
 
   // Load this project's member agents + the Library agents the add-agent
   // dialog offers. Non-critical for the project home, so failures are quiet.
@@ -1941,7 +1338,7 @@ export const ProjectDetailPage = () => {
               shows — empty state offers an "add task" affordance. The ref is
               the sentinel ``useListScrollAnchor`` walks up from to find the
               real scroll container (plan §4B). */}
-          <div ref={listRootRef} className="mt-4 w-full pb-6">
+          <div className="mt-4 w-full pb-6">
             <Tabs defaultValue="all">
               <div className="flex items-center border-b border-surface-border">
                 <TabsList
@@ -1963,48 +1360,48 @@ export const ProjectDetailPage = () => {
                 </TabsList>
               </div>
               <TabsContent value="all" className="mt-5">
-                <ProjectAllList
-                  sessions={projectSessions}
-                  tasks={tasks}
+                <ActivityTabPanel
+                  projectId={id}
+                  tab="all"
                   onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
                   onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
                   onRenameConfirm={handleRenameConfirm}
                   onDeleteSession={handleDeleteSession}
+                  emptyLabel={t("project.noSessions" as Parameters<typeof t>[0])}
                 />
               </TabsContent>
               <TabsContent value="chat" className="mt-5">
-                <ProjectRecents
-                  sessions={userSessions}
-                  onOpen={(sid) => navigate(`/conversation/${sid}`)}
+                <ActivityTabPanel
+                  projectId={id}
+                  tab="chat"
+                  onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
+                  onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
                   onRenameConfirm={handleRenameConfirm}
-                  onDelete={handleDeleteSession}
+                  onDeleteSession={handleDeleteSession}
+                  emptyLabel={t("project.noSessions" as Parameters<typeof t>[0])}
                 />
               </TabsContent>
               <TabsContent value="tasks" className="mt-5">
-                <ProjectTasks
-                  tasks={userTasks}
-                  onOpen={(taskId) => navigate(`/tasks/${taskId}`)}
-                  onAddTask={() => {
-                    // v2: there is no separate "new task" page anymore — the
-                    // project composer's "task" mode is the new entry. Switch
-                    // it and scroll the composer back into view.
-                    setComposerMode("task");
-                    setComposerValue("");
-                    document
-                      .getElementById("project-composer")
-                      ?.scrollIntoView({ behavior: "smooth", block: "center" });
-                  }}
+                <ActivityTabPanel
+                  projectId={id}
+                  tab="task"
+                  onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
+                  onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
+                  onRenameConfirm={handleRenameConfirm}
+                  onDeleteSession={handleDeleteSession}
+                  emptyLabel={t("project.noSessions" as Parameters<typeof t>[0])}
                 />
               </TabsContent>
               <TabsContent value="automation" className="mt-5">
-                <ProjectAllList
-                  sessions={automationSessions}
-                  tasks={automationTasks}
+                <ActivityTabPanel
+                  projectId={id}
+                  tab="automation"
                   onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
                   onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
                   onRenameConfirm={handleRenameConfirm}
                   onDeleteSession={handleDeleteSession}
                   hideScopeTag
+                  emptyLabel={t("project.noSessions" as Parameters<typeof t>[0])}
                 />
               </TabsContent>
             </Tabs>
