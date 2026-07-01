@@ -81,11 +81,31 @@ export function useLeadFollowUpChat(params: {
   const rawTurns = useMemo(() => buildTurns(followUpEvents), [followUpEvents]);
   const turns = useStableTurns(rawTurns);
 
+  // A run is in flight from a user send until the next ``session.idle`` /
+  // ``run.failed`` — mirrors the chat view's ``isStreaming``. Derived from the
+  // live event stream (last ``message.user`` newer than the last terminal
+  // event) so the latest turn shows the streaming indicator (logo loader) and
+  // hides its copy button until the turn actually completes, exactly like a
+  // normal conversation.
+  const streaming = useMemo(() => {
+    let lastTerminal = -1;
+    let lastUser = -1;
+    events.forEach((e, i) => {
+      const type = e.event.event_type;
+      if (type === "session.idle" || type === "run.failed") lastTerminal = i;
+      else if (type === "message.user") lastUser = i;
+    });
+    return lastUser > lastTerminal;
+  }, [events]);
+
   // The caller is expected to gate on ``sending`` (disable the composer while a
   // turn is in flight); this hook does not itself guard against concurrent sends.
   const send = useCallback(
     async (text: string) => {
       if (!leadSessionId || !text.trim()) return;
+      // Optimistic: hold the streaming state through the send-HTTP window too,
+      // before the ``message.user`` event echoes back over SSE — otherwise the
+      // indicator flickers off between send and echo.
       setSending(true);
       try {
         await sessionsApi.sendMessage(leadSessionId, text);
@@ -96,5 +116,5 @@ export function useLeadFollowUpChat(params: {
     [leadSessionId],
   );
 
-  return { turns, sending, send };
+  return { turns, sending: sending || streaming, send };
 }
