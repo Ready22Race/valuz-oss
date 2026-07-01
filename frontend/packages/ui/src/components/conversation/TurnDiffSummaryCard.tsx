@@ -8,6 +8,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "../ui/sheet";
+import { Badge } from "../ui/badge";
 import { cn } from "../../lib/cn";
 import { useI18n } from "../../hooks/use-i18n";
 
@@ -209,10 +210,10 @@ export const TurnDiffSummaryCard: FC<TurnDiffSummaryCardProps> = ({
                     {change.file_path}
                   </span>
                   {change.has_error ? (
-                    <span className="flex shrink-0 items-center gap-1 rounded-md bg-error-light px-1.5 py-0.5 text-2xs text-error-text">
+                    <Badge variant="error" className="shrink-0">
                       <AlertCircle className="h-2.5 w-2.5" />
                       {t("common.failed", t("common.failed"))}
-                    </span>
+                    </Badge>
                   ) : null}
                   <span className="shrink-0 font-mono text-2xs text-success">
                     +{change.additions}
@@ -290,10 +291,10 @@ export const TurnDiffSummaryCard: FC<TurnDiffSummaryCardProps> = ({
                       {change.file_path}
                     </span>
                     {change.has_error ? (
-                      <span className="flex shrink-0 items-center gap-1 rounded-md bg-error-light px-1.5 py-0.5 text-2xs text-error-text">
+                      <Badge variant="error" className="shrink-0">
                         <AlertCircle className="h-2.5 w-2.5" />
                         {t("common.failed", t("common.failed"))}
-                      </span>
+                      </Badge>
                     ) : null}
                     <span className="shrink-0 font-mono text-2xs text-success">
                       +{change.additions}

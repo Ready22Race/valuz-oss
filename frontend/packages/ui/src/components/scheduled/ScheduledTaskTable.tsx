@@ -9,6 +9,7 @@ import {
   Power,
   Trash2,
 } from "lucide-react";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Card } from "../ui/card";
 import { CardContent } from "../ui/card";
@@ -19,7 +20,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
-import { StatusDot } from "./StatusDot";
 import { useI18n } from "../../hooks/use-i18n";
 import { cn } from "../../lib/cn";
 
@@ -122,6 +122,15 @@ export const ScheduledTaskTable = ({
 
   const statusLabel = (status: "on" | "off") =>
     status === "on" ? t("cron.enable") : t("cron.paused");
+  const statusBadge = (status: "on" | "off") => (
+    <Badge
+      variant={status === "on" ? "success" : "warning"}
+      className="gap-1.5"
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+      {statusLabel(status)}
+    </Badge>
+  );
 
   return (
     <Card className="gap-0 overflow-hidden py-0">
@@ -202,19 +211,7 @@ export const ScheduledTaskTable = ({
                     {task.last}
                   </div>
                   <div className="flex justify-center">
-                    <span
-                      className={
-                        task.status === "on"
-                          ? "inline-flex items-center gap-1.5 rounded-full bg-[#53cb76]/10 px-2 py-0.5 text-[11px] font-medium text-[#53cb76]"
-                          : "inline-flex items-center gap-1.5 rounded-full bg-surface-soft px-2 py-0.5 text-[11px] font-medium text-ink-meta"
-                      }
-                    >
-                      <StatusDot
-                        status={task.status}
-                        className={task.status === "on" ? "bg-[#53cb76]" : ""}
-                      />
-                      {statusLabel(task.status)}
-                    </span>
+                    {statusBadge(task.status)}
                   </div>
                   <div className="flex justify-center">
                     <ScheduledTaskActionMenu
@@ -248,19 +245,7 @@ export const ScheduledTaskTable = ({
                         {task.name}
                       </button>
                     </div>
-                    <span
-                      className={
-                        task.status === "on"
-                          ? "inline-flex items-center gap-1.5 rounded-full bg-[#53cb76]/10 px-2 py-0.5 text-[11px] font-medium text-[#53cb76]"
-                          : "inline-flex items-center gap-1.5 rounded-full bg-surface-soft px-2 py-0.5 text-[11px] font-medium text-ink-meta"
-                      }
-                    >
-                      <StatusDot
-                        status={task.status}
-                        className={task.status === "on" ? "bg-[#53cb76]" : ""}
-                      />
-                      {statusLabel(task.status)}
-                    </span>
+                    {statusBadge(task.status)}
                   </div>
                   <div
                     className={cn(

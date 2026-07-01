@@ -17,6 +17,7 @@
 
 import type { ReactElement } from "react";
 import type { PlanSubtask } from "@valuz/core";
+import { Badge } from "@valuz/ui";
 
 /** One subtask cell in the card. The four glyphs map to backend
  * ``to_panel`` statuses: planned / in_progress / done / failed. */
@@ -77,6 +78,14 @@ export function PlanCard(props: PlanCardProps): ReactElement {
     status === "abandoned" ||
     status === "blocked" ||
     status === "failed";
+  const statusVariant =
+    status === "active"
+      ? "brand"
+      : status === "completed"
+        ? "success"
+        : status === "blocked" || status === "failed"
+          ? "error"
+          : "outline";
 
   // Older versions of the same plan render half-opacity, read-only.
   const wrapperClass = [
@@ -93,9 +102,9 @@ export function PlanCard(props: PlanCardProps): ReactElement {
           <span className="font-medium text-ink-heading">
             Plan v{planVersion}
           </span>
-          <span className="rounded bg-surface px-1.5 py-0.5 text-xs uppercase tracking-wide text-ink-muted">
+          <Badge variant={statusVariant} className="uppercase tracking-wide">
             {status}
-          </span>
+          </Badge>
           <span className="truncate text-ink-body">{taskTitle}</span>
         </div>
         {isLatest && <span className="text-xs text-ink-muted">(latest)</span>}

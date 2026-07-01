@@ -3,8 +3,8 @@ import { useNavigate } from "react-router-dom";
 import { Clock3, ListChecks, MessageSquare } from "lucide-react";
 import {
   DeleteConfirmDialog,
+  Badge,
   PageHeader,
-  StatusPill,
   Tabs,
   TabsList,
   TabsTrigger,
@@ -33,7 +33,7 @@ type SourceFilter = "all" | "chat" | "task" | "automation";
 const tk = (key: string) =>
   key as Parameters<ReturnType<typeof useTranslation>["t"]>[0];
 
-// Label key per run status; colors/style come from the shared StatusPill.
+// Label key per run status; colors/style come from the shared Badge.
 const STATUS_LABEL_KEY: Record<string, string> = {
   running: "activity.statusRunning",
   paused: "activity.statusPaused",
@@ -42,6 +42,16 @@ const STATUS_LABEL_KEY: Record<string, string> = {
   failed: "activity.statusFailed",
   stopped: "activity.statusStopped",
   blocked: "activity.statusBlocked",
+};
+
+const activityRunStatusVariant = (
+  status: string,
+): "brand" | "success" | "warning" | "error" | "outline" => {
+  if (status === "running") return "brand";
+  if (status === "completed" || status === "idle") return "success";
+  if (status === "failed") return "error";
+  if (status === "blocked" || status === "paused") return "warning";
+  return "outline";
 };
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -338,7 +348,14 @@ export const ActivityPage = () => {
   const renderStatusChip = (run: RunSummary) => {
     const key = STATUS_LABEL_KEY[run.status];
     if (!key) return null;
-    return <StatusPill status={run.status} label={t(tk(key))} />;
+    return (
+      <Badge
+        variant={activityRunStatusVariant(run.status)}
+        className="shrink-0"
+      >
+        {t(tk(key))}
+      </Badge>
+    );
   };
 
   // History rows: title + relative created time + status pill on the side,
