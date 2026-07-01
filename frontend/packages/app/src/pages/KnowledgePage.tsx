@@ -60,6 +60,7 @@ import type {
   KbTreeNode,
 } from "@valuz/core";
 import { useProjectOutlet } from "@valuz/app/layout";
+import type { DirectoryFieldMode } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
 import { useTranslation } from "@valuz/core";
 import { CreateKbDialog } from "../components";
@@ -225,7 +226,11 @@ function kbStatusLabel(
   }
 }
 
-export const KnowledgePage = () => {
+export const KnowledgePage = ({
+  directoryFieldMode = "picker",
+}: {
+  directoryFieldMode?: DirectoryFieldMode;
+} = {}) => {
   const { t } = useTranslation();
   const { copyFiles } = usePlatform();
   const [kbs, setKbs] = useState<KbListItem[]>([]);
@@ -761,7 +766,9 @@ export const KnowledgePage = () => {
               <EmptyState
                 variant="plain"
                 title={t("knowledge.createNew" as Parameters<typeof t>[0])}
-                description={t("knowledge.supportedFormats" as Parameters<typeof t>[0])}
+                description={t(
+                  "knowledge.supportedFormats" as Parameters<typeof t>[0],
+                )}
                 icon={<FolderPlus className="h-5 w-5" />}
                 action={
                   <Button
@@ -1025,6 +1032,7 @@ export const KnowledgePage = () => {
       {activeKb ? renderKbDetail() : renderKbList()}
 
       <CreateKbDialog
+        directoryFieldMode={directoryFieldMode}
         open={createOpen}
         onOpenChange={setCreateOpen}
         onSubmit={async (data) => {
