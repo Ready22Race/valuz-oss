@@ -1,3 +1,4 @@
+export * from "./api/activity-api";
 export * from "./api/agents-api";
 export * from "./api/agent-templates-api";
 export * from "./api/analytics-api";
