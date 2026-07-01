@@ -10,6 +10,7 @@ export * from "./use-project-list-auto-refresh";
 export * from "./use-project-last-used";
 export * from "./use-connector-alert";
 export * from "./use-connector-tools";
+export * from "./use-activity-feed";
 export * from "./use-resource-categories";
 export * from "./use-resource-guard";
 export * from "./use-running-runs";

@@ -1,0 +1,198 @@
+/**
+ * Shared renderer for the unified activity feed (``GET /v1/activity``) — used by
+ * the project-home tabs (scoped) and the global 动态 history list. Chats + task
+ * entities interleaved by time bucket, with a keyset "load more". The caller
+ * owns the feed (``useActivityFeed``); this component only renders it.
+ */
+import { useState } from "react";
+
+import { useTranslation } from "@valuz/core";
+import type { ActivityFeed, ActivityItem } from "@valuz/core";
+import { StatusPill } from "@valuz/ui";
+import { Clock3, ListChecks, MessageSquare } from "lucide-react";
+
+import { BUCKET_KEY, groupByTimeBucket } from "../lib/time-buckets";
+import { RenameInput } from "./RenameInput";
+import { RowActionsMenu } from "./RowActionsMenu";
+import { formatCreatedAt } from "./format-created-at";
+
+// Session status -> i18n key for the right-edge StatusPill on chat rows. The
+// pill draws its color tone from the same status string via ``status-tone``.
+const SESSION_STATUS_KEY: Record<string, string> = {
+  running: "activity.statusRunning",
+  idle: "activity.statusIdle",
+  failed: "activity.statusFailed",
+  cancelled: "activity.statusStopped",
+  archived: "activity.statusStopped",
+};
+
+// Task status -> i18n key for task rows.
+const TASK_STATUS_KEY: Record<string, string> = {
+  draft: "task.statusDraft",
+  active: "task.statusActive",
+  paused: "task.statusPaused",
+  stopped: "task.statusStopped",
+  completed: "task.statusCompleted",
+  failed: "task.statusFailed",
+  blocked: "task.statusBlocked",
+};
+
+export interface ActivityFeedListProps {
+  feed: ActivityFeed;
+  onOpenSession: (id: string) => void;
+  onOpenTask: (id: string) => void;
+  onRenameConfirm: (id: string, value: string) => void;
+  onDeleteSession: (id: string, title: string) => void;
+  /** Hide the leading 对话/任务/自动化 chip (the 自动化 tab is already scoped). */
+  hideScopeTag?: boolean;
+  /** Append the project name after the title — the global 动态 list wants it. */
+  showProjectName?: boolean;
+  emptyLabel: string;
+}
+
+export const ActivityFeedList = ({
+  feed,
+  onOpenSession,
+  onOpenTask,
+  onRenameConfirm,
+  onDeleteSession,
+  hideScopeTag,
+  showProjectName,
+  emptyLabel,
+}: ActivityFeedListProps) => {
+  const { t } = useTranslation();
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const { items, loading, loadingMore, hasMore, loadMore } = feed;
+
+  if (loading && items.length === 0) {
+    return (
+      <div className="px-3 py-12 text-center text-sm text-ink-meta">
+        {t("common.loading" as Parameters<typeof t>[0])}
+      </div>
+    );
+  }
+  if (items.length === 0) {
+    return (
+      <div className="px-3 py-12 text-center text-sm text-ink-meta">
+        {emptyLabel}
+      </div>
+    );
+  }
+
+  const grouped = groupByTimeBucket(items, (item) => item.sort_at);
+
+  const renderItem = (item: ActivityItem) => {
+    const Icon = item.is_automation
+      ? Clock3
+      : item.kind === "task"
+        ? ListChecks
+        : MessageSquare;
+    const statusKey =
+      item.kind === "task"
+        ? TASK_STATUS_KEY[item.status]
+        : SESSION_STATUS_KEY[item.status];
+    if (item.kind === "chat" && renamingId === item.id) {
+      return (
+        <li key={`${item.kind}-${item.id}`}>
+          <div className="flex w-full items-center gap-2 rounded-xl px-3 py-3">
+            <RenameInput
+              initial={item.title}
+              onConfirm={(v) => {
+                onRenameConfirm(item.id, v);
+                setRenamingId(null);
+              }}
+              onCancel={() => setRenamingId(null)}
+            />
+          </div>
+        </li>
+      );
+    }
+    return (
+      <li key={`${item.kind}-${item.id}`} className="group relative">
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={() =>
+            item.kind === "task" ? onOpenTask(item.id) : onOpenSession(item.id)
+          }
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              if (item.kind === "task") onOpenTask(item.id);
+              else onOpenSession(item.id);
+            }
+          }}
+          className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
+        >
+          {!hideScopeTag && (
+            <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
+              <Icon className="h-3 w-3" strokeWidth={2} />
+              {item.is_automation
+                ? t("activity.automationTag" as Parameters<typeof t>[0])
+                : item.kind === "task"
+                  ? t("project.tasksColumn" as Parameters<typeof t>[0])
+                  : t("project.chatTab" as Parameters<typeof t>[0])}
+            </span>
+          )}
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
+            {item.title}
+            {showProjectName && item.project_name && (
+              <span className="ml-2 text-[11px] font-normal text-ink-meta">
+                · {item.project_name}
+              </span>
+            )}
+          </span>
+          <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
+            {formatCreatedAt(item.sort_at, t)}
+          </span>
+          <span className="relative inline-flex min-w-6 shrink-0 items-center justify-center">
+            {statusKey && (
+              <StatusPill
+                status={item.status}
+                label={t(statusKey as Parameters<typeof t>[0])}
+                className={
+                  item.kind === "chat"
+                    ? "transition-opacity group-hover:opacity-0 group-has-[[data-state=open]]:opacity-0"
+                    : undefined
+                }
+              />
+            )}
+            {item.kind === "chat" && (
+              <RowActionsMenu
+                onRename={() => setRenamingId(item.id)}
+                onDelete={() => onDeleteSession(item.id, item.title)}
+              />
+            )}
+          </span>
+        </div>
+      </li>
+    );
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      {grouped.map(([bucket, bucketItems]) => (
+        <div key={bucket}>
+          <div className="mb-1.5 px-3 text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+            {t(BUCKET_KEY[bucket] as Parameters<typeof t>[0])}
+          </div>
+          <ul className="flex flex-col">{bucketItems.map(renderItem)}</ul>
+        </div>
+      ))}
+      {hasMore && (
+        <div className="px-3">
+          <button
+            type="button"
+            onClick={loadMore}
+            disabled={loadingMore}
+            className="w-full rounded-lg border border-surface-border py-2 text-xs text-ink-body transition-colors hover:bg-surface-soft disabled:opacity-50"
+          >
+            {loadingMore
+              ? t("common.loading" as Parameters<typeof t>[0])
+              : t("conversation.showMore" as Parameters<typeof t>[0])}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};

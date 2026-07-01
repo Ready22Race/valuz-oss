@@ -31,3 +31,5 @@ export { TaskStatusLabel } from "./TaskStatusLabel";
 export { RowActionsMenu } from "./RowActionsMenu";
 export { RenameInput } from "./RenameInput";
 export { formatCreatedAt } from "./format-created-at";
+export { ActivityFeedList } from "./ActivityFeedList";
+export type { ActivityFeedListProps } from "./ActivityFeedList";
