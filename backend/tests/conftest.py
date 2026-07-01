@@ -130,6 +130,8 @@ def _apply_default_user_id_patches():
         (parser_routing, "get_plugin_config"),
         (parser_routing, "update_plugin_config"),
         (setup_jobs_base.SetupJobController, "get"),
+        (setup_jobs_base.SetupJobController, "start"),
+        (setup_jobs_base.SetupJobController, "cancel"),
         (setup_jobs_base.SetupJobController, "_write_row"),
         (setup_jobs_base.SetupJobController, "_update_progress"),
         (decisions_service, "enrich_pending"),
