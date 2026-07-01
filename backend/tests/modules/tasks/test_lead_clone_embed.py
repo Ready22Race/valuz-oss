@@ -46,7 +46,7 @@ def _build_lead_request(monkeypatch: pytest.MonkeyPatch):
         list_by_project=_as_async(lambda _uid, _pid: []),
     )
     monkeypatch.setattr(
-        agent_resolver, "_member_agent_config", _as_async(lambda _m, _ds: fake_agent)
+        agent_resolver, "_member_agent_config", _as_async(lambda _m, _ds, **_kw: fake_agent)
     )
     monkeypatch.setattr(
         agent_resolver, "resolve_skill_slugs_to_paths", _as_async(lambda *a, **k: [])
