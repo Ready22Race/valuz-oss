@@ -706,18 +706,21 @@ class SeatbeltDriver:
         # boot — same source the kernel's AppConfig reads. A Postgres-backed data
         # service (pg/remote) means the sandbox reaches the host DataService over
         # HTTP+JWT and never holds the DSN.
-        if os.environ.get("KERNEL_STORE", "local") in ("pg", "remote") and ctx.host_callback_url:
+        # Owner is the local device user here; the multi-tenant cloud driver
+        # passes the request principal instead (same helper — see
+        # ``boot/data_service_inject``). The helper no-ops on a local store.
+        if ctx.host_callback_url:
             from valuz_agent.api.deps import _secret_store
-            from valuz_agent.boot.kernel import mint_data_service_token
-            from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
+            from valuz_agent.boot.data_service_inject import data_service_env
             from valuz_agent.infra.local_identity import resolve_local_user_id
 
-            owner = resolve_local_user_id()
-            secret = get_or_create_ds_secret(_secret_store(), owner)
-            env["KERNEL_STORE"] = "remote"
-            env["VALUZ_DATA_API_KIND"] = "http"
-            env["VALUZ_DATA_API_URL"] = ctx.host_callback_url.rstrip("/") + "/internal/data"
-            env["VALUZ_DATA_API_TOKEN"] = mint_data_service_token(secret, user_id=owner)
+            env.update(
+                data_service_env(
+                    owner_user_id=resolve_local_user_id(),
+                    host_callback_url=ctx.host_callback_url,
+                    secret_store=_secret_store(),
+                )
+            )
         spec = SandboxSpec(
             sandbox_id="host-kernel",
             kernel_db_path=str(kernel_db),
