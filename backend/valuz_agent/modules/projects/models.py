@@ -27,4 +27,4 @@ class ProjectRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
 
 class ProjectCreateRequest(BaseModel):
     name: str
-    root_path: str
+    root_path: str | None = None

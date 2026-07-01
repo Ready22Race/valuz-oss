@@ -84,6 +84,38 @@ async def create_project(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/{project_id}/files", status_code=201)
+async def upload_project_files(
+    project_id: str,
+    files: list[UploadFile] = File(...),
+    user_id: str = Depends(get_current_user_id),
+    svc: ProjectService = Depends(get_project_service),
+) -> dict[str, object]:
+    """Upload one or more files into the project's cwd (multipart form).
+
+    Each upload's ``filename`` is the target relative path (must be
+    relative; parent dirs are created). Used by cloud-managed projects
+    whose cwd the client cannot reach directly; equally valid locally.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    written: list[str] = []
+    try:
+        for upload in files:
+            data = await upload.read()
+            rel = await svc.write_file(
+                user_id, project_id, upload.filename or "", data
+            )
+            written.append(rel)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=f"Unknown project: {project_id}"
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"project_id": project_id, "written": written}
+
+
 @router.patch("/{project_id}")
 async def rename_project(
     project_id: str,

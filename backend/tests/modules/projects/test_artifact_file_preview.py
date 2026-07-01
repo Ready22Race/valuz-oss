@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from valuz_agent.modules.projects.models import ProjectRow
@@ -240,3 +242,57 @@ async def test_read_file_rejects_hidden_files(tmp_path) -> None:
 
     with pytest.raises(PermissionError):
         await _service(str(tmp_path)).read_file("user-1", "proj_1", ".env")
+
+
+# ── write_file (multipart upload target) ────────────────────────────
+
+
+async def test_write_file_writes_relative_path(tmp_path) -> None:
+    rel = await _service(str(tmp_path)).write_file("user-1", "proj_1", "doc.txt", b"hello")
+    assert rel == "doc.txt"
+    assert (tmp_path / "doc.txt").read_bytes() == b"hello"
+
+
+async def test_write_file_creates_parent_dirs(tmp_path) -> None:
+    rel = await _service(str(tmp_path)).write_file("user-1", "proj_1", "sub/deep.txt", b"x")
+    assert rel == "sub/deep.txt"
+    assert (tmp_path / "sub" / "deep.txt").read_bytes() == b"x"
+
+
+async def test_write_file_rejects_traversal(tmp_path) -> None:
+    svc = _service(str(tmp_path))
+    with pytest.raises(ValueError):
+        await svc.write_file("user-1", "proj_1", "../escape.txt", b"x")
+    with pytest.raises(ValueError):
+        await svc.write_file("user-1", "proj_1", "/abs.txt", b"x")
+
+
+async def test_create_project_without_root_allocates_managed_cwd(
+    tmp_path, monkeypatch
+) -> None:
+    """create_project(root_path=None) allocates a managed cwd — the
+    cloud/headless path (mirrors create_project_from_pack's managed branch)."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from valuz_agent.infra import fs_registry
+    from valuz_agent.infra.database import Base
+    from valuz_agent.infra.eventbus import EventBus
+    from valuz_agent.modules.projects.datastore import ProjectDatastore
+
+    monkeypatch.setattr(fs_registry.fs_registry, "data_dir", lambda: tmp_path)
+
+    db_file = tmp_path / "proj.db"
+    sync_engine = create_engine(
+        f"sqlite:///{db_file}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(sync_engine, tables=[ProjectRow.__table__])
+    async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
+    sm = async_sessionmaker(bind=async_engine, expire_on_commit=False)
+
+    async with sm() as db:
+        svc = ProjectService(datastore=ProjectDatastore(db), event_bus=EventBus())
+        detail = await svc.create_project("user-1", name="Managed")
+        assert detail.cwd
+        assert Path(detail.cwd).is_dir()
+        assert str(detail.root_path).startswith(str(tmp_path / "projects"))
