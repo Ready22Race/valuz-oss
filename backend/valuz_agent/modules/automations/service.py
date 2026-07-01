@@ -1052,6 +1052,7 @@ class AutomationService:
         *,
         trigger_type: Literal["manual", "agent"] = "manual",
         invoked_by_session_id: str | None = None,
+        extra_input: str | None = None,
         user_id: str | None = None,
     ) -> AutomationRunAcceptedResponse:
         """Enqueue an immediate, off-schedule run for this automation.
@@ -1099,6 +1100,7 @@ class AutomationService:
             status="queued",
             triggered_at=now,
             invoked_by_session_id=invoked_by_session_id,
+            extra_input=(extra_input.strip() or None) if extra_input else None,
         )
         await self._ds.create_run(user_id, run)
         self._bus.publish(

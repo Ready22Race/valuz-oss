@@ -72,7 +72,7 @@ describe("ScheduledTaskTable", () => {
 
     fireEvent.pointerDown(screen.getAllByRole("button", { name: "操作" })[0]);
 
-    expect(screen.getByText("运行测试")).not.toBeNull();
+    expect(screen.getByText("立即运行")).not.toBeNull();
     expect(screen.getByText("执行")).not.toBeNull();
     expect(screen.getByText("删除")).not.toBeNull();
   });

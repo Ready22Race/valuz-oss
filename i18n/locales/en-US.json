@@ -2,6 +2,7 @@
   "automation": {
     "spawnedTask": "Task \"{title}\"",
     "actionCreate": "Create automation",
+    "actionGet": "Details",
     "actionKindChat": "Simple",
     "actionKindChatHint": "One agent run per fire.",
     "actionKindLabel": "Mode",
@@ -471,6 +472,8 @@
     "generatedFile": "Generated file (",
     "hour": "Hour",
     "instruction": "Instruction",
+    "instructionCollapse": "Collapse editor",
+    "instructionExpand": "Expand editor",
     "instructionPlaceholder": "Describe the task for Agent...",
     "lastRunColumn": "Last run",
     "loadFailed": "Failed to load scheduled tasks",

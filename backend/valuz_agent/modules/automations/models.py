@@ -126,3 +126,8 @@ class AutomationRunRow(Base, PrimaryKeyMixin, UserMixin):
     # chain its provenance back to the originating task (transitive
     # task→automation→task nesting). NULL for cron/interval/manual runs.
     invoked_by_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # Per-run extra input appended to the rendered prompt for THIS run only
+    # (not stored on the automation). Set when an agent fires the ``run`` action
+    # with an ``input`` argument — e.g. a triage agent passing a discovered task
+    # id into a manual automation's instruction. NULL for plain runs.
+    extra_input: Mapped[str | None] = mapped_column(Text, nullable=True)

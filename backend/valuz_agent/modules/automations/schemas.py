@@ -283,11 +283,21 @@ class AutomationToolPayload(BaseModel):
     """
 
     action: str = Field(
-        description="One of: create, list, update, pause, resume, run, remove.",
+        description="One of: create, get, list, update, pause, resume, run, remove.",
     )
     automation_id: str | None = None
     name: str | None = Field(default=None, max_length=50)
     prompt_template: str | None = None
+    # ``run`` only: extra text appended to the automation's instruction for THIS
+    # run (e.g. a discovered task id). Ignored by the other actions.
+    input: str | None = Field(
+        default=None,
+        description=(
+            "run only: extra text appended to the automation's instruction for "
+            "this single run (e.g. a task id you discovered). Does NOT modify the "
+            "saved automation."
+        ),
+    )
     trigger: Trigger | None = None
     agent_slug: str | None = None
     # Execution mode on create. ``chat`` (default) runs the bound agent once;

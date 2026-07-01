@@ -627,6 +627,31 @@ def test_auto_finalize_completes_when_no_pending_subtasks(db_factory, tmp_path) 
     assert "task_completed" in _events(db_factory)
 
 
+def test_finalize_actor_threads_user_id_to_auto_finalize(db_factory, tmp_path) -> None:
+    """Regression: ``_finalize_actor`` must forward ``user_id`` to
+    ``_auto_finalize_lead_task``. The task lookup there is owner-scoped, so a
+    dropped owner silently misses and orphans the task ``active`` forever — the
+    exact live bug (lead self-completed inline, empty plan, task stuck active
+    while the session sat ``idle``/end_turn). Drive the full finalize seam (not
+    just ``_auto_finalize_lead_task`` directly) so the threading is covered."""
+    _make_task(db_factory, tmp_path)
+    _make_lead_run(db_factory)
+    orch = TaskOrchestrator()
+    asyncio.run(
+        orch._finalize_actor(
+            session_id="lead-sess",
+            last_content="done inline",
+            final_status="idle",
+            role="lead",
+            task_id="t1",
+            project_id="w1",
+            user_id=OWNER,
+        )
+    )
+    assert _task_status(db_factory) == "completed"
+    assert "task_completed" in _events(db_factory)
+
+
 def test_auto_finalize_blocks_when_plan_has_unresolved_nodes(db_factory, tmp_path) -> None:
     _make_task(db_factory, tmp_path)
     orch = TaskOrchestrator()
