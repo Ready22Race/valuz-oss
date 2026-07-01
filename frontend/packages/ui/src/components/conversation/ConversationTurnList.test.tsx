@@ -234,3 +234,47 @@ describe("ConversationTurnList virtualization", () => {
     expect(indicators[0].textContent).toContain("已处理 2 分");
   });
 });
+
+describe("UserMessageBody skill-tag rendering", () => {
+  it("chips leading commands + real skills — file-path segments stay literal", () => {
+    const turns: ConversationTurn[] = [
+      {
+        id: "t1",
+        userMessageSeq: 1,
+        // ``/goal`` is a leading command; ``/deep-research`` is a real skill;
+        // ``/Users`` / ``/pawa`` are directory segments. A stray whitespace
+        // boundary (here spaces; in the wild a ``\r`` between path parts) is
+        // what lets the token regex match the path segments at all.
+        userText: "/goal 见 /Users /pawa /deep-research 目录",
+        blocks: [],
+        failedMessage: null,
+      },
+    ];
+    const scrollRef = createRef<HTMLDivElement>();
+    const { container } = render(
+      <div ref={scrollRef} style={{ height: 640, overflowY: "auto" }}>
+        <ConversationTurnList
+          turns={turns}
+          scrollContainerRef={scrollRef}
+          sending={false}
+          loading={false}
+          error={null}
+          skillsBySlug={{ "deep-research": { name: "深度研究" } }}
+        />
+      </div>,
+    );
+    const text = container.textContent ?? "";
+    // Non-skill path segments keep their literal ``/slug`` form (a chip would
+    // consume the leading slash and show the bare word).
+    expect(text).toContain("/Users");
+    expect(text).toContain("/pawa");
+    // The real skill renders as a chip showing its display name; its raw
+    // ``/deep-research`` token is consumed into the chip.
+    expect(text).toContain("深度研究");
+    expect(text).not.toContain("/deep-research");
+    // The leading ``/goal`` command chips even though it's not a catalogued
+    // skill — its raw ``/goal`` token is consumed into the chip.
+    expect(text).toContain("goal");
+    expect(text).not.toContain("/goal");
+  });
+});
