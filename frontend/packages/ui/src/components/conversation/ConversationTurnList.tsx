@@ -565,6 +565,12 @@ const UserMessageBody = ({
   skillsBySlug?: Record<string, { name: string }>;
 }) => {
   const skillTokenRe = /(^|\s)\/([a-zA-Z0-9_-]+)(?=\s|$)/g;
+  // The message's leading run of ``/command`` tokens — what the composer
+  // prepends and the backend's ``_SKILL_PREFIX_RE`` strips for the title
+  // (``/goal ``, ``/skill ``, …). Tokens inside it are genuine command / skill
+  // invocations and chip even when they aren't in the skill catalogue.
+  const prefixLen =
+    text.match(/^\s*(?:\/[a-zA-Z0-9_-]+(?:\s+|$))+/)?.[0].length ?? 0;
   const parts: ReactNode[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -572,17 +578,25 @@ const UserMessageBody = ({
   while ((match = skillTokenRe.exec(text)) !== null) {
     const [whole, leading, slug] = match;
     const tokenStart = match.index + leading.length;
+    const entry = skillsBySlug?.[slug];
+    const isLeadingCommand = tokenStart < prefixLen;
+    // Chip a ``/word`` only when it's a known skill OR a leading command. A
+    // bare ``/word`` in the body that's neither — a file-path segment
+    // (``/Users/pawa/Data/…``), a CLI flag, a URL path — is left as literal
+    // text, never a phantom skill tag. (Whitespace, incl. a stray ``\r``
+    // between path segments, is what let the token regex bite a directory
+    // listing in the first place.)
+    if (!entry && !isLeadingCommand) continue;
     if (tokenStart > lastIndex) {
       parts.push(text.slice(lastIndex, tokenStart));
     }
-    const name = skillsBySlug?.[slug]?.name ?? slug;
     parts.push(
       <span
         key={`s-${key++}`}
         className="mr-0.5 inline-flex items-center gap-1 rounded-full border border-brand/20 bg-brand-light px-2 py-0.5 text-2xs text-brand align-middle select-none"
       >
         <Zap className="h-3 w-3" />
-        {name}
+        {entry?.name ?? slug}
       </span>,
     );
     lastIndex = match.index + whole.length;
