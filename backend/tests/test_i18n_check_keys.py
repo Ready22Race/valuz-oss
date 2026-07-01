@@ -45,3 +45,13 @@ class TestCollectDotPaths:
         keys = _collect_dot_paths(data)
         assert "common.save" in keys
         assert "schedule.validation.invalidCron" in keys
+
+    def test_should_include_skill_empty_state_keys(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        expected = {"skill.emptyAction", "skill.emptyDesc", "skill.emptyTitle"}
+
+        for locale in ("en-US", "zh-CN"):
+            path = repo / "i18n" / "locales" / f"{locale}.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            keys = set(_collect_dot_paths(data))
+            assert expected <= keys
