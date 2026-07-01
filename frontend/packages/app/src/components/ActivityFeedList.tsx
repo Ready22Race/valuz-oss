@@ -91,6 +91,18 @@ export const ActivityFeedList = ({
       item.kind === "task"
         ? TASK_STATUS_KEY[item.status]
         : SESSION_STATUS_KEY[item.status];
+    const kindLabel = item.is_automation
+      ? t("activity.automationTag" as Parameters<typeof t>[0])
+      : item.kind === "task"
+        ? t("project.tasksColumn" as Parameters<typeof t>[0])
+        : t("project.chatTab" as Parameters<typeof t>[0]);
+    // Leading scope chip. Global (动态) view prefixes the project name —
+    // ``项目名 · 分类`` (project first, then category), matching the old list;
+    // the project-scoped tabs show just the category.
+    const scopeText =
+      showProjectName && item.project_name
+        ? `${item.project_name} · ${kindLabel}`
+        : kindLabel;
     if (item.kind === "chat" && renamingId === item.id) {
       return (
         <li key={`${item.kind}-${item.id}`}>
@@ -125,22 +137,13 @@ export const ActivityFeedList = ({
           className="flex w-full cursor-default items-center gap-2 rounded-xl px-3 py-3 text-left outline-none transition-colors hover:bg-surface-soft focus-visible:bg-surface-soft"
         >
           {!hideScopeTag && (
-            <span className="inline-flex shrink-0 items-center gap-1 text-[11px] text-ink-muted">
-              <Icon className="h-3 w-3" strokeWidth={2} />
-              {item.is_automation
-                ? t("activity.automationTag" as Parameters<typeof t>[0])
-                : item.kind === "task"
-                  ? t("project.tasksColumn" as Parameters<typeof t>[0])
-                  : t("project.chatTab" as Parameters<typeof t>[0])}
+            <span className="inline-flex max-w-[45%] shrink-0 items-center gap-1 text-[11px] text-ink-muted">
+              <Icon className="h-3 w-3 shrink-0" strokeWidth={2} />
+              <span className="truncate">{scopeText}</span>
             </span>
           )}
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
             {item.title}
-            {showProjectName && item.project_name && (
-              <span className="ml-2 text-[11px] font-normal text-ink-meta">
-                · {item.project_name}
-              </span>
-            )}
           </span>
           <span className="shrink-0 whitespace-nowrap text-[11px] text-ink-meta">
             {formatCreatedAt(item.sort_at, t)}
