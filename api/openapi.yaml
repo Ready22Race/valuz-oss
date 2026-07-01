@@ -36,6 +36,37 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/RunSummary"
+  /v1/activity:
+    get:
+      summary: Unified activity feed (chats + tasks), cursor-paginated
+      operationId: listActivity
+      tags: [activity]
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema: {type: string}
+          description: Scope to one project; omit for the global 动态 feed.
+        - name: tab
+          in: query
+          required: false
+          schema: {type: string, enum: [all, chat, task, automation], default: all}
+        - name: limit
+          in: query
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+        - name: cursor
+          in: query
+          required: false
+          schema: {type: string}
+          description: Opaque keyset cursor from a prior page's next_cursor.
+      responses:
+        "200":
+          description: A page of activity items (newest first)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActivityPage"
   /v1/agents:
     get:
       summary: List official Agents (read-only)
@@ -2938,6 +2969,30 @@ components:
       properties:
         target: {$ref: "#/components/schemas/MemoryTarget"}
         project_id: {type: string}
+    ActivityItem:
+      type: object
+      required: [kind, id, title, status, is_automation, project_id, sort_at]
+      properties:
+        kind: {type: string, enum: [chat, task]}
+        id: {type: string, description: "session id for chats, task id for tasks."}
+        title: {type: string}
+        status: {type: string, description: "session status for chats, task status for tasks."}
+        is_automation: {type: boolean}
+        project_id: {type: string}
+        project_name: {type: string, nullable: true, description: "null for non-project quick chats."}
+        sort_at: {type: integer, format: int64, description: "Unix epoch ms; interleave key + cursor."}
+    ActivityPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityItem"
+        next_cursor:
+          type: string
+          nullable: true
+          description: "Keyset cursor for the next page; null when exhausted."
     RunSummary:
       type: object
       required: [session_id, source_kind, project_id, title, status, updated_at]

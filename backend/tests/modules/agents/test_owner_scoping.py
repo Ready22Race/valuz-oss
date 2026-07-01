@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from valuz_agent.infra.database import Base
@@ -36,6 +37,44 @@ class TestAgentOwnerScoping:
             assert await ds.get_agent("user-A", "a1") is not None
             assert await ds.get_agent("user-B", "a1") is None
             assert {r.slug for r in await ds.list_agents("user-A")} == {"a1"}
+
+    async def test_agent_slug_uniqueness_is_owner_scoped(self, sessionmaker_) -> None:
+        async with sessionmaker_() as db:
+            await AgentDatastore(db).create(
+                "user-A",
+                AgentRow(user_id="local-test-owner", slug="shared", name="A", source="custom"),
+            )
+            await AgentDatastore(db).create(
+                "user-B",
+                AgentRow(user_id="local-test-owner", slug="shared", name="B", source="custom"),
+            )
+
+        async with sessionmaker_() as db:
+            ds = AgentDatastore(db)
+            user_a_agent = await ds.get_agent("user-A", "shared")
+            user_b_agent = await ds.get_agent("user-B", "shared")
+            assert user_a_agent is not None
+            assert user_b_agent is not None
+            assert user_a_agent.name == "A"
+            assert user_b_agent.name == "B"
+
+    async def test_agent_slug_still_unique_within_owner(self, sessionmaker_) -> None:
+        async with sessionmaker_() as db:
+            ds = AgentDatastore(db)
+            await ds.create(
+                "user-A",
+                AgentRow(user_id="local-test-owner", slug="same-owner", name="A", source="custom"),
+            )
+            with pytest.raises(IntegrityError):
+                await ds.create(
+                    "user-A",
+                    AgentRow(
+                        user_id="local-test-owner",
+                        slug="same-owner",
+                        name="A2",
+                        source="custom",
+                    ),
+                )
 
     async def test_agent_delete_is_owner_scoped(self, sessionmaker_) -> None:
         async with sessionmaker_() as db:

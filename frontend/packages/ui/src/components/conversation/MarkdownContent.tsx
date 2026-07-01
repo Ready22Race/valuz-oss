@@ -550,7 +550,11 @@ export const MarkdownContent = memo(function MarkdownContent({
       <div
         id="streamdown"
         className={cn(
-          "text-base leading-[1.7] text-ink-heading",
+          // ``break-words`` (inherited by every descendant) breaks long
+          // unbreakable runs — API-error JSON blobs, URLs, hashes in plain
+          // paragraphs — so they wrap instead of pushing past the message
+          // column's right edge. Inline ``<code>`` keeps its own ``break-all``.
+          "text-base leading-[1.7] text-ink-heading break-words",
           ...RICH_TEXT_OVERRIDES,
           className,
         )}

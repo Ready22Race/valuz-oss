@@ -14,13 +14,18 @@ import {
 import { DirectoryPicker } from "@valuz/ui";
 import { useTranslation } from "@valuz/core";
 import { usePlatform } from "@valuz/app/platform";
+import type { DirectoryFieldMode } from "../layout";
 
 export interface CreateKbDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** ``"managed"`` hides the local-directory picker and creates a
+   * backend-managed KB root (cloud / headless). */
+  directoryFieldMode?: DirectoryFieldMode;
   onSubmit: (data: {
     name: string;
-    root_path: string;
+    /** Undefined when ``directoryFieldMode="managed"``. */
+    root_path?: string;
     auto_discover: boolean;
   }) => Promise<void>;
 }
@@ -28,6 +33,7 @@ export interface CreateKbDialogProps {
 export const CreateKbDialog = ({
   open,
   onOpenChange,
+  directoryFieldMode = "picker",
   onSubmit,
 }: CreateKbDialogProps) => {
   const { t } = useTranslation();
@@ -39,12 +45,13 @@ export const CreateKbDialog = ({
   const [creating, setCreating] = useState(false);
 
   const handleCreate = async () => {
-    if (!name.trim() || !rootPath.trim()) return;
+    const managed = directoryFieldMode === "managed";
+    if (!name.trim() || (!managed && !rootPath.trim())) return;
     setCreating(true);
     try {
       await onSubmit({
         name: name.trim(),
-        root_path: rootPath.trim(),
+        root_path: managed ? undefined : rootPath.trim(),
         auto_discover: autoDiscover,
       });
       onOpenChange(false);
@@ -79,18 +86,30 @@ export const CreateKbDialog = ({
               )}
             />
           </FormField>
-          <FormField
-            label={t("knowledge.sourcePath" as Parameters<typeof t>[0])}
-          >
-            <DirectoryPicker
-              value={rootPath}
-              placeholder={t("knowledge.selectDir" as Parameters<typeof t>[0])}
-              onBrowse={async () => {
-                const dir = await selectDirectory();
-                if (dir) setRootPath(dir);
-              }}
-            />
-          </FormField>
+          {directoryFieldMode === "managed" ? (
+            <FormField
+              label={t("knowledge.sourcePath" as Parameters<typeof t>[0])}
+            >
+              <p className="text-xs text-muted-foreground">
+                {t("knowledge.managedKbHint" as Parameters<typeof t>[0])}
+              </p>
+            </FormField>
+          ) : (
+            <FormField
+              label={t("knowledge.sourcePath" as Parameters<typeof t>[0])}
+            >
+              <DirectoryPicker
+                value={rootPath}
+                placeholder={t(
+                  "knowledge.selectDir" as Parameters<typeof t>[0],
+                )}
+                onBrowse={async () => {
+                  const dir = await selectDirectory();
+                  if (dir) setRootPath(dir);
+                }}
+              />
+            </FormField>
+          )}
           <label className="flex items-center gap-2">
             <Checkbox
               checked={autoDiscover}
@@ -113,7 +132,10 @@ export const CreateKbDialog = ({
           <Button
             onClick={handleCreate}
             loading={creating}
-            disabled={!name.trim() || !rootPath.trim()}
+            disabled={
+              !name.trim() ||
+              (directoryFieldMode !== "managed" && !rootPath.trim())
+            }
           >
             {t("common.create" as Parameters<typeof t>[0])}
           </Button>

@@ -15,7 +15,7 @@ class KnowledgeBaseRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     auto_discover: Mapped[bool] = mapped_column(default=False)
     last_full_scan_at: Mapped[int | None] = mapped_column(BigInteger, default=None)
 
-    __table_args__ = (Index("ux_kb_root_path", "root_path", unique=True),)
+    __table_args__ = (Index("ux_kb_user_root_path", "user_id", "root_path", unique=True),)
 
 
 class KbFolderRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):

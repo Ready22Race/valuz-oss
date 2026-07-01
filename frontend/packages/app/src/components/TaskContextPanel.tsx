@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Bot,
   CheckCircle2,
@@ -78,6 +78,14 @@ export interface TaskContextPanelProps {
   /** The lead's subtask plan (from the latest ``task_plan_update`` event).
    *  Empty until the lead calls ``plan_task``. */
   plannedSubtasks?: PlannedSubtask[];
+  /** Task-header status (active / paused / stopped / completed / blocked …).
+   *  Used to de-spin subtasks on a halted task: the backend only parks
+   *  ``in_progress`` nodes on pause/stop and deliberately leaves ``in_review``
+   *  / ``rework`` intact (so resume doesn't re-run already-delivered work) —
+   *  but both project to the spinning ``active`` panel state. When the task is
+   *  not ``active`` no member is live, so such nodes render as paused, not
+   *  spinning. */
+  taskStatus?: string;
   /** Project file tree for the project this task runs in. When
    *  provided, the panel switches into a tabbed shell with a "项目文件"
    *  tab alongside the context sections. Absent → tabs hide and we
@@ -126,6 +134,7 @@ export const TaskContextPanel = ({
   runs,
   members,
   plannedSubtasks = [],
+  taskStatus,
   fileTree,
   rootPath,
   onRefreshFiles,
@@ -135,6 +144,16 @@ export const TaskContextPanel = ({
 }: TaskContextPanelProps) => {
   const { t } = useTranslation();
   const [planReviewOpen, setPlanReviewOpen] = useState(false);
+  // On a halted task (anything but ``active``) no member is live, yet the
+  // backend leaves ``in_review`` / ``rework`` nodes projected as the spinning
+  // ``active`` panel state (it parks only ``in_progress``). Surface those as
+  // ``paused`` so the panel stops spinning — display-only; the internal node
+  // status is untouched and resume reconciles it.
+  const displaySubtaskStatus = useCallback(
+    (status: string): string =>
+      taskStatus !== "active" && status === "active" ? "paused" : status,
+    [taskStatus],
+  );
 
   // slug → AgentSummary, so each team row can show the bound model
   // without an extra API roundtrip.
@@ -349,10 +368,12 @@ export const TaskContextPanel = ({
                           .join(", ")}
                       </span>
                     )}
-                    <SubtaskStatusChip status={task.status} />
+                    <SubtaskStatusChip
+                      status={displaySubtaskStatus(task.status)}
+                    />
                   </div>
                 </div>
-                <StatusIcon status={task.status} />
+                <StatusIcon status={displaySubtaskStatus(task.status)} />
               </li>
             ))}
           </ol>

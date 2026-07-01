@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
-from valuz_agent.api.deps import get_document_service, get_current_user_id
+from valuz_agent.api.deps import get_current_user_id, get_document_service
+from valuz_agent.modules.docs.errors import KbNotFound
 from valuz_agent.modules.docs.service import (
     DocSearchHit,
     DocumentDetail,
@@ -22,7 +23,7 @@ router = APIRouter(tags=["docs"])
 
 class CreateKbRequest(BaseModel):
     name: str
-    root_path: str
+    root_path: str | None = None
     parser_routing: str = "local_only"
     auto_discover: bool = False
 
@@ -125,6 +126,33 @@ async def rescan_kb(
     # would otherwise hold the request open for many seconds and
     # freeze the dialog / button. Progress is polled via
     # /v1/docs/tasks/{task_id}.
+    return await svc.start_rescan_kb(user_id, kb_id)
+
+
+@router.post("/v1/kb/{kb_id}/files", status_code=201)
+async def upload_kb_files(
+    kb_id: str,
+    files: list[UploadFile] = File(...),
+    user_id: str = Depends(get_current_user_id),
+    svc: DocumentLibraryService = Depends(get_document_service),
+) -> ImportTaskResult:
+    """Upload one or more documents into the KB's root dir (multipart form).
+
+    Each upload's ``filename`` is the target relative path (parent dirs are
+    created). After writing all files a rescan is kicked off so the new docs
+    are parsed + indexed; the rescan task row is returned so the caller can
+    poll progress via ``GET /v1/docs/tasks/{task_id}``.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    try:
+        for upload in files:
+            data = await upload.read()
+            await svc.write_file(user_id, kb_id, upload.filename or "", data)
+    except KbNotFound as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown KB: {kb_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return await svc.start_rescan_kb(user_id, kb_id)
 
 

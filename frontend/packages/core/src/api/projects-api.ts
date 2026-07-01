@@ -201,7 +201,8 @@ export interface LastSessionPick {
 
 export interface ProjectCreateRequest {
   name: string;
-  root_path: string;
+  /** Omit/empty to allocate a backend-managed cwd (cloud / headless). */
+  root_path?: string;
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
@@ -212,7 +213,11 @@ function filenameFromDisposition(header: string | null): string {
 }
 
 function absolutizeApiUrl(url: string): string {
-  if (/^https?:\/\//i.test(url) || url.startsWith("data:") || url.startsWith("blob:")) {
+  if (
+    /^https?:\/\//i.test(url) ||
+    url.startsWith("data:") ||
+    url.startsWith("blob:")
+  ) {
     return url;
   }
   if (!url.startsWith("/")) return url;
@@ -263,12 +268,9 @@ export const projectsApi = {
 
   rename(projectId: string, name: string): Promise<ProjectDetail> {
     const qs = new URLSearchParams({ name });
-    return fetchJson(
-      `/v1/projects/${encodeURIComponent(projectId)}?${qs}`,
-      {
-        method: "PATCH",
-      },
-    );
+    return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}?${qs}`, {
+      method: "PATCH",
+    });
   },
 
   updateInstructions(
@@ -325,10 +327,7 @@ export const projectsApi = {
     );
   },
 
-  setMcpServers(
-    projectId: string,
-    slugs: string[],
-  ): Promise<{ ok: boolean }> {
+  setMcpServers(projectId: string, slugs: string[]): Promise<{ ok: boolean }> {
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/connectors`,
       {

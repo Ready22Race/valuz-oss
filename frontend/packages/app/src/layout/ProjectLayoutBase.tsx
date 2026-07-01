@@ -87,12 +87,17 @@ import { ExportProjectDialog } from "../components/ExportProjectDialog";
 import { ImportProjectDialog } from "../components/ImportProjectDialog";
 import type { ProjectOutletContext } from "./types";
 
-export type DirectoryFieldMode = "input" | "picker";
+export type DirectoryFieldMode = "input" | "picker" | "managed";
 
 export interface ProjectLayoutBaseProps {
   logoSrc: string;
   logoMenuContentStyle?: CSSProperties;
   directoryFieldMode?: DirectoryFieldMode;
+  /** When ``directoryFieldMode="managed"``, invoked after a project is
+   * created so the host can offer an upload flow into the managed cwd
+   * (overlay editions wire this to their multipart upload UI). OSS leaves
+   * it unset — an empty managed project. */
+  onUploadInitialContent?: (projectId: string) => Promise<void>;
   /** Rendered at the very top of the sidebar, above "新对话". Overlay
    * editions inject an org / account switcher here. */
   sidebarHeader?: ReactNode;
@@ -134,6 +139,7 @@ export function ProjectLayoutBase({
   logoSrc,
   logoMenuContentStyle,
   directoryFieldMode = "picker",
+  onUploadInitialContent,
   sidebarHeader,
   sidebarExtraItems,
   topbarActions,
@@ -202,7 +208,10 @@ export function ProjectLayoutBase({
   // (``/`` redirects to ``/conversation/new``) forces a fresh check so a status
   // that flipped during the gap shows up at once instead of on the next tick.
   useEffect(() => {
-    if (location.pathname === "/conversation/new" || location.pathname === "/") {
+    if (
+      location.pathname === "/conversation/new" ||
+      location.pathname === "/"
+    ) {
       refreshConnectorAlert();
     }
   }, [location.pathname]);
@@ -484,7 +493,9 @@ export function ProjectLayoutBase({
     }
     // Tasks / anything else: match the route against the run items.
     for (const [pid, items] of projectRunItems) {
-      if (items.some((it) => path === it.href || path.startsWith(`${it.href}/`)))
+      if (
+        items.some((it) => path === it.href || path.startsWith(`${it.href}/`))
+      )
         return pid;
     }
     return null;
@@ -493,13 +504,14 @@ export function ProjectLayoutBase({
   const handleCreateProject = async () => {
     const trimmedName = newName.trim();
     const trimmedPath = newRootPath.trim();
-    if (!trimmedName || !trimmedPath) return;
+    const managed = directoryFieldMode === "managed";
+    if (!trimmedName || (!managed && !trimmedPath)) return;
     setCreateError("");
     try {
-      const ws = await projectsApi.create({
-        name: trimmedName,
-        root_path: trimmedPath,
-      });
+      const payload = managed
+        ? { name: trimmedName }
+        : { name: trimmedName, root_path: trimmedPath };
+      const ws = await projectsApi.create(payload);
       const failed = await memberPicker.deploy(ws.id);
       if (failed > 0) {
         toast.warning(t("project.deployPartialFail", { count: failed }));
@@ -511,6 +523,9 @@ export function ProjectLayoutBase({
       setCreateOpen(false);
       await fetchProjects();
       navigate(`/projects/${ws.id}`);
+      if (managed && onUploadInitialContent) {
+        void onUploadInitialContent(ws.id);
+      }
     } catch (err) {
       const message =
         err instanceof Error ? err.message : t("project.createFailed");
@@ -709,7 +724,9 @@ export function ProjectLayoutBase({
                     <DropdownMenuTrigger asChild>
                       <button
                         type="button"
-                        aria-label={t("cli.menuLabel" as Parameters<typeof t>[0])}
+                        aria-label={t(
+                          "cli.menuLabel" as Parameters<typeof t>[0],
+                        )}
                         className="flex h-[22px] w-[22px] items-center justify-center rounded-[5px] text-ink-body transition-colors hover:bg-surface-muted"
                       >
                         <Menu className="h-4 w-4" />
@@ -734,7 +751,9 @@ export function ProjectLayoutBase({
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem
-                        onSelect={() => void platform.windowToggleFullscreen?.()}
+                        onSelect={() =>
+                          void platform.windowToggleFullscreen?.()
+                        }
                       >
                         <Maximize className="mr-2 h-3.5 w-3.5" />
                         Toggle Fullscreen
@@ -912,60 +931,76 @@ export function ProjectLayoutBase({
                 onChange={(event) => setNewName(event.target.value)}
               />
             </div>
-            <div className="flex flex-col">
-              <label className="mb-[5px] text-xs font-medium text-foreground">
-                {t("project.projectDir")}
-              </label>
-              <div className="flex items-center gap-2">
-                {directoryFieldMode === "picker" && platform.isElectron ? (
-                  <button
-                    type="button"
-                    className="flex h-8 flex-1 items-center rounded-lg border border-input bg-surface px-2.5 text-sm text-foreground transition-[border-color,box-shadow,color,background-color] hover:border-ring focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 focus-visible:outline-none"
-                    onClick={() => void handleSelectDirectory()}
-                  >
-                    <span
-                      className={
-                        newRootPath
-                          ? "truncate text-foreground"
-                          : "text-muted-foreground"
-                      }
-                    >
-                      {newRootPath || t("project.selectDir")}
-                    </span>
-                  </button>
-                ) : (
-                  <Input
-                    value={newRootPath}
-                    onChange={(event) => {
-                      setNewRootPath(event.target.value);
-                      setCreateError("");
-                    }}
-                    placeholder={t("project.selectDir")}
-                    className="flex-1"
-                  />
-                )}
-                {platform.isElectron ? (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-8 shrink-0"
-                    onClick={() => void handleSelectDirectory()}
-                  >
-                    <FolderOpen className="mr-1.5 h-4 w-4" />
-                    {t("project.browse")}
-                  </Button>
+            {directoryFieldMode === "managed" ? (
+              <div className="flex flex-col">
+                <label className="mb-[5px] text-xs font-medium text-foreground">
+                  {t("project.projectDir")}
+                </label>
+                <p className="text-xs text-muted-foreground">
+                  {t("project.managedDirHint")}
+                </p>
+                {createError ? (
+                  <p className="mt-[3px] text-xs text-destructive">
+                    {createError}
+                  </p>
                 ) : null}
               </div>
-              <p className="mt-[3px] text-xs text-muted-foreground">
-                {t("project.dirHint")}
-              </p>
-              {createError ? (
-                <p className="mt-[3px] text-xs text-destructive">
-                  {createError}
+            ) : (
+              <div className="flex flex-col">
+                <label className="mb-[5px] text-xs font-medium text-foreground">
+                  {t("project.projectDir")}
+                </label>
+                <div className="flex items-center gap-2">
+                  {directoryFieldMode === "picker" && platform.isElectron ? (
+                    <button
+                      type="button"
+                      className="flex h-8 flex-1 items-center rounded-lg border border-input bg-surface px-2.5 text-sm text-foreground transition-[border-color,box-shadow,color,background-color] hover:border-ring focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 focus-visible:outline-none"
+                      onClick={() => void handleSelectDirectory()}
+                    >
+                      <span
+                        className={
+                          newRootPath
+                            ? "truncate text-foreground"
+                            : "text-muted-foreground"
+                        }
+                      >
+                        {newRootPath || t("project.selectDir")}
+                      </span>
+                    </button>
+                  ) : (
+                    <Input
+                      value={newRootPath}
+                      onChange={(event) => {
+                        setNewRootPath(event.target.value);
+                        setCreateError("");
+                      }}
+                      placeholder={t("project.selectDir")}
+                      className="flex-1"
+                    />
+                  )}
+                  {platform.isElectron ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8 shrink-0"
+                      onClick={() => void handleSelectDirectory()}
+                    >
+                      <FolderOpen className="mr-1.5 h-4 w-4" />
+                      {t("project.browse")}
+                    </Button>
+                  ) : null}
+                </div>
+                <p className="mt-[3px] text-xs text-muted-foreground">
+                  {t("project.dirHint")}
                 </p>
-              ) : null}
-            </div>
+                {createError ? (
+                  <p className="mt-[3px] text-xs text-destructive">
+                    {createError}
+                  </p>
+                ) : null}
+              </div>
+            )}
             <div className="space-y-2">
               <label className="text-sm font-medium text-foreground">
                 {t("project.deployAgents")}
@@ -980,7 +1015,10 @@ export function ProjectLayoutBase({
             </Button>
             <Button
               onClick={() => void handleCreateProject()}
-              disabled={!newName.trim() || !newRootPath.trim()}
+              disabled={
+                !newName.trim() ||
+                (directoryFieldMode !== "managed" && !newRootPath.trim())
+              }
             >
               {t("project.create")}
             </Button>

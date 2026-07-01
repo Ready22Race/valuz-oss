@@ -30,10 +30,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from valuz_agent.infra.auth_context import (
-    reset_current_user_id,
-    set_current_user_id,
-)
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.agent_resolver import spill_goal_brief_if_too_long
 from valuz_agent.infra.db import async_unit_of_work
@@ -60,6 +56,12 @@ Disposition = Literal["resume", "completed", "failed", "in_flight"]
 # Resume retry cap (VALUZ-RESUME §5.0): a member node may be resumed at most this
 # many times before we give up and hand it back to the lead as rework.
 RESUME_RETRY_CAP = 3
+
+
+def _require_user_id(user_id: str | None) -> str:
+    if user_id is None:
+        raise ValueError("user_id is required")
+    return user_id
 
 
 def _stop_reason_dict(stop_reason: Any) -> dict[str, Any]:
@@ -208,22 +210,19 @@ class RecoveryService:
         Best-effort + idempotent (re-running converges on current run/node state).
         """
         async with async_unit_of_work(commit=False) as db:
-            # Cross-owner boot sweep: capture each task's owner so the per-task
-            # recovery below runs under that owner's identity (the downstream
-            # datastore reads are owner-scoped by explicit user_id parameters).
+            # Cross-owner boot sweep: capture each task's owner so per-task
+            # recovery runs under that owner (downstream reads are owner-scoped
+            # by explicit user_id parameters).
             active = [
                 (t.id, t.project_id, t.user_id) for t in await TaskDatastore(db).list_active()
             ]
         recovered = 0
         for task_id, project_id, user_id in active:
-            token = set_current_user_id(user_id)
             try:
                 if await self._recover_one_task(task_id, project_id, user_id=user_id):
                     recovered += 1
             except Exception:  # noqa: BLE001
                 logger.exception("recover_active_tasks: failed for task %s", task_id)
-            finally:
-                reset_current_user_id(token)
         if recovered:
             logger.warning(
                 "recover_active_tasks: reconciled + re-drove %d active task(s)", recovered
@@ -233,19 +232,18 @@ class RecoveryService:
     async def _recover_one_task(
         self, task_id: str, project_id: str, user_id: str | None = None
     ) -> bool:
-        if user_id is None:
-            raise ValueError("user_id is required")
-
         """Reconcile one active task's members + re-drive its lead.
 
         Used by both Layer 1 (startup) and Layer 2 (user 'resume'). Returns False
         if the task isn't recoverable (gone / no lead run).
         """
         from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
+        from valuz_agent.modules.tasks.recovery import reconcile
 
         member_done: list[tuple[str, dict[str, Any]]] = []
         # (session_id, brief, run_dir, agent_slug, subtask_key) — run_dir + slug
-        # + key let us spill an over-cap resume brief before re-injecting it.
+        # + key let us spill an over-cap resume brief to a doc before re-injecting
+        # it into the member's goal-mode session.
         resume_members: list[tuple[str, str, str, str, str]] = []
         summary: list[str] = []
         lead_session_id: str | None = None
@@ -330,6 +328,23 @@ class RecoveryService:
                     user_id=user_id,
                 )
 
+        # Evict any stale kernel runtime BEFORE respawning so each resumed turn
+        # builds a FRESH one. Load-bearing for pause→resume: the pause
+        # ``interrupt`` cancels the in-flight turn and leaves the runtime's SDK
+        # client in a broken/cancelled state cached in the kernel orchestrator's
+        # ``_runtimes``; ``_ensure_runtime`` would reuse it and the resumed turn
+        # immediately cancels (9s, null output) → the lead loop ends with an
+        # errored ``stop_reason`` → ``_auto_finalize`` blocks the task. Doing it
+        # HERE — right before respawn, not in the old loop's async
+        # ``_finalize_actor`` — is race-free: the old loop has already exited and
+        # the new one hasn't built its runtime yet. On Layer-1 startup recovery
+        # the cache is empty so it's a harmless no-op.
+        async def _evict_runtime(sid: str) -> None:
+            try:
+                await kernel_client.cleanup_runtime(sid)
+            except Exception:  # noqa: BLE001
+                pass
+
         # Re-drive (outside the DB txn): register the lead mailbox, deliver any
         # completed members' results, respawn resumable members (kernel run_turn
         # on the persisted session), then respawn the lead with a reconcile brief.
@@ -340,10 +355,12 @@ class RecoveryService:
                 InboxMsg(kind="member_done", from_session=member_sid, payload=manifest),
             )
         for member_sid, brief, m_run_dir, m_slug, m_key in resume_members:
+            await _evict_runtime(member_sid)
             self._members.add_member(task_id, member_sid)
             resume_prompt = brief or "继续完成你的子任务,完成后会汇报给 lead。"
-            # Fence the goal-mode re-injection: spill an over-cap subtask goal to
-            # a doc and re-inject a short pointer (same fence as first dispatch).
+            # Fence the goal-mode re-injection: an over-cap subtask goal would
+            # blow the ``/goal`` payload again on resume — spill it to a doc and
+            # re-inject a short pointer instead (same fence as first dispatch).
             if brief and m_run_dir:
                 resume_prompt = spill_goal_brief_if_too_long(
                     brief,
@@ -362,6 +379,7 @@ class RecoveryService:
                     user_id=user_id,
                 )
             )
+        await _evict_runtime(lead_session_id)
         lead_brief = (
             "<system-recovery>\n本任务已被恢复(系统重启或用户恢复)。子任务对账结果:\n"
             + ("\n".join(summary) if summary else "(无在途子任务)")
@@ -391,28 +409,49 @@ class RecoveryService:
         between turns has no live runtime (``interrupt`` returns False), and the
         ``shutdown`` mailbox message is what stops its actor loop instead.
         """
+        user_id = _require_user_id(user_id)
         try:
-            from valuz_agent.adapters import kernel_client
-
             await kernel_client.interrupt(user_id, session_id)
         except Exception:  # noqa: BLE001
             logger.warning("interrupt failed for session %s", session_id, exc_info=True)
 
-    async def stop_task(self, task_id: str, project_id: str, user_id: str | None = None) -> bool:
-        """User-initiated cascade stop → ``paused`` (recoverable).
+    async def stop_task(
+        self,
+        task_id: str,
+        project_id: str,
+        *,
+        target_status: str = "paused",
+        user_id: str | None = None,
+    ) -> bool:
+        """User-initiated cascade halt → ``paused`` (pause) or ``stopped`` (stop).
 
         Interrupts the lead + every in-flight member, broadcasts ``shutdown`` to
-        their actor loops, flips in-flight member runs ``active→paused`` and the
-        task ``→paused``. ``paused`` is deliberate: Layer-1 app-restart recovery
-        skips it; the user resumes explicitly via ``resume_task``. Only acts on an
-        ``active`` task. Returns False if the task is gone / not active.
+        their actor loops, parks in-flight member runs ``→paused`` AND their
+        running plan nodes (``in_progress`` → ``paused``) so the panel stops
+        rendering them as actively running, then flips the task to
+        ``target_status``:
+
+          * ``paused`` — recoverable pause. Layer-1 app-restart recovery skips it;
+            the user resumes explicitly via ``resume_task``. Only from ``active``.
+          * ``stopped`` — user-driven stop. Soft-terminal in the UI (no resume
+            button) but still revivable via chat/inject (``resume_task`` accepts
+            it). From ``active`` or an already-``paused`` task.
+
+        Members + plan nodes are parked identically for both (``stopped`` stays
+        revivable by design); only the task status + the emitted event differ.
+        Returns False if the task is gone or the transition is illegal.
         """
+        user_id = _require_user_id(user_id)
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             run_ds = TaskSessionDatastore(db)
             event_ds = TaskEventDatastore(db)
             task = await task_ds.get_task_by_project(user_id, project_id, task_id)
-            if task is None or task.status != "active":
+            if task is None:
+                return False
+            # pause: only an active task. stop: an active OR already-paused task.
+            allowed_from = ("active",) if target_status == "paused" else ("active", "paused")
+            if task.status not in allowed_from:
                 return False
             runs = await run_ds.list_runs(user_id, task_id)
             lead_session_id: str | None = next(
@@ -423,21 +462,48 @@ class RecoveryService:
             ]
             for sid in member_sids:
                 await run_ds.update_run_by_session(session_id=sid, status="paused")
-            await task_ds.update_task_status(user_id, task_id, "paused")
+            # Park only the running member's node (``in_progress`` = a live
+            # member session, the one we're halting) → ``paused`` so the panel
+            # stops spinning it. Leave ``in_review`` (member finished, awaiting
+            # the lead's review — parking would lose that) and ``rework``
+            # (awaiting re-dispatch) alone. On resume, recovery reconcile flips
+            # a parked node back to ``in_progress`` if its run survived;
+            # otherwise it stays ``paused`` and is re-dispatchable (ready_keys +
+            # resolve_dispatch_node both accept ``paused``).
+            plan = TaskPlan.from_dict(task.plan)
+            parked = 0
+            for node in plan.nodes:
+                if node.status == "in_progress":
+                    plan.update_node(node.key, status="paused")
+                    parked += 1
+            if parked:
+                task.plan = plan.to_dict()
+            task.status = target_status
+            await task_ds.update_task(task)
+            if parked:
+                await planning.emit_plan_update(
+                    event_ds,
+                    project_id=project_id,
+                    task_id=task_id,
+                    plan=plan,
+                    actor="user",
+                    session_id=lead_session_id,
+                    user_id=user_id,
+                )
             await event_ds.append_event(
                 user_id,
                 project_id,
                 task_id,
-                "stopped",
+                target_status,  # "paused" | "stopped" — drives UI status + timer
                 actor="user",
                 payload={"members_paused": len(member_sids)},
             )
 
         # Cascade interrupt + shutdown (outside the DB txn).
         for sid in member_sids:
-            await self._interrupt_kernel_session(sid)
+            await self._interrupt_kernel_session(sid, user_id=user_id)
         if lead_session_id is not None:
-            await self._interrupt_kernel_session(lead_session_id)
+            await self._interrupt_kernel_session(lead_session_id, user_id=user_id)
         self._coordination._broadcast_shutdown(task_id)
         if lead_session_id is not None:
             from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
@@ -551,6 +617,7 @@ class RecoveryService:
         run ``→rejected`` and the plan node ``→rework``. The lead decides next
         (redispatch / modify_plan / finish) on its next ``get_plan``.
         """
+        user_id = _require_user_id(user_id)
         from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
 
         async with async_unit_of_work() as db:
@@ -567,9 +634,7 @@ class RecoveryService:
             agent_slug = run.agent_slug
             await run_ds.update_run_by_session(session_id=session_id, status="rejected")
             if subtask_key:
-                task = await task_ds.get_task_by_project(
-                    user_id, project_id, task_id
-                )
+                task = await task_ds.get_task_by_project(user_id, project_id, task_id)
                 if task is not None:
                     plan = TaskPlan.from_dict(task.plan)
                     if plan.get(subtask_key) is not None:
@@ -599,7 +664,7 @@ class RecoveryService:
                 payload={"subtask_key": subtask_key},
             )
 
-        await self._interrupt_kernel_session(session_id)
+        await self._interrupt_kernel_session(session_id, user_id=user_id)
         self._members.discard_member(task_id, session_id)
         if lead_session_id:
             mailbox_registry.put(
