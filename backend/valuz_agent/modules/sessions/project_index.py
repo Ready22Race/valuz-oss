@@ -106,17 +106,21 @@ async def list_chat_index_rows(
     automation: bool | None = None,
     limit: int = 20,
 ) -> list[ProjectSessionRow]:
-    """Chat-kind index rows (newest first) for the unified activity feed.
+    """Chat-kind index rows (most-recently-active first) for the activity feed.
 
-    Host-side keyset page: everything the merge needs — ``created_at`` (the sort
-    key + cursor), ``origin`` (the automation filter), ``project_id`` — lives on
-    the index, so no kernel round-trip is needed just to rank/filter. The top-N
-    winners are enriched with title/status from the kernel by the caller.
+    Host-side keyset page: everything the merge needs — ``updated_at`` (the
+    last-activity sort key + cursor, bumped by ``touch_activity`` each turn),
+    ``origin`` (the automation filter), ``project_id`` — lives on the index, so
+    no kernel round-trip is needed just to rank/filter. The top-N winners are
+    enriched with title/status from the kernel by the caller.
+
+    Ordering by ``updated_at`` (not ``created_at``) is what floats a chat back to
+    the top when it gets a new message.
 
     ``project_id=None`` spans every project (incl. the ``chat-default`` sentinel
     for non-project quick chats) — the global 动态 scope. ``automation`` filters
     by trigger: ``True`` → automation only, ``False`` → user only, ``None`` →
-    both. ``before_ts`` is the keyset cursor (strictly older ``created_at``)."""
+    both. ``before_ts`` is the keyset cursor (strictly older ``updated_at``)."""
     if user_id is None:
         raise ValueError("user_id is required")
     async with async_unit_of_work(commit=False) as db:
@@ -131,9 +135,24 @@ async def list_chat_index_rows(
         elif automation is False:
             stmt = stmt.where(ProjectSessionRow.origin != "automation")
         if before_ts is not None:
-            stmt = stmt.where(ProjectSessionRow.created_at < before_ts)
-        stmt = stmt.order_by(ProjectSessionRow.created_at.desc()).limit(limit)
+            stmt = stmt.where(ProjectSessionRow.updated_at < before_ts)
+        stmt = stmt.order_by(ProjectSessionRow.updated_at.desc()).limit(limit)
         return list((await db.execute(stmt)).scalars().all())
+
+
+async def touch_activity(session_id: str) -> None:
+    """Bump the index row's ``updated_at`` so a chat floats back to the top of
+    the activity feed when it gets a new turn (see ``list_chat_index_rows``).
+
+    SYSTEM write, keyed by the globally-unique kernel ``session_id`` (not
+    owner-scoped). Best-effort: a session with no index row (e.g. a task-internal
+    run, never indexed as a chat) is a silent no-op."""
+    async with async_unit_of_work(commit=True) as db:
+        await db.execute(
+            update(ProjectSessionRow)
+            .where(ProjectSessionRow.session_id == session_id)
+            .values(updated_at=now_ms())
+        )
 
 
 async def project_of(session_id: str) -> str | None:

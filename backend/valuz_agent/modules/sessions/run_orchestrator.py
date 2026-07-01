@@ -112,6 +112,12 @@ async def _run_agent_background(
     post-turn queue drain (docs/design/session-input-queue.md).
     """
     owner_user_id = _require_user_id(user_id)
+    # A new turn is new activity — float this chat back to the top of the
+    # activity feed (project home + 动态) by bumping its index ``updated_at``.
+    # Best-effort; a session with no chat index row is a silent no-op.
+    from valuz_agent.modules.sessions import project_index
+
+    await project_index.touch_activity(session_id)
     meter = _chat_billing_meter(session_id, user_id=owner_user_id)
     await run_session_to_idle(
         session_id,
