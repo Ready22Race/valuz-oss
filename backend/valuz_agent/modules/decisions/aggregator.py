@@ -93,35 +93,63 @@ class DecisionAggregator:
         # multi-tenant host never delivers one owner's inbox to another.
         self._subscribers: list[tuple[str, asyncio.Queue[DecisionStreamEvent]]] = []
         self._lock = asyncio.Lock()
-        self._sub_task: asyncio.Task[None] | None = None
+        # Per-owner live tap tasks + refcounts. One ``subscribe_all_events(owner)``
+        # loop per owner that has ≥1 open SSE subscription; started lazily on the
+        # first subscribe, cancelled when the owner's last subscriber leaves.
+        # (Was a single process-global tap. A multi-tenant host runs one kernel
+        # per owner, so the "all events" stream must be taken per-owner from that
+        # owner's kernel — mirroring event_sse_adapter's history=DataService /
+        # live=kernel split, at cross-session granularity.)
+        self._owner_taps: dict[str, asyncio.Task[None]] = {}
+        self._owner_refs: dict[str, int] = {}
+        # Mode is decided at start(): LOCAL (single process/boot kernel) keeps the
+        # proven single global tap; MULTITENANT (a per-user allocator is bound)
+        # uses per-owner taps on each owner's kernel. Dual-mode so local behavior
+        # is byte-for-byte unchanged.
+        self._multitenant = False
+        self._global_tap: asyncio.Task[None] | None = None
         self._stopped = False
 
     # ---- Lifecycle --------------------------------------------------
 
     async def start(self) -> None:
-        """Hydrate from history + start the broadcast subscription loop.
+        """Decide the mode + (LOCAL only) hydrate history + start the global tap.
 
-        Safe to call repeatedly — second + later calls are no-ops.
+        LOCAL (no per-user allocator / ``BootSingletonAllocator``): behavior is
+        unchanged — one global hydrate + one global broadcast tap.
+        MULTITENANT (a per-user allocator is bound): no global tap; hydration is
+        a per-owner durable read and the live tap is per-owner, started lazily on
+        the first ``subscribe(owner)`` (one kernel per owner → the "all events"
+        stream is inherently per-owner).
         """
-        if self._sub_task is not None:
+        if self._global_tap is not None:
             return
-        await self._hydrate_from_history()
-        self._sub_task = asyncio.create_task(self._broadcast_loop(), name="decisions-aggregator")
+        from valuz_agent.ports.extensions import ext
+        from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator
+
+        alloc = getattr(ext, "sandbox_allocator", None)
+        self._multitenant = alloc is not None and not isinstance(alloc, BootSingletonAllocator)
+        if self._multitenant:
+            logger.info("DecisionAggregator started (multi-tenant, per-owner taps)")
+            return
+        await self._hydrate_all()
+        self._global_tap = asyncio.create_task(self._global_tap_loop(), name="decisions-aggregator")
         logger.info(
-            "DecisionAggregator started; hydrated %d pending entries",
-            len(self._pending),
+            "DecisionAggregator started (local); hydrated %d pending entries", len(self._pending)
         )
 
     async def stop(self) -> None:
-        """Cancel the subscription loop + release the broadcast queue.
-
-        Safe to call from FastAPI shutdown handlers — idempotent.
-        """
+        """Cancel the global tap + every per-owner tap + release queues. Idempotent."""
         self._stopped = True
-        task = self._sub_task
-        self._sub_task = None
-        if task is not None:
+        taps = list(self._owner_taps.values())
+        self._owner_taps.clear()
+        self._owner_refs.clear()
+        if self._global_tap is not None:
+            taps.append(self._global_tap)
+            self._global_tap = None
+        for task in taps:
             task.cancel()
+        for task in taps:
             try:
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
@@ -139,135 +167,121 @@ class DecisionAggregator:
 
     # ---- Public read API --------------------------------------------
 
-    def snapshot(self, owner_user_id: str) -> list[DecisionEntry]:
-        """Return a stable list of ``owner_user_id``'s currently-pending entries.
-
-        Owner-scoped (multi-tenant): only this owner's pendings. Sorted
-        ``raised_at`` ASC so the drawer renders oldest-first without further
-        client-side sorting.
-        """
+    def _owner_entries(self, owner_user_id: str) -> list[DecisionEntry]:
+        """Sorted (raised_at ASC) in-memory pendings for one owner. Caller may
+        hold ``self._lock``; pure read over ``self._pending``."""
         return sorted(
             (e for e in self._pending.values() if e.owner_user_id == owner_user_id),
             key=lambda e: e.raised_at,
         )
 
-    async def subscribe(self, owner_user_id: str) -> asyncio.Queue[DecisionStreamEvent]:
-        """Open a new fan-out queue for SSE delivery, scoped to ``owner_user_id``.
+    async def snapshot(self, owner_user_id: str) -> list[DecisionEntry]:
+        """Return ``owner_user_id``'s currently-pending entries (oldest first).
 
-        The queue receives a ``snapshot`` event first (this owner's current
-        state), then ``added`` / ``resolved`` events for this owner only. Caller
-        MUST call :meth:`unsubscribe` to release the queue when the SSE
-        connection closes.
+        MULTITENANT: history is a per-owner durable read (DataService) so the
+        REST snapshot is correct with no live subscription and even when the
+        owner's sandbox is gone (mirrors event_sse_adapter: history=durable).
+        LOCAL: the global tap keeps ``_pending`` fresh — just read it.
         """
+        if self._multitenant:
+            await self._hydrate_owner(owner_user_id)
+        async with self._lock:
+            return self._owner_entries(owner_user_id)
+
+    async def subscribe(self, owner_user_id: str) -> asyncio.Queue[DecisionStreamEvent]:
+        """Open a fan-out queue for SSE delivery, scoped to ``owner_user_id``.
+
+        First frame is a ``snapshot`` of this owner's state, then ``added`` /
+        ``resolved`` deltas for this owner only. MULTITENANT: hydrate from durable
+        + start a per-owner live tap on that owner's kernel. LOCAL: the global tap
+        already feeds ``_pending`` — just register the queue. Caller MUST call
+        :meth:`unsubscribe` when the SSE connection closes.
+        """
+        if self._multitenant:
+            # Hydrate from durable BEFORE taking the lock (durable I/O).
+            await self._hydrate_owner(owner_user_id)
+        from valuz_agent.modules.decisions.schemas import (
+            _DecisionStreamSnapshotPayload,
+        )
+
         async with self._lock:
             q: asyncio.Queue[DecisionStreamEvent] = asyncio.Queue(maxsize=512)
-            # Initial state — caller sees their current snapshot before any
-            # live events. Wrapped in the same ``DecisionStreamEvent``
-            # shape the HTTP layer already knows how to serialise.
-            from valuz_agent.modules.decisions.schemas import (
-                _DecisionStreamSnapshotPayload,
-            )
-
             snap_ev = DecisionStreamEvent(
                 kind="snapshot",
-                payload=_DecisionStreamSnapshotPayload(entries=self.snapshot(owner_user_id)),
+                payload=_DecisionStreamSnapshotPayload(entries=self._owner_entries(owner_user_id)),
             )
             await q.put(snap_ev)
             self._subscribers.append((owner_user_id, q))
+            if self._multitenant:
+                self._owner_refs[owner_user_id] = self._owner_refs.get(owner_user_id, 0) + 1
+                # First subscriber for this owner → start the live tap on their kernel.
+                if owner_user_id not in self._owner_taps and not self._stopped:
+                    self._owner_taps[owner_user_id] = asyncio.create_task(
+                        self._owner_tap_loop(owner_user_id),
+                        name=f"decisions-tap-{owner_user_id}",
+                    )
             return q
 
     async def unsubscribe(self, q: asyncio.Queue[DecisionStreamEvent]) -> None:
         async with self._lock:
+            owners = [o for (o, sq) in self._subscribers if sq is q]
             self._subscribers = [(o, sq) for (o, sq) in self._subscribers if sq is not q]
+            if not self._multitenant:
+                return  # local: global tap owns _pending; nothing per-owner to tear down
+            tap_to_stop: asyncio.Task[None] | None = None
+            for owner_user_id in owners:
+                left = self._owner_refs.get(owner_user_id, 1) - 1
+                if left > 0:
+                    self._owner_refs[owner_user_id] = left
+                    continue
+                # Last subscriber for this owner left → drop refcount, stop tap,
+                # and clear their in-memory pendings (durable stays authoritative).
+                self._owner_refs.pop(owner_user_id, None)
+                tap_to_stop = self._owner_taps.pop(owner_user_id, None)
+                self._forget_owner_locked(owner_user_id)
+        if tap_to_stop is not None:
+            tap_to_stop.cancel()
+
+    def _forget_owner_locked(self, owner_user_id: str) -> None:
+        """Drop an owner's in-memory pendings. Caller holds ``self._lock``."""
+        stale = [pid for pid, e in self._pending.items() if e.owner_user_id == owner_user_id]
+        for pid in stale:
+            self._pending.pop(pid, None)
+        for sid, pids in list(self._by_session.items()):
+            pids.difference_update(stale)
+            if not pids:
+                self._by_session.pop(sid, None)
 
     # ---- Internal: hydration ----------------------------------------
 
-    async def _hydrate_from_history(self) -> None:
-        """Rebuild the snapshot from kernel events at startup."""
-        from valuz_agent.adapters import kernel_client
-
-        # Scan all sessions (the kernel doesn't index by status; the
-        # filter is cheap in-memory since active sessions are small in
-        # the typical desktop deployment).
+    async def _hydrate_all(self) -> None:
+        """LOCAL: rebuild the snapshot from ALL sessions (cross-owner) at startup."""
         try:
-            # Cross-owner: the decision inbox aggregates every owner's
-            # task-driven sessions into one process-wide snapshot.
             sessions = await data_reader().list_all_sessions(limit=500)
         except kernel_client.KernelNotImplementedError:
-            # Expected, not an error: the HTTP kernel transport (sandbox /
-            # remote kernel) is owner-scoped and exposes no cross-owner
-            # listing. Start empty — the inbox fills from live events as the
-            # aggregator subscribes; there's no startup backfill in this mode.
-            logger.info(
-                "decisions hydration: cross-owner listing unavailable on the http "
-                "kernel transport — starting with 0 hydrated entries"
-            )
+            logger.info("decisions hydration: cross-owner listing unavailable — starting empty")
             return
         except Exception:  # noqa: BLE001
-            logger.warning("decisions hydration: list_sessions failed", exc_info=True)
+            logger.warning("decisions hydration: list_all_sessions failed", exc_info=True)
             return
-
         for session in sessions:
-            if getattr(session, "status", None) != "running":
-                continue
-            if not is_task_driven(session):
+            if getattr(session, "status", None) != "running" or not is_task_driven(session):
                 continue
             try:
                 events = await kernel_client.get_events(session.user_id, session.id, limit=200)
             except Exception:  # noqa: BLE001
                 logger.warning(
-                    "decisions hydration: get_events(%s) failed",
-                    session.id,
-                    exc_info=True,
+                    "decisions hydration: get_events(%s) failed", session.id, exc_info=True
                 )
                 continue
+            fresh = await self._collect_pending(session, events)
+            async with self._lock:
+                self._pending.update(fresh)
+                for pid in fresh:
+                    self._by_session.setdefault(session.id, set()).add(pid)
 
-            await self._replay_session_events(session, events)
-
-    async def _replay_session_events(self, session: Session, events: list[Event]) -> None:
-        """Reproduce per-pending state from a session's recent events.
-
-        Two-pass over the slice: pass 1 collects resolved pending_ids,
-        pass 2 finds unresolved ``requires_action(clarifying_questions)``
-        and enriches each into a ``DecisionEntry``. Mirrors the same
-        logic ConversationPage.tsx ``refreshEvents`` uses on the
-        frontend cold-open path — keeping the two in sync prevents the
-        backend snapshot from disagreeing with the inline session UI.
-        """
-        resolved_ids: set[str] = set()
-        for ev in events:
-            if ev.type == _KERNEL_ACTION_RESOLVED:
-                pid = (ev.data or {}).get("pending_id")
-                if isinstance(pid, str):
-                    resolved_ids.add(pid)
-
-        for ev in events:
-            if ev.type != _KERNEL_REQUIRES_ACTION:
-                continue
-            data = ev.data or {}
-            subject = data.get("subject")
-            if subject not in _INBOX_SUBJECTS:
-                continue
-            pending_id = data.get("pending_id")
-            if not isinstance(pending_id, str) or pending_id in resolved_ids:
-                continue
-            raw_payload = data.get("payload")
-            payload_dict = _coerce_payload(raw_payload)
-            entry = await enrich_pending(
-                session,
-                pending_id=pending_id,
-                question_payload=payload_dict,
-                raised_at=_event_timestamp(ev),
-                user_id=session.user_id,
-            )
-            if entry is None:
-                continue
-            self._pending[pending_id] = entry
-            self._by_session.setdefault(session.id, set()).add(pending_id)
-
-    # ---- Internal: live broadcast loop ------------------------------
-
-    async def _broadcast_loop(self) -> None:
+    async def _global_tap_loop(self) -> None:
+        """LOCAL: single process-global tap over ``subscribe_all_events()``."""
         try:
             async for event in kernel_client.subscribe_all_events():
                 if self._stopped:
@@ -276,19 +290,138 @@ class DecisionAggregator:
                 if not session_id:
                     continue
                 try:
-                    await self._handle_event(session_id, event)
-                except Exception:  # noqa: BLE001 — broad-catch keeps loop alive
+                    await self._handle_event(None, session_id, event)
+                except Exception:  # noqa: BLE001 — keep the tap alive
                     logger.warning(
-                        "decisions: broadcast handler crashed for %s",
-                        event.type,
-                        exc_info=True,
+                        "decisions: global tap handler crashed for %s", event.type, exc_info=True
                     )
         except asyncio.CancelledError:
             return
 
-    async def _handle_event(self, session_id: str, event: Event) -> None:
+    async def _hydrate_owner(self, owner_user_id: str) -> None:
+        """Rebuild ``owner_user_id``'s pending snapshot from the durable store.
+
+        Per-owner (the durable read is owner-scoped and works even when the
+        owner's sandbox is gone). All durable I/O happens without the lock; the
+        computed set replaces this owner's in-memory entries under the lock.
+        """
+        try:
+            sessions = await data_reader().list_sessions(owner_user_id, limit=500)
+        except kernel_client.KernelNotImplementedError:
+            return
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "decisions hydration: list_sessions(%s) failed", owner_user_id, exc_info=True
+            )
+            return
+
+        fresh: dict[str, DecisionEntry] = {}
+        fresh_by_session: dict[str, set[str]] = {}
+        for session in sessions:
+            if getattr(session, "status", None) != "running" or not is_task_driven(session):
+                continue
+            try:
+                events = await kernel_client.get_events(session.user_id, session.id, limit=200)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "decisions hydration: get_events(%s) failed", session.id, exc_info=True
+                )
+                continue
+            for pending_id, entry in (await self._collect_pending(session, events)).items():
+                fresh[pending_id] = entry
+                fresh_by_session.setdefault(session.id, set()).add(pending_id)
+
+        async with self._lock:
+            self._forget_owner_locked(owner_user_id)
+            self._pending.update(fresh)
+            for sid, pids in fresh_by_session.items():
+                self._by_session.setdefault(sid, set()).update(pids)
+
+    async def _collect_pending(
+        self, session: Session, events: list[Event]
+    ) -> dict[str, DecisionEntry]:
+        """Reproduce per-pending state from a session's recent events (no
+        mutation, no lock).
+
+        Two-pass over the slice: pass 1 collects resolved pending_ids, pass 2
+        finds unresolved ``requires_action(clarifying_questions)`` and enriches
+        each into a ``DecisionEntry``. Mirrors ConversationPage.tsx
+        ``refreshEvents`` on the frontend cold-open path so the backend snapshot
+        never disagrees with the inline session UI.
+        """
+        resolved_ids: set[str] = set()
+        for ev in events:
+            if ev.type == _KERNEL_ACTION_RESOLVED:
+                pid = (ev.data or {}).get("pending_id")
+                if isinstance(pid, str):
+                    resolved_ids.add(pid)
+
+        out: dict[str, DecisionEntry] = {}
+        for ev in events:
+            if ev.type != _KERNEL_REQUIRES_ACTION:
+                continue
+            data = ev.data or {}
+            if data.get("subject") not in _INBOX_SUBJECTS:
+                continue
+            pending_id = data.get("pending_id")
+            if not isinstance(pending_id, str) or pending_id in resolved_ids:
+                continue
+            entry = await enrich_pending(
+                session,
+                pending_id=pending_id,
+                question_payload=_coerce_payload(data.get("payload")),
+                raised_at=_event_timestamp(ev),
+                user_id=session.user_id,
+            )
+            if entry is not None:
+                out[pending_id] = entry
+        return out
+
+    # ---- Internal: live broadcast loop ------------------------------
+
+    async def _owner_tap_loop(self, owner_user_id: str) -> None:
+        """Per-owner live tap: consume ``owner_user_id``'s kernel event stream
+        (``subscribe_all_events`` routed to that owner's kernel) and turn
+        requires_action / action_resolved into inbox deltas.
+
+        Resilient: if the owner's kernel isn't up yet (or restarts) the stream
+        ends immediately; we re-hydrate from durable and retry with a short
+        backoff while the owner still has subscribers, so an inbox opened before
+        a turn starts still catches its live decisions.
+        """
+        try:
+            while not self._stopped and owner_user_id in self._owner_taps:
+                try:
+                    async for event in kernel_client.subscribe_all_events_for(owner_user_id):
+                        if self._stopped:
+                            break
+                        session_id = event.session_id or ""
+                        if not session_id:
+                            continue
+                        try:
+                            await self._handle_event(owner_user_id, session_id, event)
+                        except Exception:  # noqa: BLE001 — keep the tap alive
+                            logger.warning(
+                                "decisions: tap handler crashed for %s", event.type, exc_info=True
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — transient kernel/transport error
+                    logger.warning(
+                        "decisions: tap(%s) stream errored; retrying", owner_user_id, exc_info=True
+                    )
+                if self._stopped or owner_user_id not in self._owner_taps:
+                    break
+                # Stream ended (no kernel yet / kernel restarted) — refresh the
+                # durable snapshot and retry attaching.
+                await self._hydrate_owner(owner_user_id)
+                await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            return
+
+    async def _handle_event(self, owner_user_id: str | None, session_id: str, event: Event) -> None:
         if event.type == _KERNEL_REQUIRES_ACTION:
-            await self._on_requires_action(session_id, event)
+            await self._on_requires_action(owner_user_id, session_id, event)
             return
         if event.type == _KERNEL_ACTION_RESOLVED:
             await self._on_action_resolved(session_id, event)
@@ -299,15 +432,17 @@ class DecisionAggregator:
         # emits with ``decision="interrupted"`` / ``"expired"`` on
         # session shutdown).
 
-    async def _on_requires_action(self, session_id: str, event: Event) -> None:
+    async def _on_requires_action(
+        self, owner_user_id: str | None, session_id: str, event: Event
+    ) -> None:
         data = event.data or {}
         if data.get("subject") not in _INBOX_SUBJECTS:
             return
         pending_id = data.get("pending_id")
         if not isinstance(pending_id, str):
             return
-        # Resolve the session to determine run_kind + enrichment join keys.
-        session = await self._load_session(session_id)
+        # Resolve the session (per-owner durable read) for run_kind + join keys.
+        session = await self._load_session(owner_user_id, session_id)
         if session is None or not is_task_driven(session):
             return
         payload = _coerce_payload(data.get("payload"))
@@ -371,11 +506,14 @@ class DecisionAggregator:
 
     # ---- Helpers ----------------------------------------------------
 
-    async def _load_session(self, session_id: str) -> Session | None:
-
+    async def _load_session(self, owner_user_id: str | None, session_id: str) -> Session | None:
         try:
-            # Cross-owner lookup by id (the live event carries no owner) — the
-            # inbox is a process-wide aggregator across every owner.
+            if owner_user_id is not None:
+                # MULTITENANT: per-owner durable read (the tap is scoped to this
+                # owner's kernel). Works where cross-owner listing is unavailable.
+                return await data_reader().get_session(owner_user_id, session_id)
+            # LOCAL global tap: the event carries no owner — cross-owner lookup by
+            # id (in-process durable) as before.
             sessions = await data_reader().list_all_sessions(ids=[session_id], limit=1)
             return sessions[0] if sessions else None
         except Exception:  # noqa: BLE001
