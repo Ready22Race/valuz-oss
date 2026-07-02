@@ -25,10 +25,13 @@ const SESSION_STATUS_KEY: Record<string, string> = {
   archived: "activity.statusStopped",
 };
 
-// Task status -> i18n key for task rows.
+// Task status -> i18n key for task rows. ``active`` reuses the session
+// "running" key so a task and a conversation both read 运行中 / Running in the
+// same feed — ``task.statusActive`` (进行中 / Active) is kept for the task detail
+// header, but mixing it into this list read inconsistently against chat rows.
 const TASK_STATUS_KEY: Record<string, string> = {
   draft: "task.statusDraft",
-  active: "task.statusActive",
+  active: "activity.statusRunning",
   paused: "task.statusPaused",
   stopped: "task.statusStopped",
   completed: "task.statusCompleted",
