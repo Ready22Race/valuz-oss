@@ -144,6 +144,7 @@ async def enrich_pending(
 
     return DecisionEntry(
         pending_id=pending_id,
+        owner_user_id=session.user_id,  # owner from the session, never client-supplied
         session_id=session_id,
         task_id=task_id,
         project_id=project_id or None,

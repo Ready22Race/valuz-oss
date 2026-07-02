@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, Request
 from sse_starlette.sse import EventSourceResponse
 
-from valuz_agent.api.deps import get_decision_aggregator
+from valuz_agent.api.deps import get_current_user_id, get_decision_aggregator
 from valuz_agent.modules.decisions.schemas import DecisionPendingResponse
 
 if TYPE_CHECKING:
@@ -34,15 +34,17 @@ router = APIRouter()
 @router.get("/v1/decisions/pending", response_model=DecisionPendingResponse)
 async def list_pending(
     agg: DecisionAggregator = Depends(get_decision_aggregator),
+    user_id: str = Depends(get_current_user_id),
 ) -> DecisionPendingResponse:
-    """Return all pending decisions across every task-driven session."""
-    return DecisionPendingResponse(entries=agg.snapshot())
+    """Return the caller's pending decisions across their task-driven sessions."""
+    return DecisionPendingResponse(entries=agg.snapshot(user_id))
 
 
 @router.get("/v1/decisions/stream")
 async def stream(
     request: Request,
     agg: DecisionAggregator = Depends(get_decision_aggregator),
+    user_id: str = Depends(get_current_user_id),
 ) -> EventSourceResponse:
     """SSE stream of inbox changes.
 
@@ -53,7 +55,7 @@ async def stream(
     """
 
     async def event_source():
-        queue = await agg.subscribe()
+        queue = await agg.subscribe(user_id)
         try:
             while True:
                 if await request.is_disconnected():

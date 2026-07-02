@@ -180,6 +180,7 @@ def test_enrich_pending_builds_full_entry(db_factory) -> None:
     )
     assert entry is not None
     assert entry.pending_id == "p1"
+    assert entry.owner_user_id == "local-test-owner"  # owner captured from the session
     assert entry.task_id == "t1"
     assert entry.project_id == "w1"
     assert entry.project_title == "全栈开发"
@@ -209,7 +210,7 @@ def test_enrich_pending_returns_none_when_task_missing(db_factory) -> None:
 
 def test_snapshot_empty_initially(db_factory) -> None:
     agg = DecisionAggregator()
-    assert agg.snapshot() == []
+    assert agg.snapshot("local-test-owner") == []
 
 
 def test_add_entry_on_requires_action(db_factory) -> None:
@@ -217,7 +218,7 @@ def test_add_entry_on_requires_action(db_factory) -> None:
     agg = DecisionAggregator()
     _bind_session(agg, _subtask_session())
     asyncio.run(agg._handle_event("sub-sess", _requires_action_event()))
-    snap = agg.snapshot()
+    snap = agg.snapshot("local-test-owner")
     assert len(snap) == 1
     assert snap[0].pending_id == "p1"
     assert snap[0].task_title == "打豆豆小游戏"
@@ -231,7 +232,7 @@ def test_ignore_non_task_driven_session(db_factory) -> None:
         SimpleNamespace(id="sub-sess", status="running", metadata={"valuz": {}}),
     )
     asyncio.run(agg._handle_event("sub-sess", _requires_action_event()))
-    assert agg.snapshot() == []
+    assert agg.snapshot("local-test-owner") == []
 
 
 def test_ignore_non_clarifying_subject(db_factory) -> None:
@@ -239,7 +240,7 @@ def test_ignore_non_clarifying_subject(db_factory) -> None:
     agg = DecisionAggregator()
     _bind_session(agg, _subtask_session())
     asyncio.run(agg._handle_event("sub-sess", _requires_action_event(subject="shell_command")))
-    assert agg.snapshot() == []
+    assert agg.snapshot("local-test-owner") == []
 
 
 def test_remove_entry_on_action_resolved(db_factory) -> None:
@@ -247,9 +248,9 @@ def test_remove_entry_on_action_resolved(db_factory) -> None:
     agg = DecisionAggregator()
     _bind_session(agg, _subtask_session())
     asyncio.run(agg._handle_event("sub-sess", _requires_action_event()))
-    assert len(agg.snapshot()) == 1
+    assert len(agg.snapshot("local-test-owner")) == 1
     asyncio.run(agg._handle_event("sub-sess", _resolved_event()))
-    assert agg.snapshot() == []
+    assert agg.snapshot("local-test-owner") == []
 
 
 # ---- subscriber fan-out ---------------------------------------------
@@ -264,7 +265,7 @@ def test_subscriber_receives_initial_snapshot(db_factory) -> None:
         # Pre-seed one pending, then a fresh subscriber should see it in
         # the initial snapshot frame.
         await agg._handle_event("sub-sess", _requires_action_event())
-        q = await agg.subscribe()
+        q = await agg.subscribe("local-test-owner")
         first = await q.get()
         await agg.unsubscribe(q)
         return first
@@ -281,8 +282,8 @@ def test_fan_out_added_and_resolved_to_subscribers(db_factory) -> None:
     _bind_session(agg, _subtask_session())
 
     async def scenario():
-        q1 = await agg.subscribe()
-        q2 = await agg.subscribe()
+        q1 = await agg.subscribe("local-test-owner")
+        q2 = await agg.subscribe("local-test-owner")
         # Drain the initial snapshot frames.
         await q1.get()
         await q2.get()
@@ -303,3 +304,49 @@ def test_fan_out_added_and_resolved_to_subscribers(db_factory) -> None:
     assert a2.kind == "added"
     assert r1.kind == "resolved"
     assert r1.payload.pending_id == "p1"
+
+
+# ---- multi-tenant owner scoping -------------------------------------
+
+
+def _entry(pending_id: str, owner: str, *, raised_at: int = 0):
+    from valuz_agent.modules.decisions.schemas import DecisionEntry
+
+    return DecisionEntry(
+        pending_id=pending_id,
+        owner_user_id=owner,
+        session_id="s",
+        task_id="t",
+        agent_slug="a",
+        task_title="T",
+        raised_at=raised_at,
+    )
+
+
+def test_snapshot_and_fanout_are_owner_scoped(db_factory) -> None:
+    """snapshot() / subscribe() only expose the caller's own pendings (no leak)."""
+    agg = DecisionAggregator()
+    agg._pending["pa"] = _entry("pa", "owner-A")
+    agg._pending["pb"] = _entry("pb", "owner-B")
+
+    assert [e.pending_id for e in agg.snapshot("owner-A")] == ["pa"]
+    assert [e.pending_id for e in agg.snapshot("owner-B")] == ["pb"]
+
+    async def scenario():
+        qa = await agg.subscribe("owner-A")
+        qb = await agg.subscribe("owner-B")
+        snap_a = await qa.get()
+        snap_b = await qb.get()
+        # A resolves → only A's subscriber is notified; B's stays empty.
+        await agg._handle_event("s", _resolved_event(pending_id="pa"))
+        ra = await qa.get()
+        result = (snap_a, snap_b, ra, qb.empty())
+        await agg.unsubscribe(qa)
+        await agg.unsubscribe(qb)
+        return result
+
+    snap_a, snap_b, ra, qb_empty = asyncio.run(scenario())
+    assert [e.pending_id for e in snap_a.payload.entries] == ["pa"]  # A sees only A
+    assert [e.pending_id for e in snap_b.payload.entries] == ["pb"]  # B sees only B
+    assert ra.kind == "resolved" and ra.payload.pending_id == "pa"
+    assert qb_empty  # A's resolve never reached B

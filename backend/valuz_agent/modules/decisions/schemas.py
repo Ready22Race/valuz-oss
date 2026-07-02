@@ -28,6 +28,12 @@ class DecisionEntry(BaseModel):
     """Kernel-issued pending id. Required for ``POST /v1/sessions/
     {session_id}/actions`` to resolve."""
 
+    owner_user_id: str
+    """The owner (``user_id``) this pending belongs to. The aggregator is a
+    process-wide singleton across every owner; ``snapshot`` / ``subscribe`` filter
+    on this so a shared multi-tenant host never leaks one owner's inbox to another.
+    Set from the session's ``user_id`` (never a client-supplied value)."""
+
     session_id: str
     """The session asking the question — usually a subtask run session,
     occasionally a lead session that delegated to AskUserQuestion before
