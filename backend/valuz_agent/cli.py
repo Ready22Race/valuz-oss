@@ -28,7 +28,7 @@ import os
 import typer
 import uvicorn
 
-from valuz_agent.infra.config import settings
+from valuz_agent.infra.fs_registry import fs_registry
 
 app = typer.Typer(name="valuz-agent", add_completion=False)
 
@@ -50,7 +50,7 @@ def serve(
     ),
 ) -> None:
     """Start the Valuz Agent backend server."""
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    fs_registry.data_dir()  # ensure the data root exists
     if headless:
         os.environ["VALUZ_HEADLESS"] = "1"
     uvicorn.run(
@@ -78,7 +78,7 @@ def reset_providers_cmd(
     from valuz_agent.modules.providers.datastore import ProviderDatastore
     from valuz_agent.modules.providers.service import LLMChannel, reset_providers
 
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    fs_registry.data_dir()  # ensure the data root exists
     # Ensure the host schema exists via the SAME path as app startup — Alembic
     # upgrade head (idempotent; a no-op against an already-current DB). Using
     # ``Base.metadata.create_all`` here would build tables without an
@@ -120,7 +120,7 @@ def cleanup_seed_agents_cmd() -> None:
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
     from valuz_agent.modules.connectors.service import ConnectorService
 
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    fs_registry.data_dir()  # ensure the data root exists
     run_host_migrations()
 
     keep = {"default-assistant"}

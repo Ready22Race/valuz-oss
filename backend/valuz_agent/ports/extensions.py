@@ -22,6 +22,7 @@ from typing import Any
 from valuz_agent.api.middleware import AuthMiddleware
 from valuz_agent.infra.asset_store import AssetStore, LocalAssetStore
 from valuz_agent.infra.config import settings
+from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.secret_store import AssetBackedSecretStore, SecretStorePort
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
@@ -65,7 +66,7 @@ class Extensions:
         # user_id + encryption) for a shared multi-process backend. It is an
         # object store with a file view — NOT a filesystem (no rename/seek);
         # POSIX workspaces are a separate concern (mounted into the sandbox).
-        self.asset_store: AssetStore = LocalAssetStore(settings.data_dir)
+        self.asset_store: AssetStore = LocalAssetStore(fs_registry.data_dir())
         # API keys / OAuth tokens (BYOK creds, parser secrets, …) — the first
         # business built on the asset store, under the ``secrets/`` namespace.
         # A shared backend's asset store adds encryption at rest. Read access is

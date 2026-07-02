@@ -73,7 +73,7 @@ def _is_windows() -> bool:
 
 def _bin_dir() -> Path:
     # Non-creating sibling of FsRegistry.browser_bin_dir() for read-only checks.
-    return settings.data_dir / "bin"
+    return _fs.resolve("bin")
 
 
 def _wrapper_path(bin_dir: Path) -> Path:

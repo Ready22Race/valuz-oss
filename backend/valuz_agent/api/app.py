@@ -38,6 +38,7 @@ from valuz_agent.api.routes.system import router as system_router
 from valuz_agent.api.routes.tasks import router as tasks_router
 from valuz_agent.boot import lifespan
 from valuz_agent.infra.config import settings
+from valuz_agent.infra.fs_registry import fs_registry
 
 logger = logging.getLogger("valuz_agent.api")
 
@@ -55,7 +56,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     prefixed.
     """
     if getattr(sys, "frozen", False):
-        _env_path = settings.data_dir / ".env"
+        _env_path = fs_registry.resolve(".env")
     else:
         _env_path = Path(__file__).resolve().parents[2] / ".env"
     load_dotenv(_env_path)

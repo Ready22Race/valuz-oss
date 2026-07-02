@@ -22,6 +22,7 @@ from pathlib import Path
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.config import settings
+from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.system.schemas import SystemStatusResponse
 
@@ -153,7 +154,7 @@ async def collect_system_status(*, port: int) -> SystemStatusResponse:
         db_path=str(settings.db_path),
         log_path=str(log_file),
         log_dir=str(log_dir),
-        data_dir=str(settings.data_dir),
+        data_dir=str(fs_registry.resolve()),  # non-creating data-root read
         runtimes_available=_runtimes_available(),
         warnings=list(_warnings),
     )

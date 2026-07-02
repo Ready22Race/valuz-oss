@@ -66,7 +66,11 @@ def resolve_local_user_id() -> str:
     fingerprint = _device_fingerprint()
     user_id = _fingerprint_to_user_id(fingerprint)
     try:
-        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        # Lazy import: ``config`` lazy-imports this module (internal_mcp_token),
+        # so keep the fs_registry dependency local to avoid an import cycle.
+        from valuz_agent.infra.fs_registry import fs_registry
+
+        fs_registry.data_dir()  # ensure the data root exists before writing
         path.write_text(
             json.dumps(
                 {
