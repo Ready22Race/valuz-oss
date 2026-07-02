@@ -113,6 +113,7 @@ def _subtask_session(session_id="sub-sess", task_id="t1") -> SimpleNamespace:
     """Fabricate a kernel-shaped Session with valuz subtask metadata."""
     return SimpleNamespace(
         id=session_id,
+        user_id="local-test-owner",
         status="running",
         metadata={
             "valuz": {

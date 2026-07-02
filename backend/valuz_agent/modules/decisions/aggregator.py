@@ -255,6 +255,7 @@ class DecisionAggregator:
                 pending_id=pending_id,
                 question_payload=payload_dict,
                 raised_at=_event_timestamp(ev),
+                user_id=session.user_id,
             )
             if entry is None:
                 continue
@@ -312,6 +313,7 @@ class DecisionAggregator:
             pending_id=pending_id,
             question_payload=payload,
             raised_at=_event_timestamp(event),
+            user_id=session.user_id,
         )
         if entry is None:
             return
