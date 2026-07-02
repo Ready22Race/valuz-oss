@@ -94,7 +94,6 @@ async def _call_tool(server: Any, name: str, arguments: dict[str, Any]) -> Any:
 
 
 def test_call_tool_rebuilds_exec_context_from_session_header() -> None:
-    from valuz_agent.integrations import _mcp_asgi
 
     tk.install_toolkit_toolsets(base=(_echo_tool(),), lead=())
     server = tk._build_server("base")
@@ -110,7 +109,6 @@ def test_call_tool_rebuilds_exec_context_from_session_header() -> None:
 
 
 def test_call_tool_outside_session_scope_fails() -> None:
-    from valuz_agent.integrations import _mcp_asgi
 
     tk.install_toolkit_toolsets(base=(_echo_tool(),), lead=())
     server = tk._build_server("base")
@@ -126,7 +124,6 @@ def test_call_tool_outside_session_scope_fails() -> None:
 
 
 def test_tool_result_is_error_projected_as_text_prefix() -> None:
-    from valuz_agent.integrations import _mcp_asgi
 
     tk.install_toolkit_toolsets(base=(_failing_tool(),), lead=())
     server = tk._build_server("base")
@@ -186,14 +183,54 @@ def test_asgi_rejects_bad_token(monkeypatch) -> None:
 
 
 def test_asgi_requires_session_id(monkeypatch) -> None:
-    from valuz_agent.infra.config import settings
+    from valuz_agent.adapters.capability_resolver import _mint_internal_mcp_token
 
-    monkeypatch.setattr(settings, "internal_mcp_token_override", "GOOD")
     tk.install_toolkit_toolsets(base=(), lead=())
     app = tk.build_toolkit_mcp_asgi("base")
 
-    status = asyncio.run(_run_asgi(app, _scope({"x-valuz-internal": "GOOD"})))
-    assert status == 400
+    token = _mint_internal_mcp_token("owner-x")  # valid per-owner token
+    status = asyncio.run(_run_asgi(app, _scope({"x-valuz-internal": token})))
+    assert status == 400  # verified owner, but missing X-Valuz-Session-Id
+
+
+def test_asgi_per_owner_verification(monkeypatch) -> None:
+    """Built-in MCP auth is per-owner: forged signature and cross-owner session
+    are both rejected; a token whose owner matches the session passes (ADR-012)."""
+    from types import SimpleNamespace
+
+    from valuz_agent.adapters import data_reader as dr
+    from valuz_agent.adapters.capability_resolver import _mint_internal_mcp_token
+    from valuz_agent.boot.kernel import mint_data_service_token
+
+    tk.install_toolkit_toolsets(base=(), lead=())
+    app = tk.build_toolkit_mcp_asgi("base")
+
+    class _Reader:
+        def __init__(self, owner: str) -> None:
+            self._owner = owner
+
+        async def list_all_sessions(self, *, ids=None, limit=50, **_):
+            return [SimpleNamespace(user_id=self._owner)]
+
+    def _run(tok: str) -> int:
+        return asyncio.run(
+            _run_asgi(app, _scope({"x-valuz-internal": tok, "x-valuz-session-id": "s"}))
+        )
+
+    tok_a = _mint_internal_mcp_token("A")  # creates A's real per-owner secret
+    forged = mint_data_service_token("attacker-secret", user_id="A")  # signed with wrong key
+    try:
+        dr.bind_data_reader(_Reader("A"))
+        assert _run(forged) == 403  # bad signature under A's real secret
+        dr.bind_data_reader(_Reader("B"))
+        assert _run(tok_a) == 403  # A's token, session owned by B → cross-owner reject
+    finally:
+        dr.bind_data_reader(None)
+
+    # Positive path at the verifier level (the ASGI success case would reach the
+    # MCP inner app, which needs a running task group — out of scope here):
+    assert _mcp_asgi._verify_token_owner(tok_a) == "A"  # valid token → its owner
+    assert _mcp_asgi._verify_token_owner(forged) is None  # bad signature → rejected
 
 
 def test_unknown_toolset_rejected() -> None:
@@ -212,12 +249,12 @@ def test_always_on_set_includes_harness_per_toolkit() -> None:
         harness_toolkit_for_run_kind,
     )
 
-    base_set = always_on_http_mcp_servers("sess-1")
+    base_set = always_on_http_mcp_servers("sess-1", owner_user_id="u1")
     by_name = {m.name: m for m in base_set}
     assert by_name["harness"].url.endswith("/internal/mcp/toolkit/base/mcp")
     assert by_name["harness"].headers["X-Valuz-Session-Id"] == "sess-1"
 
-    lead_set = always_on_http_mcp_servers("sess-1", toolkit="lead")
+    lead_set = always_on_http_mcp_servers("sess-1", owner_user_id="u1", toolkit="lead")
     assert {m.name for m in lead_set} == set(by_name)
     assert next(m for m in lead_set if m.name == "harness").url.endswith(
         "/internal/mcp/toolkit/lead/mcp"

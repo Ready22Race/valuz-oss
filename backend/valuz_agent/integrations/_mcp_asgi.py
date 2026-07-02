@@ -47,7 +47,7 @@ def reset_current_mcp_context(token: Token[BuiltinMCPContext | None]) -> None:
 
 
 async def _resolve_session_owner(session_id: str) -> str | None:
-    """Resolve the session owner from the raw session id."""
+    """Resolve the session owner from the raw session id (durable, cross-owner)."""
     from valuz_agent.adapters.data_reader import data_reader
 
     try:
@@ -60,13 +60,34 @@ async def _resolve_session_owner(session_id: str) -> str | None:
     return sessions[0].user_id if sessions else None
 
 
+def _verify_token_owner(token: str | None) -> str | None:
+    """Verified owner from a per-owner MCP token, or None if invalid/absent.
+
+    Same per-owner signing/verification as the data service (unifies the two
+    forms — see ADR-012): the token's ``sub`` picks the owner's secret, the
+    signature proves it. A forged ``sub`` / unknown owner fails.
+    """
+    if not token:
+        return None
+    from src.core.token_signer import InvalidTokenError
+
+    from valuz_agent.boot.kernel import make_host_data_service_verifier_per_owner
+    from valuz_agent.ports.extensions import ext
+
+    try:
+        claims = make_host_data_service_verifier_per_owner(ext.secret_store).verify(token)
+    except InvalidTokenError:
+        return None
+    return claims.user_id if claims else None
+
+
 def build_internal_mcp_asgi(inner: Any) -> Any:
     """Return a wrapper ASGI app for built-in MCP endpoints.
 
-    The wrapper enforces:
-      1) per-process secret header
+    The wrapper enforces (per-owner, both forms — ADR-012):
+      1) ``X-Valuz-Internal`` carries a per-owner signed token → verified owner
       2) `X-Valuz-Session-Id` presence
-      3) owner resolution from kernel session
+      3) the session belongs to the verified owner (anti cross-owner)
       4) built-in MCP context publication for request-scoped access
     """
 
@@ -76,12 +97,13 @@ def build_internal_mcp_asgi(inner: Any) -> Any:
             await response(scope, receive, send)
             return
 
-        from valuz_agent.infra.config import settings as _settings
-
         headers = {
             k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers") or []
         }
-        if headers.get("x-valuz-internal") != _settings.internal_mcp_token:
+        # Owner comes from the VERIFIED token — never a shared secret or a trusted
+        # header. A forged sub / unknown owner fails verification.
+        owner_id = _verify_token_owner(headers.get("x-valuz-internal"))
+        if not owner_id:
             response = PlainTextResponse("Forbidden", status_code=403)
             await response(scope, receive, send)
             return
@@ -92,13 +114,14 @@ def build_internal_mcp_asgi(inner: Any) -> Any:
             await response(scope, receive, send)
             return
 
-        user_id = await _resolve_session_owner(session_id)
-        if not user_id:
-            response = PlainTextResponse("Unknown session owner", status_code=401)
+        # The session must belong to the authenticated owner (cross-owner guard).
+        session_owner = await _resolve_session_owner(session_id)
+        if session_owner != owner_id:
+            response = PlainTextResponse("Forbidden", status_code=403)
             await response(scope, receive, send)
             return
 
-        mcp_ctx_token = set_current_mcp_context(session_id=session_id, user_id=user_id)
+        mcp_ctx_token = set_current_mcp_context(session_id=session_id, user_id=owner_id)
         try:
             await inner(scope, receive, send)
         finally:

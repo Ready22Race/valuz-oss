@@ -161,7 +161,9 @@ async def refresh_always_on_mcp_for_session(session_id: str, user_id: str) -> bo
         return False
 
     run_kind = ((session.metadata or {}).get("valuz", {}) or {}).get("run_kind")
-    fresh = always_on_http_mcp_servers(session_id, toolkit=harness_toolkit_for_run_kind(run_kind))
+    fresh = always_on_http_mcp_servers(
+        session_id, owner_user_id=user_id, toolkit=harness_toolkit_for_run_kind(run_kind)
+    )
     fresh_names = {m.name for m in fresh}
     current = list(session.mcp_servers or ())
     # Drop any existing always-on entry (stale token/url), keep everything

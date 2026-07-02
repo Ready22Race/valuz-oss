@@ -256,7 +256,7 @@ async def resolve_session_capabilities(
     #      inject the same set — task lead/member sessions don't flow through
     #      this resolver but must still carry these built-in tools.
     if session_id:
-        mcp_configs_list.extend(always_on_http_mcp_servers(session_id))
+        mcp_configs_list.extend(always_on_http_mcp_servers(session_id, owner_user_id=user_id))
     else:
         logger.warning(
             "session_id not provided — skipping always-on HTTP MCP injection "
@@ -317,8 +317,37 @@ def always_on_skill_paths() -> list[str]:
     return paths
 
 
+# Internal MCP token: a per-owner signed token (same signer as the data service)
+# proves the caller's owner to the host built-in MCP endpoints — replacing the old
+# shared, single-owner ``internal_mcp_token``. Owner-scoped + long-lived; rotated
+# whenever the session's capabilities are re-resolved (create / resume). Verified
+# host-side by ``_PerOwnerDataServiceVerifier`` (see integrations/_mcp_asgi).
+_MCP_TOKEN_TTL_S = 30 * 86400
+
+# Cache the per-owner token so it is STABLE within a process: a fresh mint each
+# call (new iat) would make every capability re-resolve look "changed" and defeat
+# the restamp idempotency (prompt-cache warmth in ``refresh_always_on_mcp_for_session``).
+# Rotates on process restart / session resume (which re-bakes headers) — fine for a
+# long-lived internal token.
+_mcp_token_cache: dict[str, str] = {}
+
+
+def _mint_internal_mcp_token(owner_user_id: str) -> str:
+    cached = _mcp_token_cache.get(owner_user_id)
+    if cached is not None:
+        return cached
+    from valuz_agent.boot.kernel import mint_data_service_token
+    from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
+    from valuz_agent.ports.extensions import ext
+
+    secret = get_or_create_ds_secret(ext.secret_store, owner_user_id)
+    token = mint_data_service_token(secret, user_id=owner_user_id, ttl_s=_MCP_TOKEN_TTL_S)
+    _mcp_token_cache[owner_user_id] = token
+    return token
+
+
 def always_on_http_mcp_servers(
-    session_id: str, *, toolkit: str = "base"
+    session_id: str, *, owner_user_id: str, toolkit: str = "base"
 ) -> list[McpHttpServerConfig]:
     """Built-in HTTP MCP servers every session carries: docs, schedules,
     connectors, and the harness toolkit.
@@ -347,7 +376,7 @@ def always_on_http_mcp_servers(
     from valuz_agent.integrations.toolkit_mcp_server import toolkit_mcp_url
 
     headers = {
-        "X-Valuz-Internal": _settings.internal_mcp_token,
+        "X-Valuz-Internal": _mint_internal_mcp_token(owner_user_id),
         "X-Valuz-Session-Id": session_id,
     }
     base = _settings.backend_base_url

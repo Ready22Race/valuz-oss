@@ -17,7 +17,6 @@ from app.schemas import (  # type: ignore[import-not-found]
 )
 
 import valuz_agent.boot.kernel  # noqa: F401 — kernel sys.path side-effect
-from valuz_agent.infra.config import settings
 from valuz_agent.modules.sessions import capabilities
 
 
@@ -82,7 +81,10 @@ def _patch_client(monkeypatch, session):
 
 async def test_restamps_stale_token_and_preserves_external(monkeypatch):
     """A stale always-on token is rewritten to the current one; external MCP kept."""
-    monkeypatch.setattr(settings, "internal_mcp_token_override", "NEWTOKEN")
+    from valuz_agent.adapters import capability_resolver as cr
+
+    monkeypatch.setattr(cr, "_mcp_token_cache", {})
+    current = cr._mint_internal_mcp_token("local-test-owner")  # per-owner signed token
 
     external = McpHttpServerConfigSchema(
         name="valuz-search",
@@ -101,17 +103,20 @@ async def test_restamps_stale_token_and_preserves_external(monkeypatch):
     assert len(updates) == 1
     _sid, req = updates[0]
     by_name = {m.name: m for m in req.mcp_servers}
-    # Every always-on entry (incl. the harness toolkit) carries the live token.
+    # Every always-on entry (incl. the harness toolkit) carries the live per-owner token.
     for name in ("valuz_docs", "valuz_automations", "valuz_connectors", "harness"):
-        assert by_name[name].headers["X-Valuz-Internal"] == "NEWTOKEN"
+        assert by_name[name].headers["X-Valuz-Internal"] == current
     # The user-attached external connector is untouched.
     assert by_name["valuz-search"].headers == {"Authorization": "Bearer xyz"}
 
 
 async def test_noop_when_token_already_current(monkeypatch):
     """No PATCH (prompt cache stays warm) when the token already matches."""
-    monkeypatch.setattr(settings, "internal_mcp_token_override", "CURRENT")
-    session = _make_session(mcp_servers=_stale_trio("CURRENT"))
+    from valuz_agent.adapters import capability_resolver as cr
+
+    monkeypatch.setattr(cr, "_mcp_token_cache", {})
+    current = cr._mint_internal_mcp_token("local-test-owner")  # stable per-owner (cached)
+    session = _make_session(mcp_servers=_stale_trio(current))
     updates = _patch_client(monkeypatch, session)
 
     changed = await capabilities.refresh_always_on_mcp_for_session(
