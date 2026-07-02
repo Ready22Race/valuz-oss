@@ -585,8 +585,39 @@ def rebind_client() -> None:
 # lives behind ``client`` for the HTTP transport.
 
 
+# ---------------------------------------------------------------------------
+# Per-user kernel resolution (fleet seam). EXECUTION / LIVE facade methods route
+# through ``_kernel_for(user_id)``; STORE reads/writes stay on the durable path.
+# The OSS default allocator returns endpoint=None → the process-global ``client``
+# (in-process or boot-attached sandbox) — behavior unchanged. A commercial
+# allocator returns a per-user endpoint; we cache one HttpKernelClient per URL.
+# ---------------------------------------------------------------------------
+
+_endpoint_clients: dict[str, KernelClient] = {}
+
+
+async def _kernel_for(user_id: str) -> KernelClient:
+    """Resolve the execution kernel client for ``user_id`` via the allocator."""
+    from valuz_agent.ports.extensions import ext
+
+    alloc = getattr(ext, "sandbox_allocator", None)
+    if alloc is None:
+        return client  # no allocator bound → process-global client (current behavior)
+    lease = await alloc.ensure(owner_user_id=user_id)
+    if lease is None or lease.endpoint is None:
+        return client  # "use the process/global client" (BootSingletonAllocator default)
+    ep = lease.endpoint
+    cached = _endpoint_clients.get(ep.base_url)
+    if cached is None:
+        from valuz_agent.adapters.kernel_client_http import HttpKernelClient
+
+        cached = HttpKernelClient(ep.base_url, token=ep.token)
+        _endpoint_clients[ep.base_url] = cached
+    return cached
+
+
 async def create_session(user_id: str, req: CreateSessionRequest) -> SessionData:
-    return await client.create_session(user_id, req)
+    return await (await _kernel_for(user_id)).create_session(user_id, req)
 
 
 async def get_session(user_id: str, session_id: str) -> SessionData | None:
@@ -639,7 +670,7 @@ async def append_event(user_id: str, session_id: str, event: EventPayload) -> bo
 
 
 async def emit_live_event(user_id: str, session_id: str, type: str, data: dict[str, Any]) -> None:
-    await client.emit_live_event(user_id, session_id, type, data)
+    await (await _kernel_for(user_id)).emit_live_event(user_id, session_id, type, data)
 
 
 async def get_events(
@@ -663,8 +694,10 @@ async def get_events_window(
     )
 
 
-def subscribe_session_events(user_id: str, session_id: str) -> AsyncIterator[EventData]:
-    return client.subscribe_session_events(user_id, session_id)
+async def subscribe_session_events(user_id: str, session_id: str) -> AsyncIterator[EventData]:
+    k = await _kernel_for(user_id)
+    async for event in k.subscribe_session_events(user_id, session_id):
+        yield event
 
 
 def subscribe_all_events() -> AsyncIterator[EventData]:
@@ -687,11 +720,11 @@ async def latest_message_id(user_id: str, session_id: str) -> str | None:
 
 
 async def submit_action(user_id: str, session_id: str, req: SubmitActionRequest) -> dict[str, Any]:
-    return await client.submit_action(user_id, session_id, req)
+    return await (await _kernel_for(user_id)).submit_action(user_id, session_id, req)
 
 
 async def interrupt(user_id: str, session_id: str) -> None:
-    await client.interrupt(user_id, session_id)
+    await (await _kernel_for(user_id)).interrupt(user_id, session_id)
 
 
 async def run_turn(
@@ -701,7 +734,9 @@ async def run_turn(
     attachments: list[dict[str, Any]] | None = None,
     additional_context: str = "",
 ) -> MessageData:
-    return await client.run_turn(user_id, session_id, text, attachments, additional_context)
+    return await (await _kernel_for(user_id)).run_turn(
+        user_id, session_id, text, attachments, additional_context
+    )
 
 
 async def scan_orphan_pendings() -> int:

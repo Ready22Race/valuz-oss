@@ -28,6 +28,7 @@ from valuz_agent.ports.cache import CachePort, FileCache
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
+from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator, SandboxAllocatorPort
 from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
 
 
@@ -47,6 +48,11 @@ class Extensions:
         # fail-closed policy. Separate from ``billing`` on purpose — gating is
         # not metering (see commercial ADR-012).
         self.sandbox_policy: SandboxPolicyPort = AllowAllSandboxPolicy()
+        # Resolve which kernel serves a given owner (② control face). OSS default
+        # returns "use the process/global kernel client" for everyone — single
+        # in-process / single boot-sandbox behavior unchanged. The commercial
+        # overlay binds a per-user pool allocator (one sandbox per user_id).
+        self.sandbox_allocator: SandboxAllocatorPort = BootSingletonAllocator()
         self.resource_list_hook: ResourceListHook = NoopResourceListHook()
         # Generic ephemeral cache (e.g. the connector OAuth PKCE handoff). OSS
         # default is a local file cache (single desktop process); the commercial
