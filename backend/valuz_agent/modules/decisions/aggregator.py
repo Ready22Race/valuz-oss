@@ -89,7 +89,9 @@ class DecisionAggregator:
         # sweep (we delete by session, not by pending_id).
         self._by_session: dict[str, set[str]] = {}
 
-        self._subscribers: list[asyncio.Queue[DecisionStreamEvent]] = []
+        # (owner_user_id, queue): fan-out is filtered by owner so a shared
+        # multi-tenant host never delivers one owner's inbox to another.
+        self._subscribers: list[tuple[str, asyncio.Queue[DecisionStreamEvent]]] = []
         self._lock = asyncio.Lock()
         self._sub_task: asyncio.Task[None] | None = None
         self._stopped = False
@@ -127,7 +129,7 @@ class DecisionAggregator:
         async with self._lock:
             # Signal any live subscribers to drain — they'll exit on the
             # sentinel and clean themselves up via unsubscribe().
-            for q in self._subscribers:
+            for _owner, q in self._subscribers:
                 try:
                     q.put_nowait(None)  # type: ignore[arg-type]
                 except asyncio.QueueFull:
@@ -137,25 +139,29 @@ class DecisionAggregator:
 
     # ---- Public read API --------------------------------------------
 
-    def snapshot(self) -> list[DecisionEntry]:
-        """Return a stable list of all currently-pending entries.
+    def snapshot(self, owner_user_id: str) -> list[DecisionEntry]:
+        """Return a stable list of ``owner_user_id``'s currently-pending entries.
 
-        Sorted ``raised_at`` ASC so the drawer can render oldest-first
-        without further sorting on the client.
+        Owner-scoped (multi-tenant): only this owner's pendings. Sorted
+        ``raised_at`` ASC so the drawer renders oldest-first without further
+        client-side sorting.
         """
-        return sorted(self._pending.values(), key=lambda e: e.raised_at)
+        return sorted(
+            (e for e in self._pending.values() if e.owner_user_id == owner_user_id),
+            key=lambda e: e.raised_at,
+        )
 
-    async def subscribe(self) -> asyncio.Queue[DecisionStreamEvent]:
-        """Open a new fan-out queue for SSE delivery.
+    async def subscribe(self, owner_user_id: str) -> asyncio.Queue[DecisionStreamEvent]:
+        """Open a new fan-out queue for SSE delivery, scoped to ``owner_user_id``.
 
-        The queue receives a ``snapshot`` event first (carrying the full
-        current state), then ``added`` / ``resolved`` events as they
-        happen. Caller MUST call :meth:`unsubscribe` to release the
-        queue when the SSE connection closes.
+        The queue receives a ``snapshot`` event first (this owner's current
+        state), then ``added`` / ``resolved`` events for this owner only. Caller
+        MUST call :meth:`unsubscribe` to release the queue when the SSE
+        connection closes.
         """
         async with self._lock:
             q: asyncio.Queue[DecisionStreamEvent] = asyncio.Queue(maxsize=512)
-            # Initial state — caller sees the current snapshot before any
+            # Initial state — caller sees their current snapshot before any
             # live events. Wrapped in the same ``DecisionStreamEvent``
             # shape the HTTP layer already knows how to serialise.
             from valuz_agent.modules.decisions.schemas import (
@@ -164,18 +170,15 @@ class DecisionAggregator:
 
             snap_ev = DecisionStreamEvent(
                 kind="snapshot",
-                payload=_DecisionStreamSnapshotPayload(entries=self.snapshot()),
+                payload=_DecisionStreamSnapshotPayload(entries=self.snapshot(owner_user_id)),
             )
             await q.put(snap_ev)
-            self._subscribers.append(q)
+            self._subscribers.append((owner_user_id, q))
             return q
 
     async def unsubscribe(self, q: asyncio.Queue[DecisionStreamEvent]) -> None:
         async with self._lock:
-            try:
-                self._subscribers.remove(q)
-            except ValueError:
-                pass
+            self._subscribers = [(o, sq) for (o, sq) in self._subscribers if sq is not q]
 
     # ---- Internal: hydration ----------------------------------------
 
@@ -326,7 +329,8 @@ class DecisionAggregator:
                 DecisionStreamEvent(
                     kind="added",
                     payload=_added_payload(entry),
-                )
+                ),
+                entry.owner_user_id,
             )
 
     async def _on_action_resolved(self, session_id: str, event: Event) -> None:
@@ -334,8 +338,10 @@ class DecisionAggregator:
         if not isinstance(pending_id, str):
             return
         async with self._lock:
-            if pending_id not in self._pending:
+            existing = self._pending.get(pending_id)
+            if existing is None:
                 return
+            owner_user_id = existing.owner_user_id  # capture before delete
             del self._pending[pending_id]
             siblings = self._by_session.get(session_id)
             if siblings is not None:
@@ -346,12 +352,15 @@ class DecisionAggregator:
                 DecisionStreamEvent(
                     kind="resolved",
                     payload=_resolved_payload(pending_id),
-                )
+                ),
+                owner_user_id,
             )
 
-    async def _fan_out(self, ev: DecisionStreamEvent) -> None:
-        """Push to every subscriber. Caller holds ``self._lock``."""
-        for q in self._subscribers:
+    async def _fan_out(self, ev: DecisionStreamEvent, owner_user_id: str) -> None:
+        """Push to ``owner_user_id``'s subscribers only. Caller holds ``self._lock``."""
+        for owner, q in self._subscribers:
+            if owner != owner_user_id:
+                continue
             try:
                 q.put_nowait(ev)
             except asyncio.QueueFull:
