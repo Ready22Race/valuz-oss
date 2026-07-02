@@ -4255,6 +4255,53 @@ export const ConversationPage = () => {
     return () => cancelAnimationFrame(r);
   }, [selectedSessionId]);
 
+  // Entering a conversation that's already RUNNING: land on the live bottom so
+  // the user sees the streaming output, not the top. The generic entry scroll
+  // above fires a single rAF on session change, but a running session is still
+  // replaying history / streaming, so its content settles over several frames —
+  // and once it paints, ``showScrollBottom`` can latch true (first paint at the
+  // top), which blocks the events-follow effect and strands the viewport up top.
+  // A short burst of scroll-to-bottom + latch-clear across the load window pins
+  // it to the newest message; the normal follow takes over afterwards.
+  //
+  // Only the FIRST status observation after entering a session counts (tracked
+  // per session id): if it's already running, jump; otherwise leave scrolling to
+  // the generic entry effect + the send-time pin-to-top, so a later idle→running
+  // from the user's OWN send isn't yanked to the bottom.
+  // Open every conversation on its newest message — running or ended alike. The
+  // generic entry scroll above fires a single rAF on session change, but the
+  // transcript settles over later frames (history replay / streaming), and once
+  // it paints ``showScrollBottom`` can latch true (first paint at the top),
+  // blocking the events-follow effect and stranding the viewport up top. Burst
+  // scroll-to-bottom + latch-clear across the settle window guarantees the
+  // bottom. Gated to the FIRST transcript load per session id via the ref, so a
+  // later send / streaming delta (which also bumps ``events.length``) doesn't
+  // re-trigger it and fight the send-time pin-to-top.
+  const entryScrolledRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedSessionId) return;
+    if (entryScrolledRef.current === selectedSessionId) return;
+    if (events.length === 0) return; // wait for the transcript window to load
+    entryScrolledRef.current = selectedSessionId;
+    if (!scrollContainerRef.current) return;
+    let cancelled = false;
+    const jump = () => {
+      const node = scrollContainerRef.current;
+      if (cancelled || !node) return;
+      node.scrollTop = node.scrollHeight;
+      setShowScrollBottom(false);
+    };
+    const raf = requestAnimationFrame(jump);
+    const timers = [120, 300, 600, 1000].map((ms) =>
+      window.setTimeout(jump, ms),
+    );
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+      timers.forEach((tm) => window.clearTimeout(tm));
+    };
+  }, [selectedSessionId, events.length]);
+
   // Mirror the kernel session's locked model/provider into the composer's
   // selector state so the UI shows what the session is actually using
   // (V5 freezes the model at session creation — picking a different one
