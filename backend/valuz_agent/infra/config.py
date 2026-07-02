@@ -165,87 +165,12 @@ class Settings(BaseSettings):
     # Override with ``VALUZ_SUBSCRIPTION_LOGIN_ENABLED``.
     subscription_login_enabled: bool = True
 
-    @property
-    def db_path(self) -> Path:
-        return self.data_dir / self.db_filename
-
-    @property
-    def db_url(self) -> str:
-        if self.database_url:
-            return self.database_url
-        return f"sqlite:///{self.db_path}"
-
-    @property
-    def db_url_async(self) -> str:
-        if self.database_url:
-            return self._to_async_url(self.database_url)
-        return f"sqlite+aiosqlite:///{self.db_path}"
-
-    @property
-    def kernel_db_path(self) -> Path:
-        return self.data_dir / self.kernel_db_filename
-
-    @property
-    def kernel_db_url(self) -> str:
-        """Sync-driver URL for the kernel's database.
-
-        Resolution order:
-        1. ``kernel_database_url`` — explicit override (Postgres / custom path).
-        2. ``database_url`` — an explicit host DB (e.g. a shared Postgres
-           server) co-locates the kernel there, preserving the single-store
-           layout server deployments rely on.
-        3. Otherwise (the local SQLite default) the kernel gets its OWN
-           ``kernel.db`` file, separate from the host ``valuz.db``.
-        """
-        if self.kernel_database_url:
-            return self.kernel_database_url
-        if self.database_url:
-            return self.database_url
-        return f"sqlite:///{self.kernel_db_path}"
-
-    @property
-    def kernel_db_url_async(self) -> str:
-        if self.kernel_database_url:
-            return self._to_async_url(self.kernel_database_url)
-        if self.database_url:
-            return self._to_async_url(self.database_url)
-        return f"sqlite+aiosqlite:///{self.kernel_db_path}"
-
-    @property
-    def is_sqlite(self) -> bool:
-        return self.db_url.startswith("sqlite")
-
-    @staticmethod
-    def _to_async_url(url: str) -> str:
-        if url.startswith("postgresql://"):
-            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        if url.startswith("sqlite://"):
-            return url.replace("sqlite://", "sqlite+aiosqlite://", 1)
-        return url
-
-    @property
-    def docs_dir(self) -> Path:
-        return self.data_dir / "docs"
-
-    @property
-    def secrets_dir(self) -> Path:
-        return self.data_dir / "secrets"
-
-    @property
-    def cache_dir(self) -> Path:
-        # Generic ephemeral cache (FileCache default — e.g. connector OAuth PKCE).
-        return self.data_dir / "cache"
-
     # ── Installation identity ────────────────────────────────────────
     # Where the locally-generated owner id (int32) is persisted. Lives
     # OUTSIDE the business tables so a DB clean-up rebuild never loses it
     # (see ``infra.local_identity.resolve_local_user_id``). Assigned once
     # on first install from a device fingerprint and stable thereafter.
     installation_filename: str = "installation.json"
-
-    @property
-    def installation_file(self) -> Path:
-        return self.data_dir / self.installation_filename
 
     # ── Logging paths ────────────────────────────────────────────────
     # ``infra.logging.configure_logging`` writes structured JSON lines
@@ -263,16 +188,9 @@ class Settings(BaseSettings):
     def log_file(self) -> Path:
         return self.log_dir / self.log_filename
 
-    # Per-session scratch dir where skill-creator writes draft skills.
-    # Each session gets a subdirectory named after its session_id; inside,
-    # the agent creates one directory per skill (slug-named) containing
-    # SKILL.md plus any bundled scripts/references/assets. Empty default
-    # means "data_dir/skill-creator/staging"; set via VALUZ_SKILL_STAGING_DIR.
+    # Optional root override for legacy skill-creator staging fallback.
+    # FsRegistry appends the user id; Settings only carries the configured root.
     skill_staging_dir_override: Path | None = None
-
-    @property
-    def skill_staging_dir(self) -> Path:
-        return self.skill_staging_dir_override or (self.data_dir / "skill-creator" / "staging")
 
     @property
     def internal_mcp_token(self) -> str:
@@ -320,10 +238,6 @@ class Settings(BaseSettings):
     # the bundled skill's command vocabulary in sync. GA vendors the bin
     # and sets VALUZ_CDT_PATH instead of npx.
     chrome_devtools_version: str = "1.2.0"
-
-    @property
-    def browser_profile_dir(self) -> Path:
-        return self.data_dir / self.browser_profile_subdir
 
     model_config = {"env_prefix": "VALUZ_"}
 

@@ -24,21 +24,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.models import Base, ProviderRow
 from valuz_agent.modules.providers.service import ProviderService, get_provider
-
-
-class _NoopSecretStore(SecretStorePort):
-    def get(self, key: str) -> str | None:
-        return None
-
-    def put(self, key: str, value: str) -> None:  # pragma: no cover - unused
-        pass
-
-    def delete(self, key: str) -> None:  # pragma: no cover - unused
-        pass
 
 
 class _SvcHandle:
@@ -67,7 +55,7 @@ async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
 
     async_session = async_factory()
     ds = ProviderDatastore(async_session)
-    service = ProviderService(ds, _NoopSecretStore(), EventBus())
+    service = ProviderService(ds, EventBus())
     try:
         yield _SvcHandle(service, sync_factory)
     finally:

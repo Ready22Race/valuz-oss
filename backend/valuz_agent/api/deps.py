@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from valuz_agent.infra import auth_context
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
-from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.integrations.docs_embedded import EmbeddedDocsRuntime
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.integrations.skills_official import OfficialSkillSource
@@ -68,20 +67,10 @@ def get_current_user_id_optional() -> str | None:
     return auth_context.get_current_user_id()
 
 
-def _secret_store() -> SecretStorePort:
-    # Convenience accessor for the configured secret store. OSS default is the
-    # local file store; the commercial overlay binds a shared store on ``ext``.
-    # Resolved per call (not cached) so a late overlay binding is honoured.
-    from valuz_agent.ports.extensions import ext
-
-    return ext.secret_store
-
-
 async def get_provider_service() -> AsyncGenerator[ProviderService, None]:
     async with async_unit_of_work() as db:
         yield ProviderService(
             datastore=ProviderDatastore(db),
-            secret_store=_secret_store(),
             event_bus=event_bus,
         )
 
@@ -157,19 +146,20 @@ def get_polling_scheduler():  # type: ignore[no-untyped-def]
     return _polling_scheduler()
 
 
-class _SecretStoreResolver:
-    """Bridges ``ParserPlugin.SecretResolver`` to ``SecretStorePort``.
+class _SecretResolver:
+    """Bridges ``ParserPlugin.SecretResolver`` to user-scoped secret files.
     Plugins call ``resolve(secret_ref)`` to fetch the API key at build
     time; we never plumb the plaintext through routing layers."""
 
-    def __init__(self, store: SecretStorePort, user_id: str) -> None:
-        self._store = store
+    def __init__(self, user_id: str) -> None:
         self._user_id = user_id
 
     def resolve(self, secret_ref: str | None) -> str | None:
         if not secret_ref:
             return None
-        return self._store.get(self._user_id, secret_ref)
+        from valuz_agent.infra import secret_store
+
+        return secret_store.get(self._user_id, secret_ref)
 
 
 async def build_parser_router(db: AsyncSession, user_id: str) -> ParserRouter:
@@ -190,19 +180,18 @@ async def build_parser_router(db: AsyncSession, user_id: str) -> ParserRouter:
     routing_config = await load_routing_config(db, user_id=user_id)
     return ParserRouter(
         registry=_parser_registry(),
-        secret_resolver=_SecretStoreResolver(_secret_store(), user_id),
+        secret_resolver=_SecretResolver(user_id),
         routing_config=routing_config,
         setup_complete_probe=_setup_controller().is_complete,
     )
 
 
 async def get_document_service() -> AsyncGenerator[DocumentLibraryService, None]:
-    from valuz_agent.infra.config import settings
+    from valuz_agent.infra.fs_registry import fs_registry
 
     user_id = get_current_user_id()
     async with async_unit_of_work() as db:
-        preview_dir = settings.docs_dir / "preview"
-        preview_dir.mkdir(parents=True, exist_ok=True)
+        preview_dir = fs_registry.docs_preview_dir(user_id)
         docs_runtime = EmbeddedDocsRuntime(preview_dir=preview_dir)
         # ``ParserRouter`` reads its routing config from an immutable snapshot
         # resolved here (one async read per request) instead of opening a sync
@@ -213,7 +202,7 @@ async def get_document_service() -> AsyncGenerator[DocumentLibraryService, None]
             parser=parser,
             docs_runtime=docs_runtime,
             event_bus=event_bus,
-            scan_state_dir=settings.docs_dir / "scan_state",
+            scan_state_dir=fs_registry.docs_scan_state_dir(user_id),
             # ``session_factory=None`` → the background reindex runner uses
             # ``async_unit_of_work`` (its own fresh async session per job), so
             # the worker never reuses the request's closed session.
@@ -231,7 +220,6 @@ async def get_session_service() -> AsyncGenerator[SessionService, None]:
             skills=SkillDatastore(db),
             projects=project_ds,
             docs=DocumentDatastore(db),
-            secrets=_secret_store(),
             connectors=ConnectorDatastore(db),
             skill_source=FilesystemSkillSource(),
             extra_skill_sources=[OfficialSkillSource()],

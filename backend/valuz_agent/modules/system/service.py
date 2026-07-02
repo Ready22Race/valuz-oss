@@ -23,6 +23,8 @@ from pathlib import Path
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.config import settings
 from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.infra.db_urls import db_url, sqlite_path_from_url
+from valuz_agent.infra.local_identity import resolve_local_user_id
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.system.schemas import SystemStatusResponse
 
@@ -142,6 +144,8 @@ async def collect_system_status(*, port: int) -> SystemStatusResponse:
     log_dir = settings.log_dir
     log_file = settings.log_file
 
+    db_path = sqlite_path_from_url(db_url())
+
     return SystemStatusResponse(
         status=status,
         pid=os.getpid(),
@@ -151,10 +155,10 @@ async def collect_system_status(*, port: int) -> SystemStatusResponse:
         kernel_pin=_read_kernel_pin(),
         port=port,
         active_session_count=await _count_active_sessions(),
-        db_path=str(settings.db_path),
+        db_path=str(db_path) if db_path is not None else "",
         log_path=str(log_file),
         log_dir=str(log_dir),
-        data_dir=str(fs_registry.resolve()),  # non-creating data-root read
+        data_dir=str(fs_registry.data_dir(resolve_local_user_id())),
         runtimes_available=_runtimes_available(),
         warnings=list(_warnings),
     )

@@ -108,7 +108,7 @@ class ProjectPackService:
         # Resolve the on-disk memory dir; pass None when absent / empty so
         # the archive carries no ``memory/`` entries for projects that have
         # never written any memory yet.
-        memory_dir = self._resolve_memory_dir(project_id)
+        memory_dir = self._resolve_memory_dir(user_id, project_id)
 
         skill_dirs = await self._resolve_embedded_skill_dirs(user_id, manifest)
         return build_archive(manifest, skill_dirs, memory_dir)
@@ -402,7 +402,9 @@ class ProjectPackService:
                 if project.memory:
                     src_memory = (root / project.memory).resolve()
                     if src_memory.is_dir() and src_memory.is_relative_to(root.resolve()):
-                        dest_memory = fs_registry.memory_dir("project", project_id=project_row.id)
+                        dest_memory = fs_registry.memory_dir(
+                            user_id, "project", project_id=project_row.id
+                        )
                         shutil.copytree(src_memory, dest_memory, dirs_exist_ok=True)
             except Exception:  # noqa: BLE001
                 logger.exception("project-pack: memory restore failed for %s", project_row.id)
@@ -523,10 +525,10 @@ class ProjectPackService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _resolve_memory_dir(self, project_id: str) -> Path | None:
+    def _resolve_memory_dir(self, user_id: str, project_id: str) -> Path | None:
         """Return the project's memory dir if it has any files, else None."""
         try:
-            d = fs_registry.memory_dir("project", project_id=project_id)
+            d = fs_registry.memory_dir(user_id, "project", project_id=project_id)
         except ValueError:
             return None
         if not d.is_dir():

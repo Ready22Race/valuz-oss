@@ -28,21 +28,29 @@ class InjectionAssembler:
         self._store = store or memory_store
         self._snapshots: OrderedDict[str, str] = OrderedDict()
 
-    def snapshot_for_session(self, *, session_id: str, project_id: str | None = None) -> str:
+    def snapshot_for_session(
+        self, *, user_id: str, session_id: str, project_id: str | None = None
+    ) -> str:
         """Frozen memory block for a session — built once, then reused verbatim."""
-        cached = self._snapshots.get(session_id)
+        cache_key = f"{user_id}:{session_id}"
+        cached = self._snapshots.get(cache_key)
         if cached is not None:
-            self._snapshots.move_to_end(session_id)  # LRU touch
+            self._snapshots.move_to_end(cache_key)  # LRU touch
             return cached
-        block = self._store.render_for_injection(project_id=project_id)
-        self._snapshots[session_id] = block
+        block = self._store.render_for_injection(user_id, project_id=project_id)
+        self._snapshots[cache_key] = block
         while len(self._snapshots) > _MAX_SNAPSHOTS:
             self._snapshots.popitem(last=False)  # evict the least-recently-used
         return block
 
-    def invalidate(self, session_id: str) -> None:
+    def invalidate(self, session_id: str, user_id: str | None = None) -> None:
         """Drop a session's cached snapshot (e.g. on session end)."""
-        self._snapshots.pop(session_id, None)
+        if user_id is not None:
+            self._snapshots.pop(f"{user_id}:{session_id}", None)
+            return
+        for key in tuple(self._snapshots):
+            if key.endswith(f":{session_id}"):
+                self._snapshots.pop(key, None)
 
 
 injection_assembler = InjectionAssembler()

@@ -1,7 +1,7 @@
 """Shared member/lead session-build helpers (ADR-023).
 
 These are pure, stateless helpers used by the dispatcher + lifecycle services
-when they build kernel sessions: resolving the provider/secret deps that
+when they build kernel sessions: resolving the provider deps that
 ``build_member_session`` needs, and a credential pre-flight that fails fast
 when a built session has no usable model provider.
 
@@ -22,14 +22,12 @@ logger = logging.getLogger(__name__)
 
 
 def _provider_resolver_deps(db: Any) -> dict[str, Any]:
-    """Build the (providers, secrets) deps so build_member_session
+    """Build the provider deps so build_member_session
     can resolve a per-agent pinned provider into the run's model_provider."""
     from valuz_agent.modules.providers.datastore import ProviderDatastore
-    from valuz_agent.ports.extensions import ext
 
     return {
         "providers": ProviderDatastore(db),
-        "secrets": ext.secret_store,
     }
 
 
@@ -45,9 +43,6 @@ async def _credential_gap(
     db: Any | None = None,
     user_id: str | None = None,
 ) -> str | None:
-    if user_id is None:
-        raise ValueError("user_id is required")
-
     """Return a clear reason when a built session has no usable credentials.
 
     Credentials are funnelled through the provider system: a session's
@@ -68,6 +63,9 @@ async def _credential_gap(
     Returns ``None`` when a provider resolved (or is an OAuth
     subscription), else a human-readable reason.
     """
+    if user_id is None:
+        raise ValueError("user_id is required")
+
     if getattr(session, "model_provider", None) is not None:
         return None
 

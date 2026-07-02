@@ -23,6 +23,8 @@ import pytest
 
 _REIMPORT_PREFIXES = (
     "valuz_agent.infra.config",
+    "valuz_agent.infra.db_urls",
+    "valuz_agent.infra.fs_registry",
     "valuz_agent.boot.kernel",
     "valuz_agent.boot.schema",
     "valuz_agent.infra.database",
@@ -43,7 +45,6 @@ async def split_db(tmp_path, monkeypatch):
     monkeypatch.setenv("VALUZ_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("VALUZ_DB_FILENAME", "host-probe.db")
     kernel_db = tmp_path / "kernel-probe.db"
-    host_db = tmp_path / "host-probe.db"
     monkeypatch.setenv("VALUZ_KERNEL_DATABASE_URL", f"sqlite:///{kernel_db}")
     # This probe exercises the SEPARATED-kernel, NO-durable seam (host stays
     # clean of kernel tables). Pin the durable OFF so ``_set_kernel_env``'s
@@ -64,6 +65,10 @@ async def split_db(tmp_path, monkeypatch):
         kb.run_kernel_migrations()
 
         import valuz_agent.boot.schema as sb
+        from valuz_agent.infra.db_urls import db_url, sqlite_path_from_url
+
+        host_db = sqlite_path_from_url(db_url())
+        assert host_db is not None
 
         sb.run_host_migrations()
 

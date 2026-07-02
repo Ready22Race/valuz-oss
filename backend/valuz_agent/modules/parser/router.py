@@ -117,7 +117,7 @@ def classify(file_path: str | Path) -> str:
 
 
 class _NullSecretResolver(SecretResolver):
-    """PR-1 stub. PR-2 swaps this for a real ``FileSecretStore`` adapter."""
+    """Fallback resolver used when no local secret store is provided."""
 
     def resolve(self, secret_ref: str | None) -> str | None:
         return None

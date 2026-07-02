@@ -179,7 +179,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = _parse_args(argv)
-    fs_registry.data_dir()  # ensure the data root exists
+    from valuz_agent.infra.local_identity import resolve_local_user_id
+
+    fs_registry.data_dir(resolve_local_user_id())  # ensure the data root exists
     # NB: structured JSON logging is configured **inside** the FastAPI
     # startup hook (see ``api/app.py``), NOT here. Uvicorn calls
     # ``logging.config.dictConfig`` during its own boot which wipes

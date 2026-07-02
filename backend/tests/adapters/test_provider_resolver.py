@@ -49,9 +49,22 @@ class _FakeProviderDatastore:
         return self._by_id.get(provider_id)
 
 
-class _UnusedSecrets:
-    def get(self, _user_id: str, _ref: str):  # type: ignore[no-untyped-def]
-        return None
+
+@pytest.fixture(autouse=True)
+def fake_secret_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    valid_refs = {
+        "channel/broken",
+        "channel/zhipu",
+        "channel/glm-coding",
+        "channel/ds",
+        "channel/custom",
+        "ch/x",
+    }
+
+    def _get(_user_id: str, ref: str) -> str | None:
+        return "sk-test" if ref in valid_refs else None
+
+    monkeypatch.setattr("valuz_agent.adapters.provider_resolver.secret_store.get", _get)
 
 
 async def test_explicit_runtime_overrides_provider_default() -> None:
@@ -125,7 +138,6 @@ async def test_oauth_subscription_provider_returns_none_model_provider() -> None
         provider_id="ch-claude-subscription",
         model_id="claude-sonnet-4-6",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_UnusedSecrets(),  # type: ignore[arg-type]
     )
     assert result is None
 
@@ -144,7 +156,6 @@ async def test_oauth_subscription_provider_skips_base_url_check() -> None:
         provider_id="ch-codex-subscription",
         model_id="gpt-5-codex",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_UnusedSecrets(),  # type: ignore[arg-type]
     )
     assert result is None
 
@@ -154,10 +165,6 @@ async def test_api_key_provider_without_base_url_falls_through_to_first_party() 
     row has no URL, the resolver now returns ``base_url=None`` so the
     runtime falls back to the SDK's ambient endpoint. Only api_key is
     strictly required (no credentials still raises)."""
-
-    class _Secrets:
-        def get(self, user_id: str, ref: str) -> str | None:
-            return "sk-test" if ref == "channel/broken" else None
 
     provider = _FakeProvider(
         id="ch-broken",
@@ -171,7 +178,6 @@ async def test_api_key_provider_without_base_url_falls_through_to_first_party() 
         provider_id="ch-broken",
         model_id="any",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_Secrets(),  # type: ignore[arg-type]
     )
     assert result is not None
     assert result.base_url is None
@@ -193,7 +199,6 @@ async def test_api_key_provider_without_credentials_still_raises() -> None:
             provider_id="ch-broken",
             model_id="any",
             providers=_FakeProviderDatastore([provider]),
-            secrets=_UnusedSecrets(),  # type: ignore[arg-type]
         )
     assert "credentials" in exc.value.reason
 
@@ -203,10 +208,6 @@ async def test_dual_protocol_builtin_follows_runtime_to_anthropic_endpoint() -> 
     session picks claude_agent runtime, resolve must route to that URL
     with api_protocol=anthropic, regardless of the row's stored base_url.
     """
-
-    class _Secrets:
-        def get(self, user_id: str, ref: str) -> str | None:
-            return "sk-test" if ref == "channel/zhipu" else None
 
     provider = _FakeProvider(
         id="ch-zhipu",
@@ -219,7 +220,6 @@ async def test_dual_protocol_builtin_follows_runtime_to_anthropic_endpoint() -> 
         provider_id="ch-zhipu",
         model_id="glm-4-plus",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_Secrets(),  # type: ignore[arg-type]
         runtime_provider="claude_agent",
     )
     assert result is not None
@@ -229,10 +229,6 @@ async def test_dual_protocol_builtin_follows_runtime_to_anthropic_endpoint() -> 
 
 async def test_dual_protocol_builtin_follows_runtime_to_openai_endpoint() -> None:
     """Same provider with deepagents runtime → openai endpoint."""
-
-    class _Secrets:
-        def get(self, user_id: str, ref: str) -> str | None:
-            return "sk-test" if ref == "channel/zhipu" else None
 
     provider = _FakeProvider(
         id="ch-zhipu",
@@ -245,7 +241,6 @@ async def test_dual_protocol_builtin_follows_runtime_to_openai_endpoint() -> Non
         provider_id="ch-zhipu",
         model_id="glm-4-plus",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_Secrets(),  # type: ignore[arg-type]
         runtime_provider="deepagents",
     )
     assert result is not None
@@ -254,10 +249,6 @@ async def test_dual_protocol_builtin_follows_runtime_to_openai_endpoint() -> Non
 
 async def test_zhipu_provider_preserves_saved_coding_endpoint_for_openai_runtime() -> None:
     """One Zhipu card can persist the Coding Plan endpoint after discovery fallback."""
-
-    class _Secrets:
-        def get(self, user_id: str, ref: str) -> str | None:
-            return "sk-test" if ref == "channel/glm-coding" else None
 
     provider = _FakeProvider(
         id="ch-zhipu",
@@ -270,7 +261,6 @@ async def test_zhipu_provider_preserves_saved_coding_endpoint_for_openai_runtime
         provider_id="ch-zhipu",
         model_id="glm-5.2",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_Secrets(),  # type: ignore[arg-type]
         runtime_provider="claude_agent",
     )
     assert anthropic is not None
@@ -281,7 +271,6 @@ async def test_zhipu_provider_preserves_saved_coding_endpoint_for_openai_runtime
         provider_id="ch-zhipu",
         model_id="glm-5.2",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_Secrets(),  # type: ignore[arg-type]
         runtime_provider="deepagents",
     )
     assert openai is not None
@@ -295,10 +284,6 @@ async def test_dual_protocol_builtin_fallback_synthesises_anthropic_path() -> No
     shape of the same upstream.
     """
 
-    class _Secrets:
-        def get(self, user_id: str, ref: str) -> str | None:
-            return "sk-test" if ref == "channel/ds" else None
-
     provider = _FakeProvider(
         id="ch-deepseek",
         provider_kind="deepseek",
@@ -310,7 +295,6 @@ async def test_dual_protocol_builtin_fallback_synthesises_anthropic_path() -> No
         provider_id="ch-deepseek",
         model_id="deepseek-v4-flash",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_Secrets(),  # type: ignore[arg-type]
         runtime_provider="claude_agent",
     )
     assert result is not None
@@ -322,10 +306,6 @@ async def test_compatible_channel_trusts_row_base_url_under_either_runtime() -> 
     """Custom (compatible) channel: the user told us where to point, so
     runtime_provider must NOT override the stored base_url.
     """
-
-    class _Secrets:
-        def get(self, user_id: str, ref: str) -> str | None:
-            return "sk-test" if ref == "channel/custom" else None
 
     provider = _FakeProvider(
         id="ch-custom",
@@ -339,7 +319,6 @@ async def test_compatible_channel_trusts_row_base_url_under_either_runtime() -> 
         provider_id="ch-custom",
         model_id="whatever",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_Secrets(),  # type: ignore[arg-type]
         runtime_provider="deepagents",
     )
     assert result is not None
@@ -365,15 +344,6 @@ async def test_legacy_call_signature_without_runtime_kwarg_still_works() -> None
 # ---------------------------------------------------------------------------
 
 
-class _SecretRefSecrets:
-    """Minimal secret store that resolves a single channel id."""
-
-    def __init__(self, ref: str, key: str = "sk-test") -> None:
-        self._ref, self._key = ref, key
-
-    def get(self, user_id: str, ref: str) -> str | None:
-        return self._key if ref == self._ref else None
-
 
 async def test_row_protocol_openai_completion_maps_to_kernel_underscore_form() -> None:
     """User-facing hyphen ``openai-completion`` translates to kernel
@@ -390,7 +360,6 @@ async def test_row_protocol_openai_completion_maps_to_kernel_underscore_form() -
         provider_id="ch-x",
         model_id="any",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_SecretRefSecrets("ch/x"),  # type: ignore[arg-type]
     )
     assert result is not None
     assert result.api_protocol == "openai_completion"
@@ -409,7 +378,6 @@ async def test_row_protocol_openai_response_maps_to_kernel_underscore_form() -> 
         provider_id="ch-x",
         model_id="any",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_SecretRefSecrets("ch/x"),  # type: ignore[arg-type]
     )
     assert result is not None
     assert result.api_protocol == "openai_response"
@@ -428,7 +396,6 @@ async def test_row_protocol_gemini_maps_to_kernel_gemini() -> None:
         provider_id="ch-x",
         model_id="any",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_SecretRefSecrets("ch/x"),  # type: ignore[arg-type]
     )
     assert result is not None
     assert result.api_protocol == "gemini"
@@ -450,7 +417,6 @@ async def test_legacy_bare_openai_protocol_maps_to_openai_completion() -> None:
         provider_id="ch-x",
         model_id="any",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_SecretRefSecrets("ch/x"),  # type: ignore[arg-type]
     )
     assert result is not None
     assert result.api_protocol == "openai_completion"
@@ -472,7 +438,6 @@ async def test_runtime_default_codex_picks_openai_response() -> None:
         provider_id="ch-x",
         model_id="gpt-5-codex",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_SecretRefSecrets("ch/x"),  # type: ignore[arg-type]
         runtime_provider="codex",
     )
     assert result is not None
@@ -494,7 +459,6 @@ async def test_empty_base_url_normalizes_to_none() -> None:
         provider_id="ch-x",
         model_id="any",
         providers=_FakeProviderDatastore([provider]),
-        secrets=_SecretRefSecrets("ch/x"),  # type: ignore[arg-type]
     )
     assert result is not None
     assert result.base_url is None

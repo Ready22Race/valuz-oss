@@ -740,11 +740,9 @@ class InProcessAutomationRunner:
     def _build_session_service(self, db: Any) -> Any:
         """Construct a per-fire ``SessionService`` with all collaborators.
 
-        Mirrors the wiring in ``api/deps.get_session_service`` — since
-        kernel V5 the SessionService needs secrets for provider resolution,
-        plus docs and connectors for runtime catalog injection.
+        Mirrors the wiring in ``api/deps.get_session_service`` — the service
+        gets docs and connectors for runtime catalog injection.
         """
-        from valuz_agent.api.deps import _secret_store
         from valuz_agent.infra.eventbus import event_bus
         from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
         from valuz_agent.integrations.skills_official import OfficialSkillSource
@@ -758,7 +756,6 @@ class InProcessAutomationRunner:
 
         project_ds = ProjectDatastore(db)
         project_svc = ProjectService(datastore=project_ds, event_bus=event_bus)
-        secrets = _secret_store()
 
         return SessionService(
             event_bus=event_bus,
@@ -767,7 +764,6 @@ class InProcessAutomationRunner:
             skills=SkillDatastore(db),
             projects=project_ds,
             docs=DocumentDatastore(db),
-            secrets=secrets,
             connectors=ConnectorDatastore(db),
             skill_source=FilesystemSkillSource(),
             extra_skill_sources=[OfficialSkillSource()],

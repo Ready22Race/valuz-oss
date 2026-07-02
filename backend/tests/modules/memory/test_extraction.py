@@ -29,8 +29,9 @@ def _completer(payload):  # noqa: ANN001, ANN202 — async stub returning a fixe
 def store(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
     from valuz_agent.infra import fs_registry as fsmod
 
-    monkeypatch.setattr(fsmod.FsRegistry, "data_dir", lambda self: tmp_path / "app")
-    return MemoryStore()
+    fs = fsmod.FsRegistry()
+    monkeypatch.setattr(fs, "data_dir", lambda user_id: tmp_path / "app")
+    return MemoryStore(fs=fs)
 
 
 def test_redact_secrets():
@@ -79,13 +80,13 @@ def test_apply_ops_scope_routing(store):
         )
     )
     # no project bound -> the project op is skipped, user/global applied
-    rep = apply_ops(ops, project_id=None, store=store)
+    rep = apply_ops(ops, user_id="local-test-owner", project_id=None, store=store)
     assert rep["applied"] == 2 and rep["skipped"]
-    assert store.read_entries("user") == ["be terse"]
-    assert store.read_entries("global") == ["prefers pnpm"]
+    assert store.read_entries("local-test-owner", "user") == ["be terse"]
+    assert store.read_entries("local-test-owner", "global") == ["prefers pnpm"]
     # with a project -> project op lands
-    rep2 = apply_ops(ops, project_id="p1", store=store)
-    assert "tracks ACME" in store.read_entries("project", project_id="p1")
+    rep2 = apply_ops(ops, user_id="local-test-owner", project_id="p1", store=store)
+    assert "tracks ACME" in store.read_entries("local-test-owner", "project", project_id="p1")
     assert rep2["applied"] >= 1
 
 
@@ -99,8 +100,8 @@ def test_apply_ops_redacts_before_persist(store):
             }
         )
     )
-    apply_ops(ops, store=store)
-    stored = store.read_entries("global")[0]
+    apply_ops(ops, user_id="local-test-owner", store=store)
+    stored = store.read_entries("local-test-owner", "global")[0]
     assert "sk-ABCDEFGH" not in stored and "[REDACTED_SECRET]" in stored
 
 
@@ -110,15 +111,20 @@ def test_extractor_end_to_end(store):
     )
     ext = MemoryExtractor(store=store, complete=_completer(payload))
     assert ext.enabled
-    rep = asyncio.run(ext.extract(transcript="user: I'm an investor; reply in Chinese"))
+    rep = asyncio.run(
+        ext.extract(
+            user_id="local-test-owner",
+            transcript="user: I'm an investor; reply in Chinese",
+        )
+    )
     assert rep["applied"] == 1
-    assert "investor, replies in zh" in store.read_entries("user")
+    assert "investor, replies in zh" in store.read_entries("local-test-owner", "user")
 
 
 def test_extractor_inert_without_completer(store):
     ext = MemoryExtractor(store=store)
     assert not ext.enabled
-    rep = asyncio.run(ext.extract(transcript="anything"))
+    rep = asyncio.run(ext.extract(user_id="local-test-owner", transcript="anything"))
     assert rep["applied"] == 0 and "skipped" in rep
 
 
@@ -145,7 +151,7 @@ def test_render_current_memory_shows_usage():
 def test_extractor_surfaces_usage_in_review_prompt(store):
     """The reviewer must see each target's char budget so it consolidates before a
     target overflows (over-cap writes are rejected, not auto-grown)."""
-    store.add("global", "prefers pnpm over npm for all JS projects")
+    store.add("local-test-owner", "global", "prefers pnpm over npm for all JS projects")
     seen: dict[str, str] = {}
 
     async def _capture(prompt):  # noqa: ANN001, ANN202
@@ -153,7 +159,12 @@ def test_extractor_surfaces_usage_in_review_prompt(store):
         return json.dumps({"ops": []})
 
     ext = MemoryExtractor(store=store, complete=_capture)
-    asyncio.run(ext.extract(transcript="user: please review this conversation content"))
+    asyncio.run(
+        ext.extract(
+            user_id="local-test-owner",
+            transcript="user: please review this conversation content",
+        )
+    )
     assert "/2,500 chars (" in seen["p"]  # global budget surfaced
     assert "/1,500 chars (" in seen["p"]  # user budget surfaced
 
@@ -178,7 +189,13 @@ def _capture_prompt(store, **extract_kwargs):  # noqa: ANN001, ANN202
         return json.dumps({"ops": []})
 
     ext = MemoryExtractor(store=store, complete=_capture)
-    asyncio.run(ext.extract(transcript="user: please review this content", **extract_kwargs))
+    asyncio.run(
+        ext.extract(
+            user_id="local-test-owner",
+            transcript="user: please review this content",
+            **extract_kwargs,
+        )
+    )
     return seen["p"]
 
 

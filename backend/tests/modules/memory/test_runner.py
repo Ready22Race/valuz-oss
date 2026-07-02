@@ -44,7 +44,8 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
     """Redirect storage to tmp and stub every kernel/provider dependency."""
     from valuz_agent.infra import fs_registry as fsmod
 
-    monkeypatch.setattr(fsmod.FsRegistry, "data_dir", lambda self: tmp_path / "app")
+    monkeypatch.setattr(fsmod.fs_registry, "data_dir", lambda user_id: tmp_path / "app")
+    monkeypatch.setattr(memory_store._fs, "data_dir", lambda user_id: tmp_path / "app")
     monkeypatch.setattr(r, "async_unit_of_work", lambda *_a, **_k: _UOW())
 
     async def _resolve(**_kw):  # noqa: ANN003, ANN202
@@ -117,7 +118,7 @@ def test_end_to_end_writes_memory(patched):
         assistant=payload,
     )
     asyncio.run(run_extraction_for_session("s1", "u1"))
-    assert "user is an investor" in memory_store.read_entries("global")
+    assert "user is an investor" in memory_store.read_entries("u1", "global")
     assert calls["create"] == 1 and calls["delete"] == 1
 
 
@@ -130,7 +131,7 @@ def test_triviality_gate_skips_short(patched):
         assistant=json.dumps({"ops": [{"action": "add", "target": "global", "content": "x"}]}),
     )
     asyncio.run(run_extraction_for_session("s1", "u1"))
-    assert memory_store.read_entries("global") == [] and calls["create"] == 0
+    assert memory_store.read_entries("u1", "global") == [] and calls["create"] == 0
 
 
 def test_toggle_off_skips(patched):
@@ -150,7 +151,7 @@ def test_toggle_off_skips(patched):
         assistant=json.dumps({"ops": [{"action": "add", "target": "global", "content": "y"}]}),
     )
     asyncio.run(run_extraction_for_session("s1", "u1"))
-    assert memory_store.read_entries("global") == [] and calls["create"] == 0
+    assert memory_store.read_entries("u1", "global") == [] and calls["create"] == 0
 
 
 def test_guard_skips_ephemeral_review(patched):
@@ -162,7 +163,7 @@ def test_guard_skips_ephemeral_review(patched):
         assistant=json.dumps({"ops": [{"action": "add", "target": "global", "content": "x"}]}),
     )
     asyncio.run(run_extraction_for_session("s1", "u1"))
-    assert memory_store.read_entries("global") == [] and calls["create"] == 0
+    assert memory_store.read_entries("u1", "global") == [] and calls["create"] == 0
 
 
 def test_guard_skips_task_session(patched):
@@ -174,7 +175,7 @@ def test_guard_skips_task_session(patched):
         assistant=json.dumps({"ops": [{"action": "add", "target": "global", "content": "x"}]}),
     )
     asyncio.run(run_extraction_for_session("s1", "u1"))
-    assert memory_store.read_entries("global") == [] and calls["create"] == 0
+    assert memory_store.read_entries("u1", "global") == [] and calls["create"] == 0
 
 
 def test_guard_skips_without_provider(patched):
@@ -186,7 +187,7 @@ def test_guard_skips_without_provider(patched):
         assistant=json.dumps({"ops": [{"action": "add", "target": "global", "content": "x"}]}),
     )
     asyncio.run(run_extraction_for_session("s1", "u1"))
-    assert memory_store.read_entries("global") == [] and calls["create"] == 0
+    assert memory_store.read_entries("u1", "global") == [] and calls["create"] == 0
 
 
 def test_no_user_id_is_noop(patched):
@@ -219,7 +220,7 @@ def test_subscription_provider_none_still_runs(patched):
         ),
     )
     asyncio.run(run_extraction_for_session("s1", "u1"))
-    assert "prefers Codex runtime" in memory_store.read_entries("global")
+    assert "prefers Codex runtime" in memory_store.read_entries("u1", "global")
     assert calls["create"] == 1  # ephemeral review session still created
 
 
@@ -252,7 +253,9 @@ def test_real_project_injects_context_and_writes_project_memory(patched):
     monkeypatch.setattr(r.kernel_client, "run_turn", _run)
 
     asyncio.run(run_extraction_for_session("s1", "u1"))
-    assert "tracks 茅台 quarterly" in memory_store.read_entries("project", project_id="realproj")
+    assert "tracks 茅台 quarterly" in memory_store.read_entries(
+        "u1", "project", project_id="realproj"
+    )
     # project identity was injected so the reviewer can route project facts
     assert "茅台研究" in seen["prompt"] and "一手财报" in seen["prompt"]
 
@@ -283,8 +286,8 @@ def test_chat_kind_project_gated_to_user_global(patched):
     )
     asyncio.run(run_extraction_for_session("s1", "u1"))
     # chat-kind project → project scope dropped; global still written
-    assert memory_store.read_entries("project", project_id="chatproj") == []
-    assert "kept global" in memory_store.read_entries("global")
+    assert memory_store.read_entries("u1", "project", project_id="chatproj") == []
+    assert "kept global" in memory_store.read_entries("u1", "global")
 
 
 # ── Task-finish extraction (memory-system-design §7.1) ───────────────────────
@@ -436,7 +439,7 @@ def test_task_finish_writes_project_memory(patched):
 
     asyncio.run(run_task_finish_extraction("t1", "u1"))
     assert "decomposition collect-then-analyze works well for 渠道 research" in (
-        memory_store.read_entries("project", project_id="realproj")
+        memory_store.read_entries("u1", "project", project_id="realproj")
     )
     # task-finish review prompt used (multi-agent framing) + project identity injected
     assert "MULTI-AGENT TASK" in seen["prompt"] and "茅台研究" in seen["prompt"]

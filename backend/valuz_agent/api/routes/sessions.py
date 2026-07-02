@@ -12,6 +12,7 @@ from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.adapters.event_sse_adapter import iter_events_sse
 from valuz_agent.api.deps import get_current_user_id, get_session_service
 from valuz_agent.infra.db import get_async_session
+from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
     QueuedInputList,
@@ -28,6 +29,17 @@ from valuz_agent.modules.sessions.service import SessionService
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
+
+
+def _data_file_path(user_id: str, ref: str) -> Path:
+    rel = Path(ref)
+    if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
+        raise ValueError("Invalid data file path")
+    target = (fs_registry.data_dir(user_id) / rel).resolve()
+    data_root = fs_registry.data_dir(user_id).resolve()
+    if data_root != target and data_root not in target.parents:
+        raise ValueError("Data file path escapes data dir")
+    return target
 
 
 class SessionCreateRequest(SessionModelSelection):
@@ -723,25 +735,25 @@ async def upload_attachment(
             ),
         )
 
-    from valuz_agent.ports.extensions import ext
-
     safe_name = (file.filename or "upload").replace("/", "_").replace("\\", "_")
     # Disambiguate if the same filename is uploaded twice. Don't try to be
     # clever about content hashing — the user can always rename later.
     name = safe_name
     key = f"attachments/{session_id}/{name}"
-    if ext.asset_store.exists(user_id, key):
+    if _data_file_path(user_id, key).is_file():
         stem = Path(safe_name).stem
         suffix = Path(safe_name).suffix
         i = 1
-        while ext.asset_store.exists(user_id, key):
+        while _data_file_path(user_id, key).is_file():
             name = f"{stem}-{i}{suffix}"
             key = f"attachments/{session_id}/{name}"
             i += 1
 
     data = await file.read()
     size = len(data)
-    ext.asset_store.put(user_id, key, data)
+    target = _data_file_path(user_id, key)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
 
     # Persist the row as ``parsing`` and kick the heavy parse off the event
     # loop in a background task. The parser (PyMuPDF / MarkItDown / RapidOCR)
@@ -801,14 +813,14 @@ def _write_parse_result(
     if not markdown or error:
         reason = str(error) if error else "parser produced no content"
         return None, "failed", engine, reason[:2000]
-    from valuz_agent.ports.extensions import ext
-
     parsed_key = f"attachments/{session_id}/{base_name}.parsed.md"
     i = 1
-    while ext.asset_store.exists(user_id, parsed_key):
+    while _data_file_path(user_id, parsed_key).is_file():
         parsed_key = f"attachments/{session_id}/{base_name}-{i}.parsed.md"
         i += 1
-    ext.asset_store.put(user_id, parsed_key, markdown.encode("utf-8"))
+    target = _data_file_path(user_id, parsed_key)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(markdown, encoding="utf-8")
     return parsed_key, "ready", engine, None
 
 
@@ -896,9 +908,9 @@ def _spawn_attachment_parse(
             # is closed by the time this background task runs.
             async with async_unit_of_work() as db:
                 router = await _build_attachment_parser(db, user_id)
-            from valuz_agent.modules.sessions.attachments import _resolve_asset_path
+            from valuz_agent.modules.sessions.attachments import _resolve_file_key_path
 
-            src_path = _resolve_asset_path(user_id, source)
+            src_path = _resolve_file_key_path(user_id, source)
             if src_path is None:
                 raise FileNotFoundError(f"attachment source not found: {source}")
             if router.plugin_mode_for(src_path) == ParserPluginMode.ASYNC_POLL:
@@ -1073,7 +1085,6 @@ async def delete_attachment(
         raise HTTPException(status_code=404, detail=f"Attachment {attachment_id!r} not found")
     # Local rows own both paths; KB rows own only the parsed
     # derivative — their ``stored_path`` is a KB-owned source file.
-    from valuz_agent.ports.extensions import ext
 
     owned_paths = (
         (row.stored_path, row.parsed_path) if row.source_kind == "local" else (row.parsed_path,)
@@ -1091,7 +1102,12 @@ async def delete_attachment(
             except OSError:
                 logger.exception("Failed to unlink attachment file %s", ref)
         else:
-            ext.asset_store.delete(user_id, ref)
+            try:
+                _data_file_path(user_id, ref).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                logger.exception("Failed to unlink attachment file %s", ref)
     await ds.delete_attachment(user_id, attachment_id)
     return Response(status_code=204)
 

@@ -14,6 +14,7 @@ from sqlalchemy.orm import (
 )
 
 from valuz_agent.infra.config import settings
+from valuz_agent.infra.db_urls import db_url_async, is_sqlite_runtime
 from valuz_agent.infra.time_utils import now_ms
 
 
@@ -61,9 +62,9 @@ class UserMixin:
 # ADR-020 hazard is sync-on-loop), own no session, and read no business data.
 # They are data-preserving — a DB on a known alembic revision is migrated
 # forward in place; only an unknown/foreign/corrupt stamp is dropped + rebuilt.
-async_engine: AsyncEngine = create_async_engine(settings.db_url_async, echo=settings.debug)
+async_engine: AsyncEngine = create_async_engine(db_url_async(), echo=settings.debug)
 
-if settings.is_sqlite:
+if is_sqlite_runtime():
 
     @event.listens_for(async_engine.sync_engine, "connect")
     def _set_async_sqlite_pragma(dbapi_conn, _connection_record):  # type: ignore[no-untyped-def]
@@ -98,5 +99,5 @@ def new_background_sessionmaker() -> tuple[AsyncEngine, async_sessionmaker[Async
     (aiosqlite proxies each connection through its own thread), so callers skip
     this for sqlite and keep using the shared ``AsyncSessionLocal``.
     """
-    engine = create_async_engine(settings.db_url_async, echo=settings.debug, poolclass=NullPool)
+    engine = create_async_engine(db_url_async(), echo=settings.debug, poolclass=NullPool)
     return engine, async_sessionmaker(bind=engine, expire_on_commit=False)

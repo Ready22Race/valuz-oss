@@ -17,8 +17,8 @@ like everything else, in a single step from rev 0003:
 
 The credential model is unified along the way: ``headers`` / ``params`` become
 ``{name: {"value", "secret"}}`` (plaintext + secret together), merging any
-legacy ``FileSecretStore`` secret values referenced by the now-dropped
-``cred_manifest_json``. The OAuth token (read from the FileSecretStore) lands in
+legacy local secret file values referenced by the now-dropped
+``cred_manifest_json``. The OAuth token (read from the local secret files) lands in
 the ``oauth_token`` / ``oauth_token_expires_at`` attrs. The transient PKCE
 handoff is NOT stored — it lives in ``ext.cache`` (file locally, Redis on the
 shared backend).
@@ -91,7 +91,7 @@ def _unify_creds(
 
     Existing plaintext entries (``{name: value}``) become ``secret: false``;
     every ``cred_manifest_json`` secret entry pulls its value via ``read_secret``
-    and lands as ``secret: true``. Pure — the migration injects a FileSecretStore
+    and lands as ``secret: true``. Pure — the migration injects a local secret file
     reader; tests inject a dict.
     """
 
@@ -128,13 +128,13 @@ def _unify_creds(
     )
 
 
-def _file_secret_reader() -> Callable[[str], str | None]:
-    """A ``ref → value`` reader over the legacy FileSecretStore dir (or a no-op
+def _local_secret_file_reader() -> Callable[[str], str | None]:
+    """A ``ref → value`` reader over the legacy local secret dir (or a no-op
     reader when it's absent — fresh install / shared backend)."""
     try:
         from valuz_agent.infra.config import settings
 
-        base = settings.secrets_dir
+        base = settings.data_dir / "secrets"
     except Exception:
         base = None
 
@@ -151,11 +151,11 @@ def _file_secret_reader() -> Callable[[str], str | None]:
 
 
 def _extract_connector_attrs() -> None:
-    """Read each connector's blob columns + FileSecretStore secrets and write
+    """Read each connector's blob columns + local secret files and write
     them into ``valuz_connector_attr`` (key without the ``_json`` suffix),
     unifying plaintext + secret creds. No-op on a fresh / shared backend."""
     bind = op.get_bind()
-    read_secret = _file_secret_reader()
+    read_secret = _local_secret_file_reader()
     cols = ", ".join(_COLUMN_TO_KEY)
     rows = (
         bind.execute(
@@ -223,7 +223,7 @@ def upgrade() -> None:
         op.f("ix_valuz_connector_attr_user_id"), "valuz_connector_attr", ["user_id"]
     )
 
-    # 3. move blob columns + FileSecretStore secrets into the attr table.
+    # 3. move blob columns + local secret file values into the attr table.
     _extract_connector_attrs()
 
     # 4. drop the now-extracted blob columns (incl. the consumed cred_manifest_json).
@@ -235,7 +235,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Re-add the blob columns and copy attr values back (unified form). The
     # consumed cred_manifest_json returns empty; the oauth_token(_expires_at)
-    # attrs stay only in the FileSecretStore they were read from. Dev escape hatch.
+    # attrs stay only in the local secret files they were read from. Dev escape hatch.
     with op.batch_alter_table("valuz_connector", schema=None) as batch_op:
         for col in _COLUMN_TO_KEY:
             batch_op.add_column(sa.Column(col, sa.Text(), nullable=True))

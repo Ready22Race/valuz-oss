@@ -196,8 +196,8 @@ class ParserPluginConfig:
     """User-provided configuration for one plugin instance.
 
     Secrets are never stored here in plaintext — the ``secret_ref`` points
-    into the ``SecretStorePort`` and is resolved by ``ParserPlugin.build``
-    at request time.
+    into the local secret store and is resolved by ``ParserPlugin.build`` at
+    request time.
     """
 
     plugin_id: str
@@ -210,7 +210,7 @@ class ParserPlugin(Protocol):
     """Factory for ``ParserBackend`` instances of a particular kind.
 
     Implementations are stateless and registered once at app startup. The
-    router calls ``build(config, secret_store)`` each time it needs to
+    router calls ``build(config, secret_resolver)`` each time it needs to
     execute a parse — implementations are expected to cache the resulting
     backend internally if construction is expensive."""
 
@@ -225,9 +225,8 @@ class ParserPlugin(Protocol):
 
 
 class SecretResolver(Protocol):
-    """Indirection over ``SecretStorePort`` so plugins do not pull in
-    ``infra.secret_store`` directly. Implemented in
-    ``modules/parser/router.py``."""
+    """Indirection over secret lookup so plugins do not pull in
+    ``infra.secret_store`` directly. Implemented in ``modules/parser/router.py``."""
 
     def resolve(self, secret_ref: str | None) -> str | None: ...
 

@@ -338,9 +338,8 @@ def _mint_internal_mcp_token(owner_user_id: str) -> str:
         return cached
     from valuz_agent.boot.kernel import mint_data_service_token
     from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
-    from valuz_agent.ports.extensions import ext
 
-    secret = get_or_create_ds_secret(ext.secret_store, owner_user_id)
+    secret = get_or_create_ds_secret(owner_user_id)
     token = mint_data_service_token(secret, user_id=owner_user_id, ttl_s=_MCP_TOKEN_TTL_S)
     _mcp_token_cache[owner_user_id] = token
     return token

@@ -52,7 +52,11 @@ def _migrate_kernel_db(db_path) -> None:
     monkeypatch module attributes and must hit the objects
     already-imported call sites hold.
     """
-    reimport_prefixes = ("valuz_agent.infra.config", "valuz_agent.boot.kernel")
+    reimport_prefixes = (
+        "valuz_agent.infra.config",
+        "valuz_agent.infra.db_urls",
+        "valuz_agent.boot.kernel",
+    )
     saved_modules = {
         name: mod for name, mod in sys.modules.items() if name.startswith(reimport_prefixes)
     }

@@ -311,7 +311,7 @@ async def create_example_project(
        duplicated. Either way the agent library stays empty for users who skip
        onboarding.
     """
-    root_path = fs_registry.example_project_dir()
+    root_path = fs_registry.example_project_dir(user_id)
     # Match ProjectService.create_project's normalization (it stores the
     # resolved path) so the idempotent get_by_root_path lookup stays in sync —
     # on macOS /tmp resolves to /private/tmp.

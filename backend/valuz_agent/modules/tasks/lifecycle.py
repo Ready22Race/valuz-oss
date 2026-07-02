@@ -172,6 +172,7 @@ class LifecycleService:
             if ws_row is None:
                 raise ValueError(f"project {project_id!r} not found")
             project_cwd = fs_registry.project_cwd(
+                user_id,
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -464,6 +465,7 @@ class LifecycleService:
                 )
 
             project_cwd = fs_registry.project_cwd(
+                user_id,
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -582,6 +584,7 @@ class LifecycleService:
             if ws_row is None:
                 return {"error": f"project {project_id!r} not found"}
             project_cwd = fs_registry.project_cwd(
+                user_id,
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],

@@ -46,7 +46,6 @@ from valuz_agent.adapters.model_resolver import resolve_model
 from valuz_agent.adapters.system_prompt_builder import build_project_system_prompt
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.docs.datastore import DocumentDatastore
@@ -199,7 +198,6 @@ class SessionService:
         # need data sources) can omit them. When provided the capability
         # resolver injects ``McpServerConfig`` rows into the kernel session
         # at creation time.
-        secrets: SecretStorePort | None = None,
         connectors: ConnectorDatastore | None = None,
         # User-library skill source — when supplied, chat (non-project)
         # projects auto-include every discovered user-scoped skill in
@@ -226,7 +224,6 @@ class SessionService:
         self._providers = providers
         self._skills = skills
         self._projects = projects
-        self._secrets = secrets
         self._connectors = connectors
         self._docs = docs
         self._skill_source = skill_source
@@ -458,13 +455,13 @@ class SessionService:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _resolve_session_cwd(row) -> str:  # noqa: ANN001
+    def _resolve_session_cwd(user_id: str, row) -> str:  # noqa: ANN001
         """Required session cwd — the kernel no longer has a project to fall
         back to, so every create path must pass an absolute directory."""
         from valuz_agent.infra.fs_registry import fs_registry
 
         kind = row.kind if row.kind in ("chat", "project") else "chat"
-        return str(fs_registry.project_cwd(row.id, kind, row.root_path))
+        return str(fs_registry.project_cwd(user_id, row.id, kind, row.root_path))
 
     async def _resolve_bound_agent(
         self, project_id: str, agent_slug: str,
@@ -568,12 +565,6 @@ class SessionService:
             subscription_login_hint,
         )
 
-        if self._secrets is None:
-            raise RuntimeError(
-                "SessionService is missing secrets wiring — required "
-                "for provider resolution since kernel V5"
-            )
-
         # Temp / quick-chat sessions bind a global library agent to a fresh,
         # isolated chat project — materialize it first (same as the raw-model
         # path) so the runtime is isolated from sibling chats and the library
@@ -615,11 +606,9 @@ class SessionService:
         if not provider_id:
             from valuz_agent.infra.eventbus import event_bus
             from valuz_agent.modules.providers.service import ProviderService
-            from valuz_agent.ports.extensions import ext
 
             prov_svc = ProviderService(
                 datastore=self._providers,
-                secret_store=ext.secret_store,
                 event_bus=event_bus,
             )
             match = await prov_svc.resolve_provider_for_model(
@@ -665,7 +654,6 @@ class SessionService:
                 provider_id=provider_id,
                 model_id=effective_model,
                 providers=self._providers,
-                secrets=self._secrets,
                 runtime_provider=runtime_provider,
                 user_id=user_id,
             )
@@ -716,7 +704,7 @@ class SessionService:
         project_row = await self._projects.get_by_id(user_id, project_id)
         if project_row is None:
             raise SessionNotRunnable(f"project '{project_id}' not found")
-        session_cwd = self._resolve_session_cwd(project_row)
+        session_cwd = self._resolve_session_cwd(user_id, project_row)
 
         session_id = uuid4().hex
 
@@ -918,11 +906,9 @@ class SessionService:
         if not resolved_provider_id and resolution.model:
             from valuz_agent.infra.eventbus import event_bus
             from valuz_agent.modules.providers.service import ProviderService
-            from valuz_agent.ports.extensions import ext
 
             prov_svc = ProviderService(
                 datastore=self._providers,
-                secret_store=ext.secret_store,
                 event_bus=event_bus,
             )
             match = await prov_svc.resolve_provider_for_model(
@@ -953,12 +939,6 @@ class SessionService:
                 "no provider selected — pick a model provider before creating "
                 "a session, or configure a project default"
             )
-        if self._secrets is None:
-            raise RuntimeError(
-                "SessionService is missing secrets wiring — required "
-                "for provider resolution since kernel V5"
-            )
-
         # Backstop for a composer pick / stale default that still carries a
         # virtual ``ch-*`` subscription id (no row → raw "provider not found").
         # Materialize it now if its CLI is logged in (mirrors the frontend's
@@ -997,7 +977,6 @@ class SessionService:
                 provider_id=resolved_provider_id,
                 model_id=resolution.model,
                 providers=self._providers,
-                secrets=self._secrets,
                 runtime_provider=runtime_provider,
                 user_id=user_id,
             )
@@ -1131,7 +1110,7 @@ class SessionService:
             CreateSessionRequest(
                 id=session_id,
                 agent_config=agent_config_to_schema(agent_config),
-                cwd=self._resolve_session_cwd(project_row),
+                cwd=self._resolve_session_cwd(user_id, project_row),
                 runtime_provider=runtime_provider,
                 model=resolution.model,
                 model_provider=model_provider,

@@ -32,7 +32,7 @@ async def test_status_route(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_open_route_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_start() -> BrowserStartResult:
+    async def fake_start(_user_id: str) -> BrowserStartResult:
         return BrowserStartResult(status="started", mode="managed", cli_prefix="x")
 
     monkeypatch.setattr(service, "start", fake_start)
@@ -41,7 +41,7 @@ async def test_open_route_success(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_open_route_propagates_browser_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_start() -> BrowserStartResult:
+    async def fake_start(_user_id: str) -> BrowserStartResult:
         raise BrowserNodeMissing()
 
     monkeypatch.setattr(service, "start", fake_start)

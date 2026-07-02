@@ -56,7 +56,9 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     prefixed.
     """
     if getattr(sys, "frozen", False):
-        _env_path = fs_registry.resolve(".env")
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
+        _env_path = fs_registry.data_dir(resolve_local_user_id()) / ".env"
     else:
         _env_path = Path(__file__).resolve().parents[2] / ".env"
     load_dotenv(_env_path)

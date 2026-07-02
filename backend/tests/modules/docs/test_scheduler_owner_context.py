@@ -61,8 +61,7 @@ def _stub_heavy_scan(monkeypatch, tmp_path, kbs: list[_KB], called: list[str]) -
         return None
 
     monkeypatch.setattr("valuz_agent.api.deps._parser_registry", lambda: None)
-    monkeypatch.setattr("valuz_agent.api.deps._secret_store", lambda: None)
-    monkeypatch.setattr("valuz_agent.api.deps._SecretStoreResolver", lambda *a, **k: None)
+    monkeypatch.setattr("valuz_agent.api.deps._SecretResolver", lambda *a, **k: None)
     monkeypatch.setattr(
         "valuz_agent.api.deps._setup_controller",
         lambda: types.SimpleNamespace(is_complete=lambda: True),
