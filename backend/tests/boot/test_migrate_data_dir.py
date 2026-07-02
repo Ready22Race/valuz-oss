@@ -155,11 +155,40 @@ def _build_old_tree(home: Path, old_app: Path, old_kb: Path):
     }
 
 
-def test_unscoped_data_root_migrates_into_user_dir(fake_home, monkeypatch):
+def test_unscoped_data_root_without_placeholder_is_noop(fake_home, monkeypatch):
     from valuz_agent.infra import local_identity as li
 
     _old_app, _old_kb, root = fake_home
     monkeypatch.setattr(settings, "deployment_type", "local")
+    root.mkdir(parents=True)
+    user_id = "local-USERA"
+    target = root / user_id
+
+    (root / "installation.json").write_text(
+        json.dumps({"user_id": user_id, "fingerprint": "x", "created_at_ms": 1})
+    )
+    (root / "valuz.db").write_bytes(b"db")
+    (root / "projects" / "p_chat").mkdir(parents=True)
+
+    li.resolve_local_user_id.cache_clear()
+    try:
+        migrate.migrate_unscoped_data_root()
+    finally:
+        li.resolve_local_user_id.cache_clear()
+
+    assert not target.exists()
+    assert (root / "valuz.db").exists()
+    assert (root / "projects" / "p_chat").exists()
+
+
+def test_unscoped_data_root_migrates_into_user_dir_when_config_is_templated(
+    fake_home, monkeypatch
+):
+    from valuz_agent.infra import local_identity as li
+
+    _old_app, _old_kb, root = fake_home
+    monkeypatch.setattr(settings, "deployment_type", "local")
+    monkeypatch.setattr(settings, "data_dir", root / "{user_id}")
     root.mkdir(parents=True)
     user_id = "local-USERA"
     target = root / user_id
@@ -260,6 +289,7 @@ def test_unscoped_data_root_migrates_into_user_dir(fake_home, monkeypatch):
 def test_unscoped_cloud_root_migrates_rows_by_owner(fake_home, monkeypatch):
     _old_app, _old_kb, root = fake_home
     monkeypatch.setattr(settings, "deployment_type", "cloud")
+    monkeypatch.setattr(settings, "data_dir", root / "{user_id}")
     root.mkdir(parents=True)
     users = ("user-A", "user-B")
 

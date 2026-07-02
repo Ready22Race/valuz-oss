@@ -65,7 +65,7 @@ async def test_backfill_imports_project_selection(db, tmp_path, monkeypatch):
     ds = ConnectorDatastore(db)
     # Only the ``connectors`` key is imported (skills are a separate module).
     assert sorted(await ds.get_project_connectors(_OWNER, "p1")) == ["github", "slack"]
-    assert (tmp_path / _OWNER / ".connector_fs_backfilled").exists()
+    assert (tmp_path / ".connector_fs_backfilled").exists()
 
 
 @pytest.mark.asyncio

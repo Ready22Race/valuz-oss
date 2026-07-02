@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # change. Direct ``settings.data_dir`` reads are sanctioned ONLY in this
     # file (self-derivation of the paths below), in ``fs_registry`` itself, and
     # in ``boot.migrate_data_dir`` (the one-time root relocation).
+    # May contain {user_id} when the deployment mounts per-user config roots.
+    # OSS defaults to the root itself, without a user-id subdirectory.
     data_dir: Path = Path.home() / ".valuz-oss"
     db_filename: str = "valuz.db"
     # The kernel's own SQLite file — sessions / messages / events, its
@@ -218,6 +220,7 @@ class Settings(BaseSettings):
     # ── User-facing project root ───────────────────────────────────
     # Base directory for user-visible projects (not hidden).
     # Defaults to ~/Valuz; override with VALUZ_USER_PROJECT_ROOT.
+    # May contain {user_id} when the deployment mounts per-user workspaces.
     user_project_root: Path = Path.home() / "Valuz"
 
     # ── Browser feature (chrome-devtools-mcp) ──────────────────────

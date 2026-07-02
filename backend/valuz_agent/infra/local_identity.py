@@ -2,9 +2,9 @@
 
 OSS is single-tenant: every row is owned by one local user. That owner id is a
 stable string generated **once** on first install from a device fingerprint,
-then persisted under ``<VALUZ_DATA_DIR>/<user_id>/installation.json`` so it
-survives both process restarts and DB clean-up rebuilds (the file lives outside
-the business tables on purpose and its path is resolved by ``FsRegistry``).
+then persisted under the resolved ``VALUZ_DATA_DIR`` so it survives both process
+restarts and DB clean-up rebuilds (the file lives outside the business tables
+on purpose and its path is resolved by ``FsRegistry``).
 
 The commercial edition never calls this: it overrides identity resolution via
 ``set_identity_resolver()`` and supplies its own per-request ``user_id`` from the
@@ -100,6 +100,10 @@ def _read_installation_file() -> str | None:
 def _candidate_installation_files() -> list[Path]:
     root = settings.data_dir
     candidates = [root / settings.installation_filename]
+    if "{user_id}" in str(root):
+        template_parent = Path(str(root).replace("{user_id}", "")).expanduser()
+        candidates.append(template_parent / settings.installation_filename)
+        root = template_parent
     if root.is_dir():
         for child in sorted(root.iterdir()):
             if child.is_dir():
