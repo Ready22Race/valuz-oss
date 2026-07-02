@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1268,9 +1269,11 @@ export const TaskDetailPage = () => {
         {(goalDiffersFromTitle || kickoffAttachments.length > 0) && (
         <section className="mt-4 w-full rounded-lg border border-surface-border bg-[#f7f7f8] px-4 py-3">
           {goalDiffersFromTitle && (
-            <p className="whitespace-pre-wrap text-[12px] leading-5 text-[#131313]">
-              {task.goal}
-            </p>
+            <ClampText
+              text={task.goal}
+              t={t}
+              className="text-[12px] leading-5 text-[#131313]"
+            />
           )}
           {/* Attachment chips — files staged by the user when launching
             this task. Source: ``kickoff.payload.attachments``. Hides
@@ -1794,6 +1797,74 @@ function EventAvatar({
   );
 }
 
+/** Long free-text (task goal, timeline event detail) clamped to ``maxLines``
+ *  visual lines with a trailing 展开/收起 toggle on its own last line.
+ *  ``whitespace-pre-wrap`` is kept in BOTH states so the author's line breaks
+ *  survive the collapse; ``overflow:hidden`` preserves ``scrollHeight`` so the
+ *  full height can be measured to decide whether a toggle is needed at all. */
+function ClampText({
+  text,
+  t,
+  className,
+  maxLines = 20,
+}: {
+  text: string;
+  t: Translator;
+  className?: string;
+  maxLines?: number;
+}) {
+  const ref = useRef<HTMLParagraphElement>(null);
+  const [maxH, setMaxH] = useState<number | null>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const cs = getComputedStyle(el);
+    let lh = parseFloat(cs.lineHeight);
+    if (!Number.isFinite(lh)) lh = parseFloat(cs.fontSize) * 1.5;
+    const h = lh * maxLines;
+    setMaxH(h);
+    setOverflowing(el.scrollHeight > h + 1);
+  }, [text, maxLines]);
+  const clamped = overflowing && !expanded;
+  return (
+    <>
+      <p
+        ref={ref}
+        className={cn("whitespace-pre-wrap", className)}
+        style={
+          clamped && maxH != null
+            ? { maxHeight: maxH, overflow: "hidden" }
+            : undefined
+        }
+      >
+        {text}
+      </p>
+      {overflowing && (
+        <div className="mt-0.5 flex justify-end">
+          <button
+            type="button"
+            // stopPropagation: these live inside click-through rows (EventBody →
+            // onOpenSession) — toggling must not also open the session.
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+            className="text-[11px] font-medium text-brand transition-colors hover:text-brand/80"
+          >
+            {t(
+              (expanded
+                ? "common.collapse"
+                : "common.expand") as Parameters<typeof t>[0],
+            )}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
 function EventBody({
   evt,
   meta,
@@ -1880,9 +1951,11 @@ function EventBody({
         </span>
       </div>
       {detail && (
-        <p className="mt-1 whitespace-pre-wrap text-[12px] leading-5 text-ink-body">
-          {detail}
-        </p>
+        <ClampText
+          text={detail}
+          t={t}
+          className="mt-1 text-[12px] leading-5 text-ink-body"
+        />
       )}
     </div>
   );
@@ -1957,9 +2030,11 @@ function GroupedEventCard({
         </span>
       </div>
       {spawnDetail && (
-        <p className="mt-1 whitespace-pre-wrap text-[12px] leading-5 text-ink-body">
-          {spawnDetail}
-        </p>
+        <ClampText
+          text={spawnDetail}
+          t={t}
+          className="mt-1 text-[12px] leading-5 text-ink-body"
+        />
       )}
       <div
         className={cn(
