@@ -63,8 +63,18 @@ class FsRegistry:
             raise ValueError("user_id is required for user-scoped data dir")
         return user_id.replace("/", "__").replace("\\", "__")
 
+    def _expand_user_template(self, root: Path, user_id: str) -> Path:
+        raw = str(root)
+        return Path(raw.replace("{user_id}", self.user_dir_name(user_id))).expanduser()
+
+    def _shared_root(self) -> Path:
+        raw = str(settings.data_dir)
+        if "{user_id}" in raw:
+            raw = raw.replace("{user_id}", "")
+        return Path(raw).expanduser()
+
     def data_dir(self, user_id: str) -> Path:
-        path = settings.data_dir / self.user_dir_name(user_id)
+        path = self._expand_user_template(settings.data_dir, user_id)
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -108,7 +118,7 @@ class FsRegistry:
         return path
 
     def cache_dir(self) -> Path:
-        path = settings.data_dir / "cache"
+        path = self._shared_root() / "cache"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -133,7 +143,7 @@ class FsRegistry:
         ``chrome-devtools`` wrapper resolves (vs. the raw ``node <entry>`` /
         ``npx`` invocation). See docs/design/browser-feature.md §8.
         """
-        path = settings.data_dir / "bin"
+        path = self._shared_root() / "bin"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -146,9 +156,10 @@ class FsRegistry:
 
         - ``kind="project"``: caller-supplied ``root_path`` is used as-is. The
           path must already be absolute; it is not created.
-        - ``kind="chat"``: a managed cwd is allocated under
-          ``data_dir/projects/{project_id}/`` and created on demand. This
-          satisfies V5's invariant that ``project.cwd`` is always present.
+        - ``kind="chat"``: a managed cwd is allocated under the configured
+          user-visible project root and created on demand. Deployments that
+          need user scoping can set ``VALUZ_USER_PROJECT_ROOT`` to a template
+          such as ``~/Valuz/{user_id}``.
         """
         if kind == "project":
             if not root_path:
@@ -158,7 +169,24 @@ class FsRegistry:
                 raise ValueError(f"project root_path must be absolute: {root_path}")
             return path
 
-        path = self.data_dir(user_id) / "projects" / project_id
+        path = self.project_root(user_id) / project_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def project_root(self, user_id: str) -> Path:
+        """Return the app-visible root for managed project workspaces.
+
+        ``VALUZ_USER_PROJECT_ROOT`` may contain a ``{user_id}`` placeholder
+        when deployments need per-user workspace roots. The placeholder expands
+        to the filesystem-safe ``user_dir_name(user_id)`` value.
+
+        This lets cloud deployments express the external mount contract without
+        hard-coding deployment-type branches in OSS code:
+
+        - ``valuz-conf/{user_id}/*`` -> ``$HOME/.valuz-dev/{user_id}/*``
+        - ``user-project/{user_id}/workspace/*`` -> ``$HOME/Valuz/{user_id}/*``
+        """
+        path = self._expand_user_template(settings.user_project_root, user_id)
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -302,7 +330,7 @@ class FsRegistry:
         override = os.environ.get("VALUZ_OFFICIAL_SKILLS_DIR")
         if override:
             return Path(override).expanduser()
-        return settings.data_dir / "official-skills"
+        return self._shared_root() / "official-skills"
 
     def legacy_user_skill_roots(self) -> list[Path]:
         """Return the legacy CLI skill locations for read-only discovery.
@@ -503,7 +531,7 @@ class FsRegistry:
             raise ValueError(f"invalid plugin_id: {plugin_id!r}")
         if subkind is not None and ("/" in subkind or ".." in subkind):
             raise ValueError(f"invalid subkind: {subkind!r}")
-        path = settings.data_dir / "models" / plugin_id
+        path = self._shared_root() / "models" / plugin_id
         if subkind:
             path = path / subkind
         path.mkdir(parents=True, exist_ok=True)
@@ -512,19 +540,19 @@ class FsRegistry:
     # ---- FS-13 — onboarding example project directory ----
     #
     # User-visible directory for the onboarding "示例项目".  Lives under the
-    # user-scoped ``user_project_root`` (default ``~/Valuz/<user_id>``) so it
-    # appears in the user's home folder rather than in the hidden ``~/.valuz``
-    # data dir while still isolating a shared deployment by owner.
+    # configured ``project_root(user_id)``. The default root yields
+    # ``~/Valuz/示例项目``; a cloud template such as ``~/Valuz/{user_id}`` yields
+    # ``~/Valuz/<user_id>/示例项目``.
 
     def example_project_dir(self, user_id: str) -> Path:
         """Return (and create) the example-project directory.
 
-        ``<user_project_root>/<user_id>/示例项目`` — created on demand.
+        ``<project_root(user_id)>/示例项目`` — created on demand.
         Used exclusively by the onboarding ``POST /v1/onboarding/example-project``
         endpoint; the path is then handed to ``ProjectService.create_project``
         as ``root_path``.
         """
-        path = settings.user_project_root / self.user_dir_name(user_id) / "示例项目"
+        path = self.project_root(user_id) / "示例项目"
         path.mkdir(parents=True, exist_ok=True)
         return path
 

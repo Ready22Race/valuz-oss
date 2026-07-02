@@ -19,7 +19,7 @@ _OWNER = "subscription-test-owner"
 
 
 def _override_path(tmp_path: Path) -> Path:
-    path = tmp_path / _OWNER / "subscription_models.local.json"
+    path = tmp_path / "subscription_models.local.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 

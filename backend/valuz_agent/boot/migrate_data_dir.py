@@ -194,20 +194,24 @@ def migrate_legacy_data_dir() -> None:
 
 
 def migrate_unscoped_data_root() -> None:
-    """Copy a pre-user-scope data root into ``<data_dir>/<user_id>`` once.
+    """Copy an unscoped data root into a templated per-user data root once.
 
-    ``settings.data_dir`` is now the mounted/shared root. User-owned files live
-    under ``<data_dir>/<user_id>/``. In local mode that includes the default
-    SQLite files; in shared/server mode the root DB remains the owner index used
-    to split rows and paths by ``user_id``. Existing installs have user files
-    directly under the root (``projects/``, ``secrets/``, etc.). Carry those
-    files forward before Alembic opens the DB, keeping the old root intact as a
-    fallback.
+    When ``VALUZ_DATA_DIR`` contains ``{user_id}``, deployments are asking for
+    user-owned files to live under the expanded template. Existing shared roots
+    may still have files directly under the template parent (``projects/``,
+    ``secrets/``, etc.), so carry those forward before Alembic opens the DB.
+
+    OSS defaults to ``~/.valuz-oss`` without ``{user_id}``; in that shape the
+    root is already the final data dir, so this migration is intentionally a
+    no-op.
     """
     if settings.database_url or settings.kernel_database_url:
         return
 
-    root = settings.data_dir
+    if "{user_id}" not in str(settings.data_dir):
+        return
+
+    root = Path(str(settings.data_dir).replace("{user_id}", "")).expanduser()
     if not root.is_dir():
         return
 

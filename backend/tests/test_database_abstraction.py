@@ -14,21 +14,31 @@ def _patch_settings(monkeypatch, s: Settings) -> None:
 
 
 class TestDatabaseUrlConfig:
-    def test_default_sqlite_is_scoped_to_local_user(self, monkeypatch) -> None:
+    def test_default_sqlite_uses_configured_data_root(self, monkeypatch) -> None:
         s = Settings(data_dir="/tmp/valuz-test-db", deployment_type="cloud")
         _patch_settings(monkeypatch, s)
         monkeypatch.setattr(db_urls, "_local_user_id", lambda: "user-A")
 
         assert db_urls.is_sqlite_runtime() is True
-        assert db_urls.db_url() == "sqlite:////tmp/valuz-test-db/user-A/valuz.db"
+        assert db_urls.db_url() == "sqlite:////tmp/valuz-test-db/valuz.db"
         assert db_urls.sqlite_path_from_url(db_urls.db_url()) == Path(
-            "/tmp/valuz-test-db/user-A/valuz.db"
+            "/tmp/valuz-test-db/valuz.db"
         )
         assert (
             db_urls.db_url_async()
-            == "sqlite+aiosqlite:////tmp/valuz-test-db/user-A/valuz.db"
+            == "sqlite+aiosqlite:////tmp/valuz-test-db/valuz.db"
         )
         assert db_urls.sqlite_path_from_url(db_urls.db_url_async()) == Path(
+            "/tmp/valuz-test-db/valuz.db"
+        )
+
+    def test_default_sqlite_expands_user_placeholder(self, monkeypatch) -> None:
+        s = Settings(data_dir="/tmp/valuz-test-db/{user_id}", deployment_type="cloud")
+        _patch_settings(monkeypatch, s)
+        monkeypatch.setattr(db_urls, "_local_user_id", lambda: "user-A")
+
+        assert db_urls.db_url() == "sqlite:////tmp/valuz-test-db/user-A/valuz.db"
+        assert db_urls.sqlite_path_from_url(db_urls.db_url()) == Path(
             "/tmp/valuz-test-db/user-A/valuz.db"
         )
 
@@ -74,13 +84,13 @@ class TestKernelDbUrlConfig:
         _patch_settings(monkeypatch, s)
         monkeypatch.setattr(db_urls, "_local_user_id", lambda: "user-A")
 
-        assert db_urls.kernel_db_url() == "sqlite:////tmp/valuz-test-db/user-A/kernel.db"
+        assert db_urls.kernel_db_url() == "sqlite:////tmp/valuz-test-db/kernel.db"
         assert db_urls.sqlite_path_from_url(db_urls.kernel_db_url()) == Path(
-            "/tmp/valuz-test-db/user-A/kernel.db"
+            "/tmp/valuz-test-db/kernel.db"
         )
         assert (
             db_urls.kernel_db_url_async()
-            == "sqlite+aiosqlite:////tmp/valuz-test-db/user-A/kernel.db"
+            == "sqlite+aiosqlite:////tmp/valuz-test-db/kernel.db"
         )
         assert db_urls.kernel_db_url() != db_urls.db_url()  # the split
 
