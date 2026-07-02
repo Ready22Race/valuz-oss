@@ -21,6 +21,7 @@ from typing import Any
 # resolve at call time.
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters import kernel_client
+from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.modules.tasks.actor_runner import run_session_to_idle
 
@@ -41,7 +42,7 @@ def _require_user_id(user_id: str | None) -> str:
 
 
 async def _resolve_session_owner(session_id: str) -> str | None:
-    sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
+    sessions = await data_reader().list_all_sessions(ids=[session_id], limit=1)
     return sessions[0].user_id if sessions else None
 
 

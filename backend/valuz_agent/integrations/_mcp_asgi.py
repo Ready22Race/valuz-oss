@@ -48,10 +48,10 @@ def reset_current_mcp_context(token: Token[BuiltinMCPContext | None]) -> None:
 
 async def _resolve_session_owner(session_id: str) -> str | None:
     """Resolve the session owner from the raw session id."""
-    from valuz_agent.adapters import kernel_client
+    from valuz_agent.adapters.data_reader import data_reader
 
     try:
-        sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
+        sessions = await data_reader().list_all_sessions(ids=[session_id], limit=1)
     except Exception:  # noqa: BLE001 — owner resolution is best-effort
         logger.warning(
             "Internal MCP: failed resolving owner for session %s", session_id, exc_info=True

@@ -41,6 +41,7 @@ from app.schemas import EventData as Event
 from app.schemas import SessionData as Session
 
 from valuz_agent.adapters import kernel_client
+from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.decisions.schemas import (
     DecisionEntry,
@@ -188,7 +189,7 @@ class DecisionAggregator:
         try:
             # Cross-owner: the decision inbox aggregates every owner's
             # task-driven sessions into one process-wide snapshot.
-            sessions = await kernel_client.list_all_sessions(limit=500)
+            sessions = await data_reader().list_all_sessions(limit=500)
         except kernel_client.KernelNotImplementedError:
             # Expected, not an error: the HTTP kernel transport (sandbox /
             # remote kernel) is owner-scoped and exposes no cross-owner
@@ -360,12 +361,11 @@ class DecisionAggregator:
     # ---- Helpers ----------------------------------------------------
 
     async def _load_session(self, session_id: str) -> Session | None:
-        from valuz_agent.adapters import kernel_client
 
         try:
             # Cross-owner lookup by id (the live event carries no owner) — the
             # inbox is a process-wide aggregator across every owner.
-            sessions = await kernel_client.list_all_sessions(ids=[session_id], limit=1)
+            sessions = await data_reader().list_all_sessions(ids=[session_id], limit=1)
             return sessions[0] if sessions else None
         except Exception:  # noqa: BLE001
             logger.warning("decisions: get_session(%s) failed", session_id, exc_info=True)

@@ -37,6 +37,19 @@ class DataReader(Protocol):
         offset: int = 0,
     ) -> list[SessionData]: ...
 
+    async def list_all_sessions(
+        self,
+        *,
+        status: str | None = None,
+        ids: Sequence[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[SessionData]:
+        """Cross-owner sweep (host aggregators / startup recovery / owner
+        resolution). Served from the durable store directly when a host reader is
+        bound, so it never depends on any per-user kernel being alive."""
+        ...
+
     async def get_events(
         self,
         user_id: str,
@@ -84,6 +97,23 @@ class _KernelClientReader:
 
         return await kernel_client.list_sessions(
             user_id,
+            status=status,
+            ids=list(ids) if ids is not None else None,
+            limit=limit,
+            offset=offset,
+        )
+
+    async def list_all_sessions(
+        self,
+        *,
+        status: str | None = None,
+        ids: Sequence[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[SessionData]:
+        from valuz_agent.adapters import kernel_client
+
+        return await kernel_client.list_all_sessions(
             status=status,
             ids=list(ids) if ids is not None else None,
             limit=limit,
