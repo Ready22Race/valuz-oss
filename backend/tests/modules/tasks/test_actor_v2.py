@@ -844,8 +844,26 @@ def _patch_await_deps(monkeypatch, key_by_session: dict[str, str]):
             return SimpleNamespace(subtask_key=sk) if sk else None
 
         async def list_runs(self, _user_id, _task_id):
-            # No in-flight runs in these unit tests → heartbeat is a no-op.
-            return []
+            # A dispatched member has an ``active`` subtask run — model that so
+            # await_member_results' precondition guard sees an in-flight member
+            # for each simulated key. Keys absent here are treated as "never
+            # dispatched" (heartbeat stays a no-op for them).
+            return [
+                SimpleNamespace(
+                    kind="subtask", subtask_key=sk, status="active", session_id=sid
+                )
+                for sid, sk in key_by_session.items()
+            ]
+
+    class _FakeTaskDs:
+        def __init__(self, _db):
+            pass
+
+        async def get_task_by_project(self, _user_id, _project_id, _task_id):
+            # Plan only feeds target-resolution (keys omitted) and the guard's
+            # ready_keys hint; these tests pass keys explicitly and never trip
+            # the guard, so an absent task (empty plan) is sufficient.
+            return None
 
     @asynccontextmanager
     async def _fake_uow(*_a, **_k):
@@ -853,6 +871,7 @@ def _patch_await_deps(monkeypatch, key_by_session: dict[str, str]):
 
     monkeypatch.setattr(coord_mod, "async_unit_of_work", _fake_uow)
     monkeypatch.setattr(coord_mod, "TaskSessionDatastore", _FakeRunDs)
+    monkeypatch.setattr(coord_mod, "TaskDatastore", _FakeTaskDs)
 
 
 @pytest.mark.asyncio
@@ -945,5 +964,41 @@ async def test_await_members_timeout_returns_partial_with_pending(monkeypatch) -
         assert res["collected"] == 1
         assert res["pending"] == ["B"]
         assert res["timed_out"] is True
+    finally:
+        mailbox_registry.unregister(lead)
+
+
+@pytest.mark.asyncio
+async def test_await_members_no_dispatched_returns_immediately(monkeypatch) -> None:
+    """Guard: awaiting a key with no in-flight member returns at once, not after
+    the full timeout (the "planned but never dispatched, then await" trap)."""
+    # No simulated members → list_runs reports nothing active.
+    _patch_await_deps(monkeypatch, {})
+    orch = TaskOrchestrator()
+
+    async def _noop_mark(**_kw):
+        return None
+
+    monkeypatch.setattr(planning, "mark_in_review", _noop_mark)
+    lead = "lead-await-guard"
+    mailbox_registry.register(lead)
+    try:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        res = await orch.await_member_results(
+            lead_session_id=lead,
+            project_id="w1",
+            task_id="t1",
+            keys=["dev"],
+            mode="all",
+            timeout_s=30,  # would hang ~30s without the guard
+            user_id=LOCAL_USER_ID,
+        )
+        elapsed = loop.time() - start
+        assert elapsed < 1.0  # returned promptly, did not block on the timeout
+        assert res["error"] == "no_dispatched_members"
+        assert res["collected"] == 0
+        assert res["pending"] == ["dev"]
+        assert res["timed_out"] is False
     finally:
         mailbox_registry.unregister(lead)

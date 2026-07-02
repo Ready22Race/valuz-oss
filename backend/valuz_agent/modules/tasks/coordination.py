@@ -110,16 +110,54 @@ class CoordinationService:
         # registers it; this is belt-and-suspenders. Idempotent.
         mailbox_registry.register(lead_session_id)
 
+        # Load the plan + the set of subtask keys that currently have a
+        # dispatched, in-flight member (an "active" subtask run). We need both to
+        # (a) resolve the target set when ``keys`` is omitted and (b) guard the
+        # wait below. ``dispatch_async`` records the run as ``active``
+        # synchronously (create_run) before it returns, so this DB view is
+        # authoritative the moment a real dispatch has happened.
+        async with async_unit_of_work(commit=False) as db:
+            row = await TaskDatastore(db).get_task_by_project(user_id, project_id, task_id)
+            live_keys = {
+                r.subtask_key
+                for r in await TaskSessionDatastore(db).list_runs(user_id, task_id)
+                if r.kind == "subtask" and r.subtask_key and r.status == "active"
+            }
+        plan = TaskPlan.from_dict(row.plan) if row else TaskPlan()
+
         # Resolve the target set from the plan when keys are not given.
         if keys:
             target: set[str] = {k for k in keys if k}
         else:
-            async with async_unit_of_work(commit=False) as db:
-                row = await TaskDatastore(db).get_task_by_project(
-                    user_id, project_id, task_id
-                )
-                plan = TaskPlan.from_dict(row.plan) if row else TaskPlan()
             target = {n.key for n in plan.nodes if n.status in ("in_progress", "in_review")}
+
+        # Precondition (VALUZ: "planned-but-never-dispatched, then await" trap):
+        # at least one target key must have a live member to wait on. Awaiting a
+        # key with no dispatched member can only ever burn the full timeout
+        # waiting for a ``member_done`` that can never arrive — which is exactly
+        # what strands a lead that re-planned but forgot to ``dispatch``. Return
+        # immediately with actionable guidance instead of blocking.
+        awaitable = (target & live_keys) if target else live_keys
+        if not awaitable:
+            requested = sorted(target)
+            return {
+                "error": "no_dispatched_members",
+                "message": (
+                    "await_members: nothing to wait for — no dispatched member is in "
+                    "flight"
+                    + (f" for keys {requested}" if requested else "")
+                    + ". A member exists only after you dispatch its subtask."
+                ),
+                "hint": (
+                    "Call dispatch(subtask_key=...) for a ready subtask BEFORE "
+                    "await_members. Use get_plan to inspect statuses."
+                ),
+                "ready_keys": plan.ready_keys(),
+                "results": [],
+                "pending": requested,
+                "collected": 0,
+                "timed_out": False,
+            }
 
         loop = asyncio.get_running_loop()
         # Default cap so a member that dies without a member_done can't hang

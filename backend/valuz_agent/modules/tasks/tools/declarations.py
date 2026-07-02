@@ -632,10 +632,14 @@ AWAIT_MEMBERS_TOOL_DECLARATION = ToolDef(
     name=AWAIT_MEMBERS_TOOL_NAME,
     description=(
         "Wait for dispatched members to finish and collect their results "
-        "(SubtaskResult[]) — call this after dispatch(). Use mode='any' in a "
-        "loop to review members the moment each one completes; mode='all' to "
+        "(SubtaskResult[]) — call this ONLY after dispatch(). Use mode='any' in "
+        "a loop to review members the moment each one completes; mode='all' to "
         "wait for the whole batch. Each returned member then awaits your "
-        "review_subtask. Omit 'keys' to wait for all outstanding subtasks."
+        "review_subtask. Omit 'keys' to wait for all outstanding subtasks. "
+        "Precondition: at least one dispatched member must be in flight — if "
+        "nothing is dispatched (or none of 'keys' were dispatched) it returns "
+        "immediately with an error and the ready-to-dispatch keys instead of "
+        "blocking, so dispatch first."
     ),
     parameters=_AWAIT_MEMBERS_PARAMETERS,
     handler=None,

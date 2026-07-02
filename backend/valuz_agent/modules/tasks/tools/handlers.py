@@ -425,7 +425,10 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 timeout_s=args.get("timeout_s"),
                 user_id=ctx.user_id,
             )
-            return ToolResult(content=json.dumps(result, ensure_ascii=False))
+            return ToolResult(
+                content=json.dumps(result, ensure_ascii=False),
+                is_error="error" in result,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("await_members handler error for task %s", task_id)
             return ToolResult(content=f"await_members failed: {exc}", is_error=True)
