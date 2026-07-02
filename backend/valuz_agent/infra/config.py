@@ -178,13 +178,13 @@ class Settings(BaseSettings):
     # ``infra.logging.configure_logging`` writes structured JSON lines
     # to ``log_file`` via a RotatingFileHandler so the desktop ``服务``
     # panel can display + offer "open in editor" without depending on
-    # whichever shell launched the process. ``log_dir`` is created on
-    # first write — we don't ``mkdir`` here so the property stays pure.
+    # whichever shell launched the process. Logs are process-wide, not
+    # user-owned data, so this deliberately does not derive from data_dir.
+    # Override with VALUZ_LOG_DIR for cloud deployments that template
+    # VALUZ_DATA_DIR by user. ``log_dir`` is created on first write — we don't
+    # ``mkdir`` here so the field stays pure.
+    log_dir: Path = Path.home() / ".valuz-oss" / "logs"
     log_filename: str = "backend.log"
-
-    @property
-    def log_dir(self) -> Path:
-        return self.data_dir / "logs"
 
     @property
     def log_file(self) -> Path:
