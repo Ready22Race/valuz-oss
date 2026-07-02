@@ -168,14 +168,15 @@ class _MessageObserverSink:
     """Forwards events to ``inner`` while accumulating per-Message state.
 
     Captures the assistant text fragments emitted as ``assistant_message``
-    events, the ``num_turns`` reported in ``session_idle``, and any
-    ``session_error`` payload. The orchestrator reads these accumulators when
-    finalizing the Message row.
+    events, the live ``text_delta`` stream, the ``num_turns`` reported in
+    ``session_idle``, and any ``session_error`` payload. The orchestrator reads
+    these accumulators when finalizing the Message row.
     """
 
     def __init__(self, inner: EventSink) -> None:
         self._inner = inner
         self._assistant_chunks: list[str] = []
+        self._assistant_delta_chunks: list[str] = []
         self.num_turns: int = 0
         self.error_payload: dict[str, Any] | None = None
         self.usage: dict[str, int] | None = None
@@ -196,13 +197,16 @@ class _MessageObserverSink:
 
     async def emit(self, event: Event) -> None:
         if event.type == "assistant_message":
-            text = event.data.get("text") or ""
+            self._record_assistant_message(event)
+        elif event.type == "text_delta":
+            text = event.data.get("text") or event.data.get("delta") or ""
             if text:
-                self._assistant_chunks.append(str(text))
+                self._assistant_delta_chunks.append(str(text))
         elif event.type == "session_idle":
             raw = event.data.get("num_turns")
             if isinstance(raw, int) and raw > 0:
                 self.num_turns = raw
+            await self.ensure_partial_assistant_message()
         elif event.type == "session_error":
             self.error_payload = {
                 "category": "execution_error",
@@ -228,11 +232,36 @@ class _MessageObserverSink:
                     self.runtime_mode_change = raw_mode
         await self._inner.emit(event)
 
+    def _record_assistant_message(self, event: Event) -> None:
+        text = event.data.get("text") or event.data.get("content") or ""
+        if text:
+            self._assistant_chunks.append(str(text))
+            self._assistant_delta_chunks.clear()
+
+    async def ensure_partial_assistant_message(self) -> None:
+        text = self.partial_assistant_text
+        if not text:
+            return
+        event = Event(type="assistant_message", data={"text": text})
+        self._record_assistant_message(event)
+        await self._inner.emit(event)
+
     @property
     def assistant_text(self) -> str | None:
-        if not self._assistant_chunks:
+        partial = self.partial_assistant_text
+        if self._assistant_chunks:
+            chunks = list(self._assistant_chunks)
+            if partial:
+                chunks.append(partial)
+            return "\n".join(chunks)
+        return partial
+
+    @property
+    def partial_assistant_text(self) -> str | None:
+        if not self._assistant_delta_chunks:
             return None
-        return "\n".join(self._assistant_chunks)
+        text = "".join(self._assistant_delta_chunks)
+        return text or None
 
 
 class SessionOrchestrator:
@@ -543,6 +572,7 @@ class SessionOrchestrator:
                 )
             )
             await runtime.run(session, user_message)
+            await observer.ensure_partial_assistant_message()
             # finalize must run BEFORE save_session — it writes session.todos
             # (and message.todos) from the observer's last todo_update payload;
             # saving first would persist a stale snapshot.
@@ -770,9 +800,7 @@ class SessionOrchestrator:
         stale = [
             sid
             for sid, ts in list(self._runtime_last_used.items())
-            if sid != exclude
-            and sid not in self._active
-            and (now - ts) >= self._runtime_idle_ttl_s
+            if sid != exclude and sid not in self._active and (now - ts) >= self._runtime_idle_ttl_s
         ]
         for sid in stale:
             await self._evict_runtime(sid)

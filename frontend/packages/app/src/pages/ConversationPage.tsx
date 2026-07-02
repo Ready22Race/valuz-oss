@@ -333,6 +333,39 @@ function sessionDetailToListItem(detail: SessionDetail): SessionListItem {
   };
 }
 
+function makeLocalUserInterruptEvent(): SessionEventDTO {
+  return {
+    seq: 0,
+    event: {
+      event_type: "session.idle",
+      payload: { stop_reason: "user_interrupt" },
+    },
+    timestamp: Date.now(),
+  };
+}
+
+function isLocalUserInterruptEvent(event: SessionEventDTO): boolean {
+  return (
+    event.seq === 0 &&
+    event.event.event_type === "session.idle" &&
+    event.event.payload.stop_reason === "user_interrupt"
+  );
+}
+
+function appendUniqueEvents(
+  current: SessionEventDTO[],
+  incoming: SessionEventDTO[],
+): SessionEventDTO[] {
+  const seenSeqs = new Set(
+    current.filter((event) => event.seq > 0).map((event) => event.seq),
+  );
+  const fresh = incoming.filter(
+    (event) => event.seq <= 0 || !seenSeqs.has(event.seq),
+  );
+  if (fresh.length === 0) return current;
+  return [...current, ...fresh];
+}
+
 /**
  * Small status pill shown next to the conversation title in the page
  * header. Mirrors the sidebar's per-row indicator: ``running`` pulses
@@ -3715,14 +3748,45 @@ export const ConversationPage = () => {
   };
 
   const handleInterrupt = async () => {
-    if (!selectedSessionId) return;
+    const sessionId = selectedSessionId;
+    if (!sessionId) return;
+    const afterSeq = maxSeqRef.current;
     if (abortRef.current) {
       abortRef.current.abort();
       abortRef.current = null;
     }
     try {
-      await sessionsApi.interrupt(selectedSessionId);
-      await refreshEvents(selectedSessionId);
+      const detail = await sessionsApi.interrupt(sessionId);
+      const missed = await sessionsApi
+        .listEvents(sessionId, afterSeq)
+        .catch(() => ({ items: [] as SessionEventDTO[] }));
+      if (selectedSessionIdRef.current !== sessionId) return;
+      if (
+        missed.items.some(
+          (event) => event.event.event_type === "message.user",
+        )
+      ) {
+        setPendingUserMessage(null);
+      }
+      for (const event of missed.items) {
+        if (event.seq > 0) {
+          maxSeqRef.current = Math.max(maxSeqRef.current, event.seq);
+        }
+      }
+      setEvents((prev) => {
+        const shouldAddLocalInterrupt = !prev.some(isLocalUserInterruptEvent);
+        const incoming = shouldAddLocalInterrupt
+          ? [...missed.items, makeLocalUserInterruptEvent()]
+          : missed.items;
+        return appendUniqueEvents(prev, incoming);
+      });
+      const updatedSession = sessionDetailToListItem(detail);
+      setSessions((prev) =>
+        prev.some((s) => s.id === updatedSession.id)
+          ? prev.map((s) => (s.id === updatedSession.id ? updatedSession : s))
+          : [updatedSession, ...prev],
+      );
+      void fetchSidebarSessions();
       setSending(false);
       toast.success(t("conversation.interrupted" as Parameters<typeof t>[0]));
     } catch (cause) {

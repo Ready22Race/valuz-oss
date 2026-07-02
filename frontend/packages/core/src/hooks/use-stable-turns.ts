@@ -12,6 +12,7 @@ export function useStableTurns(
     if (!old || old.id !== next.id) return next;
     if (old.blocks.length !== next.blocks.length) return next;
     if (old.failedMessage !== next.failedMessage) return next;
+    if (old.cancelled !== next.cancelled) return next;
     // Compare EVERY block, not just the last one. Mid-turn updates often
     // land on a non-last block — e.g. a tool block transitioning
     // running→done after a thinking block has already been appended after

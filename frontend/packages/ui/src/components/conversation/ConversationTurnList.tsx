@@ -650,6 +650,12 @@ const TurnRow = memo(
     const showStreamingCaret = inFlight && lastBlock?.kind === "assistant";
     const showLoadingDots = inFlight && !turn.failedMessage;
     const displayBlocks = buildDisplayBlocks(turn, renderToolCall);
+    const assistantText = turn.blocks
+      .filter((b) => b.kind === "assistant")
+      .map((b) => b.text)
+      .join("\n\n");
+    const actionText =
+      assistantText || (turn.cancelled ? t("conversation.userCancelled") : "");
 
     // Turn-level meta: total elapsed (max of any block's elapsedMs) and
     // whether the turn has any process content worth surfacing as a
@@ -920,22 +926,19 @@ const TurnRow = memo(
               </div>
             ) : null}
 
-            {!inFlight &&
-            !turn.failedMessage &&
-            turn.blocks.some((b) => b.kind === "assistant") ? (
-              <MessageActions
-                text={turn.blocks
-                  .filter((b) => b.kind === "assistant")
-                  .map((b) => (b as { text: string }).text)
-                  .join("\n\n")}
-                onRetry={onRetry ? () => onRetry(turn.id) : undefined}
-              />
-            ) : null}
-
             {turn.cancelled ? (
-              <div className="py-1.5 text-[13px] text-ink-meta">
+              <div className="py-1.5 text-[13px] italic text-ink-muted">
                 {t("conversation.userCancelled")}
               </div>
+            ) : null}
+
+            {!inFlight &&
+            !turn.failedMessage &&
+            (assistantText || turn.cancelled) ? (
+              <MessageActions
+                text={actionText}
+                onRetry={onRetry ? () => onRetry(turn.id) : undefined}
+              />
             ) : null}
 
             {turn.failedMessage ? (

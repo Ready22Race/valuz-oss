@@ -109,4 +109,17 @@ describe("useStableTurns", () => {
     rerender({ turns: [v2] });
     expect(result.current[0]).toBe(v2);
   });
+
+  it("should return a fresh reference when a turn becomes cancelled", () => {
+    const v1 = turn([assistant("partial")]);
+    const { result, rerender } = renderHook(
+      ({ turns }) => useStableTurns(turns),
+      { initialProps: { turns: [v1] } },
+    );
+    expect(result.current[0]).toBe(v1);
+
+    const v2 = { ...turn([assistant("partial")]), cancelled: true };
+    rerender({ turns: [v2] });
+    expect(result.current[0]).toBe(v2);
+  });
 });
