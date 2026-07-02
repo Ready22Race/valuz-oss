@@ -713,6 +713,10 @@ export const TaskDetailPage = () => {
   const [followUpDraft, setFollowUpDraft] = useState("");
   const followUpScrollRef = useRef<HTMLDivElement>(null);
   const followUpTurnsLenRef = useRef(0);
+  // Anchor for the "open at the latest content" jump — see the scroll effect
+  // below. ``initialScrollTaskRef`` gates it to once per task id.
+  const contentRef = useRef<HTMLDivElement>(null);
+  const initialScrollTaskRef = useRef<string | null>(null);
   // Whether the follow-up chat should keep itself pinned to the bottom. Starts
   // true; flips off the moment the user scrolls up to re-read history, back on
   // when they scroll back down or send a new message.
@@ -967,6 +971,38 @@ export const TaskDetailPage = () => {
     return true;
   }, [detail, timelineNodes]);
 
+  // On first open of a task, jump to the latest content instead of the top: the
+  // newest timeline events are what the user wants when they revisit an active
+  // task (its timeline scrolls the page). Gated to once per task id via
+  // ``initialScrollTaskRef`` so streaming SSE updates — or a user who has
+  // scrolled up to re-read history — aren't yanked back to the bottom. The
+  // completed layout is viewport-locked (its follow-up chat owns its own
+  // stick-to-bottom), so the scroll container isn't overflowing and this is a
+  // no-op there.
+  useEffect(() => {
+    const id = detail?.task.id;
+    if (!id || initialScrollTaskRef.current === id) return;
+    const anchor = contentRef.current;
+    if (!anchor) return;
+    // The nearest scrollable ancestor is the AppShell ``<main>`` (overflow-auto).
+    let sc: HTMLElement | null = anchor.parentElement;
+    while (sc) {
+      const oy = getComputedStyle(sc).overflowY;
+      if (oy === "auto" || oy === "scroll") break;
+      sc = sc.parentElement;
+    }
+    if (!sc) return;
+    initialScrollTaskRef.current = id;
+    const el = sc;
+    // Double rAF: wait for the timeline (markdown / cards) to lay out so
+    // ``scrollHeight`` is final before we jump.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      }),
+    );
+  }, [detail?.task.id, timelineNodes]);
+
   if (loading) {
     return <PageLoader />;
   }
@@ -1055,6 +1091,7 @@ export const TaskDetailPage = () => {
                         `/conversation/${encodeURIComponent(sid)}?from_task=${encodeURIComponent(task.id)}`,
                       )
                     }
+                    leadSessionId={leadSessionId}
                     pad=""
                   />
                 </li>
@@ -1179,6 +1216,7 @@ export const TaskDetailPage = () => {
     // to fill the remaining height and pin its composer to the bottom — the
     // page becomes a chat surface, not a scrolling document.
     <div
+      ref={contentRef}
       className={cn(
         "flex w-full flex-col px-5 pb-5 pt-5",
         isCompleted ? "h-full" : "min-h-full",
@@ -1802,6 +1840,7 @@ function EventBody({
   leadAgentSlug,
   t,
   onOpenSession,
+  leadSessionId,
   pad,
   compact,
   hideSessionLink,
@@ -1813,6 +1852,10 @@ function EventBody({
   leadAgentSlug: string;
   t: Translator;
   onOpenSession: (sid: string) => void;
+  /** The Lead's own session — the link target for lead-decision events like
+   *  ``subtask_reviewed`` (whose ``evt.session_id`` is the reviewee, not the
+   *  Lead). ``null`` when the Lead run isn't resolved yet. */
+  leadSessionId?: string | null;
   pad: string;
   compact?: boolean;
   /** Suppress the "查看会话" link + click affordance even when the
@@ -1833,23 +1876,22 @@ function EventBody({
     leadAgentSlug,
     t,
   );
-  // "查看会话" jumps to the event's session_id for a read-only trace
-  // view. Three types we suppress the link on:
-  //  - ``subtask_reviewed`` — session_id is the REVIEWEE's session,
-  //    but the review itself is a lead decision; jumping to the
-  //    sub-Run's chat from "✓ 审核通过" is the wrong mental model.
-  //  - ``task_planned`` / ``plan_revised`` — the right rail's 任务列表
-  //    already shows the current plan snapshot live, so a session
-  //    jump here just adds redundant clutter; the row stays visible
-  //    on the timeline as a historical marker but offers no link.
-  // Everything else with a session_id stays linkable.
-  const nonLinkableTypes = new Set([
-    "subtask_reviewed",
-    "task_planned",
-    "plan_revised",
-  ]);
+  // "查看会话" jumps to a session for a read-only trace view.
+  //  - ``subtask_reviewed`` is a LEAD decision: its ``evt.session_id`` is the
+  //    REVIEWEE's sub-Run, which is the wrong place to land from "✓ 审核通过".
+  //    Point it at the Lead's own session instead — same target + style as the
+  //    Lead's other timeline rows.
+  //  - ``task_planned`` / ``plan_revised`` — the right rail's 任务列表 already
+  //    shows the current plan snapshot live, so a session jump here is
+  //    redundant; the row stays as a historical marker but offers no link.
+  // Everything else with a session_id stays linkable to that session.
+  const linkTarget =
+    evt.type === "subtask_reviewed"
+      ? (leadSessionId ?? null)
+      : evt.session_id;
+  const nonLinkableTypes = new Set(["task_planned", "plan_revised"]);
   const linkSuppressed = hideSessionLink || nonLinkableTypes.has(evt.type);
-  const clickable = !!evt.session_id && !linkSuppressed;
+  const clickable = !!linkTarget && !linkSuppressed;
   return (
     <div
       className={`${pad} ${
@@ -1858,7 +1900,7 @@ function EventBody({
           : "-mt-1 -ml-1 min-w-0 flex-1 rounded-md px-3 py-2 transition-colors group-hover:bg-[#f7f7f8]"
       } ${compact ? "flex-1" : ""}`}
       onClick={
-        clickable ? () => onOpenSession(evt.session_id as string) : undefined
+        clickable ? () => onOpenSession(linkTarget as string) : undefined
       }
     >
       <div className="flex items-center gap-2">
