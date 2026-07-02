@@ -16,10 +16,14 @@ rest of the backend uses.
 
 from __future__ import annotations
 
+# ruff: noqa: I001 — the kernel side-effect import must precede ``app.*``.
+
 from collections.abc import Sequence
 from typing import Any, Protocol
 
-from app.schemas import SessionData
+import valuz_agent.boot.kernel  # noqa: F401  (sys.path side-effect)
+
+from app.schemas import SessionData  # noqa: E402
 
 
 class DataReader(Protocol):
