@@ -32,6 +32,8 @@ from valuz_agent.infra.config import settings
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from valuz_agent.infra.secret_store import SecretStorePort
+
 logger = logging.getLogger(__name__)
 
 # Triggers sys.path injection so ``from src.core...`` and ``from app.config...``
@@ -420,7 +422,9 @@ class _PerOwnerDataServiceVerifier:
         return HmacTokenVerifier(secret).verify(token)
 
 
-def make_host_data_service_verifier_per_owner(secret_store):
+def make_host_data_service_verifier_per_owner(
+    secret_store: SecretStorePort,
+) -> _PerOwnerDataServiceVerifier:
     """Per-owner HS256 verifier for the host DataService (multi-tenant)."""
     return _PerOwnerDataServiceVerifier(secret_store)
 
