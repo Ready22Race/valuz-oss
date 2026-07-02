@@ -16,10 +16,16 @@ import { RenameInput } from "./RenameInput";
 import { RowActionsMenu } from "./RowActionsMenu";
 import { formatCreatedAt } from "./format-created-at";
 
-// Session status -> i18n key for the right-edge Badge on chat rows.
+// Session status -> i18n key for the right-edge Badge on chat rows. The feed
+// carries the RAW kernel status, so an abnormally-ended chat (a user interrupt
+// or a runtime error) arrives as ``terminated`` — not ``failed``/``cancelled``,
+// which the kernel never persists. Without a ``terminated`` entry those rows
+// showed no status badge at all; map it to the neutral 已停止 (it covers both a
+// user-cancelled and an errored end, and reads muted rather than error-red).
 const SESSION_STATUS_KEY: Record<string, string> = {
   running: "activity.statusRunning",
   idle: "activity.statusIdle",
+  terminated: "activity.statusStopped",
   failed: "activity.statusFailed",
   cancelled: "activity.statusStopped",
   archived: "activity.statusStopped",

@@ -373,8 +373,43 @@ function appendUniqueEvents(
  * Idle / archived / undefined render nothing — no point in chrome for
  * the steady state.
  */
-const SessionStatusPill = ({ status }: { status?: string }) => {
+const SessionStatusPill = ({
+  status,
+  cancelled,
+  pending,
+}: {
+  status?: string;
+  cancelled?: boolean;
+  /** The transcript hasn't loaded yet, so ``cancelled`` isn't known. Suppresses
+   *  the failure pill in the meantime so a stopped conversation doesn't flash a
+   *  red 失败 for a beat before it resolves to the grey 已停止. */
+  pending?: boolean;
+}) => {
   const { t } = useTranslation();
+  // A user-interrupted turn can leave the PERSISTED session status on
+  // ``failed`` / ``terminated``: the interrupt's ``idle`` finalize races the
+  // turn's own finalize, and when the turn finalize wins it maps the cut-short
+  // run to a failure. When the transcript itself says the last turn was
+  // cancelled, that's an interrupt, not a failure — show the quiet 已中断 pill
+  // instead of a red 失败.
+  if (cancelled) {
+    return (
+      <span
+        className="flex shrink-0 items-center gap-1 rounded-md bg-surface-soft px-2 py-0.5 text-2xs text-ink-meta"
+        title="session status: cancelled"
+      >
+        {/* One label for a stopped conversation everywhere: matches the
+            activity feed / project lists (activity.statusStopped) and the
+            "停止" button, rather than a second word (已中断) only here. */}
+        {t("activity.statusStopped" as Parameters<typeof t>[0])}
+      </span>
+    );
+  }
+  // A stopped conversation persists as ``failed``/``terminated``; whether it was
+  // a user stop (grey) or a real error (red) is only known once the transcript
+  // loads and ``cancelled`` resolves. Until then, show no pill rather than a red
+  // 失败 that flips to grey a beat later.
+  if (pending && (status === "failed" || status === "terminated")) return null;
   if (!status || status === "idle" || status === "archived") return null;
   const text =
     status === "running"
@@ -5044,7 +5079,13 @@ export const ConversationPage = () => {
                   </DropdownMenu>
                 )
               ) : null}
-              <SessionStatusPill status={selectedSession?.status} />
+              <SessionStatusPill
+                status={selectedSession?.status}
+                cancelled={
+                  effectiveTurns[effectiveTurns.length - 1]?.cancelled === true
+                }
+                pending={effectiveTurns.length === 0}
+              />
               {sessionAgentSlug ? (
                 <Badge variant="brand" className="shrink-0">
                   <Bot className="h-3 w-3" />
