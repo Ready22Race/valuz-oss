@@ -987,6 +987,12 @@ interface ConversationTurnListProps {
   emptyTitle?: string;
   emptySuggestions?: string[];
   onEmptySuggestionClick?: (text: string) => void;
+  /** Show the new-chat welcome (mascot + title + suggestions) when there are no
+   *  turns. Only true for a genuinely fresh conversation — an existing
+   *  conversation whose transcript is still loading has no turns yet either, and
+   *  must NOT flash the welcome before its history lands. The error card renders
+   *  regardless. */
+  showWelcome?: boolean;
 }
 
 export function ConversationTurnList({
@@ -1007,6 +1013,7 @@ export function ConversationTurnList({
   emptyTitle,
   emptySuggestions,
   onEmptySuggestionClick,
+  showWelcome,
 }: ConversationTurnListProps) {
   const { t } = useI18n();
   const rowVirtualizer = useVirtualizer({
@@ -1188,26 +1195,31 @@ export function ConversationTurnList({
             <div className="mx-auto mb-5 max-w-[520px]">
               <ErrorMessageCard message={error} />
             </div>
-          ) : null}
-          {/* Friendly mascot above the title — the same illustration that
-              used to sit at the bottom of the sidebar, moved here so the
-              empty new-chat page feels less bare. */}
-          <img
-            src="./mascot.png"
-            alt=""
-            aria-hidden="true"
-            className="pointer-events-none mx-auto mb-6 h-[160px] w-auto select-none opacity-80"
-          />
-          <div className="text-center text-2xl font-medium leading-tight text-ink-heading">
-            {emptyTitle ?? t("conversation.startHere")}
-          </div>
-          {emptySuggestions && emptySuggestions.length > 0 ? (
-            <div className="mx-auto mt-5 max-w-[750px]">
-              <SuggestionList
-                suggestions={emptySuggestions}
-                onClick={onEmptySuggestionClick}
+          ) : showWelcome ? (
+            <>
+              {/* Friendly mascot above the title — the same illustration that
+                  used to sit at the bottom of the sidebar, moved here so the
+                  empty new-chat page feels less bare. Gated on ``showWelcome``
+                  so an existing conversation still fetching its transcript (no
+                  turns yet) doesn't flash this new-chat state mid-load. */}
+              <img
+                src="./mascot.png"
+                alt=""
+                aria-hidden="true"
+                className="pointer-events-none mx-auto mb-6 h-[160px] w-auto select-none opacity-80"
               />
-            </div>
+              <div className="text-center text-2xl font-medium leading-tight text-ink-heading">
+                {emptyTitle ?? t("conversation.startHere")}
+              </div>
+              {emptySuggestions && emptySuggestions.length > 0 ? (
+                <div className="mx-auto mt-5 max-w-[750px]">
+                  <SuggestionList
+                    suggestions={emptySuggestions}
+                    onClick={onEmptySuggestionClick}
+                  />
+                </div>
+              ) : null}
+            </>
           ) : null}
         </div>
       ) : null}

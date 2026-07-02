@@ -5203,6 +5203,12 @@ export const ConversationPage = () => {
                   ),
                 ]}
                 onEmptySuggestionClick={(text) => setDraft(text)}
+                // Only a genuinely new chat (URL is /conversation/new) shows the
+                // welcome. An existing conversation keyed by id has no turns yet
+                // while its transcript loads — gate on the URL, not the transient
+                // ``selectedSessionId`` (which briefly nulls mid-navigation), so
+                // the mascot + suggestions don't flash before history lands.
+                showWelcome={id === NEW_SESSION_ID}
               />
             </div>
           </>
