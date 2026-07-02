@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.errors import ProviderNotFound
 from valuz_agent.modules.providers.models import Base, ProviderRow
@@ -29,20 +28,6 @@ from valuz_agent.ports.llm_provider import (
     ResolvedCredential,
     SystemProviderImmutable,
 )
-
-
-class _InMemorySecretStore(SecretStorePort):
-    def __init__(self) -> None:
-        self._values: dict[tuple[str, str], str] = {}
-
-    def get(self, user_id: str, key: str) -> str | None:
-        return self._values.get((user_id, key))
-
-    def put(self, user_id: str, key: str, value: str) -> None:
-        self._values[(user_id, key)] = value
-
-    def delete(self, user_id: str, key: str) -> None:
-        self._values.pop((user_id, key), None)
 
 
 class _FakeCatalog:
@@ -68,12 +53,9 @@ class _FakeCatalog:
 class _SvcHandle:
     """A ProviderService bound to an async session, plus a sync sessionmaker."""
 
-    def __init__(
-        self, service: ProviderService, sync_factory: sessionmaker, secrets: _InMemorySecretStore
-    ) -> None:
+    def __init__(self, service: ProviderService, sync_factory: sessionmaker) -> None:
         self.service = service
         self._sync_factory = sync_factory
-        self.secrets = secrets
 
     def seed(self, row: ProviderRow) -> None:
         db = self._sync_factory()
@@ -94,12 +76,11 @@ async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
     async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
     async_factory = async_sessionmaker(bind=async_engine, expire_on_commit=False)
 
-    secrets = _InMemorySecretStore()
     async_session = async_factory()
     ds = ProviderDatastore(async_session)
-    service = ProviderService(ds, secrets, EventBus())
+    service = ProviderService(ds, EventBus())
     try:
-        yield _SvcHandle(service, sync_factory, secrets)
+        yield _SvcHandle(service, sync_factory)
     finally:
         await async_session.close()
         await async_engine.dispose()

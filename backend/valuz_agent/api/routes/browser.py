@@ -12,8 +12,9 @@ maps to a 422 with the error's message; the panel surfaces it as a hint.
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from valuz_agent.api.deps import get_current_user_id
 from valuz_agent.modules.browser import service
 from valuz_agent.modules.browser.schemas import (
     BrowserStartResult,
@@ -31,11 +32,11 @@ async def get_browser_status() -> BrowserStatus:
 
 
 @router.post("/open", response_model=BrowserStartResult)
-async def open_browser() -> BrowserStartResult:
+async def open_browser(user_id: str = Depends(get_current_user_id)) -> BrowserStartResult:
     """Login helper: start (or reuse) the managed browser so the user can log
     into sites in the isolated profile. Raises ``BrowserError`` (→ 422) when the
     environment isn't ready (e.g. Node missing)."""
-    return await service.start()
+    return await service.start(user_id)
 
 
 @router.post("/stop", response_model=BrowserStopResult)

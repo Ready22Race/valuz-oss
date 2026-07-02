@@ -95,11 +95,9 @@ async def _arun_auto_discovery_scan() -> None:
     # main-loop PollingScheduler; async-poll parses dispatch there).
     from valuz_agent.api.deps import (
         _parser_registry,
-        _secret_store,
-        _SecretStoreResolver,
+        _SecretResolver,
         _setup_controller,
     )
-    from valuz_agent.infra.config import settings
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.infra.eventbus import event_bus
     from valuz_agent.integrations.docs_embedded import EmbeddedDocsRuntime
@@ -125,8 +123,6 @@ async def _arun_auto_discovery_scan() -> None:
     if not kb_refs:
         return
 
-    preview_dir = settings.docs_dir / "preview"
-    preview_dir.mkdir(parents=True, exist_ok=True)
     logger.info(
         "KB auto-discovery scanning %d KB(s) with auto_discover=True",
         len(kb_refs),
@@ -140,11 +136,14 @@ async def _arun_auto_discovery_scan() -> None:
             )
             continue
         try:
+            from valuz_agent.infra.fs_registry import fs_registry
+
+            preview_dir = fs_registry.docs_preview_dir(owner)
             async with async_unit_of_work(commit=False) as db:
                 routing_config = await load_routing_config(db, user_id=owner)
                 parser = ParserRouter(
                     registry=_parser_registry(),
-                    secret_resolver=_SecretStoreResolver(_secret_store(), owner),
+                    secret_resolver=_SecretResolver(owner),
                     routing_config=routing_config,
                     setup_complete_probe=_setup_controller().is_complete,
                 )
@@ -153,7 +152,7 @@ async def _arun_auto_discovery_scan() -> None:
                     parser=parser,
                     docs_runtime=EmbeddedDocsRuntime(preview_dir=preview_dir),
                     event_bus=event_bus,
-                    scan_state_dir=settings.docs_dir / "scan_state",
+                    scan_state_dir=fs_registry.docs_scan_state_dir(owner),
                 )
                 # rescan_kb derives the owner from the KB row.
                 result = await svc.rescan_kb(kb_id)

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from valuz_agent.api.deps import _secret_store, get_current_user_id, get_settings_service
+from valuz_agent.api.deps import get_current_user_id, get_settings_service
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.providers.datastore import ProviderDatastore
@@ -247,7 +247,6 @@ async def patch_model_defaults(
                     # default_model row + app-setting keys all update together.
                     svc = ProviderService(
                         datastore=ProviderDatastore(db),
-                        secret_store=_secret_store(),
                         event_bus=event_bus,
                     )
                     await svc.set_default(
@@ -310,7 +309,6 @@ async def get_model_options(
         defaults = await _read_model_defaults(db, user_id)
         svc = ProviderService(
             datastore=ProviderDatastore(db),
-            secret_store=_secret_store(),
             event_bus=event_bus,
         )
         items = await svc.list_providers(user_id)

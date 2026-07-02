@@ -15,18 +15,18 @@ from __future__ import annotations
 
 import secrets
 
-from valuz_agent.infra.secret_store import SecretStorePort
+from valuz_agent.infra import secret_store
 
 DS_SECRET_REF = "data_service_jwt_secret"
 
 
-def get_or_create_ds_secret(store: SecretStorePort, owner: str) -> str:
+def get_or_create_ds_secret(owner: str) -> str:
     """Return the host's DataService JWT secret, generating + persisting one on
     first use. Idempotent: the same secret is returned across restarts so tokens
     minted earlier keep verifying."""
-    existing = store.get(owner, DS_SECRET_REF)
+    existing = secret_store.get(owner, DS_SECRET_REF)
     if existing:
         return existing
     value = secrets.token_urlsafe(32)
-    store.put(owner, DS_SECRET_REF, value)
+    secret_store.put(owner, DS_SECRET_REF, value)
     return value

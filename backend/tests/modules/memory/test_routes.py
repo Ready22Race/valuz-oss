@@ -23,9 +23,7 @@ class _UOW:
 
 @pytest.fixture
 def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
-    from valuz_agent.infra import fs_registry as fsmod
-
-    monkeypatch.setattr(fsmod.FsRegistry, "data_dir", lambda self: tmp_path / "app")
+    monkeypatch.setattr(memory_store._fs, "data_dir", lambda user_id: tmp_path / "app")
     monkeypatch.setattr(m, "async_unit_of_work", lambda *_a, **_k: _UOW())
 
     state = {"enabled": True, "auto_extract": True, "custom_instructions": ""}
@@ -58,16 +56,16 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
 
 
 def test_get_memory_view(patched):
-    memory_store.add("user", "be terse")
-    memory_store.add("global", "prefers pnpm")
-    memory_store.add("project", "tracks ACME", project_id="p1")
-    view = asyncio.run(m.get_memory(project_id="p1"))
+    memory_store.add("local-test-owner", "user", "be terse")
+    memory_store.add("local-test-owner", "global", "prefers pnpm")
+    memory_store.add("local-test-owner", "project", "tracks ACME", project_id="p1")
+    view = asyncio.run(m.get_memory(user_id="local-test-owner", project_id="p1"))
     assert view.enabled and view.auto_extract
     assert view.entries["user"] == ["be terse"]
     assert view.entries["global"] == ["prefers pnpm"]
     assert view.entries["project"] == ["tracks ACME"]
     # no project_id -> no project key in the view
-    assert "project" not in asyncio.run(m.get_memory()).entries
+    assert "project" not in asyncio.run(m.get_memory(user_id="local-test-owner", )).entries
 
 
 def test_patch_settings(patched):
@@ -77,24 +75,34 @@ def test_patch_settings(patched):
 
 
 def test_delete_entry(patched):
-    memory_store.add("global", "alpha one")
-    memory_store.add("global", "beta two")
+    memory_store.add("local-test-owner", "global", "alpha one")
+    memory_store.add("local-test-owner", "global", "beta two")
     view = asyncio.run(
-        m.delete_memory_entry(m.MemoryEntryDelete(target="global", old_text="alpha"))
+        m.delete_memory_entry(
+            m.MemoryEntryDelete(target="global", old_text="alpha"),
+            user_id="local-test-owner",
+        )
     )
     assert view.entries["global"] == ["beta two"]
 
 
 def test_delete_entry_404(patched):
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(m.delete_memory_entry(m.MemoryEntryDelete(target="global", old_text="nope")))
+        asyncio.run(
+            m.delete_memory_entry(
+                m.MemoryEntryDelete(target="global", old_text="nope"),
+                user_id="local-test-owner",
+            )
+        )
     assert ei.value.status_code == 404
 
 
 def test_clear_scope(patched):
-    memory_store.add("global", "x")
-    memory_store.add("global", "y")
-    view = asyncio.run(m.clear_memory_scope(m.MemoryClear(target="global")))
+    memory_store.add("local-test-owner", "global", "x")
+    memory_store.add("local-test-owner", "global", "y")
+    view = asyncio.run(
+        m.clear_memory_scope(m.MemoryClear(target="global"), user_id="local-test-owner")
+    )
     assert view.entries["global"] == []
 
 
@@ -108,7 +116,8 @@ def test_patch_and_view_custom_instructions(patched):
     assert out.custom_instructions == "Remember key conclusions."
     assert out.enabled is True and out.auto_extract is True
     # And it surfaces in the full view.
-    assert asyncio.run(m.get_memory()).custom_instructions == "Remember key conclusions."
+    view = asyncio.run(m.get_memory(user_id="local-test-owner"))
+    assert view.custom_instructions == "Remember key conclusions."
 
 
 def test_set_custom_instructions_trims_and_caps(monkeypatch):

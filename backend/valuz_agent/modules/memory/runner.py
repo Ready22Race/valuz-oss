@@ -93,7 +93,7 @@ def _make_completer(*, user_id: str, runtime_provider: Any, model: str, mp: Any)
             else None
         )
         ephem_id = uuid4().hex
-        review_cwd = fs_registry.data_dir() / "memory-review" / ephem_id
+        review_cwd = fs_registry.data_dir(user_id) / "memory-review" / ephem_id
         review_cwd.mkdir(parents=True, exist_ok=True)
         # Marker so the runner's recursion guard skips this session if it is ever
         # finalized through the normal path (it isn't — run_turn bypasses it).
@@ -204,6 +204,7 @@ async def run_extraction_for_session(session_id: str, user_id: str | None) -> No
             mp=mp,
         )
         await MemoryExtractor(complete=completer).extract(
+            user_id=user_id,
             transcript=transcript,
             project_id=project_id,
             project_context=project_context,
@@ -342,6 +343,7 @@ async def run_task_finish_extraction(task_id: str, user_id: str | None) -> None:
             mp=mp,
         )
         await MemoryExtractor(complete=completer).extract(
+            user_id=user_id,
             transcript=transcript,
             project_id=project_id,
             project_context=project_context,

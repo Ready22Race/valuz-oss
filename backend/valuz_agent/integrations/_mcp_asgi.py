@@ -72,10 +72,9 @@ def _verify_token_owner(token: str | None) -> str | None:
     from src.core.token_signer import InvalidTokenError
 
     from valuz_agent.boot.kernel import make_host_data_service_verifier_per_owner
-    from valuz_agent.ports.extensions import ext
 
     try:
-        claims = make_host_data_service_verifier_per_owner(ext.secret_store).verify(token)
+        claims = make_host_data_service_verifier_per_owner().verify(token)
     except InvalidTokenError:
         return None
     return claims.user_id if claims else None

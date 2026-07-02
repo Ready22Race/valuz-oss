@@ -8,6 +8,7 @@ sync path is wired correctly.
 from __future__ import annotations
 
 import contextlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -32,8 +33,8 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(user_skills))
     monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(official_skills))
 
-    # The staging dir is read off `settings.skill_staging_dir`. Patch the
-    # already-loaded singleton so reads pick up our tmp path.
+    # The legacy staging fallback is read through FsRegistry. Patch the
+    # already-loaded settings singleton so reads pick up our tmp path.
     #
     # Patch the EXACT settings object the host modules hold, not a freshly
     # imported one. ``tests/modules/sessions/test_session_approval_e2e.py``
@@ -51,11 +52,8 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     # Pin the DB filename too. ``test_session_approval_e2e`` sets
     # ``VALUZ_DB_FILENAME=approval-e2e.db`` and reimports the config module, so the
     # ``settings`` object the host modules now hold can carry that leaked filename.
-    # Startup Alembic resolves the DB URL from ``settings.db_path``
-    # (``data_dir / db_filename``), but our fresh aiosqlite engine below is pinned
-    # to ``data_dir/valuz.db`` — a filename mismatch builds the schema in one file
-    # and reads from another (``no such table: valuz_provider``). Force both to
-    # ``valuz.db`` so migrations and data access target the same file.
+    # Startup Alembic resolves the DB URL through ``db_urls`` / ``FsRegistry``.
+    # Pin the filename so this test's fresh engine and migrations keep agreeing.
     monkeypatch.setattr(live_settings, "db_filename", "valuz.db")
     monkeypatch.setattr(live_settings, "skill_staging_dir_override", staging_dir)
 
@@ -66,16 +64,35 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     # schema against an unpatched DB path while the app reads our tmp file. Pin the
     # config-module binding back to the patched object so they agree.
     import valuz_agent.infra.config as config_mod
+    import valuz_agent.infra.db_urls as db_urls_mod
+    import valuz_agent.infra.local_identity as local_identity_mod
 
     monkeypatch.setattr(config_mod, "settings", live_settings)
-
+    monkeypatch.setattr(db_urls_mod, "settings", live_settings)
     # Force a brand-new SQLite engine pinned at our tmp data_dir so tests
     # don't share the developer's local DB. The host is fully async (one
     # aiosqlite engine; deps factories drive ``async_unit_of_work`` over
-    # ``AsyncSessionLocal``). Startup Alembic migrations read ``settings.db_url_async``
-    # — already pointed at the per-test tmp file via the ``data_dir`` patch above.
+    # ``AsyncSessionLocal``). This staging fixture is not testing the local
+    # default DB layout, so use an explicit sqlite URL and bind Alembic + the
+    # fixture engine to the same file regardless of test import order.
     data_dir.mkdir(parents=True, exist_ok=True)
     db_file = data_dir / "valuz.db"
+    db_url = f"sqlite:///{db_file}"
+    db_url_async = f"sqlite+aiosqlite:///{db_file}"
+    monkeypatch.setattr(live_settings, "database_url", db_url)
+    monkeypatch.setattr(live_settings, "kernel_database_url", None)
+    for mod in {
+        db_urls_mod,
+        sys.modules.get("valuz_agent.infra.db_urls"),
+    }:
+        if mod is None:
+            continue
+        monkeypatch.setattr(mod, "db_url", lambda db_url=db_url: db_url)
+        monkeypatch.setattr(
+            mod,
+            "db_url_async",
+            lambda db_url_async=db_url_async: db_url_async,
+        )
 
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -83,10 +100,15 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     fresh_async_session = async_sessionmaker(bind=fresh_async_engine, expire_on_commit=False)
 
     import valuz_agent.api.deps as deps_mod
+    import valuz_agent.boot.backfill_connector_fs as backfill_connector_fs_mod
     import valuz_agent.infra.database as db_mod
     import valuz_agent.infra.db as db_helpers_mod
 
     monkeypatch.setattr(db_mod, "AsyncSessionLocal", fresh_async_session)
+    async def _noop_backfill(_db):  # noqa: ANN001, ANN202
+        return None
+
+    monkeypatch.setattr(backfill_connector_fs_mod, "backfill_connector_fs", _noop_backfill)
     # ``async_unit_of_work`` reads ``AsyncSessionLocal`` from its own module
     # namespace (imported at load time); rebind there so the async deps
     # factories bind to our tmp aiosqlite engine.
@@ -179,12 +201,15 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
         # way a real install would (the admin reset endpoint repopulates the
         # built-in channels for this owner).
         client.post("/v1/providers/reset")
-        yield {
-            "client": client,
-            "user_skills": user_skills,
-            "staging": staging_dir,
-            "data_dir": data_dir,
-        }
+        try:
+            yield {
+                "client": client,
+                "user_skills": user_skills,
+                "staging": staging_dir,
+                "data_dir": data_dir,
+            }
+        finally:
+            local_identity_mod.resolve_local_user_id.cache_clear()
 
 
 def _session_staging_root(session_id: str) -> Path:

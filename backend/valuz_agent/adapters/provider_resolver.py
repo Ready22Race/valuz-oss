@@ -72,7 +72,7 @@ from app.schemas import (
 
 # Side-effect import — surfaces ``src.core...`` on sys.path.
 import valuz_agent.boot.kernel  # noqa: F401
-from valuz_agent.infra.secret_store import SecretStorePort
+from valuz_agent.infra import secret_store
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.models import ProviderRow
 from valuz_agent.ports.extensions import ext
@@ -134,7 +134,6 @@ async def resolve_model_provider(
     provider_id: str,
     model_id: str,
     providers: ProviderDatastore,
-    secrets: SecretStorePort,
     runtime_provider: RuntimeProvider | None = None,
     user_id: str,
 ) -> ModelProvider | None:
@@ -198,7 +197,7 @@ async def resolve_model_provider(
     api_protocol = _resolve_api_protocol(provider, model_id, runtime_provider)
     base_url = _resolve_base_url(provider, api_protocol)
 
-    api_key = _resolve_api_key(provider, secrets)
+    api_key = _resolve_api_key(provider)
     if not api_key:
         raise ProviderNotResolvable(
             f"provider {provider.name!r} has no credentials — set an API key"
@@ -213,11 +212,10 @@ async def resolve_model_provider(
 
 def _resolve_api_key(
     provider: ProviderRow,
-    secrets: SecretStorePort,
 ) -> str | None:
     """Pull the api_key from the provider's ``secret_ref`` credential source."""
     if provider.credential_source == "secret_ref" and provider.secret_ref:
-        return secrets.get(provider.user_id, provider.secret_ref)
+        return secret_store.get(provider.user_id, provider.secret_ref)
 
     return None
 

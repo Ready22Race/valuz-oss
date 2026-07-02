@@ -710,7 +710,6 @@ async def _resolve_agent_provider(
     agent: AgentConfig,
     model: str,
     providers: object | None,
-    secrets: object | None,
     user_id: str,
 ) -> object | None:
     """Resolve a concrete ModelProvider for an agent's pinned provider_id.
@@ -735,15 +734,14 @@ async def _resolve_agent_provider(
             sorted(meta.keys()) if isinstance(meta, dict) else type(meta).__name__,
         )
         return None
-    if providers is None or secrets is None:
+    if providers is None:
         logger.warning(
             "agent_resolver: agent %s has provider_id=%s but resolver deps "
-            "are not wired (providers=%s secrets=%s). This is a "
+            "are not wired (providers=%s). This is a "
             "caller bug — kickoff/dispatch should pass _provider_resolver_deps.",
             agent.id,
             provider_id,
             providers is not None,
-            secrets is not None,
         )
         return None
     try:
@@ -753,7 +751,6 @@ async def _resolve_agent_provider(
             provider_id=provider_id,
             model_id=model,
             providers=providers,  # type: ignore[arg-type]
-            secrets=secrets,  # type: ignore[arg-type]
             runtime_provider=agent.runtime_provider,
             user_id=user_id,
         )
@@ -808,7 +805,6 @@ async def build_member_session(
     project_instructions_md: str | None = None,
     model_override: str | None = None,
     providers: object | None = None,
-    secrets: object | None = None,
     lead_session_id: str | None = None,
     dispatch_mode: str = "sync",
     goal_mode: bool = False,
@@ -961,7 +957,6 @@ async def build_member_session(
         agent=agent,
         model=model_override or agent.model,
         providers=providers,
-        secrets=secrets,
         user_id=user_id,
     )
 

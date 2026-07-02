@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
 from valuz_agent.infra.database import Base
 from valuz_agent.infra.eventbus import event_bus
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.modules.agent_packs.service import AgentPackService
 from valuz_agent.modules.agents.models import (
     AgentRow,
@@ -89,8 +88,7 @@ async def _build_app(tmp_path: Path) -> tuple[FastAPI, _Deps]:
     session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
     session = session_factory()
 
-    secret_store = FileSecretStore(tmp_path / "secrets")
-    connector_svc = ConnectorService(ConnectorDatastore(session), secret_store)
+    connector_svc = ConnectorService(ConnectorDatastore(session))
     agent_svc = AgentService(session, connector_service=connector_svc)
     agent_pack_svc = AgentPackService(agent_svc)
     project_svc = ProjectService(
@@ -257,7 +255,7 @@ async def test_round_trip_recreates_project_members_automations_memory(client, t
     # memory file
     from valuz_agent.infra.fs_registry import fs_registry
 
-    memory = fs_registry.memory_dir("project", project_id=project.id)
+    memory = fs_registry.memory_dir(USER, "project", project_id=project.id)
     (memory / "MEMORY.md").write_text("# bytes\n", encoding="utf-8")
 
     # Export
@@ -297,7 +295,7 @@ async def test_round_trip_recreates_project_members_automations_memory(client, t
     assert len(result["automations"]) == 1
     assert result["automations"][0]["name"] == "Daily brief"
     # memory restored byte-for-byte
-    new_memory = fs_registry.memory_dir("project", project_id=new_id)
+    new_memory = fs_registry.memory_dir(USER, "project", project_id=new_id)
     assert (new_memory / "MEMORY.md").read_text() == "# bytes\n"
 
 

@@ -26,12 +26,8 @@ class ResourceFacade:
         elif resource_type == "connector":
             from valuz_agent.modules.connectors.datastore import ConnectorDatastore
             from valuz_agent.modules.connectors.service import ConnectorService
-            from valuz_agent.ports.extensions import ext
 
-            conn_svc = ConnectorService(
-                ConnectorDatastore(self._db),
-                ext.secret_store,
-            )
+            conn_svc = ConnectorService(ConnectorDatastore(self._db))
 
             await conn_svc.delete_connector(user_id, resource_id)
         elif resource_type == "skill":

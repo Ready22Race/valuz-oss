@@ -460,7 +460,7 @@ class ResourceLibrary:
             from valuz_agent.modules.docs.errors import KbRootDuplicated
 
             data = snapshot.data
-            root = str(fs_registry.kb_root() / data["name"])
+            root = str(fs_registry.kb_root(user_id) / data["name"])
             os.makedirs(root, exist_ok=True)
             async with _use(get_document_service) as svc:
                 try:

@@ -49,6 +49,7 @@ import sqlite3
 from pathlib import Path
 
 from valuz_agent.infra.config import settings
+from valuz_agent.infra.fs_registry import fs_registry
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,18 @@ _COPY_IGNORE = shutil.ignore_patterns(
 _LOCK_FILENAME = ".single-writer.lock"
 
 _MARKER_FILENAME = ".migrated-from-valuz-app"
+_USER_SCOPE_MARKER_FILENAME = ".migrated-from-unscoped-data-root"
+_USER_SCOPE_MIGRATION_VERSION = 3
+_USER_SCOPED_DIRS = (
+    "projects",
+    "docs",
+    "attachments",
+    "kb",
+    "memories",
+    "secrets",
+    "browser-chrome",
+    "skill-creator",
+)
 
 # Declared-type hints for columns that can hold a path string. BLOB columns
 # (e.g. langgraph ``checkpoints``/``writes`` payloads) are skipped — string
@@ -178,6 +191,282 @@ def migrate_legacy_data_dir() -> None:
         old_app,
     )
     _write_marker(marker, old_app)
+
+
+def migrate_unscoped_data_root() -> None:
+    """Copy a pre-user-scope data root into ``<data_dir>/<user_id>`` once.
+
+    ``settings.data_dir`` is now the mounted/shared root. User-owned files live
+    under ``<data_dir>/<user_id>/``. In local mode that includes the default
+    SQLite files; in shared/server mode the root DB remains the owner index used
+    to split rows and paths by ``user_id``. Existing installs have user files
+    directly under the root (``projects/``, ``secrets/``, etc.). Carry those
+    files forward before Alembic opens the DB, keeping the old root intact as a
+    fallback.
+    """
+    if settings.database_url or settings.kernel_database_url:
+        return
+
+    root = settings.data_dir
+    if not root.is_dir():
+        return
+
+    if settings.deployment_type == "local":
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
+        user_ids = [resolve_local_user_id()]
+        mode = "local"
+    else:
+        user_ids = _user_ids_in_sqlite(root / settings.db_filename)
+        mode = "cloud"
+
+    if not user_ids:
+        return
+
+    for name in (settings.db_filename, settings.kernel_db_filename):
+        _checkpoint_wal(root / name)
+
+    migrated = 0
+    for user_id in user_ids:
+        if _migrate_unscoped_user_root(root, user_id, mode=mode):
+            migrated += 1
+
+    if migrated:
+        logger.warning(
+            "user-scope migration: migrated %d owner(s); unscoped root %s retained",
+            migrated,
+            root,
+        )
+
+
+def _migrate_unscoped_user_root(root: Path, user_id: str, *, mode: str) -> bool:
+    target = fs_registry.data_dir(user_id)
+    marker = target / _USER_SCOPE_MARKER_FILENAME
+    if marker.exists() and _marker_version(marker) >= _USER_SCOPE_MIGRATION_VERSION:
+        return False
+
+    copy_plan = (
+        _local_unscoped_copy_plan(root)
+        if mode == "local"
+        else _cloud_unscoped_copy_plan(root, user_id)
+    )
+    if not copy_plan:
+        target.mkdir(parents=True, exist_ok=True)
+        _rewrite_user_scoped_db_paths(root, user_id, mode=mode)
+        _write_user_scope_marker(marker, root)
+        return True
+
+    logger.warning(
+        "user-scope migration: copying owner %s files %s -> %s",
+        user_id,
+        root,
+        target,
+    )
+
+    target.mkdir(parents=True, exist_ok=True)
+    for src, rel in copy_plan:
+        _copy_root_entry(src, target / rel)
+
+    host_n, kernel_n = _rewrite_user_scoped_db_paths(root, user_id, mode=mode)
+    _write_user_scope_marker(marker, root)
+
+    logger.warning(
+        "user-scope migration: owner %s done — rewrote %s",
+        user_id,
+        _fmt_counts({**host_n, **kernel_n}),
+    )
+    return True
+
+
+def _local_unscoped_copy_plan(root: Path) -> list[tuple[Path, Path]]:
+    user_dir_name = None
+    try:
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
+        user_dir_name = fs_registry.user_dir_name(resolve_local_user_id())
+    except Exception:  # noqa: BLE001
+        user_dir_name = None
+
+    excluded = {
+        _LOCK_FILENAME,
+        _LOGS_DIRNAME,
+        _MARKER_FILENAME,
+        _USER_SCOPE_MARKER_FILENAME,
+        ".DS_Store",
+        ".env",
+        "bin",
+        "cache",
+        "models",
+        "official-skills",
+    }
+    if user_dir_name:
+        excluded.add(user_dir_name)
+    entries: list[tuple[Path, Path]] = []
+    for entry in root.iterdir():
+        if entry.name in excluded:
+            continue
+        if entry.name.endswith((".db-wal", ".db-shm")):
+            continue
+        if entry.is_dir() and (entry / settings.installation_filename).exists():
+            continue
+        if entry.name not in {
+            *_USER_SCOPED_DIRS,
+            settings.db_filename,
+            settings.kernel_db_filename,
+            settings.installation_filename,
+        }:
+            continue
+        entries.append((entry, Path(entry.name)))
+    return entries
+
+
+def _cloud_unscoped_copy_plan(root: Path, user_id: str) -> list[tuple[Path, Path]]:
+    entries: dict[Path, Path] = {}
+    for rel in _cloud_user_relative_roots(root, user_id):
+        src = root / rel
+        if src.exists():
+            entries[rel] = src
+    return [(src, rel) for rel, src in sorted(entries.items())]
+
+
+def _cloud_user_relative_roots(root: Path, user_id: str) -> set[Path]:
+    db = root / settings.db_filename
+    if not db.exists():
+        return set()
+
+    rels: set[Path] = set()
+    conn = sqlite3.connect(str(db))
+    try:
+        if _table_has_columns(conn, "valuz_project", {"id", "user_id"}):
+            for (project_id,) in conn.execute(
+                "SELECT id FROM valuz_project WHERE user_id = ?", (user_id,)
+            ):
+                rels.add(Path("projects") / str(project_id))
+
+        if _table_has_columns(conn, "valuz_knowledge_base", {"id", "user_id"}):
+            for (kb_id,) in conn.execute(
+                "SELECT id FROM valuz_knowledge_base WHERE user_id = ?", (user_id,)
+            ):
+                rels.add(Path("kb") / str(kb_id))
+
+        if _table_has_columns(conn, "valuz_document_record", {"id", "user_id"}):
+            for (doc_id,) in conn.execute(
+                "SELECT id FROM valuz_document_record WHERE user_id = ?", (user_id,)
+            ):
+                rels.add(Path("docs") / "assets" / str(doc_id))
+                rels.add(Path("docs") / "preview" / f"{doc_id}.md")
+
+        if _table_has_columns(conn, "valuz_session_attachment", {"session_id", "user_id"}):
+            for (session_id,) in conn.execute(
+                "SELECT DISTINCT session_id FROM valuz_session_attachment WHERE user_id = ?",
+                (user_id,),
+            ):
+                rels.add(Path("attachments") / str(session_id))
+
+        if _table_has_columns(conn, "valuz_provider", {"secret_ref", "user_id"}):
+            for (secret_ref,) in conn.execute(
+                "SELECT secret_ref FROM valuz_provider "
+                "WHERE user_id = ? AND secret_ref IS NOT NULL",
+                (user_id,),
+            ):
+                safe = str(secret_ref).replace("/", "__").replace("\\", "__")
+                rels.add(Path("secrets") / safe)
+
+        if _table_has_columns(conn, "valuz_project", {"id", "user_id"}):
+            for (project_id,) in conn.execute(
+                "SELECT id FROM valuz_project WHERE user_id = ?", (user_id,)
+            ):
+                rels.add(Path("memories") / "projects" / str(project_id))
+    finally:
+        conn.close()
+
+    return {rel for rel in rels if (root / rel).exists()}
+
+
+def _user_ids_in_sqlite(db_path: Path) -> list[str]:
+    if not db_path.exists():
+        return []
+    out: set[str] = set()
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for table in _all_tables(conn):
+            if "user_id" not in _table_column_names(conn, table):
+                continue
+            for (user_id,) in conn.execute(
+                f'SELECT DISTINCT user_id FROM "{table}" WHERE user_id IS NOT NULL'  # noqa: S608
+            ):
+                if isinstance(user_id, str) and user_id:
+                    out.add(user_id)
+    finally:
+        conn.close()
+    return sorted(out)
+
+
+def _rewrite_user_scoped_db_paths(
+    root: Path, user_id: str, *, mode: str
+) -> tuple[dict[tuple[str, str], int], dict[tuple[str, str], int]]:
+    target = fs_registry.data_dir(user_id)
+    pairs = tuple(
+        (str(root / name), str(target / name))
+        for name in _USER_SCOPED_DIRS
+        if (root / name).exists()
+    )
+    if not pairs:
+        return {}, {}
+
+    if mode == "local":
+        host_n = _rewrite_all(target / settings.db_filename, pairs)
+        kernel_n = _rewrite_all(target / settings.kernel_db_filename, pairs)
+    else:
+        host_n = _rewrite_user_rows(root / settings.db_filename, pairs, user_id)
+        kernel_n = _rewrite_user_rows(root / settings.kernel_db_filename, pairs, user_id)
+    return host_n, kernel_n
+
+
+def _copy_root_entry(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.is_symlink():
+        if dst.exists() or dst.is_symlink():
+            _remove_path(dst)
+        os.symlink(os.readlink(src), dst, target_is_directory=src.is_dir())
+        return
+    if src.is_dir():
+        if dst.is_symlink() or (dst.exists() and not dst.is_dir()):
+            _remove_path(dst)
+        dst.mkdir(parents=True, exist_ok=True)
+        for child in src.iterdir():
+            _copy_root_entry(child, dst / child.name)
+        return
+    if dst.exists() or dst.is_symlink():
+        _remove_path(dst)
+    _remove_sqlite_sidecars(dst)
+    shutil.copy2(src, dst)
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+
+
+def _remove_sqlite_sidecars(path: Path) -> None:
+    if path.suffix != ".db":
+        return
+    for sidecar in (path.with_name(path.name + "-wal"), path.with_name(path.name + "-shm")):
+        if sidecar.exists() or sidecar.is_symlink():
+            _remove_path(sidecar)
+
+
+def _write_user_scope_marker(marker: Path, root: Path) -> None:
+    try:
+        marker.write_text(
+            f"migrated from {root}\nversion={_USER_SCOPE_MIGRATION_VERSION}\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.warning("user-scope migration: could not write marker file", exc_info=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -301,6 +590,40 @@ def _rewrite_all(
     return counts
 
 
+def _rewrite_user_rows(
+    db_path: Path, pairs: tuple[tuple[str, str], ...], user_id: str
+) -> dict[tuple[str, str], int]:
+    """Rewrite path prefixes only in rows owned by ``user_id``.
+
+    Cloud/shared startup can see multiple owners in the same SQLite file. A
+    whole-DB prefix sweep would assign every path to the same target user, so
+    this variant only touches tables that carry a ``user_id`` column and filters
+    every update by that owner.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    if not db_path.exists():
+        return counts
+
+    first_prefix = pairs[0][0]
+    conn = sqlite3.connect(str(db_path))
+    try:
+        for table in _all_tables(conn):
+            if "user_id" not in _table_column_names(conn, table):
+                continue
+            for column in _text_columns(conn, table):
+                touched = _count_user_rows_under_prefix(
+                    conn, table, column, first_prefix, user_id
+                )
+                for old, new in pairs:
+                    _replace_user_rows_anchored(conn, table, column, old, new, user_id)
+                if touched:
+                    counts[(table, column)] = touched
+        conn.commit()
+    finally:
+        conn.close()
+    return counts
+
+
 def _all_tables(conn: sqlite3.Connection) -> list[str]:
     return [
         row[0]
@@ -309,6 +632,16 @@ def _all_tables(conn: sqlite3.Connection) -> list[str]:
             "AND name NOT LIKE 'sqlite_%'"
         )
     ]
+
+
+def _table_column_names(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')}
+
+
+def _table_has_columns(conn: sqlite3.Connection, table: str, names: set[str]) -> bool:
+    if table not in _all_tables(conn):
+        return False
+    return names.issubset(_table_column_names(conn, table))
 
 
 def _text_columns(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -324,6 +657,19 @@ def _text_columns(conn: sqlite3.Connection, table: str) -> list[str]:
     return cols
 
 
+def _count_user_rows_under_prefix(
+    conn: sqlite3.Connection, table: str, column: str, prefix: str, user_id: str
+) -> int:
+    boundary = prefix + os.sep
+    return int(
+        conn.execute(
+            f'SELECT COUNT(*) FROM "{table}" '  # noqa: S608 — identifiers from schema
+            f'WHERE user_id = ? AND ("{column}" = ? OR "{column}" LIKE \'%\' || ? || \'%\')',
+            (user_id, prefix, boundary),
+        ).fetchone()[0]
+    )
+
+
 def _count_under_prefix(
     conn: sqlite3.Connection, table: str, column: str, prefix: str
 ) -> int:
@@ -335,6 +681,28 @@ def _count_under_prefix(
             f'WHERE "{column}" = ? OR "{column}" LIKE \'%\' || ? || \'%\'',
             (prefix, boundary),
         ).fetchone()[0]
+    )
+
+
+def _replace_user_rows_anchored(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    old: str,
+    new: str,
+    user_id: str,
+) -> None:
+    boundary_old = old + os.sep
+    boundary_new = new + os.sep
+    conn.execute(
+        f'UPDATE "{table}" SET "{column}" = REPLACE("{column}", ?, ?) '  # noqa: S608
+        f"WHERE user_id = ? AND \"{column}\" LIKE '%' || ? || '%'",
+        (boundary_old, boundary_new, user_id, boundary_old),
+    )
+    conn.execute(
+        f'UPDATE "{table}" SET "{column}" = ? '  # noqa: S608
+        f'WHERE user_id = ? AND "{column}" = ?',
+        (new, user_id, old),
     )
 
 
@@ -456,7 +824,7 @@ def _assert_carried_over(old_app: Path, new_root: Path) -> None:
     critical = (
         settings.db_filename,
         settings.kernel_db_filename,
-        settings.installation_file.name,
+        settings.installation_filename,
     )
     for name in critical:
         if (old_app / name).exists() and not (new_root / name).exists():

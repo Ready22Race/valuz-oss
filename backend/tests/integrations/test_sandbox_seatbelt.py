@@ -244,12 +244,14 @@ def test_host_rw_mounts_cover_project_and_skill_roots(monkeypatch, tmp_path) -> 
 
     sources = {m.source for m in host_sandbox_rw_mounts()}
     assert all(m.mode == "rw" for m in host_sandbox_rw_mounts())
+    data_root = next(Path(source) for source in sources if source.endswith("/projects")).parent
     # The user project root (where real projects + their .agents/skills live).
     assert str(tmp_path / "Valuz") in sources
     # The managed chat-cwd root.
-    assert str(tmp_path / "app" / "projects") in sources
+    assert data_root.parent == tmp_path / "app"
+    assert str(data_root / "projects") in sources
     # The kernel's private DB dir.
-    assert str(tmp_path / "app" / "sandbox") in sources
+    assert str(data_root / "sandbox") in sources
 
 
 @darwin_only

@@ -11,7 +11,7 @@ import json
 
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 
-from src.core.tools import ExecContext
+from valuz_agent.integrations.toolkit_mcp_server import HostExecContext
 
 from valuz_agent.modules.browser import service, tools
 from valuz_agent.modules.browser.errors import BrowserNodeMissing
@@ -32,13 +32,16 @@ def test_tool_surface() -> None:
 
 
 async def test_start_handler_success(monkeypatch) -> None:
-    async def fake_start() -> BrowserStartResult:
+    async def fake_start(user_id: str) -> BrowserStartResult:
+        assert user_id == "user-A"
         return BrowserStartResult(
             status="started", mode="managed", cli_prefix="npx -y -p x chrome-devtools"
         )
 
     monkeypatch.setattr(service, "start", fake_start)
-    res = await _tool("browser_start").handler({}, ExecContext(session_id="s1"))
+    res = await _tool("browser_start").handler(
+        {}, HostExecContext(session_id="s1", user_id="user-A")
+    )
     assert res.is_error is False
     payload = json.loads(res.content)
     assert payload["status"] == "started"
@@ -46,13 +49,22 @@ async def test_start_handler_success(monkeypatch) -> None:
 
 
 async def test_start_handler_node_missing(monkeypatch) -> None:
-    async def fake_start() -> BrowserStartResult:
+    async def fake_start(user_id: str) -> BrowserStartResult:
+        assert user_id == "user-A"
         raise BrowserNodeMissing()
 
     monkeypatch.setattr(service, "start", fake_start)
-    res = await _tool("browser_start").handler({}, ExecContext(session_id="s1"))
+    res = await _tool("browser_start").handler(
+        {}, HostExecContext(session_id="s1", user_id="user-A")
+    )
     assert res.is_error is True
     assert "Node" in res.content  # the install hint is surfaced
+
+
+async def test_start_handler_requires_user_context(monkeypatch) -> None:
+    res = await _tool("browser_start").handler({}, HostExecContext(session_id="s1"))
+    assert res.is_error is True
+    assert "user-scoped" in res.content
 
 
 async def test_stop_handler(monkeypatch) -> None:
@@ -62,7 +74,9 @@ async def test_stop_handler(monkeypatch) -> None:
         called["v"] = True
 
     monkeypatch.setattr(service, "stop", fake_stop)
-    res = await _tool("browser_stop").handler({}, ExecContext(session_id="s1"))
+    res = await _tool("browser_stop").handler(
+        {}, HostExecContext(session_id="s1", user_id="user-A")
+    )
     assert res.is_error is False
     assert json.loads(res.content)["status"] == "stopped"
     assert called["v"] is True

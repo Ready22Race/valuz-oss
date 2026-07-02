@@ -1,6 +1,6 @@
 """Export-side tests for ``ProjectPackService`` — drives the service with
-in-memory DBs over a fresh sqlite + tmp secret store, never the real
-keychain. Import-side round-trip is covered by ``test_projects_export_import.py``.
+in-memory DBs over a fresh sqlite, never the real keychain. Import-side
+round-trip is covered by ``test_projects_export_import.py``.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from valuz_agent.infra.database import Base
 from valuz_agent.infra.eventbus import event_bus
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.modules.agent_packs.service import AgentPackService
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
 from valuz_agent.modules.agents.service import AgentService
@@ -75,8 +74,7 @@ async def env(tmp_path, monkeypatch) -> AsyncIterator[tuple]:
     monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(tmp_path / "official"))
     monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "user-skills"))
     session, engine = await _bootstrap(_ALL_TABLES, tmp_path / "db")
-    secret_store = FileSecretStore(tmp_path / "secrets")
-    connector_svc = ConnectorService(ConnectorDatastore(session), secret_store)
+    connector_svc = ConnectorService(ConnectorDatastore(session))
     agent_svc = AgentService(session, connector_service=connector_svc)
     agent_pack_svc = AgentPackService(agent_svc)
     project_svc = ProjectService(

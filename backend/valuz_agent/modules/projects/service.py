@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 from urllib.parse import quote
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +25,8 @@ from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.skills.datastore import SkillDatastore
 
 logger = logging.getLogger(__name__)
+
+PROJECT_ROOT_MARKER = ".valuz/root"
 
 # Kernel V5+1aae940 collapses ``permission_mode`` to a 3-value enum;
 # every legacy value (set on dev DBs by the previous host code) maps to
@@ -129,15 +133,6 @@ class ProjectMemberCleanup(Protocol):
     async def delete_by_project(self, user_id: str, project_id: str) -> int: ...
 
 
-@dataclass
-class FileNode:
-    name: str
-    type: str  # "file" | "directory"
-    size: int | None = None
-    modified: str | None = None
-    children: list[FileNode] = field(default_factory=list)
-
-
 class ArtifactCapabilities(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -203,11 +198,32 @@ class ArtifactFileResponse(BaseModel):
 
 @dataclass(frozen=True)
 class ProjectFileResource:
-    path: Path
     rel_path: str
     name: str
     mime_type: str | None
     size: int
+    path: Path | None = None
+    data: bytes | None = None
+
+
+@dataclass
+class FileNode:
+    name: str
+    type: str  # "file" | "directory"
+    size: int | None = None
+    modified: str | None = None
+    children: list[FileNode] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FileBytes:
+    data: bytes
+    rel_path: str
+    name: str
+    mime_type: str | None
+    size: int
+    modified_at: str | None = None
+    etag: str | None = None
 
 
 def _row_to_list_item(row: ProjectRow, cwd: str | None = None) -> ProjectListItem:
@@ -251,7 +267,9 @@ async def project_cwd_by_id(user_id: str, project_id: str) -> str | None:
     if row is None:
         return None
     kind = row.kind if row.kind in ("chat", "project") else "chat"
-    return str(fs_registry.project_cwd(row.id, kind, row.root_path))  # type: ignore[arg-type]
+    if kind == "project":
+        return str(_root_path(user_id, row.root_path)) if row.root_path else None
+    return str(fs_registry.project_cwd(user_id, row.id, kind, row.root_path))  # type: ignore[arg-type]
 
 
 async def project_name_map(user_id: str) -> dict[str, str]:
@@ -335,7 +353,10 @@ class ProjectService:
 
     async def list_projects(self, user_id: str) -> list[ProjectListItem]:
         rows = await self._ds.list_projects(user_id)
-        return [_row_to_list_item(r, cwd=self.resolve_project_cwd(r)) for r in rows]
+        items: list[ProjectListItem] = []
+        for row in rows:
+            items.append(_row_to_list_item(row, cwd=await self.resolve_project_cwd(user_id, row)))
+        return items
 
     async def get_project(self, user_id: str, project_id: str) -> ProjectDetail:
         if project_id == "chat-default":
@@ -347,7 +368,7 @@ class ProjectService:
                 return _row_to_detail(
                     row,
                     instructions_md=row.instructions_md,
-                    cwd=self.resolve_project_cwd(row),
+                    cwd=await self.resolve_project_cwd(user_id, row),
                 )
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
@@ -355,7 +376,7 @@ class ProjectService:
         return _row_to_detail(
             row,
             instructions_md=row.instructions_md,
-            cwd=self.resolve_project_cwd(row),
+            cwd=await self.resolve_project_cwd(user_id, row),
         )
 
     async def create_project(
@@ -376,27 +397,37 @@ class ProjectService:
         project works without a caller-supplied local directory, which a
         remote backend could not reach anyway.
         """
-        if root_path and root_path.strip():
-            abs_path = str(Path(root_path).resolve())
-            existing = await self._ds.get_by_root_path(user_id, abs_path)
+        new_id = uuid4().hex
+        managed_root = not (root_path and root_path.strip())
+        if not managed_root:
+            resolved_root = _normalize_explicit_root(root_path or "")
+            existing = await self._ds.get_by_root_path(user_id, resolved_root)
             if existing:
                 raise ValueError(f"Directory already bound to project '{existing.name}'")
-            row = ProjectRow(name=name, kind="project", root_path=abs_path, sort_order=10)
         else:
-            from uuid import uuid4
-
-            new_id = uuid4().hex
-            managed_cwd = fs_registry.projects_root() / new_id
-            managed_cwd.mkdir(parents=True, exist_ok=True)
-            row = ProjectRow(
-                id=new_id,
-                name=name,
-                kind="project",
-                root_path=str(managed_cwd),
-                sort_order=10,
-            )
-        await self._ds.create(user_id, row)
-        return _row_to_detail(row, cwd=self.resolve_project_cwd(row))
+            resolved_root = _managed_project_root(new_id)
+        _write_relative_file(_root_path(user_id, resolved_root), PROJECT_ROOT_MARKER, b"")
+        row = ProjectRow(
+            id=new_id,
+            name=name,
+            kind="project",
+            root_path=resolved_root,
+            sort_order=10,
+        )
+        try:
+            await self._ds.create(user_id, row)
+        except Exception:
+            if managed_root:
+                try:
+                    shutil.rmtree(_root_path(user_id, resolved_root), ignore_errors=True)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "managed project root cleanup skipped for %s",
+                        new_id,
+                        exc_info=True,
+                    )
+            raise
+        return _row_to_detail(row, cwd=await self.resolve_project_cwd(user_id, row))
 
     async def get_by_name(self, user_id: str, name: str) -> ProjectRow | None:
         """Exact-name passthrough to the datastore (used by project import's
@@ -423,13 +454,12 @@ class ProjectService:
         the source machine's ``root_path`` is never reused). Only
         ``project`` kind is supported — chat projects are not exportable.
         """
-        from uuid import uuid4
-
         if kind != "project":
             raise ValueError(f"create_project_from_pack does not support kind={kind!r}")
         new_id = uuid4().hex
-        if root_path and root_path.strip():
-            resolved_root = str(Path(root_path).resolve())
+        managed_root = not (root_path and root_path.strip())
+        if not managed_root:
+            resolved_root = _normalize_explicit_root(root_path or "")
             existing = await self._ds.get_by_root_path(user_id, resolved_root)
             if existing:
                 raise ValueError(f"directory already bound to a project: {resolved_root}")
@@ -437,9 +467,8 @@ class ProjectService:
             # Imported projects without a user-picked folder get a managed
             # cwd under data_dir/projects/{id}/ (mirrors chat projects) so
             # they're still cross-machine portable.
-            managed_cwd = fs_registry.projects_root() / new_id
-            managed_cwd.mkdir(parents=True, exist_ok=True)
-            resolved_root = str(managed_cwd)
+            resolved_root = _managed_project_root(new_id)
+        _write_relative_file(_root_path(user_id, resolved_root), PROJECT_ROOT_MARKER, b"")
         row = ProjectRow(
             id=new_id,
             name=name,
@@ -449,7 +478,19 @@ class ProjectService:
             instructions_md=(instructions_md or "").strip() or None,
             sort_order=10,
         )
-        await self._ds.create(user_id, row)
+        try:
+            await self._ds.create(user_id, row)
+        except Exception:
+            if managed_root:
+                try:
+                    shutil.rmtree(_root_path(user_id, resolved_root), ignore_errors=True)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "managed project root cleanup skipped for %s",
+                        new_id,
+                        exc_info=True,
+                    )
+            raise
         return row
 
     async def rename_project(self, user_id: str, project_id: str, name: str) -> ProjectDetail:
@@ -460,7 +501,7 @@ class ProjectService:
             raise ValueError("Chat project cannot be renamed")
         row.name = name
         await self._ds.update(row)
-        return _row_to_detail(row, cwd=self.resolve_project_cwd(row))
+        return _row_to_detail(row, cwd=await self.resolve_project_cwd(user_id, row))
 
     async def update_instructions(
         self, user_id: str, project_id: str, instructions_md: str
@@ -551,7 +592,7 @@ class ProjectService:
         try:
             from valuz_agent.modules.memory.service import memory_store
 
-            memory_store.drop_project(project_id)
+            memory_store.drop_project(user_id, project_id)
         except Exception:  # noqa: BLE001
             logger.debug("project memory cleanup skipped for %s", project_id, exc_info=True)
 
@@ -570,11 +611,13 @@ class ProjectService:
         # ``agent-`` is 6 chars + project_id (32 hex) = 38; trim to 36.
         return f"agent-{project_id}"[:36]
 
-    def resolve_project_cwd(self, row: ProjectRow) -> str:
+    async def resolve_project_cwd(self, user_id: str, row: ProjectRow) -> str | None:
         """Absolute cwd a session in this project runs in — required at
         session creation now that the kernel has no project to fall back to."""
         kind = row.kind if row.kind in ("chat", "project") else "chat"
-        return str(fs_registry.project_cwd(row.id, kind, row.root_path))  # type: ignore[arg-type]
+        if kind == "project":
+            return str(_root_path(user_id, row.root_path)) if row.root_path else None
+        return str(fs_registry.project_cwd(user_id, row.id, kind, row.root_path))  # type: ignore[arg-type]
 
     async def list_files(
         self,
@@ -586,17 +629,19 @@ class ProjectService:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
             raise KeyError(project_id)
-        # Projects walk the user-supplied root_path.
-        # Chat projects walk their managed cwd under
+        # Projects delegate to the system file system. Chat projects walk their managed cwd under
         # ``data_dir/projects/{id}/`` so any files the agent generates
         # during the chat (excel exports, reports, scratch outputs, …)
         # show up in the right-rail "generated files" panel.
         if row.kind == "project":
             if not row.root_path:
                 return []
-            root = Path(row.root_path)
+            nodes = _walk_dir(
+                _root_path(user_id, row.root_path), depth=depth, include_hidden=include_hidden
+            )
+            return [_node_to_dict(n) for n in nodes]
         else:
-            root = fs_registry.project_cwd(project_id, "chat")
+            root = fs_registry.project_cwd(user_id, project_id, "chat")
         if not root.exists():
             return []
         nodes = _walk_dir(root, depth=depth, include_hidden=include_hidden)
@@ -621,7 +666,11 @@ class ProjectService:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
             raise KeyError(project_id)
-        root = _project_root(row, project_id)
+        if row.kind == "project":
+            if not row.root_path:
+                raise ValueError("Project has no root path")
+            return _write_relative_file(_root_path(user_id, row.root_path), file_path, data)
+        root = _project_root(user_id, row, project_id)
         rel = Path(file_path)
         if rel.is_absolute() or any(part in {"", "."} for part in rel.parts):
             raise ValueError("Invalid file path")
@@ -643,102 +692,25 @@ class ProjectService:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
             raise KeyError(project_id)
-        root = _project_root(row, project_id)
+        if row.kind == "project":
+            if not row.root_path:
+                raise ValueError("Project has no root path")
+            root = _root_path(user_id, row.root_path)
+            file = _file_bytes(root, _resolve_project_file(root, file_path))
+            return _artifact_response_from_file(project_id, file)
+        root = _project_root(user_id, row, project_id)
         target = _resolve_project_file(root, file_path)
         stat = target.stat()
-        rel_path = target.relative_to(root).as_posix()
-        name = target.name
-        extension = _extension(name)
-        mime_type = mimetypes.guess_type(name)[0]
-        modified_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
-        preview_kind = _preview_kind(name, mime_type)
-        can_preview = preview_kind != "unsupported"
-        descriptor = ArtifactDescriptor(
-            id=f"project_file:{project_id}:{rel_path}",
-            kind="project_file",
-            project_id=project_id,
-            path=rel_path,
-            name=name,
-            mime_type=mime_type,
-            extension=extension or None,
+        file = FileBytes(
+            data=target.read_bytes(),
+            rel_path=target.relative_to(root).as_posix(),
+            name=target.name,
+            mime_type=mimetypes.guess_type(target.name)[0],
             size=stat.st_size,
-            modified_at=modified_at,
-            preview_kind=preview_kind,
-            capabilities=ArtifactCapabilities(
-                can_preview=can_preview,
-                can_edit=False,
-                can_open_external=True,
-                can_copy_content=preview_kind in {"markdown", "code", "html", "plain"},
-                can_download=False,
-            ),
+            modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+            etag=f"{int(stat.st_mtime)}-{stat.st_size}",
         )
-        content: ArtifactContent
-        if preview_kind in {"markdown", "code", "html", "plain"}:
-            raw = target.read_bytes()
-            truncated = len(raw) > TEXT_PREVIEW_LIMIT
-            if truncated:
-                raw = raw[:TEXT_PREVIEW_LIMIT]
-            content = TextArtifactContent(
-                kind="text",
-                encoding="utf-8",
-                content=raw.decode("utf-8", errors="replace"),
-                truncated=truncated,
-                etag=f"{int(stat.st_mtime)}-{stat.st_size}",
-                modified_at=modified_at,
-            )
-        elif preview_kind == "image":
-            resolved_mime = mime_type or "application/octet-stream"
-            encoded_path = quote(rel_path, safe="/")
-            content = BinaryArtifactContent(
-                kind="binary",
-                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
-                mime_type=resolved_mime,
-                size=stat.st_size,
-            )
-        elif preview_kind == "media":
-            resolved_mime = mime_type or "application/octet-stream"
-            encoded_path = quote(rel_path, safe="/")
-            content = BinaryArtifactContent(
-                kind="binary",
-                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
-                mime_type=resolved_mime,
-                size=stat.st_size,
-            )
-        elif preview_kind == "pdf":
-            resolved_mime = mime_type or "application/pdf"
-            encoded_path = quote(rel_path, safe="/")
-            content = BinaryArtifactContent(
-                kind="binary",
-                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
-                mime_type=resolved_mime,
-                size=stat.st_size,
-            )
-        elif preview_kind in {"docx", "spreadsheet"}:
-            resolved_mime = mime_type or "application/octet-stream"
-            parse_limit = (
-                SPREADSHEET_PARSE_PREVIEW_LIMIT
-                if preview_kind == "spreadsheet"
-                else DOCX_PARSE_PREVIEW_LIMIT
-            )
-            if stat.st_size <= parse_limit:
-                encoded_path = quote(rel_path, safe="/")
-                content = BinaryArtifactContent(
-                    kind="binary",
-                    open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
-                    mime_type=resolved_mime,
-                    size=stat.st_size,
-                )
-            else:
-                content = ExternalArtifactContent(
-                    kind="external",
-                    reason=(f"{preview_kind.upper()} is larger than the in-app parsing limit."),
-                )
-        else:
-            content = ExternalArtifactContent(
-                kind="external",
-                reason="No in-app renderer is registered for this file type yet.",
-            )
-        return ArtifactFileResponse(artifact=descriptor, content=content)
+        return _artifact_response_from_file(project_id, file)
 
     async def resolve_file_resource(
         self,
@@ -749,16 +721,166 @@ class ProjectService:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
             raise KeyError(project_id)
-        root = _project_root(row, project_id)
+        if row.kind == "project":
+            if not row.root_path:
+                raise ValueError("Project has no root path")
+            root = _root_path(user_id, row.root_path)
+            path = _resolve_project_file(root, file_path)
+            file = _file_bytes(root, path)
+            return ProjectFileResource(
+                rel_path=file.rel_path,
+                name=file.name,
+                mime_type=file.mime_type,
+                size=file.size,
+                path=path,
+            )
+        root = _project_root(user_id, row, project_id)
         target = _resolve_project_file(root, file_path)
         stat = target.stat()
         return ProjectFileResource(
-            path=target,
             rel_path=target.relative_to(root).as_posix(),
             name=target.name,
             mime_type=mimetypes.guess_type(target.name)[0],
             size=stat.st_size,
+            path=target,
         )
+
+
+def _artifact_response_from_file(project_id: str, file: FileBytes) -> ArtifactFileResponse:
+    rel_path = file.rel_path
+    name = file.name
+    extension = _extension(name)
+    mime_type = file.mime_type
+    preview_kind = _preview_kind(name, mime_type)
+    can_preview = preview_kind != "unsupported"
+    descriptor = ArtifactDescriptor(
+        id=f"project_file:{project_id}:{rel_path}",
+        kind="project_file",
+        project_id=project_id,
+        path=rel_path,
+        name=name,
+        mime_type=mime_type,
+        extension=extension or None,
+        size=file.size,
+        modified_at=file.modified_at,
+        preview_kind=preview_kind,
+        capabilities=ArtifactCapabilities(
+            can_preview=can_preview,
+            can_edit=False,
+            can_open_external=True,
+            can_copy_content=preview_kind in {"markdown", "code", "html", "plain"},
+            can_download=False,
+        ),
+    )
+    content: ArtifactContent
+    if preview_kind in {"markdown", "code", "html", "plain"}:
+        raw = file.data
+        truncated = len(raw) > TEXT_PREVIEW_LIMIT
+        if truncated:
+            raw = raw[:TEXT_PREVIEW_LIMIT]
+        content = TextArtifactContent(
+            kind="text",
+            encoding="utf-8",
+            content=raw.decode("utf-8", errors="replace"),
+            truncated=truncated,
+            etag=file.etag,
+            modified_at=file.modified_at,
+        )
+    elif preview_kind in {"image", "media", "pdf"}:
+        resolved_mime = mime_type or (
+            "application/pdf" if preview_kind == "pdf" else "application/octet-stream"
+        )
+        encoded_path = quote(rel_path, safe="/")
+        content = BinaryArtifactContent(
+            kind="binary",
+            open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
+            mime_type=resolved_mime,
+            size=file.size,
+        )
+    elif preview_kind in {"docx", "spreadsheet"}:
+        resolved_mime = mime_type or "application/octet-stream"
+        parse_limit = (
+            SPREADSHEET_PARSE_PREVIEW_LIMIT
+            if preview_kind == "spreadsheet"
+            else DOCX_PARSE_PREVIEW_LIMIT
+        )
+        if file.size <= parse_limit:
+            encoded_path = quote(rel_path, safe="/")
+            content = BinaryArtifactContent(
+                kind="binary",
+                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
+                mime_type=resolved_mime,
+                size=file.size,
+            )
+        else:
+            content = ExternalArtifactContent(
+                kind="external",
+                reason=(f"{preview_kind.upper()} is larger than the in-app parsing limit."),
+            )
+    else:
+        content = ExternalArtifactContent(
+            kind="external",
+            reason="No in-app renderer is registered for this file type yet.",
+        )
+    return ArtifactFileResponse(artifact=descriptor, content=content)
+
+
+def _managed_project_root(project_id: str) -> str:
+    return f"projects/{project_id}/workspace"
+
+
+def _normalize_explicit_root(root_path: str) -> str:
+    value = root_path.strip()
+    if not value:
+        raise ValueError("Project root path is required")
+    path = Path(value).expanduser()
+    return str(path.resolve()) if path.is_absolute() else value.strip("/")
+
+
+def _display_cwd(root_path: str | None) -> str | None:
+    if not root_path:
+        return None
+    path = Path(root_path).expanduser()
+    return str(path.resolve()) if path.is_absolute() else None
+
+
+def _root_path(user_id: str, root_path: str) -> Path:
+    path = Path(root_path).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (fs_registry.data_dir(user_id) / root_path).resolve()
+
+
+def _write_relative_file(root: Path, file_path: str, data: bytes) -> str:
+    target = _resolve_project_write_target(root, file_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    return target.relative_to(root).as_posix()
+
+
+def _resolve_project_write_target(root: Path, file_path: str) -> Path:
+    relative = Path(file_path)
+    if relative.is_absolute() or any(part in {"", "."} for part in relative.parts):
+        raise ValueError("Invalid file path")
+    if any(part == ".." for part in relative.parts):
+        raise ValueError("Invalid file path")
+    target = (root / relative).resolve()
+    if root != target and root not in target.parents:
+        raise ValueError("File path escapes project root")
+    return target
+
+
+def _file_bytes(root: Path, target: Path) -> FileBytes:
+    stat = target.stat()
+    return FileBytes(
+        data=target.read_bytes(),
+        rel_path=target.relative_to(root).as_posix(),
+        name=target.name,
+        mime_type=mimetypes.guess_type(target.name)[0],
+        size=stat.st_size,
+        modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+        etag=f"{int(stat.st_mtime)}-{stat.st_size}",
+    )
 
 
 def _walk_dir(
@@ -797,12 +919,12 @@ def _walk_dir(
     return items
 
 
-def _project_root(row: ProjectRow, project_id: str) -> Path:
+def _project_root(user_id: str, row: ProjectRow, project_id: str) -> Path:
     if row.kind == "project":
         if not row.root_path:
             raise ValueError("Project has no root path")
-        return Path(row.root_path).resolve()
-    return fs_registry.project_cwd(project_id, "chat").resolve()
+        return _root_path(user_id, row.root_path)
+    return fs_registry.project_cwd(user_id, project_id, "chat").resolve()
 
 
 def _resolve_project_file(root: Path, file_path: str) -> Path:

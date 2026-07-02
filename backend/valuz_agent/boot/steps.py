@@ -68,7 +68,9 @@ def acquire_single_writer_lock() -> None:
 
     Only applies in SQLite mode — PostgreSQL handles concurrency natively.
     """
-    if not settings.is_sqlite:
+    from valuz_agent.infra.db_urls import is_sqlite_runtime
+
+    if not is_sqlite_runtime():
         return
 
     import os
@@ -81,9 +83,11 @@ def acquire_single_writer_lock() -> None:
         AnotherInstanceRunning,
         acquire_single_writer_lock,
     )
+    from valuz_agent.infra.local_identity import resolve_local_user_id
 
-    fs_registry.data_dir()  # ensure the data root exists
-    lock_path = fs_registry.resolve(".single-writer.lock")
+    user_id = resolve_local_user_id()
+    data_dir = fs_registry.data_dir(user_id)
+    lock_path = data_dir / ".single-writer.lock"
     try:
         acquire_single_writer_lock(lock_path)
     except AnotherInstanceRunning:
@@ -108,9 +112,13 @@ def migrate_data_dir() -> None:
     INSERTed under a new owner collides with the migrated row). No-op once
     migrated / on a fresh install.
     """
-    from valuz_agent.boot.migrate_data_dir import migrate_legacy_data_dir
+    from valuz_agent.boot.migrate_data_dir import (
+        migrate_legacy_data_dir,
+        migrate_unscoped_data_root,
+    )
 
     migrate_legacy_data_dir()
+    migrate_unscoped_data_root()
 
 
 async def bootstrap_schema() -> None:
@@ -150,15 +158,18 @@ async def bootstrap_schema() -> None:
     # NB: the ``~/.valuz/app`` → ``~/.valuz-oss`` data-dir cutover runs earlier in
     # the lifespan (``migrate_data_dir``), before identity resolution — see that
     # step's docstring for why the ordering is load-bearing.
-    fs_registry.data_dir()  # ensure the data root exists
+    from valuz_agent.infra.local_identity import resolve_local_user_id
+
+    user_id = resolve_local_user_id()
+    data_dir = fs_registry.data_dir(user_id)
 
     # One-shot courtesy rename from the workspace→project naming cutover:
     # managed chat cwds moved from ``data_dir/workspaces/`` to
     # ``data_dir/projects/``. The DB is wiped by the cutover fingerprint,
     # but the directories hold user files — carry them over instead of
     # orphaning them. No-op once the new directory exists.
-    legacy_dir = fs_registry.resolve("workspaces")
-    target_dir = fs_registry.projects_root()
+    legacy_dir = data_dir / "workspaces"
+    target_dir = data_dir / "projects"
     if legacy_dir.is_dir() and not target_dir.exists():
         legacy_dir.rename(target_dir)
 
@@ -192,7 +203,7 @@ async def bootstrap_schema() -> None:
         await seed_all(db, user_id=resolve_local_user_id())
 
     # 5. One-time backfill of the connector module's legacy filesystem stores
-    #    (project-config.json selection + FileSecretStore secrets) into the
+    #    (project-config.json selection + local secret files) into the
     #    connector DB tables/columns. This remains local-only; cloud startup
     #    should not run owner-context-sensitive filesystem backfill.
     from valuz_agent.boot.backfill_connector_fs import backfill_connector_fs
@@ -337,7 +348,6 @@ async def bind_data_service(app: FastAPI) -> None:
     try:
         import os
 
-        from valuz_agent.api.deps import _secret_store
         from valuz_agent.boot import kernel as kb
         from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
         from valuz_agent.infra.local_identity import resolve_local_user_id
@@ -348,9 +358,9 @@ async def bind_data_service(app: FastAPI) -> None:
         # (valuz.db). Resolve it here too so binding isn't ordering-dependent on
         # ``_set_kernel_env``. pg/remote provide the DSN via env.
         if store_mode == "local" and not dsn:
-            from valuz_agent.infra.config import settings
+            from valuz_agent.infra.db_urls import db_url_async
 
-            dsn = settings.db_url_async
+            dsn = db_url_async()
         if not dsn:
             return
         store, engine = kb.build_host_data_service_store(dsn)
@@ -360,8 +370,8 @@ async def bind_data_service(app: FastAPI) -> None:
         # one shared host verifies every owner's data-service token (local = the one
         # owner resolves its own secret; cloud = many owners). Ensure the local
         # owner's secret exists up-front (mint side also does; idempotent).
-        get_or_create_ds_secret(_secret_store(), resolve_local_user_id())
-        ds_app.state.verifier = kb.make_host_data_service_verifier_per_owner(_secret_store())
+        get_or_create_ds_secret(resolve_local_user_id())
+        ds_app.state.verifier = kb.make_host_data_service_verifier_per_owner()
         app.state._data_service_engine = engine
         # Unify host reads (sessions + events) through the DataService
         # (in-process), so reads never depend on the sandbox being alive. Bind

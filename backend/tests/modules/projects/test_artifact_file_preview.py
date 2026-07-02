@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from valuz_agent.modules.projects.models import ProjectRow
@@ -275,14 +273,12 @@ async def test_create_project_without_root_allocates_managed_cwd(
     from sqlalchemy import create_engine
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from valuz_agent.infra.config import settings
     from valuz_agent.infra.database import Base
     from valuz_agent.infra.eventbus import EventBus
+    from valuz_agent.modules.projects import service as project_service
     from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-    # Patch the data root at the settings singleton — the whole registry
-    # (data_dir/resolve/projects_root) reads it, so managed cwds land here.
-    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(project_service.fs_registry, "data_dir", lambda user_id: tmp_path)
 
     db_file = tmp_path / "proj.db"
     sync_engine = create_engine(
@@ -295,6 +291,7 @@ async def test_create_project_without_root_allocates_managed_cwd(
     async with sm() as db:
         svc = ProjectService(datastore=ProjectDatastore(db), event_bus=EventBus())
         detail = await svc.create_project("user-1", name="Managed")
-        assert detail.cwd
-        assert Path(detail.cwd).is_dir()
-        assert str(detail.root_path).startswith(str(tmp_path / "projects"))
+        assert detail.root_path is not None
+        assert detail.cwd == str(tmp_path / detail.root_path)
+        assert detail.root_path.startswith("projects/")
+        assert (tmp_path / detail.root_path / ".valuz" / "root").is_file()

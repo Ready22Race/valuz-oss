@@ -22,7 +22,11 @@ from __future__ import annotations
 import logging
 import shutil
 
-from valuz_agent.infra.config import settings
+from valuz_agent.infra.db_urls import (
+    db_url_async,
+    kernel_db_url_async,
+    sqlite_path_from_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +75,8 @@ async def _copy_sessions(source, target) -> int:
 
 async def colocate_kernel_history_into_host_db() -> None:
     """Seed ``valuz.db`` (DataService durable) from ``kernel.db`` — one-time."""
-    source_url = settings.kernel_db_url_async  # kernel.db (execution-local)
-    target_url = settings.db_url_async  # valuz.db (DataService durable)
+    source_url = kernel_db_url_async()  # kernel.db (execution-local)
+    target_url = db_url_async()  # valuz.db (DataService durable)
     if source_url == target_url:
         return  # collapsed (shared DB) — the kernel already writes the durable
     if not (_is_sqlite(source_url) and _is_sqlite(target_url)):
@@ -95,9 +99,11 @@ async def colocate_kernel_history_into_host_db() -> None:
         # Best-effort backup before the first seed (insert-only, so low risk even
         # without it). Keep the FIRST backup if a prior run left one.
         try:
-            dst_path = settings.db_path.with_name(settings.db_path.name + _BACKUP_SUFFIX)
-            if not dst_path.exists():
-                shutil.copy2(settings.db_path, dst_path)
+            db_path = sqlite_path_from_url(target_url)
+            if db_path is not None:
+                dst_path = db_path.with_name(db_path.name + _BACKUP_SUFFIX)
+                if not dst_path.exists():
+                    shutil.copy2(db_path, dst_path)
         except Exception:  # noqa: BLE001 — backup is best-effort; copy is insert-only
             logger.debug("colocate: valuz.db backup skipped", exc_info=True)
         copied = await _copy_sessions(src_store, tgt_store)

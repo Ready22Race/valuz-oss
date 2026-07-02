@@ -30,8 +30,8 @@ from contextvars import ContextVar
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from valuz_agent.infra.config import settings
 from valuz_agent.infra.database import AsyncSessionLocal, new_background_sessionmaker
+from valuz_agent.infra.db_urls import is_sqlite_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ async def background_db_scope() -> AsyncIterator[None]:
     No-op on SQLite (aiosqlite is loop-agnostic): the shared engine is kept, so
     the default single-user deployment is entirely unaffected.
     """
-    if settings.is_sqlite:
+    if is_sqlite_runtime():
         yield
         return
     engine, maker = new_background_sessionmaker()

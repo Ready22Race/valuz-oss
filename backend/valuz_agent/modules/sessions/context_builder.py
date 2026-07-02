@@ -129,7 +129,9 @@ async def _build_additional_context(
                 from valuz_agent.modules.memory.injection import injection_assembler
 
                 mem_block = injection_assembler.snapshot_for_session(
-                    session_id=session_id, project_id=project_id or None
+                    user_id=user_id,
+                    session_id=session_id,
+                    project_id=project_id or None,
                 )
                 if mem_block.strip():
                     sections.append(mem_block.strip())

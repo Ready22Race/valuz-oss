@@ -24,6 +24,7 @@ from valuz_agent.boot.schema import ensure_host_schema_migratable
 from valuz_agent.infra import auth_context
 from valuz_agent.infra.config import settings
 from valuz_agent.infra.database import PrimaryKeyMixin, UserMixin
+from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.local_identity import resolve_local_user_id
 
 
@@ -45,7 +46,7 @@ class TestResolveLocalUserId:
     def test_persists_once_and_rereads(self, tmp_path, monkeypatch) -> None:
         self._isolate(tmp_path, monkeypatch)
         first = resolve_local_user_id()
-        assert settings.installation_file.is_file()
+        assert fs_registry.installation_file(first).is_file()
 
         # A fresh resolution (cache cleared) reads the persisted file rather
         # than regenerating, so the value is identical even if the fingerprint
@@ -55,8 +56,9 @@ class TestResolveLocalUserId:
 
     def test_corrupt_file_regenerates(self, tmp_path, monkeypatch) -> None:
         self._isolate(tmp_path, monkeypatch)
-        settings.installation_file.parent.mkdir(parents=True, exist_ok=True)
-        settings.installation_file.write_text("not json", encoding="utf-8")
+        legacy_file = settings.data_dir / settings.installation_filename
+        legacy_file.parent.mkdir(parents=True, exist_ok=True)
+        legacy_file.write_text("not json", encoding="utf-8")
         resolve_local_user_id.cache_clear()
         uid = resolve_local_user_id()
         assert uid.startswith("local-")

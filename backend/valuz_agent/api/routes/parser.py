@@ -25,13 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.api.deps import (
     _parser_registry,
-    _secret_store,
     get_current_user_id,
     get_setup_controller,
 )
 from valuz_agent.i18n import t
+from valuz_agent.infra import secret_store
 from valuz_agent.infra.db import async_unit_of_work
-from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.parser.registry import (
     LIGHT_LOCAL_PLUGIN_ID,
     ParserPluginRegistry,
@@ -450,7 +449,6 @@ async def patch_plugin_config_route(
 
     secret_ref_change: tuple[str | None] | None = None
     if payload.secret is not None:
-        secret_store: SecretStorePort = _secret_store()
         if payload.secret == "":
             secret_ref_change = (None,)
         else:
@@ -487,8 +485,6 @@ async def test_plugin(
 
     async with async_unit_of_work(commit=False) as db:
         cfg_dict = await get_plugin_config(db, plugin_id, user_id=user_id)
-
-    secret_store = _secret_store()
 
     class _Resolver:
         def resolve(self, secret_ref: str | None) -> str | None:

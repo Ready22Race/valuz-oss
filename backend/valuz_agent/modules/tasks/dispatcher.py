@@ -136,6 +136,7 @@ class DispatcherService:
             if ws_row is None:
                 return {"error": f"project {project_id!r} not found", "status": "failed"}
             project_cwd = fs_registry.project_cwd(
+                task_row.user_id,
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -470,6 +471,7 @@ class DispatcherService:
             if ws_row is None:
                 return {"error": f"project {project_id!r} not found", "status": "failed"}
             project_cwd = fs_registry.project_cwd(
+                task_row.user_id,
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],

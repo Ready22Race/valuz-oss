@@ -72,8 +72,7 @@ def _is_windows() -> bool:
 
 
 def _bin_dir() -> Path:
-    # Non-creating sibling of FsRegistry.browser_bin_dir() for read-only checks.
-    return _fs.resolve("bin")
+    return _fs.browser_bin_dir()
 
 
 def _wrapper_path(bin_dir: Path) -> Path:
@@ -206,9 +205,11 @@ async def status() -> BrowserStatus:
     )
 
 
-async def start() -> BrowserStartResult:
+async def start(user_id: str) -> BrowserStartResult:
     """Ensure the managed-browser daemon is up (idempotent). Returns the
     ``cli_prefix`` the caller should use for subsequent browser commands."""
+    if not user_id:
+        raise ValueError("user_id is required to start the managed browser")
     if not node_available():
         raise BrowserNodeMissing()
 
@@ -222,7 +223,7 @@ async def start() -> BrowserStartResult:
     if settings.browser_mode == "attach":
         argv.append(f"--browserUrl={settings.browser_attach_url}")
     else:
-        argv.append(f"--userDataDir={_fs.browser_profile_dir()}")
+        argv.append(f"--userDataDir={_fs.browser_profile_dir(user_id)}")
     # P3 (deferred) appends safety flags here: --blockedUrlPattern /
     # --redactNetworkHeaders / --no-category-network (see p3-safety §5/§8).
 

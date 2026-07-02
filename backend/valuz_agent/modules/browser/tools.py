@@ -44,8 +44,11 @@ _STOP_DESCRIPTION = (
 
 
 async def _start_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
+    user_id = str(getattr(ctx, "user_id", "") or "")
+    if not user_id:
+        return ToolResult(content="browser_start requires a user-scoped context", is_error=True)
     try:
-        result = await service.start()
+        result = await service.start(user_id)
     except BrowserError as exc:
         return ToolResult(content=exc.message, is_error=True)
     except Exception as exc:  # noqa: BLE001 — surface as a tool error, never crash the turn

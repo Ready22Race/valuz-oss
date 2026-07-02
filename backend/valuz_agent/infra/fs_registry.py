@@ -40,6 +40,14 @@ ProjectKind = Literal["chat", "project"]
 SkillSource = Literal["claude", "codex"]
 
 
+def _to_async_url(url: str) -> str:
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if url.startswith("sqlite://"):
+        return url.replace("sqlite://", "sqlite+aiosqlite://", 1)
+    return url
+
+
 class FsRegistry:
     """Resolves and ensures every host-writable path the host application uses.
 
@@ -50,56 +58,73 @@ class FsRegistry:
 
     # ---- FS-1 / FS-2 — data root + secrets ----
 
-    def data_dir(self) -> Path:
-        path = self.resolve()
+    def user_dir_name(self, user_id: str) -> str:
+        if not user_id:
+            raise ValueError("user_id is required for user-scoped data dir")
+        return user_id.replace("/", "__").replace("\\", "__")
+
+    def data_dir(self, user_id: str) -> Path:
+        path = settings.data_dir / self.user_dir_name(user_id)
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def resolve(self, *parts: str) -> Path:
-        """Non-creating path resolver under the data root — the READ
-        counterpart to :meth:`data_dir`.
+    def _db_path(self, user_id: str) -> Path:
+        path = self.data_dir(user_id) / settings.db_filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
-        Returns ``<data_dir>/<parts...>`` **without** creating anything
-        (``resolve()`` with no parts returns the data root itself). Use this for
-        reads, existence probes, and path values handed to another component;
-        use :meth:`data_dir` (or a creating helper below) only when the caller
-        will actually write. Routing reads here — rather than off
-        ``settings.data_dir`` — keeps the registry the single FS boundary, so a
-        future sandbox/relocation only has to change this file.
-        """
-        return settings.data_dir.joinpath(*parts)
+    def _kernel_db_path(self, user_id: str) -> Path:
+        path = self.data_dir(user_id) / settings.kernel_db_filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
-    def projects_root(self) -> Path:
-        """Managed-project root ``<data_dir>/projects`` (non-creating).
+    def db_url(self, user_id: str) -> str:
+        if settings.database_url:
+            return settings.database_url
+        return f"sqlite:///{self._db_path(user_id)}"
 
-        The single home for chat-managed project cwds. :meth:`project_cwd`
-        creates per-project leaves under it; the sandbox mount set and the
-        legacy ``workspaces``→``projects`` rename reference the root path itself,
-        so this stays non-creating and the ``"projects"`` literal lives here.
-        """
-        return self.resolve("projects")
+    def db_url_async(self, user_id: str) -> str:
+        if settings.database_url:
+            return _to_async_url(settings.database_url)
+        return f"sqlite+aiosqlite:///{self._db_path(user_id)}"
 
-    def sandbox_root(self) -> Path:
-        """Kernel private-write root ``<data_dir>/sandbox`` (non-creating).
+    def kernel_db_url(self, user_id: str) -> str:
+        if settings.kernel_database_url:
+            return settings.kernel_database_url
+        if settings.database_url:
+            return settings.database_url
+        return f"sqlite:///{self._kernel_db_path(user_id)}"
 
-        The sandboxed/remote kernel's own DB write area; the Seatbelt driver
-        computes it as a mount point, so it stays non-creating.
-        """
-        return self.resolve("sandbox")
+    def kernel_db_url_async(self, user_id: str) -> str:
+        if settings.kernel_database_url:
+            return _to_async_url(settings.kernel_database_url)
+        if settings.database_url:
+            return _to_async_url(settings.database_url)
+        return f"sqlite+aiosqlite:///{self._kernel_db_path(user_id)}"
 
-    def secrets_dir(self) -> Path:
-        path = settings.secrets_dir
+    def secrets_dir(self, user_id: str) -> Path:
+        path = self.data_dir(user_id) / "secrets"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def browser_profile_dir(self) -> Path:
+    def cache_dir(self) -> Path:
+        path = settings.data_dir / "cache"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def installation_file(self, user_id: str) -> Path:
+        path = self.data_dir(user_id) / settings.installation_filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def browser_profile_dir(self, user_id: str) -> Path:
         """Dedicated, persistent Chrome ``--user-data-dir`` for the managed browser.
 
         An ISOLATED profile (never the user's everyday Chrome): a full-access
         agent only ever sees the logins the user puts here, which contains the
         blast radius. See docs/design/browser-feature.md §6 (security).
         """
-        path = settings.browser_profile_dir
+        path = self.data_dir(user_id) / settings.browser_profile_subdir
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -108,13 +133,15 @@ class FsRegistry:
         ``chrome-devtools`` wrapper resolves (vs. the raw ``node <entry>`` /
         ``npx`` invocation). See docs/design/browser-feature.md §8.
         """
-        path = self.data_dir() / "bin"
+        path = settings.data_dir / "bin"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     # ---- FS-3 — project cwd (project.cwd in V5 kernel terms) ----
 
-    def project_cwd(self, project_id: str, kind: ProjectKind, root_path: str | None = None) -> Path:
+    def project_cwd(
+        self, user_id: str, project_id: str, kind: ProjectKind, root_path: str | None = None
+    ) -> Path:
         """Return the absolute cwd for a project.
 
         - ``kind="project"``: caller-supplied ``root_path`` is used as-is. The
@@ -131,12 +158,12 @@ class FsRegistry:
                 raise ValueError(f"project root_path must be absolute: {root_path}")
             return path
 
-        path = self.projects_root() / project_id
+        path = self.data_dir(user_id) / "projects" / project_id
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     def workspace_handle(
-        self, project_id: str, kind: ProjectKind, root_path: str | None = None
+        self, user_id: str, project_id: str, kind: ProjectKind, root_path: str | None = None
     ) -> WorkspaceHandle:
         """Return a ``WorkspaceHandle`` for the project's cwd.
 
@@ -145,28 +172,43 @@ class FsRegistry:
         future remote form would return a handle backed by the kernel
         file API without changing call sites.
         """
-        return LocalWorkspaceHandle(self.project_cwd(project_id, kind, root_path))
+        return LocalWorkspaceHandle(self.project_cwd(user_id, project_id, kind, root_path))
 
     # ---- FS-4 / FS-5 — doc assets and previews ----
 
-    def doc_asset_dir(self, doc_id: str) -> Path:
-        path = self.data_dir() / "docs" / "assets" / doc_id
+    def doc_asset_dir(self, user_id: str, doc_id: str) -> Path:
+        path = self.data_dir(user_id) / "docs" / "assets" / doc_id
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def doc_preview_path(self, doc_id: str) -> Path:
-        parent = self.data_dir() / "docs" / "preview"
+    def doc_preview_path(self, user_id: str, doc_id: str) -> Path:
+        parent = self.data_dir(user_id) / "docs" / "preview"
         parent.mkdir(parents=True, exist_ok=True)
         return parent / f"{doc_id}.md"
 
-    # ---- FS-6 — session attachments (V5 UserMessage.attachments source) ----
-
-    def attachment_dir(self, session_id: str) -> Path:
-        path = self.data_dir() / "attachments" / session_id
+    def docs_root(self, user_id: str) -> Path:
+        path = self.data_dir(user_id) / "docs"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def kb_root(self) -> Path:
+    def docs_preview_dir(self, user_id: str) -> Path:
+        path = self.docs_root(user_id) / "preview"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def docs_scan_state_dir(self, user_id: str) -> Path:
+        path = self.docs_root(user_id) / "scan_state"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # ---- FS-6 — session attachments (V5 UserMessage.attachments source) ----
+
+    def attachment_dir(self, user_id: str, session_id: str) -> Path:
+        path = self.data_dir(user_id) / "attachments" / session_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def kb_root(self, user_id: str) -> Path:
         """Return (and create) the knowledge-base root directory.
 
         ``<data_dir>/kb`` — the single home for KB content, replacing the
@@ -174,7 +216,7 @@ class FsRegistry:
         writes share the same audit / sandbox boundary as every other host
         write. Created on demand.
         """
-        path = self.data_dir() / "kb"
+        path = self.data_dir(user_id) / "kb"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -207,11 +249,16 @@ class FsRegistry:
     # -- Legacy (pre-2026-05 layout) — read-only fallback for content
     #    staged before the cwd-keyed convention landed. --
 
-    def legacy_skill_staging_root(self) -> Path:
-        return settings.skill_staging_dir
+    def legacy_skill_staging_root(self, user_id: str) -> Path:
+        if settings.skill_staging_dir_override:
+            path = settings.skill_staging_dir_override.expanduser() / self.user_dir_name(user_id)
+        else:
+            path = self.data_dir(user_id) / "skill-creator" / "staging"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
-    def legacy_skill_staging_session_dir(self, session_id: str) -> Path:
-        return self.legacy_skill_staging_root() / session_id
+    def legacy_skill_staging_session_dir(self, user_id: str, session_id: str) -> Path:
+        return self.legacy_skill_staging_root(user_id) / session_id
 
     # ---- FS-8 — user-scoped permanent skill targets ----
 
@@ -255,7 +302,7 @@ class FsRegistry:
         override = os.environ.get("VALUZ_OFFICIAL_SKILLS_DIR")
         if override:
             return Path(override).expanduser()
-        return self.data_dir() / "official-skills"
+        return settings.data_dir / "official-skills"
 
     def legacy_user_skill_roots(self) -> list[Path]:
         """Return the legacy CLI skill locations for read-only discovery.
@@ -456,7 +503,7 @@ class FsRegistry:
             raise ValueError(f"invalid plugin_id: {plugin_id!r}")
         if subkind is not None and ("/" in subkind or ".." in subkind):
             raise ValueError(f"invalid subkind: {subkind!r}")
-        path = self.data_dir() / "models" / plugin_id
+        path = settings.data_dir / "models" / plugin_id
         if subkind:
             path = path / subkind
         path.mkdir(parents=True, exist_ok=True)
@@ -464,19 +511,20 @@ class FsRegistry:
 
     # ---- FS-13 — onboarding example project directory ----
     #
-    # User-visible directory for the onboarding "示例项目".  Lives under
-    # ``user_project_root`` (default ``~/Valuz``) so it appears in the
-    # user's home folder rather than in the hidden ``~/.valuz`` data dir.
+    # User-visible directory for the onboarding "示例项目".  Lives under the
+    # user-scoped ``user_project_root`` (default ``~/Valuz/<user_id>``) so it
+    # appears in the user's home folder rather than in the hidden ``~/.valuz``
+    # data dir while still isolating a shared deployment by owner.
 
-    def example_project_dir(self) -> Path:
+    def example_project_dir(self, user_id: str) -> Path:
         """Return (and create) the example-project directory.
 
-        ``<user_project_root>/示例项目`` — created on demand.
+        ``<user_project_root>/<user_id>/示例项目`` — created on demand.
         Used exclusively by the onboarding ``POST /v1/onboarding/example-project``
         endpoint; the path is then handed to ``ProjectService.create_project``
         as ``root_path``.
         """
-        path = settings.user_project_root / "示例项目"
+        path = settings.user_project_root / self.user_dir_name(user_id) / "示例项目"
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -492,18 +540,19 @@ class FsRegistry:
 
     def memory_dir(
         self,
+        user_id: str,
         scope: Literal["global", "project"],
         *,
         project_id: str | None = None,
     ) -> Path:
         if scope == "global":
-            path = self.data_dir() / "memories"
+            path = self.data_dir(user_id) / "memories"
         elif scope == "project":
             if not project_id:
                 raise ValueError("project memory requires project_id")
             if "/" in project_id or ".." in project_id:
                 raise ValueError(f"invalid project_id: {project_id!r}")
-            path = self.data_dir() / "memories" / "projects" / project_id
+            path = self.data_dir(user_id) / "memories" / "projects" / project_id
         else:  # pragma: no cover - guarded by Literal
             raise ValueError(f"unknown memory scope: {scope!r}")
         path.mkdir(parents=True, exist_ok=True)

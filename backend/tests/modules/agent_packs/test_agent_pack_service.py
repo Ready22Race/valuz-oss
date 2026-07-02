@@ -16,7 +16,6 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from valuz_agent.infra.database import Base
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.modules.agent_packs.errors import PackNotFound
 from valuz_agent.modules.agent_packs.service import AgentPackService
 from valuz_agent.modules.agents.models import AgentRow, ProjectMemberRow
@@ -40,8 +39,8 @@ DEPLOY = {
 
 
 async def _build_service(workdir):  # type: ignore[no-untyped-def]
-    """Build an isolated AgentPackService over a fresh sqlite db + tmp secret
-    store. Returns (service, session, engine) so the caller can dispose."""
+    """Build an isolated AgentPackService over a fresh sqlite db.
+    Returns (service, session, engine) so the caller can dispose."""
     workdir.mkdir(parents=True, exist_ok=True)
     db_file = workdir / "packs.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
@@ -58,10 +57,8 @@ async def _build_service(workdir):  # type: ignore[no-untyped-def]
         )
     session = async_sessionmaker(bind=engine, expire_on_commit=False)()
     # Isolated connector service so import-time connector registration writes to
-    # the test db + a tmp secret store, never the real keychain.
-    connector_svc = ConnectorService(
-        ConnectorDatastore(session), FileSecretStore(workdir / "secrets")
-    )
+    # the test db, never the real local database.
+    connector_svc = ConnectorService(ConnectorDatastore(session))
     agent_svc = AgentService(session, connector_service=connector_svc)
     return AgentPackService(agent_svc), session, engine
 

@@ -34,11 +34,6 @@ class _FakeProviderDatastore:
         return _FakeOAuthProvider() if provider_id == "ch-codex-subscription" else None
 
 
-class _UnusedSecrets:
-    def get(self, ref: str) -> str | None:  # never reached on the oauth path
-        raise AssertionError("secrets must not be consulted for an OAuth subscription")
-
-
 async def test_oauth_subscription_resolves_to_none_without_warning(
     caplog: object,
 ) -> None:
@@ -55,7 +50,6 @@ async def test_oauth_subscription_resolves_to_none_without_warning(
             agent=agent,
             model="gpt-5.5",
             providers=_FakeProviderDatastore(),
-            secrets=_UnusedSecrets(),
         )
 
     # Healthy oauth path: env fallback, no ModelProvider.

@@ -89,15 +89,15 @@ class MemoryStore:
 
     # -- path / io ----------------------------------------------------------
 
-    def _path_for(self, target: Target, project_id: str | None) -> Path:
+    def _path_for(self, user_id: str, target: Target, project_id: str | None) -> Path:
         if target == "user":
-            return self._fs.memory_dir("global") / "USER.md"
+            return self._fs.memory_dir(user_id, "global") / "USER.md"
         if target == "global":
-            return self._fs.memory_dir("global") / "MEMORY.md"
+            return self._fs.memory_dir(user_id, "global") / "MEMORY.md"
         if target == "project":
             if not project_id:
                 raise MemoryError("project memory requires a project context")
-            return self._fs.memory_dir("project", project_id=project_id) / "MEMORY.md"
+            return self._fs.memory_dir(user_id, "project", project_id=project_id) / "MEMORY.md"
         raise MemoryError(f"unknown target: {target!r}")
 
     @staticmethod
@@ -113,23 +113,28 @@ class MemoryStore:
         entries = [e.strip() for e in raw.split(ENTRY_DELIMITER)]
         return list(dict.fromkeys(e for e in entries if e))  # dedupe, keep order
 
-    def read_entries(self, target: Target, *, project_id: str | None = None) -> list[str]:
-        return self._read(self._path_for(target, project_id))
+    def read_entries(
+        self, user_id: str, target: Target, *, project_id: str | None = None
+    ) -> list[str]:
+        return self._read(self._path_for(user_id, target, project_id))
 
-    def clear(self, target: Target, *, project_id: str | None = None) -> None:
+    def clear(self, user_id: str, target: Target, *, project_id: str | None = None) -> None:
         """Remove every entry in a target (delete its file). Idempotent."""
         with self._lock:
-            path = self._path_for(target, project_id)
+            path = self._path_for(user_id, target, project_id)
             if path.exists():
                 path.unlink()
 
-    def drop_project(self, project_id: str) -> None:
+    def drop_project(self, user_id: str, project_id: str) -> None:
         """Source-driven forgetting (design §11): remove a project's whole memory
         directory when the project is deleted. Idempotent / best-effort. The dir
         is Valuz-owned and centralized (never the user's bound repo), so it is
         always safe to delete."""
         with self._lock:
-            shutil.rmtree(self._fs.memory_dir("project", project_id=project_id), ignore_errors=True)
+            shutil.rmtree(
+                self._fs.memory_dir(user_id, "project", project_id=project_id),
+                ignore_errors=True,
+            )
 
     @staticmethod
     def _char_count(entries: list[str]) -> int:
@@ -149,6 +154,7 @@ class MemoryStore:
 
     def add(
         self,
+        user_id: str,
         target: Target,
         content: str,
         *,
@@ -162,7 +168,7 @@ class MemoryStore:
         if reason:
             return {"success": False, "error": reason}
         with self._lock:
-            path = self._path_for(target, project_id)
+            path = self._path_for(user_id, target, project_id)
             entries = self._read(path)
             if content in entries:
                 return self._ok(target, entries, "entry already exists (no duplicate added)")
@@ -187,6 +193,7 @@ class MemoryStore:
 
     def replace(
         self,
+        user_id: str,
         target: Target,
         old_text: str,
         new_content: str,
@@ -204,7 +211,7 @@ class MemoryStore:
         if reason:
             return {"success": False, "error": reason}
         with self._lock:
-            path = self._path_for(target, project_id)
+            path = self._path_for(user_id, target, project_id)
             entries = self._read(path)
             idx, err = self._locate(entries, old_text)
             if err is not None:
@@ -231,6 +238,7 @@ class MemoryStore:
 
     def remove(
         self,
+        user_id: str,
         target: Target,
         old_text: str,
         *,
@@ -241,7 +249,7 @@ class MemoryStore:
         if not old_text:
             return {"success": False, "error": "old_text cannot be empty"}
         with self._lock:
-            path = self._path_for(target, project_id)
+            path = self._path_for(user_id, target, project_id)
             entries = self._read(path)
             idx, err = self._locate(entries, old_text)
             if err is not None:
@@ -282,21 +290,21 @@ class MemoryStore:
 
     # -- injection (frozen-snapshot input, load-time sanitized; design §8/§9) -
 
-    def render_for_injection(self, *, project_id: str | None = None) -> str:
+    def render_for_injection(self, user_id: str, *, project_id: str | None = None) -> str:
         """Render the in-scope memory block: USER + global MEMORY + (if a project)
         that project's MEMORY. Each entry is sanitized for the snapshot only —
         live files keep the original text. Returns '' when nothing to inject."""
         blocks: list[str] = []
         user = self._render_block(
             "USER PROFILE (who the user is)",
-            self._sanitize(self.read_entries("user")),
+            self._sanitize(self.read_entries(user_id, "user")),
             CHAR_LIMITS["user"],
         )
         if user:
             blocks.append(user)
         glob = self._render_block(
             "MEMORY (cross-project notes)",
-            self._sanitize(self.read_entries("global")),
+            self._sanitize(self.read_entries(user_id, "global")),
             CHAR_LIMITS["global"],
         )
         if glob:
@@ -304,7 +312,7 @@ class MemoryStore:
         if project_id:
             proj = self._render_block(
                 "PROJECT MEMORY (this project)",
-                self._sanitize(self.read_entries("project", project_id=project_id)),
+                self._sanitize(self.read_entries(user_id, "project", project_id=project_id)),
                 CHAR_LIMITS["project"],
             )
             if proj:

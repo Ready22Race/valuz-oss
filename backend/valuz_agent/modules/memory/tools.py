@@ -85,14 +85,21 @@ async def _memory_handler(args: dict[str, Any], ctx: ExecContext) -> ToolResult:
 
     try:
         if action == "add":
-            result = memory_store.add(target, str(content), project_id=project_id, source="agent")
+            result = memory_store.add(
+                user_id, target, str(content), project_id=project_id, source="agent"
+            )
         elif action == "replace":
             result = memory_store.replace(
-                target, str(old_text), str(content), project_id=project_id, source="agent"
+                user_id,
+                target,
+                str(old_text),
+                str(content),
+                project_id=project_id,
+                source="agent",
             )
         else:  # remove
             result = memory_store.remove(
-                target, str(old_text), project_id=project_id, source="agent"
+                user_id, target, str(old_text), project_id=project_id, source="agent"
             )
     except MemoryError as exc:
         return ToolResult(content=f"memory: {exc}", is_error=True)

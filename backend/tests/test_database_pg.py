@@ -21,15 +21,15 @@ skip_no_pg = pytest.mark.skipif(
     reason="DATABASE_URL not set to a PostgreSQL URL",
 )
 
-
 @skip_no_pg
 class TestPostgresConfig:
-    def test_settings_recognises_pg_url(self) -> None:
+    def test_settings_recognises_pg_url(self, monkeypatch) -> None:
+        from valuz_agent.infra import db_urls
         from valuz_agent.infra.config import Settings
 
-        s = Settings(database_url=PG_URL)
-        assert s.is_sqlite is False
-        assert "asyncpg" in s.db_url_async
+        monkeypatch.setattr(db_urls, "settings", Settings(database_url=PG_URL))
+
+        assert "asyncpg" in db_urls.db_url_async()
 
     def test_sync_engine_connects(self) -> None:
         from sqlalchemy import create_engine, text
@@ -40,18 +40,19 @@ class TestPostgresConfig:
             assert result.scalar() == 1
         engine.dispose()
 
-    def test_async_engine_connects(self) -> None:
+    def test_async_engine_connects(self, monkeypatch) -> None:
         import asyncio
 
         from sqlalchemy import text
         from sqlalchemy.ext.asyncio import create_async_engine
 
+        from valuz_agent.infra import db_urls
         from valuz_agent.infra.config import Settings
 
-        s = Settings(database_url=PG_URL)
+        monkeypatch.setattr(db_urls, "settings", Settings(database_url=PG_URL))
 
         async def _check() -> int:
-            engine = create_async_engine(s.db_url_async, echo=False)
+            engine = create_async_engine(db_urls.db_url_async(), echo=False)
             async with engine.connect() as conn:
                 result = await conn.execute(text("SELECT 1"))
                 val = result.scalar()
