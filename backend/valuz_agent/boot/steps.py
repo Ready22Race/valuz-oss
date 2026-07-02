@@ -355,9 +355,12 @@ async def bind_data_service(app: FastAPI) -> None:
         store, engine = kb.build_host_data_service_store(dsn)
         await kb.ensure_host_data_service_schema(engine)
         ds_app.state.store = store
-        ds_app.state.verifier = kb.make_host_data_service_verifier(
-            get_or_create_ds_secret(_secret_store(), resolve_local_user_id())
-        )
+        # Per-owner verifier: resolves each token's signing secret by its owner, so
+        # one shared host verifies every owner's data-service token (local = the one
+        # owner resolves its own secret; cloud = many owners). Ensure the local
+        # owner's secret exists up-front (mint side also does; idempotent).
+        get_or_create_ds_secret(_secret_store(), resolve_local_user_id())
+        ds_app.state.verifier = kb.make_host_data_service_verifier_per_owner(_secret_store())
         app.state._data_service_engine = engine
         # Unify host reads (sessions + events) through the DataService
         # (in-process), so reads never depend on the sandbox being alive. Bind

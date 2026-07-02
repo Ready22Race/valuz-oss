@@ -367,10 +367,62 @@ async def ensure_host_data_service_schema(engine) -> None:
 
 
 def make_host_data_service_verifier(secret: str):
-    """HS256 verifier for the host-mounted DataService (sandbox tokens)."""
+    """HS256 verifier for the host-mounted DataService (sandbox tokens).
+
+    Single-secret: assumes one owner (OSS local). For a shared multi-tenant host
+    use ``make_host_data_service_verifier_per_owner``.
+    """
     from src.core.token_signer import HmacTokenVerifier
 
     return HmacTokenVerifier(secret)
+
+
+class _PerOwnerDataServiceVerifier:
+    """``TokenVerifier`` that resolves the signing secret **per token owner**.
+
+    Each owner's data-service token is signed with that owner's per-owner secret
+    (``data_service_secret``). On a shared multi-tenant host, verification must
+    read the token's ``sub`` (unverified), look up **that** owner's secret, then
+    verify. Security: the ``sub`` is only a hint to pick the key — a forged
+    ``sub`` fails the signature check (attacker lacks the victim's secret); and an
+    owner with **no** secret is rejected (read-only lookup, never minted here), so
+    an unauthenticated request cannot pollute the store. Unifies local (one owner
+    resolves its own secret) and cloud (many owners).
+    """
+
+    def __init__(self, secret_store) -> None:  # SecretStorePort
+        self._store = secret_store
+
+    def verify(self, token: str | None):
+        if not token:
+            return None
+        import base64
+        import json
+
+        from src.core.token_signer import HmacTokenVerifier, InvalidTokenError
+
+        from valuz_agent.infra.data_service_secret import DS_SECRET_REF
+
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise InvalidTokenError("malformed token")
+        try:
+            claims = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+        except Exception as exc:  # noqa: BLE001 — any decode failure = malformed
+            raise InvalidTokenError("malformed claims") from exc
+        sub = claims.get("sub")
+        if not sub:
+            raise InvalidTokenError("missing sub")
+        secret = self._store.get(str(sub), DS_SECRET_REF)  # read-only; None if absent
+        if not secret:
+            raise InvalidTokenError("unknown owner")
+        # Real verification (signature, alg pin, exp) with the owner's secret.
+        return HmacTokenVerifier(secret).verify(token)
+
+
+def make_host_data_service_verifier_per_owner(secret_store):
+    """Per-owner HS256 verifier for the host DataService (multi-tenant)."""
+    return _PerOwnerDataServiceVerifier(secret_store)
 
 
 def mint_data_service_token(
