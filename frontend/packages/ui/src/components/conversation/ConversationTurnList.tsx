@@ -920,6 +920,12 @@ const TurnRow = memo(
               </div>
             ) : null}
 
+            {turn.cancelled ? (
+              <div className="py-1.5 text-[13px] italic text-ink-muted">
+                {t("conversation.userCancelled")}
+              </div>
+            ) : null}
+
             {!inFlight &&
             !turn.failedMessage &&
             turn.blocks.some((b) => b.kind === "assistant") ? (
@@ -930,12 +936,6 @@ const TurnRow = memo(
                   .join("\n\n")}
                 onRetry={onRetry ? () => onRetry(turn.id) : undefined}
               />
-            ) : null}
-
-            {turn.cancelled ? (
-              <div className="py-1.5 text-[13px] text-ink-meta">
-                {t("conversation.userCancelled")}
-              </div>
             ) : null}
 
             {turn.failedMessage ? (
