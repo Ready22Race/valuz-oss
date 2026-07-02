@@ -69,6 +69,27 @@ const elapsedSince = (
   return end - start;
 };
 
+const isUserInterruptValue = (value: unknown): boolean => {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "user_interrupt" || normalized === "interrupted") {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object") return false;
+    const obj = parsed as Record<string, unknown>;
+    return (
+      obj.type === "user_interrupt" ||
+      obj.category === "user_interrupt" ||
+      obj.type === "interrupted" ||
+      obj.category === "interrupted"
+    );
+  } catch {
+    return false;
+  }
+};
+
 const toMetaToolCall = (
   eventType: string,
   payload: Record<string, string>,
@@ -297,6 +318,20 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       continue;
     }
 
+    if (eventType === "session.idle") {
+      if (isUserInterruptValue(payload.stop_reason) && currentTurn) {
+        currentTurn.cancelled = true;
+      }
+      continue;
+    }
+
+    if (eventType === "session.update") {
+      if (payload.status === "cancelled" && currentTurn) {
+        currentTurn.cancelled = true;
+      }
+      continue;
+    }
+
     const turn = ensureTurn();
 
     if (eventType === "session.compaction") {
@@ -496,7 +531,7 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     }
 
     if (eventType === "run.failed") {
-      if (payload.category === "user_interrupt") {
+      if (isUserInterruptValue(payload.category)) {
         // User cancelled the run — render a quiet grey line, not the
         // ``ErrorMessageCard`` (with retry / switch-model) a real failure gets.
         turn.cancelled = true;

@@ -421,6 +421,47 @@ describe("buildTurns — streaming deltas", () => {
   });
 });
 
+describe("buildTurns — user interrupt", () => {
+  it("marks the current turn as cancelled on session.idle with user_interrupt", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "stop me", message_id: "u1" }),
+      evt(2, "message.assistant.text_delta", {
+        text: "Partial answer",
+        message_id: "a1",
+      }),
+      evt(3, "session.idle", { stop_reason: "user_interrupt" }),
+    ]);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]!.cancelled).toBe(true);
+    expect(turns[0]!.failedMessage).toBeNull();
+    expect(turns[0]!.blocks).toEqual([
+      {
+        kind: "assistant",
+        text: "Partial answer",
+        messageId: "a1",
+        sealed: false,
+      },
+    ]);
+  });
+
+  it("recognizes serialized stop_reason objects without marking end_turn", () => {
+    const interrupted = buildTurns([
+      evt(1, "message.user", { text: "stop me", message_id: "u1" }),
+      evt(2, "session.idle", {
+        stop_reason: JSON.stringify({ type: "user_interrupt" }),
+      }),
+    ]);
+    const clean = buildTurns([
+      evt(1, "message.user", { text: "done", message_id: "u1" }),
+      evt(2, "session.idle", { stop_reason: "end_turn" }),
+    ]);
+
+    expect(interrupted[0]!.cancelled).toBe(true);
+    expect(clean[0]!.cancelled).toBe(false);
+  });
+});
+
 describe("buildTurns — attachment names", () => {
   it("derives the attachment name from source_path (original file)", () => {
     const turns = buildTurns([

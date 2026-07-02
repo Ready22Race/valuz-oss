@@ -44,7 +44,10 @@ function buildTurn(i: number): ConversationTurn {
   };
 }
 
-function renderList(turns: ConversationTurn[]) {
+function renderList(
+  turns: ConversationTurn[],
+  opts: { onRetry?: (turnId: string) => void } = {},
+) {
   const scrollContainerRef = createRef<HTMLDivElement>();
   let api: { scrollToTurnTop: (index: number) => void } | null = null;
 
@@ -56,6 +59,7 @@ function renderList(turns: ConversationTurn[]) {
         sending={false}
         loading={false}
         error={null}
+        onRetry={opts.onRetry}
         onVirtualApiReady={(nextApi) => {
           api = nextApi;
         }}
@@ -154,6 +158,34 @@ describe("ConversationTurnList virtualization", () => {
     expect(screen.getByText(/second thinking text/)).toBeTruthy();
     expect(screen.getByText("tool-title")).toBeTruthy();
     expect(screen.getByRole("button", { name: "查看详情" })).toBeTruthy();
+  });
+
+  it("keeps cancelled assistant turns copyable and retryable", () => {
+    virtualState.start = 0;
+    const onRetry = vi.fn();
+    renderList([{ ...buildTurn(1), cancelled: true }], { onRetry });
+
+    expect(screen.getByText("用户取消了当前对话")).toBeTruthy();
+    expect(screen.getAllByTitle("复制")).toHaveLength(2);
+    const retry = screen.getByTitle("重试");
+    expect(retry).toBeTruthy();
+
+    fireEvent.click(retry);
+    expect(onRetry).toHaveBeenCalledWith("turn-1");
+  });
+
+  it("shows actions for a reloaded cancelled turn without assistant text", () => {
+    virtualState.start = 0;
+    const onRetry = vi.fn();
+    renderList([{ ...buildTurn(1), blocks: [], cancelled: true }], { onRetry });
+
+    expect(screen.getByText("用户取消了当前对话")).toBeTruthy();
+    expect(screen.getAllByTitle("复制")).toHaveLength(2);
+    const retry = screen.getByTitle("重试");
+    expect(retry).toBeTruthy();
+
+    fireEvent.click(retry);
+    expect(onRetry).toHaveBeenCalledWith("turn-1");
   });
 
   it("renders a single processing indicator that wraps interleaved thinking and tool calls", () => {
