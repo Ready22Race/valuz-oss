@@ -86,3 +86,21 @@ class LocalDataServiceReader:
             user_id, status=status, ids=ids, limit=limit, offset=offset
         )
         return [session_to_data(s) for s in sessions]
+
+    async def list_all_sessions(
+        self,
+        *,
+        status: str | None = None,
+        ids: list[str] | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Any]:
+        # Cross-owner sweep: ``user_id=None`` reads every owner straight from the
+        # durable store — kernel-independent (host aggregators / recovery / owner
+        # resolution). The store reserves ``None`` for exactly this.
+        from app.serializers import session_to_data
+
+        sessions = await self._store.list_sessions(
+            None, status=status, ids=ids, limit=limit, offset=offset
+        )
+        return [session_to_data(s) for s in sessions]

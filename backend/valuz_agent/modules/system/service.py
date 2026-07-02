@@ -20,7 +20,7 @@ import os
 import time
 from pathlib import Path
 
-from valuz_agent.adapters import kernel_client
+from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.config import settings
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.system.schemas import SystemStatusResponse
@@ -101,7 +101,7 @@ def _read_kernel_pin() -> str:
 async def _count_active_sessions() -> int:
     try:
         # System health metric — count running sessions across every owner.
-        sessions = await kernel_client.list_all_sessions(limit=500)
+        sessions = await data_reader().list_all_sessions(limit=500)
         return sum(1 for s in sessions if s.status == "running")
     except Exception:  # noqa: BLE001 — status must never throw
         return 0

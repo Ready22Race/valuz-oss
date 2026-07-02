@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 
 from valuz_agent.adapters import kernel_client
+from valuz_agent.adapters.data_reader import data_reader
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ async def recover_running_sessions(*, batch_limit: int = 500) -> int:
     """
     try:
         # Cross-owner startup sweep — finalise every owner's stranded sessions.
-        sessions = await kernel_client.list_all_sessions(limit=batch_limit)
+        sessions = await data_reader().list_all_sessions(limit=batch_limit)
     except Exception:  # noqa: BLE001 — startup must not block on bookkeeping
         logger.exception("recover_running_sessions: failed to list kernel sessions")
         return 0
