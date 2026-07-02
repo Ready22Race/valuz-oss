@@ -8,6 +8,15 @@ from pydantic_settings import BaseSettings, NoDecode
 
 class Settings(BaseSettings):
     app_name: str = "valuz-agent"
+    # Host data root (``~/.valuz-oss``). This field is the single source of
+    # truth for the data-dir LOCATION, but application code must NOT read it
+    # directly — go through ``infra.fs_registry.fs_registry``: ``data_dir()``
+    # when a write will follow (it ensures the dir exists), or the non-creating
+    # ``resolve(*parts)`` for a read/probe / a path handed to another component.
+    # The registry is the one FS boundary a future sandbox/relocation has to
+    # change. Direct ``settings.data_dir`` reads are sanctioned ONLY in this
+    # file (self-derivation of the paths below), in ``fs_registry`` itself, and
+    # in ``boot.migrate_data_dir`` (the one-time root relocation).
     data_dir: Path = Path.home() / ".valuz-oss"
     db_filename: str = "valuz.db"
     # The kernel's own SQLite file — sessions / messages / events, its

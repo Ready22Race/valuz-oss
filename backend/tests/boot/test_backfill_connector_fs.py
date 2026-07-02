@@ -10,7 +10,6 @@ migrated by alembic 0004, not here — see tests/migrations.)
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -20,6 +19,7 @@ from sqlalchemy.pool import StaticPool
 import valuz_agent.boot.kernel  # noqa: F401 — sys.path side-effect
 
 import valuz_agent.boot.backfill_connector_fs as bf
+from valuz_agent.infra.config import settings
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.projects.models import ProjectRow
@@ -49,15 +49,15 @@ def _project_with_config(tmp_path):
         json.dumps({"connectors": ["github", "slack"], "skills_enabled": ["x"]}),
         encoding="utf-8",
     )
-    return SimpleNamespace(data_dir=tmp_path), str(proj_root)
+    return str(proj_root)
 
 
 @pytest.mark.asyncio
 async def test_backfill_imports_project_selection(db, tmp_path, monkeypatch):
-    fake_settings, proj_root = _project_with_config(tmp_path)
+    proj_root = _project_with_config(tmp_path)
     db.add(ProjectRow(id="p1", name="P", kind="project", root_path=proj_root, user_id=_OWNER))
     await db.commit()
-    monkeypatch.setattr(bf, "settings", fake_settings)
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
 
     await bf.backfill_connector_fs(db)
 
@@ -69,10 +69,10 @@ async def test_backfill_imports_project_selection(db, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_backfill_is_db_authoritative_and_marker_gated(db, tmp_path, monkeypatch):
-    fake_settings, proj_root = _project_with_config(tmp_path)
+    proj_root = _project_with_config(tmp_path)
     db.add(ProjectRow(id="p1", name="P", kind="project", root_path=proj_root, user_id=_OWNER))
     await db.commit()
-    monkeypatch.setattr(bf, "settings", fake_settings)
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
 
     ds = ConnectorDatastore(db)
     # DB already carries a (different) selection — backfill must not clobber it.

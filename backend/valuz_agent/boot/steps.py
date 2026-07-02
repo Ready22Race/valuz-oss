@@ -12,6 +12,7 @@ import logging
 from fastapi import FastAPI
 
 from valuz_agent.infra.config import settings
+from valuz_agent.infra.fs_registry import fs_registry
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +82,8 @@ def acquire_single_writer_lock() -> None:
         acquire_single_writer_lock,
     )
 
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = settings.data_dir / ".single-writer.lock"
+    fs_registry.data_dir()  # ensure the data root exists
+    lock_path = fs_registry.resolve(".single-writer.lock")
     try:
         acquire_single_writer_lock(lock_path)
     except AnotherInstanceRunning:
@@ -149,15 +150,15 @@ async def bootstrap_schema() -> None:
     # NB: the ``~/.valuz/app`` → ``~/.valuz-oss`` data-dir cutover runs earlier in
     # the lifespan (``migrate_data_dir``), before identity resolution — see that
     # step's docstring for why the ordering is load-bearing.
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    fs_registry.data_dir()  # ensure the data root exists
 
     # One-shot courtesy rename from the workspace→project naming cutover:
     # managed chat cwds moved from ``data_dir/workspaces/`` to
     # ``data_dir/projects/``. The DB is wiped by the cutover fingerprint,
     # but the directories hold user files — carry them over instead of
     # orphaning them. No-op once the new directory exists.
-    legacy_dir = settings.data_dir / "workspaces"
-    target_dir = settings.data_dir / "projects"
+    legacy_dir = fs_registry.resolve("workspaces")
+    target_dir = fs_registry.projects_root()
     if legacy_dir.is_dir() and not target_dir.exists():
         legacy_dir.rename(target_dir)
 

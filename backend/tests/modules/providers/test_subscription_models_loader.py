@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+from valuz_agent.infra.config import settings
 from valuz_agent.modules.providers.service import (
     _load_subscription_models,
 )
@@ -43,8 +44,7 @@ def test_local_override_replaces_bundled_entry(tmp_path: Path) -> None:
         )
     )
 
-    with patch("valuz_agent.infra.config.settings") as mock_settings:
-        mock_settings.data_dir = tmp_path
+    with patch.object(settings, "data_dir", tmp_path):
         loaded = _load_subscription_models()
 
     claude = loaded["claude-subscription"]
@@ -59,8 +59,7 @@ def test_local_override_replaces_bundled_entry(tmp_path: Path) -> None:
 
 def test_missing_local_override_is_silently_ignored(tmp_path: Path) -> None:
     """No local file at all → bundled values pass through unchanged."""
-    with patch("valuz_agent.infra.config.settings") as mock_settings:
-        mock_settings.data_dir = tmp_path
+    with patch.object(settings, "data_dir", tmp_path):
         loaded = _load_subscription_models()
     assert loaded["claude-subscription"]["default_model"] == "claude-sonnet-4-6"
 
@@ -70,8 +69,7 @@ def test_malformed_local_override_does_not_crash_boot(tmp_path: Path) -> None:
     bad = tmp_path / "subscription_models.local.json"
     bad.write_text("{ this is not json")
 
-    with patch("valuz_agent.infra.config.settings") as mock_settings:
-        mock_settings.data_dir = tmp_path
+    with patch.object(settings, "data_dir", tmp_path):
         loaded = _load_subscription_models()
 
     assert "claude-subscription" in loaded
@@ -101,8 +99,7 @@ def test_models_array_with_non_string_entries_is_filtered(tmp_path: Path) -> Non
         )
     )
 
-    with patch("valuz_agent.infra.config.settings") as mock_settings:
-        mock_settings.data_dir = tmp_path
+    with patch.object(settings, "data_dir", tmp_path):
         loaded = _load_subscription_models()
 
     assert loaded["codex-subscription"]["model_options"] == ("gpt-5.5", "gpt-5.4")
@@ -115,8 +112,7 @@ def test_default_model_falls_back_to_first_model_when_missing(tmp_path: Path) ->
         json.dumps({"subscriptions": {"claude-subscription": {"models": ["claude-opus-4-7"]}}})
     )
 
-    with patch("valuz_agent.infra.config.settings") as mock_settings:
-        mock_settings.data_dir = tmp_path
+    with patch.object(settings, "data_dir", tmp_path):
         loaded = _load_subscription_models()
 
     assert loaded["claude-subscription"]["default_model"] == "claude-opus-4-7"
@@ -127,8 +123,7 @@ def test_empty_models_array_skips_the_block(tmp_path: Path) -> None:
     override = tmp_path / "subscription_models.local.json"
     override.write_text(json.dumps({"subscriptions": {"codex-subscription": {"models": []}}}))
 
-    with patch("valuz_agent.infra.config.settings") as mock_settings:
-        mock_settings.data_dir = tmp_path
+    with patch.object(settings, "data_dir", tmp_path):
         loaded = _load_subscription_models()
 
     # The override didn't supply any usable models, so codex-subscription

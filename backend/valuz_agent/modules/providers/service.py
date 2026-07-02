@@ -435,9 +435,9 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
 
     # Lazy import to avoid circular import at module load.
     try:
-        from valuz_agent.infra.config import settings
+        from valuz_agent.infra.fs_registry import fs_registry
 
-        local_path = Path(settings.data_dir) / "subscription_models.local.json"
+        local_path = fs_registry.resolve("subscription_models.local.json")
         if local_path.is_file():
             with local_path.open("r", encoding="utf-8") as fh:
                 _ingest(json.load(fh))

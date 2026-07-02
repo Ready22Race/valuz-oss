@@ -275,12 +275,14 @@ async def test_create_project_without_root_allocates_managed_cwd(
     from sqlalchemy import create_engine
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from valuz_agent.infra import fs_registry
+    from valuz_agent.infra.config import settings
     from valuz_agent.infra.database import Base
     from valuz_agent.infra.eventbus import EventBus
     from valuz_agent.modules.projects.datastore import ProjectDatastore
 
-    monkeypatch.setattr(fs_registry.fs_registry, "data_dir", lambda: tmp_path)
+    # Patch the data root at the settings singleton — the whole registry
+    # (data_dir/resolve/projects_root) reads it, so managed cwds land here.
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
 
     db_file = tmp_path / "proj.db"
     sync_engine = create_engine(

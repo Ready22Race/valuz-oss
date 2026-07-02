@@ -15,9 +15,12 @@ enough that we need a single registry to:
    needs to learn about the new boundary.
 
 Strict rule (enforced in Slice 8): valuz business modules MUST acquire any
-host-writable path through ``FsRegistry``. Direct use of ``Path.home()``,
-``os.path.expanduser``, or hardcoded ``~/.claude/...`` strings is forbidden
-outside this module and ``infra.config``.
+data-dir path through ``FsRegistry`` — writes via ``data_dir()`` / the creating
+helpers, and reads/probes via the non-creating ``resolve()`` (so the registry is
+the single FS boundary for BOTH directions). Direct use of ``settings.data_dir``,
+``Path.home()``, ``os.path.expanduser``, or hardcoded ``~/.claude/...`` strings
+is forbidden outside this module, ``infra.config`` (path self-derivation), and
+``boot.migrate_data_dir`` (the one-time root relocation).
 
 The kernel (``backend/kernel/``) is exempt from this rule — it owns its own
 materialization roots under ``project.cwd`` and we feed it a clean cwd path
@@ -48,9 +51,41 @@ class FsRegistry:
     # ---- FS-1 / FS-2 — data root + secrets ----
 
     def data_dir(self) -> Path:
-        path = settings.data_dir
+        path = self.resolve()
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    def resolve(self, *parts: str) -> Path:
+        """Non-creating path resolver under the data root — the READ
+        counterpart to :meth:`data_dir`.
+
+        Returns ``<data_dir>/<parts...>`` **without** creating anything
+        (``resolve()`` with no parts returns the data root itself). Use this for
+        reads, existence probes, and path values handed to another component;
+        use :meth:`data_dir` (or a creating helper below) only when the caller
+        will actually write. Routing reads here — rather than off
+        ``settings.data_dir`` — keeps the registry the single FS boundary, so a
+        future sandbox/relocation only has to change this file.
+        """
+        return settings.data_dir.joinpath(*parts)
+
+    def projects_root(self) -> Path:
+        """Managed-project root ``<data_dir>/projects`` (non-creating).
+
+        The single home for chat-managed project cwds. :meth:`project_cwd`
+        creates per-project leaves under it; the sandbox mount set and the
+        legacy ``workspaces``→``projects`` rename reference the root path itself,
+        so this stays non-creating and the ``"projects"`` literal lives here.
+        """
+        return self.resolve("projects")
+
+    def sandbox_root(self) -> Path:
+        """Kernel private-write root ``<data_dir>/sandbox`` (non-creating).
+
+        The sandboxed/remote kernel's own DB write area; the Seatbelt driver
+        computes it as a mount point, so it stays non-creating.
+        """
+        return self.resolve("sandbox")
 
     def secrets_dir(self) -> Path:
         path = settings.secrets_dir
@@ -96,7 +131,7 @@ class FsRegistry:
                 raise ValueError(f"project root_path must be absolute: {root_path}")
             return path
 
-        path = self.data_dir() / "projects" / project_id
+        path = self.projects_root() / project_id
         path.mkdir(parents=True, exist_ok=True)
         return path
 

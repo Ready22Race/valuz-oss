@@ -386,7 +386,7 @@ class ProjectService:
             from uuid import uuid4
 
             new_id = uuid4().hex
-            managed_cwd = fs_registry.data_dir() / "projects" / new_id
+            managed_cwd = fs_registry.projects_root() / new_id
             managed_cwd.mkdir(parents=True, exist_ok=True)
             row = ProjectRow(
                 id=new_id,
@@ -437,7 +437,7 @@ class ProjectService:
             # Imported projects without a user-picked folder get a managed
             # cwd under data_dir/projects/{id}/ (mirrors chat projects) so
             # they're still cross-machine portable.
-            managed_cwd = fs_registry.data_dir() / "projects" / new_id
+            managed_cwd = fs_registry.projects_root() / new_id
             managed_cwd.mkdir(parents=True, exist_ok=True)
             resolved_root = str(managed_cwd)
         row = ProjectRow(

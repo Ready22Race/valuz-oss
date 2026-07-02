@@ -21,6 +21,7 @@ import sys
 import uvicorn
 
 from valuz_agent.infra.config import settings
+from valuz_agent.infra.fs_registry import fs_registry
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -178,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = _parse_args(argv)
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    fs_registry.data_dir()  # ensure the data root exists
     # NB: structured JSON logging is configured **inside** the FastAPI
     # startup hook (see ``api/app.py``), NOT here. Uvicorn calls
     # ``logging.config.dictConfig`` during its own boot which wipes

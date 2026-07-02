@@ -214,8 +214,8 @@ def host_sandbox_rw_mounts() -> tuple[MountSpec, ...]:
     from valuz_agent.infra.fs_registry import fs_registry as fr
 
     dirs: list[Path] = [
-        settings.data_dir / "sandbox",  # the kernel's private DB
-        settings.data_dir / "projects",  # managed chat cwds
+        fr.sandbox_root(),  # the kernel's private DB
+        fr.projects_root(),  # managed chat cwds
         settings.user_project_root,  # real projects + their .agents|.claude/skills
         fr.official_skill_root(),  # official skill bootstrap
         fr.user_skill_root("claude"),  # user skill creation / submit
@@ -676,9 +676,10 @@ class SeatbeltDriver:
 
     async def provision_for_boot(self, ctx: SandboxBootContext) -> SandboxBootResult:
         from valuz_agent.infra.config import settings
+        from valuz_agent.infra.fs_registry import fs_registry as fr
 
-        data_dir = settings.data_dir
-        sandbox_dir = data_dir / "sandbox"
+        data_dir = fr.data_dir()
+        sandbox_dir = fr.sandbox_root()
         sandbox_dir.mkdir(parents=True, exist_ok=True)
         host_db = data_dir / settings.db_filename
         # The kernel uses the SHARED ``kernel.db`` (config.kernel_db_path) so
