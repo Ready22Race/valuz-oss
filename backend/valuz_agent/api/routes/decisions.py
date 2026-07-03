@@ -37,7 +37,7 @@ async def list_pending(
     user_id: str = Depends(get_current_user_id),
 ) -> DecisionPendingResponse:
     """Return the caller's pending decisions across their task-driven sessions."""
-    return DecisionPendingResponse(entries=agg.snapshot(user_id))
+    return DecisionPendingResponse(entries=await agg.snapshot(user_id))
 
 
 @router.get("/v1/decisions/stream")
