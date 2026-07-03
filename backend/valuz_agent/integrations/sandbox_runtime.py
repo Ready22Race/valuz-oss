@@ -53,9 +53,7 @@ _state: _State | None = None
 _lazy_tried = False
 
 
-def activate(
-    provider: SandboxProvider, sandbox_id: str, static_roots: tuple[str, ...]
-) -> None:
+def activate(provider: SandboxProvider, sandbox_id: str, static_roots: tuple[str, ...]) -> None:
     """Eagerly register the active sandbox (called by the provisioner).
 
     Optional — ``ensure_workspace_granted`` lazily activates from env if
@@ -119,7 +117,7 @@ def _under_static_root(real: str, roots: tuple[str, ...]) -> bool:
     return False
 
 
-async def ensure_workspace_granted(cwd: str) -> str:
+async def ensure_workspace_granted(cwd: str, *, owner_user_id: str = "") -> str:
     """Ensure ``cwd`` is reachable inside the running sandbox; return the
     cwd the kernel should use (unchanged locally).
 
@@ -129,6 +127,11 @@ async def ensure_workspace_granted(cwd: str) -> str:
     is swallowed and the original cwd returned, so a misconfiguration
     degrades to the pre-extension behaviour ("Operation not permitted" at
     the agent, surfaced there) rather than blocking session creation.
+
+    ``owner_user_id`` is the authenticated principal, threaded explicitly to
+    ``bind_workspace`` so a cloud driver stages the files under **that owner's**
+    object-store subtree (multi-tenant isolation). Empty on the local
+    single-user path. Never read from ambient context.
     """
     state = _lazy_activate()
     if state is None:
@@ -144,11 +147,12 @@ async def ensure_workspace_granted(cwd: str) -> str:
             logger.info("workspace %s already granted to this sandbox", real)
             return existing.kernel_cwd
         try:
-            binding = await state.provider.bind_workspace(state.sandbox_id, real, "rw")
+            binding = await state.provider.bind_workspace(
+                state.sandbox_id, real, "rw", owner_user_id=owner_user_id
+            )
         except Exception:  # noqa: BLE001 — degrade, don't block session creation
             logger.warning(
-                "dynamic workspace grant FAILED for %s — agent may hit "
-                "Operation not permitted",
+                "dynamic workspace grant FAILED for %s — agent may hit Operation not permitted",
                 real,
                 exc_info=True,
             )
