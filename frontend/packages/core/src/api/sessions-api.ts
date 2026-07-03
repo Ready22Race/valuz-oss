@@ -242,7 +242,7 @@ export function parseWorkflowProgress(
   };
 }
 
-import { createFetchJson } from "./fetch-json";
+import { createFetchJson, ApiError } from "./fetch-json";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -629,10 +629,20 @@ export const sessionsApi = {
     });
   },
 
-  delete(sessionId: string): Promise<void> {
-    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
-      method: "DELETE",
-    });
+  async delete(sessionId: string): Promise<void> {
+    try {
+      await fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "DELETE",
+      });
+    } catch (err) {
+      // DELETE is idempotent: a session that's already gone is a successful
+      // outcome, not an error. This happens with a stale list/feed row, a
+      // double-click, or an empty draft the user is trying to clear — the
+      // backend returns 404 "session not found". Swallow it so the caller still
+      // drops the row instead of surfacing "no session" and leaving it stuck.
+      if (err instanceof ApiError && err.status === 404) return;
+      throw err;
+    }
   },
 
   // Per-session attached skill list. skill-creator is always active and is
