@@ -6,6 +6,9 @@ these pin its path + async-IO behaviour and the FsRegistry factory.
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 from valuz_agent.ports.workspace import LocalWorkspaceHandle, WorkspaceHandle
@@ -151,6 +154,30 @@ def test_fs_registry_legacy_skill_staging_root_uses_configured_template(
 
     assert fsr.fs_registry.legacy_skill_staging_root("org/user-A") == (
         tmp_path / ".valuz-dev" / "org__user-A" / "skill-staging"
+    )
+
+
+def test_fs_registry_user_temp_dir_uses_os_temp_by_default(monkeypatch) -> None:
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "user_temp_dir", None)
+
+    assert fsr.fs_registry.user_temp_dir("org/user-A") == (
+        Path(tempfile.gettempdir()) / "valuz-oss" / "org__user-A"
+    )
+
+
+def test_fs_registry_user_temp_dir_uses_configured_template(tmp_path, monkeypatch) -> None:
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(
+        fsr.settings,
+        "user_temp_dir",
+        tmp_path / ".valuz-dev" / "{user_id}" / "tmp",
+    )
+
+    assert fsr.fs_registry.user_temp_dir("org/user-A") == (
+        tmp_path / ".valuz-dev" / "org__user-A" / "tmp"
     )
 
 

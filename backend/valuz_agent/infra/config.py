@@ -2,7 +2,7 @@ import hashlib
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 
@@ -200,6 +200,12 @@ class Settings(BaseSettings):
     # ``{user_id}``; when unset it lives under ``data_dir(user_id)``.
     # Override with VALUZ_USER_SKILL_STAGING_DIR.
     user_skill_staging_dir: Path | None = None
+
+    # Optional per-user temporary directory for cross-request scratch data.
+    # May contain ``{user_id}``; when unset it lives under the OS temp root
+    # (``tempfile.gettempdir()`` — /tmp on Unix-like systems, the Windows temp
+    # directory on Windows). Override with VALUZ_USER_TEMP_DIR.
+    user_temp_dir: Path | None = None
 
     # Canonical user skill library directory. May contain ``{user_id}`` for
     # shared/cloud deployments.

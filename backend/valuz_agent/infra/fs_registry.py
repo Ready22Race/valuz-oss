@@ -29,6 +29,7 @@ via ``project_cwd()``.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Literal
 
@@ -299,6 +300,23 @@ class FsRegistry:
 
     def legacy_skill_staging_session_dir(self, user_id: str, session_id: str) -> Path:
         return self.legacy_skill_staging_root(user_id) / session_id
+
+    # ---- FS-7b — user-scoped temporary content ----
+
+    def user_temp_dir(self, user_id: str) -> Path:
+        """Return a per-user temp root for cross-request scratch content.
+
+        OSS defaults to the platform temp directory via ``tempfile`` rather
+        than hardcoding ``/tmp``, so Windows uses its native temp root. Server
+        deployments that need preview/confirm to cross machines should mount a
+        shared directory and set ``VALUZ_USER_TEMP_DIR``.
+        """
+        if settings.user_temp_dir:
+            path = self._expand_optional_user_template(settings.user_temp_dir, user_id)
+        else:
+            path = Path(tempfile.gettempdir()) / "valuz-oss" / self.user_dir_name(user_id)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     # ---- FS-8 — user-scoped permanent skill targets ----
 
