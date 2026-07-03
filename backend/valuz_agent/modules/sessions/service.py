@@ -745,7 +745,9 @@ class SessionService:
             user_id=user_id,
         )
         session_skills = tuple(own_skill_paths) + tuple(
-            p for p in always_on_skill_paths() if _os.path.basename(p) not in own_skill_keys
+            p
+            for p in always_on_skill_paths(user_id=user_id)
+            if _os.path.basename(p) not in own_skill_keys
         )
 
         valuz_meta: dict[str, object] = {

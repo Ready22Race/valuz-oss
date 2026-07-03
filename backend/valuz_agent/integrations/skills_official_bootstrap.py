@@ -27,12 +27,11 @@ def _resources_root() -> Path:
     return Path(__file__).resolve().parent.parent / "resources" / "official_skills"
 
 
-def _user_official_skills_root() -> Path:
+def _user_official_skills_root(user_id: str) -> Path:
     """Bundled-skill landing root. Delegated to ``fs_registry`` so the
     bootstrap and the discovery source (`OfficialSkillSource`) always
-    agree on the location. Default is ``~/.valuz-oss/official-skills/``;
-    ``$VALUZ_OFFICIAL_SKILLS_DIR`` overrides."""
-    return fs_registry.official_skill_root()
+    agree on the location. Default is ``<data_dir>/official-skills/``."""
+    return fs_registry.official_skill_root(user_id=user_id)
 
 
 def _hash_directory(root: Path) -> str:
@@ -65,7 +64,7 @@ def _copy_skill(src: Path, dest: Path, version_hash: str) -> None:
     (dest / BUNDLED_VERSION_FILE).write_text(version_hash, encoding="utf-8")
 
 
-def sync_bundled_official_skills() -> list[str]:
+def sync_bundled_official_skills(user_id: str) -> list[str]:
     """Idempotent sync. Returns the list of skill slugs that were (re-)installed.
 
     Strategy:
@@ -78,7 +77,7 @@ def sync_bundled_official_skills() -> list[str]:
         a single bad bundle should not prevent the app from starting.
     """
     src_root = _resources_root()
-    dest_root = _user_official_skills_root()
+    dest_root = _user_official_skills_root(user_id)
     dest_root.mkdir(parents=True, exist_ok=True)
 
     installed: list[str] = []
@@ -116,7 +115,11 @@ def _template_skills_root() -> Path:
     return Path(__file__).resolve().parent.parent / "resources" / "template_skills"
 
 
-def materialize_template_skills(slugs: Iterable[str]) -> list[str]:
+def materialize_template_skills(
+    slugs: Iterable[str],
+    *,
+    user_id: str,
+) -> list[str]:
     """Copy the named template skills into the user's official-skills dir.
 
     Same idempotent marker logic as :func:`sync_bundled_official_skills`, so a
@@ -125,7 +128,7 @@ def materialize_template_skills(slugs: Iterable[str]) -> list[str]:
     slugs that were (re-)installed.
     """
     src_root = _template_skills_root()
-    dest_root = _user_official_skills_root()
+    dest_root = _user_official_skills_root(user_id)
     dest_root.mkdir(parents=True, exist_ok=True)
 
     installed: list[str] = []

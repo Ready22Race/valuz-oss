@@ -321,7 +321,7 @@ async def scan_staging(user_id: str, session_id: str) -> StagingScanResult:
         user modified the original elsewhere; suggest fork-as-vN
     """
     session_dir = await staging_dir_for_session(user_id, session_id)
-    user_skill_root = _default_user_skill_root()
+    user_skill_root = _default_user_skill_root(user_id)
 
     if not session_dir.exists():
         return StagingScanResult(session_id=session_id, staging_path=str(session_dir), slugs=[])
@@ -407,7 +407,7 @@ async def sync_slug(
     if not src.is_dir() or _detect_manifest(src) is None:
         raise FileNotFoundError(f"no staging slug {slug!r} for session {session_id!r}")
 
-    root = (target_root or _default_user_skill_root()).expanduser()
+    root = (target_root or _default_user_skill_root(user_id)).expanduser()
     root.mkdir(parents=True, exist_ok=True)
 
     if strategy == "fork":

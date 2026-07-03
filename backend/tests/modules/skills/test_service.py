@@ -182,7 +182,9 @@ def skill_root(tmp_path):
 @pytest.fixture
 def svc(skill_root, monkeypatch):
     skill_root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(skill_root))
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "user_skills_dir", skill_root)
     bus = EventBus()
     return SkillLibraryService(
         datastore=FakeSkillDatastore(),

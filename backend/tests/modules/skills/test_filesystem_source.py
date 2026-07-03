@@ -3,12 +3,17 @@
 import os
 from unittest.mock import patch
 
+from valuz_agent.infra.config import settings
 from valuz_agent.integrations.skills_filesystem import (
     FilesystemSkillSource,
     _extract_frontmatter,
     _folder_birthtime,
 )
 from valuz_agent.modules.skills.contracts import RuntimeContext
+
+
+def _set_user_skills_dir(monkeypatch, path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(settings, "user_skills_dir", path)
 
 
 class TestExtractFrontmatter:
@@ -92,7 +97,7 @@ class TestExtractFrontmatter:
 
 class TestFilesystemSkillSource:
     def test_should_discover_skills_in_directory(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path))
+        _set_user_skills_dir(monkeypatch, tmp_path)
         skill_dir = tmp_path / "my-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
@@ -109,7 +114,7 @@ class TestFilesystemSkillSource:
         assert manifests[0].tags == ["test"]
 
     def test_should_skip_dirs_without_manifest(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path))
+        _set_user_skills_dir(monkeypatch, tmp_path)
         (tmp_path / "no-manifest").mkdir()
         (tmp_path / "no-manifest" / "readme.txt").write_text("not a skill")
 
@@ -118,7 +123,7 @@ class TestFilesystemSkillSource:
         assert len(manifests) == 0
 
     def test_should_detect_lowercase_skill_md(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path))
+        _set_user_skills_dir(monkeypatch, tmp_path)
         skill_dir = tmp_path / "lower"
         skill_dir.mkdir()
         (skill_dir / "skill.md").write_text('---\nname: "Lower"\n---\n\nBody\n')
@@ -129,7 +134,7 @@ class TestFilesystemSkillSource:
         assert manifests[0].name == "Lower"
 
     def test_should_compute_content_hash(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path))
+        _set_user_skills_dir(monkeypatch, tmp_path)
         skill_dir = tmp_path / "hashed"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text('---\nname: "H"\n---\n\nBody\n')
@@ -141,7 +146,7 @@ class TestFilesystemSkillSource:
         assert manifests[0].manifest_hash is not None
 
     def test_should_parse_extended_frontmatter_fields(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path))
+        _set_user_skills_dir(monkeypatch, tmp_path)
         skill_dir = tmp_path / "extended"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
@@ -159,7 +164,7 @@ class TestFilesystemSkillSource:
         assert m.origin_label == "Custom"
 
     def test_should_return_empty_when_dir_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "nonexistent"))
+        _set_user_skills_dir(monkeypatch, tmp_path / "nonexistent")
         source = FilesystemSkillSource()
         manifests = source.list_skills(RuntimeContext())
         assert manifests == []
@@ -216,7 +221,7 @@ class TestFilesystemSourceFolderBirthtime:
     on the filesystem-scanned manifest — covered in test_service.py.)"""
 
     def test_should_populate_folder_created_at(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path))
+        _set_user_skills_dir(monkeypatch, tmp_path)
         skill_dir = tmp_path / "timed"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text('---\nname: "T"\n---\n\nBody\n')

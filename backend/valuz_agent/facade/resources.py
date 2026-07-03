@@ -56,10 +56,10 @@ class ResourceSnapshot:
 
 
 @asynccontextmanager
-async def _use(dep_factory: Any) -> AsyncGenerator[Any, None]:
+async def _use(dep_factory: Any, *args: Any, **kwargs: Any) -> AsyncGenerator[Any, None]:
     """Drive a FastAPI-style async-generator dependency manually.
 
-    Calls ``dep_factory()``, advances the generator once to get the yielded
+    Calls ``dep_factory(*args, **kwargs)``, advances the generator once to get the yielded
     value, then closes the generator in the finally block (triggering any
     teardown / commit logic in the dependency).
 
@@ -68,7 +68,7 @@ async def _use(dep_factory: Any) -> AsyncGenerator[Any, None]:
         async with _use(get_skill_service) as svc:
             result = await svc.list_catalog(user_id, "chat-default")
     """
-    gen = dep_factory()
+    gen = dep_factory(*args, **kwargs)
     value = await gen.__anext__()
     try:
         yield value
@@ -99,9 +99,9 @@ class ResourceLibrary:
             return [ResourceRef(kind="agent", key=r.slug, name=r.name) for r in rows]
 
         if kind == "skill":
-            from valuz_agent.api.deps import get_skill_service
+            from valuz_agent.api.deps import get_skill_service_for_user
 
-            async with _use(get_skill_service) as svc:
+            async with _use(get_skill_service_for_user, user_id) as svc:
                 cat = await svc.list_catalog(user_id, "chat-default")
             return [ResourceRef(kind="skill", key=s.slug, name=s.name) for s in cat.skills]
 
@@ -179,9 +179,9 @@ class ResourceLibrary:
             )
 
         if kind == "skill":
-            from valuz_agent.api.deps import get_skill_service
+            from valuz_agent.api.deps import get_skill_service_for_user
 
-            async with _use(get_skill_service) as svc:
+            async with _use(get_skill_service_for_user, user_id) as svc:
                 # Resolve slug → skill id via catalog
                 cat = await svc.list_catalog(user_id, "chat-default")
                 matched = next((s for s in cat.skills if s.slug == key), None)
@@ -355,7 +355,7 @@ class ResourceLibrary:
             return ResourceRef(kind="agent", key=row.slug, name=row.name)
 
         if snapshot.kind == "skill":
-            from valuz_agent.api.deps import get_skill_service
+            from valuz_agent.api.deps import get_skill_service_for_user
             from valuz_agent.modules.skills.models import (
                 SkillCreateRequest,
                 SkillFileAction,
@@ -363,7 +363,7 @@ class ResourceLibrary:
             )
 
             data = snapshot.data
-            async with _use(get_skill_service) as svc:
+            async with _use(get_skill_service_for_user, user_id) as svc:
                 # Try create; on slug-conflict fall back to update
                 try:
                     view = await svc.create_skill(

@@ -20,18 +20,14 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     """Spin up a fresh FastAPI app rooted at tmp dirs.
 
     Each test gets a clean SQLite DB, an empty user skill library, an empty
-    staging root, and an isolated official-skills dir (so the bundled
-    skill-creator sync doesn't pollute the host home directory).
+    staging root, and an isolated data_dir whose official-skills child keeps
+    bundled skill-creator sync away from the host home directory.
     """
     data_dir = tmp_path / "data"
     user_skills = tmp_path / "user-skills"
     staging_dir = tmp_path / "staging"
-    official_skills = tmp_path / "official-skills"
     user_skills.mkdir()
     staging_dir.mkdir()
-
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(user_skills))
-    monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(official_skills))
 
     # The legacy staging fallback is read through FsRegistry. Patch the
     # already-loaded settings singleton so reads pick up our tmp path.
@@ -55,7 +51,8 @@ def isolated_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):  # type: igno
     # Startup Alembic resolves the DB URL through ``db_urls`` / ``FsRegistry``.
     # Pin the filename so this test's fresh engine and migrations keep agreeing.
     monkeypatch.setattr(live_settings, "db_filename", "valuz.db")
-    monkeypatch.setattr(live_settings, "skill_staging_dir_override", staging_dir)
+    monkeypatch.setattr(live_settings, "skill_staging_dir", staging_dir / "{user_id}")
+    monkeypatch.setattr(live_settings, "user_skills_dir", user_skills)
 
     # ``run_host_migrations`` resolves the DB URL via a fresh
     # ``from valuz_agent.infra.config import settings`` import. After the approval
@@ -415,7 +412,7 @@ def test_optimize_copies_existing_skill_into_staging(isolated_app):  # type: ign
     # drive both through ``asyncio.run``.
     import asyncio
 
-    from valuz_agent.api.deps import get_skill_service
+    from valuz_agent.api.deps import get_skill_service_for_user
 
     async def _refresh_index() -> None:
         # Run the scan under the SAME owner the TestClient's AuthMiddleware
@@ -426,7 +423,7 @@ def test_optimize_copies_existing_skill_into_staging(isolated_app):  # type: ign
 
         token = auth_context.set_current_user_id(resolve_local_user_id())
         owner = resolve_local_user_id()
-        gen = get_skill_service()
+        gen = get_skill_service_for_user(owner)
         svc = await gen.__anext__()
         try:
             await svc.startup_scan(owner)

@@ -67,12 +67,13 @@ _ALL_TABLES = [
 
 @pytest.fixture
 async def env(tmp_path, monkeypatch) -> AsyncIterator[tuple]:
+    from valuz_agent.infra import fs_registry as fsr
     from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
 
     # Pin the data dir so memory/project writes land under tmp.
     monkeypatch.setenv("VALUZ_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(tmp_path / "official"))
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "user-skills"))
+    monkeypatch.setattr(fsr.settings, "data_dir", tmp_path / "data")
+    monkeypatch.setattr(fsr.settings, "user_skills_dir", tmp_path / "user-skills")
     session, engine = await _bootstrap(_ALL_TABLES, tmp_path / "db")
     connector_svc = ConnectorService(ConnectorDatastore(session))
     agent_svc = AgentService(session, connector_service=connector_svc)

@@ -91,8 +91,97 @@ def test_fs_registry_host_wide_dirs_use_template_parent(tmp_path, monkeypatch) -
 
     assert fsr.fs_registry.cache_dir() == tmp_path / "cache"
     assert fsr.fs_registry.browser_bin_dir() == tmp_path / "bin"
-    assert fsr.fs_registry.official_skill_root() == tmp_path / "official-skills"
     assert fsr.fs_registry.parser_model_dir("light_local") == tmp_path / "models" / "light_local"
+
+
+def test_fs_registry_user_skill_root_uses_configured_template(tmp_path, monkeypatch) -> None:
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "data_dir", tmp_path / "data")
+    monkeypatch.setattr(fsr.settings, "deployment_type", "cloud")
+    monkeypatch.setattr(
+        fsr.settings,
+        "user_skills_dir",
+        tmp_path / ".valuz-dev" / "{user_id}" / "skills",
+    )
+
+    assert fsr.fs_registry.user_skill_root(user_id="org/user-A") == (
+        tmp_path / ".valuz-dev" / "org__user-A" / "skills"
+    )
+    assert fsr.fs_registry.official_skill_root(user_id="org/user-A") == (
+        tmp_path / "data" / "official-skills"
+    )
+
+
+def test_fs_registry_official_skill_root_uses_data_dir_template(
+    tmp_path, monkeypatch
+) -> None:
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "data_dir", tmp_path / "data" / "{user_id}")
+
+    assert fsr.fs_registry.official_skill_root(user_id="org/user-A") == (
+        tmp_path / "data" / "org__user-A" / "official-skills"
+    )
+
+
+def test_fs_registry_legacy_skill_staging_root_uses_data_dir_by_default(
+    tmp_path, monkeypatch
+) -> None:
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "skill_staging_dir", None)
+    monkeypatch.setattr(fsr.settings, "data_dir", tmp_path / "data" / "{user_id}")
+
+    assert fsr.fs_registry.legacy_skill_staging_root("org/user-A") == (
+        tmp_path / "data" / "org__user-A" / "skill-creator" / "staging"
+    )
+
+
+def test_fs_registry_legacy_skill_staging_root_uses_configured_template(
+    tmp_path, monkeypatch
+) -> None:
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(
+        fsr.settings,
+        "skill_staging_dir",
+        tmp_path / ".valuz-dev" / "{user_id}" / "skill-staging",
+    )
+
+    assert fsr.fs_registry.legacy_skill_staging_root("org/user-A") == (
+        tmp_path / ".valuz-dev" / "org__user-A" / "skill-staging"
+    )
+
+
+def test_fs_registry_user_skill_root_expands_user_template_override(
+    tmp_path, monkeypatch
+) -> None:
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(
+        fsr.settings,
+        "user_skills_dir",
+        tmp_path / "skills" / "{user_id}",
+    )
+
+    assert fsr.fs_registry.user_skill_root(user_id="org/user-A") == (
+        tmp_path / "skills" / "org__user-A"
+    )
+
+
+def test_fs_registry_skill_template_overrides_without_owner_use_shared_parent(
+    tmp_path, monkeypatch
+) -> None:
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(
+        fsr.settings,
+        "user_skills_dir",
+        tmp_path / "{user_id}" / "skills",
+    )
+
+    assert not (tmp_path / "{user_id}").exists()
 
 
 def test_fs_registry_example_project_dir_uses_local_project_root(tmp_path, monkeypatch) -> None:

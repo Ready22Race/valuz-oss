@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -10,16 +9,20 @@ import pytest
 from valuz_agent.integrations import skills_official_bootstrap as bootstrap
 from valuz_agent.integrations.skills_official import OfficialSkillSource
 
+USER = "test-user"
+
 
 @pytest.fixture(autouse=True)
 def _isolated_official_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    target = tmp_path / "official-skills"
-    monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(target))
-    return target
+    from valuz_agent.infra import fs_registry as fsr
+
+    data_dir = tmp_path / "data"
+    monkeypatch.setattr(fsr.settings, "data_dir", data_dir)
+    return data_dir / "official-skills"
 
 
 def test_sync_installs_bundled_skill_creator_on_first_run(_isolated_official_dir: Path) -> None:
-    installed = bootstrap.sync_bundled_official_skills()
+    installed = bootstrap.sync_bundled_official_skills(USER)
 
     assert "skill-creator" in installed
     skill_dir = _isolated_official_dir / "skill-creator"
@@ -28,25 +31,41 @@ def test_sync_installs_bundled_skill_creator_on_first_run(_isolated_official_dir
     assert (skill_dir / ".bundled-version").is_file()
 
 
+def test_sync_with_user_id_installs_into_templated_data_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "data_dir", tmp_path / "data" / "{user_id}")
+
+    installed = bootstrap.sync_bundled_official_skills(user_id="org/user-A")
+
+    assert "skill-creator" in installed
+    skill_dir = tmp_path / "data" / "org__user-A" / "official-skills" / "skill-creator"
+    assert (skill_dir / "SKILL.md").is_file()
+    assert not (tmp_path / "data" / "official-skills" / "skill-creator").exists()
+
+
 def test_sync_is_idempotent_when_marker_matches(_isolated_official_dir: Path) -> None:
-    bootstrap.sync_bundled_official_skills()
-    second = bootstrap.sync_bundled_official_skills()
+    bootstrap.sync_bundled_official_skills(USER)
+    second = bootstrap.sync_bundled_official_skills(USER)
     assert second == []  # nothing reinstalled
 
 
 def test_sync_reinstalls_when_marker_disagrees(_isolated_official_dir: Path) -> None:
-    bootstrap.sync_bundled_official_skills()
+    bootstrap.sync_bundled_official_skills(USER)
     marker = _isolated_official_dir / "skill-creator" / ".bundled-version"
     marker.write_text("stale-hash", encoding="utf-8")
 
-    second = bootstrap.sync_bundled_official_skills()
+    second = bootstrap.sync_bundled_official_skills(USER)
     assert "skill-creator" in second
     # marker should now be back to the real hash, i.e. != "stale-hash"
     assert marker.read_text(encoding="utf-8").strip() != "stale-hash"
 
 
 def test_is_bundled_skill_detects_marker(_isolated_official_dir: Path) -> None:
-    bootstrap.sync_bundled_official_skills()
+    bootstrap.sync_bundled_official_skills(USER)
     skill_dir = _isolated_official_dir / "skill-creator"
     assert bootstrap.is_bundled_skill(skill_dir)
     # A directory without the marker should be reported as not-bundled.
@@ -60,8 +79,8 @@ def test_official_source_marks_bundled_skills_as_unlocked(
 ) -> None:
     from valuz_agent.modules.skills.contracts import RuntimeContext
 
-    bootstrap.sync_bundled_official_skills()
-    manifests = OfficialSkillSource().list_skills(RuntimeContext())
+    bootstrap.sync_bundled_official_skills(USER)
+    manifests = OfficialSkillSource().list_skills(RuntimeContext(user_id=USER))
 
     bundled = [m for m in manifests if m.slug == "skill-creator"]
     assert len(bundled) == 1
@@ -85,21 +104,21 @@ def test_official_source_keeps_non_bundled_skills_locked(
         encoding="utf-8",
     )
 
-    manifests = OfficialSkillSource().list_skills(RuntimeContext())
+    manifests = OfficialSkillSource().list_skills(RuntimeContext(user_id=USER))
     third = next((m for m in manifests if m.slug == "third-party-skill"), None)
     assert third is not None
     assert third.is_locked is True
     assert third.origin_label == "Official"
 
 
-def test_environment_override_redirects_install_dir(
+def test_data_dir_controls_install_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    custom = tmp_path / "custom-official"
-    monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(custom))
+    from valuz_agent.infra import fs_registry as fsr
 
-    installed = bootstrap.sync_bundled_official_skills()
+    data_dir = tmp_path / "custom-data"
+    monkeypatch.setattr(fsr.settings, "data_dir", data_dir)
+
+    installed = bootstrap.sync_bundled_official_skills(USER)
     assert "skill-creator" in installed
-    assert (custom / "skill-creator" / "SKILL.md").is_file()
-    # Ensure it didn't leak into the default location for this run.
-    assert os.environ["VALUZ_OFFICIAL_SKILLS_DIR"] == str(custom)
+    assert (data_dir / "official-skills" / "skill-creator" / "SKILL.md").is_file()

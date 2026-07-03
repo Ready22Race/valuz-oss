@@ -26,9 +26,8 @@ def staging_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     staging_dir.mkdir(parents=True)
     user_skills.mkdir(parents=True)
 
-    # ``FsRegistry.legacy_skill_staging_root`` consults
-    # ``skill_staging_dir_override`` on every read, so patching that field
-    # redirects the legacy staging root.
+    # ``FsRegistry.legacy_skill_staging_root`` consults ``skill_staging_dir``
+    # on every read, so patching that field redirects the legacy staging root.
     #
     # IMPORTANT — patch the *exact* settings object ``staging`` holds, not a
     # freshly imported one. ``tests/modules/sessions/test_session_approval_e2e.py``
@@ -38,14 +37,12 @@ def staging_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
     # ``fs_registry`` owns filesystem layout and holds the settings object read
     # by the legacy staging fallback.
-    monkeypatch.setattr(fs_registry_mod.settings, "skill_staging_dir_override", staging_dir)
     monkeypatch.setattr(
-        fs_registry_mod.fs_registry,
-        "legacy_skill_staging_root",
-        lambda user_id: staging_dir / user_id,
+        fs_registry_mod.settings,
+        "skill_staging_dir",
+        staging_dir / "{user_id}",
     )
-    monkeypatch.setattr(staging, "staging_root", lambda user_id: staging_dir / user_id)
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(user_skills))
+    monkeypatch.setattr(fs_registry_mod.settings, "user_skills_dir", user_skills)
     return tmp_path
 
 
