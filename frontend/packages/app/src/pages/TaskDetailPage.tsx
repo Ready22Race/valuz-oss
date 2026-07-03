@@ -1112,7 +1112,13 @@ export const TaskDetailPage = () => {
                   leadAgentSlug={task.lead_agent_slug}
                   t={t}
                 />
-                <div className="flex-1">
+                {/* ``min-w-0`` is load-bearing: without it this flex child keeps
+                    ``min-width: auto`` and grows to the widest unbreakable token
+                    (long API-error JSON / paths), so the nested card's own
+                    ``min-w-0`` can't shrink it and the text overflows the reading
+                    column. EventBody is the flex child directly and already
+                    carries min-w-0; this wrapper must match. */}
+                <div className="min-w-0 flex-1">
                   <GroupedEventCard
                     spawn={node.spawn}
                     outcome={node.outcome}
