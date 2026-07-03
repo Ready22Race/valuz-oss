@@ -544,7 +544,7 @@ function SubtaskStatusChip({ status }: { status: string }) {
   if (status === "active" || status === "completed") return null;
   return (
     <span
-      className={`rounded-full px-1.5 py-0.5 text-2xs font-medium ${m.cls}`}
+      className={`inline-flex h-5 items-center rounded-[4px] px-1.5 py-0 text-2xs font-medium ${m.cls}`}
     >
       {t(m.key as Parameters<typeof t>[0])}
     </span>
@@ -625,7 +625,7 @@ function PlanReviewPopover({
                     </span>
                     <SubtaskStatusChip status={task.status} />
                     {task.attempts !== undefined && task.attempts > 1 && (
-                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-2xs font-medium text-amber-700">
+                      <span className="inline-flex h-5 items-center rounded-[4px] bg-amber-100 px-1.5 py-0 text-2xs font-medium text-amber-700">
                         {t(
                           "task.panel.planRowAttempts" as Parameters<
                             typeof t

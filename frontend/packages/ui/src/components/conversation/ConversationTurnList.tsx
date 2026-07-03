@@ -593,7 +593,7 @@ const UserMessageBody = ({
     parts.push(
       <span
         key={`s-${key++}`}
-        className="mr-0.5 inline-flex items-center gap-1 rounded-full border border-brand/20 bg-brand-light px-2 py-0.5 text-2xs text-brand align-middle select-none"
+        className="mr-0.5 inline-flex h-5 items-center gap-1 rounded-[4px] border border-brand/20 bg-brand-100 px-2 py-0 text-2xs text-brand-700 align-middle select-none"
       >
         <Zap className="h-3 w-3" />
         {entry?.name ?? slug}

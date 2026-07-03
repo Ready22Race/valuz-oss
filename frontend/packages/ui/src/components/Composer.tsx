@@ -196,7 +196,7 @@ const buildChipNode = (skill: SkillSearchItem): HTMLElement => {
   chip.contentEditable = "false";
   chip.dataset.skillName = skill.name;
   chip.className =
-    "mr-0.5 inline-flex items-center gap-1 rounded-full bg-brand-light px-2 py-0.5 text-2xs text-brand align-middle select-none";
+    "mr-0.5 inline-flex h-5 items-center gap-1 rounded-[4px] bg-brand-100 px-2 py-0 text-2xs text-brand-700 align-middle select-none";
   chip.innerHTML = `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>${skill.name}</span>`;
   return chip;
 };

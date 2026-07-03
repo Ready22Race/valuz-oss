@@ -372,7 +372,7 @@ export const AgentsPage = () => {
                 {agent.name}
               </div>
               {deploymentCount > 0 && (
-                <span className="shrink-0 rounded-full bg-surface-soft px-1.5 py-0.5 text-[10px] leading-none text-ink-meta">
+                <span className="inline-flex h-5 shrink-0 items-center rounded-[4px] bg-surface-soft px-1.5 py-0 text-[10px] leading-none text-ink-meta">
                   {t("agent.deployedInProjects" as Parameters<typeof t>[0], {
                     count: deploymentCount,
                   })}

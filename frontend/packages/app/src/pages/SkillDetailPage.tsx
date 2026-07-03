@@ -299,12 +299,12 @@ export const SkillDetailPage = () => {
               )}
               <div className="mt-2 flex flex-wrap gap-1">
                 {skill?.scope && (
-                  <Badge variant="outline" className="text-[10px]">
+                  <Badge variant="metaOutline" className="text-[10px]">
                     {skill.scope}
                   </Badge>
                 )}
                 {skill?.tags?.map((tag) => (
-                  <Badge key={tag} variant="brand" className="text-[10px]">
+                  <Badge key={tag} variant="metaNeutral" className="text-[10px]">
                     {tag}
                   </Badge>
                 ))}
