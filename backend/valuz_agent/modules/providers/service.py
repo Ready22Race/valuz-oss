@@ -1393,26 +1393,15 @@ class ProviderService:
                 or ("anthropic" if provider_kind == "anthropic" else "openai"),
             )
             if is_custom:
-                # Ping every user-supplied model — keep the ones that
-                # work, drop the rest. The user's intent is "save what's
-                # usable"; silently shipping broken ids leaves footguns
-                # in the picker.
-                batch = await ping_credentials_batch(
-                    base_url=effective_base_url,
-                    api_key=stripped_key,
-                    protocol=protocol_for_discovery,
-                    models=user_models,
-                )
-                if not batch.ok:
-                    # All failed — surface every reason so the user can
-                    # see which models broke and why.
-                    summary = "；".join(f"{m}: {r}" for m, r in batch.failed)
-                    raise ModelDiscoveryError(f"所有模型连接测试均失败：{summary}")
-                # Replace the user-provided list with the verified
-                # subset. Failed ids are dropped from model_ids and from
-                # default_model resolution below.
-                model_ids_list = list(batch.ok)
-                user_models = list(batch.ok)
+                # Save every user-supplied model id as-is — do NOT ping here.
+                # A bare-SDK probe can't stand in for every gateway: a "Claude
+                # Code clients only" proxy rejects it (wrong client identity)
+                # even though a real Claude Agent session — which runs the
+                # actual Claude Code CLI with the ``claude_code`` preset — is
+                # accepted, so gating add on it blocked working channels. Adding
+                # is now a plain write; the [连接测试] button offers an explicit,
+                # non-blocking check.
+                model_ids_list = list(user_models)
                 model_entries = [DiscoveredModel(id=model_id) for model_id in model_ids_list]
             else:
                 try:
@@ -1544,30 +1533,14 @@ class ProviderService:
 
                 raise BadRequestError("自定义通道至少需要 1 个模型 id")
 
-            # Re-ping each model so we never persist ids we know don't
-            # work. Uses whatever api_key landed in this same update —
-            # if the caller supplied a new key it overrides the stored
-            # one for the validation step; otherwise we pull the
-            # currently-stored key out of the user's local secret files.
-            stripped_new_key = (api_key or "").strip() if api_key else None
-            effective_key = stripped_new_key or (
-                secret_store.get(user_id, row.secret_ref) if row.secret_ref else None
-            )
-            effective_url = (base_url or row.base_url or "").strip()
-            effective_proto = protocol or row.protocol
-            if effective_key and effective_url:
-                protocol_for_ping = _DISCOVERY_PROTOCOL_MAP.get(effective_proto or "") or "openai"
-                batch = await ping_credentials_batch(
-                    base_url=effective_url,
-                    api_key=effective_key,
-                    protocol=protocol_for_ping,
-                    models=cleaned,
-                )
-                if not batch.ok:
-                    summary = "；".join(f"{m}: {r}" for m, r in batch.failed)
-                    raise ModelDiscoveryError(f"所有模型连接测试均失败：{summary}")
-                cleaned = list(batch.ok)
-
+            # Persist the model ids exactly as typed — do NOT ping them here.
+            # A bare-SDK probe can't stand in for every gateway: a "Claude Code
+            # clients only" proxy rejects the probe (wrong client identity) even
+            # though a real Claude Agent session — which runs the actual Claude
+            # Code CLI with the ``claude_code`` preset — is accepted. Gating the
+            # save on that probe blocked working channels, so saving is now a
+            # plain write. The [连接测试] button remains for an explicit,
+            # opt-in check that never blocks the save.
             row.model_ids = json.dumps(cleaned)
             # Keep default_model coherent — if the user removed it from
             # the list, fall back to the first remaining entry.

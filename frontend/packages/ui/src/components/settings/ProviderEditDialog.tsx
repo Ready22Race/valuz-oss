@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { ProviderFormFields, type TestStatus } from "./ProviderFormFields";
 import { useI18n } from "../../hooks/use-i18n";
 
@@ -94,6 +95,11 @@ export const ProviderEditDialog: FC<ProviderEditDialogProps> = ({
   const [testStatus, setTestStatus] = useState<TestStatus>("idle");
   const [testMsg, setTestMsg] = useState("");
   const [saving, setSaving] = useState(false);
+  // Custom channels only: when on, [保存] runs a connection test first and
+  // aborts if every model fails; off saves straight through (needed for
+  // gateways that reject a bare-SDK probe — e.g. "Claude Code clients only"
+  // proxies — even though real sessions work). Defaults on.
+  const [testBeforeSave, setTestBeforeSave] = useState(true);
   // Seeded from ``initialModels`` so the read-only "可用模型" list is
   // populated on dialog open — the discover-models result is already
   // persisted on the row, no need to re-probe just to look.
@@ -129,19 +135,28 @@ export const ProviderEditDialog: FC<ProviderEditDialogProps> = ({
   const showProtocol = isCustom;
   const showEndpoint = isCustom && !isOAuthProvider;
 
+  // Re-seed the form from the provider ONLY on the open edge. Keying this on the
+  // field props too — especially ``initialModels``, which the parent rebuilds as
+  // a fresh array (``models.map(...)``) on every render — made it re-run mid-edit
+  // whenever the settings page re-rendered, wiping the user's just-typed endpoint
+  // and API key back to the stored values. A subsequent ping then hit the OLD
+  // endpoint with the OLD key and always failed, so the edit could never be
+  // saved. Depend on ``open`` alone; the current* props are captured at open-time,
+  // which is exactly what "initialize when the dialog opens" means.
   useEffect(() => {
-    if (open) {
-      setBaseUrl(currentBaseUrl);
-      setProtocol(currentProtocol ?? "openai-completion");
-      setApiKey("");
-      setTestStatus("idle");
-      setTestMsg("");
-      setSaving(false);
-      setDiscoveredModels(initialModels.length > 0 ? initialModels : null);
-      setModelsText(initialModels.join("\n"));
-      setCustomName(providerName);
-    }
-  }, [open, currentBaseUrl, currentProtocol, initialModels, providerName]);
+    if (!open) return;
+    setBaseUrl(currentBaseUrl);
+    setProtocol(currentProtocol ?? "openai-completion");
+    setApiKey("");
+    setTestStatus("idle");
+    setTestMsg("");
+    setSaving(false);
+    setDiscoveredModels(initialModels.length > 0 ? initialModels : null);
+    setModelsText(initialModels.join("\n"));
+    setCustomName(providerName);
+    setTestBeforeSave(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- re-init is intentional on the open edge only
+  }, [open]);
 
   useEffect(() => {
     if (!open || !showProtocol || !defaultBaseUrl) return;
@@ -237,6 +252,45 @@ export const ProviderEditDialog: FC<ProviderEditDialogProps> = ({
         setTestStatus("fail");
         setTestMsg("请填写服务商名称");
         return;
+      }
+      // Optional pre-save connection test. On (default): ping the models and
+      // abort the save if every one fails. Off: save straight through — some
+      // gateways reject a bare-SDK probe (e.g. "Claude Code clients only"
+      // proxies) yet work in a real session, so the test must never be a hard
+      // gate the user can't bypass.
+      if (testBeforeSave && onPing) {
+        if (!baseUrl) {
+          setTestStatus("fail");
+          setTestMsg("请填写 Endpoint");
+          return;
+        }
+        setTestStatus("testing");
+        setTestMsg("");
+        try {
+          const batch = await onPing({
+            base_url: baseUrl,
+            api_key: apiKey || undefined,
+            protocol,
+            models: parsedModels,
+            provider_id: providerId,
+          });
+          if (batch.ok.length === 0) {
+            const summary = batch.failed
+              .map((f) => `${f.model}: ${f.reason}`)
+              .join("；");
+            setTestStatus("fail");
+            setTestMsg(`所有模型测试均失败：${summary}`);
+            return;
+          }
+        } catch (err) {
+          setTestStatus("fail");
+          setTestMsg(
+            err instanceof Error
+              ? err.message
+              : t("ui.providerEdit.connectFailed"),
+          );
+          return;
+        }
       }
     }
     setSaving(true);
@@ -343,6 +397,15 @@ export const ProviderEditDialog: FC<ProviderEditDialogProps> = ({
         </div>
 
         <DialogFooter>
+          {isCustom && !isOAuthProvider && (
+            <label className="mr-auto flex cursor-pointer select-none items-center gap-2 text-xs text-ink-body">
+              <Checkbox
+                checked={testBeforeSave}
+                onCheckedChange={(v) => setTestBeforeSave(v === true)}
+              />
+              {t("ui.providerEdit.testBeforeSave")}
+            </label>
+          )}
           {!isOAuthProvider && (
             <Button
               variant="outline"
