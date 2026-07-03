@@ -20,6 +20,7 @@
     "deleteFailed": "删除失败：{error}",
     "deleteSuccess": "已删除「{name}」",
     "deleteTitle": "删除自动化「{name}」？",
+    "backToProject": "返回项目",
     "detailTitle": "自动化任务详情",
     "dialogTitleChat": "新建 Chat 自动化",
     "dialogTitleEdit": "编辑自动化",

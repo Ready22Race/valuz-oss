@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronRight, Clock3, FilePenLine, ListChecks, MessageSquare, Pause, Play, Power, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -70,6 +70,7 @@ const BUCKET_KEY: Record<TimeBucket, string> = {
 export const AutomationDetailPage = () => {
   const { automationId = "" } = useParams<{ automationId: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { t } = useTranslation();
   const { setHideHeader, setContentInnerClassName } =
     useProjectOutlet();
@@ -202,6 +203,17 @@ export const AutomationDetailPage = () => {
   if (loading) return <PageLoader />;
   if (!detail) return null;
 
+  // Back nav respects where the user arrived from: opened from a project's
+  // automation panel (``?from=project``) it returns to that project; opened from
+  // the standalone Automation list it returns to the list.
+  const fromProject = searchParams.get("from") === "project";
+  const backTarget = fromProject
+    ? `/projects/${detail.project_id}`
+    : "/automations";
+  const backLabel = fromProject
+    ? t(k("automation.backToProject"))
+    : t(k("automation.title"));
+
   // Drop runs that never produced a session — interrupted-on-shutdown
   // or recovered-skip ticks that fired but never kicked off a task/chat.
   // They carry no title or destination, so they'd read as empty rows.
@@ -263,11 +275,11 @@ export const AutomationDetailPage = () => {
       <div className="flex min-w-0 shrink-0 items-center gap-2 px-5 pt-5 text-sm leading-5">
         <button
           type="button"
-          onClick={() => navigate("/automations")}
+          onClick={() => navigate(backTarget)}
           className="inline-flex shrink-0 items-center gap-1 text-ink-meta transition-colors hover:text-ink-heading"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
-          <span>{t(k("automation.title"))}</span>
+          <span>{backLabel}</span>
         </button>
         <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
         <span className="min-w-0 truncate font-medium text-ink-heading">

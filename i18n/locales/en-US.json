@@ -20,6 +20,7 @@
     "deleteFailed": "Delete failed: {error}",
     "deleteSuccess": "Deleted \"{name}\"",
     "deleteTitle": "Delete automation \"{name}\"?",
+    "backToProject": "Back to project",
     "detailTitle": "Automation detail",
     "dialogTitleChat": "New chat automation",
     "dialogTitleEdit": "Edit automation",
