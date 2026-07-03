@@ -2080,7 +2080,7 @@ function GroupedEventCard({
       )}
       <div
         className={cn(
-          "mt-2 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] leading-4",
+          "mt-2 inline-flex h-5 items-center rounded-[4px] px-2 py-0 text-[10px] leading-4",
           outcome
             ? "bg-emerald-50 text-emerald-700"
             : "bg-surface-soft text-ink-meta",

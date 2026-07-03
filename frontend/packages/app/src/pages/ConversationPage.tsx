@@ -395,7 +395,7 @@ const SessionStatusPill = ({
   if (cancelled) {
     return (
       <span
-        className="flex shrink-0 items-center gap-1 rounded-md bg-surface-soft px-2 py-0.5 text-2xs text-ink-meta"
+        className="flex h-5 shrink-0 items-center gap-1 rounded-[4px] bg-surface-soft px-2 py-0 text-2xs text-ink-meta"
         title="session status: cancelled"
       >
         {/* One label for a stopped conversation everywhere: matches the
@@ -431,7 +431,7 @@ const SessionStatusPill = ({
           : "bg-surface-soft text-ink-meta";
   return (
     <span
-      className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-0.5 text-2xs ${cls}`}
+      className={`flex h-5 shrink-0 items-center gap-1 rounded-[4px] px-2 py-0 text-2xs ${cls}`}
       title={`session status: ${status}`}
     >
       {status === "running" ? (
@@ -4963,7 +4963,7 @@ export const ConversationPage = () => {
                 </>
               ) : null}
               {isSkillCreatorMode ? (
-                <Badge variant="brand" className="shrink-0">
+                <Badge variant="metaBrand" className="shrink-0">
                   <Sparkles className="h-3 w-3" />
                   Skill Creator
                 </Badge>
@@ -5087,13 +5087,13 @@ export const ConversationPage = () => {
                 pending={effectiveTurns.length === 0}
               />
               {sessionAgentSlug ? (
-                <Badge variant="brand" className="shrink-0">
+                <Badge variant="metaBrand" className="shrink-0">
                   <Bot className="h-3 w-3" />
                   {agentNameBySlug.get(sessionAgentSlug) ?? sessionAgentSlug}
                 </Badge>
               ) : null}
               {activeProject?.name && !isSkillCreatorMode ? (
-                <Badge variant="outline" className="shrink-0">
+                <Badge variant="metaOutline" className="shrink-0">
                   {activeProject.name}
                 </Badge>
               ) : null}

@@ -182,7 +182,7 @@ export const SkillCreateChat = ({
               {t("skill.livePreview")}
             </span>
             {skillName && (
-              <span className="rounded bg-surface-soft px-2 py-0.5 text-2xs text-ink-meta">
+              <span className="inline-flex h-5 items-center rounded-[4px] bg-surface-soft px-2 py-0 text-2xs text-ink-meta">
                 {skillName}
               </span>
             )}

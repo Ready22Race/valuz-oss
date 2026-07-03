@@ -117,9 +117,9 @@ export const SkillCard = ({
               <span className="inline-flex items-center gap-1">
                 {originBadge ? (
                   <Badge
-                    variant="brand"
+                    variant="metaBrand"
                     className={cn(
-                      "rounded-[4px] px-1 py-0 text-[10px] leading-4",
+                      "h-4 px-1 text-[10px] leading-4",
                       ORIGIN_BADGE_TONE[originBadge.tone ?? "default"],
                     )}
                   >
@@ -127,8 +127,8 @@ export const SkillCard = ({
                   </Badge>
                 ) : sourceLabel ? (
                   <Badge
-                    variant="brand"
-                    className="rounded-[4px] bg-surface-soft px-1 py-0 text-[10px] leading-4 text-ink-body"
+                    variant="metaNeutral"
+                    className="h-4 px-1 text-[10px] leading-4"
                   >
                     {sourceLabel}
                   </Badge>
@@ -141,9 +141,12 @@ export const SkillCard = ({
               </span>
             ) : null}
             {skill.versionNumber != null ? (
-              <span className="rounded bg-surface-soft px-1.5 py-0.5 font-mono text-2xs text-ink-meta">
+              <Badge
+                variant="metaNeutral"
+                className="h-4 px-1.5 font-mono text-2xs text-ink-meta"
+              >
                 v{skill.versionNumber}
-              </span>
+              </Badge>
             ) : null}
           </div>
           <div className="mb-2 truncate font-mono text-2xs text-ink-meta">
@@ -161,8 +164,8 @@ export const SkillCard = ({
               {skill.tags.map((tag) => (
                 <Badge
                   key={tag}
-                  variant="outline"
-                  className="rounded-[4px] px-1 py-0 text-[10px] font-normal leading-4 text-ink-body"
+                  variant="metaOutline"
+                  className="h-4 px-1 text-[10px] font-normal leading-4 text-ink-body"
                 >
                   {tag}
                 </Badge>

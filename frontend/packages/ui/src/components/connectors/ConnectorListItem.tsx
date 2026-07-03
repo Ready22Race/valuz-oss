@@ -60,8 +60,8 @@ export const ConnectorListItem = ({
         />
       ) : badge ? (
         <Badge
-          variant="brand"
-          className="shrink-0 rounded-[4px] bg-surface-soft px-1 py-0 text-[10px] leading-4 font-normal text-ink-meta"
+          variant="metaNeutral"
+          className="h-4 shrink-0 px-1 text-[10px] leading-4 font-normal text-ink-meta"
         >
           {badge}
         </Badge>
