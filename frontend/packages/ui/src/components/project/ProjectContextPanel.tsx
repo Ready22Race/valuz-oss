@@ -1700,9 +1700,10 @@ export const ProjectDetailContextPanel = ({
                 {sortedScheduledTasks.map((task) => (
                   <div
                     key={task.id}
-                    // Row click opens the task's detail page; keeps the default
-                    // cursor (no pointer/hand) per design.
-                    className="group relative rounded-lg bg-card"
+                    // Row click opens the task's detail page; force the default
+                    // arrow cursor (no pointer/hand per design, and no text
+                    // I-beam over the task name).
+                    className="group relative cursor-default rounded-lg bg-card"
                     role={onOpenScheduledTask ? "button" : undefined}
                     tabIndex={onOpenScheduledTask ? 0 : undefined}
                     onClick={
