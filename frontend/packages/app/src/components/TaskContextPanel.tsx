@@ -51,6 +51,11 @@ export interface PlannedSubtask {
   key?: string;
   label: string;
   agent?: string;
+  /** Member display name, stamped into the plan snapshot at emit time by the
+   *  backend. Preferred over the ``agent`` slug → members-list join, which
+   *  races the async members load and misses removed agents. Absent on older
+   *  events that pre-date the field. */
+  agent_name?: string;
   status: "completed" | "failed" | "active" | "pending" | "paused";
   depends_on?: string[];
   parallel_group?: string | null;
@@ -345,11 +350,14 @@ export const TaskContextPanel = ({
                   <div className="flex flex-wrap items-center gap-1.5">
                     {task.agent && (
                       <span className="text-2xs text-ink-meta">
-                        {/* Same slug→display-name join as Team rows:
-                            "agent-2" reads as "高级前端架构型原型工程师2"
-                            so plan items and team roster speak the
-                            same language. */}
-                        {agentBySlug.get(task.agent)?.name ?? task.agent}
+                        {/* Prefer the backend-stamped ``agent_name`` (durable,
+                            no members-list race); fall back to the same
+                            slug→display-name join as Team rows, then the slug.
+                            "agent-2" reads as "高级前端架构型原型工程师2" so
+                            plan items and team roster speak the same language. */}
+                        {task.agent_name ??
+                          agentBySlug.get(task.agent)?.name ??
+                          task.agent}
                       </span>
                     )}
                     {task.depends_on && task.depends_on.length > 0 && (
@@ -598,7 +606,9 @@ function PlanReviewPopover({
       <ol className="flex-1 overflow-y-auto">
         {subtasks.map((task, idx) => {
           const agentLabel = task.agent
-            ? (agentBySlug.get(task.agent)?.name ?? task.agent)
+            ? (task.agent_name ??
+              agentBySlug.get(task.agent)?.name ??
+              task.agent)
             : null;
           const depLabel =
             task.depends_on && task.depends_on.length > 0
