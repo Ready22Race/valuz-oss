@@ -299,6 +299,25 @@ export const projectsApi = {
     );
   },
 
+  /** Upload one or more files into the project's cwd (multipart form).
+   *  Each file's ``name`` is the target relative path (parent dirs are
+   *  created by the backend). Works for cloud-managed projects whose cwd
+   *  the client cannot reach directly, and equally for local ones.
+   *  Uses ``fetchJson`` with a ``FormData`` body — no ``Content-Type`` so
+   *  the browser sets the multipart boundary (same shape as
+   *  ``importProjectPreview``). */
+  uploadFiles(
+    projectId: string,
+    files: File[],
+  ): Promise<{ project_id: string; written: string[] }> {
+    const form = new FormData();
+    for (const f of files) form.append("files", f, f.name);
+    return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}/files`, {
+      method: "POST",
+      body: form,
+    });
+  },
+
   readFile(projectId: string, filePath: string): Promise<ArtifactFileResponse> {
     const encodedPath = filePath
       .split("/")

@@ -24,6 +24,7 @@ import {
   Power,
   Zap,
   RefreshCw,
+  Upload,
   PanelRightOpen,
   AlertTriangle,
   Link2,
@@ -319,6 +320,13 @@ export interface ProjectContextPanelProps {
    * The button manages its own spin animation locally; the page
    * doesn't need to thread a loading flag back through. */
   onRefreshFiles?: () => void;
+  /** Upload files into the project cwd (multipart). Wired only when the
+   *  page can accept uploads — i.e. the backend hosting the project is
+   *  reachable over HTTP. The button owns its own hidden
+   *  ``<input type=file multiple>``; the page gets the picked files and
+   *  is responsible for the actual ``projectsApi.uploadFiles`` call,
+   *  the success toast, and re-listing the tree. */
+  onUploadFiles?: (files: File[]) => void;
   onOpenInSystem?: (path: string) => void;
   onDeleteFile?: (path: string) => void;
   /** Initial accordion section. ``null`` starts every section collapsed. */
@@ -744,6 +752,50 @@ export function FileRefreshButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+/**
+ * File-tree upload button — the multipart-upload companion to
+ * {@link FileRefreshButton}. Owns a hidden ``<input type=file multiple>``
+ * and hands the picked files to the page's ``onUploadFiles``. The page
+ * does the actual ``projectsApi.uploadFiles`` call, toast, and re-list.
+ *
+ * Exported so other right-rail file panels can render the same button.
+ */
+export function FileUploadButton({
+  onUploadFiles,
+}: {
+  onUploadFiles: (files: File[]) => void;
+}) {
+  const { t } = useI18n();
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          inputRef.current?.click();
+        }}
+        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
+        title={t("project.uploadFile")}
+      >
+        <Upload className="h-3.5 w-3.5" />
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = e.target.files ? Array.from(e.target.files) : [];
+          // Reset so picking the same file twice still fires ``change``.
+          e.target.value = "";
+          if (files.length > 0) onUploadFiles(files);
+        }}
+      />
+    </>
+  );
+}
+
 /* ── Accordion Section ────────────────────────────────────────── */
 
 // Exported so other right-rail panels (e.g. ``TaskContextPanel``) can
@@ -912,6 +964,7 @@ export const ProjectDetailContextPanel = ({
   onFileDoubleClick,
   onOpenInFinder,
   onRefreshFiles,
+  onUploadFiles,
   onOpenInSystem,
   onDeleteFile,
   initialOpenSection,
@@ -1038,8 +1091,11 @@ export const ProjectDetailContextPanel = ({
 
   const fileCount = countFiles(fileTree ?? []);
   const fileActions =
-    onRefreshFiles || onOpenInFinder ? (
+    onRefreshFiles || onOpenInFinder || onUploadFiles ? (
       <div className="flex items-center gap-1.5">
+        {onUploadFiles ? (
+          <FileUploadButton onUploadFiles={onUploadFiles} />
+        ) : null}
         {onRefreshFiles ? <FileRefreshButton onClick={onRefreshFiles} /> : null}
         {onOpenInFinder ? (
           <button
@@ -1102,11 +1158,14 @@ export const ProjectDetailContextPanel = ({
       contentClassName="px-5 py-2"
       count={fileCount > 0 ? fileCount : undefined}
       action={
-        onRefreshFiles || onOpenInFinder ? (
+        onRefreshFiles || onOpenInFinder || onUploadFiles ? (
           // Auto-refresh fires on turn-end; the manual refresh
           // button is the bail-out for mid-turn writes the
           // user wants to peek at before the turn closes.
           <div className="flex items-center gap-2">
+            {onUploadFiles ? (
+              <FileUploadButton onUploadFiles={onUploadFiles} />
+            ) : null}
             {onRefreshFiles ? (
               <FileRefreshButton onClick={onRefreshFiles} />
             ) : null}

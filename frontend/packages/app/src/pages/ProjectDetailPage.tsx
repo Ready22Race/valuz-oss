@@ -590,6 +590,30 @@ export const ProjectDetailPage = () => {
       .catch(() => setFileTree([]));
   }, [id]);
 
+  // Upload files into the project cwd via the OSS multipart endpoint
+  // (``POST /v1/projects/{id}/files``). This is the path that works for
+  // cloud-managed projects — the backend hosting the project writes the
+  // files into the managed cwd; the client never needs to reach the FS.
+  // Uses module-level ``_t`` for the toasts so the callback dep array
+  // stays free of ``t`` (i18n anti-loop rule, .claude/rules/frontend.md).
+  const handleUploadFiles = useCallback(
+    async (files: File[]): Promise<void> => {
+      if (!id || files.length === 0) return;
+      try {
+        await projectsApi.uploadFiles(id, files);
+        toast.success(
+          _t("project.uploadSuccess", { count: String(files.length) }),
+        );
+        refreshFileTree();
+      } catch (e) {
+        toast.error(
+          `${_t("project.uploadFailed")}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    },
+    [id, refreshFileTree],
+  );
+
   const fetchData = useCallback(async () => {
     // Unblock the full-page ``loading`` gate as soon as the project itself
     // lands. The gate previously waited for EVERY list — files, providers +
@@ -1143,6 +1167,7 @@ export const ProjectDetailPage = () => {
         fileTreeInTab
         rootPath={project?.root_path ?? ""}
         onRefreshFiles={refreshFileTree}
+        onUploadFiles={handleUploadFiles}
         onFileClick={(path) => {
           void openArtifactFile(path);
         }}
