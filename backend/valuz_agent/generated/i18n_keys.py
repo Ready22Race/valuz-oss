@@ -2029,6 +2029,7 @@ I18nKey = Literal[
     "ui.providerEdit.saveButton",
     "ui.providerEdit.saveFailed",
     "ui.providerEdit.saving",
+    "ui.providerEdit.testBeforeSave",
     "ui.providerEdit.testButton",
     "ui.providerEdit.testing",
     "ui.providerEdit.title",

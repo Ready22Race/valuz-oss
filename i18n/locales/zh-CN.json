@@ -1893,6 +1893,7 @@
       "saveButton": "保存",
       "saveFailed": "保存失败",
       "saving": "保存中...",
+      "testBeforeSave": "保存前先测试",
       "testButton": "连接测试",
       "testing": "测试中...",
       "title": "编辑模型"

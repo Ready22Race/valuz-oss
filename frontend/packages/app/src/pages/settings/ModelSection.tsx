@@ -1151,6 +1151,9 @@ export const ModelSection = () => {
       {/* Provider Edit Dialog */}
       {editProvider && (
         <ProviderEditDialog
+          // Force a fresh instance per provider so switching which row is edited
+          // never carries another provider's in-progress endpoint/key state.
+          key={editProvider.id}
           open={editProvider !== null}
           onOpenChange={(v) => {
             if (!v) setEditProvider(null);
