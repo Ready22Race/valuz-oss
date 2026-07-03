@@ -221,8 +221,8 @@ def host_sandbox_rw_mounts() -> tuple[MountSpec, ...]:
         data_dir / "sandbox",  # the kernel's private DB
         data_dir / "projects",  # legacy managed chat/project cwds
         fr.project_root(user_id),  # real/managed projects + .agents|.claude/skills
-        fr.official_skill_root(),  # official skill bootstrap
-        fr.user_skill_root("claude"),  # user skill creation / submit
+        fr.official_skill_root(user_id=user_id),  # official skill bootstrap
+        fr.user_skill_root(user_id=user_id),  # user skill creation / submit
         *fr.legacy_user_skill_roots(),  # ~/.claude/skills, ~/.codex/skills
     ]
     seen: set[str] = set()

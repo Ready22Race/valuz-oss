@@ -226,7 +226,7 @@ async def test_init_kernel_skips_browser_cli_bootstrap_when_startup_user_content
 async def test_start_skills_skipped_when_startup_user_content_disabled(monkeypatch) -> None:
     settings.initialize_user_content_on_startup = False
     monkeypatch.setattr(
-        "valuz_agent.api.deps.get_skill_service",
+        "valuz_agent.api.deps.get_skill_service_for_user",
         lambda: (_ for _ in ()).throw(AssertionError("skill service must not resolve")),
     )
 
@@ -251,7 +251,8 @@ async def test_start_skills_uses_startup_flag_not_deployment_type(monkeypatch) -
             calls.append(f"scan:{owner}")
             return 1
 
-    async def get_skill_service():
+    async def get_skill_service(user_id: str):
+        del user_id
         yield SkillSvc()
 
     class SkillFileWatcher:
@@ -267,19 +268,19 @@ async def test_start_skills_uses_startup_flag_not_deployment_type(monkeypatch) -
     monkeypatch.setattr("valuz_agent.infra.local_identity.resolve_local_user_id", lambda: "u-1")
     monkeypatch.setattr(
         "valuz_agent.integrations.skills_official_bootstrap.sync_bundled_official_skills",
-        lambda: calls.append("sync"),
+        lambda owner: calls.append(f"sync:{owner}"),
     )
-    monkeypatch.setattr("valuz_agent.api.deps.get_skill_service", get_skill_service)
+    monkeypatch.setattr("valuz_agent.api.deps.get_skill_service_for_user", get_skill_service)
     monkeypatch.setattr("valuz_agent.infra.file_watcher.SkillFileWatcher", SkillFileWatcher)
     monkeypatch.setattr(
         "valuz_agent.integrations.skills_filesystem._default_user_skill_root",
-        lambda: SimpleNamespace(exists=lambda: False),
+        lambda owner: SimpleNamespace(exists=lambda: False),
     )
 
     app = SimpleNamespace(state=SimpleNamespace())
     await steps.start_skills(app)
 
-    assert calls[:4] == ["sync", "official:u-1", "scan:u-1", "watcher"]
+    assert calls[:4] == ["sync:u-1", "official:u-1", "scan:u-1", "watcher"]
     assert hasattr(app.state, "skill_watcher")
 
 

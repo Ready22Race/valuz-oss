@@ -666,23 +666,21 @@ async def start_skills(app: FastAPI) -> None:
     # on first run. (Previously mis-placed in stop_polling_scheduler's
     # shutdown handler — skills only synced/scanned on process exit, lagging
     # a whole lifecycle.)
-    from valuz_agent.integrations.skills_official_bootstrap import (
-        sync_bundled_official_skills,
-    )
-
-    try:
-        sync_bundled_official_skills()
-    except Exception:
-        pass
-
-    from valuz_agent.api.deps import get_skill_service
     from valuz_agent.infra.local_identity import resolve_local_user_id
+    from valuz_agent.integrations.skills_official_bootstrap import sync_bundled_official_skills
 
     # Local startup writes are owned explicitly by the stable local install id.
     # Shared/cloud deployments returned above, so this step never invents a
     # synthetic owner for a multi-user backend.
     owner = resolve_local_user_id()
-    skill_gen = get_skill_service()
+    try:
+        sync_bundled_official_skills(owner)
+    except Exception:
+        pass
+
+    from valuz_agent.api.deps import get_skill_service_for_user
+
+    skill_gen = get_skill_service_for_user(owner)
     skill_svc = await skill_gen.__anext__()
     try:
         # Deterministically index the bundled official skills FIRST, in the
@@ -724,7 +722,7 @@ async def start_skills(app: FastAPI) -> None:
     # was deleted along with its tables, routes, and frontend
     # surface. See the removal commit for the rationale.
     watcher = SkillFileWatcher(event_bus)
-    user_root = _default_user_skill_root()
+    user_root = _default_user_skill_root(owner)
     if user_root.exists():
         watcher.add_path(user_root)
     app.state.skill_watcher = watcher

@@ -125,12 +125,17 @@ class AgentPackService:
         # skills don't clutter the library). Idempotent + off the event loop.
         bundled = [s.slug for s in manifest.skills if s.source == "bundled"]
         if bundled:
-            await asyncio.to_thread(materialize_template_skills, bundled)
+            await asyncio.to_thread(materialize_template_skills, bundled, user_id=user_id)
 
         # Install embedded (user-authored) skills carried inside the archive.
         embedded = [s.slug for s in manifest.skills if s.source == "embedded"]
         if embedded and embedded_skills_root is not None:
-            await asyncio.to_thread(self._install_embedded_skills, embedded_skills_root, embedded)
+            await asyncio.to_thread(
+                self._install_embedded_skills,
+                embedded_skills_root,
+                embedded,
+                user_id=user_id,
+            )
 
         # Index the just-installed skills NOW so the pack's agents resolve them
         # immediately. Without this they're only picked up by the next boot scan
@@ -435,13 +440,13 @@ class AgentPackService:
 
     # -- internal ---------------------------------------------------------
 
-    def _install_embedded_skills(self, root: Path, slugs: list[str]) -> None:
+    def _install_embedded_skills(self, root: Path, slugs: list[str], *, user_id: str) -> None:
         """Copy embedded skills from an extracted archive into the user skill
         library (``~/.agents/skills/``). Existing slugs are left untouched —
         importing never clobbers a skill the user already authored."""
         from valuz_agent.infra.fs_registry import fs_registry
 
-        dest_root = fs_registry.user_skill_root()
+        dest_root = fs_registry.user_skill_root(user_id=user_id)
         dest_root.mkdir(parents=True, exist_ok=True)
         for slug in slugs:
             src = embedded_skill_dir(root, slug)

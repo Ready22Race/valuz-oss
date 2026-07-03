@@ -956,7 +956,7 @@ async def build_member_session(
     # injects for chat/project sessions. Task sessions don't flow through that
     # resolver, so inject the same set here. Dedupe against the agent's own
     # skills by basename so an agent that explicitly lists one isn't doubled.
-    baseline_skill_paths = always_on_skill_paths()
+    baseline_skill_paths = always_on_skill_paths(user_id=user_id)
     own_skill_names = [(s.name if hasattr(s, "name") else str(s)) for s in (agent.skills or [])]
     # Resolve the agent's skill slugs → absolute source dirs (the kernel
     # materializer needs paths, not slugs); display names stay as the slugs.

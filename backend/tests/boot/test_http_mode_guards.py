@@ -83,7 +83,7 @@ async def test_local_skill_indexing_skipped_when_startup_user_content_disabled(
     def _boom(*_args, **_kwargs):
         raise AssertionError("skill boot scan should not resolve the skill service")
 
-    monkeypatch.setattr("valuz_agent.api.deps.get_skill_service", _boom)
+    monkeypatch.setattr("valuz_agent.api.deps.get_skill_service_for_user", _boom)
 
     app = SimpleNamespace(state=SimpleNamespace())
     await steps.start_skills(app)

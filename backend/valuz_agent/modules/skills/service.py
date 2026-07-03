@@ -170,7 +170,7 @@ async def reindex_official_skills(user_id: str) -> int:
     from valuz_agent.integrations.skills_official import OfficialSkillSource
     from valuz_agent.modules.skills.contracts import RuntimeContext
 
-    ctx = RuntimeContext()
+    ctx = RuntimeContext(user_id=user_id)
     count = 0
     async with _scan_lock:
         async with async_unit_of_work(commit=True) as db:
@@ -202,7 +202,7 @@ async def reindex_user_skills(user_id: str) -> int:
     from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
     from valuz_agent.modules.skills.contracts import RuntimeContext
 
-    ctx = RuntimeContext()
+    ctx = RuntimeContext(user_id=user_id)
     count = 0
     async with _scan_lock:
         async with async_unit_of_work(commit=True) as db:
@@ -386,7 +386,7 @@ class SkillLibraryService:
         from valuz_agent.modules.skills.contracts import RuntimeContext
 
         all_manifests: list = []
-        ctx = RuntimeContext()
+        ctx = RuntimeContext(user_id=user_id)
         all_manifests.extend(self._source.list_skills(ctx))
         for source in self._extra_sources:
             all_manifests.extend(source.list_skills(ctx))
@@ -438,7 +438,7 @@ class SkillLibraryService:
         """
         from valuz_agent.modules.skills.contracts import RuntimeContext
 
-        ctx = RuntimeContext()
+        ctx = RuntimeContext(user_id=user_id)
         count = 0
         async with _scan_lock:
             for source in self._extra_sources:
@@ -554,9 +554,9 @@ class SkillLibraryService:
         # Fall back to scanning all sources (covers fresh installs / official).
         from valuz_agent.modules.skills.contracts import RuntimeContext
 
-        all_manifests = list(self._source.list_skills(RuntimeContext()))
+        all_manifests = list(self._source.list_skills(RuntimeContext(user_id=user_id)))
         for source in self._extra_sources:
-            all_manifests.extend(source.list_skills(RuntimeContext()))
+            all_manifests.extend(source.list_skills(RuntimeContext(user_id=user_id)))
         for m in all_manifests:
             if m.id == skill_id:
                 return Path(m.path)
@@ -568,14 +568,14 @@ class SkillLibraryService:
         """Resolve the target skill-library directory for sync / create.
 
         - "user" (default) → _default_user_skill_root() (controlled by
-          VALUZ_USER_SKILLS_DIR env var).
+          configured ``settings.user_skills_dir``).
         - "project" → <project.root_path>/.claude/skills/. Requires
           project_id pointing at a project.
         - "official" / "tenant" → not supported here; raise to surface a clear
           error rather than silently writing to the wrong place.
         """
         if target_scope == "user":
-            return _default_user_skill_root()
+            return _default_user_skill_root(user_id)
         if target_scope == "project":
             if not project_id:
                 raise ValueError("project_id required when target_scope='project'")
@@ -1467,14 +1467,15 @@ class SkillLibraryService:
                 f"Ask the agent to regenerate the skill."
             )
 
-        # Always promote into the user library — agentskills.io standard
-        # location managed by ``fs_registry.user_skill_root()``.
+        # Always promote into the user's library. Cloud/shared deployments
+        # scope this root by owner; local desktop keeps the agentskills.io
+        # standard location.
         result = await staging.sync_slug(
             user_id,
             session_id=session_id,
             slug=slug,
             strategy="overwrite",
-            target_root=_default_user_skill_root(),
+            target_root=_default_user_skill_root(user_id),
         )
         if not result.written_path:
             raise RuntimeError("staging.sync_slug returned no written_path")
@@ -1636,7 +1637,7 @@ class SkillLibraryService:
 
     async def _scope_root(self, user_id: str, target_scope: str, project_id: str | None) -> Path:
         if target_scope == "user":
-            return _default_user_skill_root()
+            return _default_user_skill_root(user_id)
         if project_id is None:
             raise ValueError("project_id is required for project-scoped skills")
         project = await self._projects.get_project(user_id, project_id)

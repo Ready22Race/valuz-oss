@@ -29,7 +29,6 @@ via ``project_cwd()``.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Literal
 
@@ -71,6 +70,13 @@ class FsRegistry:
         raw = str(settings.data_dir)
         if "{user_id}" in raw:
             raw = raw.replace("{user_id}", "")
+        return Path(raw).expanduser()
+
+    def _expand_optional_user_template(self, root: str | Path, user_id: str | None) -> Path:
+        raw = str(root)
+        if "{user_id}" in raw:
+            replacement = self.user_dir_name(user_id) if user_id else ""
+            raw = raw.replace("{user_id}", replacement)
         return Path(raw).expanduser()
 
     def data_dir(self, user_id: str) -> Path:
@@ -284,8 +290,8 @@ class FsRegistry:
     #    staged before the cwd-keyed convention landed. --
 
     def legacy_skill_staging_root(self, user_id: str) -> Path:
-        if settings.skill_staging_dir_override:
-            path = settings.skill_staging_dir_override.expanduser() / self.user_dir_name(user_id)
+        if settings.skill_staging_dir:
+            path = self._expand_optional_user_template(settings.skill_staging_dir, user_id)
         else:
             path = self.data_dir(user_id) / "skill-creator" / "staging"
         path.mkdir(parents=True, exist_ok=True)
@@ -296,14 +302,15 @@ class FsRegistry:
 
     # ---- FS-8 — user-scoped permanent skill targets ----
 
-    def user_skill_root(self, source: SkillSource = "claude") -> Path:
+    def user_skill_root(
+        self,
+        user_id: str,
+    ) -> Path:
         """Return the canonical write-target for promoted user skills.
 
-        Default is ``~/.agents/skills/`` — the directory the Open Agent
-        Skills standard (agentskills.io) tells agents to scan, so other
-        compatible hosts discover the same library.
-        ``$VALUZ_USER_SKILLS_DIR`` overrides for tests, packaged
-        installers, or sandboxed runs.
+        ``settings.user_skills_dir`` is the single source of truth. It defaults
+        to ``~/.agent/skills/`` and may contain ``{user_id}``, matching the
+        ``VALUZ_DATA_DIR`` template convention.
 
         ``source`` is kept for API compatibility but ignored: the host
         manages a single skill catalog that any kernel runtime can
@@ -312,31 +319,24 @@ class FsRegistry:
         via ``legacy_user_skill_roots()`` so skills the user authored in
         those CLIs are still discoverable.
         """
-        del source  # one canonical root now; legacy roots are read-only
-        override = os.environ.get("VALUZ_USER_SKILLS_DIR")
-        if override:
-            path = Path(override).expanduser()
-        else:
-            path = Path.home() / ".agents" / "skills"
+        path = self._expand_optional_user_template(settings.user_skills_dir, user_id)
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def user_skill_dir(self, slug: str, source: SkillSource = "claude") -> Path:
-        return self.user_skill_root(source) / slug
+    # def user_skill_dir(self, slug: str, source: SkillSource = "claude") -> Path:
+    #     return self.user_skill_root(source) / slug
 
-    def official_skill_root(self) -> Path:
+    def official_skill_root(self, *, user_id: str) -> Path:
         """Return the canonical home for bundled / official skills.
 
-        Defaults to ``<data_dir>/official-skills/`` (i.e.
-        ``~/.valuz-oss/official-skills/``) so the host owns the location.
-        ``$VALUZ_OFFICIAL_SKILLS_DIR`` overrides for tests / sandboxed
-        runs. The directory is created lazily by
-        ``sync_bundled_official_skills`` on first boot.
+        Official skills are host-owned content under ``VALUZ_DATA_DIR``. The
+        directory is created lazily by ``sync_bundled_official_skills`` on
+        first boot.
+
+        Passing ``user_id`` is required so ``data_dir`` templates naturally
+        materialize bundled official skills under the owner data root.
         """
-        override = os.environ.get("VALUZ_OFFICIAL_SKILLS_DIR")
-        if override:
-            return Path(override).expanduser()
-        return self._shared_root() / "official-skills"
+        return self.data_dir(user_id) / "official-skills"
 
     def legacy_user_skill_roots(self) -> list[Path]:
         """Return the legacy CLI skill locations for read-only discovery.
@@ -344,7 +344,7 @@ class FsRegistry:
         Used by ``providers.skills_filesystem`` to surface skills the
         user authored in their Claude Code / Codex CLI before adopting
         Valuz. New promotions never write here — the canonical target
-        is ``user_skill_root()`` (``~/.agents/skills/``).
+        is ``user_skill_root()`` (``~/.agent/skills/`` by default).
         """
         roots: list[Path] = []
         for sub in (".claude/skills", ".codex/skills"):

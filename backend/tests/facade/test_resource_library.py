@@ -145,7 +145,7 @@ class TestAgentRoundTrip:
 class TestSkillListSmoke:
     async def test_list_skill_returns_list(self, monkeypatch) -> None:
         """list("skill") should return a list (possibly empty) without crashing."""
-        # Patch get_skill_service to return a stub that yields a minimal service
+        # Patch get_skill_service_for_user to return a stub that yields a minimal service
         from valuz_agent.modules.skills.models import SkillsCatalog
 
         class _FakeSkillService:
@@ -154,10 +154,14 @@ class TestSkillListSmoke:
             ) -> SkillsCatalog:
                 return SkillsCatalog(project_id=project_id, skills=[])
 
-        async def _fake_get_skill_service():  # type: ignore[return]
+        async def _fake_get_skill_service(user_id: str):  # type: ignore[return]
+            del user_id
             yield _FakeSkillService()
 
-        monkeypatch.setattr("valuz_agent.api.deps.get_skill_service", _fake_get_skill_service)
+        monkeypatch.setattr(
+            "valuz_agent.api.deps.get_skill_service_for_user",
+            _fake_get_skill_service,
+        )
 
         lib = ResourceLibrary()
         refs = await lib.list(USER_ID, "skill")
@@ -183,10 +187,14 @@ class TestSkillListSmoke:
             ) -> SkillsCatalog:
                 return SkillsCatalog(project_id=project_id, skills=[fake_view])
 
-        async def _fake_get_skill_service():  # type: ignore[return]
+        async def _fake_get_skill_service(user_id: str):  # type: ignore[return]
+            del user_id
             yield _FakeSkillService()
 
-        monkeypatch.setattr("valuz_agent.api.deps.get_skill_service", _fake_get_skill_service)
+        monkeypatch.setattr(
+            "valuz_agent.api.deps.get_skill_service_for_user",
+            _fake_get_skill_service,
+        )
 
         lib = ResourceLibrary()
         refs = await lib.list(USER_ID, "skill")

@@ -6,6 +6,8 @@ from collections.abc import AsyncGenerator
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from fastapi import Depends
+
 from valuz_agent.infra import auth_context
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.eventbus import event_bus
@@ -89,7 +91,9 @@ async def get_project_service() -> AsyncGenerator[ProjectService, None]:
         )
 
 
-async def get_skill_service() -> AsyncGenerator[SkillLibraryService, None]:
+async def get_skill_service_for_user(
+    user_id: str,
+) -> AsyncGenerator[SkillLibraryService, None]:
     async with async_unit_of_work() as db:
         yield SkillLibraryService(
             datastore=SkillDatastore(db),
@@ -101,6 +105,17 @@ async def get_skill_service() -> AsyncGenerator[SkillLibraryService, None]:
             event_bus=event_bus,
             extra_sources=[OfficialSkillSource()],
         )
+
+
+async def get_skill_service(
+    user_id: str = Depends(get_current_user_id),
+) -> AsyncGenerator[SkillLibraryService, None]:
+    gen = get_skill_service_for_user(user_id)
+    svc = await gen.__anext__()
+    try:
+        yield svc
+    finally:
+        await gen.aclose()
 
 
 @lru_cache

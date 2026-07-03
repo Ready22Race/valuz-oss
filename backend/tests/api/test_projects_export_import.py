@@ -169,8 +169,10 @@ async def _build_app(tmp_path: Path) -> tuple[FastAPI, _Deps]:
 @pytest.fixture
 async def client(tmp_path, monkeypatch) -> AsyncIterator[tuple]:
     monkeypatch.setenv("VALUZ_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(tmp_path / "official"))
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "user-skills"))
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "data_dir", tmp_path / "data")
+    monkeypatch.setattr(fsr.settings, "user_skills_dir", tmp_path / "user-skills")
     app, deps = await _build_app(tmp_path)
     transport = ASGITransport(app=app)
     token = set_current_user_id(USER)

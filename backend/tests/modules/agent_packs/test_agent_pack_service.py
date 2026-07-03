@@ -66,8 +66,11 @@ async def _build_service(workdir):  # type: ignore[no-untyped-def]
 @pytest.fixture
 async def svc(tmp_path, monkeypatch) -> AsyncIterator[AgentPackService]:
     # import_pack materializes the pack's bundled skills to the official-skills
-    # dir — pin it under tmp so tests never touch the real ~/.valuz-oss tree.
-    monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(tmp_path / "official-skills"))
+    # dir under data_dir — pin data_dir under tmp so tests never touch the real
+    # ~/.valuz-oss tree.
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "data_dir", tmp_path)
     service, session, engine = await _build_service(tmp_path)
     try:
         yield service
@@ -169,7 +172,13 @@ async def test_import_pack_indexes_embedded_skills(
     # We spy the user-scope reindex (it writes via the global unit-of-work, out
     # of this test's reach) and assert the on-disk install, which is the
     # observable half of the same guarantee.
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "user-skills"))
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(
+        fsr.settings,
+        "user_skills_dir",
+        tmp_path / "user-skills",
+    )
 
     calls: list[str] = []
 
@@ -340,8 +349,14 @@ async def test_export_import_roundtrip(svc: AgentPackService, tmp_path, monkeypa
 
     # Import into a *separate* install (fresh db + secret store), simulating a
     # different machine — connector slugs are globally unique per install.
-    monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(tmp_path / "dest-official"))
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "dest-user-skills"))
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "data_dir", tmp_path / "dest-data")
+    monkeypatch.setattr(
+        fsr.settings,
+        "user_skills_dir",
+        tmp_path / "dest-user-skills",
+    )
     dest, session2, engine2 = await _build_service(tmp_path / "dest")
     try:
         preview = await dest.preview_import(USER, data)

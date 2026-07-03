@@ -89,7 +89,7 @@ def run_skill_scan() -> None:
 
 
 async def _arun_skill_scan() -> None:
-    from valuz_agent.api.deps import get_skill_service
+    from valuz_agent.api.deps import get_skill_service_for_user
     from valuz_agent.infra.config import settings
     from valuz_agent.infra.eventbus import event_bus
     from valuz_agent.infra.local_identity import resolve_local_user_id
@@ -102,7 +102,7 @@ async def _arun_skill_scan() -> None:
     # is explicitly owned by the stable local install identity; cloud/shared
     # deployments disable this scheduler rather than inventing a synthetic owner.
     owner = resolve_local_user_id()
-    gen = get_skill_service()
+    gen = get_skill_service_for_user(owner)
     svc = await gen.__anext__()
     try:
         indexed = await svc.startup_scan(owner)

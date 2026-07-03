@@ -2,7 +2,7 @@ import hashlib
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode
 
 
@@ -196,9 +196,16 @@ class Settings(BaseSettings):
     def log_file(self) -> Path:
         return self.log_dir / self.log_filename
 
-    # Optional root override for legacy skill-creator staging fallback.
-    # FsRegistry appends the user id; Settings only carries the configured root.
-    skill_staging_dir_override: Path | None = None
+    # Optional legacy skill-creator staging directory. May contain
+    # ``{user_id}``; when unset it lives under ``data_dir(user_id)``.
+    skill_staging_dir: Path | None = None
+
+    # Canonical user skill library directory. May contain ``{user_id}`` for
+    # shared/cloud deployments.
+    user_skills_dir: Path = Field(
+        default=Path.home() / ".agent" / "skills",
+        validation_alias="VALUZ_USER_SKILLS_DIR",
+    )
 
     @property
     def internal_mcp_token(self) -> str:
