@@ -1764,15 +1764,23 @@ export const TaskDetailPage = () => {
  *  - terminal events (task_completed / kickoff_failed) use the lead
  *    session id; collapse to the lead agent name
  *  - everything else is an ``agent_slug`` we can ``join`` against
- *    ``members`` to get the display name */
+ *    ``members`` to get the display name
+ *
+ *  Member-attributed events (subtask_spawned / _completed / _failed) now carry
+ *  the resolved name in ``payload.agent_name``, stamped at emit time by the
+ *  backend. Prefer it: it's durable (survives the member being un-deployed /
+ *  renamed) and needs no members list, so it doesn't race the async members
+ *  fetch — the root cause of the intermittent "成员智能体名称查询不到". The
+ *  members join + slug remain as fallbacks for events emitted before this
+ *  landed. */
 function resolveActor(
-  actor: string,
-  type: string,
+  evt: TaskEvent,
   members: MemberWithAgent[],
   leadAgentName: string | null,
   leadAgentSlug: string,
   t: Translator,
 ): string {
+  const { actor, type } = evt;
   if (actor === "user") return t("task.actorYou");
   // Lead-driven events carry the lead SESSION id as actor — collapse to the
   // lead agent name (VALUZ-TASK adds plan/review events on this path).
@@ -1786,6 +1794,8 @@ function resolveActor(
   ) {
     return leadAgentName ?? leadAgentSlug;
   }
+  const payloadName = evt.payload?.agent_name;
+  if (typeof payloadName === "string" && payloadName) return payloadName;
   const m = members.find((x) => x.member.agent_slug === actor);
   return m?.agent?.name ?? actor;
 }
@@ -1940,8 +1950,7 @@ function EventBody({
 }) {
   const detail = eventDetail(evt, t);
   const actorLabel = resolveActor(
-    evt.actor,
-    evt.type,
+    evt,
     members,
     leadAgentName,
     leadAgentSlug,
@@ -2026,8 +2035,7 @@ function GroupedEventCard({
 }) {
   const spawnDetail = eventDetail(spawn, t);
   const spawnActor = resolveActor(
-    spawn.actor,
-    spawn.type,
+    spawn,
     members,
     leadAgentName,
     leadAgentSlug,

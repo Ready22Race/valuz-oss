@@ -25,6 +25,7 @@ import logging
 import os
 import sys
 import threading
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -703,6 +704,61 @@ async def resolve_member_agent(
             agent_slug,
         )
     return agent
+
+
+async def resolve_agent_display_names(
+    project_id: str,
+    agent_slugs: Iterable[str],
+    user_id: str,
+) -> dict[str, str]:
+    """Batch resolve project-local agent slugs → human display names.
+
+    Captured at **emit time** into task-event / plan-snapshot payloads
+    (``agent_name``) so names are durable: they survive a member being
+    un-deployed / renamed, and free the frontend from joining a slug against a
+    separately-fetched members list (which races an async load and misses
+    removed agents — the "成员智能体名称查询不到" bug).
+
+    Resolves every unique non-empty slug in a **single** read-only unit of work
+    (its own, so a failure can't poison a caller's in-flight write transaction).
+    Each slug maps to its library-agent name, or to the slug itself when the
+    membership / source agent can't be resolved. Empty slugs are skipped.
+    """
+    slugs = {s for s in agent_slugs if s}
+    if not slugs:
+        return {}
+    from valuz_agent.infra.db import async_unit_of_work
+
+    out: dict[str, str] = {}
+    try:
+        async with async_unit_of_work(commit=False) as db:
+            members = ProjectMemberDatastore(db)
+            for slug in slugs:
+                agent = await resolve_member_agent(project_id, slug, members, user_id)
+                out[slug] = agent.name if agent and agent.name else slug
+    except Exception:  # noqa: BLE001 — name resolution must never fail a dispatch/review
+        logger.warning(
+            "resolve_agent_display_names: failed to resolve names for %s — falling back to slugs",
+            project_id,
+            exc_info=True,
+        )
+    # Backfill any slug the loop didn't reach (e.g. it raised partway) with itself.
+    for slug in slugs:
+        out.setdefault(slug, slug)
+    return out
+
+
+async def resolve_agent_display_name(
+    project_id: str,
+    agent_slug: str,
+    user_id: str,
+) -> str:
+    """Resolve a single agent slug to its display name (see
+    ``resolve_agent_display_names``). Returns an empty slug as-is."""
+    if not agent_slug:
+        return agent_slug
+    names = await resolve_agent_display_names(project_id, [agent_slug], user_id)
+    return names.get(agent_slug, agent_slug)
 
 
 async def _resolve_agent_provider(

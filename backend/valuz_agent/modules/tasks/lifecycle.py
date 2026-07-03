@@ -49,6 +49,7 @@ from valuz_agent.adapters.agent_resolver import (
     _member_agent_config,
     build_member_session,
     embed_agent_config,
+    resolve_agent_display_name,
     spill_goal_brief_if_too_long,
 )
 from valuz_agent.infra.db import async_unit_of_work
@@ -1123,6 +1124,9 @@ class LifecycleService:
                                     session_id=session_id,
                                     user_id=user_id,
                                 )
+                    agent_name = await resolve_agent_display_name(
+                        project_id, agent_slug, user_id
+                    )
                     await event_ds.append_event(
                         user_id,
                         project_id=project_id,
@@ -1130,7 +1134,11 @@ class LifecycleService:
                         type="subtask_failed",
                         actor=agent_slug,
                         session_id=session_id,
-                        payload={**manifest, **({"subtask_key": key} if key else {})},
+                        payload={
+                            "agent_name": agent_name,
+                            **manifest,
+                            **({"subtask_key": key} if key else {}),
+                        },
                     )
         except Exception:  # noqa: BLE001
             logger.exception("_finalize_actor: failed to record terminal run for %s", session_id)

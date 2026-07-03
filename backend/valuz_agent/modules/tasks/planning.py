@@ -22,6 +22,10 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from valuz_agent.adapters.agent_resolver import (
+    resolve_agent_display_name,
+    resolve_agent_display_names,
+)
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.tasks.datastore import (
@@ -60,6 +64,18 @@ async def emit_plan_update(
         raise ValueError("user_id is required")
 
     """Append a ``task_plan_update`` snapshot event (frontend Todo panel)."""
+    panel = plan.to_panel()
+    # Stamp each node's member display name so the Todo panel renders it
+    # directly rather than joining the ``agent`` slug against an async members
+    # list (which races the load / misses removed agents — the same
+    # "成员智能体名称查询不到" bug as the timeline). Batched into one read UoW.
+    names = await resolve_agent_display_names(
+        project_id, [n["agent"] for n in panel], user_id
+    )
+    for n in panel:
+        slug = n.get("agent")
+        if slug:
+            n["agent_name"] = names.get(slug, slug)
     await event_ds.append_event(
         user_id,
         project_id=project_id,
@@ -67,7 +83,7 @@ async def emit_plan_update(
         type="task_plan_update",
         actor=actor,
         session_id=session_id,
-        payload={"subtasks": plan.to_panel()},
+        payload={"subtasks": panel},
     )
 
 
@@ -332,14 +348,27 @@ async def review_subtask(
                 session_id=target_session,
                 payload={"subtask_key": key, "decision": "approve", "feedback": feedback or ""},
             )
+            completed_agent = (node.agent or "") if node else ""
+            # Stamp the member's display name into the payload so the frontend
+            # renders it directly rather than joining the ``actor`` slug against
+            # an async members list (which races the load / misses removed
+            # agents — and here ``actor`` can even be empty). See
+            # ``resolve_agent_display_name``.
+            completed_agent_name = await resolve_agent_display_name(
+                project_id, completed_agent, user_id
+            )
             await event_ds.append_event(
                 user_id,
                 project_id=project_id,
                 task_id=task_id,
                 type="subtask_completed",
-                actor=(node.agent or "") if node else "",
+                actor=completed_agent,
                 session_id=target_session,
-                payload={"subtask_key": key, "title": node.title if node else key},
+                payload={
+                    "subtask_key": key,
+                    "title": node.title if node else key,
+                    "agent_name": completed_agent_name,
+                },
             )
             task_row.plan = plan.to_dict()
             await task_ds.update_task(task_row)

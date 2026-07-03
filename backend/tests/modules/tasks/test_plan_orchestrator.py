@@ -96,6 +96,24 @@ def _events(db_factory, project_id="w1", task_id="t1") -> list[str]:
         db.close()
 
 
+def _event_payload(db_factory, ev_type, project_id="w1", task_id="t1") -> dict:
+    """Sync read of the newest event payload of ``ev_type`` for a task."""
+    db = db_factory()
+    try:
+        rows = (
+            db.execute(
+                select(TaskEventRow)
+                .filter_by(project_id=project_id, task_id=task_id, type=ev_type)
+                .order_by(TaskEventRow.sequence)
+            )
+            .scalars()
+            .all()
+        )
+        return dict(rows[-1].payload or {}) if rows else {}
+    finally:
+        db.close()
+
+
 def _runs(db_factory, task_id="t1") -> dict[str, str]:
     """Sync read of {session_id: status} for a task's runs (datastores are async)."""
     db = db_factory()
@@ -132,6 +150,16 @@ def test_plan_task_persists_plan_and_emits_events(db_factory, tmp_path) -> None:
     assert res["ready"] == ["a"]  # b is blocked on a
     types = _events(db_factory)
     assert "task_planned" in types and "task_plan_update" in types
+    # The plan snapshot the frontend Todo panel consumes stamps each node's
+    # member display name at emit time, so the panel renders it directly instead
+    # of joining the ``agent`` slug against an async members list. With no member
+    # rows seeded here, resolution falls back to the slug — but the key is always
+    # present on every node with an agent.
+    panel = _event_payload(db_factory, "task_plan_update")["subtasks"]
+    assert {n["key"]: n.get("agent_name") for n in panel} == {
+        "a": "researcher",
+        "b": "writer",
+    }
 
 
 def test_plan_task_rejects_when_progress_exists(db_factory, tmp_path) -> None:
@@ -365,6 +393,13 @@ def test_review_approve_marks_done_and_unlocks(db_factory, tmp_path) -> None:
     assert res["ready"] == ["b"]  # b unlocked now that a is done
     types = _events(db_factory)
     assert "subtask_reviewed" in types and "subtask_completed" in types
+    # The member's display name is stamped into the event payload at emit time
+    # so the frontend renders it directly instead of joining the ``actor`` slug
+    # against an async members list ("成员智能体名称查询不到"). With no member
+    # rows seeded here, resolution falls back to the slug — but the key is always
+    # present, which is what frees the frontend from the racy join.
+    completed_payload = _event_payload(db_factory, "subtask_completed")
+    assert completed_payload.get("agent_name") == "x"
 
 
 def test_review_rework_no_live_member_sets_rework(db_factory, tmp_path) -> None:
