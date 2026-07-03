@@ -261,6 +261,7 @@ export const KnowledgePage = ({
   const [dropping, setDropping] = useState(false);
   const dragCounterRef = useRef(0);
   const kbGridRef = useRef<HTMLDivElement | null>(null);
+  const uploadInputRef = useRef<HTMLInputElement | null>(null);
   const [kbGridWidth, setKbGridWidth] = useState(0);
 
   const {
@@ -552,6 +553,28 @@ export const KnowledgePage = ({
     }
   }, [activeKb, enterKb]);
 
+  // Multipart upload into the KB root — used by both the explicit
+  // header button and the drag-drop fallback (when Electron's
+  // ``File.path`` is unavailable, i.e. browser or cloud-managed KB).
+  // The backend writes the bytes and kicks the rescan itself.
+  const uploadKbFiles = useCallback(
+    async (files: File[]): Promise<void> => {
+      if (!activeKb || files.length === 0) return;
+      try {
+        await kbApi.uploadFiles(activeKb.id, files);
+        toast.success(
+          t("knowledge.imported" as Parameters<typeof t>[0], {
+            count: String(files.length),
+          }),
+        );
+        await enterKb(activeKb.id);
+      } catch {
+        toast.error(t("knowledge.importFailed" as Parameters<typeof t>[0]));
+      }
+    },
+    [activeKb, enterKb],
+  );
+
   const handleDeleteKb = async () => {
     if (!activeKb) return;
     try {
@@ -624,32 +647,37 @@ export const KnowledgePage = ({
       const files = Array.from(e.dataTransfer.files);
       if (files.length === 0) return;
 
-      const paths = files
-        .map((f) => (f as File & { path?: string }).path)
-        .filter(Boolean) as string[];
-      if (paths.length === 0) {
-        toast.error(t("knowledge.cannotGetPath" as Parameters<typeof t>[0]));
-        return;
-      }
-
       setDropping(true);
       try {
-        const result = await copyFiles(paths, activeKb.root_path);
-        if (result.errors.length > 0) {
-          toast.error(
-            t("knowledge.copyFailedCount" as Parameters<typeof t>[0], {
-              count: String(result.errors.length),
-            }),
-          );
-        }
-        if (result.copied > 0) {
-          toast.success(
-            t("knowledge.imported" as Parameters<typeof t>[0], {
-              count: String(result.copied),
-            }),
-          );
-          await kbApi.rescan(activeKb.id);
-          await enterKb(activeKb.id);
+        // Electron exposes ``File.path``; when present, copy the local
+        // file straight into the KB root (fast — no upload). When absent
+        // (browser, or a cloud-managed KB whose root the client can't
+        // reach), fall back to the multipart endpoint ``POST /v1/kb/{id}/files``
+        // — the backend writes the bytes into the KB root and kicks the
+        // rescan itself, so no separate ``kbApi.rescan`` is needed.
+        const paths = files
+          .map((f) => (f as File & { path?: string }).path)
+          .filter(Boolean) as string[];
+        if (paths.length > 0) {
+          const result = await copyFiles(paths, activeKb.root_path);
+          if (result.errors.length > 0) {
+            toast.error(
+              t("knowledge.copyFailedCount" as Parameters<typeof t>[0], {
+                count: String(result.errors.length),
+              }),
+            );
+          }
+          if (result.copied > 0) {
+            toast.success(
+              t("knowledge.imported" as Parameters<typeof t>[0], {
+                count: String(result.copied),
+              }),
+            );
+            await kbApi.rescan(activeKb.id);
+            await enterKb(activeKb.id);
+          }
+        } else {
+          await uploadKbFiles(files);
         }
       } catch {
         toast.error(t("knowledge.importFailed" as Parameters<typeof t>[0]));
@@ -657,7 +685,7 @@ export const KnowledgePage = ({
         setDropping(false);
       }
     },
-    [activeKb, enterKb],
+    [activeKb, enterKb, uploadKbFiles],
   );
 
   // ── Tree search filter ────────────────────────────────────────────
@@ -937,6 +965,15 @@ export const KnowledgePage = ({
             <Button
               variant="outline"
               size="sm"
+              onClick={() => uploadInputRef.current?.click()}
+              aria-label={t("knowledge.uploadFiles" as Parameters<typeof t>[0])}
+              className="h-8 w-8 p-0 text-ink-meta hover:text-ink-heading"
+            >
+              <Upload className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
               onClick={handleRescan}
               loading={rescanning}
               aria-label={t("common.refresh" as Parameters<typeof t>[0])}
@@ -1029,6 +1066,22 @@ export const KnowledgePage = ({
           </div>
         </div>
       )}
+      {/* Hidden picker for the header "Upload files" button. The drop
+          overlay above is the primary entry; this button is the explicit,
+          discoverable one. Both routes go through ``uploadKbFiles``
+          → ``POST /v1/kb/{id}/files``. */}
+      <input
+        ref={uploadInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = e.target.files ? Array.from(e.target.files) : [];
+          // Reset so picking the same file twice still fires ``change``.
+          e.target.value = "";
+          if (files.length > 0) void uploadKbFiles(files);
+        }}
+      />
       {activeKb ? renderKbDetail() : renderKbList()}
 
       <CreateKbDialog

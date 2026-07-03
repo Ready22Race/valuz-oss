@@ -181,6 +181,24 @@ export const kbApi = {
     return fetchJson(`/v1/kb/${kbId}/rescan`, { method: "POST" });
   },
 
+  /** Upload one or more documents into the KB's root dir (multipart form).
+   *  Each file's ``name`` is the target relative path (parent dirs are
+   *  created by the backend). After writing, the backend kicks a rescan
+   *  and returns the task row so the caller can poll progress via
+   *  ``docsApi.getTask(taskId)``. Uses ``fetchJson`` with a ``FormData``
+   *  body — no ``Content-Type`` so the browser sets the multipart boundary.
+   *  This is the path that works in a browser and against a remote
+   *  (cloud-managed) backend, where the Electron-only ``File.path`` fast
+   *  path in ``KnowledgePage.handleDrop`` is unavailable. */
+  uploadFiles(kbId: string, files: File[]): Promise<ImportTask> {
+    const form = new FormData();
+    for (const f of files) form.append("files", f, f.name);
+    return fetchJson(`/v1/kb/${encodeURIComponent(kbId)}/files`, {
+      method: "POST",
+      body: form,
+    });
+  },
+
   tree(kbId: string, folderId?: string): Promise<{ nodes: KbTreeNode[] }> {
     const qs = folderId ? `?folder_id=${folderId}` : "";
     return fetchJson(`/v1/kb/${kbId}/tree${qs}`);

@@ -1001,6 +1001,8 @@
     "taskEnabled": "Enabled",
     "taskPaused": "Paused",
     "uploadFile": "Upload file",
+    "uploadSuccess": "Uploaded {count} file(s)",
+    "uploadFailed": "Upload failed",
     "writeInstructions": "Write instructions",
     "sendFailed": "Send failed",
     "skillSelected": "Selected Skill: {name}",
