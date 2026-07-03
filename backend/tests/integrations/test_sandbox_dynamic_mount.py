@@ -179,6 +179,46 @@ async def test_ensure_granted_threads_owner_to_bind(fresh_runtime, tmp_path) -> 
     assert fake.bind_owners == ["owner-7"]  # owner reached the cloud-staging seam
 
 
+@pytest.mark.asyncio
+async def test_ensure_granted_rewrites_managed_cwd_to_mount(
+    fresh_runtime, tmp_path, monkeypatch
+) -> None:
+    """Multi-tenant cloud (config-gated): a cwd under the owner's project root is
+    rewritten to the in-sandbox mount path — no active sandbox, no bind. The
+    per-user sandbox is provisioned out-of-band, so the mount already stages it."""
+    sr = fresh_runtime
+    from valuz_agent.infra.config import settings
+
+    # Owner project root template → {tmp}/{user_id}; the mount surfaces it at /workspace.
+    monkeypatch.setattr(settings, "user_project_root", tmp_path / "{user_id}")
+    monkeypatch.setenv("VALUZ_SANDBOX_WORKSPACE_MOUNT", "/workspace")
+    proj = tmp_path / "owner-7" / "p9"
+    proj.mkdir(parents=True)
+
+    # No sandbox activated at all — the rewrite is pure config, not a grant.
+    assert sr.is_active() is False
+    out = await sr.ensure_workspace_granted(str(proj), owner_user_id="owner-7")
+    assert out == "/workspace/p9"
+
+
+@pytest.mark.asyncio
+async def test_ensure_granted_mount_rewrite_skips_external_cwd(
+    fresh_runtime, tmp_path, monkeypatch
+) -> None:
+    """A cwd OUTSIDE the owner's project root is not covered by the mount → the
+    rewrite returns the cwd unchanged (no active sandbox to bind against here)."""
+    sr = fresh_runtime
+    from valuz_agent.infra.config import settings
+
+    monkeypatch.setattr(settings, "user_project_root", tmp_path / "roots" / "{user_id}")
+    monkeypatch.setenv("VALUZ_SANDBOX_WORKSPACE_MOUNT", "/workspace")
+    external = tmp_path / "elsewhere"
+    external.mkdir()
+
+    out = await sr.ensure_workspace_granted(str(external), owner_user_id="owner-7")
+    assert out == str(external)  # not under project root → unchanged
+
+
 # ---- end-to-end across the real sandbox boundary (macOS) ---------------
 
 
