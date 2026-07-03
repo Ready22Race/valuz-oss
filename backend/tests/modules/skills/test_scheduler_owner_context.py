@@ -52,8 +52,8 @@ async def test_auto_scan_uses_explicit_local_owner(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_scan_skips_non_local_deployments(monkeypatch) -> None:
-    cloud_settings = settings.model_copy(update={"deployment_type": "cloud"})
+async def test_auto_scan_skips_when_startup_user_content_disabled(monkeypatch) -> None:
+    disabled_settings = settings.model_copy(update={"initialize_user_content_on_startup": False})
     called_in_main = False
     main_thread = threading.main_thread()
 
@@ -64,7 +64,7 @@ async def test_auto_scan_skips_non_local_deployments(monkeypatch) -> None:
         return _skill_service_gen(_Svc())
 
     monkeypatch.setattr("valuz_agent.api.deps.get_skill_service", _get_skill_service)
-    monkeypatch.setattr("valuz_agent.infra.config.settings", cloud_settings)
+    monkeypatch.setattr("valuz_agent.infra.config.settings", disabled_settings)
 
     await sched._arun_skill_scan()
 

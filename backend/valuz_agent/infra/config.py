@@ -132,6 +132,12 @@ class Settings(BaseSettings):
             return value.strip().lower()
         raise ValueError("deployment_type must be 'local' or 'cloud'")
 
+    # Whether process startup may initialize owner-scoped user content under the
+    # local install owner. OSS desktop keeps this enabled. Multi-user overlays
+    # with request-bound identity disable it and initialize user content after
+    # login with the authenticated user_id.
+    initialize_user_content_on_startup: bool = True
+
     # Custom URL scheme the desktop shell registers (Electron
     # ``setAsDefaultProtocolClient`` — see
     # frontend/apps/desktop/src/main/deep-link-utils.ts ``DEEP_LINK_PROTOCOL``).
