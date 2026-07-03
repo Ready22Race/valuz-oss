@@ -288,7 +288,7 @@ export const AskUserQuestionCard = memo(function AskUserQuestionCard({
   };
 
   return (
-    <div className="rounded-lg border border-surface-border bg-surface-soft shadow-sm">
+    <div className="rounded-lg border-0 bg-surface-soft shadow-[var(--shadow-1)]">
       <div className="flex items-center gap-2 px-4 py-3">
         <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand/10 text-brand">
           <CircleHelp className="h-3.5 w-3.5" />
