@@ -164,7 +164,7 @@ Info 复用品牌紫（裁决：不引入第五个状态色相）。
 - 状态全集：`default / hover / active / focus-visible / disabled / loading`，新组件缺一不交付。
 - **Button 阴影/hover 规则（v2.6）**：`outline` 用 `shadow-outline`（纯投影，因自带边框）；`outline`/`ghost` 的 hover 底统一用 `fg-5` 中性灰（ghost 旧版用 brand-100 紫底太抢眼，已改）。**实底按钮 hover = 同色加深一档**：`default` → `brand-600`；`destructive` 底色用 `error-strong`（无障碍裁决，见 §0），hover = `error-hover`（在 error-strong 基础上再加深 ≈8% 黑，明暗两端同向加深、无分模式特例，见 v2.6.10）。两个实底变体都必须有 hover，不得只给 default。
 - **选中态两种约定（v2.6.7 修订）**：**都不用品牌色**，但按场景分两类——①**导航侧栏 Sidebar**：选中 = `surface` 白底 + `shadow-2`「浮起」，hover = fg-3；②**内容列表 List Item / 菜单项**：选中 = fg-2 灰填充，hover = fg-1。区别理由：侧栏导航项需要"当前页"的强存在感（浮起卡片），内容列表只需轻量区分（灰填充），两者各自内部统一即可，不强行合并。共同底线：选中都不掺品牌紫。
-- **标签三分法（v2.6.5）**：徽标按语义分三类，**不可混用颜色体系**——①`状态` 用语义色（success/warning/error/brand），表示运行/连接等动态；②`meta/归属` 用品牌浅底或灰描边（tag-brand/tag-outline/tag-neutral），表示选中/归属/计数等静态分类；③`角色/职位` 用 accent 分类色软底（tag-role-*），纯类目区分。禁止用状态绿表示"已选"、用品牌紫表示"运行中"这类跨类借色。
+- **标签三分法（v2.6.5）**：徽标按语义分三类，**不可混用颜色体系**——①`状态` 用语义色（success/warning/error/brand），表示运行/连接等动态；②`meta/归属` 用品牌浅底或灰描边（tag-brand/tag-outline/tag-neutral），表示选中/归属/计数等静态分类；③`角色/职位` 用 accent 分类色软底（tag-role-*），纯类目区分，尺寸固定为 `h-4 px-1 text-[10px]`；Lead 角色标签例外使用 `brand-100 / brand-700` 紫色软底。禁止用状态绿表示"已选"、用品牌紫表示"运行中"这类跨类借色。
 - **弹窗关闭按钮规则（v2.6.5）**：普通弹窗/可关闭面板右上角放线性 X（`.iclose`，hover fg-1 底）；**alert-dialog（危险确认）不放 X**——高风险操作强制在「取消/确认」间明确选择，多一个 X 是模糊的第三退出路径。
 - **Tooltip 规则（v2.6.15）**：提示气泡出现在触发元素下方居中，反色底（`foreground` 底 + `background` 字）、`shadow-3`、圆角 `md(6)`，**不画三角/箭头**。母版不再维护 Avatar 组件，避免与 Chat Message「Agent 无头像」规则冲突。
 - DESIGN.md v1 §5 的组件像素规格（Sidebar/Composer/Popover/ToolCard/ContextPanel）仍然有效，但其中色值/字号/圆角一律按本文档 token 替换字面量。
@@ -206,6 +206,7 @@ Info 复用品牌紫（裁决：不引入第五个状态色相）。
 
 ## Changelog
 
+- **2026-07-03 v2.6.17**：标签规范同步——role / 角色职位标签固定为 `h-4 px-1 text-[10px]`，组件母版新增 `role-tag` 与 Lead 紫色软底（`brand-100 / brand-700`）示例；tokens.css 记录 token 用法，spec.html 补 StatusPill / Badge 三分法示例，DESIGN.md / tokens.css / components.html / spec.html 四文件同步。
 - **2026-06-17 v2.6.15**：组件母版从 18 个收敛为 17 个——删除 `17 Avatar（头像）` 整段与相关 `.avatar*` 样式；`Tooltip（提示气泡）` 重编号为 17，改为触发元素**下方居中**，移除三角/箭头伪元素，演示 padding 同步改为下方留白。`components.html` 标题/导语计数与本文档配套文件描述同步。
 - **2026-06-17 v2.6.14**：外部全维度复审整改（实算驱动，七处）——①**无障碍·财务色**：新增 `--finance-up-text`/`--finance-down-text`（mix 65% foreground，白底 ≈6.7/5.0:1），数据表与内联涨跌数字（components/spec）改用文字档；基色作 ≤14px 文字白底仅 3.5/2.4:1 未达 AA、此前 §6 漏将 finance 纳入分析（§2.3 + §6 补规则、tokens 补派生与 Tailwind 映射、检测器 TOKENS 收录）。②**文档漂移·阴影**：§4 重写——原文谎称「v2.6.7 合并、不再区分 bordered/borderless」且漏掉在用的 `shadow-1`，与 tokens.css/changelog/母版（`.set-card` 无边框用 shadow-1）三方矛盾；改回明确「有边框 shadow-outline / 无边框 shadow-1」并补列 shadow-1。③**检测器碰撞**：`#f3f4f6`（= fg-2 实测渲染值）仍滞留 DEPRECATED→fg-3，而 fg-2 不在 TOKENS，会把正确的 fg-2 值误判「已废止」（v2.6.13 修了 fg-3 同类碰撞但漏了 fg-2）——fg-2 收入 TOKENS、该键移出 DEPRECATED。④**无障碍·灰底小字**：`pill-queued` 文字 fg-60→fg-80（fg-60 on fg-5 仅 4.05，提到 7.46）。⑤**无障碍·placeholder**：Input placeholder fg-50→fg-60（fg-50 白底 3.4，违反 §6 自定「fg-50 仅 ≥18px/图标」）。⑥**无障碍·amber 角色标签**：tag-role-amber 文字 62%→50%（3.98→5.44，过 AA；amber 最亮需更深，其余色 62% 即达标）。⑦**自洽**：spec.html `.sp-bar` 圆角 3px→4px（3px 为 §4 废止值）；components/audit `h1` 20px→18px（20 不在 8 档字阶）；§0 与 tokens 注释 fg-30 标称由旧近似 #b6b7bc 改注实测 #b1b5ba。
 - **2026-06-11 v2**：三方裁决（§0）；token 架构改派生制；字阶/圆角/阴影/图标收敛；新增状态三件套、z-index、动效、无障碍、暗色规则。

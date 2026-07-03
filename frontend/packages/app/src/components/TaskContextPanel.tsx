@@ -248,7 +248,7 @@ export const TaskContextPanel = ({
                         {agent?.name ?? slug}
                       </span>
                       {isLead && (
-                        <span className="rounded-sm bg-[#f3f2ff] px-1 py-0 text-[10px] font-normal text-[#725cf9]">
+                        <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand-light px-1 text-[10px] font-normal leading-none text-brand-700">
                           {t("task.runLead")}
                         </span>
                       )}

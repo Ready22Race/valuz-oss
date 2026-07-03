@@ -1292,7 +1292,7 @@ export const TaskDetailPage = () => {
               </span>
               <span className="mx-3 h-3 w-px bg-[#f3f4f6]" />
               <span className="inline-flex items-center gap-1.5 text-[#898f9c]">
-                <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-[#725cf9]/10 px-1 text-[10px] font-normal leading-none text-[#725cf9]">
+                <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand-light px-1 text-[10px] font-normal leading-none text-brand-700">
                   Lead
                 </span>
                 {leadAgentName ?? task.lead_agent_slug}
