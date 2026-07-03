@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -93,12 +94,27 @@ class FakeSkillDatastore:
     async def get_by_id(self, user_id, skill_id):
         return self._rows.get(skill_id)
 
+    async def get_by_slug(self, user_id, slug):
+        return next((row for row in self._rows.values() if row.slug == slug), None)
+
     async def set_creation_origin(self, user_id, skill_id, origin):
         row = self._rows.get(skill_id)
         if row is not None:
             row.creation_origin = origin
 
+    async def set_creation_origin_by_slug(self, user_id, slug, origin):
+        row = await self.get_by_slug(user_id, slug)
+        if row is not None:
+            row.creation_origin = origin
+
+    async def set_origin_metadata_by_slug(self, user_id, slug, origin_json):
+        row = await self.get_by_slug(user_id, slug)
+        if row is not None:
+            row.origin_json = origin_json
+
     async def create(self, user_id, row):
+        if not row.id:
+            row.id = uuid4().hex
         self._rows[row.id] = row
         return row
 
@@ -112,13 +128,31 @@ class FakeSkillDatastore:
     async def list_library_disabled_ids(self, user_id):
         return set(getattr(self, "_library_disabled", set()))
 
+    async def list_library_disabled_slugs(self, user_id):
+        return set(getattr(self, "_library_disabled_slugs", set()))
+
     async def set_library_enabled(self, user_id, skill_id, enabled):
         disabled = getattr(self, "_library_disabled", set())
+        disabled_slugs = getattr(self, "_library_disabled_slugs", set())
+        slug = skill_id.split(":", 1)[1] if ":" in skill_id else None
         if enabled:
             disabled.discard(skill_id)
+            if slug is not None:
+                disabled_slugs.discard(slug)
         else:
             disabled.add(skill_id)
+            if slug is not None:
+                disabled_slugs.add(slug)
         self._library_disabled = disabled
+        self._library_disabled_slugs = disabled_slugs
+
+    async def set_library_enabled_by_slug(self, user_id, slug, enabled):
+        disabled = getattr(self, "_library_disabled_slugs", set())
+        if enabled:
+            disabled.discard(slug)
+        else:
+            disabled.add(slug)
+        self._library_disabled_slugs = disabled
 
     def add_ignore(self, skill_id, content_hash=None):
         pass

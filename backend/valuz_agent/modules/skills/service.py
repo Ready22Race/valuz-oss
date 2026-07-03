@@ -78,13 +78,13 @@ async def _upsert_skill_row(user_id: str, ds: SkillDatastore, manifest) -> None:
     """
     from valuz_agent.modules.skills.models import SkillIndexRow
 
-    existing = await ds.get_by_id(user_id, manifest.id)
+    slug = manifest.slug or manifest.id
+    existing = await ds.get_by_slug(user_id, slug)
     if existing is None:
         await ds.create(
             user_id,
             SkillIndexRow(
-                id=manifest.id,
-                slug=manifest.slug or manifest.id,
+                slug=slug,
                 name=manifest.name,
                 description=manifest.description,
                 scope=manifest.scope,
@@ -107,9 +107,16 @@ async def _upsert_skill_row(user_id: str, ds: SkillDatastore, manifest) -> None:
             ),
         )
     else:
+        existing.slug = slug
         existing.name = manifest.name
         existing.description = manifest.description
+        existing.scope = manifest.scope
+        existing.source = manifest.source
         existing.source_path = manifest.path
+        existing.project_root = manifest.project_root
+        existing.manifest_filename = None
+        existing.tags_json = ",".join(manifest.tags) if manifest.tags else None
+        existing.icon = manifest.icon
         existing.status = "available"
         existing.content_hash = manifest.content_hash
         existing.manifest_hash = manifest.manifest_hash
@@ -255,13 +262,14 @@ class SkillLibraryService:
         # missing row (skill on disk but not yet indexed) or a NULL value
         # (legacy row seeded before the column landed) coalesces to
         # ``"discovered"`` so the field is always a real enum value.
-        origin_by_id = {row.id: row.creation_origin for row in await self._ds.list_skills(user_id)}
+        rows_by_slug = {row.slug: row for row in await self._ds.list_skills(user_id)}
 
-        def _origin(skill_id: str) -> str:
-            return origin_by_id.get(skill_id) or "discovered"
+        def _origin(slug: str) -> str:
+            row = rows_by_slug.get(slug)
+            return (row.creation_origin if row is not None else None) or "discovered"
 
         skills = [
-            SkillView(**item.model_dump(), creation_origin=_origin(item.id)) for item in items
+            SkillView(**item.model_dump(), creation_origin=_origin(item.slug)) for item in items
         ]
 
         from valuz_agent.modules.skills.contracts import ProjectRef, RuntimeContext
@@ -289,7 +297,7 @@ class SkillLibraryService:
         has_official_entitlement = await self._check_entitlement("skills:official")
         for source in self._extra_sources:
             for manifest in source.list_skills(ctx):
-                view = SkillView(**manifest.model_dump(), creation_origin=_origin(manifest.id))
+                view = SkillView(**manifest.model_dump(), creation_origin=_origin(manifest.slug))
                 # Bundled skills (origin_label="Built-in") ship with the
                 # client and are always free; never gate them behind the
                 # entitlement. Only externally-installed official skills
@@ -358,10 +366,10 @@ class SkillLibraryService:
         # the new-conversation ``/`` picker filters on. Built-in skills (bundled
         # with the client) are always-on and can't be disabled — guard here too so
         # a forced row value can never hide one, mirroring the disabled UI toggle.
-        disabled_ids = await self._ds.list_library_disabled_ids(user_id)
-        if disabled_ids:
+        disabled_slugs = await self._ds.list_library_disabled_slugs(user_id)
+        if disabled_slugs:
             for s in skills:
-                if s.id in disabled_ids and s.origin_label != "Built-in":
+                if s.slug in disabled_slugs and s.origin_label != "Built-in":
                     s.library_enabled = False
 
         return SkillsCatalog(project_id=project_id, skills=skills)
@@ -397,19 +405,20 @@ class SkillLibraryService:
                 )
                 all_manifests.extend(self._source.list_skills(project_ctx))
 
-        seen_ids: set[str] = set()
+        seen_slugs: set[str] = set()
         for manifest in all_manifests:
-            if manifest.id in seen_ids:
+            slug = manifest.slug or manifest.id
+            if slug in seen_slugs:
                 continue
-            seen_ids.add(manifest.id)
+            seen_slugs.add(slug)
             await self._upsert_manifest(user_id, manifest)
 
         for row in await self._ds.list_skills(user_id):
-            if row.id not in seen_ids:
+            if row.slug not in seen_slugs:
                 row.status = "unavailable"
                 await self._ds.update(row)
 
-        return len(seen_ids)
+        return len(seen_slugs)
 
     async def _upsert_manifest(self, user_id: str, manifest) -> None:  # type: ignore[no-untyped-def]
         """Create or refresh the index row for one manifest (see
@@ -508,7 +517,7 @@ class SkillLibraryService:
                 )
             except KeyError:
                 continue
-            await self._ds.set_creation_origin(user_id, written.id, "created")
+            await self._ds.set_creation_origin_by_slug(user_id, written.slug, "created")
 
         # Notify any subscribers (frontend uses /v1/skills/events/stream).
         self._bus.publish(SKILL_CHANGED, skill_id="*", reason="staging-sync")
@@ -942,8 +951,8 @@ class SkillLibraryService:
         # Overlay the global library switch (default on; off only when stored).
         # Built-in skills are always-on (can't be disabled), so never flip them.
         if skill.origin_label != "Built-in":
-            disabled_ids = await self._ds.list_library_disabled_ids(user_id)
-            skill.library_enabled = skill.id not in disabled_ids
+            disabled_slugs = await self._ds.list_library_disabled_slugs(user_id)
+            skill.library_enabled = skill.slug not in disabled_slugs
 
         return SkillDetail(
             **skill.model_dump(),
@@ -952,7 +961,7 @@ class SkillLibraryService:
             root_path=str(skill_dir),
             manifest_filename=manifest_filename,
             metadata=metadata,
-            origin=await self._load_origin(user_id, skill.id),
+            origin=await self._load_origin(user_id, skill.slug),
         )
 
     async def set_library_enabled(self, user_id: str, skill_id: str, enabled: bool) -> SkillDetail:
@@ -965,16 +974,17 @@ class SkillLibraryService:
         """
         from valuz_agent.modules.skills.errors import SkillNotFound
 
-        row = await self._ds.get_by_id(user_id, skill_id)
+        skill = await self._resolve_skill(user_id, skill_id=skill_id)
+        row = await self._ds.get_by_slug(user_id, skill.slug)
         if row is None:
             raise SkillNotFound(skill_id)
-        await self._ds.set_library_enabled(user_id, skill_id, enabled)
+        await self._ds.set_library_enabled_by_slug(user_id, skill.slug, enabled)
         self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="library_state")
         return await self.get_skill_detail(user_id, skill_id)
 
-    async def _load_origin(self, user_id: str, skill_id: str) -> SkillOrigin | None:
+    async def _load_origin(self, user_id: str, slug: str) -> SkillOrigin | None:
         """Read import provenance off the ``valuz_skill_index`` row, if any."""
-        row = await self._ds.get_by_id(user_id, skill_id)
+        row = await self._ds.get_by_slug(user_id, slug)
         if row is None or not row.origin_json:
             return None
         try:
@@ -1158,7 +1168,9 @@ class SkillLibraryService:
         # imports — host bookkeeping in valuz_skill_index, never SKILL.md.
         skill = await self._finalize_origin(user_id, target_dir, "imported", payload.project_id)
         if origin is not None:
-            await self._ds.set_origin_metadata(user_id, skill.id, origin.model_dump_json())
+            await self._ds.set_origin_metadata_by_slug(
+                user_id, skill.slug, origin.model_dump_json()
+            )
         return skill
 
     def _enforce_import_caps(self, skill_root: Path) -> None:
@@ -1493,7 +1505,7 @@ class SkillLibraryService:
         # The skill-creator AI flow landing a skill is a "created" act.
         # creation_origin is host bookkeeping in valuz_skill_index — the
         # startup_scan above created the row as "discovered"; overwrite it.
-        await self._ds.set_creation_origin(user_id, skill.id, "created")
+        await self._ds.set_creation_origin_by_slug(user_id, skill.slug, "created")
         skill.creation_origin = "created"
 
         # Notify subscribers — frontend reloads the catalog & cards.
@@ -1601,7 +1613,7 @@ class SkillLibraryService:
         except Exception:  # noqa: BLE001
             pass
         skill = await self._resolve_created_skill(user_id, skill_dir, project_id=project_id)
-        await self._ds.set_creation_origin(user_id, skill.id, origin)
+        await self._ds.set_creation_origin_by_slug(user_id, skill.slug, origin)
         skill.creation_origin = origin
         return skill
 

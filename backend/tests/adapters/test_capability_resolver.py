@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -57,16 +58,26 @@ class _FakeProjectDatastore:
 class _FakeSkillDatastore:
     """Honors only what the resolver consumes: enabled_skill_paths + get_by_id."""
 
-    def __init__(self, enabled_paths: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        enabled_paths: set[str] | None = None,
+        rows_by_id: dict[str, object] | None = None,
+        rows_by_slug: dict[str, object] | None = None,
+    ) -> None:
         self._enabled_paths = enabled_paths or set()
+        self._rows_by_id = rows_by_id or {}
+        self._rows_by_slug = rows_by_slug or {}
 
     def enabled_skill_paths(self, project: _FakeProject) -> set[str]:
         if project.kind != "project":
             return set()
         return self._enabled_paths
 
-    def get_by_id(self, user_id: str, skill_id: str):  # noqa: ANN201 — matches real signature
-        return None
+    async def get_by_id(self, user_id: str, skill_id: str):  # noqa: ANN201 — matches real signature
+        return self._rows_by_id.get(skill_id)
+
+    async def get_by_slug(self, user_id: str, slug: str):  # noqa: ANN201 — matches real signature
+        return self._rows_by_slug.get(slug)
 
 
 class _FakeSkillSource:
@@ -122,6 +133,24 @@ def test_chat_project_auto_includes_user_library_skills(tmp_path: Path) -> None:
 
     assert _user_skills(caps.skills) == (str(skill_dir.resolve(strict=False)),)
     assert _DOCS_SKILL_PATH in caps.skills
+
+
+def test_extra_skill_id_resolves_manifest_id_by_slug(tmp_path: Path) -> None:
+    skill_dir = _make_skill_dir(tmp_path, "skill-creator")
+    project = _FakeProject(id="ws-project", kind="project", root_path=str(tmp_path))
+    row = SimpleNamespace(source_path=str(skill_dir.resolve(strict=False)))
+
+    caps = asyncio.run(
+        resolve_session_capabilities(
+            projects=_FakeProjectDatastore(project),
+            skills=_FakeSkillDatastore(rows_by_slug={"skill-creator": row}),
+            project_id="ws-project",
+            extra_skill_ids=["official:skill-creator"],
+        )
+    )
+
+    assert str(skill_dir.resolve(strict=False)) in caps.skills
+    assert caps.skill_resolution_warnings == ()
 
 
 def test_project_does_not_auto_include_user_library_skills(
