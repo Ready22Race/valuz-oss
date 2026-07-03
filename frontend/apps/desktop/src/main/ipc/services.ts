@@ -1,5 +1,12 @@
 import type { ServiceDescriptor } from '@valuz/core'
 import { createServiceManager, type DesktopServiceManager } from '../services/mod'
+import { cleanStaleUpdateCache } from '../update-cache'
+
+// Once-per-session guard: purge a previous version's leftover update package the
+// first time the backend reports healthy, not before. Keeping it until the new
+// build proves it actually runs means a start-up failure (e.g. a bad update)
+// still leaves the old package around to fall back to.
+let updateCachePurged = false
 
 export interface DesktopRuntime {
   startAllServices(): Promise<ReturnType<DesktopServiceManager['getAllStatus']>>
@@ -23,6 +30,15 @@ export const createDesktopRuntime = (
   async startAllServices() {
     const snapshot = await manager.startAllServices()
     emitEvent('service-status-changed', snapshot)
+    // Backend came up healthy → the app has truly started. Only now purge a
+    // previous version's leftover update package (see ``cleanStaleUpdateCache``).
+    if (
+      !updateCachePurged &&
+      snapshot.some((s) => s.name === 'agent-server' && s.status === 'running')
+    ) {
+      updateCachePurged = true
+      cleanStaleUpdateCache()
+    }
     return snapshot
   },
   async stopAllServices() {
