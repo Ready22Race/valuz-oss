@@ -199,7 +199,7 @@ class Settings(BaseSettings):
     # Optional legacy skill-creator staging directory. May contain
     # ``{user_id}``; when unset it lives under ``data_dir(user_id)``.
     # Override with VALUZ_USER_SKILL_STAGING_DIR.
-    skill_staging_dir: Path | None = Field(
+    user_skill_staging_dir: Path | None = Field(
         default=None,
         validation_alias="VALUZ_USER_SKILL_STAGING_DIR",
     )
