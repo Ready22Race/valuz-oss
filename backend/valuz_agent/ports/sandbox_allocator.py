@@ -51,6 +51,16 @@ class SandboxAllocatorPort(Protocol):
         """Best-effort teardown for ``owner_user_id`` (idle TTL). Idempotent."""
         ...
 
+    async def peek(self, *, owner_user_id: str) -> SandboxLease | None:
+        """Return the owner's CURRENT lease **without provisioning**; ``None`` if
+        the owner has no live kernel.
+
+        For GLOBAL-LIVE taps (the decision inbox): opening the inbox must never
+        spin up a sandbox. ``ensure`` provisions; ``peek`` only reveals what's
+        already running.
+        """
+        ...
+
 
 class BootSingletonAllocator:
     """Default OSS allocator: every owner shares the one process/boot kernel.
@@ -66,6 +76,11 @@ class BootSingletonAllocator:
 
     async def release(self, *, owner_user_id: str) -> None:
         return None
+
+    async def peek(self, *, owner_user_id: str) -> SandboxLease | None:
+        # The boot / in-process kernel always exists → route to the global
+        # client (``endpoint=None``), same as ``ensure``.
+        return SandboxLease(endpoint=None)
 
 
 __all__ = ["BootSingletonAllocator", "SandboxAllocatorPort", "SandboxLease"]

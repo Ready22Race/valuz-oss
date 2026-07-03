@@ -71,6 +71,13 @@ def _provision_sandboxed_kernel(args: argparse.Namespace) -> None:
 
     log = logging.getLogger("valuz_agent.sandbox")
 
+    if not settings.initialize_user_content_on_startup:
+        log.info(
+            "startup user-content initialization disabled; "
+            "boot sandbox provisioning skipped"
+        )
+        return
+
     driver_name = os.environ.get("VALUZ_SANDBOX_DRIVER")
     driver = sandbox_registry.get(driver_name)
     if driver is None:
@@ -179,7 +186,13 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = _parse_args(argv)
-    fs_registry.data_dir()  # ensure the data root exists
+
+    if settings.initialize_user_content_on_startup:
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
+        fs_registry.data_dir(resolve_local_user_id())  # ensure the user data root exists
+    else:
+        fs_registry.shared_root()  # ensure only the process-shared root exists
     # NB: structured JSON logging is configured **inside** the FastAPI
     # startup hook (see ``api/app.py``), NOT here. Uvicorn calls
     # ``logging.config.dictConfig`` during its own boot which wipes

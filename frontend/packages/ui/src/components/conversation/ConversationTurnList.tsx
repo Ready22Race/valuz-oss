@@ -593,7 +593,7 @@ const UserMessageBody = ({
     parts.push(
       <span
         key={`s-${key++}`}
-        className="mr-0.5 inline-flex items-center gap-1 rounded-full border border-brand/20 bg-brand-light px-2 py-0.5 text-2xs text-brand align-middle select-none"
+        className="mr-0.5 inline-flex h-5 items-center gap-1 rounded-[4px] border border-brand/20 bg-brand-100 px-2 py-0 text-2xs text-brand-700 align-middle select-none"
       >
         <Zap className="h-3 w-3" />
         {entry?.name ?? slug}
@@ -650,6 +650,12 @@ const TurnRow = memo(
     const showStreamingCaret = inFlight && lastBlock?.kind === "assistant";
     const showLoadingDots = inFlight && !turn.failedMessage;
     const displayBlocks = buildDisplayBlocks(turn, renderToolCall);
+    const assistantText = turn.blocks
+      .filter((b) => b.kind === "assistant")
+      .map((b) => b.text)
+      .join("\n\n");
+    const actionText =
+      assistantText || (turn.cancelled ? t("conversation.userCancelled") : "");
 
     // Turn-level meta: total elapsed (max of any block's elapsedMs) and
     // whether the turn has any process content worth surfacing as a
@@ -920,22 +926,19 @@ const TurnRow = memo(
               </div>
             ) : null}
 
-            {!inFlight &&
-            !turn.failedMessage &&
-            turn.blocks.some((b) => b.kind === "assistant") ? (
-              <MessageActions
-                text={turn.blocks
-                  .filter((b) => b.kind === "assistant")
-                  .map((b) => (b as { text: string }).text)
-                  .join("\n\n")}
-                onRetry={onRetry ? () => onRetry(turn.id) : undefined}
-              />
-            ) : null}
-
             {turn.cancelled ? (
-              <div className="py-1.5 text-[13px] text-ink-meta">
+              <div className="py-1.5 text-[13px] italic text-ink-muted">
                 {t("conversation.userCancelled")}
               </div>
+            ) : null}
+
+            {!inFlight &&
+            !turn.failedMessage &&
+            (assistantText || turn.cancelled) ? (
+              <MessageActions
+                text={actionText}
+                onRetry={onRetry ? () => onRetry(turn.id) : undefined}
+              />
             ) : null}
 
             {turn.failedMessage ? (
@@ -984,6 +987,12 @@ interface ConversationTurnListProps {
   emptyTitle?: string;
   emptySuggestions?: string[];
   onEmptySuggestionClick?: (text: string) => void;
+  /** Show the new-chat welcome (mascot + title + suggestions) when there are no
+   *  turns. Only true for a genuinely fresh conversation — an existing
+   *  conversation whose transcript is still loading has no turns yet either, and
+   *  must NOT flash the welcome before its history lands. The error card renders
+   *  regardless. */
+  showWelcome?: boolean;
 }
 
 export function ConversationTurnList({
@@ -1004,6 +1013,7 @@ export function ConversationTurnList({
   emptyTitle,
   emptySuggestions,
   onEmptySuggestionClick,
+  showWelcome,
 }: ConversationTurnListProps) {
   const { t } = useI18n();
   const rowVirtualizer = useVirtualizer({
@@ -1185,26 +1195,31 @@ export function ConversationTurnList({
             <div className="mx-auto mb-5 max-w-[520px]">
               <ErrorMessageCard message={error} />
             </div>
-          ) : null}
-          {/* Friendly mascot above the title — the same illustration that
-              used to sit at the bottom of the sidebar, moved here so the
-              empty new-chat page feels less bare. */}
-          <img
-            src="./mascot.png"
-            alt=""
-            aria-hidden="true"
-            className="pointer-events-none mx-auto mb-6 h-[160px] w-auto select-none opacity-80"
-          />
-          <div className="text-center text-2xl font-medium leading-tight text-ink-heading">
-            {emptyTitle ?? t("conversation.startHere")}
-          </div>
-          {emptySuggestions && emptySuggestions.length > 0 ? (
-            <div className="mx-auto mt-5 max-w-[750px]">
-              <SuggestionList
-                suggestions={emptySuggestions}
-                onClick={onEmptySuggestionClick}
+          ) : showWelcome ? (
+            <>
+              {/* Friendly mascot above the title — the same illustration that
+                  used to sit at the bottom of the sidebar, moved here so the
+                  empty new-chat page feels less bare. Gated on ``showWelcome``
+                  so an existing conversation still fetching its transcript (no
+                  turns yet) doesn't flash this new-chat state mid-load. */}
+              <img
+                src="./mascot.png"
+                alt=""
+                aria-hidden="true"
+                className="pointer-events-none mx-auto mb-6 h-[160px] w-auto select-none opacity-80"
               />
-            </div>
+              <div className="text-center text-2xl font-medium leading-tight text-ink-heading">
+                {emptyTitle ?? t("conversation.startHere")}
+              </div>
+              {emptySuggestions && emptySuggestions.length > 0 ? (
+                <div className="mx-auto mt-5 max-w-[750px]">
+                  <SuggestionList
+                    suggestions={emptySuggestions}
+                    onClick={onEmptySuggestionClick}
+                  />
+                </div>
+              ) : null}
+            </>
           ) : null}
         </div>
       ) : null}

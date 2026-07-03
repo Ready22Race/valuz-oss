@@ -44,9 +44,8 @@ async def _get_pack_service(
 ) -> AgentPackService:
     from valuz_agent.modules.connectors.datastore import ConnectorDatastore
     from valuz_agent.modules.connectors.service import ConnectorService
-    from valuz_agent.ports.extensions import ext
 
-    connector_svc = ConnectorService(ConnectorDatastore(db), ext.secret_store)
+    connector_svc = ConnectorService(ConnectorDatastore(db))
     agent_svc = AgentService(db, connector_service=connector_svc)  # type: ignore[arg-type]
     return AgentPackService(agent_svc)
 

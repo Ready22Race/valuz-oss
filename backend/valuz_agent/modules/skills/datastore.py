@@ -53,6 +53,20 @@ class SkillDatastore:
             .first()
         )
 
+    async def get_by_slug(self, user_id: str, slug: str) -> SkillIndexRow | None:
+        return (
+            (
+                await self._db.execute(
+                    select(SkillIndexRow).where(
+                        SkillIndexRow.user_id == user_id,
+                        SkillIndexRow.slug == slug,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+
     async def set_creation_origin(self, user_id: str, skill_id: str, origin: str) -> None:
         """Stamp ``creation_origin`` on an existing ``valuz_skill_index`` row.
 
@@ -68,6 +82,15 @@ class SkillDatastore:
         row.creation_origin = origin
         await async_commit_with_retry(self._db, where="SkillDatastore.set_creation_origin")
 
+    async def set_creation_origin_by_slug(self, user_id: str, slug: str, origin: str) -> None:
+        row = await self.get_by_slug(user_id, slug)
+        if row is None:
+            return
+        row.creation_origin = origin
+        await async_commit_with_retry(
+            self._db, where="SkillDatastore.set_creation_origin_by_slug"
+        )
+
     async def set_origin_metadata(self, user_id: str, skill_id: str, origin_json: str) -> None:
         """Stamp import provenance (``origin_json``) on an existing row.
 
@@ -80,6 +103,15 @@ class SkillDatastore:
             return
         row.origin_json = origin_json
         await async_commit_with_retry(self._db, where="SkillDatastore.set_origin_metadata")
+
+    async def set_origin_metadata_by_slug(self, user_id: str, slug: str, origin_json: str) -> None:
+        row = await self.get_by_slug(user_id, slug)
+        if row is None:
+            return
+        row.origin_json = origin_json
+        await async_commit_with_retry(
+            self._db, where="SkillDatastore.set_origin_metadata_by_slug"
+        )
 
     async def create(self, user_id: str, row: SkillIndexRow) -> SkillIndexRow:
         row.user_id = user_id
@@ -148,6 +180,18 @@ class SkillDatastore:
         ).scalars()
         return set(rows)
 
+    async def list_library_disabled_slugs(self, user_id: str) -> set[str]:
+        """Skill slugs the user has turned OFF in the library."""
+        rows = (
+            await self._db.execute(
+                select(SkillIndexRow.slug).where(
+                    SkillIndexRow.user_id == user_id,
+                    SkillIndexRow.library_enabled.is_(False),
+                )
+            )
+        ).scalars()
+        return set(rows)
+
     async def set_library_enabled(self, user_id: str, skill_id: str, enabled: bool) -> None:
         """Set the global library switch on one index row (the Skills-page
         representative). No-op if the id is unknown to this owner."""
@@ -156,6 +200,15 @@ class SkillDatastore:
             return
         row.library_enabled = enabled
         await async_commit_with_retry(self._db, where="SkillDatastore.set_library_enabled")
+
+    async def set_library_enabled_by_slug(self, user_id: str, slug: str, enabled: bool) -> None:
+        row = await self.get_by_slug(user_id, slug)
+        if row is None:
+            return
+        row.library_enabled = enabled
+        await async_commit_with_retry(
+            self._db, where="SkillDatastore.set_library_enabled_by_slug"
+        )
 
     # ------------------------------------------------------------------
     # Filesystem-based project skill config (JSON project-config.json)

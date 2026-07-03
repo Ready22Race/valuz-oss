@@ -2,9 +2,9 @@
 
 OSS is single-tenant: every row is owned by one local user. That owner id is a
 stable string generated **once** on first install from a device fingerprint,
-then persisted to ``~/.valuz-oss/installation.json`` so it survives both process
-restarts and DB clean-up rebuilds (the file lives outside the business tables on
-purpose — see ``infra.config.installation_file``).
+then persisted under the resolved ``VALUZ_DATA_DIR`` so it survives both process
+restarts and DB clean-up rebuilds (the file lives outside the business tables
+on purpose and its path is resolved by ``FsRegistry``).
 
 The commercial edition never calls this: it overrides identity resolution via
 ``set_identity_resolver()`` and supplies its own per-request ``user_id`` from the
@@ -19,8 +19,10 @@ import logging
 import platform
 import uuid
 from functools import lru_cache
+from pathlib import Path
 
 from valuz_agent.infra.config import settings
+from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.time_utils import now_ms
 
 logger = logging.getLogger(__name__)
@@ -53,24 +55,20 @@ def _fingerprint_to_user_id(fingerprint: str) -> str:
 def resolve_local_user_id() -> str:
     """Return the persisted OSS owner id, generating it on first call.
 
-    Reads ``settings.installation_file``; if absent (or unreadable / malformed),
-    derives the id from the device fingerprint and writes the file. Cached for
-    the process lifetime.
+    Reads the current user-scoped installation file, with a legacy fallback for
+    the pre-user-directory ``<VALUZ_DATA_DIR>/installation.json`` file. If absent
+    (or unreadable / malformed), derives the id from the device fingerprint and
+    writes the new user-scoped file. Cached for the process lifetime.
     """
-    path = settings.installation_file
-
     existing = _read_installation_file()
     if existing is not None:
         return existing
 
     fingerprint = _device_fingerprint()
     user_id = _fingerprint_to_user_id(fingerprint)
+    path = _installation_file_for_user(user_id)
     try:
-        # Lazy import: ``config`` lazy-imports this module (internal_mcp_token),
-        # so keep the fs_registry dependency local to avoid an import cycle.
-        from valuz_agent.infra.fs_registry import fs_registry
-
-        fs_registry.data_dir()  # ensure the data root exists before writing
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(
                 {
@@ -92,14 +90,39 @@ def resolve_local_user_id() -> str:
 
 def _read_installation_file() -> str | None:
     """Return the stored ``user_id`` if the file exists and is valid."""
-    path = settings.installation_file
+    for path in _candidate_installation_files():
+        user_id = _read_user_id_from(path)
+        if user_id:
+            return user_id
+    return None
+
+
+def _candidate_installation_files() -> list[Path]:
+    root = settings.data_dir
+    candidates = [root / settings.installation_filename]
+    if "{user_id}" in str(root):
+        template_parent = Path(str(root).replace("{user_id}", "")).expanduser()
+        candidates.append(template_parent / settings.installation_filename)
+        root = template_parent
+    if root.is_dir():
+        for child in sorted(root.iterdir()):
+            if child.is_dir():
+                candidates.append(child / settings.installation_filename)
+    return candidates
+
+
+def _installation_file_for_user(user_id: str) -> Path:
+    return fs_registry.installation_file(user_id)
+
+
+def _read_user_id_from(path: Path) -> str | None:
     if not path.is_file():
         return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         user_id = data["user_id"]
     except (OSError, KeyError, json.JSONDecodeError):
-        logger.warning("Malformed installation file at %s — regenerating", path)
+        logger.warning("Malformed installation file at %s — ignoring", path)
         return None
     if isinstance(user_id, str) and user_id:
         return user_id

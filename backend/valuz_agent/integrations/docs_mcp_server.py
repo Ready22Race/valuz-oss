@@ -81,7 +81,7 @@ async def _resolve_project_id(user_id: str, session_id: str) -> str | None:
     return str(project_id) if project_id else None
 
 
-def _build_doc_service(db: Any) -> Any:  # type: ignore[no-untyped-def]
+def _build_doc_service(db: Any, user_id: str) -> Any:  # type: ignore[no-untyped-def]
     """Build a one-shot DocumentLibraryService against ``db`` (an open
     ``AsyncSession``).
 
@@ -90,21 +90,20 @@ def _build_doc_service(db: Any) -> Any:  # type: ignore[no-untyped-def]
     per invocation; in return we don't have to thread a long-lived session
     through the FastMCP request pipeline.
     """
-    from valuz_agent.infra.config import settings
     from valuz_agent.infra.eventbus import event_bus
+    from valuz_agent.infra.fs_registry import fs_registry
     from valuz_agent.integrations.docs_embedded import EmbeddedDocsRuntime
     from valuz_agent.integrations.parser_light_local import LightLocalParser
     from valuz_agent.modules.docs.datastore import DocumentDatastore
     from valuz_agent.modules.docs.service import DocumentLibraryService
 
-    preview_dir = settings.docs_dir / "preview"
-    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview_dir = fs_registry.docs_preview_dir(user_id)
     return DocumentLibraryService(
         datastore=DocumentDatastore(db),
         parser=LightLocalParser(),
         docs_runtime=EmbeddedDocsRuntime(preview_dir=preview_dir),
         event_bus=event_bus,
-        scan_state_dir=settings.docs_dir / "scan_state",
+        scan_state_dir=fs_registry.docs_scan_state_dir(user_id),
     )
 
 
@@ -140,7 +139,7 @@ async def doc_search(
     if project_id is None:
         return []
     async with async_unit_of_work(commit=False) as db:
-        svc = _build_doc_service(db)
+        svc = _build_doc_service(db, user_id)
         hits = await svc.search_docs(
             user_id,
             project_id=project_id,
@@ -184,7 +183,7 @@ async def list_doc_scope(folder_id: str | None = None) -> dict[str, Any]:
     if project_id is None:
         return {"knowledge_bases": [], "total_documents": 0}
     async with async_unit_of_work(commit=False) as db:
-        svc = _build_doc_service(db)
+        svc = _build_doc_service(db, user_id)
         tree = await svc.build_doc_scope_tree(user_id, project_id)
     return _scope_tree_to_dict(tree)
 

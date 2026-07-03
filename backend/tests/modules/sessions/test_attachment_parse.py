@@ -55,13 +55,14 @@ def db(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
 
 
 @pytest.fixture
-def asset_store(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
-    """Point ``ext.asset_store`` at a tmp local store so attachment put/fetch
+def data_dir_store(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """Point VALUZ_DATA_DIR at a tmp local root so attachment put/fetch
     is isolated and inspectable."""
-    from valuz_agent.infra.asset_store import LocalAssetStore
-    from valuz_agent.ports.extensions import ext
+    from valuz_agent.api.routes import sessions as sessions_routes
+    from valuz_agent.modules.sessions import attachments as attachments_mod
 
-    monkeypatch.setattr(ext, "asset_store", LocalAssetStore(tmp_path))
+    monkeypatch.setattr(sessions_routes.fs_registry, "data_dir", lambda user_id: tmp_path)
+    monkeypatch.setattr(attachments_mod.fs_registry, "data_dir", lambda user_id: tmp_path)
 
 
 class _Row:
@@ -230,8 +231,8 @@ async def _run_spawn(rid: str, src, _dest, base_name: str) -> SessionAttachmentR
     from valuz_agent.api.routes.sessions import _spawn_attachment_parse
     from valuz_agent.infra.db import async_unit_of_work
 
-    # ``_make_parsing_row`` stamps session_id="s1"; the parsed asset lands under
-    # ``attachments/s1/`` in the tmp asset store bound by the ``asset_store`` fixture.
+    # ``_make_parsing_row`` stamps session_id="s1"; the parsed file lands under
+    # ``attachments/s1/`` in the tmp data dir bound by the fixture.
     _spawn_attachment_parse(rid, str(src), "s1", base_name, "local-test-owner")
     await _drain_parse_tasks()
     async with async_unit_of_work() as session:
@@ -241,7 +242,7 @@ async def _run_spawn(rid: str, src, _dest, base_name: str) -> SessionAttachmentR
 
 
 async def test_spawn_sync_backend_uses_parse_sync_not_parse(
-    db, asset_store, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     """S2-06: a SYNC backend is driven via parse_sync (off-loop), never the
     on-loop async parse()."""
@@ -258,7 +259,7 @@ async def test_spawn_sync_backend_uses_parse_sync_not_parse(
 
 
 async def test_spawn_async_poll_backend_awaits_parse_not_parse_sync(  # type: ignore[no-untyped-def]
-    db, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:
     """S2-05: an ASYNC_POLL (MinerU/PaddleOCR) backend is awaited via parse()
     on the main loop — NOT to_thread(parse_sync), which would asyncio.run a
@@ -276,7 +277,7 @@ async def test_spawn_async_poll_backend_awaits_parse_not_parse_sync(  # type: ig
 
 
 async def test_spawn_records_configured_engine_and_writes_markdown(  # type: ignore[no-untyped-def]
-    db, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:
     """S2-01 / X-07 (attachment context): with a configured cloud parser, the
     attachment is parsed by THAT engine and the row records its provenance."""
@@ -293,13 +294,14 @@ async def test_spawn_records_configured_engine_and_writes_markdown(  # type: ign
     assert got.parse_status == "ready"
     assert got.parse_mode == "mineru"
     assert got.parsed_path is not None
-    from valuz_agent.ports.extensions import ext
 
-    blob = ext.asset_store.get("local-test-owner", got.parsed_path)
+    blob = (tmp_path / got.parsed_path).read_bytes()
     assert blob is not None and blob.decode("utf-8") == "MINERU EXTRACTED TEXT"
 
 
-async def test_spawn_parser_exception_marks_failed(db, asset_store, tmp_path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+async def test_spawn_parser_exception_marks_failed(
+    db, data_dir_store, tmp_path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
     """S1-07: a parser crash flips the row to failed (never stranded in
     parsing) and records the error — the poller stops."""
     router = _SpyRouter(mode=ParserPluginMode.SYNC, raises=RuntimeError("kaboom"))
@@ -314,7 +316,7 @@ async def test_spawn_parser_exception_marks_failed(db, asset_store, tmp_path, mo
 
 
 async def test_spawn_result_with_error_metadata_marks_failed(
-    db, asset_store, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     """S1-08: an unsupported/binary file (parser returns metadata['error'])
     is classified failed, not written as a bogus parsed.md — and the
@@ -337,7 +339,7 @@ async def test_spawn_result_with_error_metadata_marks_failed(
 
 
 async def test_spawn_office_error_reason_is_persisted(
-    db, asset_store, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     """Regression for the Windows docx report: a frozen build missing magika's
     model makes MarkItDown raise, which light_local catches and RETURNS as
@@ -366,7 +368,7 @@ async def test_spawn_office_error_reason_is_persisted(
 
 
 async def test_spawn_image_parse_miss_marks_native_not_failed(
-    db, asset_store, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     """An image the local parser can't text-extract (e.g. OCR not authorized,
     no enhanced model) is NOT a failure: it's reclassified ``native`` so the
@@ -388,7 +390,7 @@ async def test_spawn_image_parse_miss_marks_native_not_failed(
 
 
 async def test_spawn_image_parser_exception_marks_native(
-    db, asset_store, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     """Even a hard parser crash on an image lands ``native`` (hand it to the
     runtime) rather than ``failed`` — the runtime does its best with the raw
@@ -404,7 +406,7 @@ async def test_spawn_image_parser_exception_marks_native(
 
 
 async def test_spawn_real_light_local_router_end_to_end(
-    db, asset_store, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     """Scenario-1 end-to-end through the REAL ParserRouter + LightLocal plugin
     (no stub): a .txt attachment parses to ready with engine=light_local and
@@ -428,9 +430,8 @@ async def test_spawn_real_light_local_router_end_to_end(
     assert got.parse_status == "ready"
     assert got.parse_mode == "light_local"
     assert got.parsed_path is not None and got.parsed_path.endswith(".parsed.md")
-    from valuz_agent.ports.extensions import ext
 
-    blob = ext.asset_store.get("local-test-owner", got.parsed_path)
+    blob = (tmp_path / got.parsed_path).read_bytes()
     assert blob is not None and "hello world" in blob.decode("utf-8")
 
 
@@ -500,7 +501,7 @@ def _router_with_cloud_primary():  # type: ignore[no-untyped-def]
 
 
 async def test_scenario2_configured_cloud_parses_pdf_attachment(
-    db, asset_store, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     """S2-01: with the configured router primary = fake_cloud, a .pdf
     conversation attachment is parsed by fake_cloud (NOT light_local)."""
@@ -513,14 +514,14 @@ async def test_scenario2_configured_cloud_parses_pdf_attachment(
     got = await _run_spawn(rid, src, dest, "doc.pdf")
     assert got.parse_status == "ready"
     assert got.parse_mode == "fake_cloud"
-    from valuz_agent.ports.extensions import ext
 
-    blob = ext.asset_store.get("local-test-owner", got.parsed_path)
+    assert got.parsed_path is not None
+    blob = (tmp_path / got.parsed_path).read_bytes()
     assert blob is not None and "FAKECLOUD::" in blob.decode("utf-8")
 
 
 async def test_scenario2_locked_text_kind_stays_local_even_with_cloud_primary(  # type: ignore[no-untyped-def]
-    db, tmp_path, monkeypatch
+    db, data_dir_store, tmp_path, monkeypatch
 ) -> None:
     """S2-02 edge: text is a LOCKED_LOCAL_KIND — even with cloud configured, a
     .txt attachment routes to light_local, not the cloud engine."""

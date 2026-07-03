@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.modules.providers.datastore import ProviderDatastore
 from valuz_agent.modules.providers.discover import DiscoveredModel, ModelDiscoveryError
 from valuz_agent.modules.providers.errors import ProviderNotFound
@@ -33,20 +32,6 @@ from valuz_agent.ports.extensions import ext
 from valuz_agent.ports.llm_provider import NoopLLMProvider
 
 OWNER = "owner-A"
-
-
-class _InMemorySecretStore(SecretStorePort):
-    def __init__(self) -> None:
-        self._values: dict[tuple[str, str], str] = {}
-
-    def get(self, user_id: str, key: str) -> str | None:
-        return self._values.get((user_id, key))
-
-    def put(self, user_id: str, key: str, value: str) -> None:
-        self._values[(user_id, key)] = value
-
-    def delete(self, user_id: str, key: str) -> None:
-        self._values.pop((user_id, key), None)
 
 
 class _SvcHandle:
@@ -73,7 +58,7 @@ async def svc(tmp_path) -> AsyncIterator[_SvcHandle]:
     async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
     async_factory = async_sessionmaker(bind=async_engine, expire_on_commit=False)
     async_session = async_factory()
-    service = ProviderService(ProviderDatastore(async_session), _InMemorySecretStore(), EventBus())
+    service = ProviderService(ProviderDatastore(async_session), EventBus())
     try:
         yield _SvcHandle(service, sync_factory)
     finally:
@@ -436,7 +421,9 @@ class TestMaterializeLoggedInSubscription:
         a = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
         b = await materialize_logged_in_subscription(ds, OWNER, "ch-codex-subscription")
         assert a is not None and b is not None and a.id == b.id
-        codex = [r for r in await ds.list_providers(OWNER) if r.provider_kind == "codex-subscription"]
+        codex = [
+            r for r in await ds.list_providers(OWNER) if r.provider_kind == "codex-subscription"
+        ]
         assert len(codex) == 1
 
     async def test_normalizes_legacy_undeletable_row(self, svc: _SvcHandle, monkeypatch) -> None:

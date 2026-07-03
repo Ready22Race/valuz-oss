@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-02
+
+### Added
+
+- **Multi-tenant / SaaS foundation.** A large body of work makes the host ready
+  to serve many owners from one process: a new **DataService** durable data
+  layer — the local `kernel.db` write-through to the host `valuz.db`, or a remote
+  HTTP data service; env-driven and always-on (#354 @Ready22Race) — plus a
+  host-wide `list_all_sessions` over the durable DataReader (#371 @Ready22Race),
+  per-user kernel allocation through a `SandboxAllocatorPort` seam
+  (#370 @Ready22Race), multi-tenant provisioning + authorization seams
+  (#359 @Ready22Race), owner-parametrized data-service wiring + a per-owner
+  verifier (#365 @Ready22Race), per-owner auth for the built-in MCP callbacks
+  (#374 @Ready22Race), and an owner-scoped decision-inbox aggregator
+  (#380 @Ready22Race).
+- **Project export / import.** Projects export and import as a portable archive
+  (#320 @hanjixin); agent and project export are unified into one `.valuzpack`
+  format (#321 @St0neWan9); `ResourceLibrary` gains project + automation kinds
+  (#327 @hanjixin).
+- **Artifact file viewer** — open a generated artifact in an in-app viewer
+  (#313 @zhourongyu).
+- **Automation** — manual triggers with localized cadence and card/panel UX
+  (#336 @St0neWan9), a fullscreen instruction editor + "Run now"
+  (#339 @St0neWan9), and per-run input / a `get` action / background chat runs
+  (#343 @St0neWan9).
+- **Activity feed** — a unified cursor-paginated feed shared by the project home
+  and the global activity list (#351 @St0neWan9); chats float to the top on new
+  messages, in both the feed and the sidebar (#355 @St0neWan9).
+- **Cloud / headless projects & KB** — managed cwd/root + multipart file upload
+  (#348 @hanjixin), with `directoryFieldMode` plumbed through the Knowledge page
+  (#350 @hanjixin).
+- **Task detail** — render the `AskUserQuestion` card in the Lead follow-up chat
+  (#367 @St0neWan9); open the task detail and conversations on their latest
+  content (#378 @St0neWan9); collapse an over-long goal / event text to 20 lines
+  (#379 @St0neWan9).
+
+### Changed
+
+- **Explicit owner identity throughout.** User id is now threaded explicitly
+  across the host's service boundaries instead of an ambient context — service
+  calls (#314 @homeant), background runs (#328 @homeant), the built-in MCP
+  context + auth (#329 @homeant), agent slugs (#352 @homeant), knowledge-base
+  roots (#353 @homeant), connector slugs (scoped + idempotent per user)
+  (#337, #338 @homeant), and user-scoped local filesystem storage
+  (#381 @homeant) — with `FsRegistry` as the single read/write data-dir boundary
+  (#373 @Ready22Race).
+- Provider onboarding + agent cleanup polish (#324 @zhourongyu).
+- Project sidebar menu reordered and "open in directory" relabeled
+  (#323 @St0neWan9).
+- Project home renders its shell immediately and defers non-critical fetches
+  (#349 @St0neWan9).
+- Task-detail polish + wrap long unbreakable text (#347 @St0neWan9); a cancelled
+  turn now shows a quiet grey line instead of an error card (#368 @St0neWan9);
+  user messages chip only real skills + leading commands, never `/path` segments
+  (#369 @St0neWan9).
+- Running task rows read the same "running" label as chat rows in the activity
+  feed (#377 @St0neWan9).
+- Design pass toward Valuz v2.6 — UI refresh (#315 @yy83000812), button styles
+  (#357 @yy83000812), badge styling (#362 @yy83000812), and shadow-1 card
+  outlines (#364 @yy83000812).
+- Composer attachments + error-card boundaries (#332 @hanjixin).
+
+### Fixed
+
+- **Owner-id threading fixes.** Complete the explicit user-id dependencies
+  (#325, #326 @homeant); thread the caller's user id into harness tool service
+  calls (#334 @Ready22Race) and `_member_agent_config` (#335 @Ready22Race); make
+  the built-in harness tools usable — owner context + reachable endpoint
+  (#333 @Ready22Race); thread user_id through `get_project_pack_service`
+  (#330 @hanjixin), the parser setup-job routes to fix a 500 (#360 @Ready22Race),
+  skill-path resolution on export (#366 @St0neWan9), and requires_action
+  enrichment (#376 @St0neWan9).
+- Windows upgrade boot crash + sidecar process-tree teardown
+  (#319 @Ready22Race).
+- Task stop/pause state consistency + RecoveryService extraction and a green
+  test gate (#346 @Ready22Race); guard `await_members` against a
+  "planned but never dispatched" hang (#372 @Ready22Race).
+- Gate local skill indexing (#316 @homeant); skill empty-state translations
+  (#344 @hanjixin).
+- Preview generated conversation artifacts inline (#317 @zhourongyu); name the
+  export download from the dialog's name input (#322 @St0neWan9); contain long
+  error-card details (#340 @hanjixin); match the fullscreen instruction editor to
+  the dialog size (#342 @St0neWan9).
+- Follow-up chat — visible turns, streaming state, uniform composer background
+  (#361 @St0neWan9).
+- Activity empty-state alignment (#318, #363 @yy83000812).
+- Skip schema bootstrap for cloud workers (#345 @homeant); fix quality gates +
+  cloud creation flows (#356 @hanjixin); prime the kernel `sys.path` before
+  importing `app.schemas` in the data reader (#375 @Ready22Race); support
+  templated data + project roots (#383 @homeant); separate the log dir from the
+  data dir (#384 @homeant).
+
+### Docs & Chore
+
+- Complete the 0.2.5 changelog (#311 @St0neWan9); require deriving the CHANGELOG
+  from git, with English-only notes (#312 @St0neWan9); make artifact delivery an
+  explicit strong rule in the handbook (#341 @Ready22Race).
+- Fix test signature compatibility after the user-id context merge
+  (#331 @homeant); use the corepack pnpm shim for frontend commands
+  (#358 @yy83000812).
+
 ## [0.2.5] - 2026-06-27
 
 ### Added

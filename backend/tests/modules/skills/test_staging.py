@@ -26,20 +26,23 @@ def staging_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     staging_dir.mkdir(parents=True)
     user_skills.mkdir(parents=True)
 
-    # ``skill_staging_dir`` is a property that consults ``skill_staging_dir_override``
+    # ``FsRegistry.legacy_skill_staging_root`` consults ``user_skill_staging_dir``
     # on every read, so patching that field redirects the legacy staging root.
     #
     # IMPORTANT — patch the *exact* settings object ``staging`` holds, not a
     # freshly imported one. ``tests/modules/sessions/test_session_approval_e2e.py``
     # pops + reimports ``valuz_agent.infra.config`` to rebind the kernel env,
     # which swaps the module-level ``settings`` singleton for a NEW instance.
-    # ``staging`` was imported earlier in the suite via ``from …config import
-    # settings`` so it keeps the OLD object. A bare ``from …config import
-    # settings`` here would patch the NEW one and miss the object ``staging``
-    # actually reads — leaking the resolved path back to the real ``~/.valuz-oss``
-    # staging dir. Patching ``staging.settings`` is hermetic against that.
-    monkeypatch.setattr(staging.settings, "skill_staging_dir_override", staging_dir)
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(user_skills))
+    import valuz_agent.infra.fs_registry as fs_registry_mod
+
+    # ``fs_registry`` owns filesystem layout and holds the settings object read
+    # by the legacy staging fallback.
+    monkeypatch.setattr(
+        fs_registry_mod.settings,
+        "user_skill_staging_dir",
+        staging_dir / "{user_id}",
+    )
+    monkeypatch.setattr(fs_registry_mod.settings, "user_skills_dir", user_skills)
     return tmp_path
 
 

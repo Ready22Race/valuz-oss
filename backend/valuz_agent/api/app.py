@@ -51,12 +51,16 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     kernel routers) so the backend can sit behind a shared-host ingress that
     namespaces it by path. ``None`` (default) falls back to
     ``settings.api_prefix`` (env ``VALUZ_API_PREFIX``); an empty result → routes
-    served at their native paths (behaviour unchanged). The ``/internal/mcp/*``
-    mounts are reached server-side via ``backend_base_url`` and are NEVER
-    prefixed.
+    served at their native paths (behaviour unchanged). The internal sub-apps
+    (``/internal/data`` + ``/internal/mcp/*``) are reached server-side via
+    ``backend_base_url``; they are mounted under EACH configured base path (not
+    just root) so a kernel whose ``backend_base_url`` carries the ingress
+    sub-path — e.g. a cloud sandbox reachable only through it — resolves them too.
     """
     if getattr(sys, "frozen", False):
-        _env_path = fs_registry.resolve(".env")
+        from valuz_agent.infra.local_identity import resolve_local_user_id
+
+        _env_path = fs_registry.data_dir(resolve_local_user_id()) / ".env"
     else:
         _env_path = Path(__file__).resolve().parents[2] / ".env"
     load_dotenv(_env_path)
@@ -105,9 +109,9 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
 
     # The whole public HTTP surface is aggregated into one router so a global
     # ``api_prefix`` can be applied uniformly (mirrors valuz-server's factory).
-    # Infra mounts (/internal/mcp/*) are added to ``app`` directly below and
-    # stay at fixed native paths — they're reached server-side via
-    # ``backend_base_url``, never through the prefixed ingress.
+    # Infra mounts (/internal/data, /internal/mcp/*) are added to ``app`` below
+    # via ``_mount_internal`` — mounted under each base path so a sandbox that can
+    # only reach the host through the prefixed ingress resolves them too.
     api = APIRouter()
     api.include_router(providers_router)
     api.include_router(connectors_router)
@@ -162,8 +166,21 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     # paths, unchanged). Multiple entries (e.g. ["", "/valuz-backend"]) → the
     # surface is served under each base at once.
     prefixes = api_prefix if api_prefix is not None else settings.api_prefix
-    for _prefix in prefixes or [""]:
+    resolved_prefixes = prefixes or [""]
+    for _prefix in resolved_prefixes:
         app.include_router(api, prefix=_prefix)
+
+    # Internal sub-apps (DataService + in-process MCP servers) that a sandboxed
+    # kernel reaches over HTTP+JWT via ``backend_base_url``. Mount each under
+    # EVERY configured base path, not just root: a kernel whose
+    # ``backend_base_url`` carries an ingress sub-path — e.g. a cloud sandbox
+    # reachable ONLY through ``/valuz-backend/*`` (the internal cluster address is
+    # unroutable from the sandbox) — must resolve ``{backend_base_url}/internal/*``
+    # too. With no ``api_prefix`` (the default, and every desktop build) this is a
+    # single root mount, so behaviour is unchanged.
+    def _mount_internal(path: str, subapp: object) -> None:
+        for _p in resolved_prefixes:
+            app.mount(f"{_p}{path}", subapp)
 
     # In-process docs MCP server. Mounted as a Starlette ASGI sub-app
     # because FastMCP owns its own request pipeline (streamable HTTP
@@ -173,7 +190,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     # binding — see ``adapters/capability_resolver.py``.
     from valuz_agent.integrations.docs_mcp_server import build_docs_mcp_asgi
 
-    app.mount("/internal/mcp/docs", build_docs_mcp_asgi())
+    _mount_internal("/internal/mcp/docs", build_docs_mcp_asgi())
 
     # Host-mounted DataService (kernel three-table CRUD over /rpc/{op}). Mounted
     # here as a sub-app; its store + JWT verifier are bound in the lifespan
@@ -183,7 +200,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     from valuz_agent.boot.kernel import make_data_service_placeholder
 
     app.state.data_service_app = make_data_service_placeholder()
-    app.mount("/internal/data", app.state.data_service_app)
+    _mount_internal("/internal/data", app.state.data_service_app)
 
     # In-process automations MCP server — exposes the ``automation`` tool
     # to every session. Replaces the legacy ``cronjob`` tool per ADR-021.
@@ -191,7 +208,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
         build_automations_mcp_asgi,
     )
 
-    app.mount("/internal/mcp/automations", build_automations_mcp_asgi())
+    _mount_internal("/internal/mcp/automations", build_automations_mcp_asgi())
 
     # In-process connectors MCP server — exposes the ``create_mcp`` tool to
     # every session so the agent can create connectors on behalf of the user.
@@ -199,7 +216,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
         build_connectors_mcp_asgi,
     )
 
-    app.mount("/internal/mcp/connectors", build_connectors_mcp_asgi())
+    _mount_internal("/internal/mcp/connectors", build_connectors_mcp_asgi())
 
     # In-process toolkit MCP server — serves the harness tools (dispatch /
     # orchestration / memory / submit_skill) per toolset. Sessions reference
@@ -207,8 +224,8 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     # consumes host tools through its standard MCP client path.
     from valuz_agent.integrations.toolkit_mcp_server import build_toolkit_mcp_asgi
 
-    app.mount("/internal/mcp/toolkit/base", build_toolkit_mcp_asgi("base"))
-    app.mount("/internal/mcp/toolkit/lead", build_toolkit_mcp_asgi("lead"))
+    _mount_internal("/internal/mcp/toolkit/base", build_toolkit_mcp_asgi("base"))
+    _mount_internal("/internal/mcp/toolkit/lead", build_toolkit_mcp_asgi("lead"))
 
     # Startup/shutdown orchestration lives in ``boot/lifespan.py`` (bound via
     # ``lifespan=lifespan`` above). The startup order is load-bearing; see the

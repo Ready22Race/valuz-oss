@@ -100,11 +100,11 @@ async def ensure_host_schema_migratable(engine: AsyncEngine | None = None) -> No
     from sqlalchemy import inspect, text
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    from valuz_agent.infra.config import settings
+    from valuz_agent.infra.db_urls import db_url_async
 
     owns_engine = engine is None
     if engine is None:
-        engine = create_async_engine(settings.db_url_async)
+        engine = create_async_engine(db_url_async())
     try:
         async with engine.connect() as conn:
             existing = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
@@ -150,16 +150,16 @@ def run_host_migrations() -> None:
     The host alembic ``env.py`` is async (``asyncio.run``), so — like
     ``run_kernel_migrations`` — this runs in a dedicated thread: the app startup
     hook is already on the event loop, and a nested ``asyncio.run`` there would
-    raise. ``DATABASE_URL`` is set to ``settings.db_url_async`` so ``env.py``'s
+    raise. ``DATABASE_URL`` is set to ``db_url_async()`` so ``env.py``'s
     ``get_url()`` picks up the same SQLite file the rest of the host talks to,
     then restored on exit.
     """
     import os
     import threading
 
-    from valuz_agent.infra.config import settings
+    from valuz_agent.infra.db_urls import db_url_async
 
-    db_url = settings.db_url_async
+    db_url = db_url_async()
 
     def _do() -> None:
         import asyncio

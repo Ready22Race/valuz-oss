@@ -53,9 +53,7 @@ _state: _State | None = None
 _lazy_tried = False
 
 
-def activate(
-    provider: SandboxProvider, sandbox_id: str, static_roots: tuple[str, ...]
-) -> None:
+def activate(provider: SandboxProvider, sandbox_id: str, static_roots: tuple[str, ...]) -> None:
     """Eagerly register the active sandbox (called by the provisioner).
 
     Optional — ``ensure_workspace_granted`` lazily activates from env if
@@ -119,7 +117,33 @@ def _under_static_root(real: str, roots: tuple[str, ...]) -> bool:
     return False
 
 
-async def ensure_workspace_granted(cwd: str) -> str:
+def _mounted_project_cwd(cwd: str, owner_user_id: str, mount: str) -> str | None:
+    """Project a managed cwd under the owner's project root to its in-sandbox
+    mount path — the multi-tenant cloud translation.
+
+    A cloud deployment mounts each owner's project root
+    (``fs_registry.project_root(owner)``) verbatim into that owner's sandbox at
+    a fixed path (``mount``), so ``{project_root}/{rel}`` is already reachable at
+    ``{mount}/{rel}`` — no dynamic grant, just the path transform. Example:
+    project_root ``/data/valuz_data/workspace/<uid>``, cwd
+    ``/data/valuz_data/workspace/<uid>/p9`` → ``/workspace/p9``.
+
+    Returns ``None`` when ``cwd`` is outside the owner's project root (an
+    external folder — left to the dynamic-grant path below).
+    """
+    from valuz_agent.infra.fs_registry import fs_registry
+
+    root = os.path.realpath(str(fs_registry.project_root(owner_user_id)))
+    real = os.path.realpath(str(Path(cwd).expanduser()))
+    mp = mount.rstrip("/")
+    if real == root:
+        return mp or "/"
+    if real.startswith(root + os.sep):
+        return f"{mp}/{real[len(root) + 1 :]}"
+    return None
+
+
+async def ensure_workspace_granted(cwd: str, *, owner_user_id: str = "") -> str:
     """Ensure ``cwd`` is reachable inside the running sandbox; return the
     cwd the kernel should use (unchanged locally).
 
@@ -129,7 +153,33 @@ async def ensure_workspace_granted(cwd: str) -> str:
     is swallowed and the original cwd returned, so a misconfiguration
     degrades to the pre-extension behaviour ("Operation not permitted" at
     the agent, surfaced there) rather than blocking session creation.
+
+    ``owner_user_id`` is the authenticated principal, threaded explicitly to
+    ``bind_workspace`` so a cloud driver stages the files under **that owner's**
+    object-store subtree (multi-tenant isolation). Empty on the local
+    single-user path. Never read from ambient context.
+
+    **Multi-tenant cloud (config-gated):** when ``VALUZ_SANDBOX_WORKSPACE_MOUNT``
+    is set, the deployment mounts each owner's project root into that owner's
+    sandbox at a fixed path, and the sandbox is provisioned out-of-band (the
+    per-user allocator, not this module's boot singleton). A managed project's
+    cwd is therefore ALREADY reachable via that mount — there is no active
+    sandbox here to bind against — so a cwd under the owner's project root is
+    rewritten to ``{mount}/{rel}`` and returned directly. Unset on the local
+    Seatbelt path, which falls through to the dynamic sandbox-extension grant.
     """
+    mount = os.getenv("VALUZ_SANDBOX_WORKSPACE_MOUNT", "").strip()
+    if mount and owner_user_id:
+        staged = _mounted_project_cwd(cwd, owner_user_id, mount)
+        if staged is not None:
+            logger.info(
+                "workspace %s is under owner %s's mounted project root — kernel_cwd=%s",
+                cwd,
+                owner_user_id,
+                staged,
+            )
+            return staged
+
     state = _lazy_activate()
     if state is None:
         logger.debug("ensure_workspace_granted(%s): no active sandbox — no-op", cwd)
@@ -144,11 +194,12 @@ async def ensure_workspace_granted(cwd: str) -> str:
             logger.info("workspace %s already granted to this sandbox", real)
             return existing.kernel_cwd
         try:
-            binding = await state.provider.bind_workspace(state.sandbox_id, real, "rw")
+            binding = await state.provider.bind_workspace(
+                state.sandbox_id, real, "rw", owner_user_id=owner_user_id
+            )
         except Exception:  # noqa: BLE001 — degrade, don't block session creation
             logger.warning(
-                "dynamic workspace grant FAILED for %s — agent may hit "
-                "Operation not permitted",
+                "dynamic workspace grant FAILED for %s — agent may hit Operation not permitted",
                 real,
                 exc_info=True,
             )

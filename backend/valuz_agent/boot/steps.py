@@ -17,6 +17,10 @@ from valuz_agent.infra.fs_registry import fs_registry
 logger = logging.getLogger(__name__)
 
 
+def _startup_user_content_enabled() -> bool:
+    return bool(settings.initialize_user_content_on_startup)
+
+
 def configure_structured_logging() -> None:
     """Install JSON-line file handler on the root logger.
 
@@ -47,14 +51,11 @@ def ensure_local_identity() -> None:
     overrides per-request identity by swapping ``AuthMiddleware`` (overriding
     ``resolve_user_id``) via ``ext.auth_middleware``.
     """
-    # In shared/cloud deployments the boot process runs without a stable
-    # local owner context. Leaving the owner unset makes optional-owner startup
-    # paths safe to skip owner-attribution (official seed scans, locale cache)
-    # rather than silently writing data under a synthetic install id.
-    if settings.deployment_type != "local":
+    if not _startup_user_content_enabled():
         from valuz_agent.infra.auth_context import set_current_user_id
 
         set_current_user_id(None)
+        logger.info("startup user-content initialization disabled; local identity skipped")
         return
 
     from valuz_agent.infra.auth_context import set_current_user_id
@@ -68,7 +69,9 @@ def acquire_single_writer_lock() -> None:
 
     Only applies in SQLite mode — PostgreSQL handles concurrency natively.
     """
-    if not settings.is_sqlite:
+    from valuz_agent.infra.db_urls import is_sqlite_runtime
+
+    if not is_sqlite_runtime():
         return
 
     import os
@@ -77,13 +80,17 @@ def acquire_single_writer_lock() -> None:
     if os.environ.get("VALUZ_SKIP_WRITER_LOCK") == "1":
         return
 
+    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.infra.single_writer import (
         AnotherInstanceRunning,
         acquire_single_writer_lock,
     )
 
-    fs_registry.data_dir()  # ensure the data root exists
-    lock_path = fs_registry.resolve(".single-writer.lock")
+    if _startup_user_content_enabled():
+        data_dir = fs_registry.data_dir(resolve_local_user_id())
+    else:
+        data_dir = fs_registry.shared_root()
+    lock_path = data_dir / ".single-writer.lock"
     try:
         acquire_single_writer_lock(lock_path)
     except AnotherInstanceRunning:
@@ -108,9 +115,17 @@ def migrate_data_dir() -> None:
     INSERTed under a new owner collides with the migrated row). No-op once
     migrated / on a fresh install.
     """
-    from valuz_agent.boot.migrate_data_dir import migrate_legacy_data_dir
+    if not _startup_user_content_enabled():
+        logger.info("startup user-content initialization disabled; data-dir migration skipped")
+        return
+
+    from valuz_agent.boot.migrate_data_dir import (
+        migrate_legacy_data_dir,
+        migrate_unscoped_data_root,
+    )
 
     migrate_legacy_data_dir()
+    migrate_unscoped_data_root()
 
 
 async def bootstrap_schema() -> None:
@@ -135,32 +150,29 @@ async def bootstrap_schema() -> None:
     from valuz_agent.boot.kernel import run_kernel_migrations
     from valuz_agent.boot.schema import run_host_migrations
     from valuz_agent.infra.db import async_unit_of_work
-    from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.infra.logging import configure_logging
     from valuz_agent.seeds import seed_all
 
-    if settings.deployment_type == "cloud":
-        configure_logging()
-        logger.info(
-            "schema bootstrap skipped (deployment_type=cloud); "
-            "run `python -m valuz_commercial migrate` before starting workers"
-        )
-        return
+    user_content_enabled = _startup_user_content_enabled()
 
     # NB: the ``~/.valuz/app`` → ``~/.valuz-oss`` data-dir cutover runs earlier in
     # the lifespan (``migrate_data_dir``), before identity resolution — see that
     # step's docstring for why the ordering is load-bearing.
-    fs_registry.data_dir()  # ensure the data root exists
+    if user_content_enabled:
+        from valuz_agent.infra.local_identity import resolve_local_user_id
 
-    # One-shot courtesy rename from the workspace→project naming cutover:
-    # managed chat cwds moved from ``data_dir/workspaces/`` to
-    # ``data_dir/projects/``. The DB is wiped by the cutover fingerprint,
-    # but the directories hold user files — carry them over instead of
-    # orphaning them. No-op once the new directory exists.
-    legacy_dir = fs_registry.resolve("workspaces")
-    target_dir = fs_registry.projects_root()
-    if legacy_dir.is_dir() and not target_dir.exists():
-        legacy_dir.rename(target_dir)
+        user_id = resolve_local_user_id()
+        data_dir = fs_registry.data_dir(user_id)
+
+        # One-shot courtesy rename from the workspace→project naming cutover:
+        # managed chat cwds moved from ``data_dir/workspaces/`` to
+        # ``data_dir/projects/``. The DB is wiped by the cutover fingerprint,
+        # but the directories hold user files — carry them over instead of
+        # orphaning them. No-op once the new directory exists.
+        legacy_dir = data_dir / "workspaces"
+        target_dir = data_dir / "projects"
+        if legacy_dir.is_dir() and not target_dir.exists():
+            legacy_dir.rename(target_dir)
 
     # NB: the legacy ``kernel_db_split`` cutover (move kernel tables *out* of
     #    valuz.db into kernel.db) is RETIRED. It contradicts the DataService
@@ -187,12 +199,18 @@ async def bootstrap_schema() -> None:
     #     both env.py files, silenced every already-imported valuz logger).
     configure_logging()
 
+    if not user_content_enabled:
+        logger.info("startup user-content initialization disabled; seed/backfill skipped")
+        return
+
+    from valuz_agent.infra.local_identity import resolve_local_user_id
+
     # 4. Pure-insert seeds for built-in rows.
     async with async_unit_of_work() as db:
         await seed_all(db, user_id=resolve_local_user_id())
 
     # 5. One-time backfill of the connector module's legacy filesystem stores
-    #    (project-config.json selection + FileSecretStore secrets) into the
+    #    (project-config.json selection + local secret files) into the
     #    connector DB tables/columns. This remains local-only; cloud startup
     #    should not run owner-context-sensitive filesystem backfill.
     from valuz_agent.boot.backfill_connector_fs import backfill_connector_fs
@@ -210,13 +228,14 @@ async def configure_i18n() -> None:
     access; subsequent locale changes re-push via
     ``preferences.set_default_locale`` → ``i18n.set_locale``.
     """
+    if not _startup_user_content_enabled():
+        logger.info("startup user-content initialization disabled; user locale skipped")
+        return
+
     from valuz_agent.i18n import set_locale
     from valuz_agent.infra.db import async_unit_of_work
     from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.modules.settings.preferences import get_default_locale
-
-    if settings.deployment_type != "local":
-        return
 
     async with async_unit_of_work(commit=False) as db:
         set_locale(await get_default_locale(db, user_id=resolve_local_user_id()))
@@ -294,7 +313,12 @@ async def init_kernel(app: FastAPI) -> None:
         # Install the friendly ``chrome-devtools`` wrapper on PATH now, at boot —
         # before any session spawns its agent subprocess (which inherits env at
         # spawn time). Lets the agent run a clean ``chrome-devtools <tool>``.
-        if browser_service.ensure_cli_on_path():
+        if not _startup_user_content_enabled():
+            logger.info(
+                "startup user-content initialization disabled; "
+                "browser CLI bootstrap skipped"
+            )
+        elif browser_service.ensure_cli_on_path():
             logger.info("browser CLI installed on PATH (chrome-devtools)")
     else:
         logger.info("browser engine unavailable — browser_start/browser_stop not registered")
@@ -337,7 +361,6 @@ async def bind_data_service(app: FastAPI) -> None:
     try:
         import os
 
-        from valuz_agent.api.deps import _secret_store
         from valuz_agent.boot import kernel as kb
         from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
         from valuz_agent.infra.local_identity import resolve_local_user_id
@@ -348,9 +371,9 @@ async def bind_data_service(app: FastAPI) -> None:
         # (valuz.db). Resolve it here too so binding isn't ordering-dependent on
         # ``_set_kernel_env``. pg/remote provide the DSN via env.
         if store_mode == "local" and not dsn:
-            from valuz_agent.infra.config import settings
+            from valuz_agent.infra.db_urls import db_url_async
 
-            dsn = settings.db_url_async
+            dsn = db_url_async()
         if not dsn:
             return
         store, engine = kb.build_host_data_service_store(dsn)
@@ -360,8 +383,9 @@ async def bind_data_service(app: FastAPI) -> None:
         # one shared host verifies every owner's data-service token (local = the one
         # owner resolves its own secret; cloud = many owners). Ensure the local
         # owner's secret exists up-front (mint side also does; idempotent).
-        get_or_create_ds_secret(_secret_store(), resolve_local_user_id())
-        ds_app.state.verifier = kb.make_host_data_service_verifier_per_owner(_secret_store())
+        if _startup_user_content_enabled():
+            get_or_create_ds_secret(resolve_local_user_id())
+        ds_app.state.verifier = kb.make_host_data_service_verifier_per_owner()
         app.state._data_service_engine = engine
         # Unify host reads (sessions + events) through the DataService
         # (in-process), so reads never depend on the sandbox being alive. Bind
@@ -573,6 +597,10 @@ async def start_automation_runner(app: FastAPI) -> None:
     # (ADR-011) keeps DB access safe.
     await automation_failure_monitor.startup()
 
+    if not _startup_user_content_enabled():
+        logger.info("startup user-content initialization disabled; docs/skills scanners skipped")
+        return
+
     from valuz_agent.modules.docs.scheduler import start_auto_discovery
 
     start_auto_discovery()
@@ -629,12 +657,8 @@ def shutdown_parse_pool() -> None:
 
 
 async def start_skills(app: FastAPI) -> None:
-    from valuz_agent.infra.config import settings
-
-    if settings.deployment_type != "local":
-        logger.info(
-            "local skill indexing disabled (deployment_type=%s)", settings.deployment_type
-        )
+    if not _startup_user_content_enabled():
+        logger.info("startup user-content initialization disabled; local skill indexing skipped")
         return
 
     # Sync bundled official skills (e.g. skill-creator, valuz-handbook) into
@@ -642,23 +666,21 @@ async def start_skills(app: FastAPI) -> None:
     # on first run. (Previously mis-placed in stop_polling_scheduler's
     # shutdown handler — skills only synced/scanned on process exit, lagging
     # a whole lifecycle.)
-    from valuz_agent.integrations.skills_official_bootstrap import (
-        sync_bundled_official_skills,
-    )
-
-    try:
-        sync_bundled_official_skills()
-    except Exception:
-        pass
-
-    from valuz_agent.api.deps import get_skill_service
     from valuz_agent.infra.local_identity import resolve_local_user_id
+    from valuz_agent.integrations.skills_official_bootstrap import sync_bundled_official_skills
 
     # Local startup writes are owned explicitly by the stable local install id.
     # Shared/cloud deployments returned above, so this step never invents a
     # synthetic owner for a multi-user backend.
     owner = resolve_local_user_id()
-    skill_gen = get_skill_service()
+    try:
+        sync_bundled_official_skills(owner)
+    except Exception:
+        pass
+
+    from valuz_agent.api.deps import get_skill_service_for_user
+
+    skill_gen = get_skill_service_for_user(owner)
     skill_svc = await skill_gen.__anext__()
     try:
         # Deterministically index the bundled official skills FIRST, in the
@@ -700,7 +722,7 @@ async def start_skills(app: FastAPI) -> None:
     # was deleted along with its tables, routes, and frontend
     # surface. See the removal commit for the rationale.
     watcher = SkillFileWatcher(event_bus)
-    user_root = _default_user_skill_root()
+    user_root = _default_user_skill_root(owner)
     if user_root.exists():
         watcher.add_path(user_root)
     app.state.skill_watcher = watcher

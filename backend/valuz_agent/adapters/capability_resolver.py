@@ -128,7 +128,7 @@ async def resolve_session_capabilities(
         if absolute in seen:
             continue
         if not Path(absolute).is_dir():
-            fallback = _try_find_skill_by_slug(absolute)
+            fallback = _try_find_skill_by_slug(absolute, user_id=user_id)
             if fallback:
                 absolute = fallback
             else:
@@ -144,6 +144,7 @@ async def resolve_session_capabilities(
     #     opt out, so the resolver must mirror that for the runtime.
     if project.kind != "project" and (skill_source is not None or extra_skill_sources):
         ctx = RuntimeContext(
+            user_id=user_id,
             project=ProjectRef(
                 id=project.id,
                 slug=project.id,
@@ -185,11 +186,14 @@ async def resolve_session_capabilities(
                 seen.add(absolute)
                 skill_paths.append(absolute)
 
-    # 2) Session-level extras — opaque skill IDs attached just for this session
-    #    on top of whatever the project already enables. Look each one up in
-    #    the skill index to recover its source_path.
+    # 2) Session-level extras — SkillView ids attached just for this session
+    #    on top of whatever the project already enables. SkillView.id comes from
+    #    the manifest (e.g. "official:skill-creator"), while valuz_skill_index.id
+    #    is only the DB row primary key; prefer slug lookup when the id is scoped.
     for skill_id in extra_skill_ids or []:
         row = await skills.get_by_id(user_id, skill_id)
+        if row is None and ":" in skill_id and hasattr(skills, "get_by_slug"):
+            row = await skills.get_by_slug(user_id, skill_id.split(":", 1)[1])
         if row is None:
             warnings.append(f"extra skill id not found: {skill_id!r}")
             continue
@@ -227,7 +231,7 @@ async def resolve_session_capabilities(
     #      that doc search is available. For chat sessions the MCP
     #      tools return empty results (no KB bindings → empty scope)
     #      which is a normal answer the agent already handles.
-    for absolute in always_on_skill_paths():
+    for absolute in always_on_skill_paths(user_id=user_id):
         if absolute not in seen:
             seen.add(absolute)
             skill_paths.append(absolute)
@@ -280,7 +284,7 @@ async def resolve_session_capabilities(
     )
 
 
-def always_on_skill_paths() -> list[str]:
+def always_on_skill_paths(*, user_id: str) -> list[str]:
     """Bundled skills every session carries: project-docs + skill-creator (+ browser).
 
     These are the skill half of the always-on baseline (the MCP half lives in
@@ -301,7 +305,7 @@ def always_on_skill_paths() -> list[str]:
 
     candidates = [
         _PROJECT_DOCS_SKILL_DIR,
-        fs_registry.official_skill_root() / "skill-creator",
+        fs_registry.official_skill_root(user_id=user_id) / "skill-creator",
     ]
     # The browser skill teaches the ``chrome-devtools`` CLI, which only works
     # when the engine (Node + chrome-devtools-mcp) is available; don't inject a
@@ -338,9 +342,8 @@ def _mint_internal_mcp_token(owner_user_id: str) -> str:
         return cached
     from valuz_agent.boot.kernel import mint_data_service_token
     from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
-    from valuz_agent.ports.extensions import ext
 
-    secret = get_or_create_ds_secret(ext.secret_store, owner_user_id)
+    secret = get_or_create_ds_secret(owner_user_id)
     token = mint_data_service_token(secret, user_id=owner_user_id, ttl_s=_MCP_TOKEN_TTL_S)
     _mcp_token_cache[owner_user_id] = token
     return token
@@ -492,12 +495,12 @@ async def resolve_skill_slugs_to_paths(
     return resolved
 
 
-def _try_find_skill_by_slug(absolute_path: str) -> str | None:
+def _try_find_skill_by_slug(absolute_path: str, *, user_id: str) -> str | None:
     """Fallback: try to find a skill by its slug name in the canonical dir."""
     from valuz_agent.infra.fs_registry import fs_registry
 
     slug = Path(absolute_path).name
-    canonical = fs_registry.user_skill_root() / slug
+    canonical = fs_registry.user_skill_root(user_id=user_id) / slug
     if canonical.is_dir():
         logger.info(
             "Skill path %r not found, using canonical fallback: %s",

@@ -28,11 +28,6 @@ class _NoProviders:
         return None
 
 
-class _UnusedSecrets:
-    def get(self, _: str):  # type: ignore[no-untyped-def]
-        return None
-
-
 class _FakeCatalog:
     def __init__(
         self,
@@ -98,7 +93,6 @@ class TestResolveModelProviderViaLLMProvider:
             provider_id="valuz-channel",
             model_id="claude-sonnet-4-6",
             providers=_NoProviders(),  # type: ignore[arg-type]
-            secrets=_UnusedSecrets(),  # type: ignore[arg-type]
             user_id="u1",
         )
         assert mp is not None
@@ -119,7 +113,6 @@ class TestResolveModelProviderViaLLMProvider:
                 provider_id="valuz-channel",
                 model_id="m",
                 providers=_NoProviders(),  # type: ignore[arg-type]
-                secrets=_UnusedSecrets(),  # type: ignore[arg-type]
                 user_id="u1",
             )
 
@@ -129,7 +122,6 @@ class TestResolveModelProviderViaLLMProvider:
             provider_id="valuz-channel",
             model_id="m",
             providers=_NoProviders(),  # type: ignore[arg-type]
-            secrets=_UnusedSecrets(),  # type: ignore[arg-type]
             user_id="u1",
         )
         assert mp is not None
@@ -141,10 +133,9 @@ class TestResolveModelProviderViaLLMProvider:
             await resolve_model_provider(
                 provider_id="unknown",
                 model_id="m",
-            providers=_NoProviders(),  # type: ignore[arg-type]
-            secrets=_UnusedSecrets(),  # type: ignore[arg-type]
-            user_id="u1",
-        )
+                providers=_NoProviders(),  # type: ignore[arg-type]
+                user_id="u1",
+            )
 
     async def test_passes_explicit_user_id_to_llm_provider(self) -> None:
         catalog = _FakeCatalog(
@@ -156,7 +147,6 @@ class TestResolveModelProviderViaLLMProvider:
             provider_id="valuz-channel",
             model_id="m",
             providers=_NoProviders(),  # type: ignore[arg-type]
-            secrets=_UnusedSecrets(),  # type: ignore[arg-type]
             user_id="u-from-automation-row",
         )
 

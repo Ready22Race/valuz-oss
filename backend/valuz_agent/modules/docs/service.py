@@ -68,6 +68,21 @@ def _engine_to_plugin_id(engine: str | None) -> str | None:
     return _ENGINE_TO_PLUGIN_ID.get(engine)
 
 
+def _resolve_data_file_path(user_id: str, ref: str | None) -> Path | None:
+    if not ref:
+        return None
+    if os.path.isabs(ref):
+        return Path(ref)
+    rel = Path(ref)
+    if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
+        return None
+    target = (fs_registry.data_dir(user_id) / rel).resolve()
+    data_root = fs_registry.data_dir(user_id).resolve()
+    if data_root != target and data_root not in target.parents:
+        return None
+    return target
+
+
 SUPPORTED_EXTS = {
     ".pdf",
     ".docx",
@@ -383,7 +398,7 @@ class DocumentLibraryService:
             # Managed root (cloud / headless parity): allocate
             # ``kb_root/{id}/`` so the KB works without a caller-supplied
             # local directory, which a remote backend could not reach.
-            root = fs_registry.kb_root() / kb_id
+            root = fs_registry.kb_root(user_id) / kb_id
             root.mkdir(parents=True, exist_ok=True)
         root_str = str(root)
         if await self._ds.kb_root_path_exists(user_id, root_str):
@@ -1005,13 +1020,9 @@ class DocumentLibraryService:
         if not row:
             raise DocumentNotFound()
         if row.preview_text_path:
-            from valuz_agent.infra.asset_store import resolve_asset_path
-
-            local = resolve_asset_path(user_id, row.preview_text_path)
-            if local:
-                p = Path(local)
-                if p.exists():
-                    return p.read_text(encoding="utf-8")
+            local = _resolve_data_file_path(user_id, row.preview_text_path)
+            if local and local.exists():
+                return local.read_text(encoding="utf-8")
         return ""
 
     async def reindex_documents(self, user_id: str, document_ids: list[str]) -> ImportTaskResult:
@@ -1184,8 +1195,6 @@ class DocumentLibraryService:
         if not scope_ids:
             return []
 
-        from valuz_agent.infra.asset_store import resolve_asset_path
-
         doc_paths: dict[str, str] = {}
         doc_names: dict[str, str] = {}
         uid = user_id
@@ -1194,9 +1203,9 @@ class DocumentLibraryService:
             if row:
                 doc_names[did] = row.source_filename
                 if row.preview_text_path:
-                    local = resolve_asset_path(uid, row.preview_text_path)
+                    local = _resolve_data_file_path(user_id, row.preview_text_path)
                     if local:
-                        doc_paths[did] = local
+                        doc_paths[did] = str(local)
 
         from valuz_agent.integrations.docs_embedded import EmbeddedDocsRuntime
 
@@ -1281,8 +1290,10 @@ class DocumentLibraryService:
         result: dict[str, str] = {}
         for did in doc_ids:
             row = await self._ds.get_by_id(user_id, did)
-            if row and row.preview_text_path and Path(row.preview_text_path).exists():
-                result[did] = row.preview_text_path
+            if row and row.preview_text_path:
+                local = _resolve_data_file_path(user_id, row.preview_text_path)
+                if local and local.exists():
+                    result[did] = str(local)
         return result
 
     async def build_doc_scope_tree(self, user_id: str, project_id: str) -> DocScopeTreeView:
@@ -1534,13 +1545,15 @@ class DocumentLibraryService:
         )
 
     def _save_preview(self, doc_id: str, markdown: str, user_id: str) -> str:
-        from valuz_agent.ports.extensions import ext
-
         # Preview markdown is valuz-owned (the original KB file is not). Store it
-        # on the asset store under a deterministic per-doc key; the row keeps the
+        # under a deterministic per-doc key; the row keeps the
         # key (relative), resolved back to a local path on read.
         key = f"docs/preview/{doc_id}.md"
-        ext.asset_store.put(user_id, key, markdown.encode("utf-8"))
+        target = _resolve_data_file_path(user_id, key)
+        if target is None:
+            raise ValueError("Invalid preview path")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(markdown, encoding="utf-8")
         return key
 
     def _parser_parse_sync(self, file_path: str) -> ParseResult:

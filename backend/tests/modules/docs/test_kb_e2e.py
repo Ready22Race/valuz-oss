@@ -172,13 +172,12 @@ def _make_service(db, session_factory, parser=None) -> DocumentLibraryService:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_asset_store(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
-    """Bind ``ext.asset_store`` to a tmp local store so preview writes (now on
-    the asset store via ``_save_preview``) don't touch the real data_dir."""
-    from valuz_agent.infra.asset_store import LocalAssetStore
-    from valuz_agent.ports.extensions import ext
+def _isolate_data_dir(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """Point VALUZ_DATA_DIR at a tmp local root so preview writes do not
+    touch the real data_dir."""
+    from valuz_agent.infra import fs_registry
 
-    monkeypatch.setattr(ext, "asset_store", LocalAssetStore(tmp_path / "_assets"))
+    monkeypatch.setattr(fs_registry.fs_registry, "data_dir", lambda user_id: tmp_path / "_assets")
 
 
 @pytest.fixture()
@@ -897,14 +896,16 @@ class TestManagedKbRoot:
     async def test_create_kb_without_root_allocates_managed_root(
         self, svc, monkeypatch, tmp_path
     ) -> None:
-        from valuz_agent.infra import fs_registry
+        from valuz_agent.modules.docs import service as docs_service
 
         # Managed root lives under <data_dir>/kb/<kb_id>; point data_dir at
         # tmp so the test never touches the real ~/.valuz-oss tree.
-        monkeypatch.setattr(
-            type(fs_registry.fs_registry), "data_dir", lambda self: tmp_path
-        )  # patch the CLASS method — patching the singleton instance leaves a
-        # shadowing instance attr on teardown that breaks later tests' data_dir patches
+        def _kb_root(_user_id: str) -> Path:
+            path = tmp_path / "kb"
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
+        monkeypatch.setattr(docs_service.fs_registry, "kb_root", _kb_root)
 
         kb = await svc.create_kb("local-test-owner", name="Managed")
         await _drain(svc)
@@ -916,12 +917,14 @@ class TestManagedKbRoot:
     async def test_write_file_into_managed_kb_and_rejects_traversal(
         self, svc, monkeypatch, tmp_path
     ) -> None:
-        from valuz_agent.infra import fs_registry
+        from valuz_agent.modules.docs import service as docs_service
 
-        monkeypatch.setattr(
-            type(fs_registry.fs_registry), "data_dir", lambda self: tmp_path
-        )  # patch the CLASS method — patching the singleton instance leaves a
-        # shadowing instance attr on teardown that breaks later tests' data_dir patches
+        def _kb_root(_user_id: str) -> Path:
+            path = tmp_path / "kb"
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+
+        monkeypatch.setattr(docs_service.fs_registry, "kb_root", _kb_root)
 
         kb = await svc.create_kb("local-test-owner", name="Managed")
         await _drain(svc)

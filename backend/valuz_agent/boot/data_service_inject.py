@@ -17,12 +17,8 @@ from __future__ import annotations
 
 import os
 
-from valuz_agent.infra.secret_store import SecretStorePort
 
-
-def data_service_env(
-    *, owner_user_id: str, host_callback_url: str, secret_store: SecretStorePort
-) -> dict[str, str]:
+def data_service_env(*, owner_user_id: str, host_callback_url: str) -> dict[str, str]:
     """Env pointing a sandboxed kernel at the host DataService for ``owner_user_id``.
 
     Returns an **empty dict** when the host is not on a durable store
@@ -37,7 +33,7 @@ def data_service_env(
     from valuz_agent.boot.kernel import mint_data_service_token
     from valuz_agent.infra.data_service_secret import get_or_create_ds_secret
 
-    secret = get_or_create_ds_secret(secret_store, owner_user_id)
+    secret = get_or_create_ds_secret(owner_user_id)
     return {
         "KERNEL_STORE": "remote",
         "VALUZ_DATA_API_KIND": "http",

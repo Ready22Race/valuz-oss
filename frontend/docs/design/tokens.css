@@ -37,7 +37,8 @@
 
   /* 点缀 / 图表分类色（同一亮度饱和度区间，只动色相）。
    * 图表系列固定取色顺序：sky → teal → amber → pink → blue → lime → orange → fuchsia，
-   * 超过 8 个系列后用 fg-50 中性灰归并为"其他"。amber 是点缀，不得当 warning 用。 */
+   * 超过 8 个系列后用 fg-50 中性灰归并为"其他"。amber 是点缀，不得当 warning 用。
+   * role / 角色职位 tag 使用这些 accent 软底作类目区分；Lead 例外使用 brand-100 / brand-700。 */
   --accent-sky:     #0ea5e9;
   --accent-teal:    #14b8a6;
   --accent-amber:   #eab308;

@@ -155,6 +155,226 @@ def _build_old_tree(home: Path, old_app: Path, old_kb: Path):
     }
 
 
+def test_unscoped_data_root_without_placeholder_is_noop(fake_home, monkeypatch):
+    from valuz_agent.infra import local_identity as li
+
+    _old_app, _old_kb, root = fake_home
+    monkeypatch.setattr(settings, "deployment_type", "local")
+    root.mkdir(parents=True)
+    user_id = "local-USERA"
+    target = root / user_id
+
+    (root / "installation.json").write_text(
+        json.dumps({"user_id": user_id, "fingerprint": "x", "created_at_ms": 1})
+    )
+    (root / "valuz.db").write_bytes(b"db")
+    (root / "projects" / "p_chat").mkdir(parents=True)
+
+    li.resolve_local_user_id.cache_clear()
+    try:
+        migrate.migrate_unscoped_data_root()
+    finally:
+        li.resolve_local_user_id.cache_clear()
+
+    assert not target.exists()
+    assert (root / "valuz.db").exists()
+    assert (root / "projects" / "p_chat").exists()
+
+
+def test_unscoped_data_root_migrates_into_user_dir_when_config_is_templated(
+    fake_home, monkeypatch
+):
+    from valuz_agent.infra import local_identity as li
+
+    _old_app, _old_kb, root = fake_home
+    monkeypatch.setattr(settings, "deployment_type", "local")
+    monkeypatch.setattr(settings, "data_dir", root / "{user_id}")
+    root.mkdir(parents=True)
+    user_id = "local-USERA"
+    target = root / user_id
+    (target / "logs").mkdir(parents=True)
+    (target / ".single-writer.lock").write_text("pid\n")
+
+    (root / "installation.json").write_text(
+        json.dumps({"user_id": user_id, "fingerprint": "x", "created_at_ms": 1})
+    )
+    (root / ".env").write_text("GLOBAL=1\n")
+    other_user = root / "local-OTHER"
+    other_user.mkdir()
+    (other_user / "installation.json").write_text(json.dumps({"user_id": "local-OTHER"}))
+    (other_user / "sentinel.txt").write_text("do not copy\n")
+
+    official = root / "official-skills" / "skill-creator"
+    official.mkdir(parents=True)
+    (official / "SKILL.md").write_text("# skill\n")
+    chat_cwd = root / "projects" / "p_chat"
+    chat_skills = chat_cwd / ".claude" / "skills"
+    chat_skills.mkdir(parents=True)
+    os.symlink(str(official), str(chat_skills / "skill-creator"), target_is_directory=True)
+    (root / "secrets").mkdir()
+    (root / "secrets" / "demo").write_text("secret\n")
+    (root / "browser-chrome" / "Default").mkdir(parents=True)
+    (root / "browser-chrome" / "Default" / "Cookies").write_text("cookie\n")
+    (root / "skill-creator" / "staging" / "sess-1" / "draft").mkdir(parents=True)
+    (root / "skill-creator" / "staging" / "sess-1" / "draft" / "SKILL.md").write_text(
+        "# draft\n"
+    )
+
+    _make_host_db(
+        root / "valuz.db",
+        chat_cwd=str(chat_cwd),
+        external_cwd=str(root.parent / "Downloads" / "ext"),
+        official_skill=str(official),
+    )
+    _make_kernel_db(
+        root / "kernel.db",
+        cwd=str(chat_cwd),
+        skill_target=str(official),
+    )
+
+    li.resolve_local_user_id.cache_clear()
+    try:
+        migrate.migrate_unscoped_data_root()
+    finally:
+        li.resolve_local_user_id.cache_clear()
+
+    assert (target / migrate._USER_SCOPE_MARKER_FILENAME).exists()
+    assert (target / "valuz.db").exists()
+    assert (target / "kernel.db").exists()
+    assert (target / "installation.json").exists()
+    assert (target / "projects" / "p_chat").exists()
+    assert (target / "secrets" / "demo").read_text() == "secret\n"
+    assert (target / "browser-chrome" / "Default" / "Cookies").read_text() == "cookie\n"
+    assert (
+        target / "skill-creator" / "staging" / "sess-1" / "draft" / "SKILL.md"
+    ).read_text() == "# draft\n"
+    assert not (target / ".env").exists()
+    assert not (target / "local-OTHER").exists()
+    assert (root / "valuz.db").exists()  # fallback retained
+
+    host_db = target / "valuz.db"
+    kernel_db = target / "kernel.db"
+    chat_root = _scalar(host_db, "SELECT root_path FROM valuz_project WHERE id='p_chat'")
+    assert chat_root == str(target / "projects" / "p_chat")
+    skill = _scalar(host_db, "SELECT source_path FROM valuz_skill_index WHERE id='sk1'")
+    assert skill == str(root / "official-skills" / "skill-creator")
+    cwd = _scalar(kernel_db, "SELECT cwd FROM sessions WHERE id='s1'")
+    assert cwd == str(target / "projects" / "p_chat")
+
+    chat_link = target / "projects" / "p_chat" / ".claude" / "skills" / "skill-creator"
+    assert os.path.islink(chat_link)
+    assert os.readlink(chat_link) == str(root / "official-skills" / "skill-creator")
+
+    (target / migrate._USER_SCOPE_MARKER_FILENAME).write_text(
+        f"migrated from {root}\nversion=2\n",
+        encoding="utf-8",
+    )
+    (root / "browser-chrome" / "Default" / "History").write_text("history\n")
+    (target / "valuz.db-wal").write_bytes(b"stale wal")
+    (target / "valuz.db-shm").write_bytes(b"stale shm")
+
+    li.resolve_local_user_id.cache_clear()
+    try:
+        migrate.migrate_unscoped_data_root()
+    finally:
+        li.resolve_local_user_id.cache_clear()
+
+    assert (target / "browser-chrome" / "Default" / "History").read_text() == "history\n"
+    assert not (target / "valuz.db-wal").exists()
+    assert not (target / "valuz.db-shm").exists()
+    assert os.path.islink(chat_link)
+    assert os.readlink(chat_link) == str(root / "official-skills" / "skill-creator")
+
+
+def test_unscoped_cloud_root_migrates_rows_by_owner(fake_home, monkeypatch):
+    _old_app, _old_kb, root = fake_home
+    monkeypatch.setattr(settings, "deployment_type", "cloud")
+    monkeypatch.setattr(settings, "data_dir", root / "{user_id}")
+    root.mkdir(parents=True)
+    users = ("user-A", "user-B")
+
+    conn = sqlite3.connect(root / "valuz.db")
+    try:
+        conn.execute(
+            "CREATE TABLE valuz_project ("
+            "id TEXT PRIMARY KEY, user_id TEXT, kind TEXT, root_path TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE valuz_document_record ("
+            "id TEXT PRIMARY KEY, user_id TEXT, preview_text_path TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE valuz_session_attachment ("
+            "id TEXT PRIMARY KEY, user_id TEXT, session_id TEXT, "
+            "stored_path TEXT, parsed_path TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE valuz_provider ("
+            "id TEXT PRIMARY KEY, user_id TEXT, secret_ref TEXT)"
+        )
+        for user in users:
+            project_id = f"p-{user[-1]}"
+            doc_id = f"d-{user[-1]}"
+            session_id = f"s-{user[-1]}"
+            secret_ref = f"channel/{user[-1]}"
+            conn.execute(
+                "INSERT INTO valuz_project VALUES (?, ?, 'project', ?)",
+                (project_id, user, str(root / "projects" / project_id / "workspace")),
+            )
+            conn.execute(
+                "INSERT INTO valuz_document_record VALUES (?, ?, ?)",
+                (doc_id, user, str(root / "docs" / "preview" / f"{doc_id}.md")),
+            )
+            conn.execute(
+                "INSERT INTO valuz_session_attachment VALUES (?, ?, ?, ?, ?)",
+                (
+                    f"a-{user[-1]}",
+                    user,
+                    session_id,
+                    str(root / "attachments" / session_id / "in.txt"),
+                    str(root / "docs" / "preview" / f"{doc_id}.md"),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO valuz_provider VALUES (?, ?, ?)",
+                (f"provider-{user[-1]}", user, secret_ref),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    for user in users:
+        suffix = user[-1]
+        (root / "projects" / f"p-{suffix}" / "workspace").mkdir(parents=True)
+        (root / "projects" / f"p-{suffix}" / "workspace" / "README.md").write_text(user)
+        (root / "docs" / "preview").mkdir(parents=True, exist_ok=True)
+        (root / "docs" / "preview" / f"d-{suffix}.md").write_text(user)
+        (root / "attachments" / f"s-{suffix}").mkdir(parents=True, exist_ok=True)
+        (root / "attachments" / f"s-{suffix}" / "in.txt").write_text(user)
+        (root / "secrets").mkdir(exist_ok=True)
+        (root / "secrets" / f"channel__{suffix}").write_text(user)
+
+    migrate.migrate_unscoped_data_root()
+
+    for user in users:
+        suffix = user[-1]
+        target = root / user
+        assert (target / migrate._USER_SCOPE_MARKER_FILENAME).exists()
+        assert (target / "projects" / f"p-{suffix}" / "workspace" / "README.md").read_text() == user
+        assert (target / "docs" / "preview" / f"d-{suffix}.md").read_text() == user
+        assert (target / "attachments" / f"s-{suffix}" / "in.txt").read_text() == user
+        assert (target / "secrets" / f"channel__{suffix}").read_text() == user
+
+    assert not (root / "user-A" / "projects" / "p-B").exists()
+    assert not (root / "user-B" / "projects" / "p-A").exists()
+    assert _scalar(root / "valuz.db", "SELECT root_path FROM valuz_project WHERE id='p-A'") == str(
+        root / "user-A" / "projects" / "p-A" / "workspace"
+    )
+    assert _scalar(root / "valuz.db", "SELECT root_path FROM valuz_project WHERE id='p-B'") == str(
+        root / "user-B" / "projects" / "p-B" / "workspace"
+    )
+
+
 def test_migrates_copies_rewrites_and_repoints(fake_home):
     old_app, old_kb, new_root = fake_home
     paths = _build_old_tree(old_app.parent.parent, old_app, old_kb)

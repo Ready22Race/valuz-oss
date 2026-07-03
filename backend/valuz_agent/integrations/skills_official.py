@@ -15,28 +15,31 @@ from valuz_agent.integrations.skills_official_bootstrap import is_bundled_skill
 from valuz_agent.modules.skills.contracts import RuntimeContext, SkillManifest
 
 
-def _default_official_skill_root() -> Path:
+def _default_official_skill_root(user_id: str) -> Path:
     """Canonical home for officially-distributed skills.
 
     Always reads through ``fs_registry`` so the location stays
     consistent with the bootstrap sync target — both surfaces resolve
     to ``~/.valuz-oss/official-skills/`` by default.
     """
-    return fs_registry.official_skill_root()
+    return fs_registry.official_skill_root(user_id=user_id)
 
 
 class OfficialSkillSource:
     name = "official"
 
     def __init__(self, official_dir: Path | None = None) -> None:
-        self._dir = official_dir or _default_official_skill_root()
+        self._dir = official_dir
 
     def list_skills(self, ctx: RuntimeContext) -> list[SkillManifest]:
-        if not self._dir.exists():
+        if ctx.user_id is None:
+            raise ValueError("user_id is required to list official skills")
+        official_dir = self._dir or _default_official_skill_root(ctx.user_id)
+        if not official_dir.exists():
             return []
 
         manifests: list[SkillManifest] = []
-        for skill_dir in sorted(p for p in self._dir.iterdir() if p.is_dir()):
+        for skill_dir in sorted(p for p in official_dir.iterdir() if p.is_dir()):
             manifest_path = _detect_manifest(skill_dir)
             if manifest_path is None:
                 continue

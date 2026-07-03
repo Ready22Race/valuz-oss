@@ -27,12 +27,16 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from valuz_agent.infra.config import settings
+from valuz_agent.infra.db_urls import (
+    db_url_async,
+    is_sqlite_runtime,
+    kernel_db_url,
+    kernel_db_url_async,
+    sqlite_path_from_url,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
-
-    from valuz_agent.infra.secret_store import SecretStorePort
 
 logger = logging.getLogger(__name__)
 
@@ -71,16 +75,15 @@ def _set_kernel_env() -> None:
     cwd happened to be active at first boot; setdefault honours an external
     override.
     """
-    os.environ["DATABASE_URL"] = settings.kernel_db_url_async
-    os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(settings.kernel_db_path))
+    os.environ["DATABASE_URL"] = kernel_db_url_async()
+    kernel_db_path = sqlite_path_from_url(kernel_db_url())
+    if kernel_db_path is not None:
+        os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(kernel_db_path))
     # OSS default (KERNEL_STORE local/unset): the DataService backend is the host
     # sqlite (valuz.db). Inject it as the durable so the kernel dual-writes
-    # kernel.db → valuz.db and reads are served from the DataService (design §3
-    # form 1) — the DataService is always the data layer, not a bypass. A shared-DB
-    # deployment (database_url set) makes this equal the kernel's own DSN → the
-    # factory collapses it to a single write. pg/remote bring their own durable.
+    # kernel.db -> valuz.db and reads are served from the DataService.
     if os.environ.get("KERNEL_STORE", "local") == "local":
-        os.environ.setdefault("VALUZ_DURABLE_DATABASE_URL", settings.db_url_async)
+        os.environ.setdefault("VALUZ_DURABLE_DATABASE_URL", db_url_async())
 
 
 def _known_kernel_revisions() -> set[str]:
@@ -143,7 +146,7 @@ async def ensure_kernel_schema_migratable(engine: AsyncEngine | None = None) -> 
 
     owns_engine = engine is None
     if engine is None:
-        engine = create_async_engine(settings.kernel_db_url_async)
+        engine = create_async_engine(kernel_db_url_async())
     try:
         async with engine.connect() as conn:
             existing = set(await conn.run_sync(lambda c: inspect(c).get_table_names()))
@@ -197,7 +200,7 @@ def _do_alembic_upgrade() -> None:
     # two must agree on the kernel file — point the config at the kernel URL,
     # not the host ``db_url_async``, so the migration can never land on
     # ``valuz.db`` if the env is ever cleared.
-    cfg.set_main_option("sqlalchemy.url", settings.kernel_db_url_async)
+    cfg.set_main_option("sqlalchemy.url", kernel_db_url_async())
 
     command.upgrade(cfg, "head")
 
@@ -276,7 +279,7 @@ async def init_kernel_dependencies() -> None:
     # to the kernel engine here (at the host seam), then dispose the pool so live
     # connections reconnect with it. The tidier home is the kernel's engine
     # factory — fold busy_timeout in there when next touching it.
-    if settings.is_sqlite and getattr(kernel_deps, "_engine", None) is not None:
+    if is_sqlite_runtime() and getattr(kernel_deps, "_engine", None) is not None:
         from sqlalchemy import event as _sa_event
 
         kernel_engine = kernel_deps._engine
@@ -392,9 +395,6 @@ class _PerOwnerDataServiceVerifier:
     resolves its own secret) and cloud (many owners).
     """
 
-    def __init__(self, secret_store) -> None:  # SecretStorePort
-        self._store = secret_store
-
     def verify(self, token: str | None):
         if not token:
             return None
@@ -404,6 +404,7 @@ class _PerOwnerDataServiceVerifier:
         from src.core.token_signer import HmacTokenVerifier, InvalidTokenError
 
         from valuz_agent.infra.data_service_secret import DS_SECRET_REF
+        from valuz_agent.infra import secret_store
 
         parts = token.split(".")
         if len(parts) != 3:
@@ -415,18 +416,16 @@ class _PerOwnerDataServiceVerifier:
         sub = claims.get("sub")
         if not sub:
             raise InvalidTokenError("missing sub")
-        secret = self._store.get(str(sub), DS_SECRET_REF)  # read-only; None if absent
+        secret = secret_store.get(str(sub), DS_SECRET_REF)  # read-only; None if absent
         if not secret:
             raise InvalidTokenError("unknown owner")
         # Real verification (signature, alg pin, exp) with the owner's secret.
         return HmacTokenVerifier(secret).verify(token)
 
 
-def make_host_data_service_verifier_per_owner(
-    secret_store: SecretStorePort,
-) -> _PerOwnerDataServiceVerifier:
+def make_host_data_service_verifier_per_owner() -> _PerOwnerDataServiceVerifier:
     """Per-owner HS256 verifier for the host DataService (multi-tenant)."""
-    return _PerOwnerDataServiceVerifier(secret_store)
+    return _PerOwnerDataServiceVerifier()
 
 
 def mint_data_service_token(

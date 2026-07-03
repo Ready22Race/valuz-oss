@@ -392,7 +392,15 @@ export const AutomationPage = () => {
                 .map((group) => (
                   <section key={group.project_id}>
                     <ScheduledTaskTable
-                      tasks={group.automations.map(automationToTableRow)}
+                      // Enabled automations sort ahead of paused ones (stable
+                      // within each group); the row map preserves this order.
+                      tasks={[...group.automations]
+                        .sort(
+                          (a, b) =>
+                            Number(b.status === "enabled") -
+                            Number(a.status === "enabled"),
+                        )
+                        .map(automationToTableRow)}
                       title={group.project_name}
                       taskCountLabel={t(
                         k(

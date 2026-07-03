@@ -6,7 +6,7 @@ moved to ``valuz_project_connector``, this imports any legacy selection on first
 boot so existing users keep their picks.
 
 (The connector *credentials* — header/param values + OAuth tokens — are migrated
-straight off the ``FileSecretStore`` files into the unified ``valuz_connector``
+straight off the local secret files into the unified ``valuz_connector``
 columns by migration 0004, not here.)
 
 DB-authoritative and idempotent: a project that already carries a selection is
@@ -24,6 +24,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.infra.local_identity import resolve_local_user_id
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.projects.models import ProjectRow
 
@@ -34,7 +35,7 @@ _MARKER_NAME = ".connector_fs_backfilled"
 
 async def backfill_connector_fs(db: AsyncSession) -> None:
     """Import the legacy per-project connector selection into the DB exactly once."""
-    marker = fs_registry.resolve(_MARKER_NAME)
+    marker = fs_registry.data_dir(resolve_local_user_id()) / _MARKER_NAME
     if marker.exists():
         return
     await _backfill_project_selection(db)

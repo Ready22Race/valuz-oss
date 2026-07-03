@@ -180,14 +180,14 @@ async def test_status_without_node_skips_cli(monkeypatch: pytest.MonkeyPatch) ->
 async def test_start_requires_node(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(service, "node_available", lambda: False)
     with pytest.raises(BrowserNodeMissing):
-        await service.start()
+        await service.start("user-A")
 
 
 async def test_start_idempotent_when_running(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(service, "node_available", lambda: True)
     fake = FakeCli(initially_running=True)
     monkeypatch.setattr(service, "_run_cli", fake)
-    res = await service.start()
+    res = await service.start("user-A")
     assert res.status == "already_running"
     assert all(c[0] != "start" for c in fake.calls)  # did not relaunch
 
@@ -195,15 +195,20 @@ async def test_start_idempotent_when_running(monkeypatch: pytest.MonkeyPatch) ->
 async def test_start_managed_builds_args(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(service, "node_available", lambda: True)
     monkeypatch.setattr(service.settings, "browser_mode", "managed")
-    monkeypatch.setattr(service._fs, "browser_profile_dir", lambda: tmp_path / "browser-chrome")
+    monkeypatch.setattr(
+        service._fs, "browser_profile_dir", lambda user_id: tmp_path / user_id / "browser-chrome"
+    )
     fake = FakeCli(initially_running=False, running_after_start=True)
     monkeypatch.setattr(service, "_run_cli", fake)
 
-    res = await service.start()
+    res = await service.start("user-A")
     assert res.status == "started"
     start_call = next(c for c in fake.calls if c[0] == "start")
     assert "--headless=false" in start_call
-    assert any(a.startswith("--userDataDir=") and a.endswith("browser-chrome") for a in start_call)
+    assert any(
+        a.startswith("--userDataDir=") and a.endswith("user-A/browser-chrome")
+        for a in start_call
+    )
 
 
 async def test_start_attach_builds_args(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,7 +218,7 @@ async def test_start_attach_builds_args(monkeypatch: pytest.MonkeyPatch) -> None
     fake = FakeCli(initially_running=False, running_after_start=True)
     monkeypatch.setattr(service, "_run_cli", fake)
 
-    res = await service.start()
+    res = await service.start("user-A")
     assert res.status == "started"
     start_call = next(c for c in fake.calls if c[0] == "start")
     assert "--browserUrl=http://127.0.0.1:9222" in start_call
@@ -223,11 +228,13 @@ async def test_start_attach_builds_args(monkeypatch: pytest.MonkeyPatch) -> None
 async def test_start_failure_raises(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(service, "node_available", lambda: True)
     monkeypatch.setattr(service.settings, "browser_mode", "managed")
-    monkeypatch.setattr(service._fs, "browser_profile_dir", lambda: tmp_path / "browser-chrome")
+    monkeypatch.setattr(
+        service._fs, "browser_profile_dir", lambda user_id: tmp_path / user_id / "browser-chrome"
+    )
     fake = FakeCli(initially_running=False, running_after_start=False)  # never comes up
     monkeypatch.setattr(service, "_run_cli", fake)
     with pytest.raises(BrowserStartFailed):
-        await service.start()
+        await service.start("user-A")
 
 
 async def test_stop_calls_cli(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shutil
 import tarfile
 import tempfile
+import time
 import zipfile
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from valuz_agent.infra.eventbus import EventBus
+from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.integrations.skills_filesystem import (
     FilesystemSkillSource,
     _default_user_skill_root,
@@ -52,14 +55,9 @@ from valuz_agent.modules.skills.models import (
 
 logger = logging.getLogger(__name__)
 
-# Preview entries are heterogeneous by import kind:
-#   archive/directory: (skill_root, managed_temp: bool)  — cleaned via skill_root.parent
-#   URL/GitHub:        (skill_root, cleanup_root: Path, created_at: float)
-# For URL imports every candidate shares one ``cleanup_root`` (the staging dir),
-# ref-counted in ``_import_cleanup_refs`` so confirming one skill never deletes a
-# sibling's source; the dir is reclaimed only when the last candidate is gone.
-_import_previews: dict[str, tuple[Path, bool] | tuple[Path, Path, float]] = {}
-_import_cleanup_refs: dict[str, int] = {}
+_IMPORT_PREVIEW_INDEX_DIR = "_import-previews"
+_IMPORT_PREVIEW_CONTENT_DIR = "_import-content"
+_IMPORT_PREVIEW_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 # Serializes ``startup_scan`` across concurrent callers (e.g. a multi-skill
 # import confirming N skills at once). Without it, two scans both see a
 # just-copied skill as absent and race to INSERT its index row → UNIQUE
@@ -78,13 +76,13 @@ async def _upsert_skill_row(user_id: str, ds: SkillDatastore, manifest) -> None:
     """
     from valuz_agent.modules.skills.models import SkillIndexRow
 
-    existing = await ds.get_by_id(user_id, manifest.id)
+    slug = manifest.slug or manifest.id
+    existing = await ds.get_by_slug(user_id, slug)
     if existing is None:
         await ds.create(
             user_id,
             SkillIndexRow(
-                id=manifest.id,
-                slug=manifest.slug or manifest.id,
+                slug=slug,
                 name=manifest.name,
                 description=manifest.description,
                 scope=manifest.scope,
@@ -107,9 +105,16 @@ async def _upsert_skill_row(user_id: str, ds: SkillDatastore, manifest) -> None:
             ),
         )
     else:
+        existing.slug = slug
         existing.name = manifest.name
         existing.description = manifest.description
+        existing.scope = manifest.scope
+        existing.source = manifest.source
         existing.source_path = manifest.path
+        existing.project_root = manifest.project_root
+        existing.manifest_filename = None
+        existing.tags_json = ",".join(manifest.tags) if manifest.tags else None
+        existing.icon = manifest.icon
         existing.status = "available"
         existing.content_hash = manifest.content_hash
         existing.manifest_hash = manifest.manifest_hash
@@ -163,7 +168,7 @@ async def reindex_official_skills(user_id: str) -> int:
     from valuz_agent.integrations.skills_official import OfficialSkillSource
     from valuz_agent.modules.skills.contracts import RuntimeContext
 
-    ctx = RuntimeContext()
+    ctx = RuntimeContext(user_id=user_id)
     count = 0
     async with _scan_lock:
         async with async_unit_of_work(commit=True) as db:
@@ -195,7 +200,7 @@ async def reindex_user_skills(user_id: str) -> int:
     from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
     from valuz_agent.modules.skills.contracts import RuntimeContext
 
-    ctx = RuntimeContext()
+    ctx = RuntimeContext(user_id=user_id)
     count = 0
     async with _scan_lock:
         async with async_unit_of_work(commit=True) as db:
@@ -255,13 +260,14 @@ class SkillLibraryService:
         # missing row (skill on disk but not yet indexed) or a NULL value
         # (legacy row seeded before the column landed) coalesces to
         # ``"discovered"`` so the field is always a real enum value.
-        origin_by_id = {row.id: row.creation_origin for row in await self._ds.list_skills(user_id)}
+        rows_by_slug = {row.slug: row for row in await self._ds.list_skills(user_id)}
 
-        def _origin(skill_id: str) -> str:
-            return origin_by_id.get(skill_id) or "discovered"
+        def _origin(slug: str) -> str:
+            row = rows_by_slug.get(slug)
+            return (row.creation_origin if row is not None else None) or "discovered"
 
         skills = [
-            SkillView(**item.model_dump(), creation_origin=_origin(item.id)) for item in items
+            SkillView(**item.model_dump(), creation_origin=_origin(item.slug)) for item in items
         ]
 
         from valuz_agent.modules.skills.contracts import ProjectRef, RuntimeContext
@@ -289,7 +295,7 @@ class SkillLibraryService:
         has_official_entitlement = await self._check_entitlement("skills:official")
         for source in self._extra_sources:
             for manifest in source.list_skills(ctx):
-                view = SkillView(**manifest.model_dump(), creation_origin=_origin(manifest.id))
+                view = SkillView(**manifest.model_dump(), creation_origin=_origin(manifest.slug))
                 # Bundled skills (origin_label="Built-in") ship with the
                 # client and are always free; never gate them behind the
                 # entitlement. Only externally-installed official skills
@@ -358,10 +364,10 @@ class SkillLibraryService:
         # the new-conversation ``/`` picker filters on. Built-in skills (bundled
         # with the client) are always-on and can't be disabled — guard here too so
         # a forced row value can never hide one, mirroring the disabled UI toggle.
-        disabled_ids = await self._ds.list_library_disabled_ids(user_id)
-        if disabled_ids:
+        disabled_slugs = await self._ds.list_library_disabled_slugs(user_id)
+        if disabled_slugs:
             for s in skills:
-                if s.id in disabled_ids and s.origin_label != "Built-in":
+                if s.slug in disabled_slugs and s.origin_label != "Built-in":
                     s.library_enabled = False
 
         return SkillsCatalog(project_id=project_id, skills=skills)
@@ -378,7 +384,7 @@ class SkillLibraryService:
         from valuz_agent.modules.skills.contracts import RuntimeContext
 
         all_manifests: list = []
-        ctx = RuntimeContext()
+        ctx = RuntimeContext(user_id=user_id)
         all_manifests.extend(self._source.list_skills(ctx))
         for source in self._extra_sources:
             all_manifests.extend(source.list_skills(ctx))
@@ -397,19 +403,20 @@ class SkillLibraryService:
                 )
                 all_manifests.extend(self._source.list_skills(project_ctx))
 
-        seen_ids: set[str] = set()
+        seen_slugs: set[str] = set()
         for manifest in all_manifests:
-            if manifest.id in seen_ids:
+            slug = manifest.slug or manifest.id
+            if slug in seen_slugs:
                 continue
-            seen_ids.add(manifest.id)
+            seen_slugs.add(slug)
             await self._upsert_manifest(user_id, manifest)
 
         for row in await self._ds.list_skills(user_id):
-            if row.id not in seen_ids:
+            if row.slug not in seen_slugs:
                 row.status = "unavailable"
                 await self._ds.update(row)
 
-        return len(seen_ids)
+        return len(seen_slugs)
 
     async def _upsert_manifest(self, user_id: str, manifest) -> None:  # type: ignore[no-untyped-def]
         """Create or refresh the index row for one manifest (see
@@ -429,7 +436,7 @@ class SkillLibraryService:
         """
         from valuz_agent.modules.skills.contracts import RuntimeContext
 
-        ctx = RuntimeContext()
+        ctx = RuntimeContext(user_id=user_id)
         count = 0
         async with _scan_lock:
             for source in self._extra_sources:
@@ -508,7 +515,7 @@ class SkillLibraryService:
                 )
             except KeyError:
                 continue
-            await self._ds.set_creation_origin(user_id, written.id, "created")
+            await self._ds.set_creation_origin_by_slug(user_id, written.slug, "created")
 
         # Notify any subscribers (frontend uses /v1/skills/events/stream).
         self._bus.publish(SKILL_CHANGED, skill_id="*", reason="staging-sync")
@@ -545,9 +552,9 @@ class SkillLibraryService:
         # Fall back to scanning all sources (covers fresh installs / official).
         from valuz_agent.modules.skills.contracts import RuntimeContext
 
-        all_manifests = list(self._source.list_skills(RuntimeContext()))
+        all_manifests = list(self._source.list_skills(RuntimeContext(user_id=user_id)))
         for source in self._extra_sources:
-            all_manifests.extend(source.list_skills(RuntimeContext()))
+            all_manifests.extend(source.list_skills(RuntimeContext(user_id=user_id)))
         for m in all_manifests:
             if m.id == skill_id:
                 return Path(m.path)
@@ -559,14 +566,14 @@ class SkillLibraryService:
         """Resolve the target skill-library directory for sync / create.
 
         - "user" (default) → _default_user_skill_root() (controlled by
-          VALUZ_USER_SKILLS_DIR env var).
+          configured ``settings.user_skills_dir``).
         - "project" → <project.root_path>/.claude/skills/. Requires
           project_id pointing at a project.
         - "official" / "tenant" → not supported here; raise to surface a clear
           error rather than silently writing to the wrong place.
         """
         if target_scope == "user":
-            return _default_user_skill_root()
+            return _default_user_skill_root(user_id)
         if target_scope == "project":
             if not project_id:
                 raise ValueError("project_id required when target_scope='project'")
@@ -739,14 +746,30 @@ class SkillLibraryService:
         target_scope: str,
         project_id: str | None = None,
     ) -> SkillImportArchivePreview:
-        # Archive extraction is blocking CPU/disk — keep it off the event loop.
-        extracted_root = await asyncio.to_thread(self._extract_archive, Path(archive_path))
         preview_id = f"skill-preview-{uuid4().hex[:8]}"
-        skill_root = self._locate_skill_root(
-            extracted_root,
-            missing_manifest_message="Archive does not contain a valid skill root with SKILL.md",
+        staging_root = self._import_preview_content_dir(user_id, preview_id)
+        # Archive extraction is blocking CPU/disk — keep it off the event loop.
+        try:
+            extracted_root = await asyncio.to_thread(
+                self._extract_archive, Path(archive_path), staging_root / "extract"
+            )
+            skill_root = self._locate_skill_root(
+                extracted_root,
+                missing_manifest_message=(
+                    "Archive does not contain a valid skill root with SKILL.md"
+                ),
+            )
+        except Exception:
+            shutil.rmtree(staging_root, ignore_errors=True)
+            raise
+        self._write_import_preview_record(
+            user_id,
+            preview_id,
+            kind="archive",
+            skill_root=skill_root,
+            managed_temp=True,
+            cleanup_root=staging_root,
         )
-        _import_previews[preview_id] = (skill_root, True)
         return await self._build_import_preview(
             user_id,
             preview_id=preview_id,
@@ -767,11 +790,25 @@ class SkillLibraryService:
             raise ValueError("Selected path must be a folder")
 
         preview_id = f"skill-preview-{uuid4().hex[:8]}"
-        skill_root = self._locate_skill_root(
-            directory_path,
-            missing_manifest_message="Selected folder must contain SKILL.md or skill.md",
+        staging_root = self._import_preview_content_dir(user_id, preview_id)
+        try:
+            source_root = self._locate_skill_root(
+                directory_path,
+                missing_manifest_message="Selected folder must contain SKILL.md or skill.md",
+            )
+            skill_root = staging_root / "skill"
+            await asyncio.to_thread(shutil.copytree, source_root, skill_root)
+        except Exception:
+            shutil.rmtree(staging_root, ignore_errors=True)
+            raise
+        self._write_import_preview_record(
+            user_id,
+            preview_id,
+            kind="directory",
+            skill_root=skill_root,
+            managed_temp=False,
+            cleanup_root=staging_root,
         )
-        _import_previews[preview_id] = (skill_root, False)
         return await self._build_import_preview(
             user_id,
             preview_id=preview_id,
@@ -785,7 +822,7 @@ class SkillLibraryService:
         user_id: str,
         payload: SkillImportArchiveConfirmRequest,
     ) -> SkillView:
-        preview = _import_previews.get(payload.preview_id)
+        preview = self._load_import_preview_entry(user_id, payload.preview_id)
         preview_root = preview[0] if preview else None
         if preview_root is None or not preview_root.exists():
             raise KeyError(payload.preview_id)
@@ -818,7 +855,7 @@ class SkillLibraryService:
             self._ds.set_skill_enabled(project, str(target_dir), True)
         elif payload.add_to_project and project is not None and project.kind == "project":
             self._ds.set_skill_enabled(project, str(target_dir), True)
-        self._cleanup_preview(payload.preview_id)
+        self._cleanup_preview(payload.preview_id, user_id=user_id)
         return await self._finalize_origin(user_id, target_dir, "imported", payload.project_id)
 
     # ------------------------------------------------------------------
@@ -942,8 +979,8 @@ class SkillLibraryService:
         # Overlay the global library switch (default on; off only when stored).
         # Built-in skills are always-on (can't be disabled), so never flip them.
         if skill.origin_label != "Built-in":
-            disabled_ids = await self._ds.list_library_disabled_ids(user_id)
-            skill.library_enabled = skill.id not in disabled_ids
+            disabled_slugs = await self._ds.list_library_disabled_slugs(user_id)
+            skill.library_enabled = skill.slug not in disabled_slugs
 
         return SkillDetail(
             **skill.model_dump(),
@@ -952,7 +989,7 @@ class SkillLibraryService:
             root_path=str(skill_dir),
             manifest_filename=manifest_filename,
             metadata=metadata,
-            origin=await self._load_origin(user_id, skill.id),
+            origin=await self._load_origin(user_id, skill.slug),
         )
 
     async def set_library_enabled(self, user_id: str, skill_id: str, enabled: bool) -> SkillDetail:
@@ -965,22 +1002,138 @@ class SkillLibraryService:
         """
         from valuz_agent.modules.skills.errors import SkillNotFound
 
-        row = await self._ds.get_by_id(user_id, skill_id)
+        skill = await self._resolve_skill(user_id, skill_id=skill_id)
+        row = await self._ds.get_by_slug(user_id, skill.slug)
         if row is None:
             raise SkillNotFound(skill_id)
-        await self._ds.set_library_enabled(user_id, skill_id, enabled)
+        await self._ds.set_library_enabled_by_slug(user_id, skill.slug, enabled)
         self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="library_state")
         return await self.get_skill_detail(user_id, skill_id)
 
-    async def _load_origin(self, user_id: str, skill_id: str) -> SkillOrigin | None:
+    async def _load_origin(self, user_id: str, slug: str) -> SkillOrigin | None:
         """Read import provenance off the ``valuz_skill_index`` row, if any."""
-        row = await self._ds.get_by_id(user_id, skill_id)
+        row = await self._ds.get_by_slug(user_id, slug)
         if row is None or not row.origin_json:
             return None
         try:
             return SkillOrigin.model_validate_json(row.origin_json)
         except ValueError:
             return None  # tolerate a legacy / malformed blob
+
+    def _import_preview_index_dir(self, user_id: str) -> Path:
+        return fs_registry.user_temp_dir(user_id) / _IMPORT_PREVIEW_INDEX_DIR
+
+    def _import_preview_content_dir(self, user_id: str, preview_id: str) -> Path:
+        if not _IMPORT_PREVIEW_ID_RE.fullmatch(preview_id):
+            raise ValueError("Invalid import preview id")
+        return fs_registry.user_temp_dir(user_id) / _IMPORT_PREVIEW_CONTENT_DIR / preview_id
+
+    def _import_preview_record_path(self, user_id: str, preview_id: str) -> Path | None:
+        if not _IMPORT_PREVIEW_ID_RE.fullmatch(preview_id):
+            return None
+        return self._import_preview_index_dir(user_id) / f"{preview_id}.json"
+
+    def _write_import_preview_record(
+        self,
+        user_id: str,
+        preview_id: str,
+        *,
+        kind: Literal["archive", "directory", "url"],
+        skill_root: Path,
+        managed_temp: bool | None = None,
+        cleanup_root: Path | None = None,
+        created_at: float | None = None,
+        origin: SkillOrigin | None = None,
+    ) -> None:
+        path = self._import_preview_record_path(user_id, preview_id)
+        if path is None:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, Any] = {
+            "preview_id": preview_id,
+            "kind": kind,
+            "skill_root": str(skill_root),
+        }
+        if managed_temp is not None:
+            payload["managed_temp"] = managed_temp
+        if cleanup_root is not None:
+            payload["cleanup_root"] = str(cleanup_root)
+        if created_at is not None:
+            payload["created_at"] = created_at
+        if origin is not None:
+            payload["origin"] = origin.model_dump()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
+        tmp.replace(path)
+
+    def _load_import_preview_record(self, user_id: str, preview_id: str) -> dict[str, Any] | None:
+        path = self._import_preview_record_path(user_id, preview_id)
+        if path is None or not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("preview_id") != preview_id:
+            return None
+        return payload
+
+    def _preview_entry_from_record(
+        self, record: dict[str, Any]
+    ) -> tuple[Path, bool] | tuple[Path, Path, float] | None:
+        raw_root = record.get("skill_root")
+        if not isinstance(raw_root, str):
+            return None
+        skill_root = Path(raw_root)
+        if record.get("kind") == "url":
+            raw_cleanup_root = record.get("cleanup_root")
+            if not isinstance(raw_cleanup_root, str):
+                return None
+            created_at = record.get("created_at")
+            try:
+                created = float(created_at)
+            except (TypeError, ValueError):
+                return None
+            return (skill_root, Path(raw_cleanup_root), created)
+        return (skill_root, bool(record.get("managed_temp", False)))
+
+    def _load_import_preview_entry(
+        self, user_id: str, preview_id: str
+    ) -> tuple[Path, bool] | tuple[Path, Path, float] | None:
+        record = self._load_import_preview_record(user_id, preview_id)
+        if record is None:
+            return None
+        origin_payload = record.get("origin")
+        if isinstance(origin_payload, dict):
+            try:
+                _import_origins[preview_id] = SkillOrigin(**origin_payload)
+            except ValueError:
+                pass
+        return self._preview_entry_from_record(record)
+
+    def _delete_import_preview_record(self, user_id: str, preview_id: str) -> dict[str, Any] | None:
+        record = self._load_import_preview_record(user_id, preview_id)
+        path = self._import_preview_record_path(user_id, preview_id)
+        if path is not None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        return record
+
+    def _has_import_preview_refs(self, user_id: str, cleanup_root: Path) -> bool:
+        index_dir = self._import_preview_index_dir(user_id)
+        if not index_dir.exists():
+            return False
+        cleanup = str(cleanup_root)
+        for path in index_dir.glob("*.json"):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if payload.get("kind") == "url" and payload.get("cleanup_root") == cleanup:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # URL import (T1.3)
@@ -996,9 +1149,13 @@ class SkillLibraryService:
         from valuz_agent.modules.skills.errors import SkillImportFailed
 
         # Everything for this import is extracted UNDER ``staging_dir`` so the
-        # whole tree is reclaimed by a single rmtree once every candidate preview
-        # has been confirmed or expired (ref-counted in ``_cleanup_preview``).
-        staging_dir = Path(tempfile.mkdtemp(prefix="valuz-skill-url-"))
+        # whole tree is visible to every server sharing the user's staging root
+        # and reclaimed once the last durable candidate preview is consumed.
+        staging_dir = self._import_preview_content_dir(
+            user_id,
+            f"skill-url-{uuid4().hex[:8]}",
+        )
+        staging_dir.mkdir(parents=True, exist_ok=False)
 
         try:
             # Network fetch (urlopen, 30s timeout) + archive extraction are
@@ -1070,12 +1227,11 @@ class SkillLibraryService:
         its ``preview_id`` for ``confirm_url_import`` to persist.
 
         Every candidate is a subdir of the SHARED ``cleanup_root`` (the import's
-        staging dir). The root is ref-counted so confirming/cleaning up one
-        skill never deletes a sibling's source — the staging dir is reclaimed
-        only once the last candidate is consumed or expired.
+        staging dir). The root is tracked through durable preview records so
+        confirming/cleaning up one skill never deletes a sibling's source — the
+        staging dir is reclaimed only once the last candidate is consumed or
+        expired.
         """
-        import time
-
         origin_type: Literal["github", "url"] = (
             "github" if self._is_github_url(source_url) else "url"
         )
@@ -1084,23 +1240,32 @@ class SkillLibraryService:
         candidates: list[SkillImportCandidate] = []
         for root in skill_roots:
             preview_id = str(uuid4())
-            _import_previews[preview_id] = (root, cleanup_root, time.time())
-            self._incref_cleanup_root(cleanup_root)
+            created_at = time.time()
+            try:
+                relpath = str(root.relative_to(fetched_root))
+            except ValueError:
+                relpath = root.name
+            origin = SkillOrigin(
+                type=origin_type,
+                source_url=source_url,
+                path="" if relpath in (".", "") else relpath,
+            )
+            _import_origins[preview_id] = origin
+            self._write_import_preview_record(
+                user_id,
+                preview_id,
+                kind="url",
+                skill_root=root,
+                cleanup_root=cleanup_root,
+                created_at=created_at,
+                origin=origin,
+            )
             preview = await self._build_import_preview(
                 user_id,
                 preview_id=preview_id,
                 skill_root=root,
                 target_scope=target_scope,
                 project_id=project_id,
-            )
-            try:
-                relpath = str(root.relative_to(fetched_root))
-            except ValueError:
-                relpath = root.name
-            _import_origins[preview_id] = SkillOrigin(
-                type=origin_type,
-                source_url=source_url,
-                path="" if relpath in (".", "") else relpath,
             )
             candidates.append(
                 SkillImportCandidate(
@@ -1123,16 +1288,14 @@ class SkillLibraryService:
         user_id: str,
         payload: SkillImportUrlConfirmRequest,
     ) -> SkillView:
-        import time
-
         from valuz_agent.modules.skills.errors import PreviewExpired
 
-        entry = _import_previews.get(payload.preview_id)
+        entry = self._load_import_preview_entry(user_id, payload.preview_id)
         if entry is None or len(entry) != 3:
             raise PreviewExpired("Import preview not found or expired")
         skill_root, _cleanup_root, created_at = entry
         if time.time() - created_at > 600:
-            self._cleanup_preview(payload.preview_id)
+            self._cleanup_preview(payload.preview_id, user_id=user_id)
             raise PreviewExpired()
 
         self._enforce_import_caps(skill_root)
@@ -1153,12 +1316,14 @@ class SkillLibraryService:
             self._ds.set_skill_enabled(project, str(target_dir), True)
         # Capture provenance before cleanup pops it.
         origin = _import_origins.get(payload.preview_id)
-        self._cleanup_preview(payload.preview_id)
+        self._cleanup_preview(payload.preview_id, user_id=user_id)
         # URL import gets the same "imported" badge as archive / directory
         # imports — host bookkeeping in valuz_skill_index, never SKILL.md.
         skill = await self._finalize_origin(user_id, target_dir, "imported", payload.project_id)
         if origin is not None:
-            await self._ds.set_origin_metadata(user_id, skill.id, origin.model_dump_json())
+            await self._ds.set_origin_metadata_by_slug(
+                user_id, skill.slug, origin.model_dump_json()
+            )
         return skill
 
     def _enforce_import_caps(self, skill_root: Path) -> None:
@@ -1455,14 +1620,15 @@ class SkillLibraryService:
                 f"Ask the agent to regenerate the skill."
             )
 
-        # Always promote into the user library — agentskills.io standard
-        # location managed by ``fs_registry.user_skill_root()``.
+        # Always promote into the user's library. Cloud/shared deployments
+        # scope this root by owner; local desktop keeps the agentskills.io
+        # standard location.
         result = await staging.sync_slug(
             user_id,
             session_id=session_id,
             slug=slug,
             strategy="overwrite",
-            target_root=_default_user_skill_root(),
+            target_root=_default_user_skill_root(user_id),
         )
         if not result.written_path:
             raise RuntimeError("staging.sync_slug returned no written_path")
@@ -1493,7 +1659,7 @@ class SkillLibraryService:
         # The skill-creator AI flow landing a skill is a "created" act.
         # creation_origin is host bookkeeping in valuz_skill_index — the
         # startup_scan above created the row as "discovered"; overwrite it.
-        await self._ds.set_creation_origin(user_id, skill.id, "created")
+        await self._ds.set_creation_origin_by_slug(user_id, skill.slug, "created")
         skill.creation_origin = "created"
 
         # Notify subscribers — frontend reloads the catalog & cards.
@@ -1601,7 +1767,7 @@ class SkillLibraryService:
         except Exception:  # noqa: BLE001
             pass
         skill = await self._resolve_created_skill(user_id, skill_dir, project_id=project_id)
-        await self._ds.set_creation_origin(user_id, skill.id, origin)
+        await self._ds.set_creation_origin_by_slug(user_id, skill.slug, origin)
         skill.creation_origin = origin
         return skill
 
@@ -1624,7 +1790,7 @@ class SkillLibraryService:
 
     async def _scope_root(self, user_id: str, target_scope: str, project_id: str | None) -> Path:
         if target_scope == "user":
-            return _default_user_skill_root()
+            return _default_user_skill_root(user_id)
         if project_id is None:
             raise ValueError("project_id is required for project-scoped skills")
         project = await self._projects.get_project(user_id, project_id)
@@ -1878,34 +2044,24 @@ class SkillLibraryService:
                 )
         return nodes
 
-    def _incref_cleanup_root(self, root: Path) -> None:
-        key = str(root)
-        _import_cleanup_refs[key] = _import_cleanup_refs.get(key, 0) + 1
-
-    def _decref_cleanup_root(self, root: Path) -> None:
-        """Drop one reference to a shared staging dir; rmtree it at zero."""
-        key = str(root)
-        remaining = _import_cleanup_refs.get(key, 1) - 1
-        if remaining > 0:
-            _import_cleanup_refs[key] = remaining
-            return
-        _import_cleanup_refs.pop(key, None)
-        shutil.rmtree(root, ignore_errors=True)
-
-    def _cleanup_preview(self, preview_id: str) -> None:
+    def _cleanup_preview(self, preview_id: str, *, user_id: str | None = None) -> None:
         _import_origins.pop(preview_id, None)
-        preview = _import_previews.pop(preview_id, None)
+        if user_id is None:
+            return
+        record = self._delete_import_preview_record(user_id, preview_id)
+        preview = self._preview_entry_from_record(record) if record is not None else None
         if preview is None:
             return
-        # URL/GitHub import: (skill_root, cleanup_root: Path, created_at). All
-        # candidates share cleanup_root, so decref and only rmtree at zero —
-        # never delete the shared tree out from under a sibling's confirm.
         if len(preview) == 3:
             cleanup_root = preview[1]
-            self._decref_cleanup_root(cleanup_root)
+            if not self._has_import_preview_refs(user_id, cleanup_root):
+                shutil.rmtree(cleanup_root, ignore_errors=True)
             return
         # archive/directory import: (skill_root, managed_temp). A managed temp
         # extraction lives one level above the skill root.
         preview_root, managed_temp = preview
-        if managed_temp:
+        cleanup_root = record.get("cleanup_root") if record is not None else None
+        if isinstance(cleanup_root, str):
+            shutil.rmtree(cleanup_root, ignore_errors=True)
+        elif managed_temp:
             shutil.rmtree(preview_root.parent, ignore_errors=True)

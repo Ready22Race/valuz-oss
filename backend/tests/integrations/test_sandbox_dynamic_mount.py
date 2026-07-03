@@ -47,8 +47,7 @@ def test_profile_predeclares_rw_extension_class(tmp_path) -> None:
         )
     )
     assert (
-        '(allow file-read* file-write* (extension "com.apple.app-sandbox.read-write"))'
-        in profile
+        '(allow file-read* file-write* (extension "com.apple.app-sandbox.read-write"))' in profile
     )
 
 
@@ -86,18 +85,18 @@ class _FakeProvider:
 
     def __init__(self) -> None:
         self.binds: list[tuple[str, str, str]] = []
+        self.bind_owners: list[str] = []  # owner_user_id threaded per bind
         self.unbinds: list[tuple[str, str]] = []
         self.fail = False
 
-    async def bind_workspace(self, sandbox_id, host_path, mode="rw"):
+    async def bind_workspace(self, sandbox_id, host_path, mode="rw", *, owner_user_id=""):
         if self.fail:
             from valuz_agent.ports.sandbox_provider import SandboxProvisionError
 
             raise SandboxProvisionError("boom")
         self.binds.append((sandbox_id, host_path, mode))
-        return MountGrant(
-            grant_id="7", kernel_cwd=host_path, host_path=host_path, mode=mode
-        )
+        self.bind_owners.append(owner_user_id)
+        return MountGrant(grant_id="7", kernel_cwd=host_path, host_path=host_path, mode=mode)
 
     async def unbind_workspace(self, sandbox_id, grant_id):
         self.unbinds.append((sandbox_id, grant_id))
@@ -165,6 +164,59 @@ async def test_ensure_granted_degrades_on_bind_failure(fresh_runtime, tmp_path) 
 
     # A grant failure must not block session creation — returns original cwd.
     assert await sr.ensure_workspace_granted(str(external)) == str(external)
+
+
+@pytest.mark.asyncio
+async def test_ensure_granted_threads_owner_to_bind(fresh_runtime, tmp_path) -> None:
+    """The authenticated owner is threaded to ``bind_workspace`` so a cloud
+    driver stages files under that owner's object-store subtree (multi-tenant)."""
+    sr = fresh_runtime
+    external = tmp_path / "elsewhere"
+    external.mkdir()
+    fake = _FakeProvider()
+    sr.activate(fake, "host-kernel", ())  # no static roots → external triggers a bind
+    await sr.ensure_workspace_granted(str(external), owner_user_id="owner-7")
+    assert fake.bind_owners == ["owner-7"]  # owner reached the cloud-staging seam
+
+
+@pytest.mark.asyncio
+async def test_ensure_granted_rewrites_managed_cwd_to_mount(
+    fresh_runtime, tmp_path, monkeypatch
+) -> None:
+    """Multi-tenant cloud (config-gated): a cwd under the owner's project root is
+    rewritten to the in-sandbox mount path — no active sandbox, no bind. The
+    per-user sandbox is provisioned out-of-band, so the mount already stages it."""
+    sr = fresh_runtime
+    from valuz_agent.infra.config import settings
+
+    # Owner project root template → {tmp}/{user_id}; the mount surfaces it at /workspace.
+    monkeypatch.setattr(settings, "user_project_root", tmp_path / "{user_id}")
+    monkeypatch.setenv("VALUZ_SANDBOX_WORKSPACE_MOUNT", "/workspace")
+    proj = tmp_path / "owner-7" / "p9"
+    proj.mkdir(parents=True)
+
+    # No sandbox activated at all — the rewrite is pure config, not a grant.
+    assert sr.is_active() is False
+    out = await sr.ensure_workspace_granted(str(proj), owner_user_id="owner-7")
+    assert out == "/workspace/p9"
+
+
+@pytest.mark.asyncio
+async def test_ensure_granted_mount_rewrite_skips_external_cwd(
+    fresh_runtime, tmp_path, monkeypatch
+) -> None:
+    """A cwd OUTSIDE the owner's project root is not covered by the mount → the
+    rewrite returns the cwd unchanged (no active sandbox to bind against here)."""
+    sr = fresh_runtime
+    from valuz_agent.infra.config import settings
+
+    monkeypatch.setattr(settings, "user_project_root", tmp_path / "roots" / "{user_id}")
+    monkeypatch.setenv("VALUZ_SANDBOX_WORKSPACE_MOUNT", "/workspace")
+    external = tmp_path / "elsewhere"
+    external.mkdir()
+
+    out = await sr.ensure_workspace_granted(str(external), owner_user_id="owner-7")
+    assert out == str(external)  # not under project root → unchanged
 
 
 # ---- end-to-end across the real sandbox boundary (macOS) ---------------

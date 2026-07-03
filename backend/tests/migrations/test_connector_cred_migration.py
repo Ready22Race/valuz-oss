@@ -1,4 +1,4 @@
-"""Migration 0004's credential merge — plaintext + FileSecretStore → unified.
+"""Migration 0004's credential merge — plaintext + local secret files → unified.
 
 Tests the pure transform (``_unify_creds``) directly with an injected secret
 reader, so no DB / filesystem is needed.

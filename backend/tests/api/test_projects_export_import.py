@@ -27,7 +27,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from valuz_agent.infra.auth_context import reset_current_user_id, set_current_user_id
 from valuz_agent.infra.database import Base
 from valuz_agent.infra.eventbus import event_bus
-from valuz_agent.infra.secret_store import FileSecretStore
 from valuz_agent.modules.agent_packs.service import AgentPackService
 from valuz_agent.modules.agents.models import (
     AgentRow,
@@ -89,8 +88,7 @@ async def _build_app(tmp_path: Path) -> tuple[FastAPI, _Deps]:
     session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
     session = session_factory()
 
-    secret_store = FileSecretStore(tmp_path / "secrets")
-    connector_svc = ConnectorService(ConnectorDatastore(session), secret_store)
+    connector_svc = ConnectorService(ConnectorDatastore(session))
     agent_svc = AgentService(session, connector_service=connector_svc)
     agent_pack_svc = AgentPackService(agent_svc)
     project_svc = ProjectService(
@@ -171,8 +169,10 @@ async def _build_app(tmp_path: Path) -> tuple[FastAPI, _Deps]:
 @pytest.fixture
 async def client(tmp_path, monkeypatch) -> AsyncIterator[tuple]:
     monkeypatch.setenv("VALUZ_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("VALUZ_OFFICIAL_SKILLS_DIR", str(tmp_path / "official"))
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(tmp_path / "user-skills"))
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "data_dir", tmp_path / "data")
+    monkeypatch.setattr(fsr.settings, "user_skills_dir", tmp_path / "user-skills")
     app, deps = await _build_app(tmp_path)
     transport = ASGITransport(app=app)
     token = set_current_user_id(USER)
@@ -257,7 +257,7 @@ async def test_round_trip_recreates_project_members_automations_memory(client, t
     # memory file
     from valuz_agent.infra.fs_registry import fs_registry
 
-    memory = fs_registry.memory_dir("project", project_id=project.id)
+    memory = fs_registry.memory_dir(USER, "project", project_id=project.id)
     (memory / "MEMORY.md").write_text("# bytes\n", encoding="utf-8")
 
     # Export
@@ -292,12 +292,16 @@ async def test_round_trip_recreates_project_members_automations_memory(client, t
     assert new_id != project.id
     # member preserved
     assert [m["agent_slug"] for m in result["members"]] == ["lead"]
+    imported = await deps.session.get(ProjectRow, new_id)
+    assert imported is not None
+    assert imported.root_path is not None
+    assert Path(imported.root_path).is_absolute()
     # automation recreated (not silently dropped — regression guard for the
     # empty-prompt bug that swallowed AutomationPromptEmpty in a broad except)
     assert len(result["automations"]) == 1
     assert result["automations"][0]["name"] == "Daily brief"
     # memory restored byte-for-byte
-    new_memory = fs_registry.memory_dir("project", project_id=new_id)
+    new_memory = fs_registry.memory_dir(USER, "project", project_id=new_id)
     assert (new_memory / "MEMORY.md").read_text() == "# bytes\n"
 
 

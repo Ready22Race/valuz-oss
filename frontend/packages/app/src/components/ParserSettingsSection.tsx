@@ -149,7 +149,7 @@ function PluginCard({ plugin, onConfigure, onTested, t }: PluginCardProps) {
       {t("settings.parsing.notConfigured")}
     </Badge>
   ) : (
-    <Badge variant="brand" className="bg-[#f3f2ff] text-2xs dark:bg-brand-light">
+    <Badge variant="metaBrand" className="text-2xs">
       {t("settings.parsing.configured")}
     </Badge>
   );

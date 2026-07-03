@@ -616,6 +616,38 @@ async def _kernel_for(user_id: str) -> KernelClient:
     return cached
 
 
+async def _kernel_for_existing(user_id: str) -> KernelClient | None:
+    """Resolve the owner's EXISTING kernel for a live tap — never provisions.
+
+    Used by GLOBAL-LIVE (``subscribe_all_events``): opening the decision inbox
+    must not spin up a sandbox. Returns ``None`` when the owner has no live
+    kernel (caller relies on the durable snapshot). No allocator, or a
+    boot-singleton lease (``endpoint=None``) → the process-global ``client``
+    (local single-user, in-process kernel) — behavior unchanged.
+    """
+    from valuz_agent.ports.extensions import ext
+
+    alloc = getattr(ext, "sandbox_allocator", None)
+    if alloc is None:
+        return client
+    peek = getattr(alloc, "peek", None)
+    if peek is None:
+        return client  # allocator predates the peek seam → best-effort global client
+    lease = await peek(owner_user_id=user_id)
+    if lease is None:
+        return None  # no live kernel for this owner → no live tap
+    if lease.endpoint is None:
+        return client  # boot-singleton default → process-global client
+    ep = lease.endpoint
+    cached = _endpoint_clients.get(ep.base_url)
+    if cached is None:
+        from valuz_agent.adapters.kernel_client_http import HttpKernelClient
+
+        cached = HttpKernelClient(ep.base_url, token=ep.token)
+        _endpoint_clients[ep.base_url] = cached
+    return cached
+
+
 async def create_session(user_id: str, req: CreateSessionRequest) -> SessionData:
     return await (await _kernel_for(user_id)).create_session(user_id, req)
 
@@ -701,7 +733,27 @@ async def subscribe_session_events(user_id: str, session_id: str) -> AsyncIterat
 
 
 def subscribe_all_events() -> AsyncIterator[EventData]:
+    """Process-global live tap (all sessions of the process/boot kernel).
+
+    Unchanged: used by the decision aggregator in LOCAL / single-kernel mode.
+    Multi-tenant hosts use :func:`subscribe_all_events_for` instead.
+    """
     return client.subscribe_all_events()
+
+
+async def subscribe_all_events_for(user_id: str) -> AsyncIterator[EventData]:
+    """Live tap on ONE owner's cross-session event stream (GLOBAL-LIVE, remote).
+
+    Routed to that owner's EXISTING kernel via ``_kernel_for_existing`` (never
+    provisions). A multi-tenant host runs one kernel per owner, so that kernel's
+    "all events" stream IS the owner's cross-session stream. Yields nothing when
+    the owner has no live kernel — callers rely on the durable snapshot.
+    """
+    k = await _kernel_for_existing(user_id)
+    if k is None:
+        return
+    async for event in k.subscribe_all_events():
+        yield event
 
 
 async def usage_rollup(user_id: str, start_ms: int, end_ms: int) -> list[UsageRollupData]:

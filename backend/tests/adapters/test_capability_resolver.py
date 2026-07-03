@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,13 +28,14 @@ from valuz_agent.modules.skills.contracts import RuntimeContext, SkillManifest
 # out before asserting against the user-controlled skill set so they
 # stay focused on the behavior under test.
 _DOCS_SKILL_PATH = str(_PROJECT_DOCS_SKILL_DIR.resolve(strict=False))
+USER = "test-user"
 
 
 def _user_skills(caps_skills: tuple[str, ...]) -> tuple[str, ...]:
     """Strip the always-on baseline skills (valuz-project-docs + skill-creator)
     so the remaining tuple reflects only what the resolver picked up from
     user / extras / library."""
-    baseline = set(always_on_skill_paths()) | {_DOCS_SKILL_PATH}
+    baseline = set(always_on_skill_paths(user_id=USER)) | {_DOCS_SKILL_PATH}
     return tuple(p for p in caps_skills if p not in baseline)
 
 
@@ -57,16 +59,26 @@ class _FakeProjectDatastore:
 class _FakeSkillDatastore:
     """Honors only what the resolver consumes: enabled_skill_paths + get_by_id."""
 
-    def __init__(self, enabled_paths: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        enabled_paths: set[str] | None = None,
+        rows_by_id: dict[str, object] | None = None,
+        rows_by_slug: dict[str, object] | None = None,
+    ) -> None:
         self._enabled_paths = enabled_paths or set()
+        self._rows_by_id = rows_by_id or {}
+        self._rows_by_slug = rows_by_slug or {}
 
     def enabled_skill_paths(self, project: _FakeProject) -> set[str]:
         if project.kind != "project":
             return set()
         return self._enabled_paths
 
-    def get_by_id(self, user_id: str, skill_id: str):  # noqa: ANN201 — matches real signature
-        return None
+    async def get_by_id(self, user_id: str, skill_id: str):  # noqa: ANN201 — matches real signature
+        return self._rows_by_id.get(skill_id)
+
+    async def get_by_slug(self, user_id: str, slug: str):  # noqa: ANN201 — matches real signature
+        return self._rows_by_slug.get(slug)
 
 
 class _FakeSkillSource:
@@ -116,12 +128,32 @@ def test_chat_project_auto_includes_user_library_skills(tmp_path: Path) -> None:
             projects=_FakeProjectDatastore(project),
             skills=_FakeSkillDatastore(),
             project_id="ws-chat",
+            user_id=USER,
             skill_source=_FakeSkillSource([_manifest_for(skill_dir)]),
         )
     )
 
     assert _user_skills(caps.skills) == (str(skill_dir.resolve(strict=False)),)
     assert _DOCS_SKILL_PATH in caps.skills
+
+
+def test_extra_skill_id_resolves_manifest_id_by_slug(tmp_path: Path) -> None:
+    skill_dir = _make_skill_dir(tmp_path, "skill-creator")
+    project = _FakeProject(id="ws-project", kind="project", root_path=str(tmp_path))
+    row = SimpleNamespace(source_path=str(skill_dir.resolve(strict=False)))
+
+    caps = asyncio.run(
+        resolve_session_capabilities(
+            projects=_FakeProjectDatastore(project),
+            skills=_FakeSkillDatastore(rows_by_slug={"skill-creator": row}),
+            project_id="ws-project",
+            user_id=USER,
+            extra_skill_ids=["official:skill-creator"],
+        )
+    )
+
+    assert str(skill_dir.resolve(strict=False)) in caps.skills
+    assert caps.skill_resolution_warnings == ()
 
 
 def test_project_does_not_auto_include_user_library_skills(
@@ -142,6 +174,7 @@ def test_project_does_not_auto_include_user_library_skills(
             projects=_FakeProjectDatastore(project),
             skills=_FakeSkillDatastore(enabled_paths=set()),
             project_id="ws-proj",
+            user_id=USER,
             skill_source=_FakeSkillSource([_manifest_for(skill_dir)]),
         )
     )
@@ -159,6 +192,7 @@ def test_chat_project_without_skill_source_yields_empty(tmp_path: Path) -> None:
             projects=_FakeProjectDatastore(project),
             skills=_FakeSkillDatastore(),
             project_id="ws-chat",
+            user_id=USER,
             skill_source=None,
         )
     )
@@ -180,6 +214,7 @@ def test_chat_project_skips_non_user_scoped_manifests(tmp_path: Path) -> None:
             projects=_FakeProjectDatastore(project),
             skills=_FakeSkillDatastore(),
             project_id="ws-chat",
+            user_id=USER,
             skill_source=_FakeSkillSource(
                 [
                     _manifest_for(user_dir, scope="user"),
@@ -204,6 +239,7 @@ def test_chat_project_dedupes_against_extras(tmp_path: Path) -> None:
             projects=_FakeProjectDatastore(project),
             skills=_FakeSkillDatastore(),
             project_id="ws-chat",
+            user_id=USER,
             skill_source=_FakeSkillSource([_manifest_for(skill_dir)]),
         )
     )
@@ -237,6 +273,7 @@ def test_chat_project_includes_bundled_official_skill_without_entitlement(
             projects=_FakeProjectDatastore(project),
             skills=_FakeSkillDatastore(),
             project_id="ws-chat",
+            user_id=USER,
             extra_skill_sources=[_FakeSkillSource([bundled])],
             official_entitled=False,
         )
@@ -273,6 +310,7 @@ def test_chat_project_excludes_unbundled_official_skill_without_entitlement(
             projects=_FakeProjectDatastore(project),
             skills=_FakeSkillDatastore(),
             project_id="ws-chat",
+            user_id=USER,
             extra_skill_sources=[_FakeSkillSource([locked])],
             official_entitled=False,
         )
@@ -308,6 +346,7 @@ def test_chat_project_includes_unbundled_official_skill_when_entitled(
             projects=_FakeProjectDatastore(project),
             skills=_FakeSkillDatastore(),
             project_id="ws-chat",
+            user_id=USER,
             extra_skill_sources=[_FakeSkillSource([locked])],
             official_entitled=True,
         )
@@ -342,6 +381,7 @@ def test_project_does_not_auto_include_official_skills(
             projects=_FakeProjectDatastore(project),
             skills=_FakeSkillDatastore(enabled_paths=set()),
             project_id="ws-proj",
+            user_id=USER,
             extra_skill_sources=[_FakeSkillSource([bundled])],
             official_entitled=True,
         )
@@ -361,10 +401,10 @@ def test_browser_skill_gated_on_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     browser_path = str(_BROWSER_SKILL_DIR.resolve(strict=False))
 
     monkeypatch.setattr(browser_service, "node_available", lambda: True)
-    assert browser_path in always_on_skill_paths()
+    assert browser_path in always_on_skill_paths(user_id=USER)
 
     monkeypatch.setattr(browser_service, "node_available", lambda: False)
-    assert browser_path not in always_on_skill_paths()
+    assert browser_path not in always_on_skill_paths(user_id=USER)
 
 
 def test_unknown_project_raises_key_error() -> None:
@@ -376,5 +416,6 @@ def test_unknown_project_raises_key_error() -> None:
                 projects=_FakeProjectDatastore(project),
                 skills=_FakeSkillDatastore(),
                 project_id="ws-missing",
+                user_id=USER,
             )
         )

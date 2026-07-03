@@ -12,8 +12,8 @@ from uuid import uuid4
 import httpx
 
 from valuz_agent.i18n import t
+from valuz_agent.infra import secret_store
 from valuz_agent.infra.eventbus import EventBus
-from valuz_agent.infra.secret_store import SecretStorePort
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.providers.cli_login_probe import (
     CliTool,
@@ -155,7 +155,6 @@ async def resolve_model_provider_for_user(
             provider_id=provider_id,
             model_id=model_id,
             providers=ProviderDatastore(db),
-            secrets=ext.secret_store,
             runtime_provider=runtime_provider,  # type: ignore[arg-type]
             user_id=user_id,
         )
@@ -436,8 +435,9 @@ def _load_subscription_models() -> dict[str, dict[str, Any]]:
     # Lazy import to avoid circular import at module load.
     try:
         from valuz_agent.infra.fs_registry import fs_registry
+        from valuz_agent.infra.local_identity import resolve_local_user_id
 
-        local_path = fs_registry.resolve("subscription_models.local.json")
+        local_path = fs_registry.data_dir(resolve_local_user_id()) / "subscription_models.local.json"
         if local_path.is_file():
             with local_path.open("r", encoding="utf-8") as fh:
                 _ingest(json.load(fh))
@@ -1083,11 +1083,9 @@ class ProviderService:
     def __init__(
         self,
         datastore: ProviderDatastore,
-        secret_store: SecretStorePort,
         event_bus: EventBus,
     ) -> None:
         self._ds = datastore
-        self._secrets = secret_store
         self._bus = event_bus
 
     # ── Queries ──────────────────────────────────────────────────
@@ -1234,7 +1232,7 @@ class ProviderService:
         return {"models": models, "model_labels": labels, "suggested_default": suggested}
 
     async def read_stored_api_key(self, user_id: str, provider_id: str) -> str | None:
-        """Pull the persisted api_key out of secret_store for a row.
+        """Pull the persisted api_key out of the user's local secret files.
 
         Used by the ping endpoint to support edit-mode flows where the
         user wants to re-test after adding a new model id without
@@ -1248,7 +1246,7 @@ class ProviderService:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
         if not row.secret_ref:
             return None
-        return self._secrets.get(user_id, row.secret_ref)
+        return secret_store.get(user_id, row.secret_ref)
 
     async def ping_compatible_batch(
         self,
@@ -1395,26 +1393,15 @@ class ProviderService:
                 or ("anthropic" if provider_kind == "anthropic" else "openai"),
             )
             if is_custom:
-                # Ping every user-supplied model — keep the ones that
-                # work, drop the rest. The user's intent is "save what's
-                # usable"; silently shipping broken ids leaves footguns
-                # in the picker.
-                batch = await ping_credentials_batch(
-                    base_url=effective_base_url,
-                    api_key=stripped_key,
-                    protocol=protocol_for_discovery,
-                    models=user_models,
-                )
-                if not batch.ok:
-                    # All failed — surface every reason so the user can
-                    # see which models broke and why.
-                    summary = "；".join(f"{m}: {r}" for m, r in batch.failed)
-                    raise ModelDiscoveryError(f"所有模型连接测试均失败：{summary}")
-                # Replace the user-provided list with the verified
-                # subset. Failed ids are dropped from model_ids and from
-                # default_model resolution below.
-                model_ids_list = list(batch.ok)
-                user_models = list(batch.ok)
+                # Save every user-supplied model id as-is — do NOT ping here.
+                # A bare-SDK probe can't stand in for every gateway: a "Claude
+                # Code clients only" proxy rejects it (wrong client identity)
+                # even though a real Claude Agent session — which runs the
+                # actual Claude Code CLI with the ``claude_code`` preset — is
+                # accepted, so gating add on it blocked working channels. Adding
+                # is now a plain write; the [连接测试] button offers an explicit,
+                # non-blocking check.
+                model_ids_list = list(user_models)
                 model_entries = [DiscoveredModel(id=model_id) for model_id in model_ids_list]
             else:
                 try:
@@ -1459,11 +1446,11 @@ class ProviderService:
 
         # Only now stash the secret — at this point we've validated the
         # key (or none was provided), so we won't end up with orphaned
-        # entries in secret_store on failure.
+        # files on failure.
         secret_ref: str | None = None
         if api_key:
             secret_ref = f"channel/{uuid4().hex[:12]}"
-            self._secrets.put(user_id, secret_ref, api_key.strip())
+            secret_store.put(user_id, secret_ref, api_key.strip())
 
         row = ProviderRow(
             name=name.strip(),
@@ -1546,30 +1533,14 @@ class ProviderService:
 
                 raise BadRequestError("自定义通道至少需要 1 个模型 id")
 
-            # Re-ping each model so we never persist ids we know don't
-            # work. Uses whatever api_key landed in this same update —
-            # if the caller supplied a new key it overrides the stored
-            # one for the validation step; otherwise we pull the
-            # currently-stored key out of secret_store.
-            stripped_new_key = (api_key or "").strip() if api_key else None
-            effective_key = stripped_new_key or (
-                self._secrets.get(user_id, row.secret_ref) if row.secret_ref else None
-            )
-            effective_url = (base_url or row.base_url or "").strip()
-            effective_proto = protocol or row.protocol
-            if effective_key and effective_url:
-                protocol_for_ping = _DISCOVERY_PROTOCOL_MAP.get(effective_proto or "") or "openai"
-                batch = await ping_credentials_batch(
-                    base_url=effective_url,
-                    api_key=effective_key,
-                    protocol=protocol_for_ping,
-                    models=cleaned,
-                )
-                if not batch.ok:
-                    summary = "；".join(f"{m}: {r}" for m, r in batch.failed)
-                    raise ModelDiscoveryError(f"所有模型连接测试均失败：{summary}")
-                cleaned = list(batch.ok)
-
+            # Persist the model ids exactly as typed — do NOT ping them here.
+            # A bare-SDK probe can't stand in for every gateway: a "Claude Code
+            # clients only" proxy rejects the probe (wrong client identity) even
+            # though a real Claude Agent session — which runs the actual Claude
+            # Code CLI with the ``claude_code`` preset — is accepted. Gating the
+            # save on that probe blocked working channels, so saving is now a
+            # plain write. The [连接测试] button remains for an explicit,
+            # opt-in check that never blocks the save.
             row.model_ids = json.dumps(cleaned)
             # Keep default_model coherent — if the user removed it from
             # the list, fall back to the first remaining entry.
@@ -1577,10 +1548,10 @@ class ProviderService:
                 row.default_model = cleaned[0]
         if api_key:
             if row.secret_ref:
-                self._secrets.put(user_id, row.secret_ref, api_key.strip())
+                secret_store.put(user_id, row.secret_ref, api_key.strip())
             else:
                 row.secret_ref = f"channel/{uuid4().hex[:12]}"
-                self._secrets.put(user_id, row.secret_ref, api_key.strip())
+                secret_store.put(user_id, row.secret_ref, api_key.strip())
                 row.credential_source = "secret_ref"
             row.test_status = "never"
             # Setting an api_key explicitly opts the provider into the api_key
@@ -1632,9 +1603,9 @@ class ProviderService:
                 "add models manually instead"
             )
 
-        api_key = self._secrets.get(user_id, row.secret_ref)
+        api_key = secret_store.get(user_id, row.secret_ref)
         if not api_key:
-            raise ModelDiscoveryError("provider's API key is missing from secret store")
+            raise ModelDiscoveryError("provider's API key is missing from local secret files")
 
         base_url = (row.base_url or "").strip()
         if not base_url:
@@ -1684,7 +1655,7 @@ class ProviderService:
             raise ProviderNotDeletable(f"Provider {provider_id!r} cannot be deleted")
 
         if row.secret_ref:
-            self._secrets.delete(user_id, row.secret_ref)
+            secret_store.delete(user_id, row.secret_ref)
 
         was_default = row.is_default
         await self._ds.delete(user_id, provider_id)
@@ -1886,7 +1857,7 @@ class ProviderService:
         api_key: str | None = None
         auth_type = "none"
         if row.credential_source == "secret_ref" and row.secret_ref:
-            api_key = self._secrets.get(user_id, row.secret_ref)
+            api_key = secret_store.get(user_id, row.secret_ref)
             auth_type = "api_key"
 
         # Protocol override drives the wire shape used during connection

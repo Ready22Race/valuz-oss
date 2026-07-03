@@ -152,11 +152,22 @@ const SKILL_CHIP_ATTR = "data-skill-slug";
 const isImeCompositionEvent = (e: React.KeyboardEvent<HTMLElement>): boolean =>
   e.nativeEvent.isComposing || e.keyCode === 229;
 
-const getClipboardImageFiles = (items: DataTransferItemList): File[] =>
-  Array.from(items)
-    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+// Every file on the clipboard — not just images. A screenshot pastes as an
+// image file; a document copied from another app (Finder, a chat client, …)
+// pastes as its own type. Merge the two representations the platform may use —
+// ``items`` (kind === "file") and ``files`` — de-duped by name+size, since they
+// usually mirror each other.
+const getClipboardFiles = (data: DataTransfer): File[] => {
+  const fromItems = Array.from(data.items)
+    .filter((item) => item.kind === "file")
     .map((item) => item.getAsFile())
     .filter((file): file is File => file !== null);
+  const seen = new Set(fromItems.map((f) => `${f.name}:${f.size}`));
+  const fromFiles = Array.from(data.files ?? []).filter(
+    (f) => !seen.has(`${f.name}:${f.size}`),
+  );
+  return [...fromItems, ...fromFiles];
+};
 
 /** Walk the contenteditable's children and serialise to a plain string,
  * mapping each chip back to its ``/slug`` token. The serialised form is
@@ -196,7 +207,7 @@ const buildChipNode = (skill: SkillSearchItem): HTMLElement => {
   chip.contentEditable = "false";
   chip.dataset.skillName = skill.name;
   chip.className =
-    "mr-0.5 inline-flex items-center gap-1 rounded-full bg-brand-light px-2 py-0.5 text-2xs text-brand align-middle select-none";
+    "mr-0.5 inline-flex h-5 items-center gap-1 rounded-[4px] bg-brand-100 px-2 py-0 text-2xs text-brand-700 align-middle select-none";
   chip.innerHTML = `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg><span>${skill.name}</span>`;
   return chip;
 };
@@ -865,13 +876,17 @@ export const Composer = ({
   // text/plain at the caret as a single text node so ``white-space:
   // pre-wrap`` preserves newlines and ``serializeEditor`` round-trips
   // them; then re-run the input handler to sync value + ``/``/``@`` triggers.
-  // Image files are different: treat them like a file-picker selection so
-  // screenshots and copied images flow through the existing attachment path.
+  // Files are different: treat them like a file-picker selection so screenshots
+  // and any file copied from another app flow through the existing attachment
+  // path.
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const imageFiles = getClipboardImageFiles(e.clipboardData.items);
-    if (imageFiles.length > 0) {
-      acceptLocalFiles(imageFiles, onLocalUpload);
+    // Files first (screenshots, images, and documents copied from other apps)
+    // — route them through the same attachment path as the file picker. Only
+    // fall back to text insertion when the clipboard carries no files.
+    const files = getClipboardFiles(e.clipboardData);
+    if (files.length > 0) {
+      acceptLocalFiles(files, onLocalUpload);
       return;
     }
     const text = e.clipboardData.getData("text/plain");
@@ -1356,19 +1371,6 @@ export const Composer = ({
         onChange={handleFileInputChange}
       />
 
-      {dragOver && (
-        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-xl bg-surface/80 backdrop-blur-sm">
-          <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-brand/40 bg-brand-light/30 px-10 py-8">
-            <div className="text-sm font-medium text-brand">
-              {t("conversation.dragToUpload")}
-            </div>
-            <div className="text-2xs text-ink-meta">
-              {t("conversation.supportedFormats")}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Spec 5.6 内层容器：1px border + radius 10px + padding 12px 8px 8px
           PRD-PAAT §3.2 task mode: switch to accent tinting (border + soft
           gradient bg) so the user gets an obvious visual cue that "send"
@@ -1376,12 +1378,14 @@ export const Composer = ({
       <div
         ref={composerBoxRef}
         className={cn(
-          "@container/composer mx-auto max-w-[760px] rounded-xl border px-2 pt-3 pb-2 transition-colors duration-[120ms]",
+          // ``relative`` so the drag overlay below anchors to THIS box (not the
+          // wider padded wrapper) — the highlight then matches the input exactly.
+          "@container/composer relative mx-auto max-w-[760px] rounded-xl px-2 pt-3 pb-2 transition-colors duration-[120ms]",
           dragOver
-            ? "border-brand/50"
+            ? "border-2 border-dashed border-brand/50"
             : mode === "task"
-              ? "border-[#725cf9] bg-surface"
-              : "border-surface-border bg-surface",
+              ? "border border-[#725cf9] bg-surface"
+              : "border border-surface-border bg-surface",
         )}
         style={
           mode === "task" && !dragOver
@@ -1392,6 +1396,21 @@ export const Composer = ({
             : undefined
         }
       >
+        {/* Drag-to-upload highlight — an ``inset-0`` overlay INSIDE the input box
+            so it covers exactly the input's footprint (the box's own border also
+            flips to a dashed brand outline above). Was a small content-sized box
+            floating over the whole padded wrapper, which read taller + narrower
+            than the input. */}
+        {dragOver && (
+          <div className="pointer-events-none absolute inset-0 z-40 flex flex-col items-center justify-center gap-2 rounded-xl bg-brand-light/40 backdrop-blur-sm">
+            <div className="text-sm font-medium text-brand">
+              {t("conversation.dragToUpload")}
+            </div>
+            <div className="text-2xs text-ink-meta">
+              {t("conversation.supportedFormats")}
+            </div>
+          </div>
+        )}
         <div>
           {/* Skill tag — the chip itself is the remove affordance.
               The previous above-the-input chip is gone — chips now
@@ -2092,7 +2111,7 @@ export const Composer = ({
                               the task detail page uses (TaskContextPanel
                               + sub-sidebar). */}
                           {mode === "task" && (
-                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand-light px-1 text-[10px] leading-none font-normal text-brand">
+                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand-light px-1 text-[10px] leading-none font-normal text-brand-700">
                               {t("task.runLead" as Parameters<typeof t>[0])}
                             </span>
                           )}

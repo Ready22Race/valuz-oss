@@ -63,8 +63,8 @@ const CLI_TOOL_BY_PROVIDER_KIND: Record<string, CliTool> = {
 };
 
 const ModelAvailableBadge = ({ label }: { label: string }) => (
-  <Badge className="gap-1 rounded-full bg-[#f3f2ff] text-[#725cf9]">
-    <span className="h-1.5 w-1.5 rounded-full bg-[#725cf9]" />
+  <Badge variant="metaBrand" className="gap-1">
+    <span className="h-1.5 w-1.5 rounded-full bg-brand-700" />
     {label}
   </Badge>
 );
@@ -839,12 +839,12 @@ export const ModelSection = () => {
                               {provider.name}
                             </span>
                             {isManaged && (
-                              <Badge variant="brand">
+                              <Badge variant="metaBrand">
                                 {t("settings.model.builtIn")}
                               </Badge>
                             )}
                             {isSystem && (
-                              <Badge variant="brand">
+                              <Badge variant="metaBrand">
                                 {t(
                                   "settings.model.systemProvider" as Parameters<
                                     typeof t
@@ -1151,6 +1151,9 @@ export const ModelSection = () => {
       {/* Provider Edit Dialog */}
       {editProvider && (
         <ProviderEditDialog
+          // Force a fresh instance per provider so switching which row is edited
+          // never carries another provider's in-progress endpoint/key state.
+          key={editProvider.id}
           open={editProvider !== null}
           onOpenChange={(v) => {
             if (!v) setEditProvider(null);

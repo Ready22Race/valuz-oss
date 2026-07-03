@@ -24,6 +24,7 @@ import {
   Power,
   Zap,
   RefreshCw,
+  Upload,
   PanelRightOpen,
   AlertTriangle,
   Link2,
@@ -283,8 +284,10 @@ export interface ProjectContextPanelProps {
   todos?: TodoListItem[] | null;
   scheduledTasks?: ScheduledTaskSummary[];
   onAddScheduledTask?: () => void;
-  /** Open the edit dialog for a scheduled task — wired to both a row click and
-   *  the row's "Edit" menu item. */
+  /** Open a scheduled task's detail page — wired to the row click. */
+  onOpenScheduledTask?: (taskId: string) => void;
+  /** Open the edit dialog for a scheduled task — wired to the row's "Edit"
+   *  menu item (no longer the row click, which now opens the detail page). */
   onEditScheduledTask?: (taskId: string) => void;
   onToggleScheduledTask?: (taskId: string, nextStatus: "on" | "off") => void;
   onDeleteScheduledTask?: (taskId: string) => void;
@@ -319,6 +322,13 @@ export interface ProjectContextPanelProps {
    * The button manages its own spin animation locally; the page
    * doesn't need to thread a loading flag back through. */
   onRefreshFiles?: () => void;
+  /** Upload files into the project cwd (multipart). Wired only when the
+   *  page can accept uploads — i.e. the backend hosting the project is
+   *  reachable over HTTP. The button owns its own hidden
+   *  ``<input type=file multiple>``; the page gets the picked files and
+   *  is responsible for the actual ``projectsApi.uploadFiles`` call,
+   *  the success toast, and re-listing the tree. */
+  onUploadFiles?: (files: File[]) => void;
   onOpenInSystem?: (path: string) => void;
   onDeleteFile?: (path: string) => void;
   /** Initial accordion section. ``null`` starts every section collapsed. */
@@ -744,6 +754,50 @@ export function FileRefreshButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+/**
+ * File-tree upload button — the multipart-upload companion to
+ * {@link FileRefreshButton}. Owns a hidden ``<input type=file multiple>``
+ * and hands the picked files to the page's ``onUploadFiles``. The page
+ * does the actual ``projectsApi.uploadFiles`` call, toast, and re-list.
+ *
+ * Exported so other right-rail file panels can render the same button.
+ */
+export function FileUploadButton({
+  onUploadFiles,
+}: {
+  onUploadFiles: (files: File[]) => void;
+}) {
+  const { t } = useI18n();
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          inputRef.current?.click();
+        }}
+        className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-border"
+        title={t("project.uploadFile")}
+      >
+        <Upload className="h-3.5 w-3.5" />
+      </button>
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = e.target.files ? Array.from(e.target.files) : [];
+          // Reset so picking the same file twice still fires ``change``.
+          e.target.value = "";
+          if (files.length > 0) onUploadFiles(files);
+        }}
+      />
+    </>
+  );
+}
+
 /* ── Accordion Section ────────────────────────────────────────── */
 
 // Exported so other right-rail panels (e.g. ``TaskContextPanel``) can
@@ -896,6 +950,7 @@ export const ProjectDetailContextPanel = ({
   todos,
   scheduledTasks,
   onAddScheduledTask,
+  onOpenScheduledTask,
   onEditScheduledTask,
   onToggleScheduledTask,
   onDeleteScheduledTask,
@@ -912,6 +967,7 @@ export const ProjectDetailContextPanel = ({
   onFileDoubleClick,
   onOpenInFinder,
   onRefreshFiles,
+  onUploadFiles,
   onOpenInSystem,
   onDeleteFile,
   initialOpenSection,
@@ -929,6 +985,11 @@ export const ProjectDetailContextPanel = ({
     instructionsTitle ?? t("project.instruction");
   const resolvedScheduledTasksTitle =
     scheduledTasksTitle ?? t("project.scheduledTasks");
+  // Enabled ("on") tasks sort ahead of paused ones; order within each group is
+  // preserved (Array.sort is stable in modern engines).
+  const sortedScheduledTasks = [...(scheduledTasks ?? [])].sort(
+    (a, b) => Number(b.status === "on") - Number(a.status === "on"),
+  );
   const resolvedFileTreeTitle = fileTreeTitle ?? t("project.fileTree");
 
   // Section visibility — chat project omits sections it has no data for.
@@ -1038,8 +1099,11 @@ export const ProjectDetailContextPanel = ({
 
   const fileCount = countFiles(fileTree ?? []);
   const fileActions =
-    onRefreshFiles || onOpenInFinder ? (
+    onRefreshFiles || onOpenInFinder || onUploadFiles ? (
       <div className="flex items-center gap-1.5">
+        {onUploadFiles ? (
+          <FileUploadButton onUploadFiles={onUploadFiles} />
+        ) : null}
         {onRefreshFiles ? <FileRefreshButton onClick={onRefreshFiles} /> : null}
         {onOpenInFinder ? (
           <button
@@ -1102,11 +1166,14 @@ export const ProjectDetailContextPanel = ({
       contentClassName="px-5 py-2"
       count={fileCount > 0 ? fileCount : undefined}
       action={
-        onRefreshFiles || onOpenInFinder ? (
+        onRefreshFiles || onOpenInFinder || onUploadFiles ? (
           // Auto-refresh fires on turn-end; the manual refresh
           // button is the bail-out for mid-turn writes the
           // user wants to peek at before the turn closes.
           <div className="flex items-center gap-2">
+            {onUploadFiles ? (
+              <FileUploadButton onUploadFiles={onUploadFiles} />
+            ) : null}
             {onRefreshFiles ? (
               <FileRefreshButton onClick={onRefreshFiles} />
             ) : null}
@@ -1630,25 +1697,26 @@ export const ProjectDetailContextPanel = ({
           {(scheduledTasks ?? []).length > 0 ? (
             <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
               <div className="divide-y divide-[#f3f4f6]">
-                {(scheduledTasks ?? []).map((task) => (
+                {sortedScheduledTasks.map((task) => (
                   <div
                     key={task.id}
-                    // Row is clickable to edit, but intentionally keeps the
-                    // default cursor (no pointer/hand) per design.
-                    className="group relative rounded-lg bg-card"
-                    role={onEditScheduledTask ? "button" : undefined}
-                    tabIndex={onEditScheduledTask ? 0 : undefined}
+                    // Row click opens the task's detail page; force the default
+                    // arrow cursor (no pointer/hand per design, and no text
+                    // I-beam over the task name).
+                    className="group relative cursor-default rounded-lg bg-card"
+                    role={onOpenScheduledTask ? "button" : undefined}
+                    tabIndex={onOpenScheduledTask ? 0 : undefined}
                     onClick={
-                      onEditScheduledTask
-                        ? () => onEditScheduledTask(task.id)
+                      onOpenScheduledTask
+                        ? () => onOpenScheduledTask(task.id)
                         : undefined
                     }
                     onKeyDown={
-                      onEditScheduledTask
+                      onOpenScheduledTask
                         ? (e) => {
                             if (e.key === "Enter" || e.key === " ") {
                               e.preventDefault();
-                              onEditScheduledTask(task.id);
+                              onOpenScheduledTask(task.id);
                             }
                           }
                         : undefined
@@ -1681,8 +1749,8 @@ export const ProjectDetailContextPanel = ({
                                 type="button"
                                 className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-label"
                                 title={t("project.taskActions")}
-                                // The row itself opens the editor; keep a menu
-                                // click from also triggering that row handler.
+                                // The row itself opens the detail page; keep a
+                                // menu click from also triggering that handler.
                                 onClick={(e) => e.stopPropagation()}
                                 onPointerDown={(e) => e.stopPropagation()}
                               >
@@ -1695,8 +1763,8 @@ export const ProjectDetailContextPanel = ({
                               onCloseAutoFocus={(e) => e.preventDefault()}
                               // Portaled, but clicks still bubble through the
                               // React tree to the row's onClick (which opens the
-                              // editor). Stop it so toggling pause/enable or
-                              // deleting doesn't also pop the edit dialog.
+                              // detail page). Stop it so toggling pause/enable or
+                              // deleting doesn't also navigate away.
                               onClick={(e) => e.stopPropagation()}
                             >
                               {onEditScheduledTask && (

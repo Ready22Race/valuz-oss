@@ -35,7 +35,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from valuz_agent.infra.config import settings
 from valuz_agent.integrations.skills_filesystem import (
     _default_user_skill_root,
     _detect_manifest,
@@ -119,18 +118,20 @@ class StagingMeta:
 # ``{project_cwd}/.skill-staging/``. When the kernel session can't be
 # loaded (e.g. the legacy staging endpoint is called for a session that
 # was already cleaned up), we fall back to the pre-refactor
-# ``{settings.skill_staging_dir}/{session_id}/`` path so legacy content
+# ``{FsRegistry.legacy_skill_staging_root(user_id)}/{session_id}/`` path so legacy content
 # stays inspectable.
 
 
-def staging_root() -> Path:
+def staging_root(user_id: str) -> Path:
     """Legacy host-managed staging root.
 
     Pre-refactor sessions wrote here as ``{root}/{session_id}/{slug}/``.
     Kept readable so old content surfaces in scans during the transition;
     new staged content always lives under the project cwd instead.
     """
-    return settings.skill_staging_dir.expanduser()
+    from valuz_agent.infra.fs_registry import fs_registry
+
+    return fs_registry.legacy_skill_staging_root(user_id)
 
 
 async def _resolve_project_cwd_for_session(user_id: str, session_id: str) -> Path | None:
@@ -171,6 +172,7 @@ async def _resolve_project_cwd_for_session(user_id: str, session_id: str) -> Pat
 
     try:
         return fs_registry.project_cwd(
+            session.user_id,
             str(project_id),
             project_kind,  # type: ignore[arg-type]
             project_root_path,
@@ -200,7 +202,7 @@ async def staging_dir_for_session(user_id: str, session_id: str, *, mkdir: bool 
     project_cwd = await _resolve_project_cwd_for_session(user_id, session_id)
     if project_cwd is None:
         # Legacy fallback — keeps in-flight staging content discoverable.
-        path = staging_root() / session_id
+        path = staging_root(user_id) / session_id
     else:
         path = fs_registry.skill_staging_root_for_project(project_cwd)
     if mkdir:
@@ -319,7 +321,7 @@ async def scan_staging(user_id: str, session_id: str) -> StagingScanResult:
         user modified the original elsewhere; suggest fork-as-vN
     """
     session_dir = await staging_dir_for_session(user_id, session_id)
-    user_skill_root = _default_user_skill_root()
+    user_skill_root = _default_user_skill_root(user_id)
 
     if not session_dir.exists():
         return StagingScanResult(session_id=session_id, staging_path=str(session_dir), slugs=[])
@@ -405,7 +407,7 @@ async def sync_slug(
     if not src.is_dir() or _detect_manifest(src) is None:
         raise FileNotFoundError(f"no staging slug {slug!r} for session {session_id!r}")
 
-    root = (target_root or _default_user_skill_root()).expanduser()
+    root = (target_root or _default_user_skill_root(user_id)).expanduser()
     root.mkdir(parents=True, exist_ok=True)
 
     if strategy == "fork":

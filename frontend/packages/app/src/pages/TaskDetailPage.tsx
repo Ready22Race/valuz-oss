@@ -1112,7 +1112,13 @@ export const TaskDetailPage = () => {
                   leadAgentSlug={task.lead_agent_slug}
                   t={t}
                 />
-                <div className="flex-1">
+                {/* ``min-w-0`` is load-bearing: without it this flex child keeps
+                    ``min-width: auto`` and grows to the widest unbreakable token
+                    (long API-error JSON / paths), so the nested card's own
+                    ``min-w-0`` can't shrink it and the text overflows the reading
+                    column. EventBody is the flex child directly and already
+                    carries min-w-0; this wrapper must match. */}
+                <div className="min-w-0 flex-1">
                   <GroupedEventCard
                     spawn={node.spawn}
                     outcome={node.outcome}
@@ -1292,7 +1298,7 @@ export const TaskDetailPage = () => {
               </span>
               <span className="mx-3 h-3 w-px bg-[#f3f4f6]" />
               <span className="inline-flex items-center gap-1.5 text-[#898f9c]">
-                <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-[#725cf9]/10 px-1 text-[10px] font-normal leading-none text-[#725cf9]">
+                <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand-light px-1 text-[10px] font-normal leading-none text-brand-700">
                   Lead
                 </span>
                 {leadAgentName ?? task.lead_agent_slug}
@@ -1764,15 +1770,23 @@ export const TaskDetailPage = () => {
  *  - terminal events (task_completed / kickoff_failed) use the lead
  *    session id; collapse to the lead agent name
  *  - everything else is an ``agent_slug`` we can ``join`` against
- *    ``members`` to get the display name */
+ *    ``members`` to get the display name
+ *
+ *  Member-attributed events (subtask_spawned / _completed / _failed) now carry
+ *  the resolved name in ``payload.agent_name``, stamped at emit time by the
+ *  backend. Prefer it: it's durable (survives the member being un-deployed /
+ *  renamed) and needs no members list, so it doesn't race the async members
+ *  fetch — the root cause of the intermittent "成员智能体名称查询不到". The
+ *  members join + slug remain as fallbacks for events emitted before this
+ *  landed. */
 function resolveActor(
-  actor: string,
-  type: string,
+  evt: TaskEvent,
   members: MemberWithAgent[],
   leadAgentName: string | null,
   leadAgentSlug: string,
   t: Translator,
 ): string {
+  const { actor, type } = evt;
   if (actor === "user") return t("task.actorYou");
   // Lead-driven events carry the lead SESSION id as actor — collapse to the
   // lead agent name (VALUZ-TASK adds plan/review events on this path).
@@ -1786,6 +1800,8 @@ function resolveActor(
   ) {
     return leadAgentName ?? leadAgentSlug;
   }
+  const payloadName = evt.payload?.agent_name;
+  if (typeof payloadName === "string" && payloadName) return payloadName;
   const m = members.find((x) => x.member.agent_slug === actor);
   return m?.agent?.name ?? actor;
 }
@@ -1940,8 +1956,7 @@ function EventBody({
 }) {
   const detail = eventDetail(evt, t);
   const actorLabel = resolveActor(
-    evt.actor,
-    evt.type,
+    evt,
     members,
     leadAgentName,
     leadAgentSlug,
@@ -2026,8 +2041,7 @@ function GroupedEventCard({
 }) {
   const spawnDetail = eventDetail(spawn, t);
   const spawnActor = resolveActor(
-    spawn.actor,
-    spawn.type,
+    spawn,
     members,
     leadAgentName,
     leadAgentSlug,
@@ -2080,7 +2094,7 @@ function GroupedEventCard({
       )}
       <div
         className={cn(
-          "mt-2 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] leading-4",
+          "mt-2 inline-flex h-5 items-center rounded-[4px] px-2 py-0 text-[10px] leading-4",
           outcome
             ? "bg-emerald-50 text-emerald-700"
             : "bg-surface-soft text-ink-meta",

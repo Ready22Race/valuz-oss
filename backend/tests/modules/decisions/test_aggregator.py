@@ -156,13 +156,28 @@ def _resolved_event(pending_id="p1") -> SimpleNamespace:
     )
 
 
-def _bind_session(agg: DecisionAggregator, session: SimpleNamespace) -> None:
-    """Stub ``_load_session`` so the aggregator skips the kernel store."""
+def _prep(agg: DecisionAggregator, session: SimpleNamespace | None = None) -> None:
+    """Stub durable access for in-memory unit tests: ``_load_session`` (skip the
+    kernel store) + ``_hydrate_owner`` (skip the durable per-owner scan, which
+    would otherwise clear the ``_pending`` these tests populate via
+    ``_handle_event``). The durable hydration path has its own test below."""
 
-    async def _fake_load(_sid: str):
-        return session if _sid == session.id else None
+    async def _fake_load(_owner: str, _sid: str):
+        return session if (session is not None and _sid == session.id) else None
+
+    async def _noop_hydrate(_owner: str) -> None:
+        return None
 
     agg._load_session = _fake_load  # type: ignore[assignment]
+    agg._hydrate_owner = _noop_hydrate  # type: ignore[assignment]
+
+
+def _snap(agg: DecisionAggregator, owner: str):
+    return asyncio.run(agg.snapshot(owner))
+
+
+def _handle(agg: DecisionAggregator, owner: str, session_id: str, event) -> None:
+    asyncio.run(agg._handle_event(owner, session_id, event))
 
 
 # ---- enrich_pending --------------------------------------------------
@@ -210,15 +225,16 @@ def test_enrich_pending_returns_none_when_task_missing(db_factory) -> None:
 
 def test_snapshot_empty_initially(db_factory) -> None:
     agg = DecisionAggregator()
-    assert agg.snapshot("local-test-owner") == []
+    _prep(agg)
+    assert _snap(agg, "local-test-owner") == []
 
 
 def test_add_entry_on_requires_action(db_factory) -> None:
     _seed(db_factory)
     agg = DecisionAggregator()
-    _bind_session(agg, _subtask_session())
-    asyncio.run(agg._handle_event("sub-sess", _requires_action_event()))
-    snap = agg.snapshot("local-test-owner")
+    _prep(agg, _subtask_session())
+    _handle(agg, "local-test-owner", "sub-sess", _requires_action_event())
+    snap = _snap(agg, "local-test-owner")
     assert len(snap) == 1
     assert snap[0].pending_id == "p1"
     assert snap[0].task_title == "打豆豆小游戏"
@@ -227,30 +243,27 @@ def test_add_entry_on_requires_action(db_factory) -> None:
 def test_ignore_non_task_driven_session(db_factory) -> None:
     _seed(db_factory)
     agg = DecisionAggregator()
-    _bind_session(
-        agg,
-        SimpleNamespace(id="sub-sess", status="running", metadata={"valuz": {}}),
-    )
-    asyncio.run(agg._handle_event("sub-sess", _requires_action_event()))
-    assert agg.snapshot("local-test-owner") == []
+    _prep(agg, SimpleNamespace(id="sub-sess", status="running", metadata={"valuz": {}}))
+    _handle(agg, "local-test-owner", "sub-sess", _requires_action_event())
+    assert _snap(agg, "local-test-owner") == []
 
 
 def test_ignore_non_clarifying_subject(db_factory) -> None:
     _seed(db_factory)
     agg = DecisionAggregator()
-    _bind_session(agg, _subtask_session())
-    asyncio.run(agg._handle_event("sub-sess", _requires_action_event(subject="shell_command")))
-    assert agg.snapshot("local-test-owner") == []
+    _prep(agg, _subtask_session())
+    _handle(agg, "local-test-owner", "sub-sess", _requires_action_event(subject="shell_command"))
+    assert _snap(agg, "local-test-owner") == []
 
 
 def test_remove_entry_on_action_resolved(db_factory) -> None:
     _seed(db_factory)
     agg = DecisionAggregator()
-    _bind_session(agg, _subtask_session())
-    asyncio.run(agg._handle_event("sub-sess", _requires_action_event()))
-    assert len(agg.snapshot("local-test-owner")) == 1
-    asyncio.run(agg._handle_event("sub-sess", _resolved_event()))
-    assert agg.snapshot("local-test-owner") == []
+    _prep(agg, _subtask_session())
+    _handle(agg, "local-test-owner", "sub-sess", _requires_action_event())
+    assert len(_snap(agg, "local-test-owner")) == 1
+    _handle(agg, "local-test-owner", "sub-sess", _resolved_event())
+    assert _snap(agg, "local-test-owner") == []
 
 
 # ---- subscriber fan-out ---------------------------------------------
@@ -259,12 +272,12 @@ def test_remove_entry_on_action_resolved(db_factory) -> None:
 def test_subscriber_receives_initial_snapshot(db_factory) -> None:
     _seed(db_factory)
     agg = DecisionAggregator()
-    _bind_session(agg, _subtask_session())
+    _prep(agg, _subtask_session())
 
     async def scenario():
         # Pre-seed one pending, then a fresh subscriber should see it in
         # the initial snapshot frame.
-        await agg._handle_event("sub-sess", _requires_action_event())
+        await agg._handle_event("local-test-owner", "sub-sess", _requires_action_event())
         q = await agg.subscribe("local-test-owner")
         first = await q.get()
         await agg.unsubscribe(q)
@@ -279,7 +292,7 @@ def test_subscriber_receives_initial_snapshot(db_factory) -> None:
 def test_fan_out_added_and_resolved_to_subscribers(db_factory) -> None:
     _seed(db_factory)
     agg = DecisionAggregator()
-    _bind_session(agg, _subtask_session())
+    _prep(agg, _subtask_session())
 
     async def scenario():
         q1 = await agg.subscribe("local-test-owner")
@@ -288,11 +301,11 @@ def test_fan_out_added_and_resolved_to_subscribers(db_factory) -> None:
         await q1.get()
         await q2.get()
         # Live add → both subscribers get an ``added`` frame.
-        await agg._handle_event("sub-sess", _requires_action_event())
+        await agg._handle_event("local-test-owner", "sub-sess", _requires_action_event())
         a1 = await q1.get()
         a2 = await q2.get()
         # Live resolve → both get a ``resolved`` frame.
-        await agg._handle_event("sub-sess", _resolved_event())
+        await agg._handle_event("local-test-owner", "sub-sess", _resolved_event())
         r1 = await q1.get()
         await agg.unsubscribe(q1)
         await agg.unsubscribe(q2)
@@ -326,11 +339,12 @@ def _entry(pending_id: str, owner: str, *, raised_at: int = 0):
 def test_snapshot_and_fanout_are_owner_scoped(db_factory) -> None:
     """snapshot() / subscribe() only expose the caller's own pendings (no leak)."""
     agg = DecisionAggregator()
+    _prep(agg)  # stub durable hydrate so seeded _pending isn't cleared
     agg._pending["pa"] = _entry("pa", "owner-A")
     agg._pending["pb"] = _entry("pb", "owner-B")
 
-    assert [e.pending_id for e in agg.snapshot("owner-A")] == ["pa"]
-    assert [e.pending_id for e in agg.snapshot("owner-B")] == ["pb"]
+    assert [e.pending_id for e in _snap(agg, "owner-A")] == ["pa"]
+    assert [e.pending_id for e in _snap(agg, "owner-B")] == ["pb"]
 
     async def scenario():
         qa = await agg.subscribe("owner-A")
@@ -338,7 +352,7 @@ def test_snapshot_and_fanout_are_owner_scoped(db_factory) -> None:
         snap_a = await qa.get()
         snap_b = await qb.get()
         # A resolves → only A's subscriber is notified; B's stays empty.
-        await agg._handle_event("s", _resolved_event(pending_id="pa"))
+        await agg._handle_event("owner-A", "s", _resolved_event(pending_id="pa"))
         ra = await qa.get()
         result = (snap_a, snap_b, ra, qb.empty())
         await agg.unsubscribe(qa)

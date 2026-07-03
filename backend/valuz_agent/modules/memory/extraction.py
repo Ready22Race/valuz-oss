@@ -103,6 +103,7 @@ def parse_ops(raw: str) -> list[MemoryOp]:
 def apply_ops(
     ops: list[MemoryOp],
     *,
+    user_id: str,
     project_id: str | None = None,
     store: MemoryStore | None = None,
 ) -> dict[str, Any]:
@@ -120,6 +121,7 @@ def apply_ops(
         try:
             if op.action == "add":
                 r = st.add(
+                    user_id,
                     op.target,
                     redact_secrets(op.content or ""),
                     project_id=project_id,
@@ -127,6 +129,7 @@ def apply_ops(
                 )
             elif op.action == "replace":
                 r = st.replace(
+                    user_id,
                     op.target,
                     op.old_text or "",
                     redact_secrets(op.content or ""),
@@ -134,7 +137,9 @@ def apply_ops(
                     source="auto",
                 )
             else:  # remove
-                r = st.remove(op.target, op.old_text or "", project_id=project_id, source="auto")
+                r = st.remove(
+                    user_id, op.target, op.old_text or "", project_id=project_id, source="auto"
+                )
         except MemoryError as exc:
             skipped.append(str(exc))
             continue
@@ -159,6 +164,7 @@ class MemoryExtractor:
     async def extract(
         self,
         *,
+        user_id: str,
         transcript: str,
         project_id: str | None = None,
         project_context: str | None = None,
@@ -178,7 +184,9 @@ class MemoryExtractor:
             return {"skipped": "empty transcript", "ops": 0, "applied": 0}
 
         targets = ["user", "global"] + (["project"] if project_id else [])
-        current = {t: self._store.read_entries(t, project_id=project_id) for t in targets}  # type: ignore[arg-type]
+        current = {
+            t: self._store.read_entries(user_id, t, project_id=project_id) for t in targets
+        }  # type: ignore[arg-type]
         # Surface each target's char budget so the reviewer consolidates before a
         # target overflows (over-cap writes are rejected, not auto-grown).
         usage = {t: MemoryStore.usage_for(v, t) for t, v in current.items()}  # type: ignore[arg-type]
@@ -206,7 +214,7 @@ class MemoryExtractor:
 
         raw = await self._complete(prompt)
         ops = parse_ops(raw)
-        report = apply_ops(ops, project_id=project_id, store=self._store)
+        report = apply_ops(ops, user_id=user_id, project_id=project_id, store=self._store)
         logger.info(
             "memory extraction: %d ops, %d applied, %d skipped",
             report["ops"],

@@ -51,7 +51,7 @@ export const ModelProviderSelector: FC<ModelProviderSelectorProps> = ({
             <span className="text-xs text-ink-body">{provider.desc}</span>
             <span
               className={cn(
-                "inline-flex w-fit rounded-full px-2 py-0.5 text-[10px] font-medium",
+                "inline-flex h-5 w-fit items-center rounded-[4px] px-2 py-0 text-[10px] font-medium",
                 provider.connected
                   ? "bg-success-light text-success-text"
                   : "bg-surface-soft text-ink-muted",

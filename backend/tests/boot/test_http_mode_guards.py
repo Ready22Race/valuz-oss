@@ -75,13 +75,15 @@ def test_kernel_routers_mounted_in_inprocess_mode(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_skill_indexing_skipped_in_non_local_deployment(monkeypatch) -> None:
-    monkeypatch.setattr(settings, "deployment_type", "cloud")
+async def test_local_skill_indexing_skipped_when_startup_user_content_disabled(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "initialize_user_content_on_startup", False)
 
     def _boom(*_args, **_kwargs):
         raise AssertionError("skill boot scan should not resolve the skill service")
 
-    monkeypatch.setattr("valuz_agent.api.deps.get_skill_service", _boom)
+    monkeypatch.setattr("valuz_agent.api.deps.get_skill_service_for_user", _boom)
 
     app = SimpleNamespace(state=SimpleNamespace())
     await steps.start_skills(app)

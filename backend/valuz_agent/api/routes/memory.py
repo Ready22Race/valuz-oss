@@ -67,11 +67,11 @@ async def _view(project_id: str | None, user_id: str) -> MemoryView:
         auto_extract = await get_memory_auto_extract(db, user_id=user_id)
         custom_instructions = await get_memory_custom_instructions(db, user_id=user_id)
     entries: dict[str, list[str]] = {
-        "user": memory_store.read_entries("user"),
-        "global": memory_store.read_entries("global"),
+        "user": memory_store.read_entries(user_id, "user"),
+        "global": memory_store.read_entries(user_id, "global"),
     }
     if project_id:
-        entries["project"] = memory_store.read_entries("project", project_id=project_id)
+        entries["project"] = memory_store.read_entries(user_id, "project", project_id=project_id)
     return MemoryView(
         enabled=enabled,
         auto_extract=auto_extract,
@@ -120,7 +120,11 @@ async def delete_memory_entry(
     """Delete the entry located by a unique ``old_text`` substring in ``target``."""
     try:
         result = memory_store.remove(
-            payload.target, payload.old_text, project_id=payload.project_id, source="user"
+            user_id,
+            payload.target,
+            payload.old_text,
+            project_id=payload.project_id,
+            source="user",
         )
     except MemoryError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -136,7 +140,7 @@ async def clear_memory_scope(
 ) -> MemoryView:
     """Clear every entry in ``target``."""
     try:
-        memory_store.clear(payload.target, project_id=payload.project_id)
+        memory_store.clear(user_id, payload.target, project_id=payload.project_id)
     except MemoryError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return await _view(payload.project_id, user_id)

@@ -182,18 +182,23 @@ async def read_file(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@router.get("/{project_id}/raw-files/{file_path:path}")
+@router.get("/{project_id}/raw-files/{file_path:path}", response_model=None)
 async def read_raw_file(
     project_id: str,
     file_path: str,
     user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
-) -> FileResponse:
+) -> FileResponse | StreamingResponse:
     try:
         resource = await svc.resolve_file_resource(user_id, project_id, file_path)
+        media_type = resource.mime_type or "application/octet-stream"
+        if resource.path is None:
+            if resource.data is None:
+                raise FileNotFoundError(file_path)
+            return StreamingResponse(iter([resource.data]), media_type=media_type)
         return FileResponse(
             resource.path,
-            media_type=resource.mime_type or "application/octet-stream",
+            media_type=media_type,
             filename=resource.name,
             content_disposition_type="inline",
         )

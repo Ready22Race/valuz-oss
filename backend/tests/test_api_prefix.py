@@ -2,9 +2,10 @@
 
 Inspects the route table built by ``create_app()`` (no DB needed): the whole
 public HTTP surface — host routers, overlay ``module_registry`` routes, and the
-in-process kernel routers — is mounted under each configured prefix, while the
-internal ``/internal/mcp/*`` ASGI mounts stay at their fixed native paths
-(they're reached server-side via ``backend_base_url``, never the ingress).
+in-process kernel routers — plus the internal ``/internal/data`` +
+``/internal/mcp/*`` ASGI sub-apps are mounted under each configured base path, so
+a kernel reaching the host through the prefixed ingress (a cloud sandbox) can
+resolve ``{backend_base_url}/internal/*`` too.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from valuz_agent.infra.config import Settings, settings
 _HOST_PATH = "/v1/decisions/pending"
 # A representative in-process kernel route (native prefix /api/v1/*).
 _KERNEL_PATH = "/api/v1/sessions"
-# Internal ASGI mounts that must never move under a prefix.
+# A representative internal ASGI mount — now mounted under each base path too.
 _MCP_MOUNT = "/internal/mcp/docs"
 
 
@@ -51,13 +52,21 @@ def test_single_prefix_shifts_the_whole_surface() -> None:
     assert _KERNEL_PATH not in paths
 
 
-def test_internal_mcp_mounts_are_never_prefixed() -> None:
-    """The /internal/mcp/* mounts stay fixed regardless of the prefix."""
-    app = create_app(api_prefix=["/valuz-backend"])
-    mounts = _mount_paths(app)
+def test_internal_mounts_follow_each_base_path() -> None:
+    """Internal sub-apps (``/internal/data`` + ``/internal/mcp/*``) mount under
+    EACH configured base path — so a kernel whose ``backend_base_url`` carries the
+    ingress sub-path (a cloud sandbox reachable only through it) resolves them
+    too. Updated from the old root-only contract."""
+    # prefix-only → the internal mounts live under that prefix.
+    mounts = _mount_paths(create_app(api_prefix=["/valuz-backend"]))
+    assert "/valuz-backend" + _MCP_MOUNT in mounts
+    assert "/valuz-backend/internal/data" in mounts
 
-    assert _MCP_MOUNT in mounts
-    assert "/valuz-backend" + _MCP_MOUNT not in mounts
+    # native + prefixed → served at BOTH, so internal ``backend_base_url`` callers
+    # keep resolving the root mounts while the prefixed ingress exposes them too.
+    both = _mount_paths(create_app(api_prefix=["", "/valuz-backend"]))
+    assert _MCP_MOUNT in both and "/valuz-backend" + _MCP_MOUNT in both
+    assert "/internal/data" in both and "/valuz-backend/internal/data" in both
 
 
 def test_dual_mount_serves_native_and_prefixed() -> None:

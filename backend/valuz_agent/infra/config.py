@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # change. Direct ``settings.data_dir`` reads are sanctioned ONLY in this
     # file (self-derivation of the paths below), in ``fs_registry`` itself, and
     # in ``boot.migrate_data_dir`` (the one-time root relocation).
+    # May contain {user_id} when the deployment mounts per-user config roots.
+    # OSS defaults to the root itself, without a user-id subdirectory.
     data_dir: Path = Path.home() / ".valuz-oss"
     db_filename: str = "valuz.db"
     # The kernel's own SQLite file — sessions / messages / events, its
@@ -130,6 +132,12 @@ class Settings(BaseSettings):
             return value.strip().lower()
         raise ValueError("deployment_type must be 'local' or 'cloud'")
 
+    # Whether process startup may initialize owner-scoped user content under the
+    # local install owner. OSS desktop keeps this enabled. Multi-user overlays
+    # with request-bound identity disable it and initialize user content after
+    # login with the authenticated user_id.
+    initialize_user_content_on_startup: bool = True
+
     # Custom URL scheme the desktop shell registers (Electron
     # ``setAsDefaultProtocolClient`` — see
     # frontend/apps/desktop/src/main/deep-link-utils.ts ``DEEP_LINK_PROTOCOL``).
@@ -165,77 +173,6 @@ class Settings(BaseSettings):
     # Override with ``VALUZ_SUBSCRIPTION_LOGIN_ENABLED``.
     subscription_login_enabled: bool = True
 
-    @property
-    def db_path(self) -> Path:
-        return self.data_dir / self.db_filename
-
-    @property
-    def db_url(self) -> str:
-        if self.database_url:
-            return self.database_url
-        return f"sqlite:///{self.db_path}"
-
-    @property
-    def db_url_async(self) -> str:
-        if self.database_url:
-            return self._to_async_url(self.database_url)
-        return f"sqlite+aiosqlite:///{self.db_path}"
-
-    @property
-    def kernel_db_path(self) -> Path:
-        return self.data_dir / self.kernel_db_filename
-
-    @property
-    def kernel_db_url(self) -> str:
-        """Sync-driver URL for the kernel's database.
-
-        Resolution order:
-        1. ``kernel_database_url`` — explicit override (Postgres / custom path).
-        2. ``database_url`` — an explicit host DB (e.g. a shared Postgres
-           server) co-locates the kernel there, preserving the single-store
-           layout server deployments rely on.
-        3. Otherwise (the local SQLite default) the kernel gets its OWN
-           ``kernel.db`` file, separate from the host ``valuz.db``.
-        """
-        if self.kernel_database_url:
-            return self.kernel_database_url
-        if self.database_url:
-            return self.database_url
-        return f"sqlite:///{self.kernel_db_path}"
-
-    @property
-    def kernel_db_url_async(self) -> str:
-        if self.kernel_database_url:
-            return self._to_async_url(self.kernel_database_url)
-        if self.database_url:
-            return self._to_async_url(self.database_url)
-        return f"sqlite+aiosqlite:///{self.kernel_db_path}"
-
-    @property
-    def is_sqlite(self) -> bool:
-        return self.db_url.startswith("sqlite")
-
-    @staticmethod
-    def _to_async_url(url: str) -> str:
-        if url.startswith("postgresql://"):
-            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        if url.startswith("sqlite://"):
-            return url.replace("sqlite://", "sqlite+aiosqlite://", 1)
-        return url
-
-    @property
-    def docs_dir(self) -> Path:
-        return self.data_dir / "docs"
-
-    @property
-    def secrets_dir(self) -> Path:
-        return self.data_dir / "secrets"
-
-    @property
-    def cache_dir(self) -> Path:
-        # Generic ephemeral cache (FileCache default — e.g. connector OAuth PKCE).
-        return self.data_dir / "cache"
-
     # ── Installation identity ────────────────────────────────────────
     # Where the locally-generated owner id (int32) is persisted. Lives
     # OUTSIDE the business tables so a DB clean-up rebuild never loses it
@@ -243,36 +180,36 @@ class Settings(BaseSettings):
     # on first install from a device fingerprint and stable thereafter.
     installation_filename: str = "installation.json"
 
-    @property
-    def installation_file(self) -> Path:
-        return self.data_dir / self.installation_filename
-
     # ── Logging paths ────────────────────────────────────────────────
     # ``infra.logging.configure_logging`` writes structured JSON lines
     # to ``log_file`` via a RotatingFileHandler so the desktop ``服务``
     # panel can display + offer "open in editor" without depending on
-    # whichever shell launched the process. ``log_dir`` is created on
-    # first write — we don't ``mkdir`` here so the property stays pure.
+    # whichever shell launched the process. Logs are process-wide, not
+    # user-owned data, so this deliberately does not derive from data_dir.
+    # Override with VALUZ_LOG_DIR for cloud deployments that template
+    # VALUZ_DATA_DIR by user. ``log_dir`` is created on first write — we don't
+    # ``mkdir`` here so the field stays pure.
+    log_dir: Path = Path.home() / ".valuz-oss" / "logs"
     log_filename: str = "backend.log"
-
-    @property
-    def log_dir(self) -> Path:
-        return self.data_dir / "logs"
 
     @property
     def log_file(self) -> Path:
         return self.log_dir / self.log_filename
 
-    # Per-session scratch dir where skill-creator writes draft skills.
-    # Each session gets a subdirectory named after its session_id; inside,
-    # the agent creates one directory per skill (slug-named) containing
-    # SKILL.md plus any bundled scripts/references/assets. Empty default
-    # means "data_dir/skill-creator/staging"; set via VALUZ_SKILL_STAGING_DIR.
-    skill_staging_dir_override: Path | None = None
+    # Optional legacy skill-creator staging directory. May contain
+    # ``{user_id}``; when unset it lives under ``data_dir(user_id)``.
+    # Override with VALUZ_USER_SKILL_STAGING_DIR.
+    user_skill_staging_dir: Path | None = None
 
-    @property
-    def skill_staging_dir(self) -> Path:
-        return self.skill_staging_dir_override or (self.data_dir / "skill-creator" / "staging")
+    # Optional per-user temporary directory for cross-request scratch data.
+    # May contain ``{user_id}``; when unset it lives under the OS temp root
+    # (``tempfile.gettempdir()`` — /tmp on Unix-like systems, the Windows temp
+    # directory on Windows). Override with VALUZ_USER_TEMP_DIR.
+    user_temp_dir: Path | None = None
+
+    # Canonical user skill library directory. May contain ``{user_id}`` for
+    # shared/cloud deployments.
+    user_skills_dir: Path = Path.home() / ".agent" / "skills"
 
     @property
     def internal_mcp_token(self) -> str:
@@ -300,6 +237,7 @@ class Settings(BaseSettings):
     # ── User-facing project root ───────────────────────────────────
     # Base directory for user-visible projects (not hidden).
     # Defaults to ~/Valuz; override with VALUZ_USER_PROJECT_ROOT.
+    # May contain {user_id} when the deployment mounts per-user workspaces.
     user_project_root: Path = Path.home() / "Valuz"
 
     # ── Browser feature (chrome-devtools-mcp) ──────────────────────
@@ -320,10 +258,6 @@ class Settings(BaseSettings):
     # the bundled skill's command vocabulary in sync. GA vendors the bin
     # and sets VALUZ_CDT_PATH instead of npx.
     chrome_devtools_version: str = "1.2.0"
-
-    @property
-    def browser_profile_dir(self) -> Path:
-        return self.data_dir / self.browser_profile_subdir
 
     model_config = {"env_prefix": "VALUZ_"}
 

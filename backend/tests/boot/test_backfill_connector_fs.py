@@ -58,6 +58,7 @@ async def test_backfill_imports_project_selection(db, tmp_path, monkeypatch):
     db.add(ProjectRow(id="p1", name="P", kind="project", root_path=proj_root, user_id=_OWNER))
     await db.commit()
     monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(bf, "resolve_local_user_id", lambda: _OWNER)
 
     await bf.backfill_connector_fs(db)
 
@@ -73,6 +74,7 @@ async def test_backfill_is_db_authoritative_and_marker_gated(db, tmp_path, monke
     db.add(ProjectRow(id="p1", name="P", kind="project", root_path=proj_root, user_id=_OWNER))
     await db.commit()
     monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(bf, "resolve_local_user_id", lambda: _OWNER)
 
     ds = ConnectorDatastore(db)
     # DB already carries a (different) selection — backfill must not clobber it.

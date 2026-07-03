@@ -29,6 +29,7 @@ from valuz_agent.adapters import kernel_client
 from valuz_agent.modules.sessions import project_index
 from valuz_agent.adapters.agent_resolver import (
     build_member_session,
+    resolve_agent_display_name,
     spill_goal_brief_if_too_long,
 )
 from valuz_agent.infra.db import async_unit_of_work
@@ -136,6 +137,7 @@ class DispatcherService:
             if ws_row is None:
                 return {"error": f"project {project_id!r} not found", "status": "failed"}
             project_cwd = fs_registry.project_cwd(
+                task_row.user_id,
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -199,6 +201,14 @@ class DispatcherService:
                     "status": "failed",
                 }
 
+            # Capture the member's display name once, here where the agent is
+            # guaranteed resolvable, and stamp it into every event payload below
+            # (``agent_name``). This makes the name durable — the frontend reads
+            # it straight from the event instead of joining the ``actor`` slug
+            # against an async members list that races the load and misses
+            # removed agents ("成员智能体名称查询不到").
+            agent_name = await resolve_agent_display_name(project_id, agent, user_id)
+
             # Fail fast on a credential-less member — return a clear reason to
             # the lead instead of spawning a doomed "Not logged in" run.
             gap = await _credential_gap(member_session, agent, db=db, user_id=user_id)
@@ -210,7 +220,12 @@ class DispatcherService:
                     type="subtask_failed",
                     actor=agent,
                     session_id=member_session.id,
-                    payload={"agent": agent, "status": "failed", "error": gap},
+                    payload={
+                        "agent": agent,
+                        "agent_name": agent_name,
+                        "status": "failed",
+                        "error": gap,
+                    },
                 )
                 return {"error": gap, "status": "failed", "agent": agent}
 
@@ -250,6 +265,7 @@ class DispatcherService:
                 session_id=member_session.id,
                 payload={
                     "agent": agent,
+                    "agent_name": agent_name,
                     "goal": goal,
                     "run_dir": str(run_dir),
                     "subtask_key": subtask_key,
@@ -336,7 +352,7 @@ class DispatcherService:
                     type="subtask_failed",
                     actor=agent,
                     session_id=member_session.id,
-                    payload={**manifest, "subtask_key": subtask_key},
+                    payload={"agent_name": agent_name, **manifest, "subtask_key": subtask_key},
                 )
 
         return manifest
@@ -470,6 +486,7 @@ class DispatcherService:
             if ws_row is None:
                 return {"error": f"project {project_id!r} not found", "status": "failed"}
             project_cwd = fs_registry.project_cwd(
+                task_row.user_id,
                 ws_row.id,
                 cast(
                     Literal["chat", "project"],
@@ -540,6 +557,11 @@ class DispatcherService:
                     "status": "failed",
                 }
 
+            # Durable member display name for the event payloads below — see the
+            # note in ``dispatch`` (frontend reads ``agent_name`` instead of
+            # joining the ``actor`` slug against an async members list).
+            agent_name = await resolve_agent_display_name(project_id, agent, user_id)
+
             # Fail fast on a credential-less member before starting its actor.
             gap = await _credential_gap(member_session, agent, db=db, user_id=user_id)
             if gap is not None:
@@ -550,7 +572,12 @@ class DispatcherService:
                     type="subtask_failed",
                     actor=agent,
                     session_id=member_session.id,
-                    payload={"agent": agent, "status": "failed", "error": gap},
+                    payload={
+                        "agent": agent,
+                        "agent_name": agent_name,
+                        "status": "failed",
+                        "error": gap,
+                    },
                 )
                 return {"error": gap, "status": "failed", "agent": agent}
 
@@ -589,6 +616,7 @@ class DispatcherService:
                 session_id=member_session.id,
                 payload={
                     "agent": agent,
+                    "agent_name": agent_name,
                     "goal": goal,
                     "run_dir": str(run_dir),
                     "subtask_key": subtask_key,

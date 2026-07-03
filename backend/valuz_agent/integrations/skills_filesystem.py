@@ -3,11 +3,11 @@ from __future__ import annotations
 import ast
 import hashlib
 import logging
-import os
 from pathlib import Path
 
 import yaml
 
+from valuz_agent.infra.config import settings
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.modules.skills.contracts import RuntimeContext, SkillManifest
 
@@ -45,13 +45,13 @@ def _folder_birthtime(path: Path) -> int | None:
         return None
 
 
-def _default_user_skill_root() -> Path:
+def _default_user_skill_root(user_id: str | None = None) -> Path:
     """Canonical write-target for promoted user skills.
 
     Delegates to ``FsRegistry.user_skill_root()`` so the destination obeys
     ADR-004 (host writes go to ``~/.valuz-oss/`` by default).
     """
-    return fs_registry.user_skill_root()
+    return fs_registry.user_skill_root(user_id=user_id)
 
 
 def _read_text(path: Path) -> str:
@@ -157,7 +157,7 @@ def _discover_roots(ctx: RuntimeContext) -> list[tuple[str, Path, str]]:
     """Enumerate every directory we should scan for user/project skills.
 
     The canonical user write-target is ``FsRegistry.user_skill_root()`` —
-    ``~/.agents/skills/`` (the agentskills.io standard location).
+    ``settings.user_skills_dir``.
     Legacy ``~/.claude/skills`` and ``~/.codex/skills`` are still
     surfaced as read-only sources so skills authored in those CLIs
     don't disappear. Source labels stay distinct so the UI can tell
@@ -166,14 +166,14 @@ def _discover_roots(ctx: RuntimeContext) -> list[tuple[str, Path, str]]:
     roots: list[tuple[str, Path, str]] = []
     seen: set[Path] = set()
 
-    has_override = bool(os.environ.get("VALUZ_USER_SKILLS_DIR"))
+    has_configured_user_dir = settings.user_skills_dir != Path.home() / ".agent" / "skills"
 
-    valuz_root = _default_user_skill_root()
+    valuz_root = _default_user_skill_root(ctx.user_id)
     if valuz_root.exists():
         roots.append(("user", valuz_root, "valuz"))
         seen.add(valuz_root)
 
-    if not has_override:
+    if not has_configured_user_dir:
         # The leaf-and-parent shape check below maps each legacy root to
         # the right source label, which drives the .claude / .codex
         # top-level group on the skill management page.

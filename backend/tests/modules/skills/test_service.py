@@ -1,7 +1,9 @@
 """Tests for SkillLibraryService — Phase 5 coverage."""
 
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
@@ -13,6 +15,7 @@ from valuz_agent.modules.skills.models import (
     SessionSkillImportConfirmRequest,
     SkillCreateRequest,
     SkillFileAction,
+    SkillImportArchiveConfirmRequest,
     SkillUpdateRequest,
 )
 from valuz_agent.modules.skills.service import SkillLibraryService
@@ -93,12 +96,27 @@ class FakeSkillDatastore:
     async def get_by_id(self, user_id, skill_id):
         return self._rows.get(skill_id)
 
+    async def get_by_slug(self, user_id, slug):
+        return next((row for row in self._rows.values() if row.slug == slug), None)
+
     async def set_creation_origin(self, user_id, skill_id, origin):
         row = self._rows.get(skill_id)
         if row is not None:
             row.creation_origin = origin
 
+    async def set_creation_origin_by_slug(self, user_id, slug, origin):
+        row = await self.get_by_slug(user_id, slug)
+        if row is not None:
+            row.creation_origin = origin
+
+    async def set_origin_metadata_by_slug(self, user_id, slug, origin_json):
+        row = await self.get_by_slug(user_id, slug)
+        if row is not None:
+            row.origin_json = origin_json
+
     async def create(self, user_id, row):
+        if not row.id:
+            row.id = uuid4().hex
         self._rows[row.id] = row
         return row
 
@@ -112,13 +130,31 @@ class FakeSkillDatastore:
     async def list_library_disabled_ids(self, user_id):
         return set(getattr(self, "_library_disabled", set()))
 
+    async def list_library_disabled_slugs(self, user_id):
+        return set(getattr(self, "_library_disabled_slugs", set()))
+
     async def set_library_enabled(self, user_id, skill_id, enabled):
         disabled = getattr(self, "_library_disabled", set())
+        disabled_slugs = getattr(self, "_library_disabled_slugs", set())
+        slug = skill_id.split(":", 1)[1] if ":" in skill_id else None
         if enabled:
             disabled.discard(skill_id)
+            if slug is not None:
+                disabled_slugs.discard(slug)
         else:
             disabled.add(skill_id)
+            if slug is not None:
+                disabled_slugs.add(slug)
         self._library_disabled = disabled
+        self._library_disabled_slugs = disabled_slugs
+
+    async def set_library_enabled_by_slug(self, user_id, slug, enabled):
+        disabled = getattr(self, "_library_disabled_slugs", set())
+        if enabled:
+            disabled.discard(slug)
+        else:
+            disabled.add(slug)
+        self._library_disabled_slugs = disabled
 
     def add_ignore(self, skill_id, content_hash=None):
         pass
@@ -148,7 +184,9 @@ def skill_root(tmp_path):
 @pytest.fixture
 def svc(skill_root, monkeypatch):
     skill_root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("VALUZ_USER_SKILLS_DIR", str(skill_root))
+    from valuz_agent.infra import fs_registry as fsr
+
+    monkeypatch.setattr(fsr.settings, "user_skills_dir", skill_root)
     bus = EventBus()
     return SkillLibraryService(
         datastore=FakeSkillDatastore(),
@@ -467,20 +505,59 @@ class TestReadonlySkill:
                 )
 
 
+class TestArchiveImport:
+    async def test_confirm_should_survive_preview_worker_switch(self, svc, tmp_path, monkeypatch):
+        service, _ = svc
+        from valuz_agent.infra import fs_registry as fsr
+
+        monkeypatch.setattr(
+            fsr.settings,
+            "user_temp_dir",
+            tmp_path / "temp" / "{user_id}",
+        )
+
+        archive = tmp_path / "skill.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr(
+                "opscli-agent/SKILL.md",
+                '---\nname: "opscli-agent"\ndescription: "Ops CLI"\n---\n\nUse opscli.\n',
+            )
+
+        preview = await service.import_archive_preview("u", str(archive), target_scope="user")
+        assert service._load_import_preview_record("u", preview.preview_id) is not None
+
+        imported = await service.confirm_archive_import(
+            "u",
+            SkillImportArchiveConfirmRequest(
+                preview_id=preview.preview_id,
+                name="opscli-agent",
+            ),
+        )
+
+        assert imported.name == "opscli-agent"
+        assert (tmp_path / "skills" / "opscli-agent" / "SKILL.md").exists()
+
+
 class TestUrlImport:
-    async def test_should_raise_preview_expired_after_ttl(self, svc):
+    async def test_should_raise_preview_expired_after_ttl(self, svc, tmp_path, monkeypatch):
         import time
 
         service, _ = svc
-        from valuz_agent.modules.skills.service import _import_previews
+        from valuz_agent.infra import fs_registry as fsr
 
+        monkeypatch.setattr(fsr.settings, "user_temp_dir", tmp_path / "temp" / "{user_id}")
         preview_id = "test-expired"
-        # URL preview shape: (skill_root, cleanup_root, created_at). Stamp it 700s
-        # ago so confirm trips the 600s TTL.
-        _import_previews[preview_id] = (
-            Path("/tmp/nonexistent/skill"),
-            Path("/tmp/nonexistent"),
-            time.time() - 700,
+        cleanup_root = tmp_path / "url-staging"
+        skill_root = cleanup_root / "skill"
+        skill_root.mkdir(parents=True)
+        (skill_root / "SKILL.md").write_text("---\nname: expired\n---\n", "utf-8")
+        service._write_import_preview_record(
+            "u",
+            preview_id,
+            kind="url",
+            skill_root=skill_root,
+            cleanup_root=cleanup_root,
+            created_at=time.time() - 700,
         )
         from valuz_agent.modules.skills.models import SkillImportUrlConfirmRequest
 
@@ -488,7 +565,7 @@ class TestUrlImport:
             await service.confirm_url_import(
                 "u", SkillImportUrlConfirmRequest(preview_id=preview_id)
             )
-        _import_previews.pop(preview_id, None)
+        assert not cleanup_root.exists()
 
 
 class TestSkillFiles:

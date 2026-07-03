@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -200,8 +201,8 @@ def host_sandbox_rw_mounts() -> tuple[MountSpec, ...]:
     be writable or the runtime fails with "Operation not permitted" the
     moment it tries to set a skill up (the reported bug).
 
-    "Dynamic" coverage by construction: we write-allow the ROOTS (the user
-    project root, the chat-cwd root, every skill root), so any project or
+    "Dynamic" coverage by construction: we write-allow the ROOTS (the resolved
+    user project root, the chat-cwd root, every skill root), so any project or
     skill created UNDER them after provision works without re-provisioning.
     A project bound OUTSIDE these roots (an arbitrary folder) is the one
     case a single host-wide sandbox can't reach — that needs a per-project
@@ -210,15 +211,18 @@ def host_sandbox_rw_mounts() -> tuple[MountSpec, ...]:
     Read access to skill *sources* is already granted by the profile's
     broad ``(allow file-read*)``; this list is strictly the write set.
     """
-    from valuz_agent.infra.config import settings
     from valuz_agent.infra.fs_registry import fs_registry as fr
+    from valuz_agent.infra.local_identity import resolve_local_user_id
+
+    user_id = resolve_local_user_id()
+    data_dir = fr.data_dir(user_id)
 
     dirs: list[Path] = [
-        fr.sandbox_root(),  # the kernel's private DB
-        fr.projects_root(),  # managed chat cwds
-        settings.user_project_root,  # real projects + their .agents|.claude/skills
-        fr.official_skill_root(),  # official skill bootstrap
-        fr.user_skill_root("claude"),  # user skill creation / submit
+        data_dir / "sandbox",  # the kernel's private DB
+        data_dir / "projects",  # legacy managed chat/project cwds
+        fr.project_root(user_id),  # real/managed projects + .agents|.claude/skills
+        fr.official_skill_root(user_id=user_id),  # official skill bootstrap
+        fr.user_skill_root(user_id=user_id),  # user skill creation / submit
         *fr.legacy_user_skill_roots(),  # ~/.claude/skills, ~/.codex/skills
     ]
     seen: set[str] = set()
@@ -388,6 +392,16 @@ class SeatbeltSandboxProvider:
         # (KERNEL_STORE / VALUZ_DATA_API_* carried in ``spec.env``), never a PG
         # credential. The local DB is present in both modes.
         db_url = f"sqlite+aiosqlite:///{spec.kernel_db_path}"
+        Path(spec.kernel_db_path).parent.mkdir(parents=True, exist_ok=True)
+        if not spec.rw_files:
+            spec = replace(
+                spec,
+                rw_files=(
+                    spec.kernel_db_path,
+                    spec.kernel_db_path + "-wal",
+                    spec.kernel_db_path + "-shm",
+                ),
+            )
         # Bootstrap step 1 — migrate the private kernel DB. Done host-side in a
         # one-shot subprocess (clean settings, private DB); the kernel-image
         # self-migration is the cloud-form upgrade.
@@ -533,7 +547,7 @@ class SeatbeltSandboxProvider:
 
     async def _migrate(self, kernel_db_path: str) -> None:
         # ``run_kernel_migrations`` reads the HOST ``Settings`` (env prefix
-        # ``VALUZ_``) and migrates ``settings.db_url_async`` — i.e.
+        # ``VALUZ_``) and migrates the runtime DB URL — i.e.
         # ``VALUZ_DATABASE_URL``, NOT the plain ``DATABASE_URL`` the kernel
         # server reads, and NOT ``VALUZ_KERNEL_DATABASE_URL`` (the alembic
         # upgrade ignores it). Point ``VALUZ_DATABASE_URL`` at the private
@@ -582,6 +596,10 @@ class SeatbeltSandboxProvider:
         # on top of it, never instead of it.
         if db_url is not None:
             env["DATABASE_URL"] = db_url
+            if "KERNEL_STORE" not in spec.env:
+                env["KERNEL_STORE"] = "local"
+            if "VALUZ_DURABLE_DATABASE_URL" not in spec.env:
+                env["VALUZ_DURABLE_DATABASE_URL"] = db_url
         if spec.host_callback_url:
             # ④ harness MCP callback target for the codex runtime.
             env["CODEX_TOOLKIT_BASE_URL"] = spec.host_callback_url
@@ -675,20 +693,33 @@ class SeatbeltDriver:
         return seatbelt_preflight()
 
     async def provision_for_boot(self, ctx: SandboxBootContext) -> SandboxBootResult:
-        from valuz_agent.infra.config import settings
-        from valuz_agent.infra.fs_registry import fs_registry as fr
+        from valuz_agent.infra.db_urls import (
+            db_url,
+            kernel_db_url,
+            sqlite_path_from_url,
+        )
+        from valuz_agent.infra.fs_registry import fs_registry
+        from valuz_agent.infra.local_identity import resolve_local_user_id
 
-        data_dir = fr.data_dir()
-        sandbox_dir = fr.sandbox_root()
+        user_id = resolve_local_user_id()
+        data_dir = fs_registry.data_dir(user_id)
+        sandbox_dir = data_dir / "sandbox"
         sandbox_dir.mkdir(parents=True, exist_ok=True)
-        host_db = data_dir / settings.db_filename
-        # The kernel uses the SHARED ``kernel.db`` (config.kernel_db_path) so
-        # dev (in-process) and dev-sandbox see one session history. It sits
-        # next to ``valuz.db`` in ``data_dir`` — outside every rw mount — so
-        # write-allow the file + its WAL/SHM sidecars explicitly (mirror of the
-        # valuz.db deny triple). The host migrates this file before spawn; the
-        # sandbox is its sole writer at runtime.
-        kernel_db = settings.kernel_db_path
+        host_db = sqlite_path_from_url(db_url())
+        # The kernel uses the runtime ``kernel.db`` resolved by ``db_urls`` so
+        # templated data roots expand by owner while explicit DB config keeps
+        # its configured location. Write-allow the file + its WAL/SHM sidecars
+        # explicitly; the host migrates this file before spawn and the sandbox
+        # is its sole writer at runtime.
+        kernel_db = sqlite_path_from_url(kernel_db_url())
+        if kernel_db is None:
+            raise RuntimeError("seatbelt sandbox requires a SQLite kernel database path")
+
+        deny_paths = [
+            str(fs_registry.secrets_dir(user_id)),
+        ]
+        if host_db is not None:
+            deny_paths.extend((str(host_db), str(host_db) + "-wal", str(host_db) + "-shm"))
 
         mounts = host_sandbox_rw_mounts()
         env = dict(ctx.passthrough_env)  # ⑥ L1 credential injection
@@ -711,15 +742,12 @@ class SeatbeltDriver:
         # passes the request principal instead (same helper — see
         # ``boot/data_service_inject``). The helper no-ops on a local store.
         if ctx.host_callback_url:
-            from valuz_agent.api.deps import _secret_store
             from valuz_agent.boot.data_service_inject import data_service_env
-            from valuz_agent.infra.local_identity import resolve_local_user_id
 
             env.update(
                 data_service_env(
-                    owner_user_id=resolve_local_user_id(),
+                    owner_user_id=user_id,
                     host_callback_url=ctx.host_callback_url,
-                    secret_store=_secret_store(),
                 )
             )
         spec = SandboxSpec(
@@ -733,12 +761,7 @@ class SeatbeltDriver:
             # threads the request principal here (see SandboxBootContext).
             owner_user_id=ctx.owner_user_id,
             # RED LINE: host business DB (+ wal/shm) and secret store.
-            deny_paths=(
-                str(host_db),
-                str(host_db) + "-wal",
-                str(host_db) + "-shm",
-                str(settings.secrets_dir),
-            ),
+            deny_paths=tuple(deny_paths),
         )
         provider = SeatbeltSandboxProvider()
         endpoint = await provider.provision(spec)

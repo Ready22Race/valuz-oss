@@ -9,27 +9,32 @@ shared by the session run path and the task orchestrator.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from valuz_agent.infra.db import async_unit_of_work
+from valuz_agent.infra.fs_registry import fs_registry
 
 
-def _resolve_asset_path(user_id: str, ref: str | None) -> str | None:
+def _resolve_file_key_path(user_id: str, ref: str | None) -> str | None:
     """Resolve a stored attachment reference to a local filesystem path.
 
-    New ``local`` attachments store an asset-store *key* (relative): resolve it
-    to a local ``Path`` via ``ext.asset_store.fetch`` (zero-copy on desktop, a
-    cache download on the shared backend). Legacy rows and ``kb_doc`` references
-    hold an absolute path (the KB-owned source / a pre-migration file) — used
-    as-is so the migration needs no backfill.
+    Local attachments store a Valuz-owned relative key under ``VALUZ_DATA_DIR``.
+    Legacy rows and ``kb_doc`` references may hold an absolute path (the
+    KB-owned source / a pre-migration file) and are used as-is so the migration
+    needs no backfill.
     """
     if not ref:
         return None
     if os.path.isabs(ref):
         return ref
-    from valuz_agent.ports.extensions import ext
-
-    p = ext.asset_store.fetch(user_id, ref)
-    return str(p) if p is not None else None
+    rel = Path(ref)
+    if rel.is_absolute() or any(part in {"", ".", ".."} for part in rel.parts):
+        return None
+    target = (fs_registry.data_dir(user_id) / rel).resolve()
+    data_root = fs_registry.data_dir(user_id).resolve()
+    if data_root != target and data_root not in target.parents:
+        return None
+    return str(target) if target.is_file() else None
 
 
 async def _load_pending_attachments(session_id: str, user_id: str):
@@ -74,8 +79,8 @@ def _attachment_specs(rows, user_id: str) -> tuple[tuple[str | None, str | None]
     """
     return tuple(
         (
-            _resolve_asset_path(user_id, row.stored_path),
-            _resolve_asset_path(user_id, row.parsed_path)
+            _resolve_file_key_path(user_id, row.stored_path),
+            _resolve_file_key_path(user_id, row.parsed_path)
             if row.parse_status == "ready" and row.parsed_path
             else None,
         )

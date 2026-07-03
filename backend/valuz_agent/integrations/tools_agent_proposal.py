@@ -183,9 +183,7 @@ async def _gather_model_options(db: Any, user_id: str) -> Any:
     agent sees exactly the runtimes + models the host can actually run. Returns
     a ``ModelOptionsResponse``; ``groups`` is empty when no provider is
     configured."""
-    from valuz_agent.infra.config import settings as app_settings
     from valuz_agent.infra.eventbus import event_bus
-    from valuz_agent.infra.secret_store import FileSecretStore
     from valuz_agent.modules.providers.datastore import ProviderDatastore
     from valuz_agent.modules.providers.service import ProviderService
     from valuz_agent.modules.settings.model_options import (
@@ -201,7 +199,6 @@ async def _gather_model_options(db: Any, user_id: str) -> Any:
 
     svc = ProviderService(
         datastore=ProviderDatastore(db),
-        secret_store=FileSecretStore(app_settings.secrets_dir),
         event_bus=event_bus,
     )
     items = await svc.list_providers(user_id)

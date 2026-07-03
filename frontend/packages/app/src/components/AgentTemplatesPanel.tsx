@@ -371,11 +371,11 @@ const RoleCard = ({ role }: { role: AgentTemplateRole }) => {
           </div>
         </div>
         {/* Recommended brain badges. */}
-        <span className="shrink-0 rounded-md bg-surface-soft px-1.5 py-0.5 text-[11px] text-ink-meta">
+        <span className="inline-flex h-5 shrink-0 items-center rounded-[4px] bg-surface-soft px-1.5 py-0 text-[11px] text-ink-meta">
           {RUNTIME_LABEL[role.runtime] ?? role.runtime}
         </span>
         {role.effort && (
-          <span className="shrink-0 rounded-md bg-surface-soft px-1.5 py-0.5 text-[11px] text-ink-meta">
+          <span className="inline-flex h-5 shrink-0 items-center rounded-[4px] bg-surface-soft px-1.5 py-0 text-[11px] text-ink-meta">
             {role.effort}
           </span>
         )}
@@ -389,7 +389,7 @@ const RoleCard = ({ role }: { role: AgentTemplateRole }) => {
           {role.skills.map((s) => (
             <span
               key={s}
-              className="rounded-md bg-surface-soft px-1.5 py-0.5 text-[11px] text-ink-body"
+              className="inline-flex h-5 items-center rounded-[4px] bg-surface-soft px-1.5 py-0 text-[11px] text-ink-body"
             >
               {s}
             </span>
@@ -397,14 +397,14 @@ const RoleCard = ({ role }: { role: AgentTemplateRole }) => {
           {role.connector_types.map((c) => (
             <span
               key={c}
-              className="flex items-center gap-0.5 rounded-md bg-surface-soft px-1.5 py-0.5 text-[11px] text-ink-body"
+              className="flex h-5 items-center gap-0.5 rounded-[4px] bg-surface-soft px-1.5 py-0 text-[11px] text-ink-body"
             >
               <Plug className="h-2.5 w-2.5" />
               {c}
             </span>
           ))}
           {role.in_library && (
-            <span className="flex items-center gap-0.5 rounded-md bg-success-light px-1.5 py-0.5 text-[11px] text-success-text">
+            <span className="flex h-5 items-center gap-0.5 rounded-[4px] bg-success-light px-1.5 py-0 text-[11px] text-success-text">
               <Check className="h-2.5 w-2.5" />
               {t("agent.template.roleInLibrary")}
             </span>
