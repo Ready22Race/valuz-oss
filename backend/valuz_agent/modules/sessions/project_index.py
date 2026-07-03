@@ -198,11 +198,17 @@ async def count_for_project(project_id: str, user_id: str) -> int:
 
 
 async def remove(session_id: str, user_id: str | None = None) -> None:
+    # Delete by the globally-unique kernel ``session_id`` ALONE — mirroring
+    # ``record`` / ``touch_activity``, which key on session_id only. The old
+    # ``AND user_id == user_id`` clause silently matched nothing whenever a
+    # caller omitted ``user_id`` (WHERE user_id IS NULL), so the delete was a
+    # no-op and the session lingered in the activity feed as an unclearable
+    # ghost. ``user_id`` is kept in the signature for call-site compatibility but
+    # is not needed to identify the row.
     async with async_unit_of_work() as db:
         await db.execute(
             delete(ProjectSessionRow).where(
                 ProjectSessionRow.session_id == session_id,
-                ProjectSessionRow.user_id == user_id,
             )
         )
 

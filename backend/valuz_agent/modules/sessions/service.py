@@ -1726,7 +1726,10 @@ class SessionService:
         if session is None:
             raise _kernel_session_not_found(session_id)
         await kernel_client.delete_session(user_id, session_id)
-        await project_index.remove(session_id)
+        # Drop the chat-index row too, or the session haunts the activity feed as
+        # a ghost "New chat" the user can't clear (``project_index.remove`` keys
+        # on the globally-unique session_id).
+        await project_index.remove(session_id, user_id=user_id)
         # Drop any pending input-queue rows for the gone session.
         try:
             async with async_unit_of_work() as db:
