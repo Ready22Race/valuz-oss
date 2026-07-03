@@ -1159,6 +1159,7 @@ export const ProjectDetailPage = () => {
               : "—",
         }))}
         onAddScheduledTask={() => setNewTaskOpen(true)}
+        onOpenScheduledTask={(id) => navigate(`/automations/${id}`)}
         onEditScheduledTask={openEditScheduledTask}
         onToggleScheduledTask={handleToggleScheduledTask}
         onDeleteScheduledTask={handleDeleteScheduledTask}

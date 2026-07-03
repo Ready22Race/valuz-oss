@@ -284,8 +284,10 @@ export interface ProjectContextPanelProps {
   todos?: TodoListItem[] | null;
   scheduledTasks?: ScheduledTaskSummary[];
   onAddScheduledTask?: () => void;
-  /** Open the edit dialog for a scheduled task — wired to both a row click and
-   *  the row's "Edit" menu item. */
+  /** Open a scheduled task's detail page — wired to the row click. */
+  onOpenScheduledTask?: (taskId: string) => void;
+  /** Open the edit dialog for a scheduled task — wired to the row's "Edit"
+   *  menu item (no longer the row click, which now opens the detail page). */
   onEditScheduledTask?: (taskId: string) => void;
   onToggleScheduledTask?: (taskId: string, nextStatus: "on" | "off") => void;
   onDeleteScheduledTask?: (taskId: string) => void;
@@ -948,6 +950,7 @@ export const ProjectDetailContextPanel = ({
   todos,
   scheduledTasks,
   onAddScheduledTask,
+  onOpenScheduledTask,
   onEditScheduledTask,
   onToggleScheduledTask,
   onDeleteScheduledTask,
@@ -982,6 +985,11 @@ export const ProjectDetailContextPanel = ({
     instructionsTitle ?? t("project.instruction");
   const resolvedScheduledTasksTitle =
     scheduledTasksTitle ?? t("project.scheduledTasks");
+  // Enabled ("on") tasks sort ahead of paused ones; order within each group is
+  // preserved (Array.sort is stable in modern engines).
+  const sortedScheduledTasks = [...(scheduledTasks ?? [])].sort(
+    (a, b) => Number(b.status === "on") - Number(a.status === "on"),
+  );
   const resolvedFileTreeTitle = fileTreeTitle ?? t("project.fileTree");
 
   // Section visibility — chat project omits sections it has no data for.
@@ -1689,25 +1697,25 @@ export const ProjectDetailContextPanel = ({
           {(scheduledTasks ?? []).length > 0 ? (
             <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
               <div className="divide-y divide-[#f3f4f6]">
-                {(scheduledTasks ?? []).map((task) => (
+                {sortedScheduledTasks.map((task) => (
                   <div
                     key={task.id}
-                    // Row is clickable to edit, but intentionally keeps the
-                    // default cursor (no pointer/hand) per design.
+                    // Row click opens the task's detail page; keeps the default
+                    // cursor (no pointer/hand) per design.
                     className="group relative rounded-lg bg-card"
-                    role={onEditScheduledTask ? "button" : undefined}
-                    tabIndex={onEditScheduledTask ? 0 : undefined}
+                    role={onOpenScheduledTask ? "button" : undefined}
+                    tabIndex={onOpenScheduledTask ? 0 : undefined}
                     onClick={
-                      onEditScheduledTask
-                        ? () => onEditScheduledTask(task.id)
+                      onOpenScheduledTask
+                        ? () => onOpenScheduledTask(task.id)
                         : undefined
                     }
                     onKeyDown={
-                      onEditScheduledTask
+                      onOpenScheduledTask
                         ? (e) => {
                             if (e.key === "Enter" || e.key === " ") {
                               e.preventDefault();
-                              onEditScheduledTask(task.id);
+                              onOpenScheduledTask(task.id);
                             }
                           }
                         : undefined
@@ -1740,8 +1748,8 @@ export const ProjectDetailContextPanel = ({
                                 type="button"
                                 className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-ink-meta transition-colors hover:bg-surface-muted hover:text-ink-label"
                                 title={t("project.taskActions")}
-                                // The row itself opens the editor; keep a menu
-                                // click from also triggering that row handler.
+                                // The row itself opens the detail page; keep a
+                                // menu click from also triggering that handler.
                                 onClick={(e) => e.stopPropagation()}
                                 onPointerDown={(e) => e.stopPropagation()}
                               >
@@ -1754,8 +1762,8 @@ export const ProjectDetailContextPanel = ({
                               onCloseAutoFocus={(e) => e.preventDefault()}
                               // Portaled, but clicks still bubble through the
                               // React tree to the row's onClick (which opens the
-                              // editor). Stop it so toggling pause/enable or
-                              // deleting doesn't also pop the edit dialog.
+                              // detail page). Stop it so toggling pause/enable or
+                              // deleting doesn't also navigate away.
                               onClick={(e) => e.stopPropagation()}
                             >
                               {onEditScheduledTask && (
