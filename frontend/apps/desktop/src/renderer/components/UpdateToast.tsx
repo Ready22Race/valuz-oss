@@ -85,7 +85,6 @@ export const UpdateToast = () => {
   const isPreparing = status === "preparing";
   const isDownloaded = status === "downloaded";
   const isError = status === "error";
-  const ver = version ? ` v${version}` : "";
 
   const onDownload = () => {
     // Flip to the progress bar immediately so the click feels instant — the
@@ -134,13 +133,14 @@ export const UpdateToast = () => {
             ) : (
               <Download className="h-4 w-4 shrink-0 text-blue-500" />
             )}
+            {/* Title only — the version rides on row 2 so it's never squeezed
+                out by the action button in the fixed-width card. */}
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
               {isError
                 ? t("updater.errorTitle" as Parameters<typeof t>[0])
-                : (isDownloaded
-                    ? t("updater.downloadedTitle" as Parameters<typeof t>[0])
-                    : t("updater.updateAvailable" as Parameters<typeof t>[0])) +
-                  ver}
+                : isDownloaded
+                  ? t("updater.downloadedTitle" as Parameters<typeof t>[0])
+                  : t("updater.updateAvailable" as Parameters<typeof t>[0])}
             </span>
             {isDownloaded ? (
               <Button
@@ -184,12 +184,25 @@ export const UpdateToast = () => {
               </span>
             </div>
           ) : (
-            <div className="mt-1 truncate text-xs leading-5 text-ink-meta">
-              {isError
-                ? (errorMessage ?? "")
-                : isDownloaded
-                  ? t("updater.downloadedDesc" as Parameters<typeof t>[0])
-                  : t("updater.availableDesc" as Parameters<typeof t>[0])}
+            <div className="mt-1 flex min-w-0 items-baseline gap-1 text-xs leading-5">
+              {/* Version leads row 2 as a shrink-0 element so it always shows in
+                  full; the description (least important, already ellipsized)
+                  yields when the row is tight. */}
+              {version && !isError ? (
+                <>
+                  <span className="shrink-0 font-medium tabular-nums text-ink-body">
+                    v{version}
+                  </span>
+                  <span className="shrink-0 text-ink-muted">·</span>
+                </>
+              ) : null}
+              <span className="min-w-0 flex-1 truncate text-ink-meta">
+                {isError
+                  ? (errorMessage ?? "")
+                  : isDownloaded
+                    ? t("updater.downloadedDesc" as Parameters<typeof t>[0])
+                    : t("updater.availableDesc" as Parameters<typeof t>[0])}
+              </span>
             </div>
           )}
         </div>
