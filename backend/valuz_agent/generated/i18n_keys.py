@@ -253,6 +253,7 @@ I18nKey = Literal[
     "automation.agentLabel",
     "automation.agentPlaceholderEmpty",
     "automation.agentPlaceholderPick",
+    "automation.backToProject",
     "automation.createFailed",
     "automation.createSuccess",
     "automation.deleteConfirmDesc",

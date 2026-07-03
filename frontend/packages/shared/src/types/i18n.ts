@@ -247,6 +247,7 @@ export type KnownI18nKey =
   | "automation.agentLabel"
   | "automation.agentPlaceholderEmpty"
   | "automation.agentPlaceholderPick"
+  | "automation.backToProject"
   | "automation.createFailed"
   | "automation.createSuccess"
   | "automation.deleteConfirmDesc"
