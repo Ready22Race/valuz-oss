@@ -20,3 +20,11 @@ def test_user_skill_staging_dir_env_alias(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("VALUZ_USER_SKILL_STAGING_DIR", str(staging_dir))
 
     assert Settings().user_skill_staging_dir == staging_dir
+
+
+def test_user_temp_dir_env_alias(monkeypatch, tmp_path) -> None:
+    temp_dir = tmp_path / "{user_id}" / "tmp"
+
+    monkeypatch.setenv("VALUZ_USER_TEMP_DIR", str(temp_dir))
+
+    assert Settings().user_temp_dir == temp_dir
