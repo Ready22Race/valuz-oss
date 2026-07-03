@@ -198,13 +198,17 @@ class Settings(BaseSettings):
 
     # Optional legacy skill-creator staging directory. May contain
     # ``{user_id}``; when unset it lives under ``data_dir(user_id)``.
-    skill_staging_dir: Path | None = None
+    # Override with VALUZ_USER_SKILL_STAGING_DIR.
+    skill_staging_dir: Path | None = Field(
+        default=None,
+        validation_alias="VALUZ_USER_SKILL_STAGING_DIR",
+    )
 
     # Canonical user skill library directory. May contain ``{user_id}`` for
     # shared/cloud deployments.
     user_skills_dir: Path = Field(
         default=Path.home() / ".agent" / "skills",
-        validation_alias="VALUZ_USER_SKILLS_DIR",
+        validation_alias="user_skills_dir",
     )
 
     @property
