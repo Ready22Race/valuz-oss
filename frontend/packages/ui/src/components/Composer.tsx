@@ -1371,19 +1371,6 @@ export const Composer = ({
         onChange={handleFileInputChange}
       />
 
-      {dragOver && (
-        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-xl bg-surface/80 backdrop-blur-sm">
-          <div className="flex flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-brand/40 bg-brand-light/30 px-10 py-8">
-            <div className="text-sm font-medium text-brand">
-              {t("conversation.dragToUpload")}
-            </div>
-            <div className="text-2xs text-ink-meta">
-              {t("conversation.supportedFormats")}
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Spec 5.6 内层容器：1px border + radius 10px + padding 12px 8px 8px
           PRD-PAAT §3.2 task mode: switch to accent tinting (border + soft
           gradient bg) so the user gets an obvious visual cue that "send"
@@ -1391,12 +1378,14 @@ export const Composer = ({
       <div
         ref={composerBoxRef}
         className={cn(
-          "@container/composer mx-auto max-w-[760px] rounded-xl border px-2 pt-3 pb-2 transition-colors duration-[120ms]",
+          // ``relative`` so the drag overlay below anchors to THIS box (not the
+          // wider padded wrapper) — the highlight then matches the input exactly.
+          "@container/composer relative mx-auto max-w-[760px] rounded-xl px-2 pt-3 pb-2 transition-colors duration-[120ms]",
           dragOver
-            ? "border-brand/50"
+            ? "border-2 border-dashed border-brand/50"
             : mode === "task"
-              ? "border-[#725cf9] bg-surface"
-              : "border-surface-border bg-surface",
+              ? "border border-[#725cf9] bg-surface"
+              : "border border-surface-border bg-surface",
         )}
         style={
           mode === "task" && !dragOver
@@ -1407,6 +1396,21 @@ export const Composer = ({
             : undefined
         }
       >
+        {/* Drag-to-upload highlight — an ``inset-0`` overlay INSIDE the input box
+            so it covers exactly the input's footprint (the box's own border also
+            flips to a dashed brand outline above). Was a small content-sized box
+            floating over the whole padded wrapper, which read taller + narrower
+            than the input. */}
+        {dragOver && (
+          <div className="pointer-events-none absolute inset-0 z-40 flex flex-col items-center justify-center gap-2 rounded-xl bg-brand-light/40 backdrop-blur-sm">
+            <div className="text-sm font-medium text-brand">
+              {t("conversation.dragToUpload")}
+            </div>
+            <div className="text-2xs text-ink-meta">
+              {t("conversation.supportedFormats")}
+            </div>
+          </div>
+        )}
         <div>
           {/* Skill tag — the chip itself is the remove affordance.
               The previous above-the-input chip is gone — chips now
