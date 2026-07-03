@@ -3455,10 +3455,39 @@ export const ConversationPage = () => {
   // Hoisted so both the side panel's remove button and the composer's
   // pinned-chip remove button share it.
   const handleRemoveSessionAttachment = useCallback(
-    (attachmentId: string) => {
-      void removeSessionAttachmentRow(attachmentId);
+    async (attachmentId: string) => {
+      await removeSessionAttachmentRow(attachmentId);
+      // Attaching a file on a draft eagerly mints a session to hold the upload.
+      // If the user removes the last file without ever sending a message, that
+      // session is left behind as a statusless "New chat" orphan cluttering
+      // Activity / recents (and, before the idempotent-delete fix, one the user
+      // couldn't clear). Discard it: we're still on the draft URL, this was the
+      // last attachment, and nothing was sent.
+      const wasLastAttachment =
+        sessionAttachments.filter((a) => a.id !== attachmentId).length === 0;
+      if (
+        id === NEW_SESSION_ID &&
+        selectedSessionId &&
+        effectiveTurns.length === 0 &&
+        wasLastAttachment
+      ) {
+        const orphan = selectedSessionId;
+        // Reset to a clean draft first so no per-session effect re-fetches the
+        // session we're about to delete, then delete it best-effort.
+        await refreshEvents(null);
+        setSelectedSessionId(null);
+        setSessions([]);
+        void sessionsApi.delete(orphan).catch(() => {});
+      }
     },
-    [removeSessionAttachmentRow],
+    [
+      removeSessionAttachmentRow,
+      sessionAttachments,
+      id,
+      selectedSessionId,
+      effectiveTurns.length,
+      refreshEvents,
+    ],
   );
 
   // The actual send. Attachments are uploaded on attach, so this never
