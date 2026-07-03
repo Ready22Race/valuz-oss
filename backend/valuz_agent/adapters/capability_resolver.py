@@ -185,11 +185,14 @@ async def resolve_session_capabilities(
                 seen.add(absolute)
                 skill_paths.append(absolute)
 
-    # 2) Session-level extras — opaque skill IDs attached just for this session
-    #    on top of whatever the project already enables. Look each one up in
-    #    the skill index to recover its source_path.
+    # 2) Session-level extras — SkillView ids attached just for this session
+    #    on top of whatever the project already enables. SkillView.id comes from
+    #    the manifest (e.g. "official:skill-creator"), while valuz_skill_index.id
+    #    is only the DB row primary key; prefer slug lookup when the id is scoped.
     for skill_id in extra_skill_ids or []:
         row = await skills.get_by_id(user_id, skill_id)
+        if row is None and ":" in skill_id and hasattr(skills, "get_by_slug"):
+            row = await skills.get_by_slug(user_id, skill_id.split(":", 1)[1])
         if row is None:
             warnings.append(f"extra skill id not found: {skill_id!r}")
             continue
