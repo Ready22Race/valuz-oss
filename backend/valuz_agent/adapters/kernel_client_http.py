@@ -144,7 +144,9 @@ class HttpKernelClient:
         if req.cwd:
             from valuz_agent.integrations import sandbox_runtime
 
-            kernel_cwd = await sandbox_runtime.ensure_workspace_granted(req.cwd)
+            kernel_cwd = await sandbox_runtime.ensure_workspace_granted(
+                req.cwd, owner_user_id=user_id
+            )
             if kernel_cwd != req.cwd:
                 req = req.model_copy(update={"cwd": kernel_cwd})
         result = await self._request(
@@ -382,7 +384,7 @@ class HttpKernelClient:
         if sandbox_runtime.is_active():
             session = await self.get_session(user_id, session_id)
             if session is not None and session.cwd:
-                await sandbox_runtime.ensure_workspace_granted(session.cwd)
+                await sandbox_runtime.ensure_workspace_granted(session.cwd, owner_user_id=user_id)
 
         ws_base = self._base_url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
         url = f"{ws_base}/api/v1/sessions/{session_id}/run"
