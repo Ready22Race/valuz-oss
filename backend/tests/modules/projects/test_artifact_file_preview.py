@@ -294,7 +294,8 @@ async def test_create_project_without_root_allocates_managed_cwd(
     async with sm() as db:
         svc = ProjectService(datastore=ProjectDatastore(db), event_bus=EventBus())
         detail = await svc.create_project("user-1", name="Managed")
+        expected_root = tmp_path / "Valuz" / detail.id
         assert detail.root_path is not None
-        assert detail.cwd == str(tmp_path / "Valuz" / detail.root_path)
-        assert "/" not in detail.root_path
-        assert (tmp_path / "Valuz" / detail.root_path / ".valuz" / "root").is_file()
+        assert detail.root_path == str(expected_root)
+        assert detail.cwd == str(expected_root)
+        assert (expected_root / ".valuz" / "root").is_file()

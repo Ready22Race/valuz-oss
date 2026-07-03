@@ -393,8 +393,8 @@ class ProjectService:
         existing projects (legacy behaviour — the project's cwd is that
         caller-supplied local directory).
 
-        An empty/None ``root_path`` allocates a managed cwd under
-        ``fs_registry.project_root(user_id)`` instead, mirroring
+        An empty/None ``root_path`` allocates and stores an absolute managed cwd
+        under ``fs_registry.project_root(user_id)``, mirroring
         ``create_project_from_pack``. This is the cloud/managed path: the
         project works without a caller-supplied local directory, which a
         remote backend could not reach anyway.
@@ -407,7 +407,7 @@ class ProjectService:
             if existing:
                 raise ValueError(f"Directory already bound to project '{existing.name}'")
         else:
-            resolved_root = _managed_project_root(new_id)
+            resolved_root = _managed_project_root(user_id, new_id)
         _write_relative_file(_root_path(user_id, resolved_root), PROJECT_ROOT_MARKER, b"")
         row = ProjectRow(
             id=new_id,
@@ -469,7 +469,7 @@ class ProjectService:
             # Imported projects without a user-picked folder get a managed
             # cwd under fs_registry.project_root(user_id) (mirrors chat projects) so
             # they're still cross-machine portable.
-            resolved_root = _managed_project_root(new_id)
+            resolved_root = _managed_project_root(user_id, new_id)
         _write_relative_file(_root_path(user_id, resolved_root), PROJECT_ROOT_MARKER, b"")
         row = ProjectRow(
             id=new_id,
@@ -827,8 +827,8 @@ def _artifact_response_from_file(project_id: str, file: FileBytes) -> ArtifactFi
     return ArtifactFileResponse(artifact=descriptor, content=content)
 
 
-def _managed_project_root(project_id: str) -> str:
-    return project_id
+def _managed_project_root(user_id: str, project_id: str) -> str:
+    return str((fs_registry.project_root(user_id) / project_id).resolve())
 
 
 def _normalize_explicit_root(root_path: str) -> str:

@@ -290,6 +290,10 @@ async def test_round_trip_recreates_project_members_automations_memory(client, t
     assert new_id != project.id
     # member preserved
     assert [m["agent_slug"] for m in result["members"]] == ["lead"]
+    imported = await deps.session.get(ProjectRow, new_id)
+    assert imported is not None
+    assert imported.root_path is not None
+    assert Path(imported.root_path).is_absolute()
     # automation recreated (not silently dropped — regression guard for the
     # empty-prompt bug that swallowed AutomationPromptEmpty in a broad except)
     assert len(result["automations"]) == 1
