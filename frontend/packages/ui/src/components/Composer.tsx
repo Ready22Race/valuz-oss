@@ -152,11 +152,22 @@ const SKILL_CHIP_ATTR = "data-skill-slug";
 const isImeCompositionEvent = (e: React.KeyboardEvent<HTMLElement>): boolean =>
   e.nativeEvent.isComposing || e.keyCode === 229;
 
-const getClipboardImageFiles = (items: DataTransferItemList): File[] =>
-  Array.from(items)
-    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+// Every file on the clipboard — not just images. A screenshot pastes as an
+// image file; a document copied from another app (Finder, a chat client, …)
+// pastes as its own type. Merge the two representations the platform may use —
+// ``items`` (kind === "file") and ``files`` — de-duped by name+size, since they
+// usually mirror each other.
+const getClipboardFiles = (data: DataTransfer): File[] => {
+  const fromItems = Array.from(data.items)
+    .filter((item) => item.kind === "file")
     .map((item) => item.getAsFile())
     .filter((file): file is File => file !== null);
+  const seen = new Set(fromItems.map((f) => `${f.name}:${f.size}`));
+  const fromFiles = Array.from(data.files ?? []).filter(
+    (f) => !seen.has(`${f.name}:${f.size}`),
+  );
+  return [...fromItems, ...fromFiles];
+};
 
 /** Walk the contenteditable's children and serialise to a plain string,
  * mapping each chip back to its ``/slug`` token. The serialised form is
@@ -865,13 +876,17 @@ export const Composer = ({
   // text/plain at the caret as a single text node so ``white-space:
   // pre-wrap`` preserves newlines and ``serializeEditor`` round-trips
   // them; then re-run the input handler to sync value + ``/``/``@`` triggers.
-  // Image files are different: treat them like a file-picker selection so
-  // screenshots and copied images flow through the existing attachment path.
+  // Files are different: treat them like a file-picker selection so screenshots
+  // and any file copied from another app flow through the existing attachment
+  // path.
   const handlePaste = (e: React.ClipboardEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const imageFiles = getClipboardImageFiles(e.clipboardData.items);
-    if (imageFiles.length > 0) {
-      acceptLocalFiles(imageFiles, onLocalUpload);
+    // Files first (screenshots, images, and documents copied from other apps)
+    // — route them through the same attachment path as the file picker. Only
+    // fall back to text insertion when the clipboard carries no files.
+    const files = getClipboardFiles(e.clipboardData);
+    if (files.length > 0) {
+      acceptLocalFiles(files, onLocalUpload);
       return;
     }
     const text = e.clipboardData.getData("text/plain");
