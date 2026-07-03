@@ -122,6 +122,12 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def shared_root(self) -> Path:
+        """Return the process-shared data root without requiring a user id."""
+        path = self._shared_root()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def installation_file(self, user_id: str) -> Path:
         path = self.data_dir(user_id) / settings.installation_filename
         path.parent.mkdir(parents=True, exist_ok=True)

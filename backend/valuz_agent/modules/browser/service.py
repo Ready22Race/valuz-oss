@@ -100,10 +100,10 @@ def _is_cli_on_path() -> bool:
     """True when the friendly wrapper is installed AND its dir is on this
     process's PATH — i.e. boot installed it before the agent subprocess spawned,
     so the agent shell can actually resolve ``chrome-devtools``."""
-    bin_dir = _bin_dir()
-    if str(bin_dir) not in os.environ.get("PATH", "").split(os.pathsep):
-        return False
-    return _wrapper_path(bin_dir).is_file()
+    for raw in os.environ.get("PATH", "").split(os.pathsep):
+        if raw and _wrapper_path(Path(raw)).is_file():
+            return True
+    return False
 
 
 def ensure_cli_on_path() -> str | None:

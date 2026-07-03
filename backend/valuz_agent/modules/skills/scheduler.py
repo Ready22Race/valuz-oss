@@ -95,10 +95,8 @@ async def _arun_skill_scan() -> None:
     from valuz_agent.infra.local_identity import resolve_local_user_id
     from valuz_agent.modules.skills.events import SKILL_CHANGED
 
-    if settings.deployment_type != "local":
-        logger.info(
-            "skill auto-scan skipped (deployment_type=%s)", settings.deployment_type
-        )
+    if not settings.initialize_user_content_on_startup:
+        logger.info("startup user-content initialization disabled; skill auto-scan skipped")
         return
     # Background path: no request context. In the OSS local profile the scan job
     # is explicitly owned by the stable local install identity; cloud/shared
@@ -127,10 +125,8 @@ def start_skill_auto_scan() -> None:
     global _scheduler
     if _scheduler:
         return
-    if settings.deployment_type != "local":
-        logger.info(
-            "skill auto-scan disabled (deployment_type=%s)", settings.deployment_type
-        )
+    if not settings.initialize_user_content_on_startup:
+        logger.info("startup user-content initialization disabled; skill auto-scan disabled")
         return
     interval = _interval_sec()
     if interval <= 0:
