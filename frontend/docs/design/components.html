@@ -136,6 +136,8 @@ h2 .num { color:var(--fg-30); margin-right:8px; font-feature-settings:"tnum"; }
 .tag-brand { background:var(--brand-100); color:var(--brand-700); }
 .tag-outline { background:transparent; border-color:var(--fg-8); color:var(--fg-60); }
 .tag-neutral { background:var(--fg-5); color:var(--fg-80); }
+.role-tag { display:inline-flex; align-items:center; gap:4px; height:16px; padding:0 4px; border-radius:4px; font-size:10px; line-height:1; font-weight:400; border:1px solid transparent; }
+.tag-role-lead { background:var(--brand-100); color:var(--brand-700); }
 .tag-role-sky { background:color-mix(in oklab,var(--accent-sky) 14%,var(--background)); color:color-mix(in oklab,var(--accent-sky) 62%,var(--foreground)); }
 .tag-role-teal { background:color-mix(in oklab,var(--accent-teal) 14%,var(--background)); color:color-mix(in oklab,var(--accent-teal) 62%,var(--foreground)); }
 .tag-role-amber { background:color-mix(in oklab,var(--accent-amber) 16%,var(--background)); color:color-mix(in oklab,var(--accent-amber) 50%,var(--foreground)); } /* amber 最亮，文字档降到 50% 过 AA（其余角色色 62% 即达标） */
@@ -318,7 +320,7 @@ h2 .num { color:var(--fg-30); margin-right:8px; font-feature-settings:"tnum"; }
 <div class="box" style="flex-direction:column;align-items:stretch;gap:14px">
   <div class="col"><span class="lab">status · 状态（语义色，禁止手配）</span><div style="display:flex;gap:8px;flex-wrap:wrap"><span class="pill pill-done"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>done</span><span class="pill pill-running"><svg class="spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>running</span><span class="pill pill-queued">queued</span><span class="pill pill-done">已连接</span><span class="pill pill-warn">配额告警</span><span class="pill pill-err">已断开</span></div></div>
   <div class="col"><span class="lab">meta / 归属（非状态，不用语义色）</span><div style="display:flex;gap:8px;flex-wrap:wrap"><span class="pill tag-brand">已派驻</span><span class="pill tag-brand">当前</span><span class="pill tag-outline">我的</span><span class="pill tag-outline">公开</span><span class="pill tag-neutral">共 12 项</span><span class="pill tag-neutral">v2.6</span></div></div>
-  <div class="col"><span class="lab">role / 角色职位（accent 分类色，类目区分）</span><div style="display:flex;gap:8px;flex-wrap:wrap"><span class="pill tag-role-pink">产品经理</span><span class="pill tag-role-sky">设计师</span><span class="pill tag-role-teal">前后端开发</span><span class="pill tag-role-amber">QA</span><span class="pill tag-role-blue">文档处理</span></div></div>
+  <div class="col"><span class="lab">role / 角色职位（accent 分类色，类目区分；h-4 px-1 text-[10px]）</span><div style="display:flex;gap:8px;flex-wrap:wrap"><span class="role-tag tag-role-lead">Lead</span><span class="role-tag tag-role-pink">产品经理</span><span class="role-tag tag-role-sky">设计师</span><span class="role-tag tag-role-teal">前后端开发</span><span class="role-tag tag-role-amber">QA</span><span class="role-tag tag-role-blue">文档处理</span></div></div>
 </div>
 
 <h2><span class="num">08</span>Toast</h2>

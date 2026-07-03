@@ -294,7 +294,7 @@ const MemberCard = ({ member }: { member: TeamMember }) => {
             {t(member.nameKey as Parameters<typeof t>[0])}
           </span>
           {member.tag && (
-            <span className="inline-flex h-4 items-center rounded-sm bg-brand-light px-1 text-micro leading-none font-normal uppercase text-brand-700">
+            <span className="inline-flex h-4 items-center rounded-[4px] bg-brand-light px-1 text-[10px] leading-none font-normal uppercase text-brand-700">
               {member.tag}
             </span>
           )}

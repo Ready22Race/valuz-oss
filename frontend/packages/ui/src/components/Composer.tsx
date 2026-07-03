@@ -2092,7 +2092,7 @@ export const Composer = ({
                               the task detail page uses (TaskContextPanel
                               + sub-sidebar). */}
                           {mode === "task" && (
-                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand-light px-1 text-[10px] leading-none font-normal text-brand">
+                            <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand-light px-1 text-[10px] leading-none font-normal text-brand-700">
                               {t("task.runLead" as Parameters<typeof t>[0])}
                             </span>
                           )}
