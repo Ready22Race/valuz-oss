@@ -29,6 +29,13 @@ import { fetchEventSource } from "../api/fetch-event-source";
 import { useDecisionStore } from "../store/decision-store";
 
 let _closeStream: (() => void) | null = null;
+let _pollTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Low-frequency REST backstop. The stream self-heals on reconnect via the
+ *  server's snapshot frame, but a stream that STAYS connected while a
+ *  server-side ``added`` fan-out was dropped (subscriber queue overflow) has
+ *  no other recovery signal — one cheap poll bounds that staleness. */
+const POLL_BACKSTOP_MS = 60_000;
 
 async function _init(): Promise<void> {
   const store = useDecisionStore.getState();
@@ -70,6 +77,17 @@ async function _init(): Promise<void> {
       }
     },
   );
+
+  // 3) Poll backstop (see POLL_BACKSTOP_MS). ``reset`` is diff-aware, so a
+  //    poll that changes nothing is a no-op for subscribers.
+  _pollTimer ??= setInterval(() => {
+    decisionsApi
+      .fetchPending()
+      .then((res) => useDecisionStore.getState().reset(res.entries))
+      .catch(() => {
+        // Non-fatal — the next tick or SSE snapshot retries.
+      });
+  }, POLL_BACKSTOP_MS);
 }
 
 /**

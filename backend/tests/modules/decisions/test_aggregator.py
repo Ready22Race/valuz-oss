@@ -319,6 +319,136 @@ def test_fan_out_added_and_resolved_to_subscribers(db_factory) -> None:
     assert r1.payload.pending_id == "p1"
 
 
+# ---- durable reconciliation (LOCAL mode) -----------------------------
+
+
+def _stub_durable(monkeypatch, sessions: list, events_by_session: dict[str, list]) -> None:
+    """Point the aggregator's durable reads (``data_reader`` +
+    ``kernel_client.get_events``) at fabricated data, so ``_hydrate_owner``
+    runs its real diff logic without a kernel store."""
+    import valuz_agent.modules.decisions.aggregator as agg_mod
+
+    class _FakeReader:
+        async def list_sessions(self, _owner: str, limit: int = 500):
+            return sessions
+
+    async def _fake_get_events(_user: str, session_id: str, limit: int = 200):
+        return events_by_session.get(session_id, [])
+
+    monkeypatch.setattr(agg_mod, "data_reader", lambda: _FakeReader())
+    monkeypatch.setattr(agg_mod.kernel_client, "get_events", _fake_get_events)
+
+
+def test_local_snapshot_recovers_pending_missed_by_the_live_tap(db_factory, monkeypatch) -> None:
+    """THE core reconciliation guarantee: a ``requires_action`` that never
+    reached the in-memory snapshot (dropped global-queue event, boot race,
+    session-row lag) is recovered from the durable events table by a plain
+    ``snapshot()`` read — no process restart needed."""
+    _seed(db_factory)
+    session = _subtask_session()
+    _stub_durable(monkeypatch, [session], {"sub-sess": [_requires_action_event()]})
+
+    agg = DecisionAggregator()  # LOCAL mode; _multitenant stays False
+    # No _handle_event was ever delivered — memory is empty, durable is not.
+    snap = _snap(agg, "local-test-owner")
+    assert [e.pending_id for e in snap] == ["p1"]
+    assert snap[0].task_title == "打豆豆小游戏"
+
+
+def test_hydrate_fans_out_recovered_added_to_connected_subscribers(
+    db_factory, monkeypatch
+) -> None:
+    """A subscriber whose ``added`` delta was lost upstream converges via the
+    reconcile pass (diff fan-out), without reconnecting."""
+    _seed(db_factory)
+    session = _subtask_session()
+    _stub_durable(monkeypatch, [session], {"sub-sess": []})
+
+    agg = DecisionAggregator()
+
+    async def scenario():
+        q = await agg.subscribe("local-test-owner")
+        first = await q.get()
+        # Durable now carries a pending the live tap never delivered.
+        _stub_durable(monkeypatch, [session], {"sub-sess": [_requires_action_event()]})
+        await agg._hydrate_owner("local-test-owner")
+        added = await q.get()
+        # The pending resolves in durable while the tap is still deaf.
+        _stub_durable(
+            monkeypatch,
+            [session],
+            {"sub-sess": [_requires_action_event(), _resolved_event()]},
+        )
+        await asyncio.sleep(0.002)  # ensure raised_at < the next scan start
+        await agg._hydrate_owner("local-test-owner")
+        resolved = await q.get()
+        await agg.unsubscribe(q)
+        return first, added, resolved
+
+    first, added, resolved = asyncio.run(scenario())
+    assert first.kind == "snapshot" and first.payload.entries == []
+    assert added.kind == "added" and added.payload.entry.pending_id == "p1"
+    assert resolved.kind == "resolved" and resolved.payload.pending_id == "p1"
+
+
+def test_hydrate_keeps_a_concurrent_live_add(db_factory, monkeypatch) -> None:
+    """An entry the live tap added while the durable scan was in flight
+    (raised_at >= scan start) must survive reconcile; a genuinely stale one
+    (raised_at < scan start, absent from durable) is removed."""
+    from valuz_agent.infra.time_utils import now_ms
+
+    _stub_durable(monkeypatch, [], {})
+    agg = DecisionAggregator()
+    agg._pending["fresh"] = _entry("fresh", "local-test-owner", raised_at=now_ms() + 60_000)
+    agg._pending["stale"] = _entry("stale", "local-test-owner", raised_at=1)
+    agg._by_session["s"] = {"fresh", "stale"}
+
+    asyncio.run(agg._hydrate_owner("local-test-owner"))
+    assert set(agg._pending) == {"fresh"}
+    assert agg._by_session.get("s") == {"fresh"}
+
+
+def test_requires_action_retries_a_transient_session_miss(db_factory, monkeypatch) -> None:
+    """The live broadcast can outrun the session row's durable write — the
+    first ``_load_session`` miss retries instead of silently dropping."""
+    import valuz_agent.modules.decisions.aggregator as agg_mod
+
+    _seed(db_factory)
+    session = _subtask_session()
+    agg = DecisionAggregator()
+    monkeypatch.setattr(agg_mod, "_ENRICH_RETRY_DELAY_SECONDS", 0.0)
+
+    calls = {"n": 0}
+
+    async def _lagging_load(_owner, _sid):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else session
+
+    async def _noop_hydrate(_owner: str) -> None:
+        return None
+
+    agg._load_session = _lagging_load  # type: ignore[assignment]
+    agg._hydrate_owner = _noop_hydrate  # type: ignore[assignment]
+
+    _handle(agg, "local-test-owner", "sub-sess", _requires_action_event())
+    assert calls["n"] == 2
+    assert [e.pending_id for e in _snap(agg, "local-test-owner")] == ["p1"]
+
+
+def test_read_path_hydrate_is_debounced(db_factory) -> None:
+    """Back-to-back snapshot() reads trigger at most one durable scan."""
+    agg = DecisionAggregator()
+    calls = {"n": 0}
+
+    async def _counting_hydrate(_owner: str) -> None:
+        calls["n"] += 1
+
+    agg._hydrate_owner = _counting_hydrate  # type: ignore[assignment]
+    _snap(agg, "local-test-owner")
+    _snap(agg, "local-test-owner")
+    assert calls["n"] == 1
+
+
 # ---- multi-tenant owner scoping -------------------------------------
 
 
