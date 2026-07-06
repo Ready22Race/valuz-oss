@@ -890,7 +890,11 @@ export function ProjectLayoutBase({
         contentInnerClassName={contentInnerClassName}
         header={header}
         headerClassName={headerClassName}
-        aside={rightPanelCollapsed ? null : resolvedRightPanel}
+        aside={
+          suppressRightPanelToggle || !rightPanelCollapsed
+            ? resolvedRightPanel
+            : null
+        }
       >
         <div
           key={location.pathname}

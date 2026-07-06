@@ -1,4 +1,4 @@
-import { type ReactNode } from "react";
+import { type KeyboardEvent, type ReactNode } from "react";
 import { cn } from "../../lib/cn";
 import { Badge } from "../ui/badge";
 import { StatusPill } from "../common/StatusPill";
@@ -35,10 +35,20 @@ export const ConnectorListItem = ({
   onClick,
   actions,
 }: ConnectorListItemProps) => {
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!onClick || event.target !== event.currentTarget) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onClick();
+    }
+  };
+
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={onClick}
+      onKeyDown={handleKeyDown}
       className={cn(
         "flex w-full cursor-default items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors select-none",
         active ? "bg-surface-soft" : "hover:bg-surface-soft/60",
@@ -67,6 +77,6 @@ export const ConnectorListItem = ({
         </Badge>
       ) : null}
       {actions}
-    </button>
+    </div>
   );
 };
