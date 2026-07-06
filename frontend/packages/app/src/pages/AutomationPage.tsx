@@ -333,7 +333,7 @@ export const AutomationPage = () => {
     agent_slug: string;
     trigger: Trigger;
     action_kind: ActionKind;
-    task_worktree: boolean;
+    worktree: boolean;
   }) => {
     if (!selectedTarget) {
       toast.error(t(k("automation.pickProjectFirst")));
@@ -350,7 +350,7 @@ export const AutomationPage = () => {
         prompt_template: data.prompt_template,
         trigger: data.trigger,
         action_kind: data.action_kind,
-        task_worktree: data.task_worktree,
+        worktree: data.worktree,
       });
       toast.success(t(k("automation.createSuccess"), { name: data.name }));
       await loadAll();

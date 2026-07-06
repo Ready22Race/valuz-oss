@@ -428,6 +428,34 @@ class WorktreeService:
             "base_sha": wt.head_sha,
         }
 
+    async def resolve_session_cwd(
+        self, user_id: str, project_row: ProjectRowLike, name: str
+    ) -> str | None:
+        """On-disk session cwd for an EXISTING managed worktree, or ``None``.
+
+        Read-only counterpart to ``get_or_create`` used by the file-tree /
+        artifact-read path: given a worktree name (from a session's snapshot),
+        resolve the directory the session actually runs in (worktree path +
+        project subdir, design D7). Returns ``None`` — never creates — when git
+        is unavailable, the project isn't a repo, the name is invalid, or the
+        worktree no longer exists on disk. The caller decides what a ``None``
+        means (empty tree / 404).
+        """
+        cwd = self._resolve_project_cwd(user_id, project_row)
+        if not await asyncio.to_thread(gw.git_available):
+            return None
+        info = await asyncio.to_thread(gw.detect_git, cwd)
+        if info is None:
+            return None
+        try:
+            gw.validate_slug(name)
+        except gw.InvalidWorktreeSlugError:
+            return None
+        wt_path = gw.worktree_path(info.git_root, name)
+        if not await asyncio.to_thread(wt_path.is_dir):
+            return None
+        return self._session_cwd(wt_path, cwd, info.git_root)
+
     # ---- helpers -------------------------------------------------------
 
     @staticmethod

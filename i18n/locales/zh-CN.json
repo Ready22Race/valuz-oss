@@ -86,8 +86,8 @@
     "triggerManual": "手动",
     "updateFailed": "更新失败：{error}",
     "updateSuccess": "已更新「{name}」",
-    "taskWorktreeLabel": "Worktree 隔离",
-    "taskWorktreeHint": "每次触发的任务都在独立的 git worktree 中运行，主工作区不受影响；任务结束时无改动的 worktree 会自动清理。"
+    "worktreeLabel": "Worktree 隔离",
+    "worktreeHint": "每次触发都在独立的 git worktree 中运行，主工作区不受影响；运行结束时无改动的 worktree 会自动清理。需要项目为 git 仓库。"
   },
   "backend": {
     "schedule": {

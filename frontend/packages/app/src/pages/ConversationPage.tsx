@@ -491,6 +491,7 @@ function parseAutomationCreateInput(input: unknown): {
   trigger: import("@valuz/core").Trigger | null;
   agent_slug?: string;
   action_kind?: "chat" | "task";
+  worktree?: boolean;
 } | null {
   if (!input) return null;
   let parsed: unknown;
@@ -521,6 +522,17 @@ function parseAutomationCreateInput(input: unknown): {
       : p.action_kind === "chat"
         ? "chat"
         : undefined;
+  // On envelope-wrapping runtimes (codex, DeepAgents) the tool OUTPUT parses to
+  // null, so the proposal card renders from this INPUT — it must carry the
+  // worktree flag or the chip vanishes and confirm silently drops it. Accept
+  // the legacy ``task_worktree`` key too so already-recorded tool calls still
+  // resolve after the field rename.
+  const worktree =
+    typeof p.worktree === "boolean"
+      ? p.worktree
+      : typeof p.task_worktree === "boolean"
+        ? p.task_worktree
+        : undefined;
   return {
     name: typeof p.name === "string" ? p.name : "",
     prompt_template: typeof p.prompt_template === "string" ? p.prompt_template : "",
@@ -530,6 +542,7 @@ function parseAutomationCreateInput(input: unknown): {
         : null,
     agent_slug: typeof p.agent_slug === "string" ? p.agent_slug : undefined,
     action_kind: actionKind,
+    worktree,
   };
 }
 
@@ -1225,6 +1238,17 @@ export const ConversationPage = () => {
     return detail?.cwd ?? detail?.root_path ?? "";
   }, [activeProject]);
 
+  // The worktree the open session runs in (creation-time snapshot on the list
+  // item). When present, the right panel's file tree + artifact reads scope to
+  // the worktree checkout (design D7) instead of the shared project cwd.
+  // Derived from ``sessions`` (not ``selectedSession``, declared below) so the
+  // callbacks above it can depend on it without a temporal-dead-zone error.
+  const activeWorktree = useMemo(
+    () =>
+      sessions.find((s) => s.id === selectedSessionId)?.worktree ?? null,
+    [sessions, selectedSessionId],
+  );
+
   const openArtifactFile = useCallback(
     async (path: string) => {
       if (!selectedProjectId || selectedProjectId === "chat-default") return;
@@ -1244,7 +1268,9 @@ export const ConversationPage = () => {
       setArtifactLoading(true);
       setArtifactError(null);
       try {
-        const result = await projectsApi.readFile(selectedProjectId, normalized);
+        const result = await projectsApi.readFile(selectedProjectId, normalized, {
+          worktree: activeWorktree?.name ?? undefined,
+        });
         setArtifact(result.artifact);
         setArtifactContent(result.content);
       } catch (error) {
@@ -1255,7 +1281,7 @@ export const ConversationPage = () => {
         setArtifactLoading(false);
       }
     },
-    [activeProjectRootPath, selectedProjectId, t],
+    [activeProjectRootPath, activeWorktree, selectedProjectId, t],
   );
 
   const handleArtifactReload = useCallback(() => {
@@ -1568,7 +1594,7 @@ export const ConversationPage = () => {
         trigger: import("@valuz/core").Trigger;
         agent_slug?: string | null;
         action_kind?: "chat" | "task";
-        task_worktree?: boolean;
+        worktree?: boolean;
       },
     ) => {
       const sid = selectedSessionIdRef.current;
@@ -1585,7 +1611,7 @@ export const ConversationPage = () => {
           trigger: spec.trigger,
           agent_slug: spec.agent_slug ?? null,
           action_kind: spec.action_kind,
-          task_worktree: spec.task_worktree ?? false,
+          worktree: spec.worktree ?? false,
         });
         setAutomationProposalStates((prev) => ({
           ...prev,
@@ -1943,7 +1969,8 @@ export const ConversationPage = () => {
             automationTriggerSummary(confirmTrigger, t);
           const cardActionKind =
             proposal?.action_kind ?? inputSpec?.action_kind ?? "chat";
-          const cardTaskWorktree = proposal?.task_worktree ?? false;
+          const cardWorktree =
+            proposal?.worktree ?? inputSpec?.worktree ?? false;
           const cardAgentName = proposal?.agent_name ?? inputSpec?.agent_slug ?? null;
           const entry = automationProposalStates[tool.id] || {
             state: "pending" as const,
@@ -1955,7 +1982,7 @@ export const ConversationPage = () => {
               triggerHuman={cardTriggerHuman}
               agentName={cardAgentName}
               actionKind={cardActionKind}
-              taskWorktree={cardTaskWorktree}
+              worktree={cardWorktree}
               state={entry.state}
               errorMessage={entry.errorMessage}
               validationError={validationError}
@@ -1967,7 +1994,7 @@ export const ConversationPage = () => {
                   trigger: confirmTrigger,
                   agent_slug: proposal?.agent_slug ?? inputSpec?.agent_slug,
                   action_kind: cardActionKind,
-                  task_worktree: cardTaskWorktree,
+                  worktree: cardWorktree,
                 });
               }}
               onDismiss={() => handleDismissAutomation(tool.id)}
@@ -2933,10 +2960,14 @@ export const ConversationPage = () => {
       return;
     }
     projectsApi
-      .listFiles(selectedProjectId, { depth: 3 })
+      .listFiles(selectedProjectId, {
+        depth: 3,
+        // Worktree sessions show their own checkout, not the shared project cwd.
+        worktree: activeWorktree?.name ?? undefined,
+      })
       .then((res) => setFileTree(toFileTree(res.files)))
       .catch(() => setFileTree([]));
-  }, [selectedProjectId]);
+  }, [selectedProjectId, activeWorktree]);
 
   useEffect(() => {
     refreshFileTree();
@@ -4821,16 +4852,20 @@ export const ConversationPage = () => {
         }
         fileTreeInTab={isProject}
         rootPath={
-          isProject
+          // A worktree session's tree is rooted at its checkout — show that
+          // path so reveal / relative-path stripping match what's listed.
+          activeWorktree?.path ??
+          (isProject
             ? ((activeProject as ProjectDetail)?.root_path ?? undefined)
-            : t("conversation.workDir" as Parameters<typeof t>[0])
+            : t("conversation.workDir" as Parameters<typeof t>[0]))
         }
         onOpenInFinder={() => {
           const ws = activeProject as ProjectDetail | null;
-          // Prefer the kernel-resolved cwd (project + chat both have one);
-          // fall back to root_path so a stale backend that hasn't
-          // populated ``cwd`` yet still works for project projects.
-          const path = ws?.cwd ?? ws?.root_path;
+          // Prefer the worktree checkout for a worktree session; else the
+          // kernel-resolved cwd (project + chat both have one); fall back to
+          // root_path so a stale backend that hasn't populated ``cwd`` yet
+          // still works for project projects.
+          const path = activeWorktree?.path ?? ws?.cwd ?? ws?.root_path;
           if (!path) {
             toast.info(t("conversation.noWorkDir" as Parameters<typeof t>[0]));
             return;

@@ -150,13 +150,18 @@ async def list_files(
     project_id: str,
     depth: int = 2,
     include_hidden: bool = False,
+    worktree: str | None = None,
     user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> dict[str, list[dict[str, object]]]:
     try:
         return {
             "files": await svc.list_files(
-                user_id, project_id, depth=depth, include_hidden=include_hidden
+                user_id,
+                project_id,
+                depth=depth,
+                include_hidden=include_hidden,
+                worktree=worktree,
             )
         }
     except KeyError as exc:
@@ -167,11 +172,12 @@ async def list_files(
 async def read_file(
     project_id: str,
     file_path: str,
+    worktree: str | None = None,
     user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> ArtifactFileResponse:
     try:
-        return await svc.read_file(user_id, project_id, file_path)
+        return await svc.read_file(user_id, project_id, file_path, worktree=worktree)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -186,11 +192,14 @@ async def read_file(
 async def read_raw_file(
     project_id: str,
     file_path: str,
+    worktree: str | None = None,
     user_id: str = Depends(get_current_user_id),
     svc: ProjectService = Depends(get_project_service),
 ) -> FileResponse | StreamingResponse:
     try:
-        resource = await svc.resolve_file_resource(user_id, project_id, file_path)
+        resource = await svc.resolve_file_resource(
+            user_id, project_id, file_path, worktree=worktree
+        )
         media_type = resource.mime_type or "application/octet-stream"
         if resource.path is None:
             if resource.data is None:
