@@ -161,17 +161,12 @@ _DISPATCH_PARAMETERS: dict[str, Any] = {
             "description": "Optional list of file paths or references relevant to the subtask.",
             "default": [],
         },
-        "project_mode": {
-            "type": "string",
-            "enum": ["shared", "repo-worktree"],
-            "description": (
-                "Working directory mode. "
-                "'shared' (default) = the project directory itself, so the "
-                "member reads/writes project files natively. "
-                "'repo-worktree' = an isolated git worktree (only when the "
-                "project is a git repo; for parallel code changes)."
-            ),
-        },
+        # Per-member ``project_mode`` (shared | repo-worktree) is retired
+        # (design §5): isolation is now a TASK-level property — a worktree
+        # task runs lead + every member in one shared worktree cwd, and a
+        # plain task runs everyone in the shared project cwd. The dispatch
+        # handler still tolerates a legacy ``project_mode`` argument from
+        # old prompts, but the knob is no longer offered to leads.
     },
 }
 

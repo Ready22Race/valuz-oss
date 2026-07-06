@@ -865,6 +865,7 @@ async def build_member_session(
     dispatch_mode: str = "sync",
     goal_mode: bool = False,
     plan_pre_committed: bool = False,
+    worktree_notice: str | None = None,
     user_id: str,
 ) -> CreateSessionRequest | None:
     """Construct the kernel create-session request for a dispatch member or lead.
@@ -998,6 +999,10 @@ async def build_member_session(
             ("member-roster", roster_block),
             ("available-skills", skills_block),
             ("task-playbook", playbook_block),
+            # Task-level worktree (design §5): every session of the task
+            # shares one worktree cwd; the notice keeps the agent from
+            # wandering back into the main workspace or force-pushing.
+            ("worktree-context", worktree_notice or ""),
             ("task-brief", brief),
         ]
     )

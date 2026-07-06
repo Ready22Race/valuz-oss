@@ -58,6 +58,7 @@ from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.infra.time_utils import now_ms
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
 from valuz_agent.modules.tasks import planning
+from valuz_agent.modules.tasks.task_worktree import task_worktree_notice
 from valuz_agent.modules.tasks._session_build import (
     _credential_gap,
     _provider_resolver_deps,
@@ -136,6 +137,7 @@ class LifecycleService:
         originating_session_id: str | None = None,
         trigger_type: str | None = None,
         trigger_automation_id: str | None = None,
+        worktree: bool = False,
         user_id: str | None = None,
     ) -> TaskRow:
         # Fail loud rather than silently looking the project up under
@@ -182,16 +184,41 @@ class LifecycleService:
                 ws_row.root_path,
             )
 
-            # Create the task narrative file path (file-as-truth)
+            # Create the task narrative file path (file-as-truth). Always
+            # anchored at the MAIN project cwd — even in worktree mode —
+            # so coordination files never dirty the task worktree and the
+            # clean-teardown check stays meaningful (design §5/R5).
             slug = lead_agent_slug.replace("/", "-")[:32]
             task_id = uuid4().hex
             file_path = str(fs_registry.task_path(project_cwd, task_id, slug))
 
             # v2.1: the lead runs in the SHARED project cwd (same as members,
             # see _member_run_dir) so it reads/writes project files natively.
-            # No per-task isolated subdir — that contradicted the shared-cwd
-            # decision (M10 附录 D); only repo-worktree opt-in isolates.
+            # Task-level worktree (design §5) keeps that shared-cwd shape and
+            # just relocates it: ONE worktree per task, lead + every member
+            # share its cwd — no per-member isolation on top.
             lead_cwd = str(project_cwd)
+            wt_snapshot: dict[str, object] | None = None
+            if worktree:
+                from valuz_agent.modules.worktrees.service import worktree_service
+
+                handle = await worktree_service.get_or_create(
+                    user_id,
+                    ws_row,
+                    name=f"task-{task_id[:12]}",
+                    origin="task",
+                )
+                lead_cwd = handle.session_cwd
+                wt_snapshot = {
+                    "name": handle.name,
+                    "branch": handle.branch,
+                    "path": handle.path,
+                    "git_root": handle.git_root,
+                    "base_sha": handle.base_sha,
+                    # The projected cwd (worktree + project subdir) every
+                    # session of this task runs in — dispatch reads this.
+                    "cwd": handle.session_cwd,
+                }
 
             # Classify what spawned this task (user / chat / agent / automation)
             # so the task list can show "由 … 触发" and the reverse "spawned by"
@@ -229,6 +256,10 @@ class LifecycleService:
                         if originating_session_id
                         else {}
                     ),
+                    # Task worktree snapshot (design §5): dispatch relocates
+                    # every member into ``worktree.cwd``; finish_task removes
+                    # the worktree iff clean.
+                    **({"worktree": wt_snapshot} if wt_snapshot else {}),
                 },
             )
             await task_ds.create_task(user_id, task_row)
@@ -262,9 +293,12 @@ class LifecycleService:
             # Fence the goal-mode payload: if the lead brief is over the ``/goal``
             # cap, spill it to a doc and pass the lead a short pointer instead
             # (used both as the embedded brief and the initial ``/goal`` prompt).
+            # Spill anchored at the MAIN project cwd (not ``lead_cwd``): in
+            # worktree mode a brief doc written into the worktree would
+            # register as "work worth keeping" and defeat clean-teardown.
             lead_brief = spill_goal_brief_if_too_long(
                 lead_brief,
-                run_dir=lead_cwd,
+                run_dir=str(project_cwd),
                 task_id=task_id,
                 label=lead_agent_slug,
                 is_lead=True,
@@ -292,6 +326,7 @@ class LifecycleService:
                 # until the task goal is met. ``finish_task`` remains the
                 # authoritative terminal (it forces mode back to default).
                 goal_mode=True,
+                worktree_notice=task_worktree_notice(wt_snapshot),
                 user_id=user_id,
                 **_provider_resolver_deps(db),
             )

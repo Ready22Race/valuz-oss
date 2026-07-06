@@ -3560,6 +3560,17 @@ components:
             member_done/send until finish_task (robust for multi-turn / long
             members); "sync" (legacy) drives the lead in a single turn then
             finalizes, with no re-drive.
+        worktree:
+          type: boolean
+          default: false
+          description: >-
+            Task-level worktree isolation (docs/design/project-worktree-design.md
+            §5). The whole task — lead and every dispatched member — runs in
+            ONE git worktree of the project repo (branch valuz/task-<id>); no
+            per-member isolation on top. When the task finishes, a clean
+            worktree is removed automatically; one with work left surfaces in
+            the project's worktrees panel. Requires the project cwd to be
+            inside a git repository (422 otherwise).
     Task:
       type: object
       required: [id, project_id, title, goal, status, created_by, lead_agent_slug, current_holder, file_path, created_at, updated_at]

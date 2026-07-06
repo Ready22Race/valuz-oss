@@ -318,6 +318,8 @@ I18nKey = Literal[
     "automation.subtitle",
     "automation.targetChat",
     "automation.targetLabelTask",
+    "automation.taskWorktreeHint",
+    "automation.taskWorktreeLabel",
     "automation.timezoneLabel",
     "automation.title",
     "automation.toggleFailed",

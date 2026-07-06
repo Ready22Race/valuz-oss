@@ -114,6 +114,10 @@ class AutomationCreatePayload(BaseModel):
     # callers that omit the field on the simple-task path; the service
     # rejects ``task`` on chat projects.
     action_kind: ActionKind = "chat"
+    # Task-level worktree isolation (design §5) — ``task`` action only: each
+    # fired task runs lead + every member in one git worktree of the project
+    # repo (clean worktrees auto-remove at finish). Ignored for ``chat`` rows.
+    task_worktree: bool = False
 
 
 class AutomationUpdatePayload(BaseModel):
@@ -137,6 +141,7 @@ class AutomationUpdatePayload(BaseModel):
     # constraint — task only on projects). The service validates
     # the resulting (project_kind, action_kind) pair.
     action_kind: ActionKind | None = None
+    task_worktree: bool | None = None
 
 
 # ── Response models ──────────────────────────────────────────────────
@@ -158,6 +163,8 @@ class AutomationItemResponse(BaseModel):
     # Execution mode (see ``ActionKind``). UI uses this to render the
     # appropriate badge and pre-select the right Tab when editing.
     action_kind: str
+    # Task-level worktree isolation flag (``task`` action only).
+    task_worktree: bool = False
 
     # Trigger payload re-projected as a discriminated union so the frontend
     # doesn't have to reconstitute it from flat columns.

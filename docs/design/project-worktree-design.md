@@ -1,6 +1,6 @@
 # Project Worktree 设计方案
 
-> 状态：P0 已实现（会话级后端闭环，见 §12；P1+ 未实施）
+> 状态：P0 + P1 已实现（会话级闭环 + 重进自愈 + 项目级前端 + 任务级开关含自动化；P2 汇合/清扫、P3 沙箱加固未实施）
 > 参考实现：Claude Code（源码调研结论见附录 A）
 > 现状关联：`fs_registry.subrun_dir(mode="repo-worktree")`（将被任务级方案取代）、
 > session cwd 决策链（`SessionService._resolve_session_cwd` → `CreateSessionRequest.cwd`）
@@ -119,8 +119,8 @@ cwd 由 host 决策、kernel 只消费字符串——**kernel 全程零改动**�
     has_changes? → §3 闭环（干净自动删；有变更保留进面板）
 ```
 
-- **取代 per-member 隔离**：现有 `Task.project_mode="repo-worktree"`（per-run
-  `git worktree add`，dispatcher.py:150 → `fs_registry.subrun_dir`）**退役**。任务级
+- **取代 per-member 隔离**：per-member `repo-worktree` 已从 lead 的 dispatch 工具
+  声明中移除（handler 兼容旧参数；`subrun_dir` 底层保留给遗留路径）。任务级
   worktree 本质上是"shared 模式 + 把共享 cwd 从主工作区搬进 worktree"——成员并行写
   同一 checkout 的冲突约束交给计划 DAG 的依赖关系，与现在 shared 模式在主工作区的行为
   完全一致，只是主工作区不再被波及。`isolated`（纯 mkdir scratch）模式保留，与本开关正交。

@@ -85,7 +85,9 @@
     "triggerInterval": "Interval",
     "triggerManual": "Manual",
     "updateFailed": "Update failed: {error}",
-    "updateSuccess": "Updated \"{name}\""
+    "updateSuccess": "Updated \"{name}\"",
+    "taskWorktreeLabel": "Worktree isolation",
+    "taskWorktreeHint": "Each fired task runs in an isolated git worktree — the main workspace stays untouched; a clean worktree is removed when the task finishes."
   },
   "backend": {
     "schedule": {

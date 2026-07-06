@@ -90,6 +90,13 @@ export interface KickoffTaskPayload {
   created_by?: string;
   /** Dispatch architecture (M10): "sync" (v1) or "async" (v2 actor). */
   dispatch_mode?: "sync" | "async";
+  /**
+   * Task-level worktree isolation: the whole task (lead + every member)
+   * runs in ONE git worktree of the project repo. A clean worktree is
+   * removed when the task finishes; one with work left surfaces in the
+   * project's worktrees panel. Requires a git-repo project (422 otherwise).
+   */
+  worktree?: boolean;
 }
 
 export interface IntervenePayload {
