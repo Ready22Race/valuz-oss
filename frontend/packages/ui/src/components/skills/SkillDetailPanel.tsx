@@ -607,8 +607,8 @@ export const SkillDetailPanel = ({
                 onFileClick={setSelectedPath}
                 activeFilePath={selectedPath}
                 defaultOpenDepth={0}
-                guideLineOffset={-7}
-                guideLineSpacing={20}
+                guideLineOffset={-13}
+                guideLineSpacing={24}
               />
             </div>
           )}
