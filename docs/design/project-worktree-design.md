@@ -89,8 +89,15 @@ worktree 让一次会话 / 一个任务在项目 git 仓库的**独立分支副�
 ⑤ 归档 hook：has_changes? → 走 §3 闭环
 ```
 
-**resume**：恢复前校验 `metadata.worktree.path` 仍在 `git worktree list` 中；不在则
-提示"该 worktree 已被删除"并回落主工作区 cwd。
+**重进历史 worktree 会话（§4-R，已实现）**：session cwd 冻结在 worktree 路径上，
+worktree 可能在会话闲置期间被删（面板丢弃 / 手动 `git worktree remove` / 兄弟会话
+删除时的清理）。处理是 **send 时自愈**而非"提示回落"：路径是确定性的（同 slug →
+同路径），快照里有 `git_root/name/branch`，`heal_from_snapshot` 在下一次发送前按
+快照原地重建（基于 repo 当前 HEAD、刷新 `base_sha` 锚点并写回 metadata 快照），
+agent 无感继续；接入点为 `send_message` / `send_message_sync` / 队列 drain
+（drain 为尽力而为）。仓库本身没了才报可读错误（422）。回落主工作区被否决——
+会话历史与 prompt 都声称在 worktree 中，静默换目录等于欺骗 agent。
+`SessionDetail.worktree.exists`（现算）供 UI 灰显 badge 并提示"下次发送自动重建"。
 
 cwd 由 host 决策、kernel 只消费字符串——**kernel 全程零改动**，符合 adapter seam 原则。
 

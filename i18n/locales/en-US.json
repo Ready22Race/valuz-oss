@@ -430,7 +430,12 @@
     "approvalAutoApprovedRuleSuffix": "· rule: {rule}",
     "approvalTrayBadge": "{count} pending approval(s)",
     "approvalTrayWarning": "Please resolve pending approvals first",
-    "permissionLockedHint": "Permission mode is locked for this session; start a new session to change it"
+    "permissionLockedHint": "Permission mode is locked for this session; start a new session to change it",
+    "worktreeToggle": "Worktree",
+    "worktreeToggleOnHint": "This conversation will run in an isolated git worktree — the main workspace stays untouched.",
+    "worktreeToggleOffHint": "Run this conversation in an isolated git worktree (a branch copy of the repo).",
+    "worktreeBadgeHint": "This session runs in an isolated git worktree.",
+    "worktreeBadgeGone": "Worktree removed — it will be recreated automatically on your next message."
   },
   "cron": {
     "actionColumn": "Actions",
@@ -1054,7 +1059,18 @@
     "needsKey": "Needs a key",
     "needsSetup": "Needs local setup",
     "importCreated": "Imported · {members} member(s), {automations} automation(s), {agents} agent(s) added",
-    "skipped": "Skipped — a project with this name already exists"
+    "skipped": "Skipped — a project with this name already exists",
+    "worktreesTitle": "Worktrees",
+    "worktreeClean": "clean",
+    "worktreeUnknown": "state unknown",
+    "worktreeStatus": "{dirty} uncommitted · {ahead} unmerged",
+    "worktreeMergeHint": "Merge into the main workspace: run `git merge {branch}`",
+    "worktreeContinue": "Continue in this worktree",
+    "worktreeContinueReady": "The next conversation will run in worktree \"{name}\"",
+    "worktreeDiscard": "Discard worktree",
+    "worktreeDiscardTitle": "Discard this worktree?",
+    "worktreeDiscardDesc": "It has {dirty} uncommitted file(s) and {ahead} unmerged commit(s). Discarding permanently deletes the worktree directory and its branch.",
+    "worktreeDiscardUnknownDesc": "Its state could not be verified. Discarding permanently deletes the worktree directory and its branch."
   },
   "schedule": {
     "create": "Create Schedule",

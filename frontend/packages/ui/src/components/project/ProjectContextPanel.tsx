@@ -27,7 +27,9 @@ import {
   Upload,
   PanelRightOpen,
   AlertTriangle,
+  GitBranch,
   Link2,
+  MessageSquarePlus,
   Sparkles,
 } from "lucide-react";
 import { modelLabel } from "@valuz/shared";
@@ -123,6 +125,17 @@ export interface ScheduledTaskSummary {
   humanReadable: string;
   status: "on" | "off";
   nextRun: string;
+}
+
+/** One project worktree row for the panel's "Worktrees" section. Mirrors the
+ *  backend's computed-on-read WorktreeItem: `null` counts mean the state
+ *  could not be verified (anchor lost / git failure) — rendered "unknown". */
+export interface WorktreeSummary {
+  name: string;
+  branch: string | null;
+  origin: string;
+  dirtyFiles: number | null;
+  aheadCommits: number | null;
 }
 
 /** A project member agent for the config panel's "Member agents" section. */
@@ -282,6 +295,17 @@ export interface ProjectContextPanelProps {
    * empty panel section would just be noise.
    */
   todos?: TodoListItem[] | null;
+  /**
+   * Project git worktrees (isolated branch copies sessions can run in).
+   * Pass the list (even empty) to show the section; ``undefined`` hides it
+   * (non-git projects, or callers that don't surface worktrees). Rows are
+   * computed on read by the backend — git is the source of truth.
+   */
+  worktrees?: WorktreeSummary[];
+  /** Start a new conversation in this worktree (wired to the row action). */
+  onContinueWorktree?: (name: string) => void;
+  /** Discard (delete) a worktree — caller owns the confirm dialog. */
+  onDiscardWorktree?: (worktree: WorktreeSummary) => void;
   scheduledTasks?: ScheduledTaskSummary[];
   onAddScheduledTask?: () => void;
   /** Open a scheduled task's detail page — wired to the row click. */
@@ -948,6 +972,9 @@ export const ProjectDetailContextPanel = ({
   generatedFiles,
   onOpenGeneratedFile,
   todos,
+  worktrees,
+  onContinueWorktree,
+  onDiscardWorktree,
   scheduledTasks,
   onAddScheduledTask,
   onOpenScheduledTask,
@@ -1509,6 +1536,115 @@ export const ProjectDetailContextPanel = ({
               {t("agent.noMembers" as Parameters<typeof t>[0])}
             </p>
           )}
+        </AccordionSection>
+      )}
+
+      {/* Worktrees — isolated branch copies sessions run in (git projects
+          only). Rows are computed on read; ``null`` counts render as
+          "unknown" and the caller's confirm dialog owns the fail-closed
+          discard consent. Only shown when there is something to manage —
+          an empty list would just advertise plumbing. */}
+      {worktrees !== undefined && worktrees.length > 0 && (
+        <AccordionSection
+          {...sectionState("worktrees")}
+          title={t("project.worktreesTitle" as Parameters<typeof t>[0])}
+          icon={GitBranch}
+          iconClassName="text-context-icon"
+          count={worktrees.length}
+        >
+          <div className="-mr-3 max-h-[25vh] overflow-y-auto overflow-x-hidden pr-3">
+            {worktrees.map((wt, index) => {
+              const verified = wt.dirtyFiles !== null && wt.aheadCommits !== null;
+              const clean = verified && wt.dirtyFiles === 0 && wt.aheadCommits === 0;
+              const statusText = !verified
+                ? t("project.worktreeUnknown" as Parameters<typeof t>[0])
+                : clean
+                  ? t("project.worktreeClean" as Parameters<typeof t>[0])
+                  : t("project.worktreeStatus" as Parameters<typeof t>[0], {
+                      dirty: wt.dirtyFiles ?? 0,
+                      ahead: wt.aheadCommits ?? 0,
+                    });
+              const mergeHint =
+                verified && (wt.aheadCommits ?? 0) > 0 && wt.branch
+                  ? t("project.worktreeMergeHint" as Parameters<typeof t>[0], {
+                      branch: wt.branch,
+                    })
+                  : undefined;
+              return (
+                <div key={wt.name}>
+                  {index > 0 ? (
+                    <div className="h-px w-full bg-[#f7f8fa]" />
+                  ) : null}
+                  <div className="group relative rounded-lg bg-card">
+                    <div className="pointer-events-none absolute inset-0 rounded-lg transition-colors group-hover:bg-[#f7f8fa]" />
+                    <div
+                      className="relative z-10 flex items-center gap-2.5 px-2 py-2.5"
+                      title={mergeHint}
+                    >
+                      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-brand/8 text-brand">
+                        <GitBranch className="h-3 w-3" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-xs font-medium text-ink-heading">
+                          {wt.name}
+                        </div>
+                        <div className="truncate text-2xs text-ink-meta">
+                          {wt.branch ? `${wt.branch} · ` : ""}
+                          {statusText}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                        {onContinueWorktree && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.currentTarget.blur();
+                              onContinueWorktree(wt.name);
+                            }}
+                            className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-surface-muted"
+                            title={t(
+                              "project.worktreeContinue" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                            aria-label={t(
+                              "project.worktreeContinue" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          >
+                            <MessageSquarePlus className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {onDiscardWorktree && (
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.currentTarget.blur();
+                              onDiscardWorktree(wt);
+                            }}
+                            className="flex h-6 w-6 items-center justify-center rounded text-ink-body transition-colors hover:bg-red-50 hover:text-red-600"
+                            title={t(
+                              "project.worktreeDiscard" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                            aria-label={t(
+                              "project.worktreeDiscard" as Parameters<
+                                typeof t
+                              >[0],
+                            )}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </AccordionSection>
       )}
 

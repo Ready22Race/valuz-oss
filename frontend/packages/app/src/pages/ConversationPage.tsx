@@ -18,6 +18,7 @@ import {
   ArrowDown,
   ArrowLeft,
   Bot,
+  GitBranch,
   ChevronDown,
   ChevronRight,
   FilePenLine,
@@ -329,6 +330,9 @@ function sessionDetailToListItem(detail: SessionDetail): SessionListItem {
     permission_mode: detail.permission_mode,
     effort: detail.effort ?? null,
     task_id: detail.task_id ?? null,
+    // Carries ``exists`` (liveness) from the detail fetch — the header
+    // worktree badge greys out on it.
+    worktree: detail.worktree ?? null,
     updated_at: detail.updated_at,
   };
 }
@@ -5119,6 +5123,27 @@ export const ConversationPage = () => {
                 <Badge variant="metaBrand" className="shrink-0">
                   <Bot className="h-3 w-3" />
                   {agentNameBySlug.get(sessionAgentSlug) ?? sessionAgentSlug}
+                </Badge>
+              ) : null}
+              {selectedSession?.worktree ? (
+                // Worktree attribution (creation-time snapshot). Greys out
+                // when the worktree no longer exists on disk — the next
+                // send self-heals by recreating it, which the tooltip says.
+                <Badge
+                  variant="metaOutline"
+                  className={cn(
+                    "shrink-0",
+                    selectedSession.worktree.exists === false && "opacity-60",
+                  )}
+                  title={
+                    selectedSession.worktree.exists === false
+                      ? t("conversation.worktreeBadgeGone")
+                      : t("conversation.worktreeBadgeHint")
+                  }
+                >
+                  <GitBranch className="h-3 w-3" />
+                  {selectedSession.worktree.branch ??
+                    selectedSession.worktree.name}
                 </Badge>
               ) : null}
               {activeProject?.name && !isSkillCreatorMode ? (

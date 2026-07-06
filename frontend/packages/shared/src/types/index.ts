@@ -12,3 +12,4 @@ export * from "./project";
 export * from "./i18n";
 export * from "./provider";
 export * from "./resource";
+export * from "./worktree";
