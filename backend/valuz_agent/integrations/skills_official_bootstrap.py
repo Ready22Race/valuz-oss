@@ -27,6 +27,19 @@ def _resources_root() -> Path:
     return Path(__file__).resolve().parent.parent / "resources" / "official_skills"
 
 
+def _builtin_resources_root() -> Path:
+    """Path to backend/valuz_agent/resources/builtin_skills/ (valuz-project-docs, browser).
+
+    Builtin skills are materialized ALONGSIDE official skills into the per-user
+    official-skills dir (same landing root, no separate directory). This is what
+    lets a remote kernel — running inside a sandbox that mounts the user's
+    official-skills subtree, not the host package tree — resolve their absolute
+    source paths. ``capability_resolver.project_docs_skill_dir`` /
+    ``browser_skill_dir`` return those materialized locations.
+    """
+    return Path(__file__).resolve().parent.parent / "resources" / "builtin_skills"
+
+
 def _user_official_skills_root(user_id: str) -> Path:
     """Bundled-skill landing root. Delegated to ``fs_registry`` so the
     bootstrap and the discovery source (`OfficialSkillSource`) always
@@ -76,12 +89,18 @@ def sync_bundled_official_skills(user_id: str) -> list[str]:
       - Errors on individual skills are logged but do not abort the loop —
         a single bad bundle should not prevent the app from starting.
     """
-    src_root = _resources_root()
     dest_root = _user_official_skills_root(user_id)
     dest_root.mkdir(parents=True, exist_ok=True)
 
+    # Official skills (skill-creator, …) and builtin skills (valuz-project-docs,
+    # browser) land in the SAME per-user root — builtin skills are not given a
+    # separate directory. Slugs never collide across the two source trees.
+    src_skills = _list_bundled_skill_dirs(_resources_root()) + _list_bundled_skill_dirs(
+        _builtin_resources_root()
+    )
+
     installed: list[str] = []
-    for src_skill in _list_bundled_skill_dirs(src_root):
+    for src_skill in src_skills:
         slug = src_skill.name
         dest_skill = dest_root / slug
         try:

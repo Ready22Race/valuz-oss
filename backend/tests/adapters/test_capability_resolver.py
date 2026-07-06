@@ -16,26 +16,51 @@ import pytest
 # resolver tries to import ``McpServerConfig`` at module load.
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.adapters.capability_resolver import (
-    _BROWSER_SKILL_DIR,
-    _PROJECT_DOCS_SKILL_DIR,
     always_on_skill_paths,
+    browser_skill_dir,
+    project_docs_skill_dir,
     resolve_session_capabilities,
 )
 from valuz_agent.modules.skills.contracts import RuntimeContext, SkillManifest
 
-# Path to the builtin valuz-project-docs skill that the resolver
-# auto-injects into every session (chat + project). Tests filter it
-# out before asserting against the user-controlled skill set so they
-# stay focused on the behavior under test.
-_DOCS_SKILL_PATH = str(_PROJECT_DOCS_SKILL_DIR.resolve(strict=False))
 USER = "test-user"
+
+# Path to the builtin valuz-project-docs skill that the resolver auto-injects
+# into every session (chat + project). Now resolves under the per-user
+# official-skills dir (materialized by ``sync_bundled_official_skills``), NOT the
+# package source. Tests filter it out before asserting against the user-controlled
+# skill set so they stay focused on the behavior under test.
+def _docs_skill_path() -> str:
+    """Live path to the materialized valuz-project-docs skill (reads current data_dir)."""
+    return str(project_docs_skill_dir(USER).resolve(strict=False))
+
+
+@pytest.fixture(autouse=True)
+def _materialize_baseline_skills(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point ``data_dir`` at a hermetic tmp root and materialize the bundled
+    baseline skills there.
+
+    ``always_on_skill_paths`` now returns the MATERIALIZED per-user
+    official-skills paths (valuz-project-docs / browser / skill-creator), each
+    gated on ``is_dir()``. Without a real ``sync_bundled_official_skills`` these
+    dirs wouldn't exist and the always-on baseline would be silently empty — so
+    every test in this module runs the sync into an isolated data root.
+    """
+    from valuz_agent.infra.config import settings
+    from valuz_agent.integrations.skills_official_bootstrap import sync_bundled_official_skills
+
+    root = tmp_path_factory.mktemp("caps-data")
+    monkeypatch.setattr(settings, "data_dir", root / "{user_id}")
+    sync_bundled_official_skills(USER)
 
 
 def _user_skills(caps_skills: tuple[str, ...]) -> tuple[str, ...]:
     """Strip the always-on baseline skills (valuz-project-docs + skill-creator)
     so the remaining tuple reflects only what the resolver picked up from
     user / extras / library."""
-    baseline = set(always_on_skill_paths(user_id=USER)) | {_DOCS_SKILL_PATH}
+    baseline = set(always_on_skill_paths(user_id=USER)) | {_docs_skill_path()}
     return tuple(p for p in caps_skills if p not in baseline)
 
 
@@ -134,7 +159,7 @@ def test_chat_project_auto_includes_user_library_skills(tmp_path: Path) -> None:
     )
 
     assert _user_skills(caps.skills) == (str(skill_dir.resolve(strict=False)),)
-    assert _DOCS_SKILL_PATH in caps.skills
+    assert _docs_skill_path() in caps.skills
 
 
 def test_extra_skill_id_resolves_manifest_id_by_slug(tmp_path: Path) -> None:
@@ -199,7 +224,7 @@ def test_chat_project_without_skill_source_yields_empty(tmp_path: Path) -> None:
 
     # No user / extras input → only the always-on docs skill remains.
     assert _user_skills(caps.skills) == ()
-    assert _DOCS_SKILL_PATH in caps.skills
+    assert _docs_skill_path() in caps.skills
 
 
 def test_chat_project_skips_non_user_scoped_manifests(tmp_path: Path) -> None:
@@ -392,13 +417,20 @@ def test_project_does_not_auto_include_official_skills(
     assert str(skill_dir.resolve(strict=False)) not in caps.skills
 
 
-def test_browser_skill_gated_on_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_browser_skill_gated_on_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The always-on browser skill is injected only when the browser engine
     (Node + chrome-devtools-mcp) is available, so headless/TUI hosts without
     Node don't advertise a dead skill. See docs/design/browser-feature.md §8."""
+    from valuz_agent.infra.config import settings
+    from valuz_agent.infra.fs_registry import fs_registry
     from valuz_agent.modules.browser import service as browser_service
 
-    browser_path = str(_BROWSER_SKILL_DIR.resolve(strict=False))
+    # always_on now returns the MATERIALIZED path under official_skill_root
+    # (produced by ``sync_bundled_official_skills``); create it under a tmp data
+    # root so the presence assertion is meaningful and hermetic.
+    monkeypatch.setattr(settings, "data_dir", tmp_path / "{user_id}")
+    (fs_registry.official_skill_root(user_id=USER) / "browser").mkdir(parents=True, exist_ok=True)
+    browser_path = str(browser_skill_dir(USER).resolve(strict=False))
 
     monkeypatch.setattr(browser_service, "node_available", lambda: True)
     assert browser_path in always_on_skill_paths(user_id=USER)

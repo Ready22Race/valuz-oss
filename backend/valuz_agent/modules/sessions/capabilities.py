@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -> bool:
-
     """Ensure the valuz-project-docs skill + ``valuz_docs`` MCP are
     present on an existing session row.
 
@@ -53,7 +52,7 @@ async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -
         McpHttpServerConfigSchema as _McpHttpServerConfig,
     )
 
-    from valuz_agent.adapters.capability_resolver import _PROJECT_DOCS_SKILL_DIR
+    from valuz_agent.adapters.capability_resolver import project_docs_skill_dir
     from valuz_agent.infra.config import settings as _settings
     from valuz_agent.integrations.docs_mcp_server import docs_mcp_url
     from valuz_agent.modules.projects.datastore import ProjectDatastore
@@ -82,10 +81,11 @@ async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -
     project = await _load_project()
     if project is None:
         return False
-    if not _PROJECT_DOCS_SKILL_DIR.is_dir():
+    _docs_skill_dir = project_docs_skill_dir(session.user_id)
+    if not _docs_skill_dir.is_dir():
         return False
 
-    docs_skill_path = str(_PROJECT_DOCS_SKILL_DIR.resolve(strict=False))
+    docs_skill_path = str(_docs_skill_dir.resolve(strict=False))
     current_skills = list(session.skills or ())
     current_mcp = list(session.mcp_servers or ())
 
