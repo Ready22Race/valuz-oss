@@ -12,6 +12,25 @@ from dataclasses import dataclass
 
 
 @dataclass
+class WorktreeRef:
+    """Immutable pointer to the worktree a session was created in.
+
+    Read from the ``metadata["valuz"]["worktree"]`` snapshot stamped at
+    session creation — it reflects creation time, not whether the worktree
+    still exists (git is the source of truth for liveness). ``None`` on the
+    session means "ran in the main workspace".
+    """
+
+    name: str
+    branch: str | None
+    path: str
+    # Liveness, computed on read (detail fetch only; ``None`` on list items).
+    # False = the worktree was removed since the session was created — the
+    # next send self-heals by recreating it at the same path.
+    exists: bool | None = None
+
+
+@dataclass
 class SessionListItem:
     id: str
     project_id: str
@@ -50,6 +69,9 @@ class SessionListItem:
     # sessions (they're an implementation detail of the task run, not
     # something the user opened directly).
     task_id: str | None = None
+    # Worktree the session runs in (creation-time snapshot). Surfaced on the
+    # list so the sidebar can render a worktree badge without a second fetch.
+    worktree: WorktreeRef | None = None
 
 
 @dataclass

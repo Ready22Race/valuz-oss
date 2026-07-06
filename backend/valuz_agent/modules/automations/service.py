@@ -276,6 +276,7 @@ class AutomationService:
             agent_slug=row.agent_slug,
             agent_name=await self._resolve_agent_name(row, user_id),
             action_kind=row.action_kind,
+            task_worktree=bool(getattr(row, "task_worktree", False)),
             trigger=self._row_to_trigger(row),
             trigger_human_readable=self._trigger_human(row),
             status=row.status,
@@ -607,6 +608,7 @@ class AutomationService:
         project_kind: str,
         project_id: str | None,
         session_agent_slug: str | None,
+        task_worktree: bool = False,
     ) -> AutomationCreatePayload:
         """Assemble an :class:`AutomationCreatePayload` from raw create inputs.
 
@@ -647,6 +649,9 @@ class AutomationService:
             prompt_template=(prompt_template or "").strip(),
             trigger=trigger,
             action_kind=action,  # type: ignore[arg-type]
+            # Worktree isolation is a task-mode property — silently drop it
+            # for chat rows rather than persisting a meaningless flag.
+            task_worktree=bool(task_worktree) and action == "task",
         )
 
     async def _preview_agent_name(
@@ -722,6 +727,7 @@ class AutomationService:
             project_id=payload.project_id or "preview",
             prompt_template=payload.prompt_template.strip(),
             action_kind=payload.action_kind,
+            task_worktree=bool(payload.task_worktree),
             trigger_kind="cron",  # overwritten by _apply_trigger
             status="enabled",
             next_run_at=None,
@@ -739,6 +745,7 @@ class AutomationService:
             agent_kind=payload.agent_kind,
             agent_name=agent_name,
             action_kind=payload.action_kind,
+            task_worktree=bool(payload.task_worktree),
             trigger_human_readable=self._trigger_human(row),
             next_run_at=next_run,
         )
@@ -803,6 +810,7 @@ class AutomationService:
             project_id=project_id,
             prompt_template=payload.prompt_template.strip(),
             action_kind=payload.action_kind,
+            task_worktree=bool(payload.task_worktree),
             trigger_kind="cron",  # overwritten by _apply_trigger
             status="enabled",
             next_run_at=None,
@@ -908,6 +916,7 @@ class AutomationService:
             agent_slug=row.agent_slug,
             agent_name=None,
             action_kind=row.action_kind,
+            task_worktree=bool(getattr(row, "task_worktree", False)),
             trigger=self._row_to_trigger(row),
             trigger_human_readable=self._trigger_human(row),
             status=row.status,
@@ -978,6 +987,9 @@ class AutomationService:
                 if ws_kind != "project":
                     raise AutomationTaskOnlyOnProject()
             row.action_kind = payload.action_kind
+
+        if payload.task_worktree is not None:
+            row.task_worktree = bool(payload.task_worktree)
 
         trigger_changed = False
         if payload.trigger is not None:

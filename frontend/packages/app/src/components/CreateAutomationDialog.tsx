@@ -40,6 +40,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
+  Switch,
   Tabs,
   TabsContent,
   TabsList,
@@ -88,6 +89,7 @@ export interface AutomationEditInitial {
   agent_slug: string;
   trigger: Trigger;
   action_kind: ActionKind;
+  task_worktree?: boolean;
 }
 
 export interface CreateAutomationDialogProps {
@@ -106,6 +108,7 @@ export interface CreateAutomationDialogProps {
     agent_slug: string;
     trigger: Trigger;
     action_kind: ActionKind;
+    task_worktree: boolean;
   }) => Promise<void>;
   /**
    * Candidate agents the user can pick. Parent loads from either
@@ -262,6 +265,9 @@ export const CreateAutomationDialog = ({
   // false (chat projects) the Task radio is disabled and we coerce
   // ``task`` back to ``chat`` at submit time as a defence-in-depth.
   const [actionKind, setActionKind] = useState<ActionKind>("chat");
+  // Task-level worktree isolation (design §5) — Task mode only. Each fired
+  // task (lead + every member) runs in one git worktree of the project repo.
+  const [taskWorktree, setTaskWorktree] = useState(false);
 
   // The agent picker is linked to the target: switching projects swaps the
   // candidate list out from under the stored ``agentSlug``. Rather than chase
@@ -320,6 +326,7 @@ export const CreateAutomationDialog = ({
           ? "chat"
           : initial.action_kind,
       );
+      setTaskWorktree(Boolean(initial.task_worktree));
       if (initial.trigger.kind === "cron") {
         setTriggerKind("cron");
         setCron(initial.trigger.cron_expr || "0 9 * * *");
@@ -369,6 +376,7 @@ export const CreateAutomationDialog = ({
     setIntervalUnit("minutes");
     setAgentSlug(defaultAgentSlug ?? agents[0]?.slug ?? "");
     setActionKind("chat");
+    setTaskWorktree(false);
   }, [open, initial, defaultAgentSlug, agents, allowTaskMode]);
 
   // Debounced next-run preview: re-validate the cron in the selected tz and
@@ -455,6 +463,8 @@ export const CreateAutomationDialog = ({
       // Defence-in-depth: if task mode isn't available, the submit always
       // coerces to chat regardless of the local toggle.
       action_kind: taskModeAllowed ? actionKind : "chat",
+      task_worktree:
+        taskModeAllowed && actionKind === "task" ? taskWorktree : false,
     });
     onOpenChange(false);
   };
@@ -592,6 +602,30 @@ export const CreateAutomationDialog = ({
               })}
             </div>
           </FormField>
+
+          {/* Task-level worktree toggle — Task mode only. Off = the task
+              works in the project directory; on = the whole task (lead +
+              members) runs in one isolated git worktree whose branch merges
+              back (or is discarded) when the task ends. */}
+          {actionKind === "task" && taskModeAllowed && (
+            <FormField
+              label={t(
+                "automation.taskWorktreeLabel" as Parameters<typeof t>[0],
+              )}
+            >
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-surface-border bg-card px-3 py-2">
+                <p className="text-[11px] leading-4 text-ink-meta">
+                  {t(
+                    "automation.taskWorktreeHint" as Parameters<typeof t>[0],
+                  )}
+                </p>
+                <Switch
+                  checked={taskWorktree}
+                  onCheckedChange={setTaskWorktree}
+                />
+              </div>
+            </FormField>
+          )}
 
           {/* "所属项目" — where this automation lives, picked before who runs
               it. Two presentations of the SAME control so the global and

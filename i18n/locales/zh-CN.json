@@ -85,7 +85,9 @@
     "triggerInterval": "间隔",
     "triggerManual": "手动",
     "updateFailed": "更新失败：{error}",
-    "updateSuccess": "已更新「{name}」"
+    "updateSuccess": "已更新「{name}」",
+    "taskWorktreeLabel": "Worktree 隔离",
+    "taskWorktreeHint": "每次触发的任务都在独立的 git worktree 中运行，主工作区不受影响；任务结束时无改动的 worktree 会自动清理。"
   },
   "backend": {
     "schedule": {
@@ -430,7 +432,12 @@
     "approvalAutoApprovedRuleSuffix": "· 规则：{rule}",
     "approvalTrayBadge": "{count} 个待审批",
     "approvalTrayWarning": "请先处理待审批项",
-    "permissionLockedHint": "会话内权限模式已锁定;新开会话即可切换"
+    "permissionLockedHint": "会话内权限模式已锁定;新开会话即可切换",
+    "worktreeToggle": "Worktree",
+    "worktreeToggleOnHint": "会话将在独立的 git worktree 分支副本中运行，主工作区不受影响。",
+    "worktreeToggleOffHint": "在独立的 git worktree（仓库分支副本）中运行此会话。",
+    "worktreeBadgeHint": "此会话在独立的 git worktree 中运行。",
+    "worktreeBadgeGone": "该 worktree 已被删除，下次发送消息时会自动重建。"
   },
   "cron": {
     "actionColumn": "操作",
@@ -1054,7 +1061,18 @@
     "needsKey": "需要密钥",
     "needsSetup": "需要本地配置",
     "importCreated": "已导入 · {members} 个成员、{automations} 个自动化，新增 {agents} 个 Agent",
-    "skipped": "已跳过——已存在同名项目"
+    "skipped": "已跳过——已存在同名项目",
+    "worktreesTitle": "Worktrees",
+    "worktreeClean": "无改动",
+    "worktreeUnknown": "状态未知",
+    "worktreeStatus": "{dirty} 个未提交 · {ahead} 个未合并提交",
+    "worktreeMergeHint": "合并回主工作区：执行 `git merge {branch}`",
+    "worktreeContinue": "在此 worktree 中继续",
+    "worktreeContinueReady": "下一个会话将在 worktree「{name}」中运行",
+    "worktreeDiscard": "丢弃 worktree",
+    "worktreeDiscardTitle": "丢弃此 worktree？",
+    "worktreeDiscardDesc": "其中有 {dirty} 个未提交文件、{ahead} 个未合并提交。丢弃将永久删除该 worktree 目录及其分支。",
+    "worktreeDiscardUnknownDesc": "其状态无法核实。丢弃将永久删除该 worktree 目录及其分支。"
   },
   "schedule": {
     "create": "创建定时任务",

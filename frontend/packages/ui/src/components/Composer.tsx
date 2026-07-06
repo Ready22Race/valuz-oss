@@ -17,6 +17,7 @@ import {
   Lock,
   Paperclip,
   Plus,
+  GitBranch,
   Search,
   Settings,
   Square,
@@ -381,6 +382,16 @@ export interface ComposerProps {
    */
   permissionModeLocked?: boolean;
   /**
+   * Worktree isolation toggle for the NEW conversation this composer will
+   * create. Hidden when undefined (back-compat) or `available: false`
+   * (project isn't a git repo / git missing). The choice is frozen at
+   * session creation — live sessions don't pass this; the header badge
+   * takes over there.
+   */
+  worktree?: { available: boolean; enabled: boolean };
+  /** Called when the user flips the worktree isolation toggle. */
+  onWorktreeToggle?: (enabled: boolean) => void;
+  /**
    * Reasoning-effort budget (kernel V5+bba3014 ``ModelSettings.effort``).
    * Live-reconcile: PATCH applies on next Send. Hide the picker when
    * ``effort`` is undefined (back-compat).
@@ -542,6 +553,8 @@ export const Composer = ({
   permissionMode,
   onPermissionModeChange,
   permissionModeLocked = false,
+  worktree,
+  onWorktreeToggle,
   effort,
   onEffortChange,
   modelLocked = false,
@@ -1933,6 +1946,40 @@ export const Composer = ({
                   </div>
                 )}
               </div>
+            )}
+            {/* Worktree isolation toggle — only for projects that are git
+                repos (``worktree.available``). A simple on/off chip, not a
+                dropdown: the choice is binary and frozen at session
+                creation. Brand-tinted when on so the isolation is visible
+                at a glance before sending the first message. */}
+            {worktree?.available && (
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      className={cn(
+                        "inline-flex h-7 items-center gap-1 rounded-lg px-2 text-xs leading-none transition-colors duration-[120ms]",
+                        worktree.enabled
+                          ? "bg-brand-light text-brand"
+                          : "text-ink-body hover:bg-surface-soft hover:text-ink-heading",
+                      )}
+                      aria-pressed={worktree.enabled}
+                      onClick={() => onWorktreeToggle?.(!worktree.enabled)}
+                    >
+                      <GitBranch className="block h-3 w-3 shrink-0" />
+                      <span className="max-w-[140px] truncate leading-none">
+                        {t("conversation.worktreeToggle")}
+                      </span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="top">
+                    {worktree.enabled
+                      ? t("conversation.worktreeToggleOnHint")
+                      : t("conversation.worktreeToggleOffHint")}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             )}
           </div>
           <div className="flex items-center gap-2">

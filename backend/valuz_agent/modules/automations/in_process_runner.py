@@ -602,6 +602,9 @@ class InProcessAutomationRunner:
                 title=title or row.name,
                 dispatch_mode="async",
                 created_by="automation",
+                # Task-level worktree (design §5): the automation's flag rides
+                # into every fired task — each run gets its own worktree.
+                worktree=bool(getattr(row, "task_worktree", False)),
                 # The background runner has no request auth context, so the
                 # project lookup in kickoff would otherwise fall back to
                 # user_id=None and fail ("project not found"). Pass the

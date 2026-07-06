@@ -56,6 +56,11 @@ from valuz_agent.modules.tasks.datastore import (
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskSessionRow
 from valuz_agent.modules.tasks.plan import TaskPlan
+from valuz_agent.modules.tasks.task_worktree import (
+    resolve_task_cwd,
+    task_worktree_notice,
+    task_worktree_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,14 +151,23 @@ class DispatcherService:
                 ws_row.root_path,
             )
 
-            # Resolve member working dir: shared project cwd by default (v2.1),
-            # isolated git worktree only for repo-worktree mode.
+            # Resolve member working dir: shared project cwd by default (v2.1).
+            # Task-level worktree (design §5): every member shares the task's
+            # ONE worktree cwd — no per-member isolation on top; the plan
+            # DAG's dependencies remain the write-conflict discipline, same as
+            # shared mode in the main workspace.
             run_seq = await run_ds.next_sequence(task_id)
-            mode = project_mode or "shared"
-            # ``repo-worktree`` mode shells out to ``git worktree add`` (blocking
-            # subprocess); offload so dispatch never blocks the event loop. The
-            # default ``shared`` mode is a no-op Path() and stays instant.
-            run_dir = await asyncio.to_thread(_member_run_dir, project_cwd, task_id, run_seq, mode)
+            wt_snapshot = task_worktree_snapshot(task_row)
+            if wt_snapshot is not None:
+                mode = "shared"
+                work_cwd = await resolve_task_cwd(task_row, str(project_cwd))
+            else:
+                mode = project_mode or "shared"
+                work_cwd = str(project_cwd)
+            # Legacy per-member ``repo-worktree`` shells out to ``git worktree
+            # add`` (blocking subprocess); offload so dispatch never blocks the
+            # event loop. The default ``shared`` mode is a no-op Path().
+            run_dir = await asyncio.to_thread(_member_run_dir, work_cwd, task_id, run_seq, mode)
             started = time.time()
 
             # Build brief for the member
@@ -164,9 +178,12 @@ class DispatcherService:
             # Fence the goal-mode payload: spill an over-cap member brief to a
             # doc and pass a short pointer (used as both the embedded brief and
             # the member's initial ``/goal`` prompt).
+            # Spill anchored at the MAIN project cwd: a brief doc written
+            # into the (work)tree would register as work worth keeping and
+            # defeat the task worktree's clean-teardown (design R5).
             member_brief = spill_goal_brief_if_too_long(
                 member_brief,
-                run_dir=str(run_dir),
+                run_dir=str(project_cwd),
                 task_id=task_id,
                 label=f"{agent}-{subtask_key}",
                 is_lead=False,
@@ -192,6 +209,7 @@ class DispatcherService:
                 # its SubtaskResult to the lead. Lead's review_subtask
                 # (approve / rework) authority is unchanged.
                 goal_mode=True,
+                worktree_notice=task_worktree_notice(wt_snapshot),
                 user_id=task_row.user_id,
                 **_provider_resolver_deps(db),
             )
@@ -496,11 +514,20 @@ class DispatcherService:
             )
 
             run_seq = await run_ds.next_sequence(task_id)
-            mode = project_mode or "shared"
-            # ``repo-worktree`` mode shells out to ``git worktree add`` (blocking
-            # subprocess); offload so dispatch never blocks the event loop. The
-            # default ``shared`` mode is a no-op Path() and stays instant.
-            run_dir = await asyncio.to_thread(_member_run_dir, project_cwd, task_id, run_seq, mode)
+            # Task-level worktree (design §5): members share the task's ONE
+            # worktree cwd — no per-member isolation on top (see the sync
+            # dispatch variant for the full rationale).
+            wt_snapshot = task_worktree_snapshot(task_row)
+            if wt_snapshot is not None:
+                mode = "shared"
+                work_cwd = await resolve_task_cwd(task_row, str(project_cwd))
+            else:
+                mode = project_mode or "shared"
+                work_cwd = str(project_cwd)
+            # Legacy per-member ``repo-worktree`` shells out to ``git worktree
+            # add`` (blocking subprocess); offload so dispatch never blocks the
+            # event loop. The default ``shared`` mode is a no-op Path().
+            run_dir = await asyncio.to_thread(_member_run_dir, work_cwd, task_id, run_seq, mode)
 
             refs_text = "\n".join(f"- {r}" for r in (refs or []))
             # Goal mode prepends ``/goal `` (wrap_for_mode); drop the redundant
@@ -520,9 +547,12 @@ class DispatcherService:
             # Fence the goal-mode payload: spill an over-cap member brief to a
             # doc and pass a short pointer (used as both the embedded brief and
             # the member's initial ``/goal`` prompt).
+            # Spill anchored at the MAIN project cwd: a brief doc written
+            # into the (work)tree would register as work worth keeping and
+            # defeat the task worktree's clean-teardown (design R5).
             member_brief = spill_goal_brief_if_too_long(
                 member_brief,
-                run_dir=str(run_dir),
+                run_dir=str(project_cwd),
                 task_id=task_id,
                 label=f"{agent}-{subtask_key}",
                 is_lead=False,
@@ -548,6 +578,7 @@ class DispatcherService:
                 # (The collapsed ``dispatch`` tool routes here, so this is the
                 # live path — the now-unused sync ``dispatch`` had it too.)
                 goal_mode=True,
+                worktree_notice=task_worktree_notice(wt_snapshot),
                 user_id=task_row.user_id,
                 **_provider_resolver_deps(db),
             )

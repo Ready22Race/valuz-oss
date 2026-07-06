@@ -1,3 +1,5 @@
+import type { WorktreeRef } from "./worktree";
+
 /**
  * Approval mode for a session (kernel V5+1aae940; live-reconcile since
  * V5+bba3014). ``default`` parks every write / shell / MCP call on the
@@ -63,6 +65,12 @@ export interface SessionListItem {
    * sessions don't leak into the user's chat history.
    */
   task_id: string | null;
+  /**
+   * Worktree the session runs in (immutable creation-time snapshot).
+   * `null` = the project's main workspace. On the *detail* shape the
+   * backend also populates `worktree.exists` (liveness, computed on read).
+   */
+  worktree?: WorktreeRef | null;
   /** Unix epoch milliseconds (UTC). Format via `new Date(ms)`. */
   updated_at: number;
 }

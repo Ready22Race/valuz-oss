@@ -8,6 +8,7 @@ import {
   ProjectDetailContextPanel,
   type FileTreeNode,
   type ProjectMemberItem,
+  type WorktreeSummary,
   KnowledgeFileTreePicker,
   KnowledgeBaseAddDialog,
   Tabs,
@@ -31,6 +32,7 @@ import {
   connectorsApi,
   tasksApi,
   agentsApi,
+  worktreesApi,
   useComposerProviders,
   useModelDefaults,
   usePanelStore,
@@ -55,7 +57,7 @@ import {
   skillsApi,
   type SkillView,
 } from "@valuz/core";
-import { modelLabel } from "@valuz/shared";
+import { modelLabel, type WorktreeItem } from "@valuz/shared";
 import { t as _t } from "@valuz/shared/i18n";
 import { useProjectOutlet } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
@@ -422,6 +424,78 @@ export const ProjectDetailPage = () => {
   // / provider). Locks out reseeds so explicit choices survive
   // re-renders.
   const [composerTouched, setComposerTouched] = useState(false);
+  // Worktree isolation for the new chat session created from this page.
+  // The toggle only shows when the project cwd is a usable git repo
+  // (``worktreeAvailable`` — computed by the backend, fetched once per
+  // project). Frozen at create time like the other session knobs.
+  // ``worktreeName`` is set by the panel's "continue in this worktree"
+  // action so the next session fast-resumes that worktree instead of
+  // minting a fresh one.
+  const [worktreeEnabled, setWorktreeEnabled] = useState(false);
+  const [worktreeName, setWorktreeName] = useState<string | null>(null);
+  const [worktreeAvailable, setWorktreeAvailable] = useState(false);
+  const [worktrees, setWorktrees] = useState<WorktreeItem[]>([]);
+  const [worktreeDiscardTarget, setWorktreeDiscardTarget] =
+    useState<WorktreeSummary | null>(null);
+  const [worktreeDiscarding, setWorktreeDiscarding] = useState(false);
+  const refreshWorktrees = useCallback(async () => {
+    try {
+      const res = await worktreesApi.list(id);
+      setWorktreeAvailable(res.git.git_available && res.git.is_repo);
+      setWorktrees(res.worktrees);
+    } catch {
+      /* gate stays closed — worktrees are strictly opt-in sugar */
+    }
+  }, [id]);
+  useEffect(() => {
+    setWorktreeAvailable(false);
+    setWorktreeEnabled(false);
+    setWorktreeName(null);
+    setWorktrees([]);
+    void refreshWorktrees();
+  }, [id, refreshWorktrees]);
+  const handleContinueWorktree = useCallback(
+    (name: string) => {
+      setComposerMode("chat");
+      setWorktreeEnabled(true);
+      setWorktreeName(name);
+      toast.success(
+        t("project.worktreeContinueReady" as Parameters<typeof t>[0], {
+          name,
+        }),
+      );
+      document
+        .getElementById("project-composer")
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    },
+    [t],
+  );
+  const handleDiscardWorktree = useCallback(async () => {
+    if (!worktreeDiscardTarget) return;
+    setWorktreeDiscarding(true);
+    try {
+      // The confirm dialog (showing the dirty/ahead counts) IS the consent,
+      // so pass force — the backend's fail-closed default is for callers
+      // that haven't asked the user.
+      await worktreesApi.discard(id, worktreeDiscardTarget.name, {
+        force: true,
+      });
+      toast.success(t("common.deleted" as Parameters<typeof t>[0]));
+      if (worktreeName === worktreeDiscardTarget.name) {
+        setWorktreeName(null);
+        setWorktreeEnabled(false);
+      }
+      setWorktreeDiscardTarget(null);
+      void refreshWorktrees();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(
+        `${t("common.deleteFailed" as Parameters<typeof t>[0])}: ${msg}`,
+      );
+    } finally {
+      setWorktreeDiscarding(false);
+    }
+  }, [id, worktreeDiscardTarget, worktreeName, refreshWorktrees, t]);
   // ADR-013/014 permission mode picker for the new session created from
   // this page. Frozen at create time per ADR-006 — once the session
   // exists, mid-session changes go through PATCH /permission-mode on
@@ -749,6 +823,7 @@ export const ProjectDetailPage = () => {
     agent_slug: string;
     trigger: Trigger;
     action_kind: ActionKind;
+    task_worktree: boolean;
   }) => {
     // Edit mode: PATCH the existing row. The dialog is stateless and calls the
     // same submit handler for create + edit; ``editTask`` decides which.
@@ -759,6 +834,7 @@ export const ProjectDetailPage = () => {
         agent_slug: data.agent_slug,
         trigger: data.trigger,
         action_kind: data.action_kind,
+        task_worktree: data.task_worktree,
       });
       toast.success(t("common.saved" as Parameters<typeof t>[0]));
       await reloadScheduledTasks();
@@ -777,6 +853,7 @@ export const ProjectDetailPage = () => {
       prompt_template: data.prompt_template,
       trigger: data.trigger,
       action_kind: data.action_kind,
+      task_worktree: data.task_worktree,
     });
     toast.success(t("project.taskCreated" as Parameters<typeof t>[0]));
     const schedRes = await automationsApi.listGroups(id);
@@ -962,6 +1039,12 @@ export const ProjectDetailPage = () => {
       project_id: id,
       agent_slug: selectedAgentSlug,
       permission_mode: selectedPermissionMode,
+      // Presence of the object opts into worktree isolation; a name set by
+      // "continue in this worktree" fast-resumes that worktree, otherwise
+      // one is auto-named. Omitted = main workspace. Frozen per session.
+      ...(worktreeEnabled
+        ? { worktree: worktreeName ? { name: worktreeName } : {} }
+        : {}),
     });
     setChatSessionId(session.id);
     return { id: session.id };
@@ -1033,6 +1116,9 @@ export const ProjectDetailPage = () => {
           lead_agent_slug: selectedAgentSlug,
           title: text.length > 60 ? text.slice(0, 60) : null,
           dispatch_mode: "async",
+          // Task-level worktree (design §5): lead + every member share ONE
+          // worktree; clean ones auto-remove at finish.
+          worktree: worktreeEnabled,
         });
         toast.success(t("task.kickedOff"));
         setComposerValue("");
@@ -1106,6 +1192,19 @@ export const ProjectDetailPage = () => {
         onAddMember={() => setAddAgentOpen(true)}
         onOpenMember={openMember}
         onRemoveMember={(slug) => setMemberDeleteTarget(slug)}
+        worktrees={
+          worktreeAvailable
+            ? worktrees.map((w) => ({
+                name: w.name,
+                branch: w.branch,
+                origin: w.origin,
+                dirtyFiles: w.dirty_files,
+                aheadCommits: w.ahead_commits,
+              }))
+            : undefined
+        }
+        onContinueWorktree={handleContinueWorktree}
+        onDiscardWorktree={(wt) => setWorktreeDiscardTarget(wt)}
         projectMemory={projectMemory}
         onMemoryDeleteEntry={handleMemoryDeleteEntry}
         onMemoryClear={handleMemoryClear}
@@ -1228,6 +1327,9 @@ export const ProjectDetailPage = () => {
     handleToggleScheduledTask,
     handleDeleteScheduledTask,
     handleRunScheduledTask,
+    worktreeAvailable,
+    worktrees,
+    handleContinueWorktree,
     connectors,
     selectedMcpSlugs,
     refreshFileTree,
@@ -1350,6 +1452,16 @@ export const ProjectDetailPage = () => {
                 setSelectedPermissionMode(mode);
                 setComposerTouched(true);
               }}
+              worktree={
+                // Chat mode: hidden once a chat session exists (frozen at
+                // creation). Task mode: every kickoff is fresh, so the
+                // toggle is always offered — a worktree task runs lead +
+                // members in ONE shared worktree (design §5).
+                composerMode === "task" || !chatSessionId
+                  ? { available: worktreeAvailable, enabled: worktreeEnabled }
+                  : undefined
+              }
+              onWorktreeToggle={setWorktreeEnabled}
             />
             <AttachmentParsingDialog
               open={parsingConfirmOpen}
@@ -1468,6 +1580,7 @@ export const ProjectDetailPage = () => {
                 agent_slug: editTask.agent_slug,
                 trigger: editTask.trigger,
                 action_kind: (editTask.action_kind as ActionKind) ?? "chat",
+                task_worktree: editTask.task_worktree ?? false,
               }
             : undefined
         }
@@ -1519,6 +1632,32 @@ export const ProjectDetailPage = () => {
         }}
       />
 
+      <DeleteConfirmDialog
+        open={worktreeDiscardTarget !== null}
+        onOpenChange={(v) => !v && setWorktreeDiscardTarget(null)}
+        itemName={worktreeDiscardTarget?.name}
+        title={t("project.worktreeDiscardTitle" as Parameters<typeof t>[0])}
+        description={
+          worktreeDiscardTarget
+            ? worktreeDiscardTarget.dirtyFiles !== null &&
+              worktreeDiscardTarget.aheadCommits !== null
+              ? t(
+                  "project.worktreeDiscardDesc" as Parameters<typeof t>[0],
+                  {
+                    dirty: worktreeDiscardTarget.dirtyFiles,
+                    ahead: worktreeDiscardTarget.aheadCommits,
+                  },
+                )
+              : t(
+                  "project.worktreeDiscardUnknownDesc" as Parameters<
+                    typeof t
+                  >[0],
+                )
+            : undefined
+        }
+        loading={worktreeDiscarding}
+        onConfirm={() => void handleDiscardWorktree()}
+      />
       <DeleteConfirmDialog
         open={memberDeleteTarget !== null}
         onOpenChange={(v) => !v && setMemberDeleteTarget(null)}

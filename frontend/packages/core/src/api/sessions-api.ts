@@ -323,6 +323,15 @@ export interface SessionCreateRequest {
    * classic model-picker path.
    */
   agent_slug?: string | null;
+  /**
+   * Opt-in worktree isolation: presence of the object (even empty `{}`)
+   * runs the session in an isolated git worktree of the project repo on
+   * its own branch; omitted/``null`` runs in the main workspace. Requires
+   * the project cwd to be inside a git repository — the backend 422s
+   * otherwise (no silent fallback). ``name`` reuses/labels the worktree
+   * (auto-generated when omitted).
+   */
+  worktree?: { name?: string | null } | null;
 }
 
 export interface SessionMessageRequest {
