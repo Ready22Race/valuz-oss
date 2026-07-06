@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.adapters.data_reader import data_reader
@@ -86,6 +86,21 @@ async def _restamp_always_on_mcp(session_id: str, user_id: str | None = None) ->
 # ---------------------------------------------------------------------------
 
 
+# Stop-reason categories that mean "the turn was cancelled on purpose", not
+# "the turn failed". ``user_interrupt`` is what every runtime stamps on an
+# explicit user interrupt; ``interrupted`` is a graceful host teardown. Both
+# are resumable intent — never a subtask failure (mirrors
+# ``recovery.classify_member``).
+_INTERRUPT_CATEGORIES = ("user_interrupt", "interrupted")
+
+# ``member_done`` payload statuses that carry NO reviewable deliverable — the
+# member died (terminated/error) or was cancelled by the user/stop_member
+# (cancelled/interrupted). Consumers must NOT flip the plan node to
+# ``in_review`` for these: the node is already parked in ``rework`` and
+# presenting a dead run as a pending deliverable confuses the lead.
+_NON_REVIEWABLE_DONE = frozenset({"terminated", "error", "cancelled", "interrupted"})
+
+
 def _resolve_turn_status(session: Any) -> str:
     """Map a turn's resolved kernel session onto the actor-loop ``final_status``.
 
@@ -102,6 +117,14 @@ def _resolve_turn_status(session: Any) -> str:
     failure (loop break, ``_finalize_actor`` ``ok=False``, lead auto-finalize
     error branch). ``finalize_session`` preserves the existing ``Error``
     stop_reason when no ``stop_reason_type`` is passed, so the reason survives.
+
+    Exception: an error whose ``category`` is a cancellation
+    (``user_interrupt`` / ``interrupted``) is user/host intent, not a failure —
+    return the loop-local ``"interrupted"`` status so the actor loop breaks but
+    finalize takes the user-stop path (node → rework with a "user stopped"
+    note, ``subtask_stopped`` event) instead of the failure path
+    (``subtask_failed``). ``"interrupted"`` never reaches the kernel store —
+    ``_finalize_actor`` maps it back to ``"idle"``.
     """
     if session is None:
         return "idle"
@@ -109,6 +132,9 @@ def _resolve_turn_status(session: Any) -> str:
     sr = getattr(session, "stop_reason", None)
     sr_type = sr.get("type") if isinstance(sr, dict) else getattr(sr, "type", None)
     if status == "idle" and isinstance(sr_type, str) and "error" in sr_type:
+        category = sr.get("category") if isinstance(sr, dict) else getattr(sr, "category", None)
+        if category in _INTERRUPT_CATEGORIES:
+            return "interrupted"
         return "terminated"
     return status
 
@@ -486,6 +512,15 @@ class ActorRunner:
             return _resolve_turn_status(loaded)
         except Exception as exc:  # noqa: BLE001
             logger.warning("actor turn failed for session %s: %s", session_id, exc)
+            # A user interrupt can also surface as a raised exception (the SDK
+            # tears the turn down). Re-read the session: if the kernel stamped
+            # a cancellation stop_reason, this is intent, not a failure.
+            try:
+                loaded = await data_reader().get_session(cast(str, user_id), session_id)
+                if _resolve_turn_status(loaded) == "interrupted":
+                    return "interrupted"
+            except Exception:  # noqa: BLE001
+                pass
             return "terminated"
 
     async def run_actor_loop(
@@ -540,12 +575,16 @@ class ActorRunner:
                 turns += 1
 
                 # A member notifies its lead after every idle (carries manifest).
-                if role == "subtask":
+                # Skip it for a user-interrupted turn: ``_finalize_actor`` owns
+                # that path and delivers exactly one ``member_done(cancelled)``
+                # (or none, when ``stop_member`` already notified the lead) —
+                # notifying here too would double-deliver.
+                if role == "subtask" and final_status != "interrupted":
                     await host._notify_lead_member_idle(
                         session_id, final_status, user_id=user_id
                     )
 
-                if final_status in ("terminated", "error"):
+                if final_status in ("terminated", "error", "interrupted"):
                     break
                 if turns >= ACTOR_MAX_TURNS:
                     logger.warning(
@@ -591,7 +630,17 @@ class ActorRunner:
                 if msg.kind == "member_done":
                     # Lead-side, single-actor (D7): flip the member's plan node
                     # to in_review so the lead reviews it (member-idle ≠ done).
-                    if role == "lead" and msg.from_session:
+                    # ONLY for a delivering member: a failed/cancelled
+                    # member_done has no work to review — its node was already
+                    # parked in ``rework`` by finalize / stop_member, and
+                    # flipping it back to in_review would present a dead run as
+                    # a pending deliverable.
+                    done_status = str((msg.payload or {}).get("status") or "")
+                    if (
+                        role == "lead"
+                        and msg.from_session
+                        and done_status not in _NON_REVIEWABLE_DONE
+                    ):
                         await planning.mark_in_review(
                             task_id=task_id,
                             project_id=project_id,
@@ -628,16 +677,32 @@ class ActorRunner:
         m = msg.payload or {}
         arts = m.get("artifacts") or []
         art_lines = "\n".join(f"- {a.get('path')}" for a in arts) if arts else "(none)"
+        status = str(m.get("status", "") or "")
+        if status in _NON_REVIEWABLE_DONE:
+            # No deliverable to review — the run died or was cancelled. The
+            # node is already parked in ``rework``; guide the lead toward a
+            # decision instead of a review of nothing.
+            guidance = (
+                "The member above did NOT deliver — its run "
+                f"ended with status '{status}' and its plan node is now in "
+                "'rework'. There is nothing to review. Decide next: re-dispatch "
+                "the subtask (dispatch + await_members), adjust the plan "
+                "(modify_plan), or — if the user cancelled it on purpose and the "
+                "goal is unreachable without it — finish_task(status='stopped')."
+            )
+        else:
+            guidance = (
+                "The member above went idle. Review its result (review_subtask), "
+                "then either send it a follow-up (send), dispatch more work "
+                "(dispatch + await_members), or call finish_task if the overall "
+                "goal is met."
+            )
         return (
             f'<member-result agent="{m.get("agent", "")}" '
-            f'session="{msg.from_session}" status="{m.get("status", "")}">\n'
+            f'session="{msg.from_session}" status="{status}">\n'
             f"{m.get('summary', '')}\n\n"
             f"Artifacts:\n{art_lines}\n"
-            f"</member-result>\n\n"
-            "The member above went idle. Review its result (review_subtask), "
-            "then either send it a follow-up (send), dispatch more work "
-            "(dispatch + await_members), or call finish_task if the overall "
-            "goal is met."
+            f"</member-result>\n\n" + guidance
         )
 
 
@@ -649,4 +714,5 @@ __all__ = [
     "ACTOR_MAX_TURNS",
     "LEAD_IDLE_TTL_S",
     "MEMBER_IDLE_TTL_S",
+    "_NON_REVIEWABLE_DONE",
 ]

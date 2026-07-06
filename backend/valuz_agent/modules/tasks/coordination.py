@@ -37,12 +37,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from valuz_agent.adapters.data_reader import data_reader
 from valuz_agent.infra.db import async_unit_of_work
 from valuz_agent.modules.tasks import messaging, planning
-from valuz_agent.modules.tasks.actor_runner import collect_manifest
+from valuz_agent.modules.tasks.actor_runner import _NON_REVIEWABLE_DONE, collect_manifest
 from valuz_agent.modules.tasks.datastore import (
     TaskDatastore,
     TaskEventDatastore,
@@ -173,6 +173,11 @@ class CoordinationService:
         # continuing to wait. Was previously silently dropped (``continue``),
         # which delayed inject by up to ``timeout_s``.
         user_inject: dict[str, Any] | None = None
+        # Set when the wait broke early because EVERY pending member is parked
+        # on a question for the user (requires_action) — waiting the full
+        # timeout is pure waste when nothing can move without the user.
+        awaiting_user_break = False
+        pending_probe: list[dict[str, Any]] = []
 
         while True:
             if mode == "all" and target and target.issubset(collected.keys()):
@@ -199,6 +204,27 @@ class CoordinationService:
                         user_id=user_id,
                     )
                 )
+                # Parked-member probe: a member sitting on an AskUserQuestion
+                # keeps its kernel session ``running``, so from here it is
+                # indistinguishable from a long tool call — unless we ask the
+                # decision inbox. When EVERY still-pending member is parked on
+                # user input, break out now with that state instead of burning
+                # the rest of the timeout (nothing moves until the user
+                # answers; the lead gets to react — do other work or end the
+                # turn and be woken by the eventual member_done).
+                still_pending = (target - set(collected.keys())) if target else set()
+                if still_pending:
+                    probe = await self._probe_pending_members(
+                        task_id=task_id, pending_keys=still_pending, user_id=user_id
+                    )
+                    if (
+                        probe
+                        and len(probe) == len(still_pending)
+                        and all(p.get("state") == "awaiting_user" for p in probe)
+                    ):
+                        pending_probe = probe
+                        awaiting_user_break = True
+                        break
                 continue
             except KeyError:
                 break
@@ -220,16 +246,19 @@ class CoordinationService:
             async with async_unit_of_work(commit=False) as db:
                 run = await TaskSessionDatastore(db).get_run(from_sid)
             sk = run.subtask_key if (run and run.subtask_key) else from_sid
+            m = msg.payload or {}
             # Member idle ≠ done: flip the node to in_review for the lead's
-            # review_subtask (the actor-loop fallback does the same).
-            if run and run.subtask_key:
+            # review_subtask (the actor-loop fallback does the same). ONLY for
+            # a delivering member — a failed/cancelled member_done has no work
+            # to review; its node is already parked in ``rework`` and flipping
+            # it back would present a dead run as a pending deliverable.
+            if run and run.subtask_key and str(m.get("status") or "") not in _NON_REVIEWABLE_DONE:
                 await planning.mark_in_review(
                     task_id=task_id,
                     project_id=project_id,
                     member_session_id=from_sid,
                     user_id=user_id,
                 )
-            m = msg.payload or {}
             collected[sk] = {
                 "subtask_key": run.subtask_key if (run and run.subtask_key) else None,
                 "session_id": from_sid,
@@ -244,8 +273,35 @@ class CoordinationService:
             "results": list(collected.values()),
             "pending": pending,
             "collected": len(collected),
-            "timed_out": bool(pending) and mode == "all",
+            "timed_out": bool(pending) and mode == "all" and not awaiting_user_break,
         }
+        if pending:
+            # Tell the lead what the pending members are actually DOING — a
+            # bare key list left it unable to distinguish "still building" from
+            # "dead", which is how leads end up stopping healthy tasks.
+            if not pending_probe:
+                pending_probe = await self._probe_pending_members(
+                    task_id=task_id, pending_keys=set(pending), user_id=user_id
+                )
+            out["pending_status"] = pending_probe
+            if awaiting_user_break:
+                out["awaiting_user"] = True
+                out["hint"] = (
+                    "Every pending member is paused on a question for the USER "
+                    "(it appears in the user's decision inbox). Do NOT re-call "
+                    "await_members right away — it will return this same state. "
+                    "Either work on other ready subtasks (get_plan → dispatch), "
+                    "or end your turn: you will be woken with a member_done once "
+                    "the member gets its answer and finishes."
+                )
+            elif out["timed_out"] and any(p.get("state") == "running" for p in pending_probe):
+                out["hint"] = (
+                    "Pending members with state 'running' are ALIVE and still "
+                    "working — a long tool call (build, tests, deploy) can easily "
+                    "exceed this wait. Do NOT treat them as dead and do NOT stop "
+                    "the task: await_members again (a longer timeout_s is fine), "
+                    "or work on other ready subtasks meanwhile."
+                )
         if user_inject is not None:
             # Surface the inject to the lead so it can decide how to respond
             # (typically: modify_plan + dispatch extra, or send to an in-flight
@@ -363,6 +419,89 @@ class CoordinationService:
                     session_id=None,
                     user_id=user_id,
                 )
+        return out
+
+    async def _probe_pending_members(
+        self,
+        *,
+        task_id: str,
+        pending_keys: set[str],
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Best-effort live status of still-pending members — READ ONLY.
+
+        Unlike ``_heartbeat_pending`` this never touches the plan or the runs;
+        it answers the one question a waiting lead cannot otherwise answer:
+        *is this silent member alive?* Three observable states:
+
+          * ``awaiting_user`` — the member is parked mid-turn on an
+            AskUserQuestion (pending decision-inbox entry); nothing moves until
+            the user answers.
+          * ``running`` — genuinely working (possibly a long tool call).
+          * anything else / ``unknown`` — the kernel status as-is (terminal
+            states are normally reconciled by the heartbeat before this runs).
+        """
+        if not pending_keys:
+            return []
+        try:
+            async with async_unit_of_work(commit=False) as db:
+                runs_by_key = {
+                    r.subtask_key: r
+                    for r in await TaskSessionDatastore(db).list_runs(cast(str, user_id), task_id)
+                    if r.kind == "subtask" and r.subtask_key and r.status == "active"
+                }
+        except Exception:  # noqa: BLE001
+            logger.debug("probe_pending_members: run listing failed", exc_info=True)
+            return []
+        asks = await self._pending_asks_by_session(user_id)
+        out: list[dict[str, Any]] = []
+        for key in sorted(pending_keys):
+            run = runs_by_key.get(key)
+            if run is None:
+                continue
+            kernel_status: str | None = None
+            try:
+                ks = await data_reader().get_session(cast(str, user_id), run.session_id)
+                kernel_status = getattr(ks, "status", None) if ks is not None else None
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "probe_pending_members: session read failed for %s",
+                    run.session_id,
+                    exc_info=True,
+                )
+            question = asks.get(run.session_id)
+            entry: dict[str, Any] = {
+                "subtask_key": key,
+                "session_id": run.session_id,
+                "agent": getattr(run, "agent_slug", "") or "",
+                "state": "awaiting_user" if question is not None else (kernel_status or "unknown"),
+            }
+            if question:
+                entry["question"] = question
+            out.append(entry)
+        return out
+
+    @staticmethod
+    async def _pending_asks_by_session(user_id: str | None) -> dict[str, str]:
+        """Map session_id → first pending clarifying-question text, from the
+        decision inbox. Best-effort: an unwired aggregator (tests, early boot)
+        just means no ask detection, never a failed await."""
+        try:
+            # Lazy import — the aggregator singleton lives on the API layer
+            # (same pattern as modules/docs/scheduler.py). Never a hard dep.
+            from valuz_agent.api.deps import get_decision_aggregator
+
+            entries = await get_decision_aggregator().snapshot(user_id or "")
+        except Exception:  # noqa: BLE001
+            return {}
+        out: dict[str, str] = {}
+        for e in entries:
+            if e.session_id in out:
+                continue
+            questions = (e.question_payload or {}).get("questions") or []
+            first = questions[0] if questions else {}
+            text = str(first.get("question") or "").strip() if isinstance(first, dict) else ""
+            out[e.session_id] = text[:200] or "(question pending)"
         return out
 
     # ------------------------------------------------------------------

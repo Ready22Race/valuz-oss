@@ -788,6 +788,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
         summary: str = args.get("summary", "")
         artifacts: list[str] = args.get("artifacts") or []
         status: str = args.get("status") or "completed"
+        force: bool = bool(args.get("force") or False)
 
         try:
             result = await orchestrator.finish_task(
@@ -797,6 +798,7 @@ def build_task_tool_defs(orchestrator: TaskOrchestrator) -> tuple[ToolDef, ...]:
                 summary=summary,
                 artifacts=artifacts,
                 status=status,
+                force=force,
                 user_id=ctx.user_id,
             )
             # Plan-completeness guard rejected the close — surface it so the

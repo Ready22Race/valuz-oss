@@ -2286,6 +2286,7 @@
       "subtaskSpawned": "派发子任务",
       "subtaskCompleted": "子任务完成",
       "subtaskFailed": "子任务失败",
+      "subtaskStopped": "子任务已被停止",
       "subtaskMessage": "成员消息",
       "userNote": "添加备注",
       "goalRevised": "修改目标",

@@ -1874,6 +1874,7 @@ export type KnownI18nKey =
   | "task.event.subtaskReviewReworkNoFeedback"
   | "task.event.subtaskReviewed"
   | "task.event.subtaskSpawned"
+  | "task.event.subtaskStopped"
   | "task.event.taskBlocked"
   | "task.event.taskCompleted"
   | "task.event.taskFailed"

@@ -99,6 +99,14 @@ const EVENT_META: Record<string, EventMeta> = {
     node: "bg-red-500/10 text-red-500",
     labelKey: "task.event.subtaskFailed",
   },
+  // User cancelled a member run (stop_subtask / conversation-page interrupt).
+  // Amber, not red — an intentional stop is not a failure; the node moved to
+  // rework and stays re-dispatchable.
+  subtask_stopped: {
+    icon: Square,
+    node: "bg-amber-500/10 text-amber-500",
+    labelKey: "task.event.subtaskStopped",
+  },
   subtask_message: {
     icon: MessageSquare,
     node: "bg-indigo-500/10 text-indigo-500",
@@ -945,7 +953,9 @@ export const TaskDetailPage = () => {
       }
       if (
         e.session_id &&
-        (e.type === "subtask_completed" || e.type === "subtask_failed")
+        (e.type === "subtask_completed" ||
+          e.type === "subtask_failed" ||
+          e.type === "subtask_stopped")
       ) {
         const grp = groupBySession.get(e.session_id);
         if (grp && grp.outcome === null) {
@@ -1024,6 +1034,11 @@ export const TaskDetailPage = () => {
   // an API/socket drop — or unresolved subtasks). Surface a retry/继续 entry
   // that re-launches the lead via ``resume_task`` (the :intervene resume path).
   const isBlocked = task.status === "blocked";
+  // ``stopped`` is a soft terminal: the backend state machine allows
+  // stopped→active and ``resume_task`` accepts it (reconcile members +
+  // re-drive the lead), so the page offers a resume entry — a stopped task
+  // with no way forward strands the user ("任务停了啥也干不了").
+  const isStopped = task.status === "stopped";
   // A task created straight from a prompt has title === goal; showing both is
   // pure repetition. Only surface the goal card when it adds something — a goal
   // distinct from the title, or staged attachments.
@@ -1621,10 +1636,11 @@ export const TaskDetailPage = () => {
       {/* /Reading column ---------------------------------------- */}
 
       {/* Sticky action bar — only shown while the task is still
-          ``in-flight`` (active or paused). Terminal states (completed /
-          failed / stopped) have no actionable next step on this page;
-          the result is read-only by design — users continue work by
-          opening a fresh task or chat from the project home. Hiding
+          ``in-flight`` (active or paused). Completed / failed have no
+          actionable next step on this page; the result is read-only by
+          design — users continue work by opening a fresh task or chat
+          from the project home. Blocked and stopped get their own
+          resume bar below (the backend accepts stopped→active). Hiding
           the bar entirely keeps the page distraction-free at rest.
 
           The bar carries three controls only — modify goal, the
@@ -1696,10 +1712,11 @@ export const TaskDetailPage = () => {
       )}
 
       {/* Blocked (failed-but-resumable): the lead turn errored — e.g. an API /
-          socket drop — or left unresolved subtasks. Offer a single primary
-          "retry/继续" that re-launches the lead via ``resume_task`` (the
-          :intervene resume path, which accepts ``blocked``). */}
-      {isBlocked && (
+          socket drop — or left unresolved subtasks. Stopped: a user-halted
+          soft terminal. Both re-launch the lead via ``resume_task`` (the
+          :intervene resume path accepts blocked AND stopped) — blocked reads
+          as "retry", stopped as "resume". */}
+      {(isBlocked || isStopped) && (
         <div className="sticky bottom-0 -mx-5 mt-auto overflow-hidden px-5 py-3">
           <div className="absolute inset-0 bg-card/94 backdrop-blur-3xl" />
           <div className="relative z-10 mx-auto flex w-full max-w-[760px] flex-wrap items-center justify-center gap-2 px-6">
@@ -1711,7 +1728,7 @@ export const TaskDetailPage = () => {
               }
               disabled={busy}
             >
-              {t("task.retry")}
+              {t(isBlocked ? "task.retry" : "task.resume")}
             </Button>
           </div>
         </div>
