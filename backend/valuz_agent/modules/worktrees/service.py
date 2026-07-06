@@ -1,0 +1,395 @@
+"""Project worktree service — policy over the ``infra/git_worktree`` primitives.
+
+No table: git itself is the source of truth (``git worktree list``), a sidecar
+``<slug>.meta.json`` next to each worktree carries the few facts git doesn't
+hold (origin, base_sha anchor, created_at), and session attribution rides the
+immutable ``sessions.metadata["valuz"]["worktree"]`` snapshot written at
+session creation. See docs/design/project-worktree-design.md §6.
+
+Concurrency: ``git worktree add``/``remove`` on the same repo contend on git's
+own lock files, so all mutations serialize through a per-git-root asyncio
+lock. Every git call runs off the event loop via ``asyncio.to_thread``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import secrets
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, Protocol
+
+from valuz_agent.infra import git_worktree as gw
+from valuz_agent.modules.worktrees.errors import (
+    InvalidWorktreeName,
+    WorktreeDirty,
+    WorktreeNotAvailable,
+    WorktreeNotFound,
+    WorktreeOperationFailed,
+)
+
+logger = logging.getLogger(__name__)
+
+_git_root_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(git_root: Path) -> asyncio.Lock:
+    key = str(git_root)
+    lock = _git_root_locks.get(key)
+    if lock is None:
+        lock = _git_root_locks.setdefault(key, asyncio.Lock())
+    return lock
+
+
+class ProjectRowLike(Protocol):
+    """The three project fields this service needs — satisfied by both the
+    ORM ``ProjectRow`` and the API-layer ``ProjectDetail`` dataclass."""
+
+    @property
+    def id(self) -> str: ...
+    @property
+    def kind(self) -> str: ...
+    @property
+    def root_path(self) -> str | None: ...
+
+
+@dataclass(frozen=True)
+class ProjectGitInfo:
+    """Computed-on-read git facts for feature gating (never persisted)."""
+
+    git_available: bool
+    is_repo: bool
+    git_root: str | None = None
+    # Relative path of the project cwd inside the repo when the bound
+    # root_path is a subdirectory of it ("" when they coincide).
+    subdir: str | None = None
+
+
+@dataclass(frozen=True)
+class WorktreeHandle:
+    """A live worktree bound to a session at creation time."""
+
+    name: str
+    path: str
+    branch: str
+    git_root: str
+    # Change-detection anchor; ``None`` when resuming a worktree whose
+    # sidecar was lost — cleanup then fail-closes to "keep".
+    base_sha: str | None
+    # The cwd the kernel session should run in: the worktree path plus the
+    # project's subdir inside the repo (design D7).
+    session_cwd: str
+    created: bool
+    submodules_ok: bool
+
+
+@dataclass(frozen=True)
+class WorktreeItem:
+    """One row for the worktrees panel — git state computed on read."""
+
+    name: str
+    branch: str | None
+    path: str
+    origin: str
+    base_sha: str | None
+    created_at: int | None  # Unix epoch ms
+    # ``None`` = could not verify (missing anchor or git failure); the UI
+    # renders that as "unknown", and discard requires force.
+    dirty_files: int | None
+    ahead_commits: int | None
+
+
+def _sidecar_path(git_root: Path, flat: str) -> Path:
+    return gw.worktrees_dir(git_root) / f"{flat}.meta.json"
+
+
+def _read_sidecar(git_root: Path, flat: str) -> dict[str, object] | None:
+    try:
+        raw = _sidecar_path(git_root, flat).read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_sidecar(git_root: Path, flat: str, payload: dict[str, object]) -> None:
+    try:
+        path = _sidecar_path(git_root, flat)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError as exc:
+        # Losing the sidecar only degrades auto-cleanup to fail-closed "keep".
+        logger.warning("worktrees: could not write sidecar for %s: %s", flat, exc)
+
+
+def _remove_sidecar(git_root: Path, flat: str) -> None:
+    try:
+        _sidecar_path(git_root, flat).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+class WorktreeService:
+    """Stateless orchestration — safe to construct per call site."""
+
+    # ---- feature gating ------------------------------------------------
+
+    async def project_git(self, user_id: str, project_row: ProjectRowLike) -> ProjectGitInfo:
+        """Git facts for the project's resolved cwd (route-level gate)."""
+        cwd = self._resolve_project_cwd(user_id, project_row)
+        available = await asyncio.to_thread(gw.git_available)
+        if not available:
+            return ProjectGitInfo(git_available=False, is_repo=False)
+        info = await asyncio.to_thread(gw.detect_git, cwd)
+        if info is None:
+            return ProjectGitInfo(git_available=True, is_repo=False)
+        try:
+            subdir = str(Path(cwd).resolve().relative_to(info.git_root))
+        except ValueError:
+            subdir = ""
+        return ProjectGitInfo(
+            git_available=True,
+            is_repo=True,
+            git_root=str(info.git_root),
+            subdir="" if subdir == "." else subdir,
+        )
+
+    # ---- lifecycle -----------------------------------------------------
+
+    async def get_or_create(
+        self,
+        user_id: str,
+        project_row: ProjectRowLike,
+        name: str | None = None,
+        origin: str = "u",
+    ) -> WorktreeHandle:
+        """Create (or fast-resume) a worktree for the project.
+
+        Raises ``WorktreeNotAvailable`` when git is missing or the project
+        isn't a repo — worktree semantics are "an isolated, mergeable copy",
+        so there is deliberately no mkdir fallback (design D2).
+        """
+        cwd = self._resolve_project_cwd(user_id, project_row)
+        if not await asyncio.to_thread(gw.git_available):
+            raise WorktreeNotAvailable("git is not installed or not usable on this machine")
+        info = await asyncio.to_thread(gw.detect_git, cwd)
+        if info is None:
+            raise WorktreeNotAvailable(
+                f"project directory {cwd} is not inside a git repository"
+            )
+
+        slug = name or f"wt-{secrets.token_hex(4)}"
+        try:
+            gw.validate_slug(slug)
+        except gw.InvalidWorktreeSlugError as exc:
+            raise InvalidWorktreeName(str(exc)) from exc
+
+        async with _lock_for(info.git_root):
+            try:
+                wt = await asyncio.to_thread(
+                    gw.get_or_create, info.git_root, slug, origin
+                )
+            except gw.GitWorktreeError as exc:
+                raise WorktreeOperationFailed(str(exc)) from exc
+
+            flat = gw.flatten_slug(slug)
+            submodules_ok = True
+            if wt.created:
+                _write_sidecar(
+                    info.git_root,
+                    flat,
+                    {
+                        "name": slug,
+                        "origin": origin,
+                        "base_sha": wt.head_sha,
+                        "created_at": int(time.time() * 1000),
+                    },
+                )
+                await asyncio.to_thread(gw.ensure_info_exclude, info.common_dir)
+                submodules_ok = await asyncio.to_thread(gw.init_submodules, wt.path)
+                base_sha: str | None = wt.head_sha
+            else:
+                meta = _read_sidecar(info.git_root, flat) or {}
+                raw_base = meta.get("base_sha")
+                base_sha = raw_base if isinstance(raw_base, str) and raw_base else None
+
+        session_cwd = self._session_cwd(wt.path, cwd, info.git_root)
+        return WorktreeHandle(
+            name=slug,
+            path=str(wt.path),
+            branch=wt.branch,
+            git_root=str(info.git_root),
+            base_sha=base_sha,
+            session_cwd=session_cwd,
+            created=wt.created,
+            submodules_ok=submodules_ok,
+        )
+
+    async def list_for_project(
+        self, user_id: str, project_row: ProjectRowLike
+    ) -> list[WorktreeItem]:
+        git = await self.project_git(user_id, project_row)
+        if not git.is_repo or git.git_root is None:
+            return []
+        git_root = Path(git.git_root)
+        try:
+            listed = await asyncio.to_thread(gw.list_worktrees, git_root)
+        except gw.GitWorktreeError as exc:
+            raise WorktreeOperationFailed(str(exc)) from exc
+
+        items: list[WorktreeItem] = []
+        for entry in listed:
+            flat = entry.path.name
+            meta = _read_sidecar(git_root, flat) or {}
+            raw_base = meta.get("base_sha")
+            base_sha = raw_base if isinstance(raw_base, str) and raw_base else None
+            raw_created = meta.get("created_at")
+            created_at = raw_created if isinstance(raw_created, int) else None
+            status = (
+                await asyncio.to_thread(gw.status_counts, entry.path, base_sha)
+                if base_sha
+                else None
+            )
+            items.append(
+                WorktreeItem(
+                    name=str(meta.get("name") or flat),
+                    branch=entry.branch,
+                    path=str(entry.path),
+                    origin=str(meta.get("origin") or _origin_from_branch(entry.branch)),
+                    base_sha=base_sha,
+                    created_at=created_at,
+                    dirty_files=status.dirty_files if status else None,
+                    ahead_commits=status.ahead_commits if status else None,
+                )
+            )
+        return items
+
+    async def discard(
+        self,
+        user_id: str,
+        project_row: ProjectRowLike,
+        name: str,
+        force: bool = False,
+    ) -> None:
+        """Remove a worktree. Fail-closed: unverifiable state requires *force*."""
+        git = await self.project_git(user_id, project_row)
+        if not git.is_repo or git.git_root is None:
+            raise WorktreeNotFound(f"worktree '{name}' not found")
+        git_root = Path(git.git_root)
+        flat = gw.flatten_slug(name)
+        target = None
+        for entry in await asyncio.to_thread(gw.list_worktrees, git_root):
+            if entry.path.name == flat:
+                target = entry
+                break
+        if target is None:
+            raise WorktreeNotFound(f"worktree '{name}' not found")
+
+        if not force:
+            meta = _read_sidecar(git_root, flat) or {}
+            raw_base = meta.get("base_sha")
+            base_sha = raw_base if isinstance(raw_base, str) and raw_base else None
+            dirty = (
+                await asyncio.to_thread(gw.has_changes, target.path, base_sha)
+                if base_sha
+                else True  # no anchor → cannot verify → fail-closed
+            )
+            if dirty:
+                status = (
+                    await asyncio.to_thread(gw.status_counts, target.path, base_sha)
+                    if base_sha
+                    else None
+                )
+                detail = (
+                    f"{status.dirty_files} uncommitted file(s), "
+                    f"{status.ahead_commits} unmerged commit(s)"
+                    if status
+                    else "state could not be verified"
+                )
+                raise WorktreeDirty(
+                    f"worktree '{name}' has work worth keeping ({detail}); "
+                    "pass force=true to discard anyway"
+                )
+
+        async with _lock_for(git_root):
+            try:
+                await asyncio.to_thread(gw.remove, git_root, target.path, target.branch)
+            except gw.GitWorktreeError as exc:
+                raise WorktreeOperationFailed(str(exc)) from exc
+            _remove_sidecar(git_root, flat)
+
+    async def cleanup_if_clean(self, snapshot: dict[str, object]) -> bool:
+        """Session-teardown hook: remove the session's worktree iff clean.
+
+        *snapshot* is the immutable ``metadata["valuz"]["worktree"]`` blob.
+        Never raises — teardown must not fail the caller. Returns True when
+        the worktree was removed.
+        """
+        try:
+            git_root = Path(str(snapshot["git_root"]))
+            path = Path(str(snapshot["path"]))
+            name = str(snapshot["name"])
+            branch = snapshot.get("branch")
+            base_sha = snapshot.get("base_sha")
+        except (KeyError, TypeError):
+            return False
+        if not isinstance(base_sha, str) or not base_sha:
+            return False  # no anchor → fail-closed keep
+        # Defense against a tampered snapshot: only ever remove paths that
+        # live under the managed worktrees dir of the recorded repo.
+        try:
+            path.resolve().relative_to(gw.worktrees_dir(git_root).resolve())
+        except (ValueError, OSError):
+            return False
+        if not (path / ".git").exists():
+            return False  # already gone (or never materialized)
+
+        try:
+            async with _lock_for(git_root):
+                if await asyncio.to_thread(gw.has_changes, path, base_sha):
+                    return False
+                await asyncio.to_thread(
+                    gw.remove,
+                    git_root,
+                    path,
+                    str(branch) if isinstance(branch, str) else None,
+                )
+                _remove_sidecar(git_root, gw.flatten_slug(name))
+                return True
+        except Exception:  # noqa: BLE001 — cleanup must never fail the caller
+            logger.warning("worktrees: clean-teardown failed for %s", path, exc_info=True)
+            return False
+
+    # ---- helpers -------------------------------------------------------
+
+    @staticmethod
+    def _resolve_project_cwd(user_id: str, row: ProjectRowLike) -> str:
+        from valuz_agent.infra.fs_registry import fs_registry
+
+        kind: Literal["chat", "project"] = "project" if row.kind == "project" else "chat"
+        return str(fs_registry.project_cwd(user_id, row.id, kind, row.root_path))
+
+    @staticmethod
+    def _session_cwd(worktree_path: Path, project_cwd: str, git_root: Path) -> str:
+        """Project cwd projected into the worktree (design D7)."""
+        try:
+            rel = Path(project_cwd).resolve().relative_to(git_root.resolve())
+        except (ValueError, OSError):
+            return str(worktree_path)
+        candidate = worktree_path / rel
+        # A sparse/odd checkout may not contain the subdir; fall back to the
+        # worktree root rather than handing the kernel a missing cwd.
+        return str(candidate) if candidate.is_dir() else str(worktree_path)
+
+
+def _origin_from_branch(branch: str | None) -> str:
+    """Fallback origin classification when the sidecar is missing."""
+    if branch and branch.startswith(f"{gw.BRANCH_NAMESPACE}/task-"):
+        return "task"
+    return "u"
+
+
+worktree_service = WorktreeService()

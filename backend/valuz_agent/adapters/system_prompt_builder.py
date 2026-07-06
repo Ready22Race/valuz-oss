@@ -60,4 +60,40 @@ def assemble_session_instructions(sections: list[tuple[str, str]]) -> str:
     return "\n\n".join(out)
 
 
-__all__ = ["assemble_session_instructions", "build_project_system_prompt"]
+def build_worktree_notice(
+    *,
+    name: str,
+    branch: str,
+    base_sha: str | None,
+    worktree_path: str,
+    main_workspace: str,
+    submodules_ok: bool = True,
+) -> str:
+    """Session-level context telling the agent it runs in a worktree (D5).
+
+    Without this the agent gets confused fast: the branch name looks alien,
+    ``git push`` has no upstream, and an absolute-path habit can walk it
+    right back into the main workspace, defeating the isolation.
+    """
+    base = f" created from {base_sha[:12]}" if base_sha else ""
+    lines = [
+        f"You are working in an isolated git worktree '{name}' of this project.",
+        f"- Worktree: {worktree_path} (branch `{branch}`{base}).",
+        f"- Main workspace: {main_workspace} — do NOT modify it; all work happens "
+        "in the worktree.",
+        "- Commit your changes on this branch. Do not switch branches and do not "
+        "push unless explicitly asked.",
+    ]
+    if not submodules_ok:
+        lines.append(
+            "- Git submodules could not be initialized here; run "
+            "`git submodule update --init --recursive` if you need them."
+        )
+    return "\n".join(lines)
+
+
+__all__ = [
+    "assemble_session_instructions",
+    "build_project_system_prompt",
+    "build_worktree_notice",
+]

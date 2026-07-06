@@ -1,0 +1,196 @@
+"""Lifecycle tests for ``modules/worktrees/service`` (no table — git + sidecar)."""
+
+import json
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
+
+from valuz_agent.infra import git_worktree as gw
+from valuz_agent.modules.worktrees.errors import (
+    InvalidWorktreeName,
+    WorktreeDirty,
+    WorktreeNotAvailable,
+)
+from valuz_agent.modules.worktrees.service import WorktreeService
+
+pytestmark = pytest.mark.skipif(
+    not gw.git_available(), reason="git not available on this machine"
+)
+
+USER = "local-test-owner"
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
+
+
+@dataclass
+class FakeProjectRow:
+    id: str
+    kind: str
+    root_path: str | None
+
+
+@pytest.fixture()
+def repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(root, "init", "-b", "main")
+    _git(root, "config", "user.email", "t@example.com")
+    _git(root, "config", "user.name", "T")
+    (root / "README.md").write_text("hello\n")
+    (root / "pkg").mkdir()
+    (root / "pkg" / "mod.py").write_text("x = 1\n")
+    _git(root, "add", ".")
+    _git(root, "commit", "-m", "init")
+    return root
+
+
+@pytest.fixture()
+def project(repo: Path) -> FakeProjectRow:
+    return FakeProjectRow(id="p1", kind="project", root_path=str(repo))
+
+
+@pytest.fixture()
+def svc() -> WorktreeService:
+    return WorktreeService()
+
+
+# ---- gating ----------------------------------------------------------------
+
+
+async def test_project_git_info(svc: WorktreeService, project: FakeProjectRow, repo: Path):
+    info = await svc.project_git(USER, project)
+    assert info.git_available and info.is_repo
+    assert info.git_root == str(repo.resolve())
+    assert info.subdir == ""
+
+
+async def test_project_git_subdir(svc: WorktreeService, repo: Path):
+    sub_project = FakeProjectRow(id="p2", kind="project", root_path=str(repo / "pkg"))
+    info = await svc.project_git(USER, sub_project)
+    assert info.is_repo and info.subdir == "pkg"
+
+
+async def test_non_git_project_rejected(svc: WorktreeService, tmp_path: Path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    row = FakeProjectRow(id="p3", kind="project", root_path=str(plain))
+    assert (await svc.project_git(USER, row)).is_repo is False
+    with pytest.raises(WorktreeNotAvailable):
+        await svc.get_or_create(USER, row)
+
+
+# ---- lifecycle -------------------------------------------------------------
+
+
+async def test_get_or_create_writes_sidecar_and_resumes(
+    svc: WorktreeService, project: FakeProjectRow, repo: Path
+):
+    handle = await svc.get_or_create(USER, project, name="feat-a")
+    assert handle.created is True
+    assert handle.branch == "valuz/u-feat-a"
+    assert handle.session_cwd == handle.path
+    sidecar = repo / ".valuz" / "worktrees" / "feat-a.meta.json"
+    meta = json.loads(sidecar.read_text())
+    assert meta["origin"] == "u" and meta["base_sha"] == handle.base_sha
+
+    resumed = await svc.get_or_create(USER, project, name="feat-a")
+    assert resumed.created is False
+    assert resumed.base_sha == handle.base_sha  # anchor survives resume
+
+
+async def test_invalid_name_rejected(svc: WorktreeService, project: FakeProjectRow):
+    with pytest.raises(InvalidWorktreeName):
+        await svc.get_or_create(USER, project, name="../escape")
+
+
+async def test_session_cwd_projects_subdir(svc: WorktreeService, repo: Path):
+    sub_project = FakeProjectRow(id="p2", kind="project", root_path=str(repo / "pkg"))
+    handle = await svc.get_or_create(USER, sub_project, name="feat-sub")
+    assert handle.session_cwd == str(Path(handle.path) / "pkg")
+
+
+async def test_list_for_project(svc: WorktreeService, project: FakeProjectRow):
+    handle = await svc.get_or_create(USER, project, name="feat-l")
+    (Path(handle.path) / "dirty.txt").write_text("x")
+    items = await svc.list_for_project(USER, project)
+    assert len(items) == 1
+    item = items[0]
+    assert item.name == "feat-l" and item.origin == "u"
+    assert item.base_sha == handle.base_sha
+    assert item.dirty_files == 1 and item.ahead_commits == 0
+
+
+async def test_discard_fail_closed_then_force(
+    svc: WorktreeService, project: FakeProjectRow
+):
+    handle = await svc.get_or_create(USER, project, name="feat-d")
+    (Path(handle.path) / "dirty.txt").write_text("x")
+
+    with pytest.raises(WorktreeDirty):
+        await svc.discard(USER, project, "feat-d")
+    assert Path(handle.path).exists()
+
+    await svc.discard(USER, project, "feat-d", force=True)
+    assert not Path(handle.path).exists()
+    assert await svc.list_for_project(USER, project) == []
+
+
+async def test_discard_clean_needs_no_force(svc: WorktreeService, project: FakeProjectRow):
+    handle = await svc.get_or_create(USER, project, name="feat-c")
+    await svc.discard(USER, project, "feat-c")
+    assert not Path(handle.path).exists()
+
+
+# ---- session-teardown hook -------------------------------------------------
+
+
+def _snapshot(handle) -> dict[str, object]:  # noqa: ANN001
+    return {
+        "name": handle.name,
+        "branch": handle.branch,
+        "path": handle.path,
+        "git_root": handle.git_root,
+        "base_sha": handle.base_sha,
+    }
+
+
+async def test_cleanup_if_clean_removes(svc: WorktreeService, project: FakeProjectRow):
+    handle = await svc.get_or_create(USER, project, name="auto-1")
+    assert await svc.cleanup_if_clean(_snapshot(handle)) is True
+    assert not Path(handle.path).exists()
+    # Sidecar removed alongside.
+    assert not (Path(handle.git_root) / ".valuz" / "worktrees" / "auto-1.meta.json").exists()
+
+
+async def test_cleanup_if_clean_keeps_dirty(svc: WorktreeService, project: FakeProjectRow):
+    handle = await svc.get_or_create(USER, project, name="auto-2")
+    (Path(handle.path) / "keep-me.txt").write_text("important")
+    assert await svc.cleanup_if_clean(_snapshot(handle)) is False
+    assert Path(handle.path).exists()
+
+
+async def test_cleanup_fail_closed_without_anchor(
+    svc: WorktreeService, project: FakeProjectRow
+):
+    handle = await svc.get_or_create(USER, project, name="auto-3")
+    snap = _snapshot(handle)
+    snap["base_sha"] = None
+    assert await svc.cleanup_if_clean(snap) is False
+    assert Path(handle.path).exists()
+
+
+async def test_cleanup_rejects_path_outside_managed_dir(
+    svc: WorktreeService, project: FakeProjectRow, repo: Path
+):
+    handle = await svc.get_or_create(USER, project, name="auto-4")
+    snap = _snapshot(handle)
+    snap["path"] = str(repo)  # tampered: points at the main workspace
+    assert await svc.cleanup_if_clean(snap) is False
+    assert repo.exists()

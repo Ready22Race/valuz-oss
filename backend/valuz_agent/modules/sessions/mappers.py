@@ -13,7 +13,12 @@ from src.core.types import (
 
 # Side-effect: puts the kernel on sys.path so ``src.core`` resolves.
 import valuz_agent.boot.kernel  # noqa: F401
-from valuz_agent.modules.sessions.dto import SessionDetail, SessionListItem, TodoItem
+from valuz_agent.modules.sessions.dto import (
+    SessionDetail,
+    SessionListItem,
+    TodoItem,
+    WorktreeRef,
+)
 from valuz_agent.modules.sessions.errors import SessionNotFound
 
 
@@ -61,6 +66,22 @@ def _valuz_meta(session: KernelSession) -> dict[str, object]:
     return session.metadata.get("valuz") or {}  # type: ignore[return-value]
 
 
+def _worktree_ref(meta: dict[str, object]) -> WorktreeRef | None:
+    raw = meta.get("worktree")
+    if not isinstance(raw, dict):
+        return None
+    name = raw.get("name")
+    path = raw.get("path")
+    if not name or not path:
+        return None
+    branch = raw.get("branch")
+    return WorktreeRef(
+        name=str(name),
+        branch=str(branch) if branch else None,
+        path=str(path),
+    )
+
+
 def _session_to_list_item(session: KernelSession) -> SessionListItem:
     meta = _valuz_meta(session)
     settings = getattr(session, "model_settings", None)
@@ -80,6 +101,7 @@ def _session_to_list_item(session: KernelSession) -> SessionListItem:
         permission_mode=getattr(session, "permission_mode", "full_access") or "full_access",
         effort=effort,
         task_id=str(raw_task_id) if raw_task_id else None,
+        worktree=_worktree_ref(meta),
     )
 
 
@@ -125,6 +147,7 @@ def _session_to_detail(session: KernelSession) -> SessionDetail:
         todos=todos,
         instructions=session.instructions or None,
         agent_slug=meta.get("agent_slug") or None,  # type: ignore[arg-type]
+        worktree=_worktree_ref(meta),
     )
 
 

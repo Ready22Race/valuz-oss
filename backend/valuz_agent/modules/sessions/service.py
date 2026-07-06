@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from app.schemas import (
@@ -101,7 +102,11 @@ from valuz_agent.modules.sessions.run_orchestrator import (
     is_draining_queue,
     schedule_drain,
 )
+from valuz_agent.modules.sessions.schemas import SessionWorktreeSpec
 from valuz_agent.modules.skills.datastore import SkillDatastore
+
+if TYPE_CHECKING:
+    from valuz_agent.modules.worktrees.service import ProjectRowLike, WorktreeHandle
 
 logger = logging.getLogger(__name__)
 
@@ -463,6 +468,51 @@ class SessionService:
         kind = row.kind if row.kind in ("chat", "project") else "chat"
         return str(fs_registry.project_cwd(user_id, row.id, kind, row.root_path))
 
+    @staticmethod
+    async def _enter_worktree(
+        user_id: str | None,
+        project_row: ProjectRowLike,
+        spec: SessionWorktreeSpec,
+    ) -> WorktreeHandle:
+        """Materialize the session's worktree; raises WorktreeNotAvailable
+        (422) when the project isn't a git repo — no silent fallback."""
+        if user_id is None:
+            raise ValueError("user_id is required")
+        from valuz_agent.modules.worktrees.service import worktree_service
+
+        return await worktree_service.get_or_create(
+            user_id, project_row, name=spec.name, origin="u"
+        )
+
+    @staticmethod
+    def _worktree_snapshot(handle: WorktreeHandle) -> dict[str, object]:
+        """The immutable metadata blob stamped into the session at creation.
+
+        This is the session's permanent record of where it ran (survives the
+        worktree's later removal) AND the input ``cleanup_if_clean`` trusts
+        for teardown — keep the two consumers in mind when changing shape.
+        """
+        return {
+            "name": handle.name,
+            "branch": handle.branch,
+            "path": handle.path,
+            "git_root": handle.git_root,
+            "base_sha": handle.base_sha,
+        }
+
+    @staticmethod
+    def _worktree_notice(handle: WorktreeHandle) -> str:
+        from valuz_agent.adapters.system_prompt_builder import build_worktree_notice
+
+        return build_worktree_notice(
+            name=handle.name,
+            branch=handle.branch,
+            base_sha=handle.base_sha,
+            worktree_path=handle.path,
+            main_workspace=handle.git_root,
+            submodules_ok=handle.submodules_ok,
+        )
+
     async def _resolve_bound_agent(
         self, project_id: str, agent_slug: str,
         user_id: str | None = None) -> tuple[str, KernelAgentConfig]:
@@ -537,6 +587,7 @@ class SessionService:
         override_model_id: str | None = None,
         override_provider_id: str | None = None,
         override_effort: str | None = None,
+        worktree: SessionWorktreeSpec | None = None,
         user_id: str | None = None) -> SessionDetail:
         """Create a session bound to an agent (project member OR global library).
 
@@ -662,6 +713,19 @@ class SessionService:
 
         # Snapshot the project prompt + the agent's persona instructions.
         project_row = await self._projects.get_by_id(user_id, project_id)
+        if project_row is None:
+            raise SessionNotRunnable(f"project '{project_id}' not found")
+        session_cwd = self._resolve_session_cwd(user_id, project_row)
+
+        # Worktree isolation (opt-in) — resolved BEFORE prompt assembly (the
+        # notice is a prompt section) and before the skill resolution below,
+        # which resolves relative to the session cwd. Raises 422 when the
+        # project isn't a git repo — deliberately no mkdir fallback.
+        wt_handle = None
+        if worktree is not None:
+            wt_handle = await self._enter_worktree(user_id, project_row, worktree)
+            session_cwd = wt_handle.session_cwd
+
         project_ctx = await self._projects.get_context(user_id, project_id)
         project_prompt = build_project_system_prompt(
             project_name=project_row.name if project_row else "",
@@ -682,6 +746,10 @@ class SessionService:
                 ("agent-instructions", agent.instructions or ""),
                 ("project-instructions", project_prompt),
                 ("task-playbook", CHAT_TASK_PLAYBOOK),
+                (
+                    "worktree-context",
+                    self._worktree_notice(wt_handle) if wt_handle else "",
+                ),
             ]
         )
 
@@ -700,11 +768,6 @@ class SessionService:
             if effective_effort
             else ModelSettingsSchema()
         )
-
-        project_row = await self._projects.get_by_id(user_id, project_id)
-        if project_row is None:
-            raise SessionNotRunnable(f"project '{project_id}' not found")
-        session_cwd = self._resolve_session_cwd(user_id, project_row)
 
         session_id = uuid4().hex
 
@@ -760,6 +823,8 @@ class SessionService:
             "extra_skill_ids": [],
             "agent_slug": agent_slug,
         }
+        if wt_handle is not None:
+            valuz_meta["worktree"] = self._worktree_snapshot(wt_handle)
         if creation_context:
             valuz_meta["creation_context"] = {str(k): str(v) for k, v in creation_context.items()}
 
@@ -811,6 +876,7 @@ class SessionService:
         permission_mode: str | None = None,
         effort: str | None = None,
         agent_slug: str | None = None,
+        worktree: SessionWorktreeSpec | None = None,
         user_id: str | None = None) -> SessionDetail:
         """Create a new kernel session for *project_id*.
 
@@ -837,6 +903,7 @@ class SessionService:
                 override_model_id=model_id,
                 override_provider_id=provider_id,
                 override_effort=effort,
+                worktree=worktree,
                 user_id=user_id,
             )
         # Quick-chat sessions get an ephemeral, single-use project each
@@ -1105,6 +1172,21 @@ class SessionService:
 
         if project_row is None:
             raise SessionNotRunnable(f"project '{project_id}' not found")
+
+        # Worktree isolation (opt-in): swap the session cwd for an isolated
+        # git worktree of the project repo, stamp the immutable snapshot into
+        # metadata, and tell the agent where it is (design §4). Raises 422
+        # when the project isn't a git repo — deliberately no mkdir fallback.
+        session_cwd = self._resolve_session_cwd(user_id, project_row)
+        if worktree is not None:
+            wt_handle = await self._enter_worktree(user_id, project_row, worktree)
+            session_cwd = wt_handle.session_cwd
+            valuz_meta["worktree"] = self._worktree_snapshot(wt_handle)
+            notice = f"<worktree-context>\n{self._worktree_notice(wt_handle)}\n</worktree-context>"
+            session_instructions = (
+                f"{session_instructions}\n\n{notice}" if session_instructions else notice
+            )
+
         from app.serializers import agent_config_to_schema
 
         created = await kernel_client.create_session(
@@ -1112,7 +1194,7 @@ class SessionService:
             CreateSessionRequest(
                 id=session_id,
                 agent_config=agent_config_to_schema(agent_config),
-                cwd=self._resolve_session_cwd(user_id, project_row),
+                cwd=session_cwd,
                 runtime_provider=runtime_provider,
                 model=resolution.model,
                 model_provider=model_provider,
@@ -1725,6 +1807,11 @@ class SessionService:
         session = await data_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
+        # Snapshot worktree attribution BEFORE the kernel row disappears —
+        # the post-delete teardown below needs it.
+        _pre_meta = _valuz_meta(session)
+        _wt_snapshot = _pre_meta.get("worktree")
+        _wt_project_id = str(_pre_meta.get("project_id") or "")
         await kernel_client.delete_session(user_id, session_id)
         # Drop the chat-index row too, or the session haunts the activity feed as
         # a ghost "New chat" the user can't clear (``project_index.remove`` keys
@@ -1738,6 +1825,48 @@ class SessionService:
                 )
         except Exception:  # noqa: BLE001 — cleanup must not fail the delete
             logger.debug("delete_session: queue cleanup failed for %s", session_id)
+
+        # Worktree teardown (design §3): when the deleted session ran in a
+        # worktree that no other session references, remove it iff clean.
+        # Fail-closed at every step — a dirty / unverifiable worktree stays
+        # and surfaces in the project's worktrees panel instead.
+        if isinstance(_wt_snapshot, dict):
+            await self._teardown_worktree_if_unused(
+                _wt_snapshot, _wt_project_id, user_id
+            )
+
+    async def _teardown_worktree_if_unused(
+        self,
+        snapshot: dict[str, object],
+        project_id: str,
+        user_id: str | None,
+    ) -> None:
+        """Best-effort clean-teardown; never raises out of a delete."""
+        try:
+            name = str(snapshot.get("name") or "")
+            if not name:
+                return
+            if project_id:
+                siblings = await self.list_sessions(
+                    project_id=project_id, user_id=user_id
+                )
+                if any(s.worktree and s.worktree.name == name for s in siblings):
+                    return  # still in use by a live session
+            from valuz_agent.modules.worktrees.service import worktree_service
+
+            removed = await worktree_service.cleanup_if_clean(snapshot)
+            if removed:
+                logger.info(
+                    "delete_session: removed clean worktree '%s' (%s)",
+                    name,
+                    snapshot.get("path"),
+                )
+        except Exception:  # noqa: BLE001 — teardown must not fail the delete
+            logger.warning(
+                "delete_session: worktree teardown failed for %s",
+                snapshot.get("path"),
+                exc_info=True,
+            )
 
     async def get_extra_skills(self, session_id: str, user_id: str | None = None) -> list[str]:
         session = await data_reader().get_session(user_id, session_id)

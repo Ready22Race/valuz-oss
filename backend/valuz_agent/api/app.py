@@ -36,6 +36,7 @@ from valuz_agent.api.routes.settings import router as settings_router
 from valuz_agent.api.routes.skills import router as skills_router
 from valuz_agent.api.routes.system import router as system_router
 from valuz_agent.api.routes.tasks import router as tasks_router
+from valuz_agent.api.routes.worktrees import router as worktrees_router
 from valuz_agent.boot import lifespan
 from valuz_agent.infra.config import settings
 from valuz_agent.infra.fs_registry import fs_registry
@@ -121,6 +122,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     api.include_router(runtimes_router)
     api.include_router(system_router)
     api.include_router(projects_router)
+    api.include_router(worktrees_router)
     api.include_router(sessions_router)
     api.include_router(skills_router)
     api.include_router(docs_router)

@@ -52,6 +52,20 @@ class SessionModelSelection(BaseModel):
     effort: EffortLevel | None = None
 
 
+class SessionWorktreeSpec(BaseModel):
+    """Opt-in worktree isolation for a session-creating request.
+
+    Presence of the object (even empty) means "run this session in an
+    isolated git worktree of the project repo"; ``name`` optionally reuses /
+    labels the worktree (auto-generated when omitted). Requires the project
+    cwd to be inside a git repository — otherwise the create 422s
+    (``WorktreeNotAvailable``); there is deliberately no silent fallback.
+    See docs/design/project-worktree-design.md.
+    """
+
+    name: str | None = None
+
+
 class SessionEffortRequest(BaseModel):
     """Body for ``PATCH /v1/sessions/{id}/effort``.
 

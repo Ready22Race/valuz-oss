@@ -395,6 +395,59 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Task"
+  /v1/projects/{project_id}/worktrees:
+    get:
+      summary: List the project's git worktrees (git is the source of truth)
+      operationId: listProjectWorktrees
+      tags: [projects]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: |
+            Computed-on-read worktree list plus the project's git facts
+            (feature gate for the "run in worktree" toggle). ``worktrees``
+            is empty when the project isn't a git repository.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorktreeListResponse"
+        "404":
+          description: Project not found
+  /v1/projects/{project_id}/worktrees/{name}:
+    delete:
+      summary: Discard a worktree (fail-closed)
+      operationId: discardProjectWorktree
+      tags: [projects]
+      parameters:
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: name
+          in: path
+          required: true
+          schema: {type: string}
+        - name: force
+          in: query
+          required: false
+          schema: {type: boolean, default: false}
+          description: |
+            Required to discard a worktree whose state can't be verified
+            clean (uncommitted files, unmerged commits, or a lost
+            change-detection anchor). UIs must show the dirty/ahead
+            counts from the 409 body (or the list endpoint) in a
+            confirm dialog before retrying with ``force=true``.
+      responses:
+        "204":
+          description: Worktree and its branch removed
+        "404":
+          description: Project or worktree not found
+        "409":
+          description: Worktree holds unmerged work and ``force`` was not set
   /v1/projects/{project_id}/files/{file_path}:
     get:
       summary: Read a project file as an artifact preview
@@ -4477,6 +4530,104 @@ components:
             desktop sidebar's "recent sessions") can hide task-internal
             sessions, which are implementation details of the task run
             and not something the user opened directly.
+        worktree:
+          allOf:
+            - $ref: "#/components/schemas/WorktreeRef"
+          nullable: true
+          description: |
+            Worktree the session was created in (immutable creation-time
+            snapshot from ``metadata["valuz"]["worktree"]``). ``null`` =
+            the session runs in the project's main workspace. Reflects
+            creation time, not liveness — the worktree may have been
+            removed since; ``GET /v1/projects/{id}/worktrees`` is the
+            source of truth for what still exists.
+
+    WorktreeRef:
+      type: object
+      required: [name, path]
+      properties:
+        name:
+          type: string
+        branch:
+          type: string
+          nullable: true
+        path:
+          type: string
+
+    ProjectGitInfo:
+      type: object
+      required: [git_available, is_repo]
+      description: |
+        Computed-on-read git facts for a project's resolved cwd — the
+        feature gate for worktree UI (never persisted).
+      properties:
+        git_available:
+          type: boolean
+          description: A usable git binary exists on the host machine.
+        is_repo:
+          type: boolean
+          description: The project cwd is inside a git repository.
+        git_root:
+          type: string
+          nullable: true
+        subdir:
+          type: string
+          nullable: true
+          description: |
+            Relative path of the project cwd inside the repo when the
+            bound folder is a subdirectory of it ("" when they coincide).
+
+    WorktreeItem:
+      type: object
+      required: [name, path, origin]
+      properties:
+        name:
+          type: string
+        branch:
+          type: string
+          nullable: true
+        path:
+          type: string
+        origin:
+          type: string
+          enum: [u, task]
+          description: |
+            Who created it — ``u`` (user-initiated session) worktrees are
+            never auto-swept; ``task`` worktrees are eligible for the
+            stale sweep (P2).
+        base_sha:
+          type: string
+          nullable: true
+          description: |
+            Change-detection anchor (commit the worktree was created
+            from). ``null`` when the sidecar metadata was lost — cleanup
+            then fail-closes to "keep" and discard requires ``force``.
+        created_at:
+          type: integer
+          format: int64
+          nullable: true
+          description: Unix epoch milliseconds (UTC).
+        dirty_files:
+          type: integer
+          nullable: true
+          description: |
+            Uncommitted-file count, computed on read. ``null`` = could
+            not verify (render as "unknown"; discard needs ``force``).
+        ahead_commits:
+          type: integer
+          nullable: true
+          description: Commits past ``base_sha``, computed on read.
+
+    WorktreeListResponse:
+      type: object
+      required: [git, worktrees]
+      properties:
+        git:
+          $ref: "#/components/schemas/ProjectGitInfo"
+        worktrees:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorktreeItem"
 
     TodoItem:
       type: object
@@ -4738,6 +4889,30 @@ components:
             Initial reasoning-effort budget (kernel V5+bba3014
             ``ModelSettings.effort``). ``null`` = SDK default. Mutable
             post-create via ``PATCH /v1/sessions/{id}/effort``.
+        worktree:
+          allOf:
+            - $ref: "#/components/schemas/SessionWorktreeSpec"
+          nullable: true
+          description: |
+            Opt-in worktree isolation. Presence of the object (even
+            empty) runs the session in an isolated git worktree of the
+            project repo on its own branch; ``null``/omitted runs in the
+            main workspace. Requires the project cwd to be inside a git
+            repository — otherwise the create fails with 422
+            (deliberately no silent fallback). See
+            docs/design/project-worktree-design.md.
+
+    SessionWorktreeSpec:
+      type: object
+      properties:
+        name:
+          type: string
+          nullable: true
+          description: |
+            Optional worktree name (slug, ≤64 chars, segments limited to
+            ``[a-zA-Z0-9._-]``, ``/`` allowed and flattened to ``+``).
+            Reuses the existing worktree of that name (fast-resume) or
+            names the new one; auto-generated when omitted.
         agent_slug:
           type: string
           nullable: true
