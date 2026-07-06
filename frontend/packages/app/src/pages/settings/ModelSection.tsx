@@ -290,7 +290,10 @@ export const ModelSection = () => {
   // agent" actually true: without it the row stays a template whose `ch-*` id
   // 400s ("provider not found") at session creation. Idempotent + guarded so it
   // fires once per kind — after enable the row turns deletable, so it no longer
-  // matches.
+  // matches. The ref stays populated after a successful enable (circuit
+  // breaker): if the backend response ever fails to flip `deletable` (e.g. a
+  // legacy seeded row before the server-side normalization existed), relying on
+  // the row shape alone turns this effect into an infinite enable→reload loop.
   const materializingRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const pending = providersList.filter((p) => {
@@ -309,8 +312,9 @@ export const ModelSection = () => {
         await Promise.all(pending.map((p) => providersApi.enable(p.id)));
         await loadProvidersList();
       } catch {
-        // best-effort: the session-creation backstop still materializes on use.
-      } finally {
+        // best-effort: the session-creation backstop still materializes on
+        // use. Re-arm only on failure so a focus/visibility recheck retries;
+        // a successful enable keeps the id guarded for this mount.
         pending.forEach((p) => materializingRef.current.delete(p.id));
       }
     })();

@@ -1020,10 +1020,15 @@ async def materialize_subscription(
                 existing.enabled
                 and existing.credential_source == "cli_keychain"
                 and existing.deletable
+                and existing.source == "user"
             ):
                 existing.enabled = True
                 existing.credential_source = "cli_keychain"
                 existing.deletable = True
+                # A legacy seed may carry source="builtin"; the delete guard
+                # requires source="user", so without this the row would show a
+                # delete affordance that always 400s.
+                existing.source = "user"
                 existing.updated_at = now_ms()
                 await ds.update(existing)
             return existing
@@ -1699,11 +1704,27 @@ class ProviderService:
 
         if row.enabled and row.credential_source == "cli_keychain":
             # Already in the desired state — idempotent, return current detail.
+            # Exception: a legacy seeded row (pre materialize-on-login, stored
+            # under the ``ch-*`` catalog id with ``deletable=False``) must still
+            # be normalized here. The settings page treats an oauth row without
+            # ``deletable`` as an un-materialized template and re-POSTs /enable
+            # after every list refresh — if this call never flips the flag, that
+            # becomes an infinite enable→reload loop.
+            if not (row.deletable and row.source == "user"):
+                row.deletable = True
+                row.source = "user"
+                row.updated_at = now_ms()
+                await self._ds.update(row)
+                self._bus.publish("provider.updated", provider_id=row.id)
             return _row_to_detail(row)
 
         row.enabled = True
         if row.auth_type == "oauth":
             row.credential_source = "cli_keychain"
+            # Canonical CLI-backed state (same as ``materialize_subscription``):
+            # a subscription the user logged into is theirs to manage.
+            row.deletable = True
+            row.source = "user"
         row.updated_at = now_ms()
         await self._ds.update(row)
         _invalidate_login_cache(row.provider_kind)
