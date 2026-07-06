@@ -30,29 +30,19 @@ from valuz_agent.modules.worktrees.errors import (
     WorktreeNotFound,
     WorktreeOperationFailed,
 )
+from valuz_agent.modules.worktrees.slug_words import SLUG_ADJECTIVES, SLUG_NOUNS
 
 logger = logging.getLogger(__name__)
 
 _git_root_locks: dict[str, asyncio.Lock] = {}
 
-# Friendly auto-names (design D11, borrowed from Claude Code's generator):
-# ``swift-fox-3f2a`` reads better than ``wt-a1b2c3d4`` in the panel, in the
-# branch name (``valuz/u-swift-fox-3f2a``), and when referenced in chat.
+# Friendly auto-names (design D11): ``fervent-bohr-14379d``-style
+# adjective-surname pairs, using Docker's names-generator vocabulary
+# (see slug_words.py; ~97 adjectives × 237 surnames ≈ 23k combos) — readable
+# in the panel, the branch name (``valuz/u-fervent-bohr-3f2a``), and chat.
 # Task worktrees deliberately do NOT use this — they stay the deterministic
 # ``task-<task_id>`` so each task addresses its own worktree and the stale
 # sweeper can key on the ``valuz/task-`` branch prefix.
-_SLUG_ADJECTIVES = (
-    "swift", "bright", "calm", "keen", "bold", "quiet", "brave", "clear",
-    "eager", "fresh", "gentle", "happy", "lively", "mellow", "noble", "proud",
-    "rapid", "solid", "sunny", "tidy", "vivid", "warm", "wise", "young",
-)
-_SLUG_NOUNS = (
-    "fox", "owl", "elm", "oak", "ray", "wren", "lark", "pine",
-    "reef", "brook", "cedar", "dune", "fern", "glade", "heron", "iris",
-    "koi", "lotus", "maple", "otter", "quail", "sparrow", "tern", "willow",
-)
-
-
 def _generate_slug(git_root: Path) -> str:
     """A fresh friendly slug for an unnamed worktree.
 
@@ -62,8 +52,8 @@ def _generate_slug(git_root: Path) -> str:
     """
     for _ in range(8):
         slug = (
-            f"{secrets.choice(_SLUG_ADJECTIVES)}-"
-            f"{secrets.choice(_SLUG_NOUNS)}-{secrets.token_hex(2)}"
+            f"{secrets.choice(SLUG_ADJECTIVES)}-"
+            f"{secrets.choice(SLUG_NOUNS)}-{secrets.token_hex(2)}"
         )
         if not gw.worktree_path(git_root, slug).exists():
             return slug
