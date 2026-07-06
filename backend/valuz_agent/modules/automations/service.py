@@ -608,6 +608,7 @@ class AutomationService:
         project_kind: str,
         project_id: str | None,
         session_agent_slug: str | None,
+        task_worktree: bool = False,
     ) -> AutomationCreatePayload:
         """Assemble an :class:`AutomationCreatePayload` from raw create inputs.
 
@@ -648,6 +649,9 @@ class AutomationService:
             prompt_template=(prompt_template or "").strip(),
             trigger=trigger,
             action_kind=action,  # type: ignore[arg-type]
+            # Worktree isolation is a task-mode property — silently drop it
+            # for chat rows rather than persisting a meaningless flag.
+            task_worktree=bool(task_worktree) and action == "task",
         )
 
     async def _preview_agent_name(
@@ -741,6 +745,7 @@ class AutomationService:
             agent_kind=payload.agent_kind,
             agent_name=agent_name,
             action_kind=payload.action_kind,
+            task_worktree=bool(payload.task_worktree),
             trigger_human_readable=self._trigger_human(row),
             next_run_at=next_run,
         )

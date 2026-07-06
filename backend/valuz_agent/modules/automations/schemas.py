@@ -311,6 +311,10 @@ class AutomationToolPayload(BaseModel):
     # ``task`` kicks off a project task with the bound agent as Lead — only
     # valid from a PROJECT session (the tool rejects ``task`` in a chat).
     action_kind: str | None = None
+    # create/update, ``task`` action only: run each fired task (lead + every
+    # member) in one isolated git worktree of the project repo. Ignored for
+    # ``chat`` action. Requires the project to be a git repository.
+    task_worktree: bool | None = None
     scope: str | None = Field(
         default=None,
         description=(
@@ -340,6 +344,9 @@ class AutomationProposalSpec(BaseModel):
     agent_kind: str
     agent_name: str | None = None
     action_kind: str
+    # Task-level worktree isolation (``task`` action only) — echoed so the
+    # confirm card can display and replay it.
+    task_worktree: bool = False
     # Localised "每天 9 点" / "every 5 minutes" — the card's primary schedule line.
     trigger_human_readable: str
     # First fire instant (epoch ms) the schedule would produce — preview only.
@@ -381,6 +388,7 @@ class AutomationProposalConfirmRequest(BaseModel):
     trigger: Trigger
     agent_slug: str | None = None
     action_kind: ActionKind = "chat"
+    task_worktree: bool = False
 
 
 class AutomationProposalStatusRequest(BaseModel):

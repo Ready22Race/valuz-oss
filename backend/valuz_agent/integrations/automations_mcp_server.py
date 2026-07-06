@@ -299,6 +299,7 @@ async def _handle_create(
             project_kind=project_kind,
             project_id=project_id,
             session_agent_slug=session_agent_slug,
+            task_worktree=bool(payload.task_worktree),
         )
     except AutomationNameEmpty:
         return _err("create", "name is required for create.", code="MISSING_NAME")
@@ -657,6 +658,12 @@ Actions
     kicks off a full project task with the bound agent as the Lead. "task" is
     ONLY valid in a PROJECT session (it needs the project's task context); in a
     chat it is rejected — omit it / use "chat" there.
+  task_worktree — OPTIONAL, "task" action only (ignored for "chat"): true runs
+    each fired task in an isolated git worktree of the project repo — the lead
+    and every member share ONE worktree branch, the main workspace stays
+    untouched, and a worktree left with no changes is removed automatically
+    when the task finishes. Only meaningful when the project is a git
+    repository. Default false (the task works in the project directory).
   trigger — discriminated object. Use interval for "every N minutes/seconds"
     schedules, cron for clock-time schedules:
     {"kind": "cron", "cron_expr": "0 9 * * *", "timezone": "Asia/Shanghai"}
@@ -709,6 +716,7 @@ async def automation(
     agent_slug: str | None = None,
     trigger: dict[str, Any] | None = None,
     action_kind: str | None = None,
+    task_worktree: bool | None = None,
     scope: str | None = None,
     input: str | None = None,  # noqa: A002 — MCP wire arg name; intentional
 ) -> str:
@@ -741,6 +749,7 @@ async def automation(
             agent_slug=agent_slug,
             trigger=coerced_trigger,
             action_kind=action_kind,
+            task_worktree=task_worktree,
             scope=scope,
             input=input,
         )

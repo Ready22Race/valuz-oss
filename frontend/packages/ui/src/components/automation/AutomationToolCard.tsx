@@ -70,6 +70,8 @@ export interface AutomationProposalSpecPayload {
   agent_kind: string;
   agent_name: string | null;
   action_kind: "chat" | "task";
+  /** Task-level worktree isolation (`task` action only). */
+  task_worktree?: boolean;
   trigger_human_readable: string;
   next_run_at: number | null;
 }

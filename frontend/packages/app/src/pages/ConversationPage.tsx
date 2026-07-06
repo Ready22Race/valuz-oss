@@ -1554,6 +1554,7 @@ export const ConversationPage = () => {
         trigger: import("@valuz/core").Trigger;
         agent_slug?: string | null;
         action_kind?: "chat" | "task";
+        task_worktree?: boolean;
       },
     ) => {
       const sid = selectedSessionIdRef.current;
@@ -1570,6 +1571,7 @@ export const ConversationPage = () => {
           trigger: spec.trigger,
           agent_slug: spec.agent_slug ?? null,
           action_kind: spec.action_kind,
+          task_worktree: spec.task_worktree ?? false,
         });
         setAutomationProposalStates((prev) => ({
           ...prev,
@@ -1929,6 +1931,7 @@ export const ConversationPage = () => {
             automationTriggerSummary(confirmTrigger, t);
           const cardActionKind =
             proposal?.action_kind ?? inputSpec?.action_kind ?? "chat";
+          const cardTaskWorktree = proposal?.task_worktree ?? false;
           const cardAgentName = proposal?.agent_name ?? inputSpec?.agent_slug ?? null;
           const entry = automationProposalStates[tool.id] || {
             state: "pending" as const,
@@ -1940,6 +1943,7 @@ export const ConversationPage = () => {
               triggerHuman={cardTriggerHuman}
               agentName={cardAgentName}
               actionKind={cardActionKind}
+              taskWorktree={cardTaskWorktree}
               state={entry.state}
               errorMessage={entry.errorMessage}
               validationError={validationError}
@@ -1951,6 +1955,7 @@ export const ConversationPage = () => {
                   trigger: confirmTrigger,
                   agent_slug: proposal?.agent_slug ?? inputSpec?.agent_slug,
                   action_kind: cardActionKind,
+                  task_worktree: cardTaskWorktree,
                 });
               }}
               onDismiss={() => handleDismissAutomation(tool.id)}

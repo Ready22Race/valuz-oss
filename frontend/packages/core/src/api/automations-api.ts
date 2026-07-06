@@ -246,6 +246,8 @@ export interface AutomationProposalSpec {
   agent_kind: AgentKind;
   agent_name: string | null;
   action_kind: ActionKind;
+  /** Task-level worktree isolation (`task` action only). */
+  task_worktree: boolean;
   trigger_human_readable: string;
   next_run_at: number | null;
 }
@@ -259,6 +261,7 @@ export interface AutomationProposalConfirmPayload {
   trigger: Trigger;
   agent_slug?: string | null;
   action_kind?: ActionKind;
+  task_worktree?: boolean;
 }
 
 export interface AutomationProposalStatusResult {
