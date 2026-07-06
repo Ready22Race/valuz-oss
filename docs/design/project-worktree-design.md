@@ -1,6 +1,6 @@
 # Project Worktree 设计方案
 
-> 状态：Aligned Draft（已对齐核心决策，未实施）
+> 状态：P0 已实现（会话级后端闭环，见 §12；P1+ 未实施）
 > 参考实现：Claude Code（源码调研结论见附录 A）
 > 现状关联：`fs_registry.subrun_dir(mode="repo-worktree")`（将被任务级方案取代）、
 > session cwd 决策链（`SessionService._resolve_session_cwd` → `CreateSessionRequest.cwd`）
