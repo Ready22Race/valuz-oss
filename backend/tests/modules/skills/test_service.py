@@ -54,7 +54,7 @@ class FakeSkillDatastore:
         self._enabled: dict[str, set[str]] = {}
         self._rows: dict[str, object] = {}
 
-    def list_project_skill_manifests(self, project, source):
+    def list_project_skill_manifests(self, project, source, *, compute_content_hash=True):
         ctx = RuntimeContext(
             project=ProjectRef(
                 id=project.id,
@@ -281,7 +281,7 @@ class TestListCatalog:
         class _ExplodingOfficialSource:
             name = "official"
 
-            def list_skills(self, ctx):
+            def list_skills(self, ctx, *, compute_content_hash=True):
                 raise AssertionError("official source should not be scanned when index is warm")
 
         service._extra_sources = [_ExplodingOfficialSource()]
@@ -373,7 +373,7 @@ class TestListCatalog:
         class _NullTimeSource:
             name = "null-time"
 
-            def list_skills(self, ctx):
+            def list_skills(self, ctx, *, compute_content_hash=True):
                 return [
                     SkillManifest(
                         id="extra:legacy",
