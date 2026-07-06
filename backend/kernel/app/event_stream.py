@@ -44,13 +44,21 @@ class GlobalQueueTap:
 
     def __init__(self, maxsize: int = DEFAULT_QUEUE_SIZE * 2) -> None:
         self.queue: asyncio.Queue[tuple[str, Event]] = asyncio.Queue(maxsize=maxsize)
+        self._dropped = 0
 
     async def emit_session(self, session_id: str, event: Event) -> None:
         try:
             self.queue.put_nowait((session_id, event))
         except asyncio.QueueFull:
-            logger.debug(
-                "Global event queue full, dropping event %s for session %s",
-                event.type,
-                session_id,
-            )
+            # This tap feeds the host's Decision Inbox aggregator — a dropped
+            # ``requires_action`` stays user-invisible until a reconcile pass,
+            # so overflow must be observable. Rate-limited: an overflow burst
+            # drops thousands of (mostly delta) events at token speed.
+            self._dropped += 1
+            if self._dropped == 1 or self._dropped % 500 == 0:
+                logger.warning(
+                    "Global event queue full; %d events dropped so far (latest: %s for %s)",
+                    self._dropped,
+                    event.type,
+                    session_id,
+                )
