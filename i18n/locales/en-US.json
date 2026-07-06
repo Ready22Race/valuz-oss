@@ -86,8 +86,8 @@
     "triggerManual": "Manual",
     "updateFailed": "Update failed: {error}",
     "updateSuccess": "Updated \"{name}\"",
-    "taskWorktreeLabel": "Worktree isolation",
-    "taskWorktreeHint": "Each fired task runs in an isolated git worktree — the main workspace stays untouched; a clean worktree is removed when the task finishes."
+    "worktreeLabel": "Worktree isolation",
+    "worktreeHint": "Each fire runs in an isolated git worktree — the main workspace stays untouched; a clean worktree is removed when the run finishes. Requires a git-repo project."
   },
   "backend": {
     "schedule": {

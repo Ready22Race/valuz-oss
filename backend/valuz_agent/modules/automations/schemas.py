@@ -114,10 +114,12 @@ class AutomationCreatePayload(BaseModel):
     # callers that omit the field on the simple-task path; the service
     # rejects ``task`` on chat projects.
     action_kind: ActionKind = "chat"
-    # Task-level worktree isolation (design §5) — ``task`` action only: each
-    # fired task runs lead + every member in one git worktree of the project
-    # repo (clean worktrees auto-remove at finish). Ignored for ``chat`` rows.
-    task_worktree: bool = False
+    # Worktree isolation (design §5) — valid for BOTH action kinds, gated on the
+    # bound project being a git repo. ``chat`` runs each fire in its own git
+    # worktree of the project repo; ``task`` runs lead + every member in one
+    # worktree (clean worktrees auto-remove at finish). Silently dropped for
+    # non-git (chat-sentinel) projects.
+    worktree: bool = False
 
 
 class AutomationUpdatePayload(BaseModel):
@@ -141,7 +143,7 @@ class AutomationUpdatePayload(BaseModel):
     # constraint — task only on projects). The service validates
     # the resulting (project_kind, action_kind) pair.
     action_kind: ActionKind | None = None
-    task_worktree: bool | None = None
+    worktree: bool | None = None
 
 
 # ── Response models ──────────────────────────────────────────────────
@@ -163,8 +165,8 @@ class AutomationItemResponse(BaseModel):
     # Execution mode (see ``ActionKind``). UI uses this to render the
     # appropriate badge and pre-select the right Tab when editing.
     action_kind: str
-    # Task-level worktree isolation flag (``task`` action only).
-    task_worktree: bool = False
+    # Worktree isolation flag (both action kinds; git-repo projects only).
+    worktree: bool = False
 
     # Trigger payload re-projected as a discriminated union so the frontend
     # doesn't have to reconstitute it from flat columns.
@@ -311,10 +313,11 @@ class AutomationToolPayload(BaseModel):
     # ``task`` kicks off a project task with the bound agent as Lead — only
     # valid from a PROJECT session (the tool rejects ``task`` in a chat).
     action_kind: str | None = None
-    # create/update, ``task`` action only: run each fired task (lead + every
-    # member) in one isolated git worktree of the project repo. Ignored for
-    # ``chat`` action. Requires the project to be a git repository.
-    task_worktree: bool | None = None
+    # create/update, both action kinds: run each fire in an isolated git
+    # worktree of the project repo. ``chat`` isolates the single session;
+    # ``task`` isolates the whole task (lead + every member). Requires the
+    # project to be a git repository (silently dropped otherwise).
+    worktree: bool | None = None
     scope: str | None = Field(
         default=None,
         description=(
@@ -344,9 +347,9 @@ class AutomationProposalSpec(BaseModel):
     agent_kind: str
     agent_name: str | None = None
     action_kind: str
-    # Task-level worktree isolation (``task`` action only) — echoed so the
-    # confirm card can display and replay it.
-    task_worktree: bool = False
+    # Worktree isolation (both action kinds; git-repo projects only) — echoed
+    # so the confirm card can display and replay it.
+    worktree: bool = False
     # Localised "每天 9 点" / "every 5 minutes" — the card's primary schedule line.
     trigger_human_readable: str
     # First fire instant (epoch ms) the schedule would produce — preview only.
@@ -388,7 +391,7 @@ class AutomationProposalConfirmRequest(BaseModel):
     trigger: Trigger
     agent_slug: str | None = None
     action_kind: ActionKind = "chat"
-    task_worktree: bool = False
+    worktree: bool = False
 
 
 class AutomationProposalStatusRequest(BaseModel):

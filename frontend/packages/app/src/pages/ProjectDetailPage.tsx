@@ -823,7 +823,7 @@ export const ProjectDetailPage = () => {
     agent_slug: string;
     trigger: Trigger;
     action_kind: ActionKind;
-    task_worktree: boolean;
+    worktree: boolean;
   }) => {
     // Edit mode: PATCH the existing row. The dialog is stateless and calls the
     // same submit handler for create + edit; ``editTask`` decides which.
@@ -834,7 +834,7 @@ export const ProjectDetailPage = () => {
         agent_slug: data.agent_slug,
         trigger: data.trigger,
         action_kind: data.action_kind,
-        task_worktree: data.task_worktree,
+        worktree: data.worktree,
       });
       toast.success(t("common.saved" as Parameters<typeof t>[0]));
       await reloadScheduledTasks();
@@ -853,7 +853,7 @@ export const ProjectDetailPage = () => {
       prompt_template: data.prompt_template,
       trigger: data.trigger,
       action_kind: data.action_kind,
-      task_worktree: data.task_worktree,
+      worktree: data.worktree,
     });
     toast.success(t("project.taskCreated" as Parameters<typeof t>[0]));
     const schedRes = await automationsApi.listGroups(id);
@@ -1580,7 +1580,7 @@ export const ProjectDetailPage = () => {
                 agent_slug: editTask.agent_slug,
                 trigger: editTask.trigger,
                 action_kind: (editTask.action_kind as ActionKind) ?? "chat",
-                task_worktree: editTask.task_worktree ?? false,
+                worktree: editTask.worktree ?? false,
               }
             : undefined
         }

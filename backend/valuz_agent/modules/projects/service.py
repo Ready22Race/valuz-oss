@@ -621,16 +621,40 @@ class ProjectService:
             return str(_root_path(user_id, row.root_path)) if row.root_path else None
         return str(fs_registry.project_cwd(user_id, row.id, kind, row.root_path))  # type: ignore[arg-type]
 
+    async def _worktree_root(
+        self, user_id: str, row: ProjectRow, worktree: str
+    ) -> Path | None:
+        """Resolve a session's worktree cwd (design D7), or ``None`` if the
+        named worktree isn't a live managed worktree of this project's repo.
+
+        Lets the file-tree / artifact-read endpoints scope to the directory a
+        worktree session actually runs in instead of the shared project cwd.
+        """
+        from valuz_agent.modules.worktrees.service import worktree_service
+
+        resolved = await worktree_service.resolve_session_cwd(user_id, row, worktree)
+        return Path(resolved) if resolved else None
+
     async def list_files(
         self,
         user_id: str,
         project_id: str,
         depth: int = 2,
         include_hidden: bool = False,
+        worktree: str | None = None,
     ) -> list[dict[str, object]]:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
             raise KeyError(project_id)
+        # A worktree session's file tree reflects the worktree checkout, not the
+        # shared project cwd. Resolve it up front; a removed/invalid worktree
+        # yields an empty tree (the session self-heals on the next send).
+        if worktree:
+            wt_root = await self._worktree_root(user_id, row, worktree)
+            if wt_root is None or not wt_root.exists():
+                return []
+            nodes = _walk_dir(wt_root, depth=depth, include_hidden=include_hidden)
+            return [_node_to_dict(n) for n in nodes]
         # Projects delegate to the system file system. Chat projects walk their managed cwd under
         # ``fs_registry.project_root(user_id)`` so any files the agent generates
         # during the chat (excel exports, reports, scratch outputs, …)
@@ -690,10 +714,17 @@ class ProjectService:
         user_id: str,
         project_id: str,
         file_path: str,
+        worktree: str | None = None,
     ) -> ArtifactFileResponse:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
             raise KeyError(project_id)
+        if worktree:
+            wt_root = await self._worktree_root(user_id, row, worktree)
+            if wt_root is None:
+                raise FileNotFoundError(file_path)
+            file = _file_bytes(wt_root, _resolve_project_file(wt_root, file_path))
+            return _artifact_response_from_file(project_id, file)
         if row.kind == "project":
             if not row.root_path:
                 raise ValueError("Project has no root path")
@@ -719,10 +750,23 @@ class ProjectService:
         user_id: str,
         project_id: str,
         file_path: str,
+        worktree: str | None = None,
     ) -> ProjectFileResource:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
             raise KeyError(project_id)
+        if worktree:
+            wt_root = await self._worktree_root(user_id, row, worktree)
+            if wt_root is None:
+                raise FileNotFoundError(file_path)
+            file = _file_bytes(wt_root, _resolve_project_file(wt_root, file_path))
+            return ProjectFileResource(
+                rel_path=file.rel_path,
+                name=file.name,
+                mime_type=file.mime_type,
+                size=file.size,
+                path=_resolve_project_file(wt_root, file_path),
+            )
         if row.kind == "project":
             if not row.root_path:
                 raise ValueError("Project has no root path")

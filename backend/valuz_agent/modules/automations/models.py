@@ -73,11 +73,12 @@ class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     #   protocol. Only valid for projects — chat projects don't
     #   have the multi-member context the task protocol needs.
     action_kind: Mapped[str] = mapped_column(String(16), default="chat")
-    # Task-level worktree isolation (design §5) — ``task`` action only. Each
-    # fire's task (lead + every member) runs in ONE git worktree of the
-    # project repo; clean worktrees auto-remove when the task finishes.
-    # Ignored for ``chat`` action rows.
-    task_worktree: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Worktree isolation (design §5) — valid for BOTH action kinds, gated on
+    # the bound project being a git repo. ``chat`` fires each run in its own
+    # git worktree of the project repo; ``task`` runs the whole task (lead +
+    # every member) in ONE worktree. Clean worktrees auto-remove when the run
+    # / task finishes. Ignored for non-git (chat-sentinel) projects.
+    worktree: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # ── Trigger (何时触发) ────────────────────────────────────────────
     trigger_kind: Mapped[str] = mapped_column(String(32))
