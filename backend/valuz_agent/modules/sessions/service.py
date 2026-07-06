@@ -106,6 +106,8 @@ from valuz_agent.modules.sessions.schemas import SessionWorktreeSpec
 from valuz_agent.modules.skills.datastore import SkillDatastore
 
 if TYPE_CHECKING:
+    from src.core.types import Session as KernelSessionT
+
     from valuz_agent.modules.worktrees.service import ProjectRowLike, WorktreeHandle
 
 logger = logging.getLogger(__name__)
@@ -381,7 +383,18 @@ class SessionService:
         session = await data_reader().get_session(user_id, session_id)
         if session is None:
             raise _kernel_session_not_found(session_id)
-        return _session_to_detail(session)
+        detail = _session_to_detail(session)
+        # Liveness is computed on read (git/fs is the source of truth) — the
+        # metadata snapshot only says where the session was created. The UI
+        # uses this to grey out the worktree badge; sending a message will
+        # self-heal (recreate) the worktree anyway.
+        if detail.worktree is not None:
+            from pathlib import Path as _Path
+
+            detail.worktree.exists = await asyncio.to_thread(
+                (_Path(detail.worktree.path) / ".git").exists
+            )
+        return detail
 
     async def list_events(
         self,
@@ -499,6 +512,19 @@ class SessionService:
             "git_root": handle.git_root,
             "base_sha": handle.base_sha,
         }
+
+    @staticmethod
+    async def _heal_worktree_if_missing(session: KernelSessionT) -> dict[str, object] | None:
+        """Re-entry guard (design §4-R): recreate a removed worktree before a
+        turn runs, so a historical worktree session stays usable instead of
+        dying in the runtime with a missing-cwd error. Returns the refreshed
+        metadata snapshot when a recreation happened (caller persists it)."""
+        snapshot = _valuz_meta(session).get("worktree")
+        if not isinstance(snapshot, dict):
+            return None
+        from valuz_agent.modules.worktrees.service import worktree_service
+
+        return await worktree_service.heal_from_snapshot(snapshot)
 
     @staticmethod
     def _worktree_notice(handle: WorktreeHandle) -> str:
@@ -1270,6 +1296,11 @@ class SessionService:
 
         await _enforce_budget(session, user_id=user_id)
 
+        # Worktree re-entry guard: a removed worktree is recreated at its
+        # deterministic path before the turn starts (raises an actionable
+        # 422/500 instead of a cryptic runtime cwd failure).
+        healed_worktree = await self._heal_worktree_if_missing(session)
+
         old_status = status
 
         # Optimistically set status to "running" so the router sees it immediately.
@@ -1277,6 +1308,8 @@ class SessionService:
         valuz = dict(meta.get("valuz") or {})
         if not valuz.get("name"):
             valuz["name"] = _derive_session_name(content)
+        if healed_worktree is not None:
+            valuz["worktree"] = healed_worktree
         meta["valuz"] = valuz
 
         updated = await kernel_client.finalize_session(
@@ -1355,6 +1388,10 @@ class SessionService:
 
         await _enforce_budget(session, user_id=user_id)
 
+        # Mirror ``send_message``: worktree re-entry guard for schedule-driven
+        # sessions too — a removed worktree is recreated before the turn.
+        healed_worktree = await self._heal_worktree_if_missing(session)
+
         # Mirror ``send_message``: flip the session to ``status="running"``
         # before driving the turn. The frontend's auto-resume effect on
         # the conversation page only subscribes to SSE when it reads
@@ -1367,6 +1404,8 @@ class SessionService:
         running_valuz = dict(running_meta.get("valuz") or {})
         if not running_valuz.get("name"):
             running_valuz["name"] = content[:40].replace("\n", " ").strip()
+        if healed_worktree is not None:
+            running_valuz["worktree"] = healed_worktree
         running_meta["valuz"] = running_valuz
         await kernel_client.finalize_session(
             user_id,

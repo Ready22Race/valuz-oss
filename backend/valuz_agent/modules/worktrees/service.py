@@ -363,6 +363,71 @@ class WorktreeService:
             logger.warning("worktrees: clean-teardown failed for %s", path, exc_info=True)
             return False
 
+    async def heal_from_snapshot(
+        self, snapshot: dict[str, object]
+    ) -> dict[str, object] | None:
+        """Recreate a session's worktree that was removed since creation.
+
+        Re-entry path (design §4-R): a historical session's cwd is frozen to
+        the worktree path; when that worktree was discarded (panel, manual
+        ``git worktree remove``, or sibling-session teardown), sending a new
+        message would otherwise die in the runtime with a missing-cwd error.
+        The path is deterministic (same slug → same path), so recreating from
+        the snapshot restores the exact cwd the kernel session points at —
+        based on the repo's CURRENT HEAD, with a fresh ``base_sha`` anchor.
+
+        Returns the refreshed snapshot (caller persists it into the session
+        metadata) when a recreation happened; ``None`` when the worktree is
+        still alive. Raises ``WorktreeNotAvailable`` when the recorded repo
+        itself is gone — the caller surfaces that as an actionable error
+        instead of a cryptic runtime failure.
+        """
+        path = Path(str(snapshot.get("path") or ""))
+        name = str(snapshot.get("name") or "")
+        git_root = Path(str(snapshot.get("git_root") or ""))
+        if not name or not str(path):
+            return None
+        if (path / ".git").exists():
+            return None  # alive — nothing to heal
+
+        if not git_root.is_dir() or await asyncio.to_thread(gw.detect_git, git_root) is None:
+            raise WorktreeNotAvailable(
+                f"worktree '{name}' was removed and its repository "
+                f"({git_root}) is no longer a git repository"
+            )
+        branch = snapshot.get("branch")
+        origin = _origin_from_branch(str(branch) if isinstance(branch, str) else None)
+
+        async with _lock_for(git_root):
+            try:
+                wt = await asyncio.to_thread(gw.get_or_create, git_root, name, origin)
+            except gw.GitWorktreeError as exc:
+                raise WorktreeOperationFailed(
+                    f"worktree '{name}' was removed and could not be recreated: {exc}"
+                ) from exc
+            flat = gw.flatten_slug(name)
+            if wt.created:
+                _write_sidecar(
+                    git_root,
+                    flat,
+                    {
+                        "name": name,
+                        "origin": origin,
+                        "base_sha": wt.head_sha,
+                        "created_at": int(time.time() * 1000),
+                    },
+                )
+                await asyncio.to_thread(gw.init_submodules, wt.path)
+
+        logger.info("worktrees: recreated missing worktree '%s' at %s", name, wt.path)
+        return {
+            "name": name,
+            "branch": wt.branch,
+            "path": str(wt.path),
+            "git_root": str(git_root),
+            "base_sha": wt.head_sha,
+        }
+
     # ---- helpers -------------------------------------------------------
 
     @staticmethod

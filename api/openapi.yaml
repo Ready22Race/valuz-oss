@@ -4553,6 +4553,16 @@ components:
           nullable: true
         path:
           type: string
+        exists:
+          type: boolean
+          nullable: true
+          description: |
+            Liveness computed on read — populated on ``GET
+            /v1/sessions/{id}`` only (``null`` on list items). ``false``
+            means the worktree was removed since the session was created;
+            the next send self-heals by recreating it at the same path
+            (fresh branch off the repo's current HEAD, new ``base_sha``
+            anchor).
 
     ProjectGitInfo:
       type: object

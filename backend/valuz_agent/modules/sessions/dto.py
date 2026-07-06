@@ -24,6 +24,10 @@ class WorktreeRef:
     name: str
     branch: str | None
     path: str
+    # Liveness, computed on read (detail fetch only; ``None`` on list items).
+    # False = the worktree was removed since the session was created — the
+    # next send self-heals by recreating it at the same path.
+    exists: bool | None = None
 
 
 @dataclass

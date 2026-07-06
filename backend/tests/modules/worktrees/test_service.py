@@ -186,6 +186,42 @@ async def test_cleanup_fail_closed_without_anchor(
     assert Path(handle.path).exists()
 
 
+async def test_heal_recreates_missing_worktree(
+    svc: WorktreeService, project: FakeProjectRow, repo: Path
+):
+    handle = await svc.get_or_create(USER, project, name="heal-1")
+    snap = _snapshot(handle)
+    # Simulate the worktree being discarded after the session was created.
+    await svc.discard(USER, project, "heal-1")
+    assert not Path(handle.path).exists()
+
+    refreshed = await svc.heal_from_snapshot(snap)
+    assert refreshed is not None
+    assert refreshed["path"] == handle.path  # deterministic path restored
+    assert refreshed["branch"] == handle.branch
+    assert (Path(handle.path) / ".git").exists()
+    # Fresh anchor points at the repo's current HEAD.
+    assert refreshed["base_sha"] == _git(repo, "rev-parse", "HEAD")
+
+
+async def test_heal_noop_when_alive(svc: WorktreeService, project: FakeProjectRow):
+    handle = await svc.get_or_create(USER, project, name="heal-2")
+    assert await svc.heal_from_snapshot(_snapshot(handle)) is None
+
+
+async def test_heal_raises_when_repo_gone(
+    svc: WorktreeService, project: FakeProjectRow, tmp_path: Path
+):
+    from valuz_agent.modules.worktrees.errors import WorktreeNotAvailable
+
+    handle = await svc.get_or_create(USER, project, name="heal-3")
+    snap = _snapshot(handle)
+    snap["git_root"] = str(tmp_path / "vanished")
+    snap["path"] = str(tmp_path / "vanished" / ".valuz" / "worktrees" / "heal-3")
+    with pytest.raises(WorktreeNotAvailable):
+        await svc.heal_from_snapshot(snap)
+
+
 async def test_cleanup_rejects_path_outside_managed_dir(
     svc: WorktreeService, project: FakeProjectRow, repo: Path
 ):
