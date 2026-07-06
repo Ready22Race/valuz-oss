@@ -155,6 +155,17 @@ cwd 由 host 决策、kernel 只消费字符串——**kernel 全程零改动**�
 - 分支命名 `valuz/<origin>-<slug>`（origin ∈ `u` | `task`）：`valuz/` 前缀是命名空间，
   origin 前缀是自动清扫的双保险（meta.json 为准，分支名兜底——对齐 CC 用命名模式
   区分临时 worktree 的思路）。斜杠 slug 扁平化为 `+`（单射，避开 git ref D/F 冲突）。
+- **自动命名（D11，已实现）**：用户未命名时的会话级 worktree 自动生成
+  `<形容词>-<科学家姓氏>-<4hex>`（如 `fervent-bohr-3f2a`）。词库采用 Docker 的
+  names-generator（moby/moby，Apache-2.0，上游已冻结；`slug_words.py` 收录并
+  过滤掉 angry/boring 等负面形容词后为 97×237 ≈ 2.3 万组合）——CC 自带的
+  5×5 生成器（`swift-fox-x4z9`）词面太窄，Docker 词库正是 CC harness 自身
+  worktree 命名（`fervent-bohr-14379d`）的同源方案。相比旧的 `wt-<8hex>`：
+  面板、分支名（`valuz/u-fervent-bohr-3f2a`）、对话里引用都可读可念。唯一性
+  不靠词而靠 hex 后缀 + 生成时的路径存在性检查（撞名会 fast-resume 到别人的
+  worktree，必须避免），撞满重试后退回纯 hex。任务级保持确定性
+  `task-<task_id 前 12 位>`——机器所有、按 task 可寻址、自动清扫按
+  `valuz/task-` 前缀识别，友好名在这里反而有害。
 
 ---
 
@@ -300,3 +311,45 @@ Agent/Workflow `isolation:"worktree"`（子 agent 隔离，结束时无变更自
 CC 没有的、valuz 因产品形态（多会话 GUI 平台）而不同的：worktree 是跨会话可见的项目
 子资源（面板/列表/汇合 UX）；任务级共享 worktree（lead+member 协作同一分支）；
 云沙箱投影。CC 没有 copy-tree（非 git 直接报错），本方案同样不做。
+
+---
+
+## 附录 B：openai/codex 调研要点（浅克隆 codex-rs 全量检索）
+
+**核心结论：codex 从不创建 worktree。** 产品代码（含 cloud-tasks）里没有任何
+`git worktree add`——它的会话隔离靠 OS 沙箱（Seatbelt / Landlock / Windows
+sandbox），不靠 git。worktree 在 codex 中的角色是"**worktree 感知的消费者**"：
+用户自己在 linked worktree 里启动 codex 时，一切照常工作。四个感知点：
+
+1. **沙箱对 `.git` 指针的处理**（`protocol/src/permissions.rs::
+   default_read_only_subpaths_for_writable_root`）：`.git` 一律保护为只读；当
+   `.git` 是**指针文件**（linked worktree / submodule）时，解析 `gitdir:` 指向的
+   主仓库 gitdir 并把它也纳入保护。——与本方案 R3/D9（沙箱挂载集必须含 git
+   common dir）是同一结论的独立印证。
+2. **信任解析**（`git-utils/src/info.rs::resolve_root_git_project_for_trust`）：
+   纯文件系统解析 `.git` 指针 → `…/.git/worktrees/<name>` → common dir → **主仓库
+   根**，不调用 git 可执行文件。信任授予一次即覆盖该仓库的所有 worktree——与 CC
+   的 canonical-git-root、本方案 `detect_git` 返回 common_dir 同一思路。
+3. **配置分层**（`config/src/loader/mod.rs::merge_root_checkout_project_hooks`）：
+   linked worktree 保留自己的 worktree 本地项目配置，但 **hooks 声明强制从主
+   checkout 的配置加载**——安全敏感的钩子跟随被信任的主仓库，不信 worktree 里的
+   副本。对应 CC 的 `core.hooksPath` 指回主仓库，是同一安全直觉的两种实现。
+4. **轻量根查找的已知局限**（`info.rs` 注释）：不带 git 执行的祖先目录 `.git`
+   探测不识别"checkout 在主仓库目录之外"的 worktree，官方建议
+   `--allow-no-git-exec` 绕过——印证了指针文件解析（我们与 codex 的信任/沙箱
+   路径都做了）才是正解。
+
+**命名**：codex 没有产品级 worktree 命名规则（不创建自然没有）。测试样例中的
+`codex.owner-<name>` 目录（`tui/resume_picker.rs` fixtures）反映的是社区把
+worktree 建成 `<repo>.<限定名>` 兄弟目录的使用习惯，非产品行为——无可借鉴项；
+可借鉴的友好命名来自 CC（见 §6 D11）。
+
+三者定位对照：
+
+| | Claude Code | openai/codex | Valuz |
+|---|---|---|---|
+| 创建 worktree | ✅ 三个入口（CLI / 会话中 / 子 agent 隔离） | ❌ 从不创建 | ✅ 会话级 + 任务级 + 自动化 |
+| 隔离手段 | git worktree（+可选沙箱） | OS 沙箱 | git worktree（+Seatbelt/远程沙箱） |
+| worktree 感知 | canonical root / 跨 worktree resume | 信任/沙箱/配置三处指针解析 | detect_git common_dir / 面板 / 自愈 |
+| 生命周期治理 | keep-remove 对话框 + 30 天临时清扫 | 无（用户自理） | 干净即删 + 面板 + 任务终结清理 |
+| 汇合 | 不代劳（keep 后用户手动） | 不涉及 | 不代劳（P2 一键 merge，冲突即中止） |

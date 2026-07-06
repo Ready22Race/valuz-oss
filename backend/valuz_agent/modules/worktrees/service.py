@@ -30,10 +30,34 @@ from valuz_agent.modules.worktrees.errors import (
     WorktreeNotFound,
     WorktreeOperationFailed,
 )
+from valuz_agent.modules.worktrees.slug_words import SLUG_ADJECTIVES, SLUG_NOUNS
 
 logger = logging.getLogger(__name__)
 
 _git_root_locks: dict[str, asyncio.Lock] = {}
+
+# Friendly auto-names (design D11): ``fervent-bohr-14379d``-style
+# adjective-surname pairs, using Docker's names-generator vocabulary
+# (see slug_words.py; ~97 adjectives × 237 surnames ≈ 23k combos) — readable
+# in the panel, the branch name (``valuz/u-fervent-bohr-3f2a``), and chat.
+# Task worktrees deliberately do NOT use this — they stay the deterministic
+# ``task-<task_id>`` so each task addresses its own worktree and the stale
+# sweeper can key on the ``valuz/task-`` branch prefix.
+def _generate_slug(git_root: Path) -> str:
+    """A fresh friendly slug for an unnamed worktree.
+
+    The existence check matters: ``get_or_create`` fast-resumes an existing
+    path, so an unlucky collision would silently drop the new session into
+    someone else's worktree. Retry a few times, then fall back to plain hex.
+    """
+    for _ in range(8):
+        slug = (
+            f"{secrets.choice(SLUG_ADJECTIVES)}-"
+            f"{secrets.choice(SLUG_NOUNS)}-{secrets.token_hex(2)}"
+        )
+        if not gw.worktree_path(git_root, slug).exists():
+            return slug
+    return f"wt-{secrets.token_hex(4)}"
 
 
 def _lock_for(git_root: Path) -> asyncio.Lock:
@@ -181,7 +205,10 @@ class WorktreeService:
                 f"project directory {cwd} is not inside a git repository"
             )
 
-        slug = name or f"wt-{secrets.token_hex(4)}"
+        if name:
+            slug = name
+        else:
+            slug = await asyncio.to_thread(_generate_slug, info.git_root)
         try:
             gw.validate_slug(slug)
         except gw.InvalidWorktreeSlugError as exc:
