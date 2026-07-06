@@ -314,7 +314,16 @@ class SkillLibraryService:
         self, user_id: str, project_id: str, *, org_id: str | None = None
     ) -> SkillsCatalog:
         project = await self._projects.get_project(user_id, project_id)
-        items = self._ds.list_project_skill_manifests(project, self._source)
+        # Off the event loop: scanning skill dirs reads each SKILL.md, a remote
+        # round-trip on a network filesystem — doing it inline blocks the loop and
+        # stalls every concurrent request. ``compute_content_hash=False`` skips the
+        # whole-directory hash the display list doesn't need (only the indexer does).
+        items = await asyncio.to_thread(
+            self._ds.list_project_skill_manifests,
+            project,
+            self._source,
+            compute_content_hash=False,
+        )
         # ``creation_origin`` is host bookkeeping kept only in
         # ``valuz_skill_index`` (never SKILL.md), so it isn't on the
         # filesystem-scanned manifest — overlay it from the DB here. A
@@ -373,7 +382,8 @@ class SkillLibraryService:
                         skills.append(view)
                     continue
 
-            for manifest in source.list_skills(ctx):
+            manifests = await asyncio.to_thread(source.list_skills, ctx, compute_content_hash=False)
+            for manifest in manifests:
                 view = SkillView(**manifest.model_dump(), creation_origin=_origin(manifest.slug))
                 # Bundled skills (origin_label="Built-in") ship with the
                 # client and are always free; never gate them behind the
