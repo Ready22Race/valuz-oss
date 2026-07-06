@@ -2286,6 +2286,7 @@
       "subtaskSpawned": "Subtask dispatched",
       "subtaskCompleted": "Subtask completed",
       "subtaskFailed": "Subtask failed",
+      "subtaskStopped": "Subtask stopped",
       "subtaskMessage": "Member message",
       "userNote": "Note added",
       "goalRevised": "Goal revised",

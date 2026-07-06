@@ -1880,6 +1880,7 @@ I18nKey = Literal[
     "task.event.subtaskReviewReworkNoFeedback",
     "task.event.subtaskReviewed",
     "task.event.subtaskSpawned",
+    "task.event.subtaskStopped",
     "task.event.taskBlocked",
     "task.event.taskCompleted",
     "task.event.taskFailed",

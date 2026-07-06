@@ -195,8 +195,13 @@ _AWAIT_MEMBERS_PARAMETERS: dict[str, Any] = {
             "type": "number",
             "description": (
                 "Optional max seconds to wait. On timeout, returns whatever "
-                "finished plus a 'pending' list (so a stuck member can't hang "
-                "you forever)."
+                "finished plus a 'pending' list AND 'pending_status' — each "
+                "pending member's live state: 'running' means it is ALIVE and "
+                "still working (long builds/tests routinely exceed this wait; "
+                "await again rather than treating it as dead), "
+                "'awaiting_user' means it is paused on a question only the "
+                "USER can answer (do not busy-wait; do other work or end your "
+                "turn — member_done will wake you)."
             ),
         },
     },
@@ -325,6 +330,18 @@ _FINISH_TASK_PARAMETERS: dict[str, Any] = {
                 "task_state.py): unrecoverable user-driven termination is "
                 "'stopped'; a mid-turn lead crash is surfaced as 'blocked' "
                 "by auto-finalize, not by you."
+            ),
+        },
+        "force": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Only meaningful with status='stopped'. A stopped finish is "
+                "rejected while members are still running (a silent member is "
+                "usually mid-build, not dead — check await_members' "
+                "pending_status first, or stop_subtask the ones you no longer "
+                "need). Pass true ONLY after deliberately deciding to "
+                "terminate despite running members."
             ),
         },
     },

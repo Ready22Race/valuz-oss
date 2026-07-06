@@ -962,6 +962,7 @@ class TaskOrchestrator:
         summary: str,
         artifacts: list[str] | None = None,
         status: str = "completed",
+        force: bool = False,
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Close the task — append a terminal event and set the task status.
@@ -982,6 +983,13 @@ class TaskOrchestrator:
         subtask (e.g. a final aggregation node) and still mark the task done.
         The lead must dispatch+review those nodes first (or drop them via
         modify_plan, or finish with status='stopped' to terminate the task).
+
+        Live-member guard: a ``stopped`` finish is REJECTED while members are
+        still running (a member deep in a long build looks exactly like a hang
+        from the lead's side — killing the whole task is almost never right).
+        The lead must first check them (``await_members`` reports pending
+        members' live status), stop them individually (``stop_subtask``), or
+        pass ``force=True`` after a deliberate decision.
         """
         if status not in ("completed", "stopped"):
             return {
@@ -996,6 +1004,33 @@ class TaskOrchestrator:
             }
         final_status = "stopped" if status == "stopped" else "completed"
         event_type = "task_stopped" if final_status == "stopped" else "task_completed"
+
+        # Live-member guard: don't let a lead kill the task while members are
+        # mid-flight (the observed failure mode: a member deep in a long build
+        # is indistinguishable from a hang, the lead "tries a few times" and
+        # stops the whole task). Name the live subtasks so the lead can check
+        # or stop them individually; ``force=True`` overrides deliberately.
+        if final_status == "stopped" and not force and self._members.has_live_members(task_id):
+            async with async_unit_of_work(commit=False) as db:
+                live_keys = sorted(
+                    r.subtask_key
+                    for r in await TaskSessionDatastore(db).list_runs(cast(str, user_id), task_id)
+                    if r.kind == "subtask" and r.subtask_key and r.status == "active"
+                )
+            return {
+                "ok": False,
+                "error": (
+                    "finish_task(stopped) rejected: members are still running "
+                    f"(subtasks {live_keys or '<unknown>'}). A silent member is "
+                    "usually still working (e.g. a long build), not dead — call "
+                    "await_members to see each pending member's live status, or "
+                    "stop_subtask the ones you no longer need. If you have "
+                    "deliberately decided to terminate the task anyway, call "
+                    "finish_task again with force=true."
+                ),
+                "live_subtasks": live_keys,
+                "status": "rejected",
+            }
 
         rejected: dict[str, Any] | None = None
         finished_task_row: Any | None = None
@@ -1026,7 +1061,7 @@ class TaskOrchestrator:
                                 "review them first (a dependent node like a final "
                                 "summary becomes ready once its deps are done), or "
                                 "drop them with modify_plan, or call finish_task "
-                                "with status='failed' to abandon the task."
+                                "with status='stopped' to terminate the task."
                             ),
                             "pending_subtasks": unresolved,
                             "status": "rejected",
