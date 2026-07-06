@@ -1900,7 +1900,7 @@ export const Composer = ({
                               "flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left transition-colors",
                               disabled
                                 ? "cursor-not-allowed text-ink-muted"
-                                : "text-ink-heading hover:bg-surface-muted",
+                                : "text-ink-heading hover:bg-[color:var(--fg-1)]",
                             )}
                             onClick={() => {
                               if (disabled) return;
@@ -2030,7 +2030,7 @@ export const Composer = ({
                           onProjectChange?.(null);
                           setProjectOpen(false);
                         }}
-                        className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted"
+                        className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[color:var(--fg-1)]"
                       >
                         <span className="flex min-w-0 flex-1 flex-col">
                           <span className="truncate text-[12.5px] text-ink-heading">
@@ -2053,7 +2053,7 @@ export const Composer = ({
                         )}
                       </button>
                       {projects && projects.length > 0 && (
-                        <div className="my-1 h-px bg-surface-border" />
+                        <div className="mx-1.5 my-1 h-px bg-[color:var(--fg-3)]" />
                       )}
                       {projects?.map((p) => {
                         const sel = p.id === selectedProjectId;
@@ -2065,7 +2065,7 @@ export const Composer = ({
                               onProjectChange?.(p.id);
                               setProjectOpen(false);
                             }}
-                            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-surface-muted"
+                            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-[color:var(--fg-1)]"
                           >
                             <span className="flex min-w-0 flex-1 flex-col">
                               <span className="truncate text-[12.5px] text-ink-heading">
@@ -2209,7 +2209,7 @@ export const Composer = ({
                                 // effort can still be changed.
                                 disabled={agentLocked && !!selectedAgentSlug}
                                 className={cn(
-                                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent",
+                                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-default disabled:hover:bg-transparent",
                                   // Highlight only while its 二级菜单 is open;
                                   // selection is shown by the ✓, not a persistent
                                   // grey background (avoids two adjacent greys).
@@ -2273,7 +2273,7 @@ export const Composer = ({
                                   type="button"
                                   disabled={agentLocked}
                                   className={cn(
-                                    "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent",
+                                    "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-default disabled:hover:bg-transparent",
                                     // Grey only while the roster 二级菜单 is open;
                                     // selection is the ✓, not a persistent grey.
                                     agentListMenuOpen && "bg-surface-muted",
@@ -2331,7 +2331,7 @@ export const Composer = ({
                                               key={a.slug}
                                               type="button"
                                               disabled={agentLocked}
-                                              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent"
+                                              className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-default disabled:hover:bg-transparent"
                                               onClick={() => {
                                                 if (agentLocked) return;
                                                 onAgentChange?.(a.slug);
@@ -2366,10 +2366,10 @@ export const Composer = ({
                                     {onAddAgent && !agentLocked && (
                                       // Pinned footer — stays visible even when
                                       // the agent list above it scrolls.
-                                      <div className="shrink-0 border-t border-surface-border p-1">
+                                      <div className="relative shrink-0 p-1 before:absolute before:inset-x-1.5 before:top-0 before:h-px before:bg-[color:var(--fg-3)]">
                                         <button
                                           type="button"
-                                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
+                                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]"
                                           onClick={() => {
                                             setAgentOpen(false);
                                             onAddAgent();
@@ -2397,7 +2397,7 @@ export const Composer = ({
                                     key={a.slug}
                                     type="button"
                                     disabled={agentLocked}
-                                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-surface-muted disabled:cursor-default disabled:hover:bg-transparent"
+                                    className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-default disabled:hover:bg-transparent"
                                     onClick={() => {
                                       if (agentLocked) return;
                                       onAgentChange?.(a.slug);
@@ -2478,7 +2478,7 @@ export const Composer = ({
                                         "flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",
                                         row.key !== "effort" && modelLocked
                                           ? "cursor-default"
-                                          : "hover:bg-surface-muted",
+                                          : "hover:bg-[color:var(--fg-1)]",
                                         agentSubmenu === row.key &&
                                           "bg-surface-muted",
                                       )}
@@ -2540,7 +2540,7 @@ export const Composer = ({
                                               key={r.id}
                                               type="button"
                                               disabled={!r.available}
-                                              className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-50"
+                                              className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-[color:var(--fg-1)] disabled:cursor-not-allowed disabled:opacity-50"
                                               onClick={() => {
                                                 onRuntimeChange?.(r.id);
                                                 setAgentSubmenu(null);
@@ -2583,7 +2583,7 @@ export const Composer = ({
                                                   <button
                                                     key={`${m.providerId}::${m.modelId}`}
                                                     type="button"
-                                                    className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-muted"
+                                                    className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-[color:var(--fg-1)]"
                                                     onClick={() => {
                                                       onModelChange?.(
                                                         m.providerId,
@@ -2610,7 +2610,7 @@ export const Composer = ({
                                               <button
                                                 key={level}
                                                 type="button"
-                                                className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-muted"
+                                                className="flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-[color:var(--fg-1)]"
                                                 onClick={() => {
                                                   onEffortChange?.(level);
                                                   setAgentSubmenu(null);
@@ -2635,10 +2635,10 @@ export const Composer = ({
                               collapsed (new-conversation) mode moves it into the
                               Agent roster 二级菜单 above. */}
                           {onAddAgent && !agentLocked && !allowAgentBrainOverride && (
-                            <div className="border-t border-surface-border p-1">
+                            <div className="relative p-1 before:absolute before:inset-x-1.5 before:top-0 before:h-px before:bg-[color:var(--fg-3)]">
                               <button
                                 type="button"
-                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
+                                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]"
                                 onClick={() => {
                                   setAgentOpen(false);
                                   onAddAgent();
@@ -2728,7 +2728,7 @@ export const Composer = ({
                             "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] transition-colors",
                             disabled
                               ? "cursor-not-allowed text-ink-muted"
-                              : "text-ink-heading hover:bg-surface-muted",
+                              : "text-ink-heading hover:bg-[color:var(--fg-1)]",
                           )}
                           onClick={() => {
                             if (disabled) return;
@@ -2870,7 +2870,7 @@ export const Composer = ({
                                       type="button"
                                       disabled={modelLocked}
                                       className={cn(
-                                        "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted",
+                                        "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]",
                                         modelLocked &&
                                           "cursor-not-allowed opacity-50 hover:bg-transparent",
                                       )}
@@ -2917,13 +2917,13 @@ export const Composer = ({
                         flyout isn't clipped. */}
                     {effort !== undefined && (
                       <div
-                        className="relative border-t border-surface-border p-1"
+                        className="relative p-1 before:absolute before:inset-x-1.5 before:top-0 before:h-px before:bg-[color:var(--fg-3)]"
                         onMouseEnter={() => setEffortSubOpen(true)}
                         onMouseLeave={() => setEffortSubOpen(false)}
                       >
                         <button
                           type="button"
-                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
+                          className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]"
                           onClick={() => setEffortSubOpen(true)}
                         >
                           <span className="min-w-0 flex-1 truncate">
@@ -2945,7 +2945,7 @@ export const Composer = ({
                                 <button
                                   key={level}
                                   type="button"
-                                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-surface-muted"
+                                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-ink-heading transition-colors hover:bg-[color:var(--fg-1)]"
                                   onClick={() => {
                                     onEffortChange?.(level);
                                     setEffortSubOpen(false);
@@ -2966,7 +2966,7 @@ export const Composer = ({
                                 </button>
                               );
                             })}
-                            <div className="mt-1 border-t border-surface-border px-2 pt-1.5 pb-0.5 text-[11px] text-ink-meta">
+                            <div className="mx-1.5 mt-1 border-t border-[color:var(--fg-3)] px-2 pt-1.5 pb-0.5 text-[11px] text-ink-meta">
                               {t("effort.hint" as Parameters<typeof t>[0])}
                             </div>
                           </div>
