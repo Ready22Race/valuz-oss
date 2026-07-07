@@ -8,15 +8,23 @@
 # bind without it). The per-owner env AGS injects (KERNEL_AUTH_TOKEN,
 # KERNEL_STORE=remote, VALUZ_DATA_API_*, CODEX_TOOLKIT_BASE_URL, provider keys)
 # is inherited here via `with-contenv`.
+#
+# NON-ROOT: s6 services default to root, and the base runs everything as root.
+# But the agent runtime (claude-agent-sdk) refuses --dangerously-skip-permissions
+# when euid==0, so we drop the kernel (and thus every agent subprocess it spawns)
+# to the base's unprivileged `user` (uid 1000) via s6-setuidgid. /app is chowned
+# to 1000 at build time; the COS workspace mount is world-writable (the standalone
+# image ran as uid 10001 against the same mount).
 set -eu
 
 export DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:////app/data/kernel.db}"
 export PYTHONPATH=/app/kernel
+export HOME=/home/user
 cd /app
 
-echo "[valuz-kernel] migrating ${DATABASE_URL}"
-/app/.venv/bin/python -m alembic -c alembic/kernel/alembic.ini upgrade head
+echo "[valuz-kernel] migrating ${DATABASE_URL} (as user)"
+s6-setuidgid user /app/.venv/bin/python -m alembic -c alembic/kernel/alembic.ini upgrade head
 
-echo "[valuz-kernel] serving app.main:app on 0.0.0.0:${KERNEL_PORT:-8000}"
-exec /app/.venv/bin/python -m uvicorn app.main:app \
+echo "[valuz-kernel] serving app.main:app on 0.0.0.0:${KERNEL_PORT:-8000} (as user)"
+exec s6-setuidgid user /app/.venv/bin/python -m uvicorn app.main:app \
     --host 0.0.0.0 --port "${KERNEL_PORT:-8000}" --log-level "${LOG_LEVEL:-info}"

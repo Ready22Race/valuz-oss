@@ -55,14 +55,18 @@ COPY alembic/kernel /app/alembic/kernel
 # it in the `user` bundle (an empty file named after the service) so /init starts
 # it alongside the built-in AIO services.
 COPY docker/aio/s6-rc.d/valuz-kernel /etc/s6-overlay/s6-rc.d/valuz-kernel
+# chown /app to the base's unprivileged `user` (uid 1000): the kernel service
+# drops to that user (s6-setuidgid in run) so the agent runtime isn't root, so it
+# needs to read the venv/kernel source and write /app/data (sqlite).
 RUN chmod +x /etc/s6-overlay/s6-rc.d/valuz-kernel/run \
     && mkdir -p /app/data \
+    && chown -R 1000:1000 /app \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/valuz-kernel
 
-# Declare the kernel port (the base exposes its own 9000/49999/49983 but not
-# 8000; :8000 is free). AGS port-maps it to https://8000-<instance>.<domain> —
-# same as the standalone image, so the host needs no config change.
-EXPOSE 8000
+# Declare the ports AGS needs to map: 8000 = our kernel; 49983 = the base's envd
+# (the login daemon — sandbox login requires 49983 exposed). The base image
+# declares NO ExposedPorts, so we must declare both here.
+EXPOSE 8000 49983
 
 # NB: no ENTRYPOINT / CMD — inherit the base's /init (s6-overlay), which brings
 # up the `user` bundle (now including valuz-kernel). The kernel is reached at
