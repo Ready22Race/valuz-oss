@@ -59,17 +59,6 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/valuz-kernel/run \
     && mkdir -p /app/data \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/valuz-kernel
 
-# SLIM: don't auto-start the heavy GUI/notebook services. AGS gives the sandbox
-# only 2 CPU / 4Gi, and booting chromium + X/VNC + VSCode + Jupyter concurrently
-# blows past AGS's container-creation SLA (StartSandboxInstance times out with
-# "provider result" timeout) even though the image itself boots in ~4s on an
-# unconstrained host. The agent doesn't use these yet; keep the base's own
-# management/gateway (envd/envtool/healthd/nginx) + our kernel only. Re-enable a
-# service by NOT removing it here once it's actually wired to the agent.
-RUN for s in chromium x11vnc novnc xvfb vscode jupyter uvicorn ttyd; do \
-        rm -f "/etc/s6-overlay/s6-rc.d/user/contents.d/$s"; \
-    done
-
 # Declare the kernel port (the base exposes its own 9000/49999/49983 but not
 # 8000; :8000 is free). AGS port-maps it to https://8000-<instance>.<domain> —
 # same as the standalone image, so the host needs no config change.
