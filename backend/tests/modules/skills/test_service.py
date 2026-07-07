@@ -327,6 +327,67 @@ class TestListCatalog:
 
         assert any(skill.slug == "browser" for skill in catalog.skills)
 
+    async def test_should_read_user_skills_from_index_without_rescanning_source(
+        self, svc, tmp_path
+    ):
+        from valuz_agent.modules.skills.models import SkillIndexRow
+
+        service, _ = svc
+        user_dir = tmp_path / "user" / "my-skill"
+        user_dir.mkdir(parents=True)
+
+        class _ExplodingSource:
+            name = "filesystem"
+
+            def list_skills(self, ctx, *, compute_content_hash=True):
+                raise AssertionError(
+                    "the filesystem source must not be scanned when the index has user skills"
+                )
+
+        service._source = _ExplodingSource()
+        await service._ds.create(
+            "u",
+            SkillIndexRow(
+                slug="my-skill",
+                name="My Skill",
+                description="Desc",
+                scope="user",
+                source="valuz",
+                source_path=str(user_dir),
+                user_id="u",
+                status="available",
+                readonly=False,
+                deletable=True,
+                content_hash="c" * 64,
+                manifest_hash="m" * 64,
+                tags_json="a,b",
+                creation_origin="created",
+                library_enabled=True,
+            ),
+        )
+
+        catalog = await service.list_catalog("u", "ws-1")
+
+        skill = next(s for s in catalog.skills if s.slug == "my-skill")
+        assert skill.id == "user:my-skill"
+        assert skill.name == "My Skill"
+        assert skill.creation_origin == "created"
+        assert skill.tags == ["a", "b"]
+        assert skill.readonly is False
+        assert skill.deletable is True
+
+    async def test_should_fallback_to_filesystem_scan_when_user_index_is_empty(
+        self, svc, skill_root
+    ):
+        # No user rows in the index → fall back to a filesystem scan so a
+        # freshly-created (not-yet-indexed) skill is never missing from the catalog.
+        service, _ = svc
+        _make_skill_dir(skill_root, "scanned-skill")
+
+        catalog = await service.list_catalog("u", "ws-1")
+
+        assert any(s.slug == "scanned-skill" for s in catalog.skills)
+
     async def test_should_sort_by_folder_birthtime_desc(self, svc, skill_root):
         """The skill management page renders the catalog in DESC
         birthtime order. We stage two folders with deliberately staggered
