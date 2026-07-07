@@ -112,7 +112,7 @@ async def test_auto_generated_name_is_friendly(
     import re
 
     handle = await svc.get_or_create(USER, project)
-    assert re.fullmatch(r"[a-z]+-[a-z]+-[0-9a-f]{4}", handle.name), handle.name
+    assert re.fullmatch(r"[a-z]+-[a-z]+-[0-9a-f]{6}", handle.name), handle.name
     gw.validate_slug(handle.name)  # generator output must satisfy slug rules
     assert handle.branch == f"valuz/u-{handle.name}"
     await svc.discard(USER, project, handle.name)
