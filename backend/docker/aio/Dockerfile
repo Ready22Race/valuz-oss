@@ -59,6 +59,11 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/valuz-kernel/run \
     && mkdir -p /app/data \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/valuz-kernel
 
+# Declare the kernel port (the base exposes its own 9000/49999/49983 but not
+# 8000; :8000 is free). AGS port-maps it to https://8000-<instance>.<domain> —
+# same as the standalone image, so the host needs no config change.
+EXPOSE 8000
+
 # NB: no ENTRYPOINT / CMD — inherit the base's /init (s6-overlay), which brings
 # up the `user` bundle (now including valuz-kernel). The kernel is reached at
 # https://8000-<instance>.<traffic-domain>/api/v1/...
