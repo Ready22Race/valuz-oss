@@ -1,5 +1,5 @@
 export type { ProjectOutletContext } from "./types";
-export { useProjectOutlet } from "./types";
+export { useProjectOutlet, useOptionalProjectOutlet } from "./types";
 export {
   ProjectLayoutBase,
   type DirectoryFieldMode,
