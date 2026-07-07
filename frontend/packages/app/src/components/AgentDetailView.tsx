@@ -503,7 +503,9 @@ export const AgentDetailView = ({
   return (
     <div
       className={
-        fullPage ? "h-full min-h-0 pb-12" : "mx-auto max-w-4xl pb-12"
+        fullPage
+          ? "mx-auto h-full min-h-0 w-[760px] max-w-full pb-12"
+          : "mx-auto max-w-4xl pb-12"
       }
     >
       {/* ── Identity — flat section, editable in place. Icon + name +
