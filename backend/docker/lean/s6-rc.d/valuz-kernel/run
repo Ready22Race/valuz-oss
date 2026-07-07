@@ -20,9 +20,15 @@ OWNER_DIR="$(ls -d /data/valuz_data/[0-9a-f]*/ 2>/dev/null | head -1 || true)"
 KDIR=""
 if [ -n "${OWNER_DIR}" ]; then
     KDIR="${OWNER_DIR%/}/.valuz-kernel"
-    mkdir -p "${KDIR}" 2>/dev/null || true
-    chown -R user:user "${KDIR}" 2>/dev/null || true
+    CCDIR="${OWNER_DIR%/}/.claude-config"
+    mkdir -p "${KDIR}" "${CCDIR}" 2>/dev/null || true
+    chown -R user:user "${KDIR}" "${CCDIR}" 2>/dev/null || true
     export DATABASE_URL="sqlite+aiosqlite:///${KDIR}/kernel.db"
+    # Persist the claude-agent-sdk conversation state (~/.claude → projects/*.jsonl
+    # transcripts used by --resume) on COS, so a session can be resumed after the
+    # sandbox is recreated. Without this the runtime session lives only in the
+    # ephemeral container home and --resume fails with "No conversation found".
+    export CLAUDE_CONFIG_DIR="${CCDIR}"
 else
     export DATABASE_URL="sqlite+aiosqlite:////app/data/kernel.db"
 fi
@@ -30,11 +36,11 @@ fi
 # Boot marker on COS (best-effort) so we can read the decision even if the kernel
 # fails to start (e.g. SQLite-on-FUSE lock error).
 if [ -n "${KDIR}" ]; then
-    echo "boot $(date -u 2>/dev/null || true): DATABASE_URL=${DATABASE_URL}" >> "${KDIR}/boot.log" 2>/dev/null || true
+    echo "boot $(date -u 2>/dev/null || true): DATABASE_URL=${DATABASE_URL} CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}" >> "${KDIR}/boot.log" 2>/dev/null || true
     chown user:user "${KDIR}/boot.log" 2>/dev/null || true
 fi
 
-echo "[valuz-kernel] db=${DATABASE_URL} kdir=${KDIR:-/app/data(local)}"
+echo "[valuz-kernel] db=${DATABASE_URL} claude_cfg=${CLAUDE_CONFIG_DIR:-<default>} kdir=${KDIR:-/app/data(local)}"
 s6-setuidgid user /app/.venv/bin/python -m alembic -c alembic/kernel/alembic.ini upgrade head
 
 if [ -n "${KDIR}" ]; then
