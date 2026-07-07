@@ -1,0 +1,38 @@
+name: Time standalone kernel boot
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "branch/sha to build the standalone image from"
+        default: "ci/kernel-image"
+        type: string
+jobs:
+  timeit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Build standalone image
+        run: |
+          docker build -f backend/docker/kernel.Dockerfile -t std ./backend
+      - name: Run + time phases (docker logs -t)
+        run: |
+          # KERNEL_STORE unset -> local sqlite (no remote-store dependency).
+          docker run -d --name k -p 8000:8000 -e KERNEL_AUTH_TOKEN=devtoken std
+          # poll /health at 0.2s granularity from container start
+          start=$(date +%s.%N)
+          ready=""
+          for i in $(seq 1 300); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/health 2>/dev/null || true)
+            if [ "$code" = "200" ]; then
+              now=$(date +%s.%N); ready=$(echo "$now - $start" | bc); break
+            fi
+            sleep 0.2
+          done
+          echo "=================================================="
+          echo "container-start -> /health 200 : ${ready:-TIMEOUT} s"
+          echo "=================================================="
+          echo "----- timestamped boot log (docker logs -t) -----"
+          docker logs -t k 2>&1 | grep -aE "migrating|upgrade|serving|Started server|Application startup|Uvicorn running|FATAL|Error" | head -40
+          docker rm -f k >/dev/null 2>&1 || true
