@@ -498,12 +498,24 @@ export const AgentDetailView = ({
     connectorsLoaded &&
     agent.connector_types.some((slug) => !connectedSlugs.has(slug));
 
+  const fullPage = !!onBack;
+
   return (
-    <div className="mx-auto max-w-4xl pb-12">
+    <div
+      className={
+        fullPage ? "h-full min-h-0 pb-12" : "mx-auto max-w-4xl pb-12"
+      }
+    >
       {/* ── Identity — flat section, editable in place. Icon + name +
           subtitle on the left, action buttons right-aligned on the same
           row (Skills detail layout). */}
-      <div className="border-b border-surface-border px-5 py-4">
+      <div
+        className={
+          fullPage
+            ? "border-b border-surface-border px-5 pt-0 pb-4"
+            : "border-b border-surface-border px-5 py-4"
+        }
+      >
         {/* Avatar picker — full-width when editing, otherwise the
                 avatar sits inline in the compact header row below. */}
         {editingField === "avatar" ? (
