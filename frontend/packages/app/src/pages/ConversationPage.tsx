@@ -2532,6 +2532,11 @@ export const ConversationPage = () => {
     // can't get POSTed against the new one — and so the post-fetch walk
     // below has a clean slate to repopulate from history.
     currentClarifyingPendingRef.current = null;
+    // Same rationale for the approval tray: clear it so a card parked in the
+    // session we're leaving can neither linger against — nor POST its
+    // pending_id against — the session we're switching to. The post-fetch
+    // walk below rebuilds it from the new session's own history.
+    setPendingApprovals([]);
     maxSeqRef.current = 0;
     minSeqRef.current = Number.POSITIVE_INFINITY;
     hasMoreOlderRef.current = false;
@@ -2582,22 +2587,37 @@ export const ConversationPage = () => {
           if (ar) resolvedPendingIds.add(ar.pending_id);
         }
       }
+      // Rebuild the approval tray from history too (the sibling of the
+      // clarifying-ref rebuild). ``pendingApprovals`` was otherwise
+      // live-SSE-only: a card parked in a session that is later reopened —
+      // or switched back to — would vanish with no way to approve it. Since
+      // an ``exit_plan_mode`` pending always parks and waits on slow human
+      // review, it is the one most likely to outlive its session context.
+      const rebuiltApprovals: PendingApprovalEntry[] = [];
       for (const ev of response.items) {
         const parsedTodos = parseTodosUpdate(ev);
         if (parsedTodos) lastTodos = parsedTodos;
         if (ev.event.event_type === SESSION_REQUIRES_ACTION_EVENT) {
           const ra = parseRequiresAction(ev);
-          if (
-            ra &&
-            ra.subject === "clarifying_questions" &&
-            !resolvedPendingIds.has(ra.pending_id)
-          ) {
+          if (!ra || resolvedPendingIds.has(ra.pending_id)) continue;
+          if (ra.subject === "clarifying_questions") {
             unresolvedClarifyingPending = ra.pending_id;
+          } else {
+            rebuiltApprovals.push({
+              pendingId: ra.pending_id,
+              subject: ra.subject as ApprovalCardSubject,
+              payload: ra.payload,
+              availableDecisions: ra.available_decisions,
+              sessionRulePreviewDisplay: ra.session_rule_preview?.display ?? null,
+              originalInput: ra.original_input,
+              receivedAt: ev.timestamp,
+            });
           }
         }
       }
       setTodos(lastTodos);
       currentClarifyingPendingRef.current = unresolvedClarifyingPending;
+      setPendingApprovals(rebuiltApprovals);
     } catch {
       if (selectedSessionIdRef.current !== sessionId) return;
       setEvents([]);
