@@ -99,6 +99,7 @@ export interface ProjectLayoutBaseProps {
   /** Rendered at the very top of the sidebar, above "新对话". Overlay
    * editions inject an org / account switcher here. */
   sidebarHeader?: ReactNode;
+  sidebarFooter?: ReactNode;
   sidebarExtraItems?: ReactNode;
   topbarActions?: ReactNode;
   projectDialogExtraFields?: ReactNode;
@@ -139,6 +140,7 @@ export function ProjectLayoutBase({
   directoryFieldMode = "picker",
   onUploadInitialContent,
   sidebarHeader,
+  sidebarFooter,
   sidebarExtraItems,
   topbarActions,
   projectDialogExtraFields,
@@ -831,6 +833,7 @@ export function ProjectLayoutBase({
                 });
             }}
             sidebarHeader={sidebarHeader}
+            sidebarFooter={sidebarFooter}
             sidebarExtraItems={sidebarExtraItems}
             mascotSrc={mascotSrc}
             LinkComponent={Link}
