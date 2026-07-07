@@ -1,0 +1,27 @@
+name: Introspect sandbox-code 2
+on:
+  workflow_dispatch:
+    inputs:
+      base_image:
+        default: "ccr.ccs.tencentyun.com/ags-image/sandbox-code:v1.2"
+        type: string
+jobs:
+  x:
+    runs-on: ubuntu-latest
+    steps:
+      - name: dump
+        run: |
+          IMG="${{ inputs.base_image }}"
+          docker pull "$IMG" >/dev/null
+          echo "===== exposed ports ====="
+          docker inspect "$IMG" --format '{{json .Config.ExposedPorts}}'
+          echo "===== env (ports/user) ====="
+          docker inspect "$IMG" --format '{{json .Config.Env}}' | python3 -c 'import sys,json;[print(" ",e) for e in json.load(sys.stdin) if any(k in e for k in ("PORT","USER","HOME","UID"))]'
+          echo "===== non-root accounts (/etc/passwd, uid>=1000) ====="
+          docker run --rm --entrypoint sh "$IMG" -c 'awk -F: "\$3>=1000 && \$3<65534 {print \$1, \$3, \$6, \$7}" /etc/passwd'
+          echo "===== envd service run ====="
+          docker run --rm --entrypoint sh "$IMG" -c 'cat /etc/s6-overlay/s6-rc.d/envd/run 2>/dev/null; echo "--- type ---"; cat /etc/s6-overlay/s6-rc.d/envd/type 2>/dev/null'
+          echo "===== does any base service drop to a user (s6-setuidgid)? ====="
+          docker run --rm --entrypoint sh "$IMG" -c 'grep -rl "s6-setuidgid" /etc/s6-overlay/s6-rc.d/*/run 2>/dev/null | while read f; do echo "$f:"; grep "s6-setuidgid" "$f"; done'
+          echo "===== jupyter/uvicorn run (who they run as) ====="
+          docker run --rm --entrypoint sh "$IMG" -c 'for s in jupyter uvicorn; do echo "## $s"; head -8 /etc/s6-overlay/s6-rc.d/$s/run 2>/dev/null; done'
