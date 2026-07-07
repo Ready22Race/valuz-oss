@@ -123,13 +123,23 @@ dependencies = [
     # import of ``src.runtimes.codex`` would explode with ``ModuleNotFoundError:
     # No module named 'openai_codex'``. Kernel pin eec331f moved codex off the
     # vendored 0.131.0a4 wheel (``AppServerConfig``) to the PUBLISHED PyPI beta
-    # (0.1.0b2, ``CodexConfig``). No version pin — ``openai-codex`` is
-    # prerelease-only, so uv resolves the beta automatically. It pulls
-    # ``openai-codex-cli-bin`` (the per-platform, version-pinned codex binary)
-    # transitively; we mirror upstream and KEEP it (no override) so
-    # ``_resolve_codex_bin`` prefers that pinned binary over a stray PATH
-    # ``codex`` — even though codex is dormant in valuz today.
-    "openai-codex",
+    # (``CodexConfig``). ``openai-codex`` is prerelease-only, so a ``>=`` floor on
+    # a beta is needed for uv to advance (a bare ``openai-codex`` sticks at the
+    # prerelease the lock first captured and won't move on ``--upgrade``). Floored
+    # at ``0.1.0b3``: the first release whose pinned ``openai-codex-cli-bin``
+    # (``==0.137.0a4``) ships ``manylinux`` glibc wheels, so the binary installs
+    # natively on the glibc Linux cloud image with NO per-platform override (see
+    # the ``[tool.uv]`` note below). The binary is pulled transitively and KEPT on
+    # every platform so ``_resolve_codex_bin`` prefers it over a stray PATH
+    # ``codex``.
+    "openai-codex>=0.1.0b3",
+    # Declared directly (though ``openai-codex`` pins it transitively at
+    # ``==0.137.0a4``) for two reasons: (1) that pin is a PRERELEASE, and uv
+    # refuses a transitive prerelease unless the package carries a DIRECT
+    # prerelease specifier — this floor is what makes ``uv lock`` accept it; and
+    # (2) it documents the glibc ``manylinux`` floor the cloud Linux kernel image
+    # depends on (0.137.0a4 is the first codex binary with a manylinux wheel).
+    "openai-codex-cli-bin>=0.137.0a4",
 ]
 
 # Note: built-in parser plugins live in ``backend/parser_plugins/`` and
@@ -174,25 +184,19 @@ postgres = [
 
 [tool.uv]
 # ``openai-codex-cli-bin`` — the version-pinned codex binary that
-# ``openai-codex`` pulls in transitively — ships ONLY ``musllinux`` wheels for
-# Linux (no ``manylinux``/glibc build). uv won't install a musl wheel on a glibc
-# host, so ``uv sync`` aborts on the glibc Linux CI runners (e.g. the
-# ``ubuntu-24.04-arm`` desktop-build job → ``manylinux_*_aarch64``).
+# ``openai-codex`` pulls in transitively — historically shipped ONLY
+# ``musllinux`` wheels for Linux (no ``manylinux``/glibc build). uv won't install
+# a musl wheel on a glibc host, so ``uv sync`` aborted on the glibc Linux CI
+# runners and we dropped the binary on Linux with an ``override-dependencies``
+# marker (``sys_platform != 'linux'``).
 #
-# Codex is dormant in valuz (``provider_resolver`` only routes
-# ``claude_agent`` / ``deepagents``), and the PyInstaller spec already tolerates
-# the binary's absence (its ``collect_submodules`` / ``collect_data_files`` calls
-# for ``codex_cli_bin`` are wrapped in try/except). So drop the BINARY on Linux
-# and keep it on macOS/Windows, where wheels exist. An ``override-dependencies``
-# entry is required because the requirement is transitive (a marker on a direct
-# dep would only *add* a constraint, not remove ``openai-codex``'s). The
-# ``openai-codex`` SDK itself is pure-Python (universal wheel) and stays on every
-# platform, so ``from openai_codex import CodexConfig`` never ImportErrors; only
-# an actual codex launch (``from codex_cli_bin import bundled_codex_path``, lazy)
-# would notice, and that path is never exercised in valuz.
-override-dependencies = [
-    "openai-codex-cli-bin; sys_platform != 'linux'",
-]
+# As of ``openai-codex`` 0.1.0b3 (which pins ``openai-codex-cli-bin==0.137.0a4``)
+# upstream publishes ``manylinux_2_17`` glibc wheels (x86_64 + aarch64) alongside
+# the macOS/Windows/musllinux ones, so the binary now resolves natively on every
+# ``required-environment`` — including glibc Linux and Intel macOS. The Linux-skip
+# override is therefore gone: codex ships in the locked closure on all platforms,
+# matching upstream, and ``_resolve_codex_bin`` gets the pinned binary everywhere
+# (the cloud Linux kernel image no longer needs a hand-extracted musl binary).
 
 # The lockfile MUST stay installable on Intel macOS (x86_64 darwin) — our
 # lowest-common-denominator dev box (a 2019 Intel MBP on Ventura). Without this,
