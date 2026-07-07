@@ -1,21 +1,45 @@
 #!/command/with-contenv bash
-# Valuz kernel as an s6 service in the lean image (python-slim + self-installed
-# s6-overlay). Migrates its sandbox-local SQLite, then serves on 0.0.0.0:8000 —
-# AGS port-maps it to https://8000-<instance>.<domain>, same as every other
-# variant. Dropped to the unprivileged `user` (uid 1000) via s6-setuidgid so the
-# agent runtime isn't root (claude-agent-sdk refuses --dangerously-skip-permissions
-# under euid 0). AGS-injected env (KERNEL_AUTH_TOKEN, KERNEL_STORE=remote,
-# VALUZ_DATA_API_*, provider keys) is inherited via with-contenv.
+# Valuz kernel s6 service (lean image). Non-root (uid 1000) via s6-setuidgid.
+#
+# FEASIBILITY TEST (COS-backed db + logs): instead of the container-local,
+# ephemeral /app/data, put the kernel's SQLite + serve log on the per-owner COS
+# mount (/data/valuz_data/<owner>/.valuz-kernel/), which is persistent across
+# sandbox restarts. This exercises whether SQLite tolerates the COS FUSE mount
+# (POSIX file locking is the known risk). Falls back to /app/data if the mount
+# isn't present/writable. A boot marker is written so the choice + any failure
+# is visible host-side via the same COS bucket.
 set -eu
 
-export DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:////app/data/kernel.db}"
 export PYTHONPATH=/app/kernel
 export HOME=/home/user
 cd /app
 
-echo "[valuz-kernel] migrating ${DATABASE_URL} (as user)"
+# The per-owner COS prefix is mounted at /data/valuz_data/<owner> (32-hex dir);
+# workspace/ and valuz_config/ start with non-hex letters so the glob skips them.
+OWNER_DIR="$(ls -d /data/valuz_data/[0-9a-f]*/ 2>/dev/null | head -1 || true)"
+KDIR=""
+if [ -n "${OWNER_DIR}" ]; then
+    KDIR="${OWNER_DIR%/}/.valuz-kernel"
+    mkdir -p "${KDIR}" 2>/dev/null || true
+    chown -R user:user "${KDIR}" 2>/dev/null || true
+    export DATABASE_URL="sqlite+aiosqlite:///${KDIR}/kernel.db"
+else
+    export DATABASE_URL="sqlite+aiosqlite:////app/data/kernel.db"
+fi
+
+# Boot marker on COS (best-effort) so we can read the decision even if the kernel
+# fails to start (e.g. SQLite-on-FUSE lock error).
+if [ -n "${KDIR}" ]; then
+    echo "boot $(date -u 2>/dev/null || true): DATABASE_URL=${DATABASE_URL}" >> "${KDIR}/boot.log" 2>/dev/null || true
+    chown user:user "${KDIR}/boot.log" 2>/dev/null || true
+fi
+
+echo "[valuz-kernel] db=${DATABASE_URL} kdir=${KDIR:-/app/data(local)}"
 s6-setuidgid user /app/.venv/bin/python -m alembic -c alembic/kernel/alembic.ini upgrade head
 
-echo "[valuz-kernel] serving app.main:app on 0.0.0.0:${KERNEL_PORT:-8000} (as user)"
-exec s6-setuidgid user /app/.venv/bin/python -m uvicorn app.main:app \
-    --host 0.0.0.0 --port "${KERNEL_PORT:-8000}" --log-level "${LOG_LEVEL:-info}"
+if [ -n "${KDIR}" ]; then
+    exec s6-setuidgid user sh -c "exec /app/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port ${KERNEL_PORT:-8000} --log-level ${LOG_LEVEL:-info} >> '${KDIR}/serve.log' 2>&1"
+else
+    exec s6-setuidgid user /app/.venv/bin/python -m uvicorn app.main:app \
+        --host 0.0.0.0 --port "${KERNEL_PORT:-8000}" --log-level "${LOG_LEVEL:-info}"
+fi
