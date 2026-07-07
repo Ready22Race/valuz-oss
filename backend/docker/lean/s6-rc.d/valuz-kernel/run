@@ -1,54 +1,37 @@
 #!/command/with-contenv bash
 # Valuz kernel s6 service (lean image). Non-root (uid 1000) via s6-setuidgid.
 #
-# FEASIBILITY TEST (COS-backed db + logs): instead of the container-local,
-# ephemeral /app/data, put the kernel's SQLite + serve log on the per-owner COS
-# mount (/data/valuz_data/<owner>/.valuz-kernel/), which is persistent across
-# sandbox restarts. This exercises whether SQLite tolerates the COS FUSE mount
-# (POSIX file locking is the known risk). Falls back to /app/data if the mount
-# isn't present/writable. A boot marker is written so the choice + any failure
-# is visible host-side via the same COS bucket.
+# GATED START. This service ships DOWN (sibling `down` file) so AGS snapshot-start
+# never captures the kernel running with the template's placeholder env. After the
+# snapshot resumes, the host writes the per-user env into the s6 container-
+# environment and `s6-svc -u`s this service (via the valuz-apply-env helper) — so
+# by the time this run script executes, `with-contenv` above has exported the
+# correct per-user env (KERNEL_STORE / VALUZ_DATA_API_* / KERNEL_AUTH_TOKEN). The
+# kernel therefore starts exactly once, already configured. The AGS tool readiness
+# probe is on envd (:49983), so the instance reaches RUNNING while this stays down.
+#
+# PERSISTENCE. db + logs live on the per-owner COS mount at ~/.valuz-kernel, and
+# ~/.claude / ~/.codex are likewise per-owner COS mounts (all declared in the AGS
+# provision). So they survive sandbox recreation, and the runtime uses its NATIVE
+# home paths — NO CLAUDE_CONFIG_DIR / CODEX_HOME redirect, NO owner-dir glob.
 set -eu
 
 export PYTHONPATH=/app/kernel
 export HOME=/home/user
 cd /app
 
-# The per-owner COS prefix is mounted at /data/valuz_data/<owner> (32-hex dir);
-# workspace/ and valuz_config/ start with non-hex letters so the glob skips them.
-OWNER_DIR="$(ls -d /data/valuz_data/[0-9a-f]*/ 2>/dev/null | head -1 || true)"
-KDIR=""
-if [ -n "${OWNER_DIR}" ]; then
-    KDIR="${OWNER_DIR%/}/.valuz-kernel"
-    CCDIR="${OWNER_DIR%/}/.claude-config"
-    CXDIR="${OWNER_DIR%/}/.codex"
-    mkdir -p "${KDIR}" "${CCDIR}" "${CXDIR}" 2>/dev/null || true
-    chown -R user:user "${KDIR}" "${CCDIR}" "${CXDIR}" 2>/dev/null || true
-    export DATABASE_URL="sqlite+aiosqlite:///${KDIR}/kernel.db"
-    # Persist the agent-runtime conversation state on COS so a session resumes
-    # after the sandbox is recreated (otherwise the runtime session lives only in
-    # the ephemeral container home and resume fails with "No conversation found"):
-    #   claude-agent-sdk → ~/.claude (projects/*.jsonl for --resume) via CLAUDE_CONFIG_DIR
-    #   openai-codex     → ~/.codex  (config.toml + rollouts for thread_resume) via CODEX_HOME
-    export CLAUDE_CONFIG_DIR="${CCDIR}"
-    export CODEX_HOME="${CXDIR}"
-else
-    export DATABASE_URL="sqlite+aiosqlite:////app/data/kernel.db"
-fi
+# Kernel SQLite + logs on the COS mount (diagnosability + local-store durability).
+KDIR=/home/user/.valuz-kernel
+mkdir -p "${KDIR}" 2>/dev/null || true
+chown user:user "${KDIR}" 2>/dev/null || true
+export DATABASE_URL="sqlite+aiosqlite:///${KDIR}/kernel.db"
 
-# Boot marker on COS (best-effort) so we can read the decision even if the kernel
-# fails to start (e.g. SQLite-on-FUSE lock error).
-if [ -n "${KDIR}" ]; then
-    echo "boot $(date -u 2>/dev/null || true): DATABASE_URL=${DATABASE_URL} CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-} CODEX_HOME=${CODEX_HOME:-}" >> "${KDIR}/boot.log" 2>/dev/null || true
-    chown user:user "${KDIR}/boot.log" 2>/dev/null || true
-fi
+# Boot marker on the mount (best-effort) so the env/store choice is visible
+# host-side even if the kernel fails to start.
+echo "boot $(date -u 2>/dev/null || true): DATABASE_URL=${DATABASE_URL} KERNEL_STORE=${KERNEL_STORE:-<unset>}" \
+    >>"${KDIR}/boot.log" 2>/dev/null || true
+chown user:user "${KDIR}/boot.log" 2>/dev/null || true
 
-echo "[valuz-kernel] db=${DATABASE_URL} claude_cfg=${CLAUDE_CONFIG_DIR:-<default>} kdir=${KDIR:-/app/data(local)}"
 s6-setuidgid user /app/.venv/bin/python -m alembic -c alembic/kernel/alembic.ini upgrade head
-
-if [ -n "${KDIR}" ]; then
-    exec s6-setuidgid user sh -c "exec /app/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port ${KERNEL_PORT:-8000} --log-level ${LOG_LEVEL:-info} >> '${KDIR}/serve.log' 2>&1"
-else
-    exec s6-setuidgid user /app/.venv/bin/python -m uvicorn app.main:app \
-        --host 0.0.0.0 --port "${KERNEL_PORT:-8000}" --log-level "${LOG_LEVEL:-info}"
-fi
+exec s6-setuidgid user sh -c \
+    "exec /app/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port ${KERNEL_PORT:-8000} --log-level ${LOG_LEVEL:-info} >> '${KDIR}/serve.log' 2>&1"
