@@ -21,14 +21,17 @@ KDIR=""
 if [ -n "${OWNER_DIR}" ]; then
     KDIR="${OWNER_DIR%/}/.valuz-kernel"
     CCDIR="${OWNER_DIR%/}/.claude-config"
-    mkdir -p "${KDIR}" "${CCDIR}" 2>/dev/null || true
-    chown -R user:user "${KDIR}" "${CCDIR}" 2>/dev/null || true
+    CXDIR="${OWNER_DIR%/}/.codex"
+    mkdir -p "${KDIR}" "${CCDIR}" "${CXDIR}" 2>/dev/null || true
+    chown -R user:user "${KDIR}" "${CCDIR}" "${CXDIR}" 2>/dev/null || true
     export DATABASE_URL="sqlite+aiosqlite:///${KDIR}/kernel.db"
-    # Persist the claude-agent-sdk conversation state (~/.claude → projects/*.jsonl
-    # transcripts used by --resume) on COS, so a session can be resumed after the
-    # sandbox is recreated. Without this the runtime session lives only in the
-    # ephemeral container home and --resume fails with "No conversation found".
+    # Persist the agent-runtime conversation state on COS so a session resumes
+    # after the sandbox is recreated (otherwise the runtime session lives only in
+    # the ephemeral container home and resume fails with "No conversation found"):
+    #   claude-agent-sdk → ~/.claude (projects/*.jsonl for --resume) via CLAUDE_CONFIG_DIR
+    #   openai-codex     → ~/.codex  (config.toml + rollouts for thread_resume) via CODEX_HOME
     export CLAUDE_CONFIG_DIR="${CCDIR}"
+    export CODEX_HOME="${CXDIR}"
 else
     export DATABASE_URL="sqlite+aiosqlite:////app/data/kernel.db"
 fi
@@ -36,7 +39,7 @@ fi
 # Boot marker on COS (best-effort) so we can read the decision even if the kernel
 # fails to start (e.g. SQLite-on-FUSE lock error).
 if [ -n "${KDIR}" ]; then
-    echo "boot $(date -u 2>/dev/null || true): DATABASE_URL=${DATABASE_URL} CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-}" >> "${KDIR}/boot.log" 2>/dev/null || true
+    echo "boot $(date -u 2>/dev/null || true): DATABASE_URL=${DATABASE_URL} CLAUDE_CONFIG_DIR=${CLAUDE_CONFIG_DIR:-} CODEX_HOME=${CODEX_HOME:-}" >> "${KDIR}/boot.log" 2>/dev/null || true
     chown user:user "${KDIR}/boot.log" 2>/dev/null || true
 fi
 
