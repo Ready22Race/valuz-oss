@@ -130,8 +130,7 @@ jobs:
             done
             exit $miss
           ' || {
-            echo "::error::AIO base is not the expected s6-overlay layout."
-            echo "Rework backend/docker/aio/ for this base'"'"'s init system (see its /init)."
+            echo "::error::AIO base is not the expected s6-overlay layout - rework backend/docker/aio for this base init system."
             exit 1
           }
 
