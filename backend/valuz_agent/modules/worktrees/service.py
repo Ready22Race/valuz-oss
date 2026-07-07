@@ -39,7 +39,7 @@ _git_root_locks: dict[str, asyncio.Lock] = {}
 # Friendly auto-names (design D11): ``fervent-bohr-14379d``-style
 # adjective-surname pairs, using Docker's names-generator vocabulary
 # (see slug_words.py; ~97 adjectives × 237 surnames ≈ 23k combos) — readable
-# in the panel, the branch name (``valuz/u-fervent-bohr-3f2a``), and chat.
+# in the panel, the branch name (``valuz/u-fervent-bohr-14379d``), and chat.
 # Task worktrees deliberately do NOT use this — they stay the deterministic
 # ``task-<task_id>`` so each task addresses its own worktree and the stale
 # sweeper can key on the ``valuz/task-`` branch prefix.
@@ -51,9 +51,11 @@ def _generate_slug(git_root: Path) -> str:
     someone else's worktree. Retry a few times, then fall back to plain hex.
     """
     for _ in range(8):
+        # 3 bytes → 6 hex chars, matching the harness's own worktree names
+        # (fervent-bohr-14379d) that this scheme is borrowed from.
         slug = (
             f"{secrets.choice(SLUG_ADJECTIVES)}-"
-            f"{secrets.choice(SLUG_NOUNS)}-{secrets.token_hex(2)}"
+            f"{secrets.choice(SLUG_NOUNS)}-{secrets.token_hex(3)}"
         )
         if not gw.worktree_path(git_root, slug).exists():
             return slug

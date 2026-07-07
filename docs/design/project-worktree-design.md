@@ -156,12 +156,12 @@ cwd 由 host 决策、kernel 只消费字符串——**kernel 全程零改动**�
   origin 前缀是自动清扫的双保险（meta.json 为准，分支名兜底——对齐 CC 用命名模式
   区分临时 worktree 的思路）。斜杠 slug 扁平化为 `+`（单射，避开 git ref D/F 冲突）。
 - **自动命名（D11，已实现）**：用户未命名时的会话级 worktree 自动生成
-  `<形容词>-<科学家姓氏>-<4hex>`（如 `fervent-bohr-3f2a`）。词库采用 Docker 的
+  `<形容词>-<科学家姓氏>-<6hex>`（如 `fervent-bohr-14379d`）。词库采用 Docker 的
   names-generator（moby/moby，Apache-2.0，上游已冻结；`slug_words.py` 收录并
   过滤掉 angry/boring 等负面形容词后为 97×237 ≈ 2.3 万组合）——CC 自带的
   5×5 生成器（`swift-fox-x4z9`）词面太窄，Docker 词库正是 CC harness 自身
   worktree 命名（`fervent-bohr-14379d`）的同源方案。相比旧的 `wt-<8hex>`：
-  面板、分支名（`valuz/u-fervent-bohr-3f2a`）、对话里引用都可读可念。唯一性
+  面板、分支名（`valuz/u-fervent-bohr-14379d`）、对话里引用都可读可念。唯一性
   不靠词而靠 hex 后缀 + 生成时的路径存在性检查（撞名会 fast-resume 到别人的
   worktree，必须避免），撞满重试后退回纯 hex。任务级保持确定性
   `task-<task_id 前 12 位>`——机器所有、按 task 可寻址、自动清扫按
