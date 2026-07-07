@@ -404,6 +404,7 @@
     "requiresFileChange": "文件修改请求",
     "requiresMcpCall": "MCP 工具调用请求",
     "requiresToolCall": "工具调用请求",
+    "requiresPlanApproval": "计划待确认",
     "decisionApproved": "已批准",
     "decisionRejected": "已拒绝",
     "decisionExpired": "已超时",
@@ -437,7 +438,9 @@
     "worktreeToggleOnHint": "会话将在独立的 git worktree 分支副本中运行，主工作区不受影响。",
     "worktreeToggleOffHint": "在独立的 git worktree（仓库分支副本）中运行此会话。",
     "worktreeBadgeHint": "此会话在独立的 git worktree 中运行。",
-    "worktreeBadgeGone": "该 worktree 已被删除，下次发送消息时会自动重建。"
+    "worktreeBadgeGone": "该 worktree 已被删除，下次发送消息时会自动重建。",
+    "planLabel": "实施计划",
+    "enterPlanMode": "进入计划模式"
   },
   "cron": {
     "actionColumn": "操作",

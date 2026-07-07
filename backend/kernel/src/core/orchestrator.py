@@ -1077,7 +1077,18 @@ class SessionOrchestrator:
         """
         pending: Event | None = None
         resolved: Event | None = None
-        events = await self._store.get_events(user_id, session_id, limit=1000, offset=0)
+        # Filter to the two pending markers at the store. A ``requires_action``
+        # is the MOST RECENT event when it is resolved, so an unfiltered
+        # oldest-first read (this used to cap at ``limit=1000, offset=0``)
+        # silently dropped it in any session with >N events and ``submit_action``
+        # then 404'd a live approval. The type filter makes the read
+        # O(pendings), not O(session length), so length no longer matters.
+        events = await self._store.get_events(
+            user_id,
+            session_id,
+            types=("requires_action", "action_resolved"),
+            limit=1000,
+        )
         for ev in events:
             if ev.data.get("pending_id") != pending_id:
                 continue
@@ -1101,7 +1112,12 @@ class SessionOrchestrator:
         # session's follow-up reads/writes use its own ``session.user_id``.
         sessions = await self._store.list_sessions(None, status="running", limit=500)
         for session in sessions:
-            events = await self._store.get_events(session.user_id, session.id, limit=1000, offset=0)
+            events = await self._store.get_events(
+                session.user_id,
+                session.id,
+                types=("requires_action", "action_resolved"),
+                limit=1000,
+            )
             open_pendings: dict[str, str] = {}  # pending_id → message_id
             for ev in events:
                 pid = ev.data.get("pending_id")

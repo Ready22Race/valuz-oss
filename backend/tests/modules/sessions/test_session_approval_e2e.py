@@ -220,6 +220,85 @@ async def test_should_complete_full_approval_cycle(_store_and_orchestrator, tmp_
 
 
 @pytest.mark.asyncio
+async def test_should_resolve_pending_beyond_the_first_events_page(
+    _store_and_orchestrator, tmp_path
+):
+    """A pending in a >1000-event session still resolves (no false 404).
+
+    Regression: ``_derive_pending`` read only the oldest 1000 events
+    (``get_events(limit=1000, offset=0)``). A ``requires_action`` is the
+    most-recent event at resolve time, so in a long session — e.g. a
+    plan-mode run with hundreds of tool calls before ``ExitPlanMode`` —
+    it fell outside that window and ``submit_action`` 404'd a live
+    approval (``PendingActionNotFoundError``). The reader now pages the
+    full log, so the pending is found regardless of session length.
+    """
+    from src.core.agent_config import AgentConfig  # type: ignore[import-not-found]
+    from src.core.events import Event  # type: ignore[import-not-found]
+    from src.core.types import Message, Session, UserMessage  # type: ignore[import-not-found]
+
+    store, orchestrator, _ = _store_and_orchestrator
+
+    aid, sid, mid = (uuid.uuid4().hex for _ in range(3))
+    pending_id = "pending-page-2"
+    await store.save_session(
+        Session(
+            user_id="local-test-owner",
+            id=sid,
+            agent_config=AgentConfig(id=aid, name="a", model="m"),
+            cwd=str(tmp_path),
+            permission_mode="default",
+        )
+    )
+    await store.save_message(
+        "local-test-owner",
+        Message(
+            id=mid,
+            session_id=sid,
+            user_message=UserMessage(text="hi"),
+            started_at=datetime.now(),
+            status="running",
+        ),
+    )
+
+    # Push the pending past the old oldest-1000 window with filler events.
+    for i in range(1001):
+        await store.append_event(
+            "local-test-owner",
+            sid,
+            mid,
+            Event(type="thinking", data={"text": f"t{i}"}),
+        )
+
+    fake = _FakeRuntime()
+    orchestrator._runtimes[sid] = fake
+    orchestrator._active[sid] = fake
+    orchestrator._active_message[sid] = await store.load_message("local-test-owner", mid)
+    park_event = fake.park(pending_id)
+    await store.append_event(
+        "local-test-owner",
+        sid,
+        mid,
+        Event(
+            type="requires_action",
+            data={
+                "pending_id": pending_id,
+                "subject": "exit_plan_mode",
+                "available_decisions": ["approve", "reject"],
+                "payload": {"plan": "# Plan"},
+            },
+        ),
+    )
+
+    result = await orchestrator.submit_action(
+        "local-test-owner", sid, pending_id=pending_id, decision="approve"
+    )
+    assert result.pending_id == pending_id
+    assert result.decision == "approve"
+    assert park_event.is_set()
+
+
+@pytest.mark.asyncio
 async def test_should_return_idempotent_on_same_decision_retry(_store_and_orchestrator, tmp_path):
     """Same (pending_id, decision) twice → idempotent=True + original timestamp."""
     from src.core.agent_config import AgentConfig  # type: ignore[import-not-found]

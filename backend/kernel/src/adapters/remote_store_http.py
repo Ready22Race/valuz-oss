@@ -143,11 +143,20 @@ class RemoteStoreHttp(RemoteStore):
         return [sw.row_to_message(r) for r in (data or [])]
 
     async def _get_events_once(
-        self, user_id: str, session_id: str, *, limit: int, offset: int
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int,
+        offset: int,
+        types: Sequence[str] | None = None,
     ) -> list[Event]:
-        data = await self._post(
-            "get_events", {"session_id": session_id, "limit": limit, "offset": offset}
-        )
+        body: dict[str, Any] = {"session_id": session_id, "limit": limit, "offset": offset}
+        # Only send ``types`` when set so the wire stays byte-identical for
+        # the common unfiltered read (and older data services ignore it).
+        if types is not None:
+            body["types"] = list(types)
+        data = await self._post("get_events", body)
         return [sw.row_to_event(r) for r in (data or [])]
 
     async def _get_events_for_message_once(
