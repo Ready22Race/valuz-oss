@@ -123,7 +123,8 @@ export const AgentDetailView = ({
 }: AgentDetailViewProps) => {
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { setHeader, setHeaderClassName } = useProjectOutlet();
+  const { setHeader, setHeaderClassName, setContentInnerClassName } =
+    useProjectOutlet();
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
@@ -210,11 +211,13 @@ export const AgentDetailView = ({
     if (!pageHeader) return;
     setHeader(pageHeader);
     setHeaderClassName("h-auto px-5 py-5");
+    setContentInnerClassName("p-0");
     return () => {
       setHeader(null);
       setHeaderClassName(undefined);
+      setContentInnerClassName(undefined);
     };
-  }, [pageHeader, setHeader, setHeaderClassName]);
+  }, [pageHeader, setContentInnerClassName, setHeader, setHeaderClassName]);
 
   const loadData = useCallback(async () => {
     try {
