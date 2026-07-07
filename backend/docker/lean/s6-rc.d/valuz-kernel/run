@@ -1,0 +1,21 @@
+#!/command/with-contenv bash
+# Valuz kernel as an s6 service in the lean image (python-slim + self-installed
+# s6-overlay). Migrates its sandbox-local SQLite, then serves on 0.0.0.0:8000 —
+# AGS port-maps it to https://8000-<instance>.<domain>, same as every other
+# variant. Dropped to the unprivileged `user` (uid 1000) via s6-setuidgid so the
+# agent runtime isn't root (claude-agent-sdk refuses --dangerously-skip-permissions
+# under euid 0). AGS-injected env (KERNEL_AUTH_TOKEN, KERNEL_STORE=remote,
+# VALUZ_DATA_API_*, provider keys) is inherited via with-contenv.
+set -eu
+
+export DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:////app/data/kernel.db}"
+export PYTHONPATH=/app/kernel
+export HOME=/home/user
+cd /app
+
+echo "[valuz-kernel] migrating ${DATABASE_URL} (as user)"
+s6-setuidgid user /app/.venv/bin/python -m alembic -c alembic/kernel/alembic.ini upgrade head
+
+echo "[valuz-kernel] serving app.main:app on 0.0.0.0:${KERNEL_PORT:-8000} (as user)"
+exec s6-setuidgid user /app/.venv/bin/python -m uvicorn app.main:app \
+    --host 0.0.0.0 --port "${KERNEL_PORT:-8000}" --log-level "${LOG_LEVEL:-info}"

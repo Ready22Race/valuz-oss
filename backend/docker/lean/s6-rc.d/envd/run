@@ -1,0 +1,6 @@
+#!/command/with-contenv bash
+# e2b envd — the AGS sandbox login/exec/file daemon (github.com/e2b-dev/infra).
+# Copied as a static binary from the AGS base at build time; runs as root (it
+# spawns login shells / does file+process ops on behalf of the AGS control
+# plane). Listens on 49983 (AGS sandbox login depends on this port).
+exec /usr/bin/envd -port "${ENVD_PORT:-49983}"
