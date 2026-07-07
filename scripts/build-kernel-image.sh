@@ -21,7 +21,22 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTEXT="${REPO_ROOT}/backend"
-DOCKERFILE="${CONTEXT}/docker/kernel.Dockerfile"
+
+# VARIANT=standalone (default) → python-slim image (docker/kernel.Dockerfile).
+# VARIANT=aio → kernel layered onto the Tencent AGS all-in-one sandbox base
+#   (docker/aio/Dockerfile), FROM ${BASE_IMAGE}. `docker login ccr.ccs.tencentyun.com`
+#   first (the base is private). Example:
+#     VARIANT=aio \
+#     BASE_IMAGE=ccr.ccs.tencentyun.com/ags-image/sandbox-aio:latest \
+#     KERNEL_IMAGE=ccr.ccs.tencentyun.com/xiaobang/valuz-kernel:0.1.0 \
+#       scripts/build-kernel-image.sh --push
+VARIANT="${VARIANT:-standalone}"
+BASE_IMAGE="${BASE_IMAGE:-ccr.ccs.tencentyun.com/ags-image/sandbox-aio:latest}"
+if [ "${VARIANT}" = "aio" ]; then
+    DOCKERFILE="${CONTEXT}/docker/aio/Dockerfile"
+else
+    DOCKERFILE="${CONTEXT}/docker/kernel.Dockerfile"
+fi
 
 KERNEL_IMAGE="${KERNEL_IMAGE:-}"
 PLATFORM="${PLATFORM:-linux/amd64}"
@@ -42,6 +57,8 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 2
 fi
 
+echo "▸ variant   : ${VARIANT}"
+[ "${VARIANT}" = "aio" ] && echo "▸ base image: ${BASE_IMAGE}"
 echo "▸ image     : ${KERNEL_IMAGE}"
 echo "▸ platform  : ${PLATFORM}"
 echo "▸ context   : ${CONTEXT}"
@@ -65,10 +82,15 @@ fi
 INDEX_ARG=()
 [ -n "${UV_DEFAULT_INDEX:-}" ] && INDEX_ARG=(--build-arg "UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX}")
 
+# aio: pass the AIO base image the kernel layers onto (the "基础镜像依赖").
+BASE_ARG=()
+[ "${VARIANT}" = "aio" ] && BASE_ARG=(--build-arg "BASE_IMAGE=${BASE_IMAGE}")
+
 docker buildx build \
     --platform "${PLATFORM}" \
     --build-arg "PYTHON_VERSION=${PYTHON_VERSION}" \
     "${INDEX_ARG[@]}" \
+    "${BASE_ARG[@]}" \
     -f "${DOCKERFILE}" \
     -t "${KERNEL_IMAGE}" \
     ${OUTPUT_FLAG} \
