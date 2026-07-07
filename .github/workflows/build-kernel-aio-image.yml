@@ -1,19 +1,17 @@
 name: Build Kernel AIO Image (Tencent AGS)
 
 # Builds the KERNEL layered onto the Tencent AGS **all-in-one sandbox** base
-# (ccr.ccs.tencentyun.com/ags-image/sandbox-aio). The kernel runs INSIDE the AIO
-# base as a supervisord custom service, fronted by the base's :8080 nginx
-# gateway at /kernel/ — see backend/docker/aio/Dockerfile.
+# (ccr.ccs.tencentyun.com/ags-image/sandbox-aio, an s6-overlay image). The kernel
+# runs INSIDE the AIO base as an s6-overlay service on :8000; AGS port-maps it to
+# https://8000-<instance>.<domain> so no gateway route is needed — see
+# backend/docker/aio/Dockerfile.
 #
-# The AIO base lives on Tencent CCR (private). To PULL it (and to PUSH the
-# result) the job needs CCR credentials as repo secrets:
-#   CCR_REGISTRY   (default: ccr.ccs.tencentyun.com)
-#   CCR_USERNAME
-#   CCR_PASSWORD
-# Without them the job can still validate the Dockerfile against a public
-# `base_image` override (e.g. ghcr.io/agent-infra/sandbox:latest), but cannot
-# pull the real AGS base or push to CCR. Pushing to TCR can also be done
-# manually — see scripts/build-kernel-image.sh (VARIANT=aio).
+# The AGS AIO base is PUBLIC (no creds to pull). By default the built image is
+# pushed to **ghcr.io** with the automatic GITHUB_TOKEN — then pull it from ghcr
+# and re-push to Tencent CCR manually (docker tag + push, or
+# scripts/build-kernel-image.sh VARIANT=aio). If you point target_image at a
+# ccr.ccs.tencentyun.com repo instead, add CCR_USERNAME / CCR_PASSWORD
+# (+ optional CCR_REGISTRY) secrets and it will log in + push there directly.
 
 on:
   workflow_dispatch:
@@ -24,9 +22,9 @@ on:
         default: "ccr.ccs.tencentyun.com/ags-image/sandbox-aio:latest"
         type: string
       target_image:
-        description: "Output image repo (no tag)."
+        description: "Output image repo, no tag. Empty = ghcr.io/<owner>/valuz-kernel-aio."
         required: false
-        default: "ccr.ccs.tencentyun.com/xiaobang/valuz-kernel"
+        default: ""
         type: string
       tag:
         description: "Image tag (default: short commit SHA)."
@@ -34,9 +32,9 @@ on:
         default: ""
         type: string
       push:
-        description: "Push to CCR (needs CCR_* secrets). Off = build-only."
+        description: "Push the image (ghcr uses GITHUB_TOKEN; ccr needs CCR_* secrets)."
         required: false
-        default: false
+        default: true
         type: boolean
       also_latest:
         description: "Also tag :latest."
@@ -54,6 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
     env:
       CCR_REGISTRY: ${{ secrets.CCR_REGISTRY }}
       CCR_USERNAME: ${{ secrets.CCR_USERNAME }}
@@ -73,31 +72,16 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Detect CCR credentials
-        id: creds
-        run: |
-          if [ -n "${CCR_PASSWORD}" ] && [ -n "${CCR_USERNAME}" ]; then
-            echo "has=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has=false" >> "$GITHUB_OUTPUT"
-            echo "▸ no CCR_* secrets: cannot pull the private AGS base or push to CCR."
-            echo "  Override base_image to a public mirror to validate the Dockerfile,"
-            echo "  or add CCR_USERNAME/CCR_PASSWORD (+ optional CCR_REGISTRY) secrets."
-          fi
-
-      - name: Log in to Tencent CCR
-        if: steps.creds.outputs.has == 'true'
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.CCR_REGISTRY != '' && env.CCR_REGISTRY || 'ccr.ccs.tencentyun.com' }}
-          username: ${{ env.CCR_USERNAME }}
-          password: ${{ env.CCR_PASSWORD }}
-
-      # ── Resolve image ref + tags ──────────────────────────────────────────
+      # ── Resolve image ref + tags + which registry to log into ─────────────
       - name: Resolve refs
         id: ref
         run: |
           image="${{ inputs.target_image }}"
+          if [ -z "$image" ]; then
+            owner_lc="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+            image="ghcr.io/${owner_lc}/valuz-kernel-aio"
+          fi
+          registry="${image%%/*}"
           tag="${{ inputs.tag }}"
           [ -z "$tag" ] && tag="$(git rev-parse --short HEAD)"
           tags="${image}:${tag}"
@@ -107,41 +91,59 @@ jobs:
           fi
           {
             echo "image=${image}"
+            echo "registry=${registry}"
             echo "tag=${tag}"
             echo "tags<<EOF"
             echo "${tags}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
           echo "▸ base : ${{ inputs.base_image }}"
-          echo "▸ image: ${image}:${tag} (latest=${{ inputs.also_latest }}, push=${{ inputs.push }})"
+          echo "▸ image: ${image}:${tag}  (registry=${registry}, latest=${{ inputs.also_latest }}, push=${{ inputs.push }})"
 
-      # ── Introspect the AIO base: the coexist contract assumes these include
-      #    dirs exist. Fail loud if the base's layout differs. ────────────────
-      - name: Inspect AIO base (verify coexist dirs)
+      - name: Log in to GHCR
+        if: ${{ inputs.push && steps.ref.outputs.registry == 'ghcr.io' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Tencent CCR
+        if: ${{ inputs.push && steps.ref.outputs.registry != 'ghcr.io' && env.CCR_PASSWORD != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.CCR_REGISTRY != '' && env.CCR_REGISTRY || 'ccr.ccs.tencentyun.com' }}
+          username: ${{ env.CCR_USERNAME }}
+          password: ${{ env.CCR_PASSWORD }}
+
+      # ── Introspect the AIO base: we add the kernel as an s6-overlay service,
+      #    so the base must be s6-overlay (PID1 /init) with the s6-rc.d service
+      #    dir + the `user` bundle we register into. Fail loud otherwise. ──────
+      - name: Inspect AIO base (verify s6-overlay layout)
         run: |
           set -e
           docker pull "${{ inputs.base_image }}"
-          echo "▸ checking supervisord + nginx include dirs on the base"
+          echo "▸ checking s6-overlay service dirs on the base"
           docker run --rm --entrypoint sh "${{ inputs.base_image }}" -c '
             miss=0
-            for d in /opt/tiger/run/supervisord /opt/gem/nginx; do
+            [ -x /init ] || { echo "  MISSING  /init (s6-overlay entrypoint)"; miss=1; }
+            for d in /etc/s6-overlay/s6-rc.d /etc/s6-overlay/s6-rc.d/user/contents.d; do
               if [ -d "$d" ]; then echo "  ok  $d"; else echo "  MISSING  $d"; miss=1; fi
             done
             exit $miss
           ' || {
-            echo "::error::AIO base does not expose the expected supervisord/nginx include dirs."
-            echo "Update backend/docker/aio/{supervisord,nginx}.kernel.conf drop paths to match this base."
+            echo "::error::AIO base is not the expected s6-overlay layout - rework backend/docker/aio for this base init system."
             exit 1
           }
 
-      - name: Build kernel AIO image
+      - name: Build & push kernel AIO image
         uses: docker/build-push-action@v6
         with:
           context: ./backend
           file: ./backend/docker/aio/Dockerfile
           platforms: linux/amd64
-          push: ${{ inputs.push && steps.creds.outputs.has == 'true' }}
-          load: ${{ !(inputs.push && steps.creds.outputs.has == 'true') }}
+          push: ${{ inputs.push }}
+          load: ${{ !inputs.push }}
           tags: ${{ steps.ref.outputs.tags }}
           build-args: |
             BASE_IMAGE=${{ inputs.base_image }}
@@ -156,10 +158,14 @@ jobs:
             echo "### Kernel AIO image"
             echo "- base:  \`${{ inputs.base_image }}\`"
             echo "- image: \`${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.tag }}\`"
-            echo "- pushed: ${{ inputs.push && steps.creds.outputs.has == 'true' }}"
-            if [ "${{ steps.creds.outputs.has }}" != "true" ]; then
+            echo "- pushed: ${{ inputs.push }} (registry: ${{ steps.ref.outputs.registry }})"
+            if [ "${{ steps.ref.outputs.registry }}" = "ghcr.io" ]; then
               echo ""
-              echo "> No CCR_* secrets — private AGS base could not be pulled/pushed."
-              echo "> Add CCR_USERNAME / CCR_PASSWORD (+ optional CCR_REGISTRY) or push to TCR manually."
+              echo "Then push to Tencent CCR manually:"
+              echo '```'
+              echo "docker pull ${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.tag }}"
+              echo "docker tag  ${{ steps.ref.outputs.image }}:${{ steps.ref.outputs.tag }} ccr.ccs.tencentyun.com/xiaobang/valuz-kernel:${{ steps.ref.outputs.tag }}"
+              echo "docker push ccr.ccs.tencentyun.com/xiaobang/valuz-kernel:${{ steps.ref.outputs.tag }}"
+              echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
