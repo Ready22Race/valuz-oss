@@ -1,0 +1,38 @@
+name: Smoke AIO image
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        default: "ghcr.io/ready22race/valuz-kernel-aio:latest"
+        type: string
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run + probe kernel :8000
+        run: |
+          IMG="${{ inputs.image }}"
+          docker pull "$IMG"
+          docker run -d --name aio -p 8000:8000 -e KERNEL_AUTH_TOKEN=devtoken "$IMG"
+          ok=0
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/health 2>/dev/null || true)
+            echo "t=$((i*2))s  /health -> ${code:-none}"
+            [ "$code" = "200" ] && { ok=1; echo "KERNEL READY at ~$((i*2))s"; break; }
+            sleep 2
+          done
+          echo "===== s6 services ====="; docker exec aio sh -c 's6-rc -da list 2>/dev/null | tr " " "\n" | grep -i valuz; ls -la /run/service 2>/dev/null' || true
+          echo "===== kernel service run script present? ====="; docker exec aio sh -c 'ls -la /etc/s6-overlay/s6-rc.d/valuz-kernel/; ls -la /etc/s6-overlay/s6-rc.d/user/contents.d/ | grep valuz' || true
+          echo "===== kernel logs (svc stdout) ====="; docker exec aio sh -c 'cat /var/log/valuz-kernel*.log 2>/dev/null; find /tmp /var/log -name "*kernel*" -exec sh -c "echo ## {}; cat {}" \; 2>/dev/null' || true
+          echo "===== container logs tail ====="; docker logs aio 2>&1 | tail -100
+          docker rm -f aio >/dev/null 2>&1 || true
+          test "$ok" = 1
