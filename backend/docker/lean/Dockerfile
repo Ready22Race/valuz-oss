@@ -78,19 +78,15 @@ RUN useradd --create-home --uid 1000 user \
 # s6 services: envd (root, login) + valuz-kernel (non-root). Register both in the
 # s6-overlay `user` bundle so /init supervises them. valuz-kernel ships GATED DOWN
 # (its `down` file) so the snapshot never captures it running with the template's
-# placeholder env; the host's valuz-apply-env helper writes the per-user env and
-# `s6-svc -u`s it, starting it once with the correct env.
+# placeholder env. Post-snapshot, the host (apply_env, over envd) writes the
+# per-user env to /run/valuz/env — which the kernel run script sources — and then
+# `s6-svc -u`s this service, starting it once with the correct env.
 COPY docker/lean/s6-rc.d/envd         /etc/s6-overlay/s6-rc.d/envd
 COPY docker/lean/s6-rc.d/valuz-kernel /etc/s6-overlay/s6-rc.d/valuz-kernel
 RUN chmod +x /etc/s6-overlay/s6-rc.d/envd/run /etc/s6-overlay/s6-rc.d/valuz-kernel/run \
     && mkdir -p /etc/s6-overlay/s6-rc.d/user/contents.d \
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/envd \
              /etc/s6-overlay/s6-rc.d/user/contents.d/valuz-kernel
-
-# Host-invoked (over envd, post snapshot-start) helper: writes per-user env into
-# the s6 container-environment + brings up the gated kernel + waits for /health.
-COPY docker/lean/valuz-apply-env /usr/local/bin/valuz-apply-env
-RUN chmod +x /usr/local/bin/valuz-apply-env
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \

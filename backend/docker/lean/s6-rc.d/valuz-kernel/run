@@ -3,18 +3,32 @@
 #
 # GATED START. This service ships DOWN (sibling `down` file) so AGS snapshot-start
 # never captures the kernel running with the template's placeholder env. After the
-# snapshot resumes, the host writes the per-user env into the s6 container-
-# environment and `s6-svc -u`s this service (via the valuz-apply-env helper) — so
-# by the time this run script executes, `with-contenv` above has exported the
-# correct per-user env (KERNEL_STORE / VALUZ_DATA_API_* / KERNEL_AUTH_TOKEN). The
-# kernel therefore starts exactly once, already configured. The AGS tool readiness
-# probe is on envd (:49983), so the instance reaches RUNNING while this stays down.
+# snapshot resumes, the host (AgsSandboxBackend.apply_env, over envd) writes the
+# per-user env to ${VALUZ_ENV_FILE} and then `s6-svc -u`s this service — so by the
+# time this run script executes, sourcing that file below gives us the correct
+# per-user env (KERNEL_STORE / VALUZ_DATA_API_* / KERNEL_AUTH_TOKEN). The kernel
+# starts exactly once, already configured. The AGS tool readiness probe is on
+# envd (:49983), so the instance reaches RUNNING while this stays down.
+#
+# Why a sourced file, not the s6 container_environment: this image sets
+# S6_KEEP_ENV=1, so `with-contenv` keeps the inherited process env and does NOT
+# read /run/s6/container_environment — writing env there would have no effect.
 #
 # PERSISTENCE. db + logs live on the per-owner COS mount at ~/.valuz-kernel, and
 # ~/.claude / ~/.codex are likewise per-owner COS mounts (all declared in the AGS
 # provision). So they survive sandbox recreation, and the runtime uses its NATIVE
 # home paths — NO CLAUDE_CONFIG_DIR / CODEX_HOME redirect, NO owner-dir glob.
 set -eu
+
+# Per-user env applied post-snapshot by the host (see apply_env). Sourced with
+# auto-export so every KEY reaches the kernel process.
+VALUZ_ENV_FILE="${VALUZ_ENV_FILE:-/run/valuz/env}"
+if [ -f "${VALUZ_ENV_FILE}" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "${VALUZ_ENV_FILE}"
+    set +a
+fi
 
 export PYTHONPATH=/app/kernel
 export HOME=/home/user
