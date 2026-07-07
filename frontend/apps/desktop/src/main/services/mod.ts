@@ -11,8 +11,17 @@ import { startSidecar, type DesktopSidecarResult } from "./sidecar";
 import { recordSidecarLine } from "./system-logs";
 
 const AGENT_SERVER_DETAIL = "Primary local agent runtime";
-const HEALTH_CHECK_TIMEOUT_MS = 30_000;
 const HEALTH_CHECK_INTERVAL_MS = 500;
+// The desktop no longer hard-fails the splash at a fixed deadline: a cold
+// backend (first-run unpack, alembic migration, slow disk) can legitimately
+// take a while. We keep probing as long as the sidecar process is alive and
+// surface an error the moment it actually exits — or, as a last-resort
+// backstop, after this generous absolute cap.
+const HEALTH_SLOW_HINT_MS = 15_000;
+const HEALTH_HARD_CAP_MS = 180_000;
+// Dev mode probes an externally-run backend (no child process to watch), so it
+// keeps a bounded wait with a "start it yourself" hint.
+const DEV_HEALTH_TIMEOUT_MS = 60_000;
 
 export interface DesktopServiceManager {
   descriptors: DescriptorRegistry;
@@ -32,24 +41,47 @@ const formatLogLine = (line: string) => {
   return `[${timestamp}] ${line}`;
 };
 
+type HealthResult = "healthy" | "exited" | "timeout";
+
 /**
- * Poll the backend health endpoint until it responds or times out.
+ * Probe the backend health endpoint until it responds, the sidecar process
+ * exits, or a hard cap elapses.
+ *
+ * Returns ``"healthy"`` on a 200, ``"exited"`` when ``isAlive`` reports the
+ * child process is gone (a real crash — fail fast instead of waiting out the
+ * cap), or ``"timeout"`` if neither happens within ``hardCapMs``.
  */
 const waitForHealth = async (
   port: number,
-  timeoutMs: number,
-): Promise<boolean> => {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
+  opts: {
+    isAlive?: () => boolean;
+    hardCapMs?: number;
+    onSlow?: () => void;
+  } = {},
+): Promise<HealthResult> => {
+  const start = Date.now();
+  const cap = opts.hardCapMs ?? HEALTH_HARD_CAP_MS;
+  let slowFired = false;
+  while (Date.now() - start < cap) {
     try {
       const res = await fetch(`http://127.0.0.1:${port}/v1/projects`);
-      if (res.ok) return true;
+      if (res.ok) return "healthy";
     } catch {
       // Not ready yet
     }
+    // The process died before it ever served — surface the failure now.
+    if (opts.isAlive && !opts.isAlive()) return "exited";
+    if (
+      !slowFired &&
+      opts.onSlow &&
+      Date.now() - start >= HEALTH_SLOW_HINT_MS
+    ) {
+      slowFired = true;
+      opts.onSlow();
+    }
     await new Promise((r) => setTimeout(r, HEALTH_CHECK_INTERVAL_MS));
   }
-  return false;
+  return "timeout";
 };
 
 export const createServiceManager = (
@@ -123,8 +155,10 @@ export const createServiceManager = (
             descriptor.name,
             `Dev mode — skipping sidecar, probing port ${devPort}...`,
           );
-          const healthy = await waitForHealth(devPort, HEALTH_CHECK_TIMEOUT_MS);
-          if (healthy) {
+          const health = await waitForHealth(devPort, {
+            hardCapMs: DEV_HEALTH_TIMEOUT_MS,
+          });
+          if (health === "healthy") {
             setStatus(descriptor.name, "running");
             addLog(
               descriptor.name,
@@ -141,6 +175,10 @@ export const createServiceManager = (
         }
 
         try {
+          // Track the child's exit so the health wait can fail fast when the
+          // backend process dies before it ever serves (vs. just being slow).
+          let exited = false;
+          let exitCode: number | null = null;
           const result = await startSidecar({
             appDataDir,
             name: descriptor.name,
@@ -160,6 +198,8 @@ export const createServiceManager = (
                 descriptor.name,
                 `Process exited (code=${code}, signal=${signal})`,
               );
+              exited = true;
+              exitCode = code;
               setStatus(descriptor.name, "stopped");
               sidecars.delete(descriptor.name);
             },
@@ -168,19 +208,31 @@ export const createServiceManager = (
           sidecars.set(descriptor.name, result);
           addLog(descriptor.name, `Sidecar spawned (pid=${result.pid})`);
 
-          // Wait for health check
-          const healthy = await waitForHealth(
-            descriptor.defaultPort,
-            HEALTH_CHECK_TIMEOUT_MS,
-          );
-          if (healthy) {
+          // Probe until healthy, the process exits, or the hard cap. No fixed
+          // 30s deadline — a slow-but-alive backend keeps the splash spinning
+          // instead of flashing a premature error; a real crash fails fast.
+          const health = await waitForHealth(descriptor.defaultPort, {
+            isAlive: () => !exited,
+            onSlow: () =>
+              addLog(
+                descriptor.name,
+                "Backend is taking longer than usual — still starting…",
+              ),
+          });
+          if (health === "healthy") {
             setStatus(descriptor.name, "running", result.pid);
             addLog(descriptor.name, "Service is ready");
+          } else if (health === "exited") {
+            setStatus(descriptor.name, "error");
+            addLog(
+              descriptor.name,
+              `Backend exited before it became ready (code=${exitCode ?? "?"}) — see logs`,
+            );
           } else {
             setStatus(descriptor.name, "error", result.pid);
             addLog(
               descriptor.name,
-              "Health check timed out — service may not be responding",
+              "Backend did not become ready within the maximum wait — see logs",
             );
           }
         } catch (err) {
