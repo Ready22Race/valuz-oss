@@ -21,7 +21,7 @@ jobs:
         run: |
           IMG="${{ inputs.image }}"
           docker pull "$IMG"
-          docker run -d --name k -p 8000:8000 -e KERNEL_AUTH_TOKEN=devtoken "$IMG"
+          docker run -d --name ksmoke -p 8000:8000 -e KERNEL_AUTH_TOKEN=devtoken "$IMG"
           ok=0
           for i in $(seq 1 60); do
             code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/health 2>/dev/null || true)
@@ -29,12 +29,12 @@ jobs:
             sleep 2
           done
           echo "===== who runs uvicorn / kernel? (expect uid 1000 user) ====="
-          docker exec k sh -c 'ps -eo user,uid,pid,comm,args 2>/dev/null | grep -E "uvicorn|python|envd" | grep -v grep | head -20'
+          docker exec ksmoke sh -c 'ps -eo user,uid,pid,comm,args 2>/dev/null | grep -E "uvicorn|python|envd" | grep -v grep | head -20' || true
           echo "===== id of user 1000 ====="
-          docker exec k sh -c 'id user 2>/dev/null; getent passwd 1000'
+          docker exec ksmoke sh -c 'id user 2>/dev/null; getent passwd 1000' || true
           echo "===== envd listening on 49983? ====="
-          docker exec k sh -c '(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep -E ":8000|:49983" | head'
+          docker exec ksmoke sh -c '(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep -E ":8000|:49983"' || true
           echo "===== kernel service log ====="
-          docker logs k 2>&1 | grep -aE "valuz-kernel|migrating|serving|Application startup|Started server|Permission|denied|Error" | head -20
-          docker rm -f k >/dev/null 2>&1 || true
+          docker logs ksmoke 2>&1 | grep -aE "valuz-kernel|migrating|serving|Application startup|Started server|Permission|denied|Error" | head -20 || true
+          docker rm -f ksmoke >/dev/null 2>&1 || true
           test "$ok" = 1
