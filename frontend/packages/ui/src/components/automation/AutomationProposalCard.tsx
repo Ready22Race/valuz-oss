@@ -33,6 +33,8 @@ interface AutomationProposalCardProps {
   /** Resolved executing agent — shown as the Lead in ``task`` mode. */
   agentName?: string | null;
   actionKind: "chat" | "task";
+  /** Both action kinds: each fire runs in an isolated git worktree. */
+  worktree?: boolean;
   state: AutomationProposalState;
   /** When ``state === "error"``, the confirm failure to display. */
   errorMessage?: string;
@@ -48,6 +50,7 @@ export const AutomationProposalCard = memo(function AutomationProposalCard({
   triggerHuman,
   agentName,
   actionKind,
+  worktree = false,
   state,
   errorMessage,
   validationError,
@@ -127,6 +130,11 @@ export const AutomationProposalCard = memo(function AutomationProposalCard({
             <span className="shrink-0 rounded-full bg-surface-muted px-1.5 text-2xs font-medium text-ink-label">
               {modeLabel}
             </span>
+            {worktree ? (
+              <span className="shrink-0 rounded-full bg-brand/10 px-1.5 text-2xs font-medium text-brand">
+                {t("automation.worktreeLabel")}
+              </span>
+            ) : null}
           </div>
 
           {triggerHuman || agentName ? (

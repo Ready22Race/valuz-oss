@@ -105,6 +105,7 @@ async def confirm_automation_proposal(
         project_kind=project_kind,
         project_id=project_id,
         session_agent_slug=bound_agent_slug,
+        worktree=payload.worktree,
     )
     # MCP-from-chat: forward the calling session's project so library agents land
     # in the user's current chat project rather than a freshly created one.

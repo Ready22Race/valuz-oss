@@ -178,6 +178,7 @@ export const AutomationDetailPage = () => {
     agent_slug: string;
     trigger: Trigger;
     action_kind: ActionKind;
+    worktree: boolean;
   }) => {
     try {
       await automationsApi.update(automationId, data);
@@ -370,6 +371,7 @@ export const AutomationDetailPage = () => {
           agent_slug: detail.agent_slug,
           trigger: detail.trigger,
           action_kind: (detail.action_kind as ActionKind) ?? "chat",
+          worktree: detail.worktree ?? false,
         }}
         title={t(k("automation.dialogTitleEditNamed"), { name: detail.name })}
       />

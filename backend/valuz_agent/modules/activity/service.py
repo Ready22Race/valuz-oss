@@ -147,8 +147,12 @@ async def list_activity(
         cands = [c for c in cands if _order_key(c) > cur_key]
     page = cands[:limit]
 
-    # Enrich only the winning chat rows with title/status from the kernel.
+    # Enrich only the winning chat rows with title/status from the kernel. A row
+    # whose session the kernel no longer has is a GHOST — the session was deleted
+    # but a stale index row lingered (or a create half-failed). Drop it so it
+    # never shows as a "New chat" the user can't clear.
     chat_ids = [c.id for c in page if c.kind == "chat"]
+    ghost_ids: set[str] = set()
     if chat_ids:
         sessions = await kernel_client.list_sessions(
             user_id, ids=chat_ids, limit=len(chat_ids)
@@ -159,13 +163,18 @@ async def list_activity(
                 continue
             s = smap.get(c.id)
             if s is None:
-                c.title, c.status = "New chat", "unknown"
+                ghost_ids.add(c.id)
                 continue
             meta = (getattr(s, "metadata", None) or {}).get("valuz") or {}
             c.title = (
                 meta.get("name") or meta.get("last_user_message_text") or "New chat"
             )
             c.status = getattr(s, "status", "unknown")
+    # Anchor the cursor to the original page tail BEFORE dropping ghosts, so
+    # pagination advances past them instead of re-requesting the same ghosts.
+    last_cand = page[-1] if page else None
+    if ghost_ids:
+        page = [c for c in page if c.id not in ghost_ids]
 
     pname = await project_name_map(user_id)
 
@@ -186,5 +195,5 @@ async def list_activity(
     ]
     # A full source page means there may be more beyond the buffer.
     more = n_sess >= limit or n_task >= limit
-    next_cursor = _encode(page[-1]) if (page and more) else None
+    next_cursor = _encode(last_cand) if (last_cand is not None and more) else None
     return ActivityPage(items=items, next_cursor=next_cursor)

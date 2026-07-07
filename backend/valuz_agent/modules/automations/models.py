@@ -18,7 +18,7 @@ CheckConstraints enforce the discriminated-trigger invariant at the DB layer
 but the DB guard is the last-line defence against direct-insert bugs.
 """
 
-from sqlalchemy import BigInteger, CheckConstraint, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
@@ -73,6 +73,12 @@ class AutomationRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     #   protocol. Only valid for projects — chat projects don't
     #   have the multi-member context the task protocol needs.
     action_kind: Mapped[str] = mapped_column(String(16), default="chat")
+    # Worktree isolation (design §5) — valid for BOTH action kinds, gated on
+    # the bound project being a git repo. ``chat`` fires each run in its own
+    # git worktree of the project repo; ``task`` runs the whole task (lead +
+    # every member) in ONE worktree. Clean worktrees auto-remove when the run
+    # / task finishes. Ignored for non-git (chat-sentinel) projects.
+    worktree: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # ── Trigger (何时触发) ────────────────────────────────────────────
     trigger_kind: Mapped[str] = mapped_column(String(32))

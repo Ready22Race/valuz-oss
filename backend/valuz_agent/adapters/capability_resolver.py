@@ -59,17 +59,41 @@ class _SkillSource(Protocol):
 
 logger = logging.getLogger(__name__)
 
-# Path to the bundled builtin skill that teaches the agent how to search
-# the project's knowledge base. Auto-injected into ``session.skills`` when
-# the project has at least one ``valuz_project_kb_binding`` row.
+# Bundled builtin skills — ``valuz-project-docs`` (teaches KB ``doc_search`` /
+# ``list_doc_scope``) and ``browser`` (teaches the ``chrome-devtools`` CLI, paired
+# with the ``browser_start``/``browser_stop`` toolkit tools). They ship under this
+# package's ``resources/builtin_skills`` tree, but are MATERIALIZED per-user into
+# ``fs_registry.official_skill_root`` by ``sync_bundled_official_skills`` — the same
+# COS-synced landing dir as ``skill-creator``.
+#
+# Session skill paths MUST resolve to that per-user location, NOT this
+# ``/srv``-side package path: a remote kernel runs INSIDE a sandbox that mounts
+# only the user's data subtree (official-skills), not the host's package tree, so
+# a package path would fail materialization with "Skill source path not found".
+# The two accessors below are the single source of truth for those paths — both
+# ``always_on_skill_paths`` and ``sessions.capabilities`` go through them so the
+# injected path strings match exactly (dedup depends on it).
 _BUILTIN_SKILLS_DIR = Path(__file__).resolve().parents[1] / "resources" / "builtin_skills"
-_PROJECT_DOCS_SKILL_DIR = _BUILTIN_SKILLS_DIR / "valuz-project-docs"
-# Teaches the agent to drive the managed browser via the ``chrome-devtools`` CLI
-# (pairs with the ``browser_start``/``browser_stop`` toolkit tools). M0 ships it
-# always-on — progressive disclosure means the body is only read when a task
-# actually needs a browser; a later iteration may make it a deploy-per-agent
-# catalog skill instead.
-_BROWSER_SKILL_DIR = _BUILTIN_SKILLS_DIR / "browser"
+
+
+def project_docs_skill_dir(user_id: str) -> Path:
+    """Absolute path to the materialized ``valuz-project-docs`` skill for a user.
+
+    Resolves under ``fs_registry.official_skill_root`` (per-user data dir), so the
+    path is valid both in-process and inside a remote sandbox that mounts the
+    user's official-skills subtree. The materialized copy is produced by
+    ``sync_bundled_official_skills``.
+    """
+    from valuz_agent.infra.fs_registry import fs_registry
+
+    return fs_registry.official_skill_root(user_id=user_id) / "valuz-project-docs"
+
+
+def browser_skill_dir(user_id: str) -> Path:
+    """Absolute path to the materialized ``browser`` skill (see ``project_docs_skill_dir``)."""
+    from valuz_agent.infra.fs_registry import fs_registry
+
+    return fs_registry.official_skill_root(user_id=user_id) / "browser"
 
 
 @dataclass(frozen=True)
@@ -94,7 +118,8 @@ async def resolve_session_capabilities(
     connectors: ConnectorDatastore | None = None,
     docs: DocumentDatastore | None = None,
     session_id: str | None = None,
- user_id: str | None = None) -> ResolvedCapabilities:
+    user_id: str | None = None,
+) -> ResolvedCapabilities:
     if user_id is None:
         raise ValueError("user_id is required")
 
@@ -304,14 +329,14 @@ def always_on_skill_paths(*, user_id: str) -> list[str]:
     from valuz_agent.modules.browser import service as browser_service
 
     candidates = [
-        _PROJECT_DOCS_SKILL_DIR,
+        project_docs_skill_dir(user_id),
         fs_registry.official_skill_root(user_id=user_id) / "skill-creator",
     ]
     # The browser skill teaches the ``chrome-devtools`` CLI, which only works
     # when the engine (Node + chrome-devtools-mcp) is available; don't inject a
     # dead skill otherwise. See docs/design/browser-feature.md §8.
     if browser_service.node_available():
-        candidates.append(_BROWSER_SKILL_DIR)
+        candidates.append(browser_skill_dir(user_id))
     paths: list[str] = []
     for d in candidates:
         if d.is_dir():

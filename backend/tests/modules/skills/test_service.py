@@ -54,7 +54,7 @@ class FakeSkillDatastore:
         self._enabled: dict[str, set[str]] = {}
         self._rows: dict[str, object] = {}
 
-    def list_project_skill_manifests(self, project, source):
+    def list_project_skill_manifests(self, project, source, *, compute_content_hash=True):
         ctx = RuntimeContext(
             project=ProjectRef(
                 id=project.id,
@@ -268,6 +268,126 @@ class TestListCatalog:
         catalog = await service.list_catalog("u", "ws-1")
         assert catalog.skills == []
 
+    async def test_should_read_official_skills_from_index_without_rescanning_source(
+        self, svc, tmp_path
+    ):
+        from valuz_agent.modules.skills.models import SkillIndexRow
+
+        service, _ = svc
+        official_dir = tmp_path / "official" / "skill-creator"
+        official_dir.mkdir(parents=True)
+        (official_dir / ".bundled-version").write_text("v1", encoding="utf-8")
+
+        class _ExplodingOfficialSource:
+            name = "official"
+
+            def list_skills(self, ctx, *, compute_content_hash=True):
+                raise AssertionError("official source should not be scanned when index is warm")
+
+        service._extra_sources = [_ExplodingOfficialSource()]
+        await service._ds.create(
+            "u",
+            SkillIndexRow(
+                slug="skill-creator",
+                name="skill-creator",
+                description="Create skills",
+                scope="official",
+                source="official",
+                source_path=str(official_dir),
+                user_id="u",
+                readonly=True,
+                deletable=False,
+                status="available",
+                content_hash="c" * 64,
+                manifest_hash="m" * 64,
+                tags_json="official,test",
+                creation_origin="discovered",
+                library_enabled=True,
+            ),
+        )
+
+        catalog = await service.list_catalog("u", "ws-1")
+
+        skill = next(s for s in catalog.skills if s.slug == "skill-creator")
+        assert skill.id == "official:skill-creator"
+        assert skill.origin_label == "Built-in"
+        assert skill.content_hash == "c" * 64
+        assert skill.manifest_hash == "m" * 64
+        assert skill.tags == ["official", "test"]
+
+    async def test_should_fallback_to_official_source_when_index_is_empty(self, svc, tmp_path):
+        service, _ = svc
+        from valuz_agent.integrations.skills_official import OfficialSkillSource
+
+        official_dir = tmp_path / "official"
+        _make_skill_dir(official_dir, "browser")
+        service._extra_sources = [OfficialSkillSource(official_dir=official_dir)]
+
+        catalog = await service.list_catalog("u", "ws-1")
+
+        assert any(skill.slug == "browser" for skill in catalog.skills)
+
+    async def test_should_read_user_skills_from_index_without_rescanning_source(
+        self, svc, tmp_path
+    ):
+        from valuz_agent.modules.skills.models import SkillIndexRow
+
+        service, _ = svc
+        user_dir = tmp_path / "user" / "my-skill"
+        user_dir.mkdir(parents=True)
+
+        class _ExplodingSource:
+            name = "filesystem"
+
+            def list_skills(self, ctx, *, compute_content_hash=True):
+                raise AssertionError(
+                    "the filesystem source must not be scanned when the index has user skills"
+                )
+
+        service._source = _ExplodingSource()
+        await service._ds.create(
+            "u",
+            SkillIndexRow(
+                slug="my-skill",
+                name="My Skill",
+                description="Desc",
+                scope="user",
+                source="valuz",
+                source_path=str(user_dir),
+                user_id="u",
+                status="available",
+                readonly=False,
+                deletable=True,
+                content_hash="c" * 64,
+                manifest_hash="m" * 64,
+                tags_json="a,b",
+                creation_origin="created",
+                library_enabled=True,
+            ),
+        )
+
+        catalog = await service.list_catalog("u", "ws-1")
+
+        skill = next(s for s in catalog.skills if s.slug == "my-skill")
+        assert skill.id == "user:my-skill"
+        assert skill.name == "My Skill"
+        assert skill.creation_origin == "created"
+        assert skill.tags == ["a", "b"]
+        assert skill.readonly is False
+        assert skill.deletable is True
+
+    async def test_should_fallback_to_filesystem_scan_when_user_index_is_empty(
+        self, svc, skill_root
+    ):
+        # No user rows in the index → fall back to a filesystem scan so a
+        # freshly-created (not-yet-indexed) skill is never missing from the catalog.
+        service, _ = svc
+        _make_skill_dir(skill_root, "scanned-skill")
+
+        catalog = await service.list_catalog("u", "ws-1")
+
+        assert any(s.slug == "scanned-skill" for s in catalog.skills)
+
     async def test_should_sort_by_folder_birthtime_desc(self, svc, skill_root):
         """The skill management page renders the catalog in DESC
         birthtime order. We stage two folders with deliberately staggered
@@ -314,7 +434,7 @@ class TestListCatalog:
         class _NullTimeSource:
             name = "null-time"
 
-            def list_skills(self, ctx):
+            def list_skills(self, ctx, *, compute_content_hash=True):
                 return [
                     SkillManifest(
                         id="extra:legacy",

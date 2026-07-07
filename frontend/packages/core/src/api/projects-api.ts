@@ -288,11 +288,14 @@ export const projectsApi = {
 
   listFiles(
     projectId: string,
-    opts?: { depth?: number; includeHidden?: boolean },
+    opts?: { depth?: number; includeHidden?: boolean; worktree?: string },
   ): Promise<{ files: ProjectFileNode[] }> {
     const qs = new URLSearchParams();
     if (opts?.depth !== undefined) qs.set("depth", String(opts.depth));
     if (opts?.includeHidden) qs.set("include_hidden", "true");
+    // Scope the tree to a worktree session's checkout instead of the shared
+    // project cwd when a worktree name is supplied.
+    if (opts?.worktree) qs.set("worktree", opts.worktree);
     const suffix = qs.toString() ? `?${qs}` : "";
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/files${suffix}`,
@@ -318,13 +321,20 @@ export const projectsApi = {
     });
   },
 
-  readFile(projectId: string, filePath: string): Promise<ArtifactFileResponse> {
+  readFile(
+    projectId: string,
+    filePath: string,
+    opts?: { worktree?: string },
+  ): Promise<ArtifactFileResponse> {
     const encodedPath = filePath
       .split("/")
       .map((part) => encodeURIComponent(part))
       .join("/");
+    const suffix = opts?.worktree
+      ? `?worktree=${encodeURIComponent(opts.worktree)}`
+      : "";
     return fetchJson<ArtifactFileResponse>(
-      `/v1/projects/${encodeURIComponent(projectId)}/files/${encodedPath}`,
+      `/v1/projects/${encodeURIComponent(projectId)}/files/${encodedPath}${suffix}`,
     ).then(normalizeArtifactFileResponse);
   },
 

@@ -19,6 +19,13 @@ that maintains the global Decision Inbox snapshot. It:
    ``terminated`` kernel status (or gets removed altogether), its
    pendings are cleared from the snapshot so the drawer doesn't
    surface stale entries.
+4. **Reconciles against durable truth** — the live tap can lose events
+   (bounded global queue, durable-read races, boot windows) while
+   ``requires_action`` is always persisted first. LOCAL mode therefore
+   re-reads the durable events table on every client read (debounced
+   per owner) and on a periodic sweep for connected subscribers,
+   fanning out the diff — so a lost live event costs latency, never a
+   permanently invisible question.
 
 Concurrency: one writer task (``_broadcast_loop``) serializes all
 snapshot mutations. SSE adapters each get their own fan-out queue via
@@ -33,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 import valuz_agent.boot.kernel  # noqa: F401
@@ -65,6 +73,19 @@ _KERNEL_ACTION_RESOLVED = "action_resolved"
 # file / MCP approvals have their own UX (the strip above the composer);
 # unifying them is a phase 2 decision.
 _INBOX_SUBJECTS = frozenset({"clarifying_questions"})
+
+# Reconciliation cadence. The live tap is the low-latency feed, but it can
+# lose events (bounded global queue drops on overflow, durable-read races,
+# events emitted before the tap attached at boot) — while ``requires_action``
+# itself is ALWAYS persisted (persist-then-broadcast). So durable truth is
+# re-read: on every client read path (debounced per owner) and on a periodic
+# sweep for connected subscribers. A lost live event then costs latency, never
+# a permanently invisible question.
+_LOCAL_HYDRATE_DEBOUNCE_SECONDS = 5.0
+_RECONCILE_INTERVAL_SECONDS = 30.0
+# One quick retry for the live tap's durable-read races (the session row /
+# ``valuz_task`` row landing just after the event broadcast).
+_ENRICH_RETRY_DELAY_SECONDS = 0.5
 
 
 class DecisionAggregator:
@@ -108,6 +129,10 @@ class DecisionAggregator:
         # is byte-for-byte unchanged.
         self._multitenant = False
         self._global_tap: asyncio.Task[None] | None = None
+        # LOCAL-mode reconciliation state: per-owner debounce stamps for the
+        # read-path hydrate + the periodic sweep task.
+        self._owner_hydrated_at: dict[str, float] = {}
+        self._reconcile_task: asyncio.Task[None] | None = None
         self._stopped = False
 
     # ---- Lifecycle --------------------------------------------------
@@ -134,6 +159,9 @@ class DecisionAggregator:
             return
         await self._hydrate_all()
         self._global_tap = asyncio.create_task(self._global_tap_loop(), name="decisions-aggregator")
+        self._reconcile_task = asyncio.create_task(
+            self._reconcile_loop(), name="decisions-reconcile"
+        )
         logger.info(
             "DecisionAggregator started (local); hydrated %d pending entries", len(self._pending)
         )
@@ -147,6 +175,9 @@ class DecisionAggregator:
         if self._global_tap is not None:
             taps.append(self._global_tap)
             self._global_tap = None
+        if self._reconcile_task is not None:
+            taps.append(self._reconcile_task)
+            self._reconcile_task = None
         for task in taps:
             task.cancel()
         for task in taps:
@@ -181,10 +212,14 @@ class DecisionAggregator:
         MULTITENANT: history is a per-owner durable read (DataService) so the
         REST snapshot is correct with no live subscription and even when the
         owner's sandbox is gone (mirrors event_sse_adapter: history=durable).
-        LOCAL: the global tap keeps ``_pending`` fresh — just read it.
+        LOCAL: the global tap keeps ``_pending`` fresh in the common case, but
+        it CAN lose events (bounded queue, races, boot windows) — so client
+        reads also reconcile against durable, debounced per owner.
         """
         if self._multitenant:
             await self._hydrate_owner(owner_user_id)
+        else:
+            await self._hydrate_owner_if_due(owner_user_id)
         async with self._lock:
             return self._owner_entries(owner_user_id)
 
@@ -194,12 +229,15 @@ class DecisionAggregator:
         First frame is a ``snapshot`` of this owner's state, then ``added`` /
         ``resolved`` deltas for this owner only. MULTITENANT: hydrate from durable
         + start a per-owner live tap on that owner's kernel. LOCAL: the global tap
-        already feeds ``_pending`` — just register the queue. Caller MUST call
+        feeds ``_pending`` live, and a debounced durable reconcile here makes the
+        snapshot frame authoritative on every (re)connect. Caller MUST call
         :meth:`unsubscribe` when the SSE connection closes.
         """
         if self._multitenant:
             # Hydrate from durable BEFORE taking the lock (durable I/O).
             await self._hydrate_owner(owner_user_id)
+        else:
+            await self._hydrate_owner_if_due(owner_user_id)
         from valuz_agent.modules.decisions.schemas import (
             _DecisionStreamSnapshotPayload,
         )
@@ -298,13 +336,65 @@ class DecisionAggregator:
         except asyncio.CancelledError:
             return
 
+    async def _hydrate_owner_if_due(self, owner_user_id: str) -> None:
+        """LOCAL read-path reconcile, debounced per owner.
+
+        ``requires_action`` is always persisted before it is broadcast, so the
+        durable events table is the source of truth the in-memory snapshot can
+        silently diverge from (dropped tap events, races, boot windows). A
+        debounced re-read on every ``snapshot()`` / ``subscribe()`` guarantees a
+        client can never be stuck with a permanently missing pending.
+        """
+        now = time.monotonic()
+        last = self._owner_hydrated_at.get(owner_user_id)
+        if last is not None and now - last < _LOCAL_HYDRATE_DEBOUNCE_SECONDS:
+            return
+        # Stamp before the (slow) durable read so concurrent readers don't
+        # stampede into parallel hydrates.
+        self._owner_hydrated_at[owner_user_id] = now
+        await self._hydrate_owner(owner_user_id)
+
+    async def _reconcile_loop(self) -> None:
+        """LOCAL periodic durable sweep for owners with live subscribers.
+
+        The read-path debounce only heals clients that re-read (page open, SSE
+        reconnect). A client whose stream stays connected but whose ``added``
+        delta was lost upstream has no other recovery signal — this sweep plus
+        the diff fan-out inside :meth:`_hydrate_owner` converges them too.
+        """
+        try:
+            while not self._stopped:
+                await asyncio.sleep(_RECONCILE_INTERVAL_SECONDS)
+                async with self._lock:
+                    owners = {o for (o, _q) in self._subscribers}
+                for owner_user_id in owners:
+                    try:
+                        await self._hydrate_owner(owner_user_id)
+                    except Exception:  # noqa: BLE001 — keep sweeping
+                        logger.warning(
+                            "decisions reconcile: hydrate(%s) failed",
+                            owner_user_id,
+                            exc_info=True,
+                        )
+        except asyncio.CancelledError:
+            return
+
     async def _hydrate_owner(self, owner_user_id: str) -> None:
-        """Rebuild ``owner_user_id``'s pending snapshot from the durable store.
+        """Reconcile ``owner_user_id``'s pending snapshot against the durable store.
 
         Per-owner (the durable read is owner-scoped and works even when the
         owner's sandbox is gone). All durable I/O happens without the lock; the
-        computed set replaces this owner's in-memory entries under the lock.
+        diff is applied under the lock:
+
+        - Entries present in durable but not in memory are added AND fanned out
+          as ``added`` deltas, so already-connected subscribers converge too —
+          not only the next snapshot reader.
+        - In-memory entries absent from durable are removed (fanned out as
+          ``resolved``) only when ``raised_at`` predates the scan start — an
+          entry the live tap added while the durable read was in flight is
+          kept, so reconcile never undoes a concurrent live add.
         """
+        started_at = now_ms()
         try:
             sessions = await data_reader().list_sessions(owner_user_id, limit=500)
         except kernel_client.KernelNotImplementedError:
@@ -332,10 +422,43 @@ class DecisionAggregator:
                 fresh_by_session.setdefault(session.id, set()).add(pending_id)
 
         async with self._lock:
-            self._forget_owner_locked(owner_user_id)
+            current = {
+                pid: e for pid, e in self._pending.items() if e.owner_user_id == owner_user_id
+            }
+            added_ids = [pid for pid in fresh if pid not in current]
+            removed_ids = [
+                pid
+                for pid, e in current.items()
+                if pid not in fresh and e.raised_at < started_at
+            ]
+            if added_ids:
+                logger.info(
+                    "decisions reconcile: recovered %d pending(s) missing from memory for %s",
+                    len(added_ids),
+                    owner_user_id,
+                )
+            for pid in removed_ids:
+                entry = self._pending.pop(pid, None)
+                if entry is None:
+                    continue
+                siblings = self._by_session.get(entry.session_id)
+                if siblings is not None:
+                    siblings.discard(pid)
+                    if not siblings:
+                        self._by_session.pop(entry.session_id, None)
             self._pending.update(fresh)
             for sid, pids in fresh_by_session.items():
                 self._by_session.setdefault(sid, set()).update(pids)
+            for pid in added_ids:
+                await self._fan_out(
+                    DecisionStreamEvent(kind="added", payload=_added_payload(fresh[pid])),
+                    owner_user_id,
+                )
+            for pid in removed_ids:
+                await self._fan_out(
+                    DecisionStreamEvent(kind="resolved", payload=_resolved_payload(pid)),
+                    owner_user_id,
+                )
 
     async def _collect_pending(
         self, session: Session, events: list[Event]
@@ -441,19 +564,39 @@ class DecisionAggregator:
         pending_id = data.get("pending_id")
         if not isinstance(pending_id, str):
             return
-        # Resolve the session (per-owner durable read) for run_kind + join keys.
-        session = await self._load_session(owner_user_id, session_id)
-        if session is None or not is_task_driven(session):
-            return
         payload = _coerce_payload(data.get("payload"))
-        entry = await enrich_pending(
-            session,
-            pending_id=pending_id,
-            question_payload=payload,
-            raised_at=_event_timestamp(event),
-            user_id=session.user_id,
-        )
+        # The live broadcast can outrun the durable writes this joins against
+        # (the session row via write-through, the ``valuz_task`` row). One
+        # short retry absorbs that lag; a real miss costs only latency — the
+        # read-path / periodic reconcile re-reads durable truth later.
+        entry: DecisionEntry | None = None
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(_ENRICH_RETRY_DELAY_SECONDS)
+            # Resolve the session (per-owner durable read) for run_kind + join keys.
+            session = await self._load_session(owner_user_id, session_id)
+            if session is None:
+                continue
+            if not is_task_driven(session):
+                # By design: plain conversations render their question inline
+                # on the page the user is already viewing — never a retry case.
+                return
+            entry = await enrich_pending(
+                session,
+                pending_id=pending_id,
+                question_payload=payload,
+                raised_at=_event_timestamp(event),
+                user_id=session.user_id,
+            )
+            if entry is not None:
+                break
         if entry is None:
+            logger.warning(
+                "decisions: dropping requires_action %s (session %s) — session/task rows "
+                "unreadable after retry; the reconcile sweep recovers it once they land",
+                pending_id,
+                session_id,
+            )
             return
         async with self._lock:
             # Idempotent on re-emit (kernel doesn't dedupe). Latest

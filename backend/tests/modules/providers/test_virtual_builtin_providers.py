@@ -155,6 +155,64 @@ class TestMaterializeOnLogin:
         items = await svc.service.list_providers(OWNER)
         assert sum(1 for i in items if i.provider_kind == "claude-subscription") == 1
 
+    async def test_enable_normalizes_legacy_catalog_id_row(self, svc: _SvcHandle) -> None:
+        # A legacy install seeded the built-in subscription as a real row under
+        # the ``ch-*`` catalog id itself, already enabled + cli_keychain but
+        # deletable=False. enable_provider used to early-return it untouched,
+        # so the settings page kept seeing an "un-materialized template"
+        # (oauth + !deletable) and re-POSTed /enable in an infinite loop.
+        svc.seed(
+            ProviderRow(
+                user_id=OWNER,
+                id="ch-claude-subscription",
+                name="Claude Pro / Max",
+                provider_kind="claude-subscription",
+                source="builtin",
+                enabled=True,
+                is_default=False,
+                deletable=False,
+                default_model=None,
+                test_status="never",
+                credential_source="cli_keychain",
+                auth_type="oauth",
+            )
+        )
+        detail = await svc.service.enable_provider(OWNER, "ch-claude-subscription")
+        assert detail.id == "ch-claude-subscription"  # reused, not duplicated
+        assert detail.deletable is True
+        assert detail.source == "user"  # delete guard requires source="user"
+        # The loop terminator: the list must carry no oauth row that still
+        # looks like an un-materialized template for this kind.
+        items = await svc.service.list_providers(OWNER)
+        claude_items = [i for i in items if i.provider_kind == "claude-subscription"]
+        assert len(claude_items) == 1
+        assert claude_items[0].deletable is True
+
+    async def test_enable_normalizes_legacy_disabled_catalog_id_row(self, svc: _SvcHandle) -> None:
+        # Same legacy shape but not yet enabled — takes the non-idempotent
+        # branch, which must also land on the canonical CLI-backed state.
+        svc.seed(
+            ProviderRow(
+                user_id=OWNER,
+                id="ch-codex-subscription",
+                name="Codex · ChatGPT",
+                provider_kind="codex-subscription",
+                source="builtin",
+                enabled=False,
+                is_default=False,
+                deletable=False,
+                default_model=None,
+                test_status="never",
+                credential_source="none",
+                auth_type="oauth",
+            )
+        )
+        detail = await svc.service.enable_provider(OWNER, "ch-codex-subscription")
+        assert detail.enabled is True
+        assert detail.credential_source == "cli_keychain"
+        assert detail.deletable is True
+        assert detail.source == "user"
+
     async def test_enable_unknown_id_raises_not_found(self, svc: _SvcHandle) -> None:
         with pytest.raises(ProviderNotFound):
             await svc.service.enable_provider(OWNER, "ch-does-not-exist")

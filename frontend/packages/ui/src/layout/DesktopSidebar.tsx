@@ -1025,8 +1025,10 @@ export const DesktopSidebar = ({
                   ``min-h-0`` lets it actually shrink under flex. ``-mr-3 pr-3``
                   pushes the scrollbar out to the sidebar's right edge (against
                   the gap before the main panel) while keeping the rows inset, so
-                  the bar rides the edge instead of overlapping the row text. */}
-              <div className="-mr-3 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-3">
+                  the bar rides the edge instead of overlapping the row text.
+                  ``pl-1.5 -ml-1.5`` keeps row text visually aligned while
+                  giving active-row shadows room to paint on the left edge. */}
+              <div className="-mr-3 -ml-1.5 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-3 pl-1.5">
                 <SectionLabel
                   open={projectsSectionOpen}
                   onToggle={() => setProjectsSectionOpen((v) => !v)}

@@ -58,6 +58,11 @@ class KickoffTaskRequest(BaseModel):
     # Dispatch architecture (M10): "sync" (v1, lead drives one turn, dispatch
     # blocks) or "async" (v2, lead + members are persistent actors).
     dispatch_mode: Literal["sync", "async"] = "async"
+    # Task-level worktree isolation (design §5): the whole task — lead and
+    # every member — runs in ONE git worktree of the project repo; the
+    # branch merges back (or is discarded) when the task ends. Requires the
+    # project cwd to be inside a git repository (422 otherwise).
+    worktree: bool = False
 
 
 class TaskTrigger(BaseModel):
@@ -264,6 +269,7 @@ async def kickoff_task(
             created_by=payload.created_by,
             title=payload.title,
             dispatch_mode=payload.dispatch_mode,
+            worktree=payload.worktree,
             user_id=user_id,
         )
     except ValueError as exc:
@@ -453,8 +459,8 @@ async def intervene(
     revise_goal   — update task.goal + append goal_revised
     pause         — cascade-halt the lead + every in-flight member → ``paused``
                     (recoverable; app-restart skips it, user resumes explicitly)
-    stop          — cascade-halt → ``stopped`` (UI-terminal: no resume button;
-                    still revivable via chat/inject per design)
+    stop          — cascade-halt → ``stopped`` (soft terminal; the detail page
+                    offers a resume entry, and chat/inject can also revive it)
     resume        — reconcile + respawn members + re-drive lead
                     (paused/stopped/blocked → active)
     """
@@ -496,8 +502,8 @@ async def intervene(
         )
     elif payload.action in ("pause", "stop"):
         # Layer 2 cascade halt (orchestrator manages its own txn). ``pause`` →
-        # ``paused`` (resumable, 恢复 button stays); ``stop`` → ``stopped``
-        # (UI-terminal, no 恢复 button — still revivable via chat/inject).
+        # ``paused``; ``stop`` → ``stopped``. Both are soft terminals the
+        # detail page can resume (stopped→active is a legal transition).
         target = "paused" if payload.action == "pause" else "stopped"
         applied = await task_orchestrator.stop_task(
             task_id, ws, target_status=target, user_id=user_id

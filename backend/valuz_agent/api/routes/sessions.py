@@ -23,7 +23,11 @@ from valuz_agent.modules.sessions.dto import (
 )
 from valuz_agent.modules.sessions.errors import BudgetExceeded
 from valuz_agent.modules.sessions.models import SessionAttachmentRow
-from valuz_agent.modules.sessions.schemas import SessionEffortRequest, SessionModelSelection
+from valuz_agent.modules.sessions.schemas import (
+    SessionEffortRequest,
+    SessionModelSelection,
+    SessionWorktreeSpec,
+)
 from valuz_agent.modules.sessions.service import SessionService
 
 logger = logging.getLogger(__name__)
@@ -74,6 +78,12 @@ class SessionCreateRequest(SessionModelSelection):
     # (the agent row is never modified). ``None`` keeps the classic
     # model-picker path (quick chats).
     agent_slug: str | None = None
+    # Opt-in worktree isolation: presence of the object (even empty) runs
+    # the session in an isolated git worktree of the project repo on its
+    # own branch. Requires the project cwd to be inside a git repository —
+    # 422 otherwise (no silent fallback). See
+    # docs/design/project-worktree-design.md.
+    worktree: SessionWorktreeSpec | None = None
 
 
 class SessionPermissionModeRequest(BaseModel):
@@ -227,6 +237,7 @@ async def create_session(
         permission_mode=body.permission_mode,
         effort=body.effort,
         agent_slug=body.agent_slug,
+        worktree=body.worktree,
         user_id=user_id,
     )
 

@@ -80,6 +80,8 @@ export interface AutomationItem {
   agent_name: string | null;
   /** Execution mode — drives the UI badge + edit-dialog default Tab. */
   action_kind: ActionKind;
+  /** Worktree isolation flag (both action kinds; git-repo projects only). */
+  worktree: boolean;
 
   trigger: Trigger;
   /** Localized "every day at 9" / "every 5 minutes". */
@@ -189,6 +191,12 @@ export interface AutomationCreatePayload {
    * (422 ``AutomationTaskOnlyOnProject``) the combination on chat.
    */
   action_kind?: ActionKind;
+  /**
+   * Worktree isolation (both action kinds; requires a git-repo project):
+   * `"chat"` runs each fire in its own git worktree, `"task"` runs lead +
+   * every member in one worktree. Silently dropped for chat-only projects.
+   */
+  worktree?: boolean;
 }
 
 export interface AutomationUpdatePayload {
@@ -197,6 +205,7 @@ export interface AutomationUpdatePayload {
   trigger?: Trigger | null;
   agent_slug?: string | null;
   action_kind?: ActionKind | null;
+  worktree?: boolean | null;
 }
 
 export interface AutomationRunAccepted {
@@ -238,6 +247,8 @@ export interface AutomationProposalSpec {
   agent_kind: AgentKind;
   agent_name: string | null;
   action_kind: ActionKind;
+  /** Worktree isolation (both action kinds; git-repo projects only). */
+  worktree: boolean;
   trigger_human_readable: string;
   next_run_at: number | null;
 }
@@ -251,6 +262,7 @@ export interface AutomationProposalConfirmPayload {
   trigger: Trigger;
   agent_slug?: string | null;
   action_kind?: ActionKind;
+  worktree?: boolean;
 }
 
 export interface AutomationProposalStatusResult {

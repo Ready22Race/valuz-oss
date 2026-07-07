@@ -276,6 +276,7 @@ class AutomationService:
             agent_slug=row.agent_slug,
             agent_name=await self._resolve_agent_name(row, user_id),
             action_kind=row.action_kind,
+            worktree=bool(getattr(row, "worktree", False)),
             trigger=self._row_to_trigger(row),
             trigger_human_readable=self._trigger_human(row),
             status=row.status,
@@ -607,6 +608,7 @@ class AutomationService:
         project_kind: str,
         project_id: str | None,
         session_agent_slug: str | None,
+        worktree: bool = False,
     ) -> AutomationCreatePayload:
         """Assemble an :class:`AutomationCreatePayload` from raw create inputs.
 
@@ -647,6 +649,11 @@ class AutomationService:
             prompt_template=(prompt_template or "").strip(),
             trigger=trigger,
             action_kind=action,  # type: ignore[arg-type]
+            # Worktree isolation needs a git-repo project. Only real projects
+            # qualify — a chat-sentinel (lazy chat project) is never a repo — so
+            # silently drop the flag for chat-kind targets rather than persisting
+            # a meaningless value. Valid for BOTH chat and task actions.
+            worktree=bool(worktree) and project_kind == "project",
         )
 
     async def _preview_agent_name(
@@ -722,6 +729,7 @@ class AutomationService:
             project_id=payload.project_id or "preview",
             prompt_template=payload.prompt_template.strip(),
             action_kind=payload.action_kind,
+            worktree=bool(payload.worktree),
             trigger_kind="cron",  # overwritten by _apply_trigger
             status="enabled",
             next_run_at=None,
@@ -739,6 +747,7 @@ class AutomationService:
             agent_kind=payload.agent_kind,
             agent_name=agent_name,
             action_kind=payload.action_kind,
+            worktree=bool(payload.worktree),
             trigger_human_readable=self._trigger_human(row),
             next_run_at=next_run,
         )
@@ -803,6 +812,7 @@ class AutomationService:
             project_id=project_id,
             prompt_template=payload.prompt_template.strip(),
             action_kind=payload.action_kind,
+            worktree=bool(payload.worktree),
             trigger_kind="cron",  # overwritten by _apply_trigger
             status="enabled",
             next_run_at=None,
@@ -908,6 +918,7 @@ class AutomationService:
             agent_slug=row.agent_slug,
             agent_name=None,
             action_kind=row.action_kind,
+            worktree=bool(getattr(row, "worktree", False)),
             trigger=self._row_to_trigger(row),
             trigger_human_readable=self._trigger_human(row),
             status=row.status,
@@ -978,6 +989,9 @@ class AutomationService:
                 if ws_kind != "project":
                     raise AutomationTaskOnlyOnProject()
             row.action_kind = payload.action_kind
+
+        if payload.worktree is not None:
+            row.worktree = bool(payload.worktree)
 
         trigger_changed = False
         if payload.trigger is not None:

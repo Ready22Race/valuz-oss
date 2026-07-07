@@ -77,6 +77,11 @@ from valuz_agent.modules.tasks.lifecycle import LifecycleService
 from valuz_agent.modules.tasks.live_member_registry import LiveMemberRegistry
 from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
 from valuz_agent.modules.tasks.plan import TaskPlan
+from valuz_agent.modules.tasks.task_worktree import (
+    resolve_task_cwd,
+    task_worktree_notice,
+    task_worktree_snapshot,
+)
 from valuz_agent.modules.tasks.provenance import resolve_trigger_provenance
 from valuz_agent.modules.tasks.recovery import RecoveryService
 
@@ -200,6 +205,7 @@ class TaskOrchestrator:
         originating_session_id: str | None = None,
         trigger_type: str | None = None,
         trigger_automation_id: str | None = None,
+        worktree: bool = False,
         user_id: str | None = None,
     ) -> TaskRow:
         """Create a task and start its lead session in the background.
@@ -237,6 +243,7 @@ class TaskOrchestrator:
             originating_session_id=originating_session_id,
             trigger_type=trigger_type,
             trigger_automation_id=trigger_automation_id,
+            worktree=worktree,
             user_id=user_id,
         )
 
@@ -426,7 +433,10 @@ class TaskOrchestrator:
                 ),
                 ws_row.root_path,
             )
-            lead_cwd = str(project_cwd)
+            # Task-level worktree (design §5): a task carrying a worktree
+            # snapshot keeps every session — including this committed lead —
+            # in the worktree cwd (heals it first if it was removed).
+            lead_cwd = await resolve_task_cwd(task_row, str(project_cwd))
 
             lead_agent = await _member_agent_config(lead_member, member_ds, user_id=user_id)
             lead_clone = None
@@ -447,9 +457,11 @@ class TaskOrchestrator:
             # Fence the goal-mode payload: spill an over-cap committed brief to a
             # doc and hand the lead a short pointer (used as both the embedded
             # brief and the initial ``/goal`` prompt below).
+            # Spill anchored at the MAIN project cwd (design R5) — never
+            # into a task worktree, where it would defeat clean-teardown.
             lead_brief = spill_goal_brief_if_too_long(
                 lead_brief,
-                run_dir=lead_cwd,
+                run_dir=str(project_cwd),
                 task_id=task_id,
                 label=lead_slug,
                 is_lead=True,
@@ -474,6 +486,7 @@ class TaskOrchestrator:
                 dispatch_mode="async",
                 goal_mode=True,
                 plan_pre_committed=True,  # ← key flag (VALUZ-CHATPLAN D10)
+                worktree_notice=task_worktree_notice(task_worktree_snapshot(task_row)),
                 user_id=user_id,
                 **_provider_resolver_deps(db),
             )
@@ -949,6 +962,7 @@ class TaskOrchestrator:
         summary: str,
         artifacts: list[str] | None = None,
         status: str = "completed",
+        force: bool = False,
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Close the task — append a terminal event and set the task status.
@@ -969,6 +983,13 @@ class TaskOrchestrator:
         subtask (e.g. a final aggregation node) and still mark the task done.
         The lead must dispatch+review those nodes first (or drop them via
         modify_plan, or finish with status='stopped' to terminate the task).
+
+        Live-member guard: a ``stopped`` finish is REJECTED while members are
+        still running (a member deep in a long build looks exactly like a hang
+        from the lead's side — killing the whole task is almost never right).
+        The lead must first check them (``await_members`` reports pending
+        members' live status), stop them individually (``stop_subtask``), or
+        pass ``force=True`` after a deliberate decision.
         """
         if status not in ("completed", "stopped"):
             return {
@@ -984,15 +1005,47 @@ class TaskOrchestrator:
         final_status = "stopped" if status == "stopped" else "completed"
         event_type = "task_stopped" if final_status == "stopped" else "task_completed"
 
+        # Live-member guard: don't let a lead kill the task while members are
+        # mid-flight (the observed failure mode: a member deep in a long build
+        # is indistinguishable from a hang, the lead "tries a few times" and
+        # stops the whole task). Name the live subtasks so the lead can check
+        # or stop them individually; ``force=True`` overrides deliberately.
+        if final_status == "stopped" and not force and self._members.has_live_members(task_id):
+            async with async_unit_of_work(commit=False) as db:
+                live_keys = sorted(
+                    r.subtask_key
+                    for r in await TaskSessionDatastore(db).list_runs(cast(str, user_id), task_id)
+                    if r.kind == "subtask" and r.subtask_key and r.status == "active"
+                )
+            return {
+                "ok": False,
+                "error": (
+                    "finish_task(stopped) rejected: members are still running "
+                    f"(subtasks {live_keys or '<unknown>'}). A silent member is "
+                    "usually still working (e.g. a long build), not dead — call "
+                    "await_members to see each pending member's live status, or "
+                    "stop_subtask the ones you no longer need. If you have "
+                    "deliberately decided to terminate the task anyway, call "
+                    "finish_task again with force=true."
+                ),
+                "live_subtasks": live_keys,
+                "status": "rejected",
+            }
+
         rejected: dict[str, Any] | None = None
+        finished_task_row: Any | None = None
         async with async_unit_of_work() as db:
             task_ds = TaskDatastore(db)
             event_ds = TaskEventDatastore(db)
             run_ds = TaskSessionDatastore(db)
 
+            # Fetched for the plan guard below AND for the task-worktree
+            # teardown after the terminal writes commit.
+            finished_task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
+
             # Guard: don't let a "completed" finish leave planned work behind.
             if final_status == "completed":
-                task_row = await task_ds.get_task_by_project(user_id, project_id, task_id)
+                task_row = finished_task_row
                 if task_row is not None:
                     plan = TaskPlan.from_dict(task_row.plan)
                     unresolved = [
@@ -1008,7 +1061,7 @@ class TaskOrchestrator:
                                 "review them first (a dependent node like a final "
                                 "summary becomes ready once its deps are done), or "
                                 "drop them with modify_plan, or call finish_task "
-                                "with status='failed' to abandon the task."
+                                "with status='stopped' to terminate the task."
                             ),
                             "pending_subtasks": unresolved,
                             "status": "rejected",
@@ -1063,6 +1116,17 @@ class TaskOrchestrator:
 
         self._broadcast_shutdown(task_id)
         mailbox_registry.put(lead_session_id, InboxMsg(kind="shutdown"))
+
+        # Task-worktree teardown (design §5): drop the task's worktree iff
+        # it holds no work worth keeping (fail-closed inside). Work left
+        # behind surfaces in the project's Worktrees panel instead.
+        if finished_task_row is not None:
+            from valuz_agent.modules.tasks.task_worktree import (
+                cleanup_task_worktree_if_clean,
+            )
+
+            await cleanup_task_worktree_if_clean(finished_task_row)
+
         return {"ok": True, "status": final_status}
 
     # ------------------------------------------------------------------

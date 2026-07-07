@@ -43,6 +43,11 @@ interface DecisionStoreState {
    *  one EventSource. */
   _inited: boolean;
 
+  /** Whether ``reset`` has run at least once. The first reset (initial
+   *  page-load snapshot) stays silent; later resets treat entries we've
+   *  never held as news (unread + toastable). */
+  _everReset: boolean;
+
   // ---- Mutations (called by the hook + UI) -----------------------
 
   /** Replace the entire pending set with a fresh snapshot. Used on
@@ -76,18 +81,38 @@ export const useDecisionStore = create<DecisionStoreState>((set) => ({
   toastedIds: new Set(),
   isOpen: false,
   _inited: false,
+  _everReset: false,
 
   reset: (entries) =>
-    set(() => {
+    set((state) => {
+      // Same pending set as we already hold → no-op, so the poll backstop
+      // doesn't mint a fresh Map (= spurious re-render) every tick.
+      if (
+        state._everReset &&
+        entries.length === state.pending.size &&
+        entries.every((e) => state.pending.has(e.pending_id))
+      ) {
+        return {};
+      }
       const pending = new Map<string, DecisionEntry>();
       const unreadIds = new Set<string>();
       for (const e of entries) {
         pending.set(e.pending_id, e);
-        // Snapshot entries are NOT marked unread — they were already
-        // present before the user opened the app; surfacing them as
-        // "new" would mis-fire the toast on every page load.
+        if (state._everReset && !state.pending.has(e.pending_id)) {
+          // A later snapshot (SSE reconnect / poll backstop) carrying an
+          // entry we never held IS news — without unread + toast, a
+          // question recovered via snapshot shows only as a silent count.
+          unreadIds.add(e.pending_id);
+        } else if (state.unreadIds.has(e.pending_id)) {
+          // Retained entries keep their unread state across snapshots —
+          // a reconnect must not silently clear the badge accent.
+          unreadIds.add(e.pending_id);
+        }
+        // First reset (initial page-load snapshot): stay silent — these
+        // entries predate the app open; toasting them on every load
+        // would be noise.
       }
-      return { pending, unreadIds };
+      return { pending, unreadIds, _everReset: true };
     }),
 
   add: (entry) =>

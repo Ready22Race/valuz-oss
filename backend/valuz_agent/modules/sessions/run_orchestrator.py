@@ -197,6 +197,20 @@ async def _drain_queue_after_turn(
                 event_bus.publish(SESSION_FINISHED, session_id=session_id, status="idle")
                 return
 
+            # Worktree re-entry guard (best-effort in the drain path — a heal
+            # failure here should not strand the queue; the turn will surface
+            # the real error).
+            try:
+                from valuz_agent.modules.worktrees.service import worktree_service
+
+                wt_snapshot = (session.metadata.get("valuz") or {}).get("worktree")
+                if isinstance(wt_snapshot, dict):
+                    await worktree_service.heal_from_snapshot(wt_snapshot)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "drain: worktree heal failed for %s", session_id, exc_info=True
+                )
+
             async with async_unit_of_work() as db:
                 await SessionDatastore(db).mark_queued_status(head_id, "dispatched")
 

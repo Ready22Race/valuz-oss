@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-03
+
+### Added
+
+- **Composer file input** — paste any file into the composer, not just images,
+  alongside the existing drag-and-drop and file picker (#411 @St0neWan9).
+- **Multi-tenant / cloud** — a per-owner Decision Inbox live tap for multi-tenant
+  kernels (#387 @Ready22Race), `owner_user_id` threaded through the
+  workspace-grant seam (#391 @Ready22Race), a config-gated managed-cwd → mount
+  rewrite for multi-tenant cloud (#393 @Ready22Race), and file upload into
+  cloud-managed projects & knowledge bases (#392 @hanjixin).
+
+### Changed
+
+- **Automation UX** — automation rows open the detail page on click, enabled
+  automations sort first, and the detail page's back link returns to wherever you
+  came from (a project's panel vs. the Automation list) (#405 @St0neWan9).
+- **UI polish** — question-card shadow (#399 @yy83000812), role-tag styling
+  (#400 @yy83000812), and meta-badge styling (#402 @yy83000812) normalized.
+- Skill staging settings simplified (#410 @homeant).
+
+### Fixed
+
+- **Conversation** — interrupting a turn no longer blanks and reloads the
+  transcript, preserves partial content, and shows a quieter cancelled hint
+  (#388 @St0neWan9); a cancelled chat now reads one consistent "stopped" status
+  (#389 @St0neWan9); the new-chat welcome no longer flashes while a conversation
+  loads (#390 @St0neWan9).
+- **Custom model channels** — editing a channel's endpoint/key now actually saves
+  the new values (they were being reverted mid-edit), and the connection test is
+  opt-in rather than an un-bypassable save gate (#406 @St0neWan9).
+- **Composer / task detail** — the drag-to-upload highlight matches the input box
+  (#414 @St0neWan9); long unbreakable event text (API-error JSON, paths) wraps
+  instead of overflowing the task detail column (#407 @St0neWan9); the update
+  toast keeps the version number visible (#394 @St0neWan9).
+- **Tasks** — a task-event member agent name no longer occasionally shows as its
+  slug or blank (#401 @Ready22Race).
+- **Skills (owner scoping & migration)** — skill slug uniqueness scoped by user
+  (#398 @homeant), skill filesystem roots scoped by owner (#403 @homeant),
+  duplicate skill index slugs repaired during migration (#409 @homeant), and
+  import previews persisted in a user temp dir (#412 @homeant).
+- **Backend** — startup user-content initialization gated (#395 @homeant),
+  managed project roots stored as absolute paths (#396 @homeant), and internal
+  sub-apps (DataService + MCP) mounted under each `api_prefix` (#404 @Ready22Race).
+
+### Docs & Chore
+
+- Added a user temp-dir env example to the backend docs (#413 @homeant).
+- Removed the Go tool-version pin (#386 @homeant).
+
 ## [0.3.0] - 2026-07-02
 
 ### Added

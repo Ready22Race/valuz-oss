@@ -126,7 +126,7 @@ const TreeNode = ({
   const rowStyle = {
     marginInline: "0",
     width: "100%",
-    paddingLeft: `${depth * 14 + 20 + (depth > 0 ? 4 : 0)}px`,
+    paddingLeft: `${depth * guideLineSpacing + 20 + (depth > 0 ? 4 : 0)}px`,
   };
 
   if (node.type === "folder") {
@@ -228,8 +228,8 @@ export const ProjectFileTree = ({
   activeFilePath,
   defaultOpenDepth = 1,
   hideRootRow = false,
-  guideLineOffset = 0,
-  guideLineSpacing = 14,
+  guideLineOffset = -6,
+  guideLineSpacing = 18,
 }: ProjectFileTreeProps) => {
   const { t } = useI18n();
   if (tree.length === 0) {

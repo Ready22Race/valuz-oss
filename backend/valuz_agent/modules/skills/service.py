@@ -64,6 +64,102 @@ _IMPORT_PREVIEW_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 # violation → flush rollback. Module-level because the service is built
 # per-request, so an instance lock wouldn't be shared.
 _scan_lock = asyncio.Lock()
+CreationOrigin = Literal["created", "imported", "discovered"]
+
+
+def _tags_from_index_row(row: Any) -> list[str]:
+    raw = getattr(row, "tags_json", None)
+    if not raw:
+        return []
+    return [tag for tag in (part.strip() for part in raw.split(",")) if tag]
+
+
+def _creation_origin_from_index_row(row: Any) -> CreationOrigin:
+    value = getattr(row, "creation_origin", None) or "discovered"
+    if value == "created":
+        return "created"
+    if value == "imported":
+        return "imported"
+    return "discovered"
+
+
+def _official_skill_view_from_index_row(
+    row: Any,
+    *,
+    enabled: bool,
+    has_official_entitlement: bool,
+) -> SkillView:
+    """Build the catalog view from ``valuz_skill_index`` without rescanning files.
+
+    The startup / rescan paths already compute the expensive manifest and content
+    hashes. Listing the catalog should reuse that indexed row and only perform a
+    cheap marker-file check to preserve the Built-in vs Official entitlement UI.
+    """
+    from valuz_agent.integrations.skills_official_bootstrap import is_bundled_skill
+
+    path = getattr(row, "source_path", "") or ""
+    is_bundled = is_bundled_skill(Path(path))
+    unlocked = is_bundled or has_official_entitlement
+    library_enabled = getattr(row, "library_enabled", True)
+    return SkillView(
+        id=f"official:{row.slug}",
+        name=row.name,
+        description=row.description or "",
+        scope=row.scope,
+        source=row.source,
+        path=path,
+        enabled=enabled,
+        library_enabled=True if library_enabled is None else bool(library_enabled),
+        tags=_tags_from_index_row(row),
+        slug=row.slug,
+        icon=getattr(row, "icon", None),
+        status=getattr(row, "status", "available") or "available",
+        readonly=bool(getattr(row, "readonly", True)),
+        deletable=bool(getattr(row, "deletable", False)),
+        is_locked=not unlocked,
+        lock_reason=None if unlocked else "Connect Reportify to unlock official skills",
+        project_root=getattr(row, "project_root", None),
+        origin_label="Built-in" if is_bundled else "Official",
+        content_hash=getattr(row, "content_hash", None),
+        manifest_hash=getattr(row, "manifest_hash", None),
+        folder_created_at=getattr(row, "folder_created_at", None),
+        creation_origin=_creation_origin_from_index_row(row),
+    )
+
+
+def _skill_view_from_index_row(row: Any, *, enabled: bool) -> SkillView:
+    """Build a catalog view for a user/project skill from ``valuz_skill_index``.
+
+    The general (non-official) companion to ``_official_skill_view_from_index_row``:
+    the index already carries the metadata the startup/rescan paths computed, so the
+    catalog reuses the indexed row instead of re-reading every SKILL.md on the read
+    path. Fields the index doesn't store (``argument_hint`` / ``context`` /
+    ``version``) are detail-view only and omitted here — the same trade-off the
+    official-from-index path already makes.
+    """
+    library_enabled = getattr(row, "library_enabled", True)
+    return SkillView(
+        id=f"{row.scope}:{row.slug}",
+        name=row.name,
+        description=row.description or "",
+        scope=row.scope,
+        source=row.source,
+        path=getattr(row, "source_path", "") or "",
+        enabled=enabled,
+        library_enabled=True if library_enabled is None else bool(library_enabled),
+        tags=_tags_from_index_row(row),
+        slug=row.slug,
+        icon=getattr(row, "icon", None),
+        status=getattr(row, "status", "available") or "available",
+        readonly=bool(getattr(row, "readonly", False)),
+        deletable=bool(getattr(row, "deletable", True)),
+        is_locked=bool(getattr(row, "is_locked", False)),
+        project_root=getattr(row, "project_root", None),
+        content_hash=getattr(row, "content_hash", None),
+        manifest_hash=getattr(row, "manifest_hash", None),
+        folder_created_at=getattr(row, "folder_created_at", None),
+        creation_origin=_creation_origin_from_index_row(row),
+    )
 
 
 async def _upsert_skill_row(user_id: str, ds: SkillDatastore, manifest) -> None:  # type: ignore[no-untyped-def]
@@ -253,22 +349,48 @@ class SkillLibraryService:
         self, user_id: str, project_id: str, *, org_id: str | None = None
     ) -> SkillsCatalog:
         project = await self._projects.get_project(user_id, project_id)
-        items = self._ds.list_project_skill_manifests(project, self._source)
-        # ``creation_origin`` is host bookkeeping kept only in
-        # ``valuz_skill_index`` (never SKILL.md), so it isn't on the
-        # filesystem-scanned manifest — overlay it from the DB here. A
-        # missing row (skill on disk but not yet indexed) or a NULL value
-        # (legacy row seeded before the column landed) coalesces to
-        # ``"discovered"`` so the field is always a real enum value.
-        rows_by_slug = {row.slug: row for row in await self._ds.list_skills(user_id)}
+        # Serve the catalog from ``valuz_skill_index`` instead of re-scanning every
+        # SKILL.md on the (hot) read path. The index already carries the metadata the
+        # startup/rescan paths computed, so this avoids per-request cosfs round-trips
+        # entirely and is shared across workers via the DB. The index is kept fresh
+        # by startup_scan (login) + every mutation (create/edit/import/delete) + the
+        # periodic auto-scan. ``creation_origin`` is host bookkeeping kept only here.
+        index_rows = await self._ds.list_skills(user_id)
+        rows_by_slug = {row.slug: row for row in index_rows}
 
         def _origin(slug: str) -> str:
             row = rows_by_slug.get(slug)
             return (row.creation_origin if row is not None else None) or "discovered"
 
-        skills = [
-            SkillView(**item.model_dump(), creation_origin=_origin(item.slug)) for item in items
+        # ``enabled`` is per-project (project-config.json), not in the index — a
+        # small read, still kept off the event loop.
+        enabled_paths = await asyncio.to_thread(self._ds.enabled_skill_paths, project)
+
+        def _enabled(path: str) -> bool:
+            return project.kind == "chat" or path in enabled_paths
+
+        user_rows = [
+            r for r in index_rows if r.scope in ("user", "project") and r.status == "available"
         ]
+        if user_rows:
+            skills = [
+                _skill_view_from_index_row(r, enabled=_enabled(getattr(r, "source_path", "") or ""))
+                for r in user_rows
+            ]
+        else:
+            # Cold / empty index (e.g. before the first scan for this user): fall
+            # back to a filesystem scan so nothing is missing, mirroring the
+            # official-from-index fallback below. ``compute_content_hash=False`` +
+            # ``to_thread`` keep it cheap and off the event loop.
+            items = await asyncio.to_thread(
+                self._ds.list_project_skill_manifests,
+                project,
+                self._source,
+                compute_content_hash=False,
+            )
+            skills = [
+                SkillView(**item.model_dump(), creation_origin=_origin(item.slug)) for item in items
+            ]
 
         from valuz_agent.modules.skills.contracts import ProjectRef, RuntimeContext
 
@@ -284,17 +406,27 @@ class SkillLibraryService:
             if hasattr(project, "kind")
             else None,
         )
-        # Compute the same enabled set ``list_project_skills`` uses for the
-        # filesystem source so the extra-source branch below can mirror its
-        # ``enabled`` semantics. Without this, official / built-in skills
-        # (e.g. skill-creator) always rendered ``enabled=False`` in the UI even
-        # after the user toggled them on — capability_resolver wrote the path
-        # into ``project-config.json`` correctly but the catalog never read it
-        # back for extra-sourced skills.
-        enabled_paths = self._ds.enabled_skill_paths(project)
         has_official_entitlement = await self._check_entitlement("skills:official")
         for source in self._extra_sources:
-            for manifest in source.list_skills(ctx):
+            if getattr(source, "name", None) == "official":
+                official_rows = [
+                    row
+                    for row in index_rows
+                    if row.scope == "official" and row.status == "available"
+                ]
+                if official_rows:
+                    for row in official_rows:
+                        view = _official_skill_view_from_index_row(
+                            row,
+                            enabled=project.kind == "chat"
+                            or getattr(row, "source_path", "") in enabled_paths,
+                            has_official_entitlement=has_official_entitlement,
+                        )
+                        skills.append(view)
+                    continue
+
+            manifests = await asyncio.to_thread(source.list_skills, ctx, compute_content_hash=False)
+            for manifest in manifests:
                 view = SkillView(**manifest.model_dump(), creation_origin=_origin(manifest.slug))
                 # Bundled skills (origin_label="Built-in") ship with the
                 # client and are always free; never gate them behind the

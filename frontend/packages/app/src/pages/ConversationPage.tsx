@@ -18,6 +18,7 @@ import {
   ArrowDown,
   ArrowLeft,
   Bot,
+  GitBranch,
   ChevronDown,
   ChevronRight,
   FilePenLine,
@@ -329,6 +330,9 @@ function sessionDetailToListItem(detail: SessionDetail): SessionListItem {
     permission_mode: detail.permission_mode,
     effort: detail.effort ?? null,
     task_id: detail.task_id ?? null,
+    // Carries ``exists`` (liveness) from the detail fetch — the header
+    // worktree badge greys out on it.
+    worktree: detail.worktree ?? null,
     updated_at: detail.updated_at,
   };
 }
@@ -454,6 +458,22 @@ const SessionStatusPill = ({
 const NEW_SESSION_ID = "new";
 
 /**
+ * True when a tool title refers to *tool* regardless of how the runtime
+ * namespaces MCP tools: bare ("automation"), Claude-style
+ * ("mcp__valuz_automations__automation"), or slash-style
+ * ("valuz_automations/automation" — the codex runtime; verified live).
+ * The old `__`-suffix-only checks silently dropped every special card
+ * (automation proposal, create_task, AskUserQuestion, …) back to the
+ * generic tool renderer on slash-namespacing runtimes.
+ */
+function isToolNamed(title: unknown, tool: string): boolean {
+  if (typeof title !== "string" || !title) return false;
+  return (
+    title === tool || title.endsWith(`__${tool}`) || title.endsWith(`/${tool}`)
+  );
+}
+
+/**
  * Parse an ``automation`` tool call's INPUT into a create spec, or null if it
  * isn't a ``create`` action. ``create`` is the only action that renders a
  * propose→confirm card (others render ``AutomationToolCard``).
@@ -471,6 +491,7 @@ function parseAutomationCreateInput(input: unknown): {
   trigger: import("@valuz/core").Trigger | null;
   agent_slug?: string;
   action_kind?: "chat" | "task";
+  worktree?: boolean;
 } | null {
   if (!input) return null;
   let parsed: unknown;
@@ -501,6 +522,17 @@ function parseAutomationCreateInput(input: unknown): {
       : p.action_kind === "chat"
         ? "chat"
         : undefined;
+  // On envelope-wrapping runtimes (codex, DeepAgents) the tool OUTPUT parses to
+  // null, so the proposal card renders from this INPUT — it must carry the
+  // worktree flag or the chip vanishes and confirm silently drops it. Accept
+  // the legacy ``task_worktree`` key too so already-recorded tool calls still
+  // resolve after the field rename.
+  const worktree =
+    typeof p.worktree === "boolean"
+      ? p.worktree
+      : typeof p.task_worktree === "boolean"
+        ? p.task_worktree
+        : undefined;
   return {
     name: typeof p.name === "string" ? p.name : "",
     prompt_template: typeof p.prompt_template === "string" ? p.prompt_template : "",
@@ -510,6 +542,7 @@ function parseAutomationCreateInput(input: unknown): {
         : null,
     agent_slug: typeof p.agent_slug === "string" ? p.agent_slug : undefined,
     action_kind: actionKind,
+    worktree,
   };
 }
 
@@ -989,9 +1022,7 @@ export const ConversationPage = () => {
       const payload = ev.event.payload ?? {};
       if (type === "tool.call.started") {
         const name = payload.name;
-        const isAsk =
-          name === "AskUserQuestion" ||
-          (typeof name === "string" && name.endsWith("__AskUserQuestion"));
+        const isAsk = isToolNamed(name, "AskUserQuestion");
         if (isAsk) {
           const toolUseId = payload.tool_use_id || payload.id;
           if (toolUseId) lastAskToolId = toolUseId;
@@ -1207,6 +1238,17 @@ export const ConversationPage = () => {
     return detail?.cwd ?? detail?.root_path ?? "";
   }, [activeProject]);
 
+  // The worktree the open session runs in (creation-time snapshot on the list
+  // item). When present, the right panel's file tree + artifact reads scope to
+  // the worktree checkout (design D7) instead of the shared project cwd.
+  // Derived from ``sessions`` (not ``selectedSession``, declared below) so the
+  // callbacks above it can depend on it without a temporal-dead-zone error.
+  const activeWorktree = useMemo(
+    () =>
+      sessions.find((s) => s.id === selectedSessionId)?.worktree ?? null,
+    [sessions, selectedSessionId],
+  );
+
   const openArtifactFile = useCallback(
     async (path: string) => {
       if (!selectedProjectId || selectedProjectId === "chat-default") return;
@@ -1226,7 +1268,9 @@ export const ConversationPage = () => {
       setArtifactLoading(true);
       setArtifactError(null);
       try {
-        const result = await projectsApi.readFile(selectedProjectId, normalized);
+        const result = await projectsApi.readFile(selectedProjectId, normalized, {
+          worktree: activeWorktree?.name ?? undefined,
+        });
         setArtifact(result.artifact);
         setArtifactContent(result.content);
       } catch (error) {
@@ -1237,7 +1281,7 @@ export const ConversationPage = () => {
         setArtifactLoading(false);
       }
     },
-    [activeProjectRootPath, selectedProjectId, t],
+    [activeProjectRootPath, activeWorktree, selectedProjectId, t],
   );
 
   const handleArtifactReload = useCallback(() => {
@@ -1550,6 +1594,7 @@ export const ConversationPage = () => {
         trigger: import("@valuz/core").Trigger;
         agent_slug?: string | null;
         action_kind?: "chat" | "task";
+        worktree?: boolean;
       },
     ) => {
       const sid = selectedSessionIdRef.current;
@@ -1566,6 +1611,7 @@ export const ConversationPage = () => {
           trigger: spec.trigger,
           agent_slug: spec.agent_slug ?? null,
           action_kind: spec.action_kind,
+          worktree: spec.worktree ?? false,
         });
         setAutomationProposalStates((prev) => ({
           ...prev,
@@ -1604,7 +1650,7 @@ export const ConversationPage = () => {
       for (const block of turn.blocks) {
         if (block.kind !== "tool") continue;
         const tname = block.tool.title || "";
-        if (tname === "propose_agent" || tname.endsWith("__propose_agent")) {
+        if (isToolNamed(tname, "propose_agent")) {
           ids.push(block.tool.id);
         }
       }
@@ -1626,7 +1672,7 @@ export const ConversationPage = () => {
       for (const block of turn.blocks) {
         if (block.kind !== "tool") continue;
         const tname = block.tool.title || "";
-        if (tname !== "propose_agent" && !tname.endsWith("__propose_agent")) {
+        if (!isToolNamed(tname, "propose_agent")) {
           continue;
         }
         let nm = "";
@@ -1685,7 +1731,7 @@ export const ConversationPage = () => {
       for (const block of turn.blocks) {
         if (block.kind !== "tool") continue;
         const tname = block.tool.title || "";
-        if (tname !== "automation" && !tname.endsWith("__automation")) continue;
+        if (!isToolNamed(tname, "automation")) continue;
         if (parseAutomationCreateInput(block.tool.input)) ids.push(block.tool.id);
       }
     }
@@ -1746,7 +1792,7 @@ export const ConversationPage = () => {
         if (block.kind !== "tool") continue;
         const t = block.tool;
         const name = t.title || "";
-        if (name !== "submit_skill" && !name.endsWith("__submit_skill")) {
+        if (!isToolNamed(name, "submit_skill")) {
           continue;
         }
         let slug = "";
@@ -1849,8 +1895,7 @@ export const ConversationPage = () => {
   const isToolCardFoldable = useCallback(
     (tool: { id: string; title?: string }): boolean => {
       const name = tool.title ?? "";
-      const isAsk =
-        name === "AskUserQuestion" || name.endsWith("__AskUserQuestion");
+      const isAsk = isToolNamed(name, "AskUserQuestion");
       if (!isAsk) return false;
       return Boolean(
         askUserQuestionAnswersByToolId[tool.id] ??
@@ -1888,11 +1933,10 @@ export const ConversationPage = () => {
       // server returns a structured JSON blob as ``tool.output``; we
       // parse it and hand off to the card. If the output is missing
       // (still running) or unparseable, we fall through to the generic
-      // tool renderer. The ``__automation`` suffix match catches the
-      // wrapped form FastMCP emits when the tool comes through a
-      // namespaced provider.
-      const isAutomation =
-        name === "automation" || name.endsWith("__automation");
+      // tool renderer. ``isToolNamed`` covers every runtime's MCP
+      // namespacing (bare / Claude ``mcp__server__tool`` / codex
+      // ``server/tool``).
+      const isAutomation = isToolNamed(name, "automation");
       if (isAutomation) {
         const result = parseAutomationToolOutput(tool.output);
         const openInAutomation = (automationId: string) => {
@@ -1925,6 +1969,8 @@ export const ConversationPage = () => {
             automationTriggerSummary(confirmTrigger, t);
           const cardActionKind =
             proposal?.action_kind ?? inputSpec?.action_kind ?? "chat";
+          const cardWorktree =
+            proposal?.worktree ?? inputSpec?.worktree ?? false;
           const cardAgentName = proposal?.agent_name ?? inputSpec?.agent_slug ?? null;
           const entry = automationProposalStates[tool.id] || {
             state: "pending" as const,
@@ -1936,6 +1982,7 @@ export const ConversationPage = () => {
               triggerHuman={cardTriggerHuman}
               agentName={cardAgentName}
               actionKind={cardActionKind}
+              worktree={cardWorktree}
               state={entry.state}
               errorMessage={entry.errorMessage}
               validationError={validationError}
@@ -1947,6 +1994,7 @@ export const ConversationPage = () => {
                   trigger: confirmTrigger,
                   agent_slug: proposal?.agent_slug ?? inputSpec?.agent_slug,
                   action_kind: cardActionKind,
+                  worktree: cardWorktree,
                 });
               }}
               onDismiss={() => handleDismissAutomation(tool.id)}
@@ -1991,7 +2039,7 @@ export const ConversationPage = () => {
       // as a content-block repr (``[{'type': 'text', 'text': '{...}'}]``), so
       // extract the fields by regex rather than JSON.parse-ing the whole blob.
       const isCreateTask =
-        name === "create_task" || name.endsWith("__create_task");
+        isToolNamed(name, "create_task");
       if (isCreateTask && tool.output) {
         const idMatch = tool.output.match(/"task_id"\s*:\s*"([^"]+)"/);
         const taskId = idMatch?.[1];
@@ -2048,7 +2096,7 @@ export const ConversationPage = () => {
       // at zero — the user never sees the read-only fill-content card
       // between submit and the kernel ack.
       const isAskUserQuestion =
-        name === "AskUserQuestion" || name.endsWith("__AskUserQuestion");
+        isToolNamed(name, "AskUserQuestion");
       if (isAskUserQuestion) {
         const parsed = parseAskUserQuestionInput(tool.input);
         if (parsed && parsed.questions.length > 0) {
@@ -2079,7 +2127,7 @@ export const ConversationPage = () => {
       // letting the user create + deploy the proposed agent. Tool name comes
       // through plain or MCP-bridged (``mcp__harness__propose_agent``).
       const isProposeAgent =
-        name === "propose_agent" || name.endsWith("__propose_agent");
+        isToolNamed(name, "propose_agent");
       if (isProposeAgent) {
         let spec: {
           name?: string;
@@ -2131,7 +2179,7 @@ export const ConversationPage = () => {
       }
 
       const isSubmit =
-        name === "submit_skill" || name.endsWith("__submit_skill");
+        isToolNamed(name, "submit_skill");
       if (!isSubmit) return null;
       let parsed: {
         slug?: string;
@@ -2912,10 +2960,14 @@ export const ConversationPage = () => {
       return;
     }
     projectsApi
-      .listFiles(selectedProjectId, { depth: 3 })
+      .listFiles(selectedProjectId, {
+        depth: 3,
+        // Worktree sessions show their own checkout, not the shared project cwd.
+        worktree: activeWorktree?.name ?? undefined,
+      })
       .then((res) => setFileTree(toFileTree(res.files)))
       .catch(() => setFileTree([]));
-  }, [selectedProjectId]);
+  }, [selectedProjectId, activeWorktree]);
 
   useEffect(() => {
     refreshFileTree();
@@ -3455,10 +3507,39 @@ export const ConversationPage = () => {
   // Hoisted so both the side panel's remove button and the composer's
   // pinned-chip remove button share it.
   const handleRemoveSessionAttachment = useCallback(
-    (attachmentId: string) => {
-      void removeSessionAttachmentRow(attachmentId);
+    async (attachmentId: string) => {
+      await removeSessionAttachmentRow(attachmentId);
+      // Attaching a file on a draft eagerly mints a session to hold the upload.
+      // If the user removes the last file without ever sending a message, that
+      // session is left behind as a statusless "New chat" orphan cluttering
+      // Activity / recents (and, before the idempotent-delete fix, one the user
+      // couldn't clear). Discard it: we're still on the draft URL, this was the
+      // last attachment, and nothing was sent.
+      const wasLastAttachment =
+        sessionAttachments.filter((a) => a.id !== attachmentId).length === 0;
+      if (
+        id === NEW_SESSION_ID &&
+        selectedSessionId &&
+        effectiveTurns.length === 0 &&
+        wasLastAttachment
+      ) {
+        const orphan = selectedSessionId;
+        // Reset to a clean draft first so no per-session effect re-fetches the
+        // session we're about to delete, then delete it best-effort.
+        await refreshEvents(null);
+        setSelectedSessionId(null);
+        setSessions([]);
+        void sessionsApi.delete(orphan).catch(() => {});
+      }
     },
-    [removeSessionAttachmentRow],
+    [
+      removeSessionAttachmentRow,
+      sessionAttachments,
+      id,
+      selectedSessionId,
+      effectiveTurns.length,
+      refreshEvents,
+    ],
   );
 
   // The actual send. Attachments are uploaded on attach, so this never
@@ -4771,16 +4852,20 @@ export const ConversationPage = () => {
         }
         fileTreeInTab={isProject}
         rootPath={
-          isProject
+          // A worktree session's tree is rooted at its checkout — show that
+          // path so reveal / relative-path stripping match what's listed.
+          activeWorktree?.path ??
+          (isProject
             ? ((activeProject as ProjectDetail)?.root_path ?? undefined)
-            : t("conversation.workDir" as Parameters<typeof t>[0])
+            : t("conversation.workDir" as Parameters<typeof t>[0]))
         }
         onOpenInFinder={() => {
           const ws = activeProject as ProjectDetail | null;
-          // Prefer the kernel-resolved cwd (project + chat both have one);
-          // fall back to root_path so a stale backend that hasn't
-          // populated ``cwd`` yet still works for project projects.
-          const path = ws?.cwd ?? ws?.root_path;
+          // Prefer the worktree checkout for a worktree session; else the
+          // kernel-resolved cwd (project + chat both have one); fall back to
+          // root_path so a stale backend that hasn't populated ``cwd`` yet
+          // still works for project projects.
+          const path = activeWorktree?.path ?? ws?.cwd ?? ws?.root_path;
           if (!path) {
             toast.info(t("conversation.noWorkDir" as Parameters<typeof t>[0]));
             return;
@@ -5090,6 +5175,27 @@ export const ConversationPage = () => {
                 <Badge variant="metaBrand" className="shrink-0">
                   <Bot className="h-3 w-3" />
                   {agentNameBySlug.get(sessionAgentSlug) ?? sessionAgentSlug}
+                </Badge>
+              ) : null}
+              {selectedSession?.worktree ? (
+                // Worktree attribution (creation-time snapshot). Greys out
+                // when the worktree no longer exists on disk — the next
+                // send self-heals by recreating it, which the tooltip says.
+                <Badge
+                  variant="metaOutline"
+                  className={cn(
+                    "shrink-0",
+                    selectedSession.worktree.exists === false && "opacity-60",
+                  )}
+                  title={
+                    selectedSession.worktree.exists === false
+                      ? t("conversation.worktreeBadgeGone")
+                      : t("conversation.worktreeBadgeHint")
+                  }
+                >
+                  <GitBranch className="h-3 w-3" />
+                  {selectedSession.worktree.branch ??
+                    selectedSession.worktree.name}
                 </Badge>
               ) : null}
               {activeProject?.name && !isSkillCreatorMode ? (
