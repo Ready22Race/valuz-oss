@@ -149,7 +149,7 @@ dependencies = [
 # package — not nested under ``valuz_agent`` — so the same directory
 # layout can lift out cleanly into separate pypi packages in Phase 2
 # (e.g. ``plugins/parser/mineru/`` → ``valuz-parser-mineru``).
-include = ["valuz_agent*", "plugins*"]
+include = ["valuz_agent*", "plugins*", "kernel"]
 
 [project.optional-dependencies]
 # NOTE: ``rapidocr`` (image OCR) moved to the default ``[project] dependencies``
