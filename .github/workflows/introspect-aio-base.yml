@@ -1,0 +1,38 @@
+name: Introspect AIO base
+on:
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: "AIO base to introspect"
+        required: false
+        default: "ccr.ccs.tencentyun.com/ags-image/sandbox-aio:latest"
+        type: string
+jobs:
+  introspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull + dump structure
+        run: |
+          IMG="${{ inputs.base_image }}"
+          docker pull "$IMG"
+          echo "===== CONFIG (entrypoint / cmd / ports) ====="
+          docker inspect "$IMG" --format '{{json .Config}}' | python3 -c 'import sys,json;c=json.load(sys.stdin);print("Entrypoint:",c.get("Entrypoint"));print("Cmd:",c.get("Cmd"));print("WorkingDir:",c.get("WorkingDir"));print("ExposedPorts:",list((c.get("ExposedPorts") or {}).keys()));print("Env:");[print("  ",e) for e in (c.get("Env") or [])]'
+          echo "===== OS ====="
+          docker run --rm --entrypoint sh "$IMG" -c 'cat /etc/os-release 2>/dev/null | head -4; uname -m'
+          echo "===== INIT / PROCESS MANAGERS ====="
+          docker run --rm --entrypoint sh "$IMG" -c '
+            for b in supervisord s6-svscan s6-overlay-suexec systemd runsv tini dumb-init pm2 openrc; do command -v $b >/dev/null 2>&1 && echo "has: $b ($(command -v $b))"; done
+            echo "-- s6 dirs --"; ls -ld /etc/s6-overlay /etc/s6-overlay/s6-rc.d /etc/services.d /etc/cont-init.d /run/service /package 2>/dev/null
+            echo "-- supervisor --"; ls -ld /etc/supervisor /etc/supervisord.d /etc/supervisor/conf.d 2>/dev/null; find / -maxdepth 5 -name "supervisord.conf" 2>/dev/null | head
+          '
+          echo "===== NGINX / GATEWAY ====="
+          docker run --rm --entrypoint sh "$IMG" -c '
+            command -v nginx >/dev/null 2>&1 && { echo "nginx: $(command -v nginx)"; nginx -V 2>&1 | tr " " "\n" | grep -E "conf-path|prefix" ; }
+            echo "-- conf dirs --"; ls -ld /etc/nginx/conf.d /etc/nginx/http.d /etc/nginx/sites-enabled /etc/nginx/servers 2>/dev/null
+            echo "-- nginx.conf includes / listen --"; for f in $(find /etc/nginx -name "*.conf" 2>/dev/null | head -10); do echo "## $f"; grep -nE "include|listen|location|proxy_pass" "$f" 2>/dev/null | head -15; done
+            echo "-- who listens on 8080 --"; grep -rsln "8080" /etc/nginx /opt /etc 2>/dev/null | head
+          '
+          echo "===== /opt + / layout ====="
+          docker run --rm --entrypoint sh "$IMG" -c 'ls -la /; echo "--- /opt ---"; find /opt -maxdepth 3 2>/dev/null | head -80'
+          echo "===== entrypoint / startup scripts ====="
+          docker run --rm --entrypoint sh "$IMG" -c 'for f in /entrypoint.sh /entrypoint /start.sh /run.sh /init /opt/entrypoint.sh /usr/local/bin/entrypoint.sh /usr/bin/entrypoint.sh /startup.sh; do [ -f "$f" ] && { echo "## $f ##"; cat "$f"; echo; }; done' | head -160
