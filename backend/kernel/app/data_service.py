@@ -165,6 +165,7 @@ async def get_events(body: JsonBody, owner_id: OwnerDep, store: StoreDep) -> dic
         body["session_id"],
         limit=body.get("limit", 200),
         offset=body.get("offset", 0),
+        types=body.get("types"),
     )
     return {"data": [sw.event_to_row(e) for e in rows]}
 

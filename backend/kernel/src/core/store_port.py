@@ -129,9 +129,21 @@ class StorePort(Protocol):
         ...
 
     async def get_events(
-        self, user_id: str, session_id: str, *, limit: int = 200, offset: int = 0
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        types: Sequence[str] | None = None,
     ) -> list[Event]:
-        """Get a session's events (owner-scoped), ordered by timestamp."""
+        """Get a session's events (owner-scoped), ordered by timestamp.
+
+        ``types`` restricts the read to those event types at the store, so a
+        caller after a rare type (e.g. the two ``requires_action`` /
+        ``action_resolved`` pending markers) gets an O(matches) result set
+        instead of paging the whole log.
+        """
         ...
 
     async def get_events_for_message(
