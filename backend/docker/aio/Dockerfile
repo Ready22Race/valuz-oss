@@ -2,37 +2,34 @@
 #
 # Valuz agent-harness KERNEL image for the **Tencent AGS AIO sandbox**.
 #
-# Unlike the generic standalone image (../kernel.Dockerfile, python-slim), the
-# AIO sandbox base brings the File API, Browser/Shell/Code tools the agents use,
-# and the unified :8080 nginx gateway. Our kernel runs INSIDE it as a
-# supervisord-managed **custom service**, reachable through the gateway. We do
-# NOT override the base entrypoint — the base's supervisord (PID1) starts our
-# program alongside the built-in AIO services (the AIO "Custom Image" path).
+# The AIO base (ccr.ccs.tencentyun.com/ags-image/sandbox-aio) is an s6-overlay
+# image (PID1 = /init) that bundles Browser/Shell/File/Jupyter/VSCode + an nginx
+# gateway. Our kernel runs INSIDE it as an **s6-overlay service** (added to the
+# base's `user` bundle), started by the base's /init alongside the built-in
+# services. We do NOT override the entrypoint.
 #
-# Coexist contract (from the agent-infra/sandbox AIO base — VERIFY against the
-# actual Tencent base with the CI `inspect-aio-base` step; the include dirs are
-# the load-bearing assumption here):
-#   - a supervisord program  → /opt/tiger/run/supervisord/<name>.conf
-#   - an nginx route          → /opt/gem/nginx/<name>.conf   (unified :8080)
+# AGS reachability: AGS port-maps container ports to https://<port>-<instance>.
+# <domain> (e2b-compatible), and the host's AgsConfig uses :8000, so the kernel
+# just listens on 0.0.0.0:8000 — NO gateway route needed (unlike the veFaaS
+# single-domain model). Auth = the AGS-injected KERNEL_AUTH_TOKEN.
 #
-# Build context = backend/. Build (needs pull access to the AGS AIO base):
-#   docker login ccr.ccs.tencentyun.com
+# Build context = backend/. Build (the AGS AIO base is public):
 #   docker buildx build --platform linux/amd64 \
 #     -f docker/aio/Dockerfile \
 #     -t ccr.ccs.tencentyun.com/xiaobang/valuz-kernel:<tag> --push .
 # or use scripts/build-kernel-image.sh with VARIANT=aio.
 
-# The Tencent AGS all-in-one sandbox base. Pinned (not :latest) for
-# reproducibility once the exact tag is known — override BASE_IMAGE at build
-# time. This is the "基础镜像依赖" the kernel layers onto.
+# The Tencent AGS all-in-one sandbox base (the "基础镜像依赖"). Override
+# BASE_IMAGE to pin a digest/tag.
 ARG BASE_IMAGE=ccr.ccs.tencentyun.com/ags-image/sandbox-aio:latest
 FROM ${BASE_IMAGE}
 
-# uv installs a self-contained python + the dependency closure, so we never
-# depend on whatever python layout the AIO base ships.
+# uv installs a self-contained python + the dependency closure into /app/.venv,
+# so the kernel never depends on the base's python (the base ships its own at
+# /root/.server for its API server).
 COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /usr/local/bin/uv
 
-# Optional PyPI mirror for faster builds behind the Great Firewall, e.g.
+# Optional PyPI mirror for faster CN builds, e.g.
 #   --build-arg UV_DEFAULT_INDEX=https://mirrors.tencent.com/pypi/simple
 ARG UV_DEFAULT_INDEX=
 ENV UV_DEFAULT_INDEX=${UV_DEFAULT_INDEX} \
@@ -54,15 +51,14 @@ RUN uv sync --no-install-project --frozen --no-dev --python 3.12
 COPY kernel /app/kernel
 COPY alembic/kernel /app/alembic/kernel
 
-# Custom-service wiring: kernel-run.sh is the supervisord program command; the
-# .conf files are dropped into the base's include dirs so its supervisord starts
-# the kernel and its nginx fronts it at /kernel/ on the unified :8080 gateway.
-COPY docker/aio/kernel-run.sh            /app/kernel-run.sh
-COPY docker/aio/supervisord.kernel.conf  /opt/tiger/run/supervisord/valuz-kernel.conf
-COPY docker/aio/nginx.kernel.conf        /opt/gem/nginx/valuz-kernel.conf
-RUN chmod +x /app/kernel-run.sh && mkdir -p /app/data
+# s6-overlay service: drop the service dir into the base's s6-rc.d and register
+# it in the `user` bundle (an empty file named after the service) so /init starts
+# it alongside the built-in AIO services.
+COPY docker/aio/s6-rc.d/valuz-kernel /etc/s6-overlay/s6-rc.d/valuz-kernel
+RUN chmod +x /etc/s6-overlay/s6-rc.d/valuz-kernel/run \
+    && mkdir -p /app/data \
+    && touch /etc/s6-overlay/s6-rc.d/user/contents.d/valuz-kernel
 
-# NB: no ENTRYPOINT / CMD — inherit the AIO base's supervisord init, which picks
-# up /opt/tiger/run/supervisord/valuz-kernel.conf and starts the kernel
-# alongside the built-in services. The host reaches it at
-# https://<sandbox-public-domain>/kernel/api/v1/...
+# NB: no ENTRYPOINT / CMD — inherit the base's /init (s6-overlay), which brings
+# up the `user` bundle (now including valuz-kernel). The kernel is reached at
+# https://8000-<instance>.<traffic-domain>/api/v1/...

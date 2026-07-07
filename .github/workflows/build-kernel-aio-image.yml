@@ -1,19 +1,18 @@
 name: Build Kernel AIO Image (Tencent AGS)
 
 # Builds the KERNEL layered onto the Tencent AGS **all-in-one sandbox** base
-# (ccr.ccs.tencentyun.com/ags-image/sandbox-aio). The kernel runs INSIDE the AIO
-# base as a supervisord custom service, fronted by the base's :8080 nginx
-# gateway at /kernel/ — see backend/docker/aio/Dockerfile.
+# (ccr.ccs.tencentyun.com/ags-image/sandbox-aio, an s6-overlay image). The kernel
+# runs INSIDE the AIO base as an s6-overlay service on :8000; AGS port-maps it to
+# https://8000-<instance>.<domain> so no gateway route is needed — see
+# backend/docker/aio/Dockerfile.
 #
-# The AIO base lives on Tencent CCR (private). To PULL it (and to PUSH the
-# result) the job needs CCR credentials as repo secrets:
+# The AGS AIO base is PUBLIC, so building on GitHub runners needs no creds.
+# PUSHING the result to Tencent CCR does need credentials (repo secrets):
 #   CCR_REGISTRY   (default: ccr.ccs.tencentyun.com)
 #   CCR_USERNAME
 #   CCR_PASSWORD
-# Without them the job can still validate the Dockerfile against a public
-# `base_image` override (e.g. ghcr.io/agent-infra/sandbox:latest), but cannot
-# pull the real AGS base or push to CCR. Pushing to TCR can also be done
-# manually — see scripts/build-kernel-image.sh (VARIANT=aio).
+# Without them the job builds (load-only); push to TCR is done manually —
+# see scripts/build-kernel-image.sh (VARIANT=aio).
 
 on:
   workflow_dispatch:
@@ -115,22 +114,24 @@ jobs:
           echo "▸ base : ${{ inputs.base_image }}"
           echo "▸ image: ${image}:${tag} (latest=${{ inputs.also_latest }}, push=${{ inputs.push }})"
 
-      # ── Introspect the AIO base: the coexist contract assumes these include
-      #    dirs exist. Fail loud if the base's layout differs. ────────────────
-      - name: Inspect AIO base (verify coexist dirs)
+      # ── Introspect the AIO base: we add the kernel as an s6-overlay service,
+      #    so the base must be s6-overlay (PID1 /init) with the s6-rc.d service
+      #    dir + the `user` bundle we register into. Fail loud otherwise. ──────
+      - name: Inspect AIO base (verify s6-overlay layout)
         run: |
           set -e
           docker pull "${{ inputs.base_image }}"
-          echo "▸ checking supervisord + nginx include dirs on the base"
+          echo "▸ checking s6-overlay service dirs on the base"
           docker run --rm --entrypoint sh "${{ inputs.base_image }}" -c '
             miss=0
-            for d in /opt/tiger/run/supervisord /opt/gem/nginx; do
+            [ -x /init ] || { echo "  MISSING  /init (s6-overlay entrypoint)"; miss=1; }
+            for d in /etc/s6-overlay/s6-rc.d /etc/s6-overlay/s6-rc.d/user/contents.d; do
               if [ -d "$d" ]; then echo "  ok  $d"; else echo "  MISSING  $d"; miss=1; fi
             done
             exit $miss
           ' || {
-            echo "::error::AIO base does not expose the expected supervisord/nginx include dirs."
-            echo "Update backend/docker/aio/{supervisord,nginx}.kernel.conf drop paths to match this base."
+            echo "::error::AIO base is not the expected s6-overlay layout."
+            echo "Rework backend/docker/aio/ for this base'"'"'s init system (see its /init)."
             exit 1
           }
 

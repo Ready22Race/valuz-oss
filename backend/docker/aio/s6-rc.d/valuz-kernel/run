@@ -1,0 +1,22 @@
+#!/command/with-contenv bash
+# Valuz kernel as an s6-overlay service inside the Tencent AGS AIO sandbox.
+#
+# Runs on 0.0.0.0:8000 so AGS exposes it at https://8000-<instance>.<domain> —
+# the same port the standalone image uses, so the host's AgsConfig.kernel_base_url
+# reaches it directly with NO gateway route needed. Auth is the AGS-injected
+# KERNEL_AUTH_TOKEN (the kernel refuses to serve unauthenticated on a non-loopback
+# bind without it). The per-owner env AGS injects (KERNEL_AUTH_TOKEN,
+# KERNEL_STORE=remote, VALUZ_DATA_API_*, CODEX_TOOLKIT_BASE_URL, provider keys)
+# is inherited here via `with-contenv`.
+set -eu
+
+export DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:////app/data/kernel.db}"
+export PYTHONPATH=/app/kernel
+cd /app
+
+echo "[valuz-kernel] migrating ${DATABASE_URL}"
+/app/.venv/bin/python -m alembic -c alembic/kernel/alembic.ini upgrade head
+
+echo "[valuz-kernel] serving app.main:app on 0.0.0.0:${KERNEL_PORT:-8000}"
+exec /app/.venv/bin/python -m uvicorn app.main:app \
+    --host 0.0.0.0 --port "${KERNEL_PORT:-8000}" --log-level "${LOG_LEVEL:-info}"
