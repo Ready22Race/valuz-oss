@@ -41,6 +41,25 @@ export function parseFileRef(ref: string): string | null {
 }
 
 /**
+ * The client-side scheme that the desktop main process serves local files on
+ * (see apps/desktop/.../local-file-protocol.ts). Lets a ``kind==="local"`` file
+ * render by URL (<img>/<iframe>/fetch), uniform with a remote presigned URL.
+ * Only resolvable inside Electron.
+ */
+export const LOCAL_FILE_URL_SCHEME = "valuz-local:";
+
+/** Build a ``valuz-local://<abs>`` URL from an absolute path (Electron only). */
+export function buildLocalFileUrl(absPath: string): string {
+  let p = absPath.replace(/\\/g, "/");
+  if (!p.startsWith("/")) p = `/${p}`;
+  const encoded = p
+    .split("/")
+    .map((seg) => (seg ? encodeURIComponent(seg) : seg))
+    .join("/");
+  return `${LOCAL_FILE_URL_SCHEME}/${encoded}`;
+}
+
+/**
  * How the client should reach a file. ``kind==="local"`` carries ``absPath``
  * (read it via the desktop ``valuz-local://`` protocol / IPC); ``kind==="remote"``
  * carries a presigned ``url`` the client fetches directly. See
