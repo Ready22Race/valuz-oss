@@ -36,14 +36,12 @@ class _FakeCatalog:
     ) -> None:
         self._rows = rows or []
         self._creds = creds or {}
-        self.resolve_calls: list[tuple[str, str | None]] = []
+        self.resolve_calls: list[tuple[str, str]] = []
 
-    async def list(self) -> list[LLMChannel]:
+    async def list(self, *, user_id: str) -> list[LLMChannel]:
         return list(self._rows)
 
-    async def resolve(
-        self, provider_id: str, *, user_id: str | None = None
-    ) -> ResolvedCredential | None:
+    async def resolve(self, provider_id: str, *, user_id: str) -> ResolvedCredential | None:
         self.resolve_calls.append((provider_id, user_id))
         return self._creds.get(provider_id)
 

@@ -10,7 +10,7 @@ Field-ownership rule: **one value per channel goes on the outer item; anything
 that differs per model goes on its :class:`LLMModel`.**
 
 This module is a leaf — pure dataclasses, no imports from ``ports`` or other
-modules — so both the port (which annotates ``list() -> list[LLMChannel]``)
+modules — so both the port (which annotates ``list(user_id=...) -> list[LLMChannel]``)
 and producers (OSS service + overlay catalogs) can depend on it without cycles.
 """
 

@@ -19,8 +19,8 @@ reads/writes go to the host durable data service, not a per-user kernel.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Protocol
 
 from valuz_agent.ports.sandbox_provider import SandboxEndpoint
 
@@ -38,19 +38,22 @@ class SandboxLease:
     endpoint: SandboxEndpoint | None = None
 
 
-class SandboxAllocatorPort(Protocol):
+class SandboxAllocatorPort(ABC):
     """Resolve / release the kernel that serves ``owner_user_id``."""
 
+    @abstractmethod
     async def ensure(self, *, owner_user_id: str) -> SandboxLease:
         """Return the running kernel lease for ``owner_user_id`` (provision or
         reuse). ``owner_user_id`` is the authenticated principal, threaded
         explicitly — never ambient."""
         ...
 
+    @abstractmethod
     async def release(self, *, owner_user_id: str) -> None:
         """Best-effort teardown for ``owner_user_id`` (idle TTL). Idempotent."""
         ...
 
+    @abstractmethod
     async def peek(self, *, owner_user_id: str) -> SandboxLease | None:
         """Return the owner's CURRENT lease **without provisioning**; ``None`` if
         the owner has no live kernel.
@@ -62,7 +65,7 @@ class SandboxAllocatorPort(Protocol):
         ...
 
 
-class BootSingletonAllocator:
+class BootSingletonAllocator(SandboxAllocatorPort):
     """Default OSS allocator: every owner shares the one process/boot kernel.
 
     ``ensure`` returns ``SandboxLease(endpoint=None)`` for everyone → the facade

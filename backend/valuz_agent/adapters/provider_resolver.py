@@ -346,7 +346,7 @@ async def resolve_runtime_provider(
         # Falls back to deepagents.
         from valuz_agent.modules.settings.model_options import runtimes_for
 
-        for it in await ext.llm_provider.list():
+        for it in await ext.llm_provider.list(user_id=user_id):
             if it.id != provider_id:
                 continue
             model = next((m for m in it.models if m.id == model_id), None)

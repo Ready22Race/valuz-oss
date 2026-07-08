@@ -41,12 +41,10 @@ class _FakeCatalog:
         self._rows = rows
         self._creds = creds or {}
 
-    async def list(self) -> list[LLMChannel]:
+    async def list(self, *, user_id: str) -> list[LLMChannel]:
         return list(self._rows)
 
-    async def resolve(
-        self, provider_id: str, *, user_id: str | None = None
-    ) -> ResolvedCredential | None:
+    async def resolve(self, provider_id: str, *, user_id: str) -> ResolvedCredential | None:
         return self._creds.get(provider_id)
 
 
@@ -270,10 +268,12 @@ class TestUserProviderHiding:
 
             return PolicyDecision(allowed=False, reason="locked")
 
-        async def hide_user_providers(self) -> bool:
+        async def hide_user_providers(self, *, user_id: str) -> bool:
             return True
 
-        async def hidden_provider_ids(self, candidates):  # type: ignore[no-untyped-def]
+        async def hidden_provider_ids(  # type: ignore[no-untyped-def]
+            self, candidates, *, user_id: str
+        ):
             return set()
 
     async def test_locked_hides_user_rows(self, svc: _SvcHandle) -> None:

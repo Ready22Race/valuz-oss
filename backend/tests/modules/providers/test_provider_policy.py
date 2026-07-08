@@ -33,6 +33,12 @@ class _DenyPolicy:
     async def authorize_write(self, ctx: ProviderWriteContext) -> PolicyDecision:
         return PolicyDecision(allowed=False, reason="locked by org")
 
+    async def hide_user_providers(self, *, user_id: str) -> bool:
+        return False
+
+    async def hidden_provider_ids(self, candidates, *, user_id: str):  # type: ignore[no-untyped-def]
+        return set()
+
 
 @pytest.fixture
 def client() -> TestClient:
