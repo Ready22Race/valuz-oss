@@ -49,6 +49,8 @@ import {
   agentsApi,
   tasksApi,
   projectsApi,
+  filesApi,
+  buildFileRef,
   useDecisionPending,
   useTaskEvents,
   useTranslation,
@@ -62,11 +64,13 @@ import {
 } from "@valuz/core";
 import type { FileTreeNode } from "@valuz/ui";
 import { useProjectOutlet } from "@valuz/app/layout";
+import { usePlatform } from "@valuz/app/platform";
 import {
   TaskContextPanel,
   type PlannedSubtask,
 } from "../components/TaskContextPanel";
 import { toFileTree } from "../lib/file-tree";
+import { resolvedToArtifactFile } from "../lib/resolve-artifact";
 import { TaskStatusLabel } from "../components/TaskStatusLabel";
 import { useLeadFollowUpChat, useAskUserQuestionCards } from "../hooks";
 import { deriveDeliverable } from "./task-detail/deliverable";
@@ -205,7 +209,10 @@ function resolveArtifactPath(path: string, rootPath: string): string {
   return `${trimmed}${sep}${path}`;
 }
 
-function toProjectRelativeArtifactPath(path: string, rootPath: string): string | null {
+function toProjectRelativeArtifactPath(
+  path: string,
+  rootPath: string,
+): string | null {
   if (!path) return null;
   const normalizedPath = path.replace(/\\/g, "/");
   if (!normalizedPath.startsWith("/") && !/^[a-zA-Z]:\//.test(normalizedPath)) {
@@ -344,6 +351,7 @@ export const TaskDetailPage = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const { t } = useTranslation();
+  const platform = usePlatform();
   const { setHeader, setHideHeader, setRightPanel } = useProjectOutlet();
   // Pending confirmations (AskUserQuestion) raised by this task's agents —
   // surfaced prominently in the timeline so the user isn't left thinking the
@@ -356,9 +364,9 @@ export const TaskDetailPage = () => {
   const [rootPath, setRootPath] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(
-    null,
-  );
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<
+    string | null
+  >(null);
   const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
   const [artifactContent, setArtifactContent] =
     useState<ArtifactContent | null>(null);
@@ -482,14 +490,12 @@ export const TaskDetailPage = () => {
     async (relPath: string, options?: { syncUrl?: boolean }) => {
       if (!projectId) return;
       const normalized = toProjectRelativeArtifactPath(relPath, rootPath);
-      if (!normalized) {
-        setSelectedArtifactPath(relPath);
-        setArtifact(null);
-        setArtifactContent(null);
-        setArtifactError(t("task.artifactOpenInFinder" as Parameters<typeof t>[0]));
-        return;
-      }
-      if (options?.syncUrl !== false && searchParams.get("file") !== normalized) {
+      const absPath = resolveArtifactPath(relPath, rootPath);
+      if (
+        options?.syncUrl !== false &&
+        normalized &&
+        searchParams.get("file") !== normalized
+      ) {
         setSearchParams(
           (current) => {
             const next = new URLSearchParams(current);
@@ -499,22 +505,39 @@ export const TaskDetailPage = () => {
           { replace: false },
         );
       }
-      setSelectedArtifactPath(normalized);
+      setSelectedArtifactPath(normalized ?? relPath);
       setArtifactLoading(true);
       setArtifactError(null);
       try {
-        const result = await projectsApi.readFile(projectId, normalized);
+        // Resolve identity -> access address; the client fetches bytes from the
+        // address (never proxied). See docs/design/file-address-resolution.md.
+        const descriptor = await filesApi.resolveOne(buildFileRef(absPath));
+        if (!descriptor || descriptor.error || !descriptor.exists) {
+          setArtifact(null);
+          setArtifactContent(null);
+          setArtifactError(
+            t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+          );
+          return;
+        }
+        const result = await resolvedToArtifactFile(descriptor, {
+          projectId,
+          relPath: normalized ?? descriptor.name,
+          platform,
+        });
         setArtifact(result.artifact);
         setArtifactContent(result.content);
       } catch (error) {
         setArtifact(null);
         setArtifactContent(null);
-        setArtifactError(error instanceof Error ? error.message : String(error));
+        setArtifactError(
+          error instanceof Error ? error.message : String(error),
+        );
       } finally {
         setArtifactLoading(false);
       }
     },
-    [projectId, rootPath, searchParams, setSearchParams, t],
+    [projectId, rootPath, searchParams, setSearchParams, t, platform],
   );
 
   useEffect(() => {
@@ -594,7 +617,10 @@ export const TaskDetailPage = () => {
   const handleOpenFileExternal = useCallback(
     (relPath: string) => {
       if (!rootPath) return;
-      void openArtifact(resolveArtifactPath(relPath, rootPath), t as Translator);
+      void openArtifact(
+        resolveArtifactPath(relPath, rootPath),
+        t as Translator,
+      );
     },
     [rootPath, t],
   );
@@ -628,7 +654,9 @@ export const TaskDetailPage = () => {
         taskStatus={detail.task.status}
         onRefreshFiles={refreshFileTree}
         onOpenInFinder={rootPath ? handleOpenProjectInFinder : undefined}
-        onPreviewFile={projectId ? (path) => void openArtifactFile(path) : undefined}
+        onPreviewFile={
+          projectId ? (path) => void openArtifactFile(path) : undefined
+        }
         onOpenFile={rootPath ? handleOpenFileExternal : undefined}
       />,
     );
@@ -1326,34 +1354,34 @@ export const TaskDetailPage = () => {
           goal distinct from the title, or staged attachments. A prompt-launched
           task (title === goal) would otherwise repeat the heading verbatim. */}
         {(goalDiffersFromTitle || kickoffAttachments.length > 0) && (
-        <section className="mt-4 w-full rounded-lg border border-surface-border bg-[#f7f7f8] px-4 py-3">
-          {goalDiffersFromTitle && (
-            <ClampText
-              text={task.goal}
-              t={t}
-              className="text-[12px] leading-5 text-[#131313]"
-            />
-          )}
-          {/* Attachment chips — files staged by the user when launching
+          <section className="mt-4 w-full rounded-lg border border-surface-border bg-[#f7f7f8] px-4 py-3">
+            {goalDiffersFromTitle && (
+              <ClampText
+                text={task.goal}
+                t={t}
+                className="text-[12px] leading-5 text-[#131313]"
+              />
+            )}
+            {/* Attachment chips — files staged by the user when launching
             this task. Source: ``kickoff.payload.attachments``. Hides
             entirely when empty so the card stays clean for goal-only
             tasks. */}
-          {kickoffAttachments.length > 0 && (
-            <ul className="mt-3 flex flex-wrap gap-1.5">
-              {kickoffAttachments.map((filename) => (
-                <li
-                  key={filename}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-surface-border bg-surface-soft px-2 py-1 text-2xs text-ink-body"
-                >
-                  <Paperclip className="h-3 w-3 text-ink-meta" />
-                  <span className="truncate max-w-[200px]" title={filename}>
-                    {filename}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+            {kickoffAttachments.length > 0 && (
+              <ul className="mt-3 flex flex-wrap gap-1.5">
+                {kickoffAttachments.map((filename) => (
+                  <li
+                    key={filename}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-surface-border bg-surface-soft px-2 py-1 text-2xs text-ink-body"
+                  >
+                    <Paperclip className="h-3 w-3 text-ink-meta" />
+                    <span className="truncate max-w-[200px]" title={filename}>
+                      {filename}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
         )}
 
         {/* Completed-state: the page flips. The run timeline is demoted to a
@@ -1429,81 +1457,84 @@ export const TaskDetailPage = () => {
               show the basename so long project-relative paths don't
               dominate the row. */}
             {deliverableOpen && (
-            <div className="overflow-hidden rounded-[8px] border border-[#e6e7e9] bg-white">
-              {completionInfo.artifacts.length > 0 && (
-                // ``max-h-[240px] overflow-y-auto`` caps the artifact list
-                // so a 30-file deliverable doesn't push the summary
-                // accordion off-screen; the user scrolls inside the list
-                // instead of scrolling the whole page.
-                <ul className="flex max-h-[280px] flex-col overflow-y-auto">
-	                  {completionInfo.artifacts.map((path) => {
-	                    const basename = path.split(/[\\/]/).pop() || path;
-	                    const absolute = resolveArtifactPath(path, rootPath);
-	                    return (
-	                      <li key={path}>
-	                        <button
-	                          type="button"
-	                          onClick={() => void openArtifactFile(path)}
-	                          title={absolute}
-                          className="group flex h-[54px] w-full items-center gap-3 px-4 text-left transition-colors hover:bg-[#fafbfd]"
-                        >
-                          <span
-                            className={cn(
-                              "flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px]",
-                              artifactIconBgClassName(basename),
-                            )}
+              <div className="overflow-hidden rounded-[8px] border border-[#e6e7e9] bg-white">
+                {completionInfo.artifacts.length > 0 && (
+                  // ``max-h-[240px] overflow-y-auto`` caps the artifact list
+                  // so a 30-file deliverable doesn't push the summary
+                  // accordion off-screen; the user scrolls inside the list
+                  // instead of scrolling the whole page.
+                  <ul className="flex max-h-[280px] flex-col overflow-y-auto">
+                    {completionInfo.artifacts.map((path) => {
+                      const basename = path.split(/[\\/]/).pop() || path;
+                      const absolute = resolveArtifactPath(path, rootPath);
+                      return (
+                        <li key={path}>
+                          <button
+                            type="button"
+                            onClick={() => void openArtifactFile(path)}
+                            title={absolute}
+                            className="group flex h-[54px] w-full items-center gap-3 px-4 text-left transition-colors hover:bg-[#fafbfd]"
                           >
-                            <FileText
-                              className={cn(
-                                "h-4 w-4",
-                                artifactIconClassName(basename),
-                              )}
-                            />
-                          </span>
-                          <div className="flex min-w-0 flex-1 flex-col justify-center">
                             <span
-                              className="truncate text-[13px] font-semibold leading-5 text-[#1f2937]"
-                              title={absolute}
+                              className={cn(
+                                "flex h-8 w-8 shrink-0 items-center justify-center rounded-[8px]",
+                                artifactIconBgClassName(basename),
+                              )}
                             >
-                              {basename}
-                            </span>
-                            {leadAgentName && (
-                              <span className="relative -top-0.5 text-[11px] leading-4 text-[#9aa3b2]">
-                                {t(
-                                  "task.artifactBy" as Parameters<typeof t>[0],
-                                  {
-                                    agent: leadAgentName,
-                                  },
+                              <FileText
+                                className={cn(
+                                  "h-4 w-4",
+                                  artifactIconClassName(basename),
                                 )}
+                              />
+                            </span>
+                            <div className="flex min-w-0 flex-1 flex-col justify-center">
+                              <span
+                                className="truncate text-[13px] font-semibold leading-5 text-[#1f2937]"
+                                title={absolute}
+                              >
+                                {basename}
                               </span>
-                            )}
-                          </div>
-                          <ChevronRight className="h-4 w-4 shrink-0 text-[#c4cad4] transition-transform group-hover:translate-x-0.5" />
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-
-              <details
-                open
-                className={cn(
-                  "group/d overflow-hidden bg-white",
-                  completionInfo.artifacts.length > 0 && "border-t border-[#f3f4f6]",
+                              {leadAgentName && (
+                                <span className="relative -top-0.5 text-[11px] leading-4 text-[#9aa3b2]">
+                                  {t(
+                                    "task.artifactBy" as Parameters<
+                                      typeof t
+                                    >[0],
+                                    {
+                                      agent: leadAgentName,
+                                    },
+                                  )}
+                                </span>
+                              )}
+                            </div>
+                            <ChevronRight className="h-4 w-4 shrink-0 text-[#c4cad4] transition-transform group-hover:translate-x-0.5" />
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
                 )}
-              >
-                <summary className="flex h-12 cursor-pointer items-center gap-3 px-4 text-left list-none [&::-webkit-details-marker]:hidden">
-                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#98a1b2] transition-transform group-open/d:rotate-90" />
-                  <span className="min-w-0 flex-1 text-[13px] font-semibold leading-5 text-[#131313]">
-                    {t("task.completionSummary" as Parameters<typeof t>[0])}
-                  </span>
-                </summary>
-                <div className="whitespace-pre-wrap px-3 pb-3 pt-0 text-[12px] leading-6 text-ink-body">
-                  {completionInfo.summary}
-                </div>
-              </details>
-            </div>
+
+                <details
+                  open
+                  className={cn(
+                    "group/d overflow-hidden bg-white",
+                    completionInfo.artifacts.length > 0 &&
+                      "border-t border-[#f3f4f6]",
+                  )}
+                >
+                  <summary className="flex h-12 cursor-pointer items-center gap-3 px-4 text-left list-none [&::-webkit-details-marker]:hidden">
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[#98a1b2] transition-transform group-open/d:rotate-90" />
+                    <span className="min-w-0 flex-1 text-[13px] font-semibold leading-5 text-[#131313]">
+                      {t("task.completionSummary" as Parameters<typeof t>[0])}
+                    </span>
+                  </summary>
+                  <div className="whitespace-pre-wrap px-3 pb-3 pt-0 text-[12px] leading-6 text-ink-body">
+                    {completionInfo.summary}
+                  </div>
+                </details>
+              </div>
             )}
           </section>
         )}
@@ -1631,7 +1662,9 @@ export const TaskDetailPage = () => {
           paused, and blocked tasks. For completed tasks the same ``timelineBody``
           is rendered higher up inside a collapsed disclosure (the deliverable,
           not the process, is the subject once the task finishes). */}
-        {!isCompleted && <section className="mt-5 w-full">{timelineBody}</section>}
+        {!isCompleted && (
+          <section className="mt-5 w-full">{timelineBody}</section>
+        )}
       </div>
       {/* /Reading column ---------------------------------------- */}
 
@@ -1925,9 +1958,9 @@ function ClampText({
             className="text-[11px] font-medium text-brand transition-colors hover:text-brand/80"
           >
             {t(
-              (expanded
-                ? "common.collapse"
-                : "common.expand") as Parameters<typeof t>[0],
+              (expanded ? "common.collapse" : "common.expand") as Parameters<
+                typeof t
+              >[0],
             )}
           </button>
         </div>
@@ -1989,9 +2022,7 @@ function EventBody({
   //    redundant; the row stays as a historical marker but offers no link.
   // Everything else with a session_id stays linkable to that session.
   const linkTarget =
-    evt.type === "subtask_reviewed"
-      ? (leadSessionId ?? null)
-      : evt.session_id;
+    evt.type === "subtask_reviewed" ? (leadSessionId ?? null) : evt.session_id;
   const nonLinkableTypes = new Set(["task_planned", "plan_revised"]);
   const linkSuppressed = hideSessionLink || nonLinkableTypes.has(evt.type);
   const clickable = !!linkTarget && !linkSuppressed;
