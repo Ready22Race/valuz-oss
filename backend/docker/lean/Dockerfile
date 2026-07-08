@@ -79,11 +79,12 @@ RUN useradd --create-home --uid 1000 user \
     && chown -R 1000:1000 /app
 
 # s6 services: envd (root, login) + valuz-kernel (non-root). Register both in the
-# s6-overlay `user` bundle so /init supervises them. valuz-kernel ships GATED DOWN
-# (its `down` file) so the snapshot never captures it running with the template's
-# placeholder env. Post-snapshot, the host (apply_env, over envd) writes the
-# per-user env to /run/valuz/env — which the kernel run script sources — and then
-# `s6-svc -u`s this service, starting it once with the correct env.
+# s6-overlay `user` bundle so /init supervises them. valuz-kernel starts at boot
+# and blocks in the kernel's CONFIG GATE (KERNEL_CONFIG_WAIT below): the process
+# imports everything, runs the migration, then waits in lifespan for the host to
+# write /run/valuz/env — so a snapshot freezes a fully-imported, waiting kernel
+# and configuration at resume costs milliseconds, no restart. (The earlier s6
+# `down`-file gate is gone: s6-rc longruns never honored it anyway.)
 COPY docker/lean/s6-rc.d/envd         /etc/s6-overlay/s6-rc.d/envd
 COPY docker/lean/s6-rc.d/valuz-kernel /etc/s6-overlay/s6-rc.d/valuz-kernel
 RUN chmod +x /etc/s6-overlay/s6-rc.d/envd/run /etc/s6-overlay/s6-rc.d/valuz-kernel/run \
@@ -91,9 +92,13 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/envd/run /etc/s6-overlay/s6-rc.d/valuz-kern
     && touch /etc/s6-overlay/s6-rc.d/user/contents.d/envd \
              /etc/s6-overlay/s6-rc.d/user/contents.d/valuz-kernel
 
+# KERNEL_CONFIG_WAIT: kernel lifespan blocks until /run/valuz/env appears (the
+# host writes it post-resume over envd), then rebuilds its config from the
+# applied env. See kernel app/config_gate.py (valuz-agent #446).
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
-    S6_KEEP_ENV=1
+    S6_KEEP_ENV=1 \
+    KERNEL_CONFIG_WAIT=1
 
 EXPOSE 8000 49983
 ENTRYPOINT ["/init"]

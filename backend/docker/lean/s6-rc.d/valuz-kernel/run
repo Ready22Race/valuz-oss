@@ -1,14 +1,20 @@
 #!/command/with-contenv bash
 # Valuz kernel s6 service (lean image). Non-root (uid 1000) via s6-setuidgid.
 #
-# GATED START. This service ships DOWN (sibling `down` file) so AGS snapshot-start
-# never captures the kernel running with the template's placeholder env. After the
-# snapshot resumes, the host (AgsSandboxBackend.apply_env, over envd) writes the
-# per-user env to ${VALUZ_ENV_FILE} and then `s6-svc -r`s this service — so by the
-# time this run script executes, sourcing that file below gives us the correct
-# per-user env (KERNEL_STORE / VALUZ_DATA_API_* / KERNEL_AUTH_TOKEN). The kernel
-# starts exactly once, already configured. The AGS tool readiness probe is on
-# envd (:49983), so the instance reaches RUNNING while this stays down.
+# CONFIG-GATED START (KERNEL_CONFIG_WAIT=1, set in the Dockerfile). The service
+# starts at boot: kernel-launch.py migrates the local db and uvicorn imports the
+# app, then the kernel's lifespan BLOCKS waiting for ${VALUZ_ENV_FILE} (see
+# kernel app/config_gate.py, valuz-agent #446). The AGS snapshot therefore
+# freezes a fully-imported, WAITING kernel — never one running with the
+# template's placeholder env. At resume the host (AgsSandboxBackend.apply_env,
+# over envd) writes the per-user env file; the gate applies it and startup
+# completes in milliseconds — no restart, no re-import, no re-migration. The
+# AGS tool readiness probe is on envd (:49983), so the instance reaches RUNNING
+# while the kernel is still waiting (its port binds only after the gate).
+#
+# The `source` below is belt-and-braces for RESTARTS AFTER configuration (s6
+# supervises the service: a post-config crash re-runs this script; the file
+# already exists, so both the sourced env and the gate resolve immediately).
 #
 # Why a sourced file, not the s6 container_environment: this image sets
 # S6_KEEP_ENV=1, so `with-contenv` keeps the inherited process env and does NOT
