@@ -9,8 +9,7 @@ export interface ConversationLocalFileLinkOptions {
 }
 
 export type ConversationLocalFileBlockReason =
-  | "managed_outside_project"
-  | "unsupported";
+  "managed_outside_project" | "unsupported";
 
 export type ConversationLocalFileLinkResolution =
   | { kind: "preview"; path: string }
@@ -64,7 +63,8 @@ export function useConversationLocalFileLinks(
 
   const isLocalFileHref = useCallback(
     (href: string) =>
-      override?.isLocalFileHref(href, options) ?? fallback.isLocalFileHref(href),
+      override?.isLocalFileHref(href, options) ??
+      fallback.isLocalFileHref(href),
     [fallback, options, override],
   );
 
@@ -125,7 +125,9 @@ export function isDefaultLocalFileHref(
   projectRootPath: string,
   runtimeMode: "local" | "managed" = "local",
 ): boolean {
-  return resolveDefaultLocalFileHref(href, projectRootPath, runtimeMode) !== null;
+  return (
+    resolveDefaultLocalFileHref(href, projectRootPath, runtimeMode) !== null
+  );
 }
 
 export function resolveDefaultLocalFileHref(
@@ -184,13 +186,17 @@ export function normalizeLocalFileHref(href: string): string {
   const withoutFragment = trimmed.split("#", 1)[0].split("?", 1)[0];
   let path = withoutFragment;
 
-  if (withoutFragment.toLowerCase().startsWith("file://")) {
+  // ``valuz-file://<abs>`` (the model/artifact file scheme) is treated like
+  // ``file://`` — strip to the absolute path so the usual cwd-relative logic
+  // routes it to preview. See docs/design/file-address-resolution.md.
+  const lower = withoutFragment.toLowerCase();
+  if (lower.startsWith("file://") || lower.startsWith("valuz-file://")) {
     try {
       const url = new URL(withoutFragment);
       path = url.pathname;
       if (/^\/[a-zA-Z]:\//.test(path)) path = path.slice(1);
     } catch {
-      path = withoutFragment.replace(/^file:\/\//i, "");
+      path = withoutFragment.replace(/^(valuz-)?file:\/\//i, "");
     }
   }
 

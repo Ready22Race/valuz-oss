@@ -10,6 +10,7 @@ export * from "./api/connectors-api";
 export * from "./api/decisions-api";
 export * from "./api/docs-api";
 export * from "./api/fetch-json";
+export * from "./api/files-api";
 export * from "./api/mcp-providers-api";
 export * from "./api/memory-api";
 export * from "./api/onboarding-api";
