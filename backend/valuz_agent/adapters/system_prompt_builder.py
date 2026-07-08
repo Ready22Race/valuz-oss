@@ -22,9 +22,11 @@ from __future__ import annotations
 # run is local or in a cloud sandbox. See docs/design/file-address-resolution.md.
 OUTPUT_FORMAT_INSTRUCTIONS = (
     "When you reference a file you created, wrote, or delivered in your reply, "
-    "link it as a markdown link `[<name>](valuz-file://<absolute-path>)`, using "
-    "the file's absolute path in your working directory. The client resolves that "
-    "link to a local path or a signed URL so the user can open the file directly."
+    "link it as a markdown link `[<name>](valuz-file:///<absolute-path>)`, joining "
+    "the scheme `valuz-file://` with the file's absolute path (which begins with "
+    "`/`) so the result has three slashes, e.g. "
+    "`[report.md](valuz-file:///Users/you/proj/report.md)`. The client resolves "
+    "that link to a local path or a signed URL so the user can open the file."
 )
 
 
@@ -91,8 +93,7 @@ def build_worktree_notice(
     lines = [
         f"You are working in an isolated git worktree '{name}' of this project.",
         f"- Worktree: {worktree_path} (branch `{branch}`{base}).",
-        f"- Main workspace: {main_workspace} — do NOT modify it; all work happens "
-        "in the worktree.",
+        f"- Main workspace: {main_workspace} — do NOT modify it; all work happens in the worktree.",
         "- Commit your changes on this branch. Do not switch branches and do not "
         "push unless explicitly asked.",
     ]
