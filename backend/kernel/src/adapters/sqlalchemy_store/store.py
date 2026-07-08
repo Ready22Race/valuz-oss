@@ -184,7 +184,13 @@ class SQLAlchemyStore:
             return int(model.id)
 
     async def get_events(
-        self, user_id: str, session_id: str, *, limit: int = 200, offset: int = 0
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        types: Sequence[str] | None = None,
     ) -> list[Event]:
         async with self._session_factory() as db:
             stmt = (
@@ -194,6 +200,8 @@ class SQLAlchemyStore:
                 .offset(offset)
                 .limit(limit)
             )
+            if types is not None:
+                stmt = stmt.where(EventModel.type.in_(list(types)))
             result = await db.execute(stmt)
             return [model_to_event(m) for m in result.scalars()]
 

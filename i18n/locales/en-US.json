@@ -404,6 +404,7 @@
     "requiresFileChange": "File change request",
     "requiresMcpCall": "MCP tool call request",
     "requiresToolCall": "Tool call request",
+    "requiresPlanApproval": "Plan ready for review",
     "decisionApproved": "Approved",
     "decisionRejected": "Rejected",
     "decisionExpired": "Expired",
@@ -437,7 +438,9 @@
     "worktreeToggleOnHint": "This conversation will run in an isolated git worktree — the main workspace stays untouched.",
     "worktreeToggleOffHint": "Run this conversation in an isolated git worktree (a branch copy of the repo).",
     "worktreeBadgeHint": "This session runs in an isolated git worktree.",
-    "worktreeBadgeGone": "Worktree removed — it will be recreated automatically on your next message."
+    "worktreeBadgeGone": "Worktree removed — it will be recreated automatically on your next message.",
+    "planLabel": "Implementation plan",
+    "enterPlanMode": "Entered plan mode"
   },
   "cron": {
     "actionColumn": "Actions",

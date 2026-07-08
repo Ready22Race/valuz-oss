@@ -203,11 +203,19 @@ class RemoteStore(abc.ABC):
         )
 
     async def get_events(
-        self, user_id: str, session_id: str, *, limit: int = 200, offset: int = 0
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        types: Sequence[str] | None = None,
     ) -> list[Event]:
         return await self._retry(
             "get_events",
-            lambda: self._get_events_once(user_id, session_id, limit=limit, offset=offset),
+            lambda: self._get_events_once(
+                user_id, session_id, limit=limit, offset=offset, types=types
+            ),
         )
 
     async def get_events_for_message(
@@ -299,7 +307,13 @@ class RemoteStore(abc.ABC):
 
     @abc.abstractmethod
     async def _get_events_once(
-        self, user_id: str, session_id: str, *, limit: int, offset: int
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int,
+        offset: int,
+        types: Sequence[str] | None = None,
     ) -> list[Event]: ...
 
     @abc.abstractmethod

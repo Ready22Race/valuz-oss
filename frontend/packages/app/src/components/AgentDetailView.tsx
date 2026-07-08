@@ -55,7 +55,7 @@ import { modelLabel } from "@valuz/shared";
 import { AgentModelPicker, type AgentModelSelection } from "./AgentModelPicker";
 import { CatalogPickerDialog } from "./CatalogPickerDialog";
 import { ExportPackDialog } from "./ExportPackDialog";
-import { useProjectOutlet } from "../layout";
+import { useOptionalProjectOutlet } from "../layout";
 import {
   AVATAR_PRESETS,
   AgentIconGlyph,
@@ -123,8 +123,14 @@ export const AgentDetailView = ({
 }: AgentDetailViewProps) => {
   const navigate = useNavigate();
   const { t } = useTranslation();
-  const { setHeader, setHeaderClassName, setContentInnerClassName } =
-    useProjectOutlet();
+  // Rendered both as a full page (inside the project outlet) and inside the
+  // agent-library master-detail right panel, which the layout mounts in its
+  // aside slot — OUTSIDE any ``<Outlet context>`` — so the outlet may be
+  // absent. Guard the header wiring instead of destructuring ``undefined``.
+  const outlet = useOptionalProjectOutlet();
+  const setHeader = outlet?.setHeader;
+  const setHeaderClassName = outlet?.setHeaderClassName;
+  const setContentInnerClassName = outlet?.setContentInnerClassName;
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
@@ -208,7 +214,11 @@ export const AgentDetailView = ({
   }, [agent, backLabel, onBack, t]);
 
   useEffect(() => {
-    if (!pageHeader) return;
+    // No project outlet (e.g. the agent-library right panel) → nothing to
+    // drive; the panel owns its own chrome.
+    if (!pageHeader || !setHeader || !setHeaderClassName || !setContentInnerClassName) {
+      return;
+    }
     setHeader(pageHeader);
     setHeaderClassName("h-auto px-5 py-5");
     setContentInnerClassName("p-0");
@@ -503,7 +513,9 @@ export const AgentDetailView = ({
   return (
     <div
       className={
-        fullPage ? "h-full min-h-0 pb-12" : "mx-auto max-w-4xl pb-12"
+        fullPage
+          ? "mx-auto h-full min-h-0 w-[760px] max-w-full pb-12"
+          : "mx-auto max-w-4xl pb-12"
       }
     >
       {/* ── Identity — flat section, editable in place. Icon + name +

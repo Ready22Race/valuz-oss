@@ -3,6 +3,7 @@ import { ChevronRight, Loader2 } from "lucide-react";
 import { cn } from "@valuz/ui/lib/utils";
 import type { PrototypeToolCall, PrototypeToolCallStatus } from "@valuz/shared";
 import { useI18n } from "../hooks/use-i18n";
+import { MarkdownContent } from "./conversation/MarkdownContent";
 
 const STATUS_KEYS: Record<PrototypeToolCallStatus, string> = {
   success: "toolCall.complete",
@@ -29,6 +30,47 @@ const STATUS_CLASSES: Record<PrototypeToolCallStatus, string> = {
   error: "bg-error-light border border-error-border text-error-text",
 };
 
+// Plan-mode tools carried by the harness / Claude Agent SDK. ``ExitPlanMode``'s
+// input is ``{"plan": "<markdown>"}`` — the model's proposed plan — and
+// ``EnterPlanMode`` is the plan-mode entry signal. Both would otherwise render
+// through the generic card as escaped JSON / raw name (an "unknown tool" look),
+// so we special-case them: render the plan as markdown and give each a friendly
+// subtitle. Detection is by the stable tool NAME (``tc.title``), which the turn
+// builder keeps verbatim.
+const EXIT_PLAN_TOOL = "ExitPlanMode";
+const ENTER_PLAN_TOOL = "EnterPlanMode";
+
+/** Pull the ``plan`` markdown out of an ExitPlanMode call's input JSON.
+ *  Returns null for partial/streaming input (not yet valid JSON) or any
+ *  shape without a string ``plan`` — the caller then falls back to the
+ *  generic input/output rendering. */
+const parsePlan = (input: string | undefined): string | null => {
+  if (!input) return null;
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as { plan?: unknown }).plan === "string"
+    ) {
+      return (parsed as { plan: string }).plan;
+    }
+  } catch {
+    // Partial JSON while the tool input is still streaming — fall through.
+  }
+  return null;
+};
+
+/** The plan's first non-empty line, stripped of a leading markdown heading
+ *  marker, used as a one-glance subtitle in the collapsed header. */
+const planHeadline = (plan: string): string => {
+  for (const raw of plan.split("\n")) {
+    const line = raw.trim();
+    if (line) return line.replace(/^#{1,6}\s*/, "");
+  }
+  return "";
+};
+
 export const ToolCallCard = memo(
   function ToolCallCard({
     tc,
@@ -37,8 +79,25 @@ export const ToolCallCard = memo(
     tc: PrototypeToolCall;
     defaultOpen?: boolean;
   }) {
-    const [open, setOpen] = useState(defaultOpen);
     const { t } = useI18n();
+
+    // Plan-tool specialization. ``plan`` is non-null only once the full
+    // ExitPlanMode input has arrived (parsePlan rejects partial JSON), so a
+    // streaming plan shows the generic view until it completes, then flips to
+    // the rendered markdown.
+    const plan = tc.title === EXIT_PLAN_TOOL ? parsePlan(tc.input) : null;
+    const subtitleOverride =
+      plan !== null
+        ? planHeadline(plan) ||
+          t("conversation.planLabel" as Parameters<typeof t>[0])
+        : tc.title === ENTER_PLAN_TOOL
+          ? t("conversation.enterPlanMode" as Parameters<typeof t>[0])
+          : undefined;
+    const subtitle = subtitleOverride ?? tc.subtitle;
+
+    // The plan is the artifact the user wants to see — open it by default
+    // instead of hiding the proposal behind a fold.
+    const [open, setOpen] = useState(defaultOpen || plan !== null);
 
     return (
       <div className="overflow-hidden rounded-lg border border-surface-border bg-surface-soft">
@@ -57,9 +116,9 @@ export const ToolCallCard = memo(
           <span className="shrink-0 font-mono text-xs font-medium text-ink-heading">
             {tc.title}
           </span>
-          {tc.subtitle ? (
+          {subtitle ? (
             <span className="min-w-0 flex-1 truncate text-xs text-ink-body">
-              {tc.subtitle}
+              {subtitle}
             </span>
           ) : (
             <div className="flex-1" />
@@ -78,24 +137,32 @@ export const ToolCallCard = memo(
         </button>
 
         {open ? (
-          <div className="space-y-2 border-t border-surface-border px-3 pt-2 pb-3 pl-8 font-mono text-2xs leading-[1.6]">
-            {tc.input ? (
-              <div>
-                <div className="label-mono mb-1">Input</div>
-                <pre className="max-h-40 overflow-auto rounded border border-surface-border bg-surface p-2.5 text-ink-label">
-                  {tc.input}
-                </pre>
-              </div>
-            ) : null}
-            {tc.output ? (
-              <div>
-                <div className="label-mono mb-1">Output</div>
-                <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded border border-surface-border bg-surface p-2.5 text-ink-label">
-                  {tc.output}
-                </pre>
-              </div>
-            ) : null}
-          </div>
+          plan !== null ? (
+            // ExitPlanMode: render the proposed plan as markdown rather than a
+            // block of escaped JSON.
+            <div className="border-t border-surface-border px-3 py-3 pl-8">
+              <MarkdownContent content={plan} />
+            </div>
+          ) : (
+            <div className="space-y-2 border-t border-surface-border px-3 pt-2 pb-3 pl-8 font-mono text-2xs leading-[1.6]">
+              {tc.input ? (
+                <div>
+                  <div className="label-mono mb-1">Input</div>
+                  <pre className="max-h-40 overflow-auto rounded border border-surface-border bg-surface p-2.5 text-ink-label">
+                    {tc.input}
+                  </pre>
+                </div>
+              ) : null}
+              {tc.output ? (
+                <div>
+                  <div className="label-mono mb-1">Output</div>
+                  <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded border border-surface-border bg-surface p-2.5 text-ink-label">
+                    {tc.output}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
+          )
         ) : null}
       </div>
     );
@@ -105,5 +172,7 @@ export const ToolCallCard = memo(
     prev.tc.status === next.tc.status &&
     prev.tc.output === next.tc.output &&
     prev.tc.input === next.tc.input &&
+    prev.tc.title === next.tc.title &&
+    prev.tc.subtitle === next.tc.subtitle &&
     (prev.defaultOpen ?? false) === (next.defaultOpen ?? false),
 );

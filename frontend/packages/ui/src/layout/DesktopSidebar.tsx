@@ -422,7 +422,9 @@ const ProjectRow = ({
                 onToggleExpanded?.();
               }}
               onPointerDown={(e) => e.stopPropagation()}
-              aria-label={expanded ? t("sidebar.showLess") : t("sidebar.showMore")}
+              aria-label={
+                expanded ? t("sidebar.showLess") : t("sidebar.showMore")
+              }
               className="absolute inset-0 flex items-center justify-start rounded text-ink-muted opacity-0 transition-opacity hover:text-ink-body group-hover:opacity-100"
             >
               <ChevronDown
@@ -500,9 +502,7 @@ const ProjectRow = ({
                 </DropdownMenuItem>
               )}
               {onProjectExport && (
-                <DropdownMenuItem
-                  onSelect={() => onProjectExport(project.id)}
-                >
+                <DropdownMenuItem onSelect={() => onProjectExport(project.id)}>
                   <Download />
                   {t("project.export")}
                 </DropdownMenuItem>
@@ -578,6 +578,11 @@ export interface DesktopSidebarProps {
    * account switcher. Rendered in both collapsed and expanded states. */
   sidebarHeader?: ReactNode;
   sidebarExtraItems?: ReactNode;
+  /** Optional content pinned at the very bottom of the sidebar, below the
+   * Library / Settings nav block. Overlay editions use this to inject a
+   * bottom-left account / org menu. Rendered in both collapsed and expanded
+   * states. */
+  sidebarFooter?: ReactNode;
   mascotSrc?: string | null;
   LinkComponent?: NavLinkComponent;
   primaryActionHref?: string;
@@ -622,6 +627,7 @@ export const DesktopSidebar = ({
   chats = [],
   sidebarHeader,
   sidebarExtraItems,
+  sidebarFooter,
   mascotSrc = "./mascot.png",
   LinkComponent = DefaultNavLink,
   primaryActionHref = "/conversation/new",
@@ -775,7 +781,9 @@ export const DesktopSidebar = ({
                   onCloseAutoFocus={(e) => e.preventDefault()}
                 >
                   {onRecentRename && (
-                    <DropdownMenuItem onSelect={() => setRecentRenamingId(item.id)}>
+                    <DropdownMenuItem
+                      onSelect={() => setRecentRenamingId(item.id)}
+                    >
                       <FilePenLine />
                       {t("sidebar.rename")}
                     </DropdownMenuItem>
@@ -809,8 +817,7 @@ export const DesktopSidebar = ({
     depth: "project" | "chats",
   ) => {
     const expanded = !!groupExpanded[key];
-    const collapsedLimit =
-      depth === "chats" ? CHATS_COLLAPSED : RUNS_COLLAPSED;
+    const collapsedLimit = depth === "chats" ? CHATS_COLLAPSED : RUNS_COLLAPSED;
     const visible = expanded ? items : items.slice(0, collapsedLimit);
     // Match renderRunRow's indent (pl-[33px] project / pl-[10px] chats) so the
     // show-more toggle's text lines up with the rows above it.
@@ -951,6 +958,7 @@ export const DesktopSidebar = ({
                     </Tooltip>
                   );
                 })}
+              {sidebarFooter}
             </div>
           </TooltipProvider>
         ) : (
@@ -1124,7 +1132,11 @@ export const DesktopSidebar = ({
                         />
                         {expanded &&
                           project.items &&
-                          renderGroupItems(project.id, project.items, "project")}
+                          renderGroupItems(
+                            project.id,
+                            project.items,
+                            "project",
+                          )}
                       </div>
                     );
                   })
@@ -1225,6 +1237,7 @@ export const DesktopSidebar = ({
                     </SidebarLink>
                   );
                 })}
+              {sidebarFooter}
             </div>
           </>
         )}
