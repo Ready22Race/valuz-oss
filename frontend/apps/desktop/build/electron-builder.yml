@@ -29,6 +29,42 @@ files:
   - dist/**/*
   - dist-electron/**/*
   - package.json
+  # Large renderer-only packages are already bundled into dist/ by Vite.
+  # Keep node_modules available for runtime dependencies, but don't ship these
+  # source packages again inside app.asar.
+  - "!node_modules/@fontsource/**"
+  - "!node_modules/mermaid/**"
+  - "!node_modules/@mermaid-js/**"
+  - "!node_modules/lucide-react/**"
+  - "!node_modules/date-fns/**"
+  - "!node_modules/date-fns-jalali/**"
+  - "!node_modules/@shikijs/**"
+  - "!node_modules/shiki/**"
+  - "!node_modules/@base-ui/**"
+  - "!node_modules/@reduxjs/**"
+  - "!node_modules/react-dom/**"
+  - "!node_modules/recharts/**"
+  - "!node_modules/xlsx/**"
+  - "!node_modules/codepage/**"
+  - "!node_modules/cytoscape/**"
+  - "!node_modules/cytoscape-fcose/**"
+  - "!node_modules/zod/**"
+  - "!node_modules/@radix-ui/**"
+  - "!node_modules/langium/**"
+  - "!node_modules/katex/**"
+  - "!node_modules/react-router/**"
+  - "!node_modules/@valuz/**"
+  - "!node_modules/@codemirror/**"
+  - "!node_modules/lodash-es/**"
+  - "!node_modules/react-day-picker/**"
+  - "!node_modules/react-hook-form/**"
+  - "!node_modules/@hookform/**"
+  - "!node_modules/dayjs/**"
+  - "!node_modules/chevrotain/**"
+  - "!node_modules/@lezer/**"
+  - "!node_modules/victory-vendor/**"
+  - "!node_modules/@babel/**"
+  - "!node_modules/es-toolkit/**"
   # Runtime-loaded icons read via `path.join(app.getAppPath(), "build", …)`
   # — the macOS menu-bar tray (iconTemplate), the dock setIcon + window icon
   # (iconRounded), and the Windows tray (icon.ico). Without these in the asar
