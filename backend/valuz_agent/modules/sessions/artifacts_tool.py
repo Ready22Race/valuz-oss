@@ -47,9 +47,11 @@ TOOL_DESCRIPTION = (
     "'mimeType' are optional — they are derived from the file on disk when "
     "omitted. Re-delivering the same path updates the existing entry instead of "
     "duplicating it. When you mention a delivered file in your reply text, link "
-    "it as [<fileName>](valuz-file://<the absolute filePath you delivered>) so "
-    "the client can open it (it resolves to a local path or a signed URL "
-    "depending on where the file lives)."
+    "it by joining `valuz-file://` with the absolute filePath (which starts with "
+    "`/`), giving three slashes — e.g. "
+    "[report.md](valuz-file:///Users/you/proj/report.md) — so the client can open "
+    "it (it resolves to a local path or a signed URL depending on where the file "
+    "lives)."
 )
 
 _PARAMS = {

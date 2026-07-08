@@ -32,10 +32,20 @@ class TestUri:
     def test_canonical_three_slash(self) -> None:
         assert build_valuz_file_uri("/a/b.md") == "valuz-file:///a/b.md"
 
-    @pytest.mark.parametrize(
-        "bad",
-        ["http://x/y", "valuz-file://host/path", "valuz-file://", "/a/b.md", ""],
-    )
+    def test_tolerates_two_slash(self) -> None:
+        # A producer that dropped the authority separator (two slashes) folds the
+        # mis-parsed host back onto the path — same result as the canonical form.
+        assert (
+            parse_valuz_file_uri("valuz-file://Users/river/x.md")
+            == parse_valuz_file_uri("valuz-file:///Users/river/x.md")
+            == "/Users/river/x.md"
+        )
+        assert (
+            parse_valuz_file_uri("valuz-file://Users/river/untitled%20folder/x.md")
+            == "/Users/river/untitled folder/x.md"
+        )
+
+    @pytest.mark.parametrize("bad", ["http://x/y", "valuz-file://", "/a/b.md", ""])
     def test_rejects(self, bad: str) -> None:
         with pytest.raises(ValueError):
             parse_valuz_file_uri(bad)

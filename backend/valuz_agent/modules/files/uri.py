@@ -20,15 +20,19 @@ _WIN_DRIVE = re.compile(r"^/[A-Za-z]:[\\/]")
 def parse_valuz_file_uri(ref: str) -> str:
     """Extract the absolute path from a ``valuz-file://<abs>`` URI.
 
-    Raises ``ValueError`` if the scheme is wrong, a host/authority is present,
-    or the path is empty. Does not touch the filesystem or validate ownership.
+    Canonical form is three-slash (empty authority). A two-slash ref
+    (``valuz-file://Users/…``) — whose producer dropped the authority separator,
+    so the first path segment was mis-parsed as the host — is **tolerated**: the
+    authority is folded back onto the front of the path, so ``//abs`` and
+    ``///abs`` resolve to the same absolute path. Raises ``ValueError`` only for a
+    wrong scheme or an empty path. Does not touch the filesystem or validate
+    ownership.
     """
     parts = urlsplit(ref.strip())
     if parts.scheme != SCHEME:
         raise ValueError(f"not a {SCHEME}:// uri")
-    if parts.netloc:
-        raise ValueError("host/authority is not allowed in a valuz-file uri")
-    path = unquote(parts.path)
+    raw = f"/{parts.netloc}{parts.path}" if parts.netloc else parts.path
+    path = unquote(raw)
     if _WIN_DRIVE.match(path):
         path = path[1:]  # /C:/x -> C:/x
     if not path:

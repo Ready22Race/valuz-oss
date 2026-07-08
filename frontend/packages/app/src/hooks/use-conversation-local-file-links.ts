@@ -193,7 +193,10 @@ export function normalizeLocalFileHref(href: string): string {
   if (lower.startsWith("file://") || lower.startsWith("valuz-file://")) {
     try {
       const url = new URL(withoutFragment);
-      path = url.pathname;
+      // Tolerate a two-slash ref (valuz-file://Users/…): the first path segment
+      // was mis-parsed as the host, so fold it back onto the path — same result
+      // as the canonical three-slash form.
+      path = (url.host ? `/${url.host}` : "") + url.pathname;
       if (/^\/[a-zA-Z]:\//.test(path)) path = path.slice(1);
     } catch {
       path = withoutFragment.replace(/^(valuz-)?file:\/\//i, "");

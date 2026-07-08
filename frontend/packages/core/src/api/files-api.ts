@@ -23,7 +23,11 @@ export function buildFileRef(absPath: string): string {
     .split("/")
     .map((seg) => (seg ? encodeURIComponent(seg) : seg))
     .join("/");
-  return `${FILE_URI_SCHEME}/${encoded}`;
+  // `encoded` already starts with "/" (leading empty segment of an absolute
+  // path), so the scheme adds its own "//" authority separator → three slashes
+  // (valuz-file:///abs). A single "/" here would make the first path segment the
+  // URL host and the backend would reject the ref as invalid.
+  return `${FILE_URI_SCHEME}//${encoded}`;
 }
 
 /** True when ``ref`` is a ``valuz-file://`` URI. */
@@ -34,10 +38,18 @@ export function isFileRef(ref: string): boolean {
 /** Extract the absolute path from a ``valuz-file://<abs>`` ref, or null. */
 export function parseFileRef(ref: string): string | null {
   if (!isFileRef(ref)) return null;
-  let path = decodeURIComponent(ref.slice(FILE_URI_SCHEME.length + 2));
-  // /C:/x -> C:/x
-  if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1);
-  return path || null;
+  try {
+    const url = new URL(ref);
+    // Tolerate a two-slash ref (valuz-file://Users/…): the first path segment was
+    // mis-parsed as the host — fold it back so //abs and ///abs give the same path.
+    let path = decodeURIComponent(
+      (url.host ? `/${url.host}` : "") + url.pathname,
+    );
+    if (/^\/[A-Za-z]:\//.test(path)) path = path.slice(1); // /C:/x -> C:/x
+    return path || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -56,7 +68,8 @@ export function buildLocalFileUrl(absPath: string): string {
     .split("/")
     .map((seg) => (seg ? encodeURIComponent(seg) : seg))
     .join("/");
-  return `${LOCAL_FILE_URL_SCHEME}/${encoded}`;
+  // Three slashes (valuz-local:///abs) — see buildFileRef.
+  return `${LOCAL_FILE_URL_SCHEME}//${encoded}`;
 }
 
 /**
