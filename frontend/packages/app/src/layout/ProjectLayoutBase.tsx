@@ -554,6 +554,7 @@ export function ProjectLayoutBase({
   }, [desktopRoutes, location.pathname, branding.appName, t]);
 
   const outletContext: ProjectOutletContext = {
+    directoryFieldMode,
     setRightPanel,
     setHeader: setPageHeader,
     setHeaderClassName,

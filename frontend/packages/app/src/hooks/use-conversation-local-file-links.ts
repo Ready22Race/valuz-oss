@@ -1,0 +1,232 @@
+import { createContext, useCallback, useContext } from "react";
+
+export interface ConversationLocalFileLinkOptions {
+  projectRootPath: string;
+  runtimeMode?: "local" | "managed";
+  previewFile: (path: string) => void;
+  openFile: (path: string) => void;
+  blockFile?: (path: string, reason: ConversationLocalFileBlockReason) => void;
+}
+
+export type ConversationLocalFileBlockReason =
+  | "managed_outside_project"
+  | "unsupported";
+
+export type ConversationLocalFileLinkResolution =
+  | { kind: "preview"; path: string }
+  | { kind: "open"; path: string }
+  | {
+      kind: "blocked";
+      path: string;
+      reason: ConversationLocalFileBlockReason;
+    };
+
+export interface ConversationLocalFileLinkController {
+  resolveLocalFileHref: (
+    href: string,
+  ) => ConversationLocalFileLinkResolution | null;
+  isLocalFileHref: (href: string) => boolean;
+  openLocalFileHref: (href: string) => void;
+}
+
+export interface ConversationLocalFileLinkOverride {
+  resolveLocalFileHref?: (
+    href: string,
+    context: ConversationLocalFileLinkOptions,
+    fallback: ConversationLocalFileLinkController,
+  ) => ConversationLocalFileLinkResolution | null;
+  isLocalFileHref: (
+    href: string,
+    context: ConversationLocalFileLinkOptions,
+  ) => boolean;
+  openLocalFileHref: (
+    href: string,
+    context: ConversationLocalFileLinkOptions,
+    fallback: ConversationLocalFileLinkController,
+  ) => void;
+}
+
+export const ConversationLocalFileLinkOverrideContext =
+  createContext<ConversationLocalFileLinkOverride | null>(null);
+
+export function useConversationLocalFileLinks(
+  options: ConversationLocalFileLinkOptions,
+): ConversationLocalFileLinkController {
+  const override = useContext(ConversationLocalFileLinkOverrideContext);
+  const fallback = useDefaultConversationLocalFileLinks(options);
+
+  const resolveLocalFileHref = useCallback(
+    (href: string) =>
+      override?.resolveLocalFileHref?.(href, options, fallback) ??
+      fallback.resolveLocalFileHref(href),
+    [fallback, options, override],
+  );
+
+  const isLocalFileHref = useCallback(
+    (href: string) =>
+      override?.isLocalFileHref(href, options) ?? fallback.isLocalFileHref(href),
+    [fallback, options, override],
+  );
+
+  const openLocalFileHref = useCallback(
+    (href: string) => {
+      if (override) {
+        override.openLocalFileHref(href, options, fallback);
+        return;
+      }
+      fallback.openLocalFileHref(href);
+    },
+    [fallback, options, override],
+  );
+
+  return { resolveLocalFileHref, isLocalFileHref, openLocalFileHref };
+}
+
+function useDefaultConversationLocalFileLinks(
+  options: ConversationLocalFileLinkOptions,
+): ConversationLocalFileLinkController {
+  const resolveLocalFileHref = useCallback(
+    (href: string) =>
+      resolveDefaultLocalFileHref(
+        href,
+        options.projectRootPath,
+        options.runtimeMode,
+      ),
+    [options.projectRootPath, options.runtimeMode],
+  );
+
+  const isLocalFileHref = useCallback(
+    (href: string) => resolveLocalFileHref(href) !== null,
+    [resolveLocalFileHref],
+  );
+
+  const openLocalFileHref = useCallback(
+    (href: string) => {
+      const resolution = resolveLocalFileHref(href);
+      if (!resolution) return;
+      if (resolution.kind === "preview") {
+        options.previewFile(resolution.path);
+        return;
+      }
+      if (resolution.kind === "open") {
+        options.openFile(resolution.path);
+        return;
+      }
+      options.blockFile?.(resolution.path, resolution.reason);
+    },
+    [options, resolveLocalFileHref],
+  );
+
+  return { resolveLocalFileHref, isLocalFileHref, openLocalFileHref };
+}
+
+export function isDefaultLocalFileHref(
+  href: string,
+  projectRootPath: string,
+  runtimeMode: "local" | "managed" = "local",
+): boolean {
+  return resolveDefaultLocalFileHref(href, projectRootPath, runtimeMode) !== null;
+}
+
+export function resolveDefaultLocalFileHref(
+  href: string,
+  projectRootPath: string,
+  runtimeMode: "local" | "managed" = "local",
+): ConversationLocalFileLinkResolution | null {
+  const isFileHref = href.toLowerCase().startsWith("file://");
+  const path = normalizeLocalFileHref(href);
+  if (!path || (!isFileHref && /^[a-z][a-z0-9+.-]*:/i.test(path))) {
+    return null;
+  }
+
+  const relative = toProjectRelativePath(path, projectRootPath);
+  if (relative) return { kind: "preview", path: relative };
+
+  if (runtimeMode === "managed") {
+    if (isFileHref || isAbsolutePath(path)) {
+      return {
+        kind: "blocked",
+        path,
+        reason: "managed_outside_project",
+      };
+    }
+    return null;
+  }
+
+  if (isFileHref || /^[a-zA-Z]:[\\/]/.test(path)) {
+    return { kind: "open", path };
+  }
+
+  if (
+    path.startsWith("/") &&
+    /^\/(Users|home|tmp|var|private|opt|Volumes|mnt|workspace|workspaces)\//.test(
+      path,
+    )
+  ) {
+    return { kind: "open", path };
+  }
+
+  if (
+    path.startsWith("./") ||
+    /^[^?#]+[\\/][^\\/]+\.[a-zA-Z0-9]{1,12}$/.test(path) ||
+    /^[^?#]+\.[a-zA-Z0-9]{1,12}$/.test(path)
+  ) {
+    return { kind: "preview", path: path.replace(/^\.\//, "") };
+  }
+
+  return null;
+}
+
+export function normalizeLocalFileHref(href: string): string {
+  const trimmed = href.trim();
+  if (!trimmed) return "";
+
+  const withoutFragment = trimmed.split("#", 1)[0].split("?", 1)[0];
+  let path = withoutFragment;
+
+  if (withoutFragment.toLowerCase().startsWith("file://")) {
+    try {
+      const url = new URL(withoutFragment);
+      path = url.pathname;
+      if (/^\/[a-zA-Z]:\//.test(path)) path = path.slice(1);
+    } catch {
+      path = withoutFragment.replace(/^file:\/\//i, "");
+    }
+  }
+
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    try {
+      path = decodeURI(path);
+    } catch {
+      // Keep the original path when percent-decoding is malformed.
+    }
+  }
+
+  return stripMarkdownLineSuffix(path);
+}
+
+function stripMarkdownLineSuffix(path: string): string {
+  return path.replace(/:(\d+)(?::\d+)?$/, "");
+}
+
+function toProjectRelativePath(path: string, rootPath: string): string | null {
+  const normalizedPath = path.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!normalizedPath || normalizedPath.startsWith("../")) return null;
+
+  if (!isAbsolutePath(normalizedPath)) {
+    return normalizedPath.replace(/^\/+/, "");
+  }
+
+  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (!normalizedRoot) return null;
+  if (!normalizedPath.startsWith(`${normalizedRoot}/`)) return null;
+
+  const relative = normalizedPath.slice(normalizedRoot.length + 1);
+  return relative && !relative.startsWith("../") ? relative : null;
+}
+
+function isAbsolutePath(path: string): boolean {
+  return path.startsWith("/") || /^[a-zA-Z]:\//.test(path);
+}
