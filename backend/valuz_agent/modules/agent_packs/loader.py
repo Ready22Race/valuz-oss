@@ -1,11 +1,8 @@
 """Load the built-in Agent Packs shipped under ``resources/agent_packs/``.
 
-Built-in packs are the recommended teams (内容 / 投研 / 产研). They are the
-single source of truth for both the agent-template library and onboarding's
-team recommendations — onboarding just surfaces a subset of these same packs.
-
-``BUILTIN_PACK_IDS`` is display order. The library may grow more packs later;
-onboarding's recommended set is ``ONBOARDING_PACK_IDS`` (currently all of them).
+Built-in packs are Valuz official Agent Teams. ``BUILTIN_PACK_IDS`` is the
+Marketplace display order. Onboarding can keep a smaller, more stable subset
+via ``ONBOARDING_PACK_IDS``.
 """
 
 from __future__ import annotations
@@ -17,11 +14,24 @@ from valuz_agent.modules.agent_packs.manifest import AgentPackManifest
 
 logger = logging.getLogger(__name__)
 
-# Display order. First role of a pack reads as its lead.
-BUILTIN_PACK_IDS: tuple[str, ...] = ("content", "investment", "product")
+# Marketplace display order. First role of a pack reads as its lead.
+BUILTIN_PACK_IDS: tuple[str, ...] = (
+    "product-strategy",
+    "development-engineering",
+    "investment",
+    "supply-chain-tracking",
+    "competitive-intelligence",
+    "content",
+    "contract-review",
+    "academic-research",
+    "recruiting-evaluation",
+    "chinese-metaphysics",
+)
 
-# The teams onboarding recommends. A subset (here: all) of the built-in packs.
-ONBOARDING_PACK_IDS: tuple[str, ...] = ("content", "investment", "product")
+# The teams onboarding recommends. Keep this aligned with the Marketplace's
+# visible task-oriented teams; the legacy broad ``product`` pack stays on disk
+# only for compatibility.
+ONBOARDING_PACK_IDS: tuple[str, ...] = ("content", "investment", "development-engineering")
 
 
 def _packs_root() -> Path:

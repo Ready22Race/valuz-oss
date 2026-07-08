@@ -2,8 +2,10 @@
 recommended teams) and, later, user-supplied packs.
 
 ``import_manifest`` is the generalization of the old ``add_template``: it
-materializes the pack's bundled skills, then idempotently creates the pack's
-agents in the user's library (de-dup by fixed slug). The concrete
+materializes the pack's bundled/embedded local skills, then idempotently creates
+the pack's agents in the user's library (de-dup by fixed slug). SkillHub
+dependencies are installed by the Marketplace service before it calls this
+service. The concrete
 ``(runtime, provider_id, model)`` is resolved by the caller (the route, reusing
 onboarding's resolver) and applied to every agent — packs stay runtime-neutral
 (their per-agent ``runtime`` / ``model_hint`` are display hints), so an agent
@@ -44,6 +46,7 @@ from valuz_agent.modules.packs_common import (
 )
 
 logger = logging.getLogger(__name__)
+_TEAM_COORDINATION_MARKER = "## 团队协作（Lead）"
 
 # Staged uploads between preview and confirm: preview_id → (manifest, temp root).
 # The temp root holds extracted embedded skills; confirm consumes + cleans it.
@@ -169,9 +172,26 @@ class AgentPackService:
         roles: list[Any] = []
         created = 0
         skipped = 0
-        for agent in manifest.agents:
+        for index, agent in enumerate(manifest.agents):
+            instructions = self._instructions_for_import(manifest, agent, index)
             if agent.slug in existing:
-                roles.append(existing[agent.slug])
+                row = existing[agent.slug]
+                if (
+                    index == 0
+                    and instructions
+                    and _TEAM_COORDINATION_MARKER not in (row.instructions or "")
+                ):
+                    row = await self._agents.update_agent(
+                        user_id,
+                        agent.slug,
+                        {
+                            "instructions": self._with_team_coordination(
+                                manifest,
+                                row.instructions or instructions,
+                            )
+                        },
+                    )
+                roles.append(row)
                 skipped += 1
                 continue
             row = await self._agents.create_agent(
@@ -180,7 +200,7 @@ class AgentPackService:
                     "slug": agent.slug,
                     "name": resolve_text(agent.name),
                     "description": resolve_text(agent.description),
-                    "instructions": resolve_text(agent.instructions),
+                    "instructions": instructions,
                     "runtime": runtime,
                     "model": model,
                     "provider_id": provider_id,
@@ -203,6 +223,67 @@ class AgentPackService:
             "skipped": skipped,
             "roles": roles,
         }
+
+    def _instructions_for_import(
+        self,
+        manifest: AgentPackManifest | PackManifest,
+        agent: PackAgent,
+        index: int,
+    ) -> str:
+        base = resolve_text(agent.instructions)
+        if index != 0 or len(manifest.agents) < 2:
+            return base
+        return self._with_team_coordination(manifest, base)
+
+    def _with_team_coordination(
+        self,
+        manifest: AgentPackManifest | PackManifest,
+        base: str,
+    ) -> str:
+        if _TEAM_COORDINATION_MARKER in base:
+            return base
+
+        team_name = resolve_text(manifest.collection.name) if manifest.collection else "Agent Team"
+        member_lines = []
+        workflow_lines = []
+        for idx, member in enumerate(manifest.agents, start=1):
+            name = resolve_text(member.name)
+            role = resolve_text(member.description) or "完成对应阶段任务"
+            label = "Lead" if idx == 1 else "Member"
+            member_lines.append(f"- {name}（{label}）：{role}")
+            workflow_lines.append(f"{idx}. {name}：{role}")
+        workflow_lines.append(
+            f"{len(manifest.agents) + 1}. Lead 汇总交付：整合成员产出、处理冲突和缺口，"
+            "形成最终答复或项目成果。"
+        )
+
+        section = "\n".join(
+            [
+                "",
+                "",
+                _TEAM_COORDINATION_MARKER,
+                f"你是「{team_name}」的 Lead。这个 Team 安装后会作为多个 Agent "
+                "一起派驻到同一个 Project 中工作。你的职责不是独自完成所有任务，"
+                "而是组织团队完成工作流。",
+                "",
+                "### Lead 职责",
+                "1. 先澄清用户目标、输入材料、约束条件和交付标准。",
+                "2. 根据成员分工拆解任务，并把对应阶段交给合适成员处理。",
+                "3. 阅读并整合成员产出；发现冲突、缺口或风险时，要求补充或复核。",
+                "4. 最终对用户输出统一结论、过程说明、关键依据和下一步建议。",
+                "",
+                "### 团队成员分工",
+                *member_lines,
+                "",
+                "### 标准协作流程",
+                *workflow_lines,
+                "",
+                "### 协作边界",
+                "如果当前 Project 中某个成员尚未派驻，先说明缺口，再用已有成员完成可覆盖部分。",
+                "不要假装已经调用或获得了其他成员的产出；必须基于项目上下文中真实可见的信息整合。",
+            ]
+        )
+        return f"{base}{section}"
 
     # -- export -----------------------------------------------------------
 
@@ -530,4 +611,5 @@ class AgentPackService:
             "icon": collection.icon or "",
             "added": all(agent.slug in present for agent in manifest.agents),
             "roles": roles,
+            "skills": [{"slug": s.slug, "source": s.source} for s in manifest.skills],
         }

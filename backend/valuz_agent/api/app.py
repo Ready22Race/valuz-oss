@@ -22,6 +22,7 @@ from valuz_agent.api.routes.browser import router as browser_router
 from valuz_agent.api.routes.connectors import router as connectors_router
 from valuz_agent.api.routes.decisions import router as decisions_router
 from valuz_agent.api.routes.docs import router as docs_router
+from valuz_agent.api.routes.marketplace import router as marketplace_router
 from valuz_agent.api.routes.memory import router as memory_router
 from valuz_agent.api.routes.onboarding import router as onboarding_router
 from valuz_agent.api.routes.parser import settings_router as parser_settings_router
@@ -130,6 +131,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     api.include_router(decisions_router)
     api.include_router(agents_router)
     api.include_router(agent_templates_router)
+    api.include_router(marketplace_router)
     api.include_router(tasks_router)
     api.include_router(analytics_router)
     api.include_router(resources_router)

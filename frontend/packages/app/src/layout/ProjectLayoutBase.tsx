@@ -115,6 +115,7 @@ const NAV_ICON_MAP: Record<string, DesktopSidebarBottomItem["icon"]> = {
   settings: "settings",
   agents: "agents",
   connectors: "connectors",
+  marketplace: "marketplace",
 };
 
 function useNavItems(): DesktopSidebarBottomItem[] {

@@ -13,6 +13,7 @@ import {
   ContextPanelPage,
   OnboardingFlow,
   KnowledgePage,
+  MarketplacePage,
   OnboardingPage,
   OverlaysPage,
   ProjectDetailPage,
@@ -41,6 +42,7 @@ const COMPONENT_MAP: Record<string, ComponentType> = {
   "automation-detail": AutomationDetailPage,
   skills: SkillsPage,
   "skill-detail": SkillDetailPage,
+  marketplace: MarketplacePage,
   settings: SettingsPage,
   onboarding: OnboardingPage,
   // /welcome — the first-run entry. The full-screen editorial flow

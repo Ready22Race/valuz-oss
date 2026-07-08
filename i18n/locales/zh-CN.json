@@ -688,7 +688,8 @@
     "projectTasks": "项目任务",
     "assistant": "新对话",
     "connectors": "连接器",
-    "activity": "动态"
+    "activity": "动态",
+    "marketplace": "市场"
   },
   "activity": {
     "running": "运行中",
@@ -817,21 +818,21 @@
     "exampleProjectName": "示例项目",
     "teams": {
       "investment": {
-        "name": "投研 Team",
-        "tagline": "行业 + 估值 + 跟踪 + 合规，投资研究深度班底",
-        "collab": "行业分析师(lead) → 财务建模师 / 季度跟踪员 ×3 / 合规审查员 → 收尾"
+        "name": "行业分析",
+        "tagline": "行业研究 → 财务建模 → 业绩跟踪 → 研报输出，快速建立投研框架",
+        "collab": "投研负责人 → 财务建模师 / 业绩跟踪员 / 研报撰写人 → 交付"
       },
-      "product": {
-        "name": "产研 Team",
-        "tagline": "需求 → 设计 → 开发 → 测试，产品研发协作班底",
-        "collab": "产品经理 → 设计师 → 前后端开发 → QA → 回归"
+      "developmentEngineering": {
+        "name": "软件开发",
+        "tagline": "需求 / 设计 → 实现 → 审查 → 修复，把功能做成可运行代码",
+        "collab": "交付负责人 → 重构工程师 / 代码审查员 / 缺陷修复工程师 → 交付"
       },
       "custom": {
         "name": "暂时不需要 team",
         "tagline": "直接开始对话，先用起来"
       },
       "content": {
-        "name": "内容创作 Team",
+        "name": "小红书内容创作",
         "tagline": "选题 → 文案 → 配图 → 发布，小红书内容生产线",
         "collab": "选题策划 → 种草写手 → 配图设计 → 发布运营"
       }
@@ -855,22 +856,22 @@
           "duty": "首次覆盖 · 晨报 · 路演 PPT"
         }
       },
-      "product": {
-        "pm": {
-          "name": "产品经理",
-          "duty": "拆需求、定方案、排优先级"
+      "developmentEngineering": {
+        "deliveryLead": {
+          "name": "交付负责人",
+          "duty": "拆实现路径、协调交付"
         },
-        "designer": {
-          "name": "设计师",
-          "duty": "UI / 交互设计、出稿"
+        "refactoringSpecialist": {
+          "name": "重构工程师",
+          "duty": "整理复杂代码和模块边界"
         },
-        "engineer": {
-          "name": "前后端开发",
-          "duty": "实现功能、写代码"
+        "codeReviewer": {
+          "name": "代码审查员",
+          "duty": "检查回归、架构和测试缺口"
         },
-        "qa": {
-          "name": "QA",
-          "duty": "用例覆盖、回归验证"
+        "bugFixer": {
+          "name": "缺陷修复工程师",
+          "duty": "复现问题、定位根因、最小修复"
         }
       },
       "content": {
@@ -2311,5 +2312,122 @@
     "viewSession": "查看会话 →",
     "needsConfirm": "需要你确认",
     "goConfirm": "去确认"
+  },
+  "marketplace": {
+    "title": "市场",
+    "subtitle": "发现并导入 Agents、Agent 团队与技能 · 由 Valuz 精选与 SkillHub 供给",
+    "tabAgents": "Agents",
+    "tabSkills": "Skills",
+    "searchAgents": "搜索 Agent、场景、领域…",
+    "searchSkills": "搜索技能、描述、标签…",
+    "teamsTitle": "精选 Agent 团队",
+    "teamsSubtitle": "Valuz 精选的高价值场景包",
+    "teamsCount": "{count} 个团队",
+    "singleAgentsTitle": "单 Agent",
+    "singleAgentsSubtitle": "可独立导入的官方专家",
+    "membersAndSkills": "{members} 位成员 · {skills} 技能",
+    "filterAll": "全部",
+    "categories": "分类",
+    "skillsTotal": "共 {count} 个技能",
+    "skillsSuffix": "{count} 技能",
+    "view": "查看",
+    "import": "导入",
+    "installed": "已安装",
+    "loadMore": "加载更多",
+    "loading": "加载中…",
+    "degradedNotice": "SkillHub 暂时不可用，当前仅显示 Valuz 官方内容",
+    "empty": "没有找到匹配的内容",
+    "importFromMarketplace": "从市场导入",
+    "sourceValuzOfficial": "Valuz 官方",
+    "sourceSkillhub": "SkillHub",
+    "sourceSkillhubCurated": "SkillHub 精选",
+    "badgeFreeInstall": "免费安装",
+    "badgeRequiresApiKey": "需 API Key",
+    "badgeThirdPartyCost": "可能第三方计费",
+    "badgeReviewedSkillhub": "SkillHub 已审查",
+    "badgeReviewedValuz": "Valuz 已审核",
+    "badgeCommunity": "社区来源",
+    "badgeVerified": "作者已认证",
+    "badgeLocked": "需连接 Reportify",
+    "modalTypeSkill": "技能",
+    "modalTypeAgent": "单 Agent",
+    "modalTypeTeam": "Agent 团队",
+    "modalVersion": "版本",
+    "modalSource": "来源",
+    "modalUpdated": "更新",
+    "modalDownloads": "下载",
+    "modalRuntime": "运行时",
+    "modalEffort": "思考强度",
+    "modalCategory": "分类",
+    "modalSkillOverview": "技能简介",
+    "modalSkillOverviewNone": "暂无技能简介",
+    "modalRequiresApiKeyHint": "安装后需要配置对应服务的 API Key 才能正常使用。",
+    "modalEvaluationReport": "TRACE 评测报告",
+    "modalEvaluationUnknown": "未知",
+    "modalSecurityReport": "安全报告",
+    "modalSecurityNone": "暂无安全报告",
+    "modalFilesPreview": "安装前文件预览",
+    "modalFilesCount": "{count} 个文件",
+    "modalRoleInstructions": "角色与指令",
+    "modalBoundSkills": "绑定技能",
+    "modalConnectors": "连接器要求",
+    "modalCollaboration": "协作方式",
+    "modalWorkflow": "工作流程",
+    "modalDeliverables": "交付物",
+    "modalUsageNotes": "使用说明",
+    "connectorRequired": "必需",
+    "connectorOptional": "可选",
+    "connectorApiKey": "需 API Key",
+    "connectorCost": "可能付费",
+    "modalMembers": "团队成员",
+    "modalMembersCount": "{count} 位",
+    "roleLead": "Lead",
+    "roleMember": "Member",
+    "memberSkills": "{count} 技能",
+    "installTargetSkill": "安装目标：技能库",
+    "installTargetAgent": "安装目标：Agent 库",
+    "installSkill": "导入技能",
+    "installAgent": "安装 Agent",
+    "installTeam": "安装团队",
+    "installing": "正在安装…",
+    "installProgressTitle": "正在安装，请稍等",
+    "installProgressTeamHint": "将安装 {members} 位 Agent，并准备 {skills} 个依赖技能。首次下载 SkillHub 技能时可能需要多等一会。",
+    "installProgressAgentHint": "正在安装 Agent，并准备 {skills} 个依赖技能。",
+    "installProgressSkillHint": "正在下载并注册技能文件。",
+    "installProgressPreparing": "正在检查依赖与本地缓存…",
+    "installProgressDownloading": "正在下载或注册依赖技能…",
+    "installProgressCreatingAgents": "正在创建 Agent 配置…",
+    "installProgressFinishing": "正在完成安装…",
+    "teamUse": "使用团队",
+    "teamActivationTitle": "把团队添加到项目",
+    "teamActivationSubtitle": "「{name}」已安装，选择一个项目开始使用，或暂时跳过。",
+    "teamActivationTarget": "下一步：派驻到项目并进入项目主页",
+    "teamActivationSkip": "暂时跳过",
+    "teamLaunchTitle": "添加到项目",
+    "teamLaunchHint": "将 {count} 位成员派驻到项目中，进入项目后可从 Lead「{lead}」开始对话。",
+    "teamLaunchDestination": "使用方式",
+    "teamLaunchNewProject": "新建项目",
+    "teamLaunchNewProjectHint": "为这个团队创建独立项目",
+    "teamLaunchExistingProject": "选择已有项目",
+    "teamLaunchExistingProjectHint": "把团队派驻到当前业务项目",
+    "teamLaunchSelectProject": "选择项目",
+    "teamLaunchNoProjects": "暂无可选项目",
+    "teamLaunchProjectName": "项目名称",
+    "teamLaunchProjectDirectory": "项目目录",
+    "teamLaunchProjectDirectoryEmpty": "请选择一个本机目录",
+    "teamLaunchChooseDirectory": "选择目录",
+    "teamLaunch": "启动团队",
+    "teamLaunching": "正在启动…",
+    "toastSkillInstalled": "「{name}」已添加到技能库",
+    "toastAgentInstalled": "「{name}」已安装到 Agent 库",
+    "toastTeamInstalled": "「{name}」已添加到 Agent 库",
+    "toastTeamLaunched": "「{name}」已加入项目",
+    "toastAlreadyInstalled": "「{name}」已在库中",
+    "error": {
+      "installFailed": "安装失败，请稍后重试",
+      "launchFailed": "启动团队失败，请稍后重试",
+      "projectDirectoryRequired": "请先选择项目目录"
+    },
+    "curatedShelf": "SkillHub 官方精选 · 共 {count} 个"
   }
 }

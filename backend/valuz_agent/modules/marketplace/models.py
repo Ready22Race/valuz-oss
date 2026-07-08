@@ -1,0 +1,153 @@
+"""Marketplace DTOs — mirror ``api/openapi.yaml`` (Marketplace* schemas)."""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+MarketplaceItemType = Literal["skill", "agent_template", "agent_team_template"]
+MarketplaceSource = Literal["skillhub", "valuz_official"]
+MarketplaceBadge = Literal[
+    "free_install",
+    "requires_api_key",
+    "third_party_cost",
+    "reviewed_skillhub",
+    "reviewed_valuz",
+    "community",
+    "verified",
+    "locked",
+]
+MarketplaceInstallTarget = Literal["skill_library", "agent_library", "agent_library_project"]
+ConnectorRequirementKind = Literal["required", "optional", "api_key", "cost"]
+
+
+class MarketplaceStats(BaseModel):
+    downloads: int | None = None
+    stars: int | None = None
+    installs: int | None = None
+
+
+class MarketplaceTeamMember(BaseModel):
+    slug: str | None = None
+    name: str
+    role: str
+    lead: bool = False
+    skill_count: int | None = None
+
+
+class MarketplaceConnectorRequirement(BaseModel):
+    name: str
+    requirement: ConnectorRequirementKind
+
+
+class MarketplaceFileEntry(BaseModel):
+    path: str
+    size: int | None = None
+    sha256: str | None = None
+
+
+class MarketplaceSecurityProviderReport(BaseModel):
+    provider: str
+    status: str
+    url: str | None = None
+
+
+class MarketplaceSecurityReport(BaseModel):
+    status: Literal["benign", "unknown", "flagged"]
+    summary: str
+    reports: list[MarketplaceSecurityProviderReport] = Field(default_factory=list)
+
+
+class MarketplaceEvaluationDimension(BaseModel):
+    key: Literal["trust", "reliability", "adaptability", "convention", "effectiveness"]
+    code: Literal["T", "R", "A", "C", "E"]
+    label: str
+    score: float | None = None
+    summary: str | None = None
+
+
+class MarketplaceEvaluationReport(BaseModel):
+    system: Literal["TRACE"] = "TRACE"
+    score: float | None = None
+    rating: str | None = None
+    summary: str | None = None
+    dimensions: list[MarketplaceEvaluationDimension] = Field(default_factory=list)
+
+
+class MarketplaceItem(BaseModel):
+    """The normalized card shape shared by every marketplace source.
+
+    ``id`` is a stable ``{source}:{type}:{ref}`` string, e.g.
+    ``skillhub:skill:agent-memory`` / ``valuz:agent:meeting-notes`` /
+    ``valuz:team:investment``.
+    """
+
+    id: str
+    type: MarketplaceItemType
+    source: MarketplaceSource
+    source_ref: str
+    title: str
+    subtitle: str | None = None
+    description: str
+    icon: str | None = None
+    category: str | None = None
+    category_label: str | None = None
+    subcategories: list[str] = Field(default_factory=list)
+    badges: list[MarketplaceBadge] = Field(default_factory=list)
+    stats: MarketplaceStats = Field(default_factory=MarketplaceStats)
+    version: str | None = None
+    runtime: str | None = None
+    skill_count: int | None = None
+    members: list[MarketplaceTeamMember] | None = None
+    install_target: MarketplaceInstallTarget
+    installed: bool = False
+    locked: bool = False
+
+
+class MarketplaceItemDetail(MarketplaceItem):
+    owner: str | None = None
+    origin_url: str | None = None
+    updated_at: str | None = None
+    instructions: str | None = None
+    workflow: list[str] | None = None
+    deliverables: list[str] | None = None
+    usage_notes: list[str] | None = None
+    bound_skills: list[str] | None = None
+    connectors: list[MarketplaceConnectorRequirement] | None = None
+    files: list[MarketplaceFileEntry] | None = None
+    security: MarketplaceSecurityReport | None = None
+    evaluation: MarketplaceEvaluationReport | None = None
+
+
+class MarketplaceItemList(BaseModel):
+    items: list[MarketplaceItem]
+    total: int
+    page: int
+    page_size: int
+    degraded: bool = False
+
+
+class MarketplaceSubcategory(BaseModel):
+    key: str
+    label: str
+
+
+class MarketplaceCategory(BaseModel):
+    key: str
+    label: str
+    count: int | None = None
+    subcategories: list[MarketplaceSubcategory] = Field(default_factory=list)
+
+
+class MarketplaceCategoryList(BaseModel):
+    categories: list[MarketplaceCategory]
+    degraded: bool = False
+
+
+class MarketplaceInstallResult(BaseModel):
+    item_id: str
+    status: Literal["installed", "already_installed"]
+    installed_ref: str | None = None
+    created: int | None = None
+    skipped: int | None = None

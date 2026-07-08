@@ -2878,6 +2878,163 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  # ------------------------------------------------------------------
+  # Marketplace — normalized discovery/import catalog over SkillHub +
+  # Valuz official skills + curated agent / agent-team templates.
+  # The client never talks to SkillHub directly; this layer normalizes
+  # every source into one item shape (see MarketplaceItem).
+  # ------------------------------------------------------------------
+
+  /v1/marketplace/categories:
+    get:
+      summary: List normalized marketplace categories
+      operationId: listMarketplaceCategories
+      tags: [marketplace]
+      description: |
+        Category rail data for one marketplace tab. `kind=skill` returns the
+        curated SkillHub category allowlist with per-category counts;
+        `kind=agent` returns the curated agent/team scenario categories. When
+        the SkillHub upstream is unreachable the response degrades to an
+        empty list with `degraded: true` instead of failing.
+      parameters:
+        - in: query
+          name: kind
+          required: true
+          schema: {type: string, enum: [skill, agent]}
+      responses:
+        "200":
+          description: Categories listed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketplaceCategoryList"
+
+  /v1/marketplace/items:
+    get:
+      summary: List normalized marketplace items
+      operationId: listMarketplaceItems
+      tags: [marketplace]
+      description: |
+        Paged catalog browse for one item type. Skill queries push category /
+        search filters down to SkillHub (curated category allowlist only —
+        Valuz-official skills ship with the client and are never market
+        items); agent / team queries serve Valuz-curated templates.
+        `degraded: true` marks a SkillHub outage.
+      parameters:
+        - in: query
+          name: type
+          required: true
+          schema: {type: string, enum: [skill, agent_template, agent_team_template]}
+        - in: query
+          name: category
+          required: false
+          schema: {type: string}
+        - in: query
+          name: subcategory
+          required: false
+          schema: {type: string}
+        - in: query
+          name: source
+          required: false
+          schema: {type: string, enum: [skillhub, valuz_official]}
+        - in: query
+          name: q
+          required: false
+          schema: {type: string}
+        - in: query
+          name: page
+          required: false
+          schema: {type: integer, minimum: 1, default: 1}
+        - in: query
+          name: page_size
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 100, default: 30}
+      responses:
+        "200":
+          description: Items listed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketplaceItemList"
+
+  /v1/marketplace/items/{item_id}:
+    get:
+      summary: Get one marketplace item with import-preview detail
+      operationId: getMarketplaceItem
+      tags: [marketplace]
+      description: |
+        Full import-preview payload. Skills add owner / version / security
+        report / pre-install file list; agent templates add instructions,
+        bound skills and connector requirements; team templates add the
+        member roster. Item ids are stable `{source}:{type}:{ref}` strings.
+      parameters:
+        - in: path
+          name: item_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Item detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketplaceItemDetail"
+        "404":
+          description: Unknown item id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: SkillHub upstream unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/marketplace/items/{item_id}:install:
+    post:
+      summary: Install a marketplace item into the caller's library
+      operationId: installMarketplaceItem
+      tags: [marketplace]
+      description: |
+        Confirmed install. SkillHub skills download through the existing
+        skill URL-import pipeline (size/count caps + provenance recorded);
+        agent templates create a library agent (runtime/model/provider/effort
+        follow the user's global defaults); team templates import the
+        built-in pack (idempotent by role slug). Installs are idempotent —
+        re-installing reports `already_installed`.
+      parameters:
+        - in: path
+          name: item_id
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: Installed (or already present)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketplaceInstallResult"
+        "404":
+          description: Unknown item id
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "422":
+          description: No model channel configured (agent/team installs)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "502":
+          description: SkillHub upstream unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
 components:
   schemas:
     ArtifactCapabilities:
@@ -3147,6 +3304,224 @@ components:
           type: array
           description: "All of the template's role agents — newly created and pre-existing."
           items: {$ref: "#/components/schemas/Agent"}
+    MarketplaceBadge:
+      type: string
+      description: "Trust / cost / setup flag rendered as a card or modal badge."
+      enum:
+        - free_install
+        - requires_api_key
+        - third_party_cost
+        - reviewed_skillhub
+        - reviewed_valuz
+        - community
+        - verified
+        - locked
+    MarketplaceStats:
+      type: object
+      properties:
+        downloads: {type: integer, nullable: true}
+        stars: {type: integer, nullable: true}
+        installs: {type: integer, nullable: true}
+    MarketplaceTeamMember:
+      type: object
+      required: [name, role, lead]
+      properties:
+        slug: {type: string, nullable: true}
+        name: {type: string}
+        role: {type: string, description: "One-line responsibility."}
+        lead: {type: boolean}
+        skill_count: {type: integer, nullable: true}
+    MarketplaceConnectorRequirement:
+      type: object
+      required: [name, requirement]
+      properties:
+        name: {type: string}
+        requirement:
+          type: string
+          enum: [required, optional, api_key, cost]
+    MarketplaceFileEntry:
+      type: object
+      required: [path]
+      properties:
+        path: {type: string}
+        size: {type: integer, nullable: true, description: "Bytes; null when unknown."}
+        sha256: {type: string, nullable: true}
+    MarketplaceSecurityReport:
+      type: object
+      required: [status, summary]
+      properties:
+        status:
+          type: string
+          enum: [benign, unknown, flagged]
+        summary: {type: string}
+        reports:
+          type: array
+          items:
+            type: object
+            required: [provider, status]
+            properties:
+              provider: {type: string}
+              status: {type: string}
+              url: {type: string, nullable: true}
+    MarketplaceEvaluationDimension:
+      type: object
+      required: [key, code, label]
+      properties:
+        key:
+          type: string
+          enum: [trust, reliability, adaptability, convention, effectiveness]
+        code:
+          type: string
+          enum: [T, R, A, C, E]
+        label: {type: string}
+        score: {type: number, nullable: true, description: "TRACE dimension score on a 1-5 scale."}
+        summary: {type: string, nullable: true}
+    MarketplaceEvaluationReport:
+      type: object
+      required: [system, dimensions]
+      properties:
+        system:
+          type: string
+          enum: [TRACE]
+        score: {type: number, nullable: true, description: "Average TRACE score on a 1-5 scale."}
+        rating: {type: string, nullable: true, description: "Localized rating derived from the TRACE score."}
+        summary: {type: string, nullable: true}
+        dimensions:
+          type: array
+          items: {$ref: "#/components/schemas/MarketplaceEvaluationDimension"}
+    MarketplaceItem:
+      type: object
+      description: |
+        The normalized card shape shared by every marketplace source. `id` is
+        a stable `{source}:{type}:{ref}` string (e.g. `skillhub:skill:agent-memory`,
+        `valuz:agent:meeting-notes`, `valuz:team:investment`).
+      required: [id, type, source, source_ref, title, description, badges, install_target, installed]
+      properties:
+        id: {type: string}
+        type:
+          type: string
+          enum: [skill, agent_template, agent_team_template]
+        source:
+          type: string
+          enum: [skillhub, valuz_official]
+        source_ref: {type: string, description: "SkillHub slug / template id / pack id."}
+        title: {type: string}
+        subtitle: {type: string, nullable: true, description: "Agent role line; null for skills."}
+        description: {type: string}
+        icon: {type: string, nullable: true, description: "Icon URL (SkillHub) or named icon (curated)."}
+        category: {type: string, nullable: true}
+        category_label: {type: string, nullable: true}
+        subcategories:
+          type: array
+          items: {type: string}
+        badges:
+          type: array
+          items: {$ref: "#/components/schemas/MarketplaceBadge"}
+        stats:
+          $ref: "#/components/schemas/MarketplaceStats"
+        version: {type: string, nullable: true}
+        runtime: {type: string, nullable: true, description: "Agent templates only."}
+        skill_count: {type: integer, nullable: true}
+        members:
+          type: array
+          nullable: true
+          description: "Team templates only — brief roster for card avatars."
+          items: {$ref: "#/components/schemas/MarketplaceTeamMember"}
+        install_target:
+          type: string
+          enum: [skill_library, agent_library, agent_library_project]
+        installed: {type: boolean}
+        locked: {type: boolean, default: false, description: "Present but not installable (e.g. official skill requires Reportify)."}
+    MarketplaceItemDetail:
+      allOf:
+        - $ref: "#/components/schemas/MarketplaceItem"
+        - type: object
+          properties:
+            owner: {type: string, nullable: true}
+            origin_url: {type: string, nullable: true, description: "Human-facing upstream page."}
+            updated_at: {type: string, nullable: true, description: "ISO date of the last upstream update."}
+            instructions: {type: string, nullable: true, description: "Agent templates — role/instructions summary."}
+            workflow:
+              type: array
+              nullable: true
+              description: "Agent Teams — ordered collaboration steps shown in the import preview."
+              items: {type: string}
+            deliverables:
+              type: array
+              nullable: true
+              description: "Agent Teams — concrete outputs the user receives."
+              items: {type: string}
+            usage_notes:
+              type: array
+              nullable: true
+              description: "Agent Teams — setup, safety, or scope notes for the preview."
+              items: {type: string}
+            bound_skills:
+              type: array
+              nullable: true
+              items: {type: string}
+            connectors:
+              type: array
+              nullable: true
+              items: {$ref: "#/components/schemas/MarketplaceConnectorRequirement"}
+            files:
+              type: array
+              nullable: true
+              description: "Skills — pre-install file preview."
+              items: {$ref: "#/components/schemas/MarketplaceFileEntry"}
+            security:
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/MarketplaceSecurityReport"
+            evaluation:
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/MarketplaceEvaluationReport"
+    MarketplaceItemList:
+      type: object
+      required: [items, total, page, page_size, degraded]
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/MarketplaceItem"}
+        total: {type: integer}
+        page: {type: integer}
+        page_size: {type: integer}
+        degraded: {type: boolean, description: "True when SkillHub was unreachable and results are official-only."}
+    MarketplaceCategory:
+      type: object
+      required: [key, label]
+      properties:
+        key: {type: string}
+        label: {type: string}
+        count: {type: integer, nullable: true}
+        subcategories:
+          type: array
+          items:
+            type: object
+            required: [key, label]
+            properties:
+              key: {type: string}
+              label: {type: string}
+    MarketplaceCategoryList:
+      type: object
+      required: [categories, degraded]
+      properties:
+        categories:
+          type: array
+          items: {$ref: "#/components/schemas/MarketplaceCategory"}
+        degraded: {type: boolean}
+    MarketplaceInstallResult:
+      type: object
+      required: [item_id, status]
+      properties:
+        item_id: {type: string}
+        status:
+          type: string
+          enum: [installed, already_installed]
+        installed_ref: {type: string, nullable: true, description: "Resulting library slug (skill or agent) or pack id."}
+        created: {type: integer, nullable: true, description: "Team installs — roles newly created."}
+        skipped: {type: integer, nullable: true, description: "Team installs — roles already present."}
     ExportCollection:
       type: object
       description: "Optional display header to brand the exported group."
@@ -4804,7 +5179,7 @@ components:
           description: Seconds since process start.
         version:
           type: string
-          description: ``valuz_agent`` package version.
+          description: "``valuz_agent`` package version."
         kernel_pin:
           type: string
           description: |
@@ -4833,7 +5208,7 @@ components:
             "open log directory" goes to the folder, not the file.
         data_dir:
           type: string
-          description: ``settings.data_dir`` (root of all valuz local writes).
+          description: "``settings.data_dir`` (root of all valuz local writes)."
         runtimes_available:
           type: array
           items:

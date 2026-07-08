@@ -107,6 +107,7 @@ export const ProjectDetailPage = () => {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const requestedAgentSlug = searchParams.get("agent");
   const {
     setRightPanel,
     setHeader,
@@ -276,10 +277,15 @@ export const ProjectDetailPage = () => {
       setRawMembers(res.agents);
       // Keep each mode's pick if it's still a valid member, else fall back to
       // the first member — applied independently to chat and task.
+      const requested =
+        requestedAgentSlug && mapped.some((m) => m.slug === requestedAgentSlug)
+          ? requestedAgentSlug
+          : null;
       const keepOrFirst = (prev: string | null) =>
-        prev && mapped.some((m) => m.slug === prev)
+        requested ??
+        (prev && mapped.some((m) => m.slug === prev)
           ? prev
-          : (mapped[0]?.slug ?? null);
+          : (mapped[0]?.slug ?? null));
       setAgentByMode((prev) => ({
         chat: keepOrFirst(prev.chat),
         task: keepOrFirst(prev.task),
@@ -289,7 +295,7 @@ export const ProjectDetailPage = () => {
       setRawMembers([]);
       setAgentByMode({ chat: null, task: null });
     }
-  }, [id]);
+  }, [id, requestedAgentSlug]);
 
   // ──────────────────────────────────────────────────────────────────
   // Member open / delete handlers. Live-reference deployment (08-agents-module
@@ -553,6 +559,15 @@ export const ProjectDetailPage = () => {
   // Each mode only overrides when its seed is a current member; otherwise
   // loadMembers' ``mapped[0]`` fallback stands (fresh project / no prior run).
   const agentSeededRef = useRef(false);
+  useEffect(() => {
+    if (!requestedAgentSlug || members.length === 0) return;
+    if (!members.some((m) => m.slug === requestedAgentSlug)) return;
+    agentSeededRef.current = true;
+    setAgentByMode({
+      chat: requestedAgentSlug,
+      task: requestedAgentSlug,
+    });
+  }, [members, requestedAgentSlug]);
   useEffect(() => {
     if (agentSeededRef.current) return;
     if (lastPickLoading || members.length === 0) return;
