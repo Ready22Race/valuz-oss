@@ -304,21 +304,20 @@ else
 fi
 
 # ============================================================
-# Phase A4: Stage browser engine (chrome-devtools-mcp + node)
+# Phase A4: Stage browser engine (chrome-devtools-mcp)
 # ============================================================
-# The browser feature drives Chrome via the chrome-devtools-mcp CLI run under a
-# real node binary (sidecar.ts sets VALUZ_NODE_PATH + VALUZ_CDT_ENTRY to these
-# absolute libexec paths). Both halves are fetched at build time (only their
-# pins are committed) — nothing third-party lives in the repo tree:
-#   - JS tree: `npm ci` from the pinned backend/vendor/chrome-devtools-mcp/
-#     {package.json,package-lock.json} (platform-independent; integrity-verified
-#     via the lockfile's SHAs).
-#   - node binary: downloaded + SHA256-verified via scripts/download-node.sh
-#     (~100 MB/platform).
-# See docs/design/browser-feature.md §8.
+# The browser feature drives Chrome via the chrome-devtools-mcp CLI run under
+# the app's own Electron binary as plain Node (ELECTRON_RUN_AS_NODE=1;
+# sidecar.ts sets VALUZ_NODE_PATH=process.execPath + VALUZ_NODE_IS_ELECTRON=1 +
+# VALUZ_CDT_ENTRY). No separate node binary is shipped. The JS tree is fetched
+# at build time (only its pin is committed): `npm ci` from the pinned
+# backend/vendor/chrome-devtools-mcp/{package.json,package-lock.json}
+# (platform-independent; integrity-verified via the lockfile's SHAs), then
+# patched so yargs' hideBin doesn't misdetect Electron-as-node as a bundled
+# Electron app. See docs/design/browser-feature.md §8.
 
 if ! $SKIP_NODE; then
-  log "=== Phase A4: Staging browser engine (chrome-devtools-mcp + node) ==="
+  log "=== Phase A4: Staging browser engine (chrome-devtools-mcp) ==="
 
   command -v npm >/dev/null 2>&1 || die "npm is required to install chrome-devtools-mcp (Phase A4)."
 
@@ -331,29 +330,23 @@ if ! $SKIP_NODE; then
   ( cd "$CDT_VENDOR_DIR" && npm ci --omit=dev --no-audit --no-fund --loglevel=error )
   [ -f "$CDT_VENDOR_DIR/node_modules/$CDT_ENTRY_REL" ] || \
     die "npm ci did not produce $CDT_ENTRY_REL"
+
+  # Patch for Electron-as-node (must run after npm ci, before staging).
+  # Fails loud when an upstream bump changed the bundle — do not ship unpatched.
+  log "Patching chrome-devtools-mcp for Electron-as-node ..."
+  node "$SCRIPT_DIR/patch-cdt-electron-node.cjs" "$CDT_VENDOR_DIR" || \
+    die "Electron-as-node patch failed (see scripts/patch-cdt-electron-node.cjs)"
+
   CDT_TARGET="$RESOURCES_LIBEXEC/chrome-devtools-mcp"
   rm -rf "$CDT_TARGET"
   mkdir -p "$CDT_TARGET"
   cp -R "$CDT_VENDOR_DIR/node_modules" "$CDT_TARGET/"
   log "chrome-devtools-mcp staged at: $CDT_TARGET/node_modules ($(du -sh "$CDT_TARGET" | cut -f1))"
 
-  # -- node binary (downloaded + verified) --
-  # Map the Valuz dist tag (platform-arch) to Node's release token.
-  case "$VALUZ_DIST_TAG" in
-    darwin-arm64)  NODE_TARGET="darwin-arm64" ;;
-    darwin-amd64)  NODE_TARGET="darwin-x64" ;;
-    linux-arm64)   NODE_TARGET="linux-arm64" ;;
-    linux-amd64)   NODE_TARGET="linux-x64" ;;
-    windows-amd64) NODE_TARGET="win-x64" ;;
-    windows-arm64) NODE_TARGET="win-arm64" ;;
-    *) die "No node mapping for dist tag $VALUZ_DIST_TAG" ;;
-  esac
-  NODE_OUT="$RESOURCES_LIBEXEC/node"
-  [ "$PLATFORM_TAG" = "windows" ] && NODE_OUT="$RESOURCES_LIBEXEC/node.exe"
-  mkdir -p "$RESOURCES_LIBEXEC"
-  bash "$SCRIPT_DIR/download-node.sh" --target="$NODE_TARGET" --out="$NODE_OUT"
-  [ -f "$NODE_OUT" ] || die "node download did not produce $NODE_OUT"
-  log "node staged at: $NODE_OUT ($(du -sh "$NODE_OUT" | cut -f1))"
+  # Purge the standalone node binary earlier builds staged (the pre-Electron-as-node
+# layout shipped one at libexec/node). A stale
+  # libexec/node would be dead weight in the bundle; nothing reads it anymore.
+  rm -f "$RESOURCES_LIBEXEC/node" "$RESOURCES_LIBEXEC/node.exe"
 else
   log "=== Phase A4: Skipping browser engine staging (--skip-node) ==="
 fi
