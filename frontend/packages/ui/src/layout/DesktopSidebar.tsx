@@ -1143,19 +1143,20 @@ export const DesktopSidebar = ({
                 )}
 
                 {/* 对话 / Chats — chats + tasks that don't belong to any
-                    project (quick conversations, project-less tasks). */}
-                {chats.length > 0 && (
-                  <>
-                    <SectionLabel
-                      open={chatsSectionOpen}
-                      onToggle={() => setChatsSectionOpen((v) => !v)}
-                    >
-                      {t("sidebar.chats")}
-                    </SectionLabel>
-                    {chatsSectionOpen &&
-                      renderGroupItems("chats", chats, "chats")}
-                  </>
-                )}
+                    project (quick conversations, project-less tasks). The
+                    section header stays visible even when there is no history
+                    yet, so the "对话" label never disappears. */}
+                <>
+                  <SectionLabel
+                    open={chatsSectionOpen}
+                    onToggle={() => setChatsSectionOpen((v) => !v)}
+                  >
+                    {t("sidebar.chats")}
+                  </SectionLabel>
+                  {chatsSectionOpen &&
+                    chats.length > 0 &&
+                    renderGroupItems("chats", chats, "chats")}
+                </>
               </div>
             </nav>
 
