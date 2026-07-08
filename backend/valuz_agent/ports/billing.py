@@ -12,8 +12,9 @@ via ``set_billing_port()`` in ``api/deps.py`` at app startup.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 
 @dataclass
@@ -42,13 +43,15 @@ class Balance:
     currency: str = "USD"
 
 
-class BillingPort(Protocol):
+class BillingPort(ABC):
     """Metering, budget enforcement, and balance queries."""
 
+    @abstractmethod
     async def meter(self, event: MeterEvent) -> None:
         """Record a billable event."""
         ...
 
+    @abstractmethod
     async def check_budget(
         self,
         user_id: str,
@@ -68,12 +71,13 @@ class BillingPort(Protocol):
         """
         ...
 
+    @abstractmethod
     async def get_balance(self, user_id: str) -> Balance:
         """Return the user's current credit balance."""
         ...
 
 
-class NoopBillingProvider:
+class NoopBillingProvider(BillingPort):
     """Default billing provider — everything is free, budget is unlimited."""
 
     async def meter(self, event: MeterEvent) -> None:

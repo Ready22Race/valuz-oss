@@ -212,31 +212,6 @@ function filenameFromDisposition(header: string | null): string {
   return m?.[1] ?? "project.valuzpack";
 }
 
-function absolutizeApiUrl(url: string): string {
-  if (
-    /^https?:\/\//i.test(url) ||
-    url.startsWith("data:") ||
-    url.startsWith("blob:")
-  ) {
-    return url;
-  }
-  if (!url.startsWith("/")) return url;
-  return `${_apiBase.replace(/\/$/, "")}${url}`;
-}
-
-function normalizeArtifactFileResponse(
-  response: ArtifactFileResponse,
-): ArtifactFileResponse {
-  if (response.content.kind !== "binary") return response;
-  return {
-    ...response,
-    content: {
-      ...response.content,
-      openUrl: absolutizeApiUrl(response.content.openUrl),
-    },
-  };
-}
-
 export const projectsApi = {
   list(): Promise<{ projects: ProjectListItem[] }> {
     return fetchJson("/v1/projects");
@@ -288,11 +263,14 @@ export const projectsApi = {
 
   listFiles(
     projectId: string,
-    opts?: { depth?: number; includeHidden?: boolean },
+    opts?: { depth?: number; includeHidden?: boolean; worktree?: string },
   ): Promise<{ files: ProjectFileNode[] }> {
     const qs = new URLSearchParams();
     if (opts?.depth !== undefined) qs.set("depth", String(opts.depth));
     if (opts?.includeHidden) qs.set("include_hidden", "true");
+    // Scope the tree to a worktree session's checkout instead of the shared
+    // project cwd when a worktree name is supplied.
+    if (opts?.worktree) qs.set("worktree", opts.worktree);
     const suffix = qs.toString() ? `?${qs}` : "";
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/files${suffix}`,
@@ -316,16 +294,6 @@ export const projectsApi = {
       method: "POST",
       body: form,
     });
-  },
-
-  readFile(projectId: string, filePath: string): Promise<ArtifactFileResponse> {
-    const encodedPath = filePath
-      .split("/")
-      .map((part) => encodeURIComponent(part))
-      .join("/");
-    return fetchJson<ArtifactFileResponse>(
-      `/v1/projects/${encodeURIComponent(projectId)}/files/${encodedPath}`,
-    ).then(normalizeArtifactFileResponse);
   },
 
   deletePreview(projectId: string): Promise<ProjectDeletePreview> {

@@ -308,14 +308,18 @@ logs land under `.ai/dev/{backend,frontend}.log`.
   `scripts/download-rg.sh`).
 - **Browser engine** (`modules/browser`) runs the `chrome-devtools-mcp` CLI
   under Node. Packaged desktop can't see the user's Node (stripped GUI PATH), so
-  the sidecar sets `VALUZ_NODE_PATH` + `VALUZ_CDT_ENTRY` to bundled `libexec`
-  paths and `_engine_argv()` invokes `node <entry>` directly; without them it
-  falls back to `npx` (dev). Both engine halves are fetched at build (only pins
-  committed): the JS tree via `npm ci` from
-  `backend/vendor/chrome-devtools-mcp/{package.json,package-lock.json}` (refresh
-  `scripts/vendor-chrome-devtools-mcp.sh`), and the Node binary downloaded +
-  SHA256-verified (`scripts/download-node.sh`). At boot the host installs a
-  friendly `chrome-devtools` wrapper on `os.environ["PATH"]` so the agent runs a
-  clean `chrome-devtools <tool>`. Skill + `browser_start`/`browser_stop` tools
-  are gated on `node_available()`. See `docs/design/browser-feature.md` §8.
+  the sidecar sets `VALUZ_NODE_PATH` = the app's own Electron binary (run as
+  plain Node via `ELECTRON_RUN_AS_NODE=1`; flag env `VALUZ_NODE_IS_ELECTRON=1`)
+  + `VALUZ_CDT_ENTRY` to the staged `libexec` tree, and `_engine_argv()` invokes
+  `node <entry>` directly — `_engine_env()` scopes `ELECTRON_RUN_AS_NODE=1` to
+  engine spawns only (never global `os.environ`). Without the env vars it falls
+  back to `npx` (dev). The JS tree is fetched at build (only pins committed) via
+  `npm ci` from `backend/vendor/chrome-devtools-mcp/{package.json,package-lock.json}`
+  (refresh `scripts/vendor-chrome-devtools-mcp.sh`), then patched by
+  `scripts/patch-cdt-electron-node.cjs` so yargs `hideBin` doesn't misparse
+  under Electron-as-node. No separate node binary ships. At boot the host
+  installs a friendly `chrome-devtools` wrapper on `os.environ["PATH"]` (it
+  embeds the `ELECTRON_RUN_AS_NODE` export) so the agent runs a clean
+  `chrome-devtools <tool>`. Skill + `browser_start`/`browser_stop` tools are
+  gated on `node_available()`. See `docs/design/browser-feature.md` §8.
 ```

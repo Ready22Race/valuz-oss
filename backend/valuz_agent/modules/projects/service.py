@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import logging
-import mimetypes
 import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import quote
 from uuid import uuid4
-
-from pydantic import BaseModel, ConfigDict, Field
 
 from valuz_agent.adapters import kernel_client
 from valuz_agent.infra.eventbus import EventBus
@@ -55,9 +51,6 @@ HIDDEN_NAMES = frozenset(
     }
 )
 
-TEXT_PREVIEW_LIMIT = 5 * 1024 * 1024
-DOCX_PARSE_PREVIEW_LIMIT = 20 * 1024 * 1024
-SPREADSHEET_PARSE_PREVIEW_LIMIT = 100 * 1024 * 1024
 IMAGE_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "svg"})
 MEDIA_EXTENSIONS = frozenset({"mp3", "wav", "m4a", "ogg", "mp4", "webm", "mov"})
 MARKDOWN_EXTENSIONS = frozenset({"md", "markdown", "mdx"})
@@ -135,79 +128,6 @@ class ProjectMemberCleanup(Protocol):
     async def delete_by_project(self, user_id: str, project_id: str) -> int: ...
 
 
-class ArtifactCapabilities(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    can_preview: bool = Field(serialization_alias="canPreview")
-    can_edit: bool = Field(serialization_alias="canEdit")
-    can_open_external: bool = Field(serialization_alias="canOpenExternal")
-    can_copy_content: bool = Field(serialization_alias="canCopyContent")
-    can_download: bool = Field(serialization_alias="canDownload")
-
-
-class ArtifactDescriptor(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    id: str
-    kind: str
-    project_id: str = Field(serialization_alias="projectId")
-    path: str
-    name: str
-    preview_kind: str = Field(serialization_alias="previewKind")
-    capabilities: ArtifactCapabilities
-    mime_type: str | None = Field(default=None, serialization_alias="mimeType")
-    extension: str | None = None
-    size: int | None = None
-    modified_at: str | None = Field(default=None, serialization_alias="modifiedAt")
-
-
-class TextArtifactContent(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    kind: str
-    encoding: str
-    content: str
-    truncated: bool
-    etag: str | None = None
-    modified_at: str | None = Field(default=None, serialization_alias="modifiedAt")
-
-
-class BinaryArtifactContent(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    kind: str
-    open_url: str = Field(serialization_alias="openUrl")
-    mime_type: str = Field(serialization_alias="mimeType")
-    size: int | None = None
-    reason: str | None = None
-
-
-class ExternalArtifactContent(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    kind: str
-    reason: str
-    open_url: str | None = Field(default=None, serialization_alias="openUrl")
-
-
-ArtifactContent = TextArtifactContent | BinaryArtifactContent | ExternalArtifactContent
-
-
-class ArtifactFileResponse(BaseModel):
-    artifact: ArtifactDescriptor
-    content: ArtifactContent
-
-
-@dataclass(frozen=True)
-class ProjectFileResource:
-    rel_path: str
-    name: str
-    mime_type: str | None
-    size: int
-    path: Path | None = None
-    data: bytes | None = None
-
-
 @dataclass
 class FileNode:
     name: str
@@ -215,17 +135,6 @@ class FileNode:
     size: int | None = None
     modified: str | None = None
     children: list[FileNode] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class FileBytes:
-    data: bytes
-    rel_path: str
-    name: str
-    mime_type: str | None
-    size: int
-    modified_at: str | None = None
-    etag: str | None = None
 
 
 def _row_to_list_item(row: ProjectRow, cwd: str | None = None) -> ProjectListItem:
@@ -621,16 +530,38 @@ class ProjectService:
             return str(_root_path(user_id, row.root_path)) if row.root_path else None
         return str(fs_registry.project_cwd(user_id, row.id, kind, row.root_path))  # type: ignore[arg-type]
 
+    async def _worktree_root(self, user_id: str, row: ProjectRow, worktree: str) -> Path | None:
+        """Resolve a session's worktree cwd (design D7), or ``None`` if the
+        named worktree isn't a live managed worktree of this project's repo.
+
+        Lets the file-tree / artifact-read endpoints scope to the directory a
+        worktree session actually runs in instead of the shared project cwd.
+        """
+        from valuz_agent.modules.worktrees.service import worktree_service
+
+        resolved = await worktree_service.resolve_session_cwd(user_id, row, worktree)
+        return Path(resolved) if resolved else None
+
     async def list_files(
         self,
         user_id: str,
         project_id: str,
         depth: int = 2,
         include_hidden: bool = False,
+        worktree: str | None = None,
     ) -> list[dict[str, object]]:
         row = await self._ds.get_by_id(user_id, project_id)
         if not row:
             raise KeyError(project_id)
+        # A worktree session's file tree reflects the worktree checkout, not the
+        # shared project cwd. Resolve it up front; a removed/invalid worktree
+        # yields an empty tree (the session self-heals on the next send).
+        if worktree:
+            wt_root = await self._worktree_root(user_id, row, worktree)
+            if wt_root is None or not wt_root.exists():
+                return []
+            nodes = _walk_dir(wt_root, depth=depth, include_hidden=include_hidden)
+            return [_node_to_dict(n) for n in nodes]
         # Projects delegate to the system file system. Chat projects walk their managed cwd under
         # ``fs_registry.project_root(user_id)`` so any files the agent generates
         # during the chat (excel exports, reports, scratch outputs, …)
@@ -685,147 +616,6 @@ class ProjectService:
         target.write_bytes(data)
         return target.relative_to(root).as_posix()
 
-    async def read_file(
-        self,
-        user_id: str,
-        project_id: str,
-        file_path: str,
-    ) -> ArtifactFileResponse:
-        row = await self._ds.get_by_id(user_id, project_id)
-        if not row:
-            raise KeyError(project_id)
-        if row.kind == "project":
-            if not row.root_path:
-                raise ValueError("Project has no root path")
-            root = _root_path(user_id, row.root_path)
-            file = _file_bytes(root, _resolve_project_file(root, file_path))
-            return _artifact_response_from_file(project_id, file)
-        root = _project_root(user_id, row, project_id)
-        target = _resolve_project_file(root, file_path)
-        stat = target.stat()
-        file = FileBytes(
-            data=target.read_bytes(),
-            rel_path=target.relative_to(root).as_posix(),
-            name=target.name,
-            mime_type=mimetypes.guess_type(target.name)[0],
-            size=stat.st_size,
-            modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
-            etag=f"{int(stat.st_mtime)}-{stat.st_size}",
-        )
-        return _artifact_response_from_file(project_id, file)
-
-    async def resolve_file_resource(
-        self,
-        user_id: str,
-        project_id: str,
-        file_path: str,
-    ) -> ProjectFileResource:
-        row = await self._ds.get_by_id(user_id, project_id)
-        if not row:
-            raise KeyError(project_id)
-        if row.kind == "project":
-            if not row.root_path:
-                raise ValueError("Project has no root path")
-            root = _root_path(user_id, row.root_path)
-            path = _resolve_project_file(root, file_path)
-            file = _file_bytes(root, path)
-            return ProjectFileResource(
-                rel_path=file.rel_path,
-                name=file.name,
-                mime_type=file.mime_type,
-                size=file.size,
-                path=path,
-            )
-        root = _project_root(user_id, row, project_id)
-        target = _resolve_project_file(root, file_path)
-        stat = target.stat()
-        return ProjectFileResource(
-            rel_path=target.relative_to(root).as_posix(),
-            name=target.name,
-            mime_type=mimetypes.guess_type(target.name)[0],
-            size=stat.st_size,
-            path=target,
-        )
-
-
-def _artifact_response_from_file(project_id: str, file: FileBytes) -> ArtifactFileResponse:
-    rel_path = file.rel_path
-    name = file.name
-    extension = _extension(name)
-    mime_type = file.mime_type
-    preview_kind = _preview_kind(name, mime_type)
-    can_preview = preview_kind != "unsupported"
-    descriptor = ArtifactDescriptor(
-        id=f"project_file:{project_id}:{rel_path}",
-        kind="project_file",
-        project_id=project_id,
-        path=rel_path,
-        name=name,
-        mime_type=mime_type,
-        extension=extension or None,
-        size=file.size,
-        modified_at=file.modified_at,
-        preview_kind=preview_kind,
-        capabilities=ArtifactCapabilities(
-            can_preview=can_preview,
-            can_edit=False,
-            can_open_external=True,
-            can_copy_content=preview_kind in {"markdown", "code", "html", "plain"},
-            can_download=False,
-        ),
-    )
-    content: ArtifactContent
-    if preview_kind in {"markdown", "code", "html", "plain"}:
-        raw = file.data
-        truncated = len(raw) > TEXT_PREVIEW_LIMIT
-        if truncated:
-            raw = raw[:TEXT_PREVIEW_LIMIT]
-        content = TextArtifactContent(
-            kind="text",
-            encoding="utf-8",
-            content=raw.decode("utf-8", errors="replace"),
-            truncated=truncated,
-            etag=file.etag,
-            modified_at=file.modified_at,
-        )
-    elif preview_kind in {"image", "media", "pdf"}:
-        resolved_mime = mime_type or (
-            "application/pdf" if preview_kind == "pdf" else "application/octet-stream"
-        )
-        encoded_path = quote(rel_path, safe="/")
-        content = BinaryArtifactContent(
-            kind="binary",
-            open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
-            mime_type=resolved_mime,
-            size=file.size,
-        )
-    elif preview_kind in {"docx", "spreadsheet"}:
-        resolved_mime = mime_type or "application/octet-stream"
-        parse_limit = (
-            SPREADSHEET_PARSE_PREVIEW_LIMIT
-            if preview_kind == "spreadsheet"
-            else DOCX_PARSE_PREVIEW_LIMIT
-        )
-        if file.size <= parse_limit:
-            encoded_path = quote(rel_path, safe="/")
-            content = BinaryArtifactContent(
-                kind="binary",
-                open_url=f"/v1/projects/{project_id}/raw-files/{encoded_path}",
-                mime_type=resolved_mime,
-                size=file.size,
-            )
-        else:
-            content = ExternalArtifactContent(
-                kind="external",
-                reason=(f"{preview_kind.upper()} is larger than the in-app parsing limit."),
-            )
-    else:
-        content = ExternalArtifactContent(
-            kind="external",
-            reason="No in-app renderer is registered for this file type yet.",
-        )
-    return ArtifactFileResponse(artifact=descriptor, content=content)
-
 
 def _managed_project_root(user_id: str, project_id: str) -> str:
     return str((fs_registry.project_root(user_id) / project_id).resolve())
@@ -870,19 +660,6 @@ def _resolve_project_write_target(root: Path, file_path: str) -> Path:
     if root != target and root not in target.parents:
         raise ValueError("File path escapes project root")
     return target
-
-
-def _file_bytes(root: Path, target: Path) -> FileBytes:
-    stat = target.stat()
-    return FileBytes(
-        data=target.read_bytes(),
-        rel_path=target.relative_to(root).as_posix(),
-        name=target.name,
-        mime_type=mimetypes.guess_type(target.name)[0],
-        size=stat.st_size,
-        modified_at=datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
-        etag=f"{int(stat.st_mtime)}-{stat.st_size}",
-    )
 
 
 def _walk_dir(

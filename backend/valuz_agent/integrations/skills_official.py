@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 
 from valuz_agent.infra.fs_registry import fs_registry
@@ -8,8 +7,7 @@ from valuz_agent.integrations.skills_filesystem import (
     _coerce_version,
     _compute_dir_hash,
     _detect_manifest,
-    _extract_frontmatter,
-    _read_text,
+    _read_manifest_cached,
 )
 from valuz_agent.integrations.skills_official_bootstrap import is_bundled_skill
 from valuz_agent.modules.skills.contracts import RuntimeContext, SkillManifest
@@ -31,7 +29,16 @@ class OfficialSkillSource:
     def __init__(self, official_dir: Path | None = None) -> None:
         self._dir = official_dir
 
-    def list_skills(self, ctx: RuntimeContext) -> list[SkillManifest]:
+    def list_skills(
+        self, ctx: RuntimeContext, *, compute_content_hash: bool = True
+    ) -> list[SkillManifest]:
+        """List official skill manifests.
+
+        ``compute_content_hash`` gates ``_compute_dir_hash`` (reads every file in
+        each skill dir — slow on a network filesystem, needed only by the indexer).
+        Display/catalog listing passes ``False`` and reads only each SKILL.md
+        (cached). See ``FilesystemSkillSource.list_skills``.
+        """
         if ctx.user_id is None:
             raise ValueError("user_id is required to list official skills")
         official_dir = self._dir or _default_official_skill_root(ctx.user_id)
@@ -44,14 +51,12 @@ class OfficialSkillSource:
             if manifest_path is None:
                 continue
 
-            raw_manifest = _read_text(manifest_path)
-            metadata, body = _extract_frontmatter(raw_manifest)
+            metadata, body, _raw, manifest_hash = _read_manifest_cached(manifest_path)
             name = str(metadata.get("name") or skill_dir.name)
             description = str(metadata.get("description") or self._summary_from_body(body))
             tags = metadata.get("tags")
             version = _coerce_version(metadata.get("version"))
-            manifest_hash = hashlib.sha256(raw_manifest.encode()).hexdigest()
-            content_hash = _compute_dir_hash(skill_dir)
+            content_hash = _compute_dir_hash(skill_dir) if compute_content_hash else None
 
             bundled = is_bundled_skill(skill_dir)
             manifests.append(

@@ -30,10 +30,36 @@ from valuz_agent.modules.worktrees.errors import (
     WorktreeNotFound,
     WorktreeOperationFailed,
 )
+from valuz_agent.modules.worktrees.slug_words import SLUG_ADJECTIVES, SLUG_NOUNS
 
 logger = logging.getLogger(__name__)
 
 _git_root_locks: dict[str, asyncio.Lock] = {}
+
+# Friendly auto-names (design D11): ``fervent-bohr-14379d``-style
+# adjective-surname pairs, using Docker's names-generator vocabulary
+# (see slug_words.py; ~97 adjectives × 237 surnames ≈ 23k combos) — readable
+# in the panel, the branch name (``valuz/u-fervent-bohr-14379d``), and chat.
+# Task worktrees deliberately do NOT use this — they stay the deterministic
+# ``task-<task_id>`` so each task addresses its own worktree and the stale
+# sweeper can key on the ``valuz/task-`` branch prefix.
+def _generate_slug(git_root: Path) -> str:
+    """A fresh friendly slug for an unnamed worktree.
+
+    The existence check matters: ``get_or_create`` fast-resumes an existing
+    path, so an unlucky collision would silently drop the new session into
+    someone else's worktree. Retry a few times, then fall back to plain hex.
+    """
+    for _ in range(8):
+        # 3 bytes → 6 hex chars, matching the harness's own worktree names
+        # (fervent-bohr-14379d) that this scheme is borrowed from.
+        slug = (
+            f"{secrets.choice(SLUG_ADJECTIVES)}-"
+            f"{secrets.choice(SLUG_NOUNS)}-{secrets.token_hex(3)}"
+        )
+        if not gw.worktree_path(git_root, slug).exists():
+            return slug
+    return f"wt-{secrets.token_hex(4)}"
 
 
 def _lock_for(git_root: Path) -> asyncio.Lock:
@@ -181,7 +207,10 @@ class WorktreeService:
                 f"project directory {cwd} is not inside a git repository"
             )
 
-        slug = name or f"wt-{secrets.token_hex(4)}"
+        if name:
+            slug = name
+        else:
+            slug = await asyncio.to_thread(_generate_slug, info.git_root)
         try:
             gw.validate_slug(slug)
         except gw.InvalidWorktreeSlugError as exc:
@@ -427,6 +456,34 @@ class WorktreeService:
             "git_root": str(git_root),
             "base_sha": wt.head_sha,
         }
+
+    async def resolve_session_cwd(
+        self, user_id: str, project_row: ProjectRowLike, name: str
+    ) -> str | None:
+        """On-disk session cwd for an EXISTING managed worktree, or ``None``.
+
+        Read-only counterpart to ``get_or_create`` used by the file-tree /
+        artifact-read path: given a worktree name (from a session's snapshot),
+        resolve the directory the session actually runs in (worktree path +
+        project subdir, design D7). Returns ``None`` — never creates — when git
+        is unavailable, the project isn't a repo, the name is invalid, or the
+        worktree no longer exists on disk. The caller decides what a ``None``
+        means (empty tree / 404).
+        """
+        cwd = self._resolve_project_cwd(user_id, project_row)
+        if not await asyncio.to_thread(gw.git_available):
+            return None
+        info = await asyncio.to_thread(gw.detect_git, cwd)
+        if info is None:
+            return None
+        try:
+            gw.validate_slug(name)
+        except gw.InvalidWorktreeSlugError:
+            return None
+        wt_path = gw.worktree_path(info.git_root, name)
+        if not await asyncio.to_thread(wt_path.is_dir):
+            return None
+        return self._session_cwd(wt_path, cwd, info.git_root)
 
     # ---- helpers -------------------------------------------------------
 

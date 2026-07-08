@@ -15,6 +15,7 @@ unchanged.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -47,15 +48,17 @@ class ProviderVisibilityCandidate(Protocol):
     source: str
 
 
-class ProviderPolicyPort(Protocol):
+class ProviderPolicyPort(ABC):
     """Gate writes to providers. Called by the provider CRUD routes before
     delegating to the service."""
 
+    @abstractmethod
     async def authorize_write(self, ctx: ProviderWriteContext) -> PolicyDecision:
         """Return a decision for the attempted provider write."""
         ...
 
-    async def hide_user_providers(self) -> bool:
+    @abstractmethod
+    async def hide_user_providers(self, *, user_id: str) -> bool:
         """Whether to hide the caller's own (``source="user"``) providers from
         the providers list.
 
@@ -67,8 +70,9 @@ class ProviderPolicyPort(Protocol):
         """
         ...
 
+    @abstractmethod
     async def hidden_provider_ids(
-        self, candidates: Iterable[ProviderVisibilityCandidate]
+        self, candidates: Iterable[ProviderVisibilityCandidate], *, user_id: str
     ) -> set[str]:
         """Return the ids among ``candidates`` to hide from the providers list.
 
@@ -80,17 +84,17 @@ class ProviderPolicyPort(Protocol):
         ...
 
 
-class AllowAllProviderPolicy:
+class AllowAllProviderPolicy(ProviderPolicyPort):
     """Default policy — every write is permitted, nothing hidden (OSS single-user)."""
 
     async def authorize_write(self, ctx: ProviderWriteContext) -> PolicyDecision:
         return PolicyDecision(allowed=True)
 
-    async def hide_user_providers(self) -> bool:
+    async def hide_user_providers(self, *, user_id: str) -> bool:
         return False
 
     async def hidden_provider_ids(
-        self, candidates: Iterable[ProviderVisibilityCandidate]
+        self, candidates: Iterable[ProviderVisibilityCandidate], *, user_id: str
     ) -> set[str]:
         return set()
 

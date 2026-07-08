@@ -1045,8 +1045,12 @@ class LifecycleService:
 
         from valuz_agent.adapters.kernel_client import KernelUnavailableError
 
+        # ``interrupted`` is a loop-local status (user cancelled the turn) —
+        # not a persistable kernel status. The session is idle and resumable;
+        # the kernel already stamped the cancellation stop_reason itself.
+        kernel_status = "idle" if final_status == "interrupted" else final_status
         try:
-            await _finalize_session(session_id, last_content, final_status)
+            await _finalize_session(session_id, last_content, kernel_status)
         except KernelUnavailableError:
             # The backend is shutting down — the kernel store is already torn
             # down (the actor loop was cancelled mid-flight and runs this
@@ -1092,6 +1096,30 @@ class LifecycleService:
         # Drop from the live-member set and write the terminal run record.
         self._members.discard_member(task_id, session_id)
         since = self._members.pop_dispatch_started(session_id)
+
+        # User-cancelled turn (conversation-page stop / kernel interrupt) — the
+        # user-stop path, NOT the failure path. Converges with ``stop_member``:
+        # run → rejected, node → rework (a "user stopped" note, still
+        # re-dispatchable), a ``subtask_stopped`` timeline event, and exactly
+        # one ``member_done(cancelled)`` so the lead never hangs in
+        # ``await_members``. When the run is no longer ``active`` the outcome
+        # was already recorded by ``stop_member`` (→rejected, lead notified) or
+        # ``stop_task`` (→paused, task halted) — leave it untouched so we don't
+        # overwrite a parked run with a terminal state.
+        if final_status == "interrupted":
+            try:
+                await self._finalize_interrupted_member(
+                    session_id=session_id,
+                    task_id=task_id,
+                    project_id=project_id,
+                    user_id=user_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "_finalize_actor: interrupted-member finalize failed for %s", session_id
+                )
+            return
+
         try:
             async with async_unit_of_work() as db:
                 run_ds = TaskSessionDatastore(db)
@@ -1178,6 +1206,92 @@ class LifecycleService:
         except Exception:  # noqa: BLE001
             logger.exception("_finalize_actor: failed to record terminal run for %s", session_id)
 
+    async def _finalize_interrupted_member(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        project_id: str,
+        user_id: str | None,
+    ) -> None:
+        """Record a user-interrupted member run — converges with ``stop_member``.
+
+        Only acts on a still-``active`` run: ``stop_member`` (run→rejected +
+        lead already notified) and ``stop_task`` (run→paused, resumable) have
+        both recorded their outcome before this loop-exit callback fires, and
+        overwriting theirs would either double-notify the lead or destroy a
+        parked run's resumability.
+        """
+        from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
+
+        uid = cast(str, user_id)
+        lead_session_id = ""
+        key: str | None = None
+        agent_slug = ""
+        async with async_unit_of_work() as db:
+            run_ds = TaskSessionDatastore(db)
+            event_ds = TaskEventDatastore(db)
+            task_ds = TaskDatastore(db)
+            run = await run_ds.get_run(session_id)
+            if run is None or run.status != "active":
+                return
+            lead_session_id = run.dispatched_by or ""
+            key = run.subtask_key
+            agent_slug = run.agent_slug
+            await run_ds.update_run_by_session(
+                session_id=session_id, status="rejected", ended_at=now_ms()
+            )
+            if key:
+                task_row = await task_ds.get_task_by_project(uid, project_id, task_id)
+                if task_row is not None:
+                    plan = TaskPlan.from_dict(task_row.plan)
+                    if plan.get(key) is not None:
+                        plan.update_node(
+                            key,
+                            status="rework",
+                            review_feedback="用户中断了该子任务",
+                        )
+                        task_row.plan = plan.to_dict()
+                        await task_ds.update_task(task_row)
+                        await planning.emit_plan_update(
+                            event_ds,
+                            project_id=project_id,
+                            task_id=task_id,
+                            plan=plan,
+                            actor="user",
+                            session_id=session_id,
+                            user_id=user_id,
+                        )
+            agent_name = await resolve_agent_display_name(project_id, agent_slug, uid)
+            await event_ds.append_event(
+                uid,
+                project_id=project_id,
+                task_id=task_id,
+                type="subtask_stopped",
+                actor="user",
+                session_id=session_id,
+                payload={
+                    "subtask_key": key,
+                    "agent": agent_slug,
+                    "agent_name": agent_name,
+                },
+            )
+
+        if lead_session_id:
+            mailbox_registry.put(
+                lead_session_id,
+                InboxMsg(
+                    kind="member_done",
+                    from_session=session_id,
+                    payload={
+                        "agent": agent_slug,
+                        "status": "cancelled",
+                        "summary": "用户中断了该子任务",
+                        "artifacts": [],
+                    },
+                ),
+            )
+
     # ------------------------------------------------------------------
     # finish_task
     # ------------------------------------------------------------------
@@ -1191,6 +1305,7 @@ class LifecycleService:
         summary: str,
         artifacts: list[str] | None = None,
         status: str = "completed",
+        force: bool = False,
         user_id: str | None = None,
     ) -> dict[str, Any]:
         """Close the task — append a terminal event and set the task status.
@@ -1211,6 +1326,13 @@ class LifecycleService:
         subtask (e.g. a final aggregation node) and still mark the task done.
         The lead must dispatch+review those nodes first (or drop them via
         modify_plan, or finish with status='stopped' to terminate the task).
+
+        Live-member guard: a ``stopped`` finish is REJECTED while members are
+        still running (a long build looks exactly like a hang from the lead's
+        side — killing the whole task is almost never the right call). The lead
+        must first check them (``await_members`` reports pending members'
+        live status), stop them individually, or pass ``force=True`` after a
+        deliberate decision.
         """
         if status not in ("completed", "stopped"):
             return {
@@ -1225,6 +1347,33 @@ class LifecycleService:
             }
         final_status = "stopped" if status == "stopped" else "completed"
         event_type = "task_stopped" if final_status == "stopped" else "task_completed"
+
+        # Live-member guard: don't let a lead kill the task while members are
+        # mid-flight (the case-B failure mode: a member deep in a long build is
+        # indistinguishable from a hang, the lead "tries a few times" and stops
+        # the whole task). Name the live subtasks so the lead can check or stop
+        # them individually; ``force=True`` overrides after a deliberate call.
+        if final_status == "stopped" and not force and self._members.has_live_members(task_id):
+            async with async_unit_of_work(commit=False) as db:
+                live_keys = sorted(
+                    r.subtask_key
+                    for r in await TaskSessionDatastore(db).list_runs(cast(str, user_id), task_id)
+                    if r.kind == "subtask" and r.subtask_key and r.status == "active"
+                )
+            return {
+                "ok": False,
+                "error": (
+                    "finish_task(stopped) rejected: members are still running "
+                    f"(subtasks {live_keys or '<unknown>'}). A silent member is "
+                    "usually still working (e.g. a long build), not dead — call "
+                    "await_members to see each pending member's live status, or "
+                    "stop_subtask the ones you no longer need. If you have "
+                    "deliberately decided to terminate the task anyway, call "
+                    "finish_task again with force=true."
+                ),
+                "live_subtasks": live_keys,
+                "status": "rejected",
+            }
 
         rejected: dict[str, Any] | None = None
         async with async_unit_of_work() as db:
@@ -1252,7 +1401,7 @@ class LifecycleService:
                                 "review them first (a dependent node like a final "
                                 "summary becomes ready once its deps are done), or "
                                 "drop them with modify_plan, or call finish_task "
-                                "with status='failed' to abandon the task."
+                                "with status='stopped' to terminate the task."
                             ),
                             "pending_subtasks": unresolved,
                             "status": "rejected",

@@ -15,6 +15,12 @@ export interface PlatformCapabilities {
   ) => Promise<{ copied: number; errors: string[] }>;
   deleteFile: (path: string) => Promise<{ success: boolean; error?: string }>;
   revealInFinder: (path: string) => Promise<void>;
+  /**
+   * Read a local file's text content (for previewing a ``kind==="local"`` file
+   * client-side — the backend never proxies bytes). Large files are truncated.
+   * Returns ``{ content: null }`` on error / outside Electron.
+   */
+  readFileContent?: (path: string) => Promise<{ content: string | null }>;
   quitApp: () => Promise<void>;
   openNewWindow: () => Promise<void>;
   isElectron: boolean;

@@ -459,8 +459,8 @@ async def intervene(
     revise_goal   — update task.goal + append goal_revised
     pause         — cascade-halt the lead + every in-flight member → ``paused``
                     (recoverable; app-restart skips it, user resumes explicitly)
-    stop          — cascade-halt → ``stopped`` (UI-terminal: no resume button;
-                    still revivable via chat/inject per design)
+    stop          — cascade-halt → ``stopped`` (soft terminal; the detail page
+                    offers a resume entry, and chat/inject can also revive it)
     resume        — reconcile + respawn members + re-drive lead
                     (paused/stopped/blocked → active)
     """
@@ -502,8 +502,8 @@ async def intervene(
         )
     elif payload.action in ("pause", "stop"):
         # Layer 2 cascade halt (orchestrator manages its own txn). ``pause`` →
-        # ``paused`` (resumable, 恢复 button stays); ``stop`` → ``stopped``
-        # (UI-terminal, no 恢复 button — still revivable via chat/inject).
+        # ``paused``; ``stop`` → ``stopped``. Both are soft terminals the
+        # detail page can resume (stopped→active is a legal transition).
         target = "paused" if payload.action == "pause" else "stopped"
         applied = await task_orchestrator.stop_task(
             task_id, ws, target_status=target, user_id=user_id

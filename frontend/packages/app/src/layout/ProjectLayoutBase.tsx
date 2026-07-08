@@ -99,6 +99,7 @@ export interface ProjectLayoutBaseProps {
   /** Rendered at the very top of the sidebar, above "新对话". Overlay
    * editions inject an org / account switcher here. */
   sidebarHeader?: ReactNode;
+  sidebarFooter?: ReactNode;
   sidebarExtraItems?: ReactNode;
   topbarActions?: ReactNode;
   projectDialogExtraFields?: ReactNode;
@@ -140,6 +141,7 @@ export function ProjectLayoutBase({
   directoryFieldMode = "picker",
   onUploadInitialContent,
   sidebarHeader,
+  sidebarFooter,
   sidebarExtraItems,
   topbarActions,
   projectDialogExtraFields,
@@ -553,6 +555,7 @@ export function ProjectLayoutBase({
   }, [desktopRoutes, location.pathname, branding.appName, t]);
 
   const outletContext: ProjectOutletContext = {
+    directoryFieldMode,
     setRightPanel,
     setHeader: setPageHeader,
     setHeaderClassName,
@@ -832,6 +835,7 @@ export function ProjectLayoutBase({
                 });
             }}
             sidebarHeader={sidebarHeader}
+            sidebarFooter={sidebarFooter}
             sidebarExtraItems={sidebarExtraItems}
             mascotSrc={mascotSrc}
             LinkComponent={Link}
@@ -891,7 +895,11 @@ export function ProjectLayoutBase({
         contentInnerClassName={contentInnerClassName}
         header={header}
         headerClassName={headerClassName}
-        aside={rightPanelCollapsed ? null : resolvedRightPanel}
+        aside={
+          suppressRightPanelToggle || !rightPanelCollapsed
+            ? resolvedRightPanel
+            : null
+        }
       >
         <div
           key={location.pathname}

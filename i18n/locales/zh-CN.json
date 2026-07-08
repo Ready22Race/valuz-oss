@@ -86,8 +86,8 @@
     "triggerManual": "手动",
     "updateFailed": "更新失败：{error}",
     "updateSuccess": "已更新「{name}」",
-    "taskWorktreeLabel": "Worktree 隔离",
-    "taskWorktreeHint": "每次触发的任务都在独立的 git worktree 中运行，主工作区不受影响；任务结束时无改动的 worktree 会自动清理。"
+    "worktreeLabel": "Worktree 隔离",
+    "worktreeHint": "每次触发都在独立的 git worktree 中运行，主工作区不受影响；运行结束时无改动的 worktree 会自动清理。需要项目为 git 仓库。"
   },
   "backend": {
     "schedule": {
@@ -404,6 +404,7 @@
     "requiresFileChange": "文件修改请求",
     "requiresMcpCall": "MCP 工具调用请求",
     "requiresToolCall": "工具调用请求",
+    "requiresPlanApproval": "计划待确认",
     "decisionApproved": "已批准",
     "decisionRejected": "已拒绝",
     "decisionExpired": "已超时",
@@ -437,7 +438,9 @@
     "worktreeToggleOnHint": "会话将在独立的 git worktree 分支副本中运行，主工作区不受影响。",
     "worktreeToggleOffHint": "在独立的 git worktree（仓库分支副本）中运行此会话。",
     "worktreeBadgeHint": "此会话在独立的 git worktree 中运行。",
-    "worktreeBadgeGone": "该 worktree 已被删除，下次发送消息时会自动重建。"
+    "worktreeBadgeGone": "该 worktree 已被删除，下次发送消息时会自动重建。",
+    "planLabel": "实施计划",
+    "enterPlanMode": "进入计划模式"
   },
   "cron": {
     "actionColumn": "操作",
@@ -2287,6 +2290,7 @@
       "subtaskSpawned": "派发子任务",
       "subtaskCompleted": "子任务完成",
       "subtaskFailed": "子任务失败",
+      "subtaskStopped": "子任务已被停止",
       "subtaskMessage": "成员消息",
       "userNote": "添加备注",
       "goalRevised": "修改目标",

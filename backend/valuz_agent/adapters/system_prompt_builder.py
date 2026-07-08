@@ -15,6 +15,18 @@ session rows.
 
 from __future__ import annotations
 
+# Global output-format guidance injected into every session (both the chat/project
+# and task assembly paths include it as an ``("output-format", …)`` section). Tells
+# the model to link files it produced with the ``valuz-file://`` scheme so the
+# client can resolve them to a local path or a signed URL regardless of whether the
+# run is local or in a cloud sandbox. See docs/design/file-address-resolution.md.
+OUTPUT_FORMAT_INSTRUCTIONS = (
+    "When you reference a file you created, wrote, or delivered in your reply, "
+    "link it as a markdown link `[<name>](valuz-file://<absolute-path>)`, using "
+    "the file's absolute path in your working directory. The client resolves that "
+    "link to a local path or a signed URL so the user can open the file directly."
+)
+
 
 def build_project_system_prompt(
     *,
@@ -93,6 +105,7 @@ def build_worktree_notice(
 
 
 __all__ = [
+    "OUTPUT_FORMAT_INSTRUCTIONS",
     "assemble_session_instructions",
     "build_project_system_prompt",
     "build_worktree_notice",

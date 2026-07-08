@@ -317,7 +317,7 @@ async def list_connectors(
 
     locale = _parse_accept_language(accept_language)
     items = [_view_to_item(v, locale).model_dump() for v in await svc.list_connectors(user_id)]
-    items = await ext.resource_list_hook.apply("connector", items)
+    items = await ext.resource_list_hook.apply("connector", items, user_id=user_id)
     return {"connectors": items}
 
 

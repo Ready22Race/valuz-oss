@@ -178,7 +178,7 @@ export const AutomationDetailPage = () => {
     agent_slug: string;
     trigger: Trigger;
     action_kind: ActionKind;
-    task_worktree: boolean;
+    worktree: boolean;
   }) => {
     try {
       await automationsApi.update(automationId, data);
@@ -288,7 +288,7 @@ export const AutomationDetailPage = () => {
         </span>
       </div>
 
-      <div className="mx-auto flex min-h-0 w-full max-w-[1000px] flex-1 flex-col overflow-hidden">
+      <div className="flex min-h-0 w-full flex-1 flex-col overflow-hidden px-5">
       {/* Title + actions section */}
       <div className="flex items-start justify-between pt-4 pb-5 shrink-0">
         <div>
@@ -308,10 +308,19 @@ export const AutomationDetailPage = () => {
               <><Power className="h-3.5 w-3.5" />{t(k("cron.enable"))}</>
             )}
           </Button>
-          <Button variant="outline" size="icon" onClick={() => setEditOpen(true)}>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            onClick={() => setEditOpen(true)}
+          >
             <FilePenLine className="h-4 w-4" />
           </Button>
-          <Button variant="outline" size="icon" className="text-destructive hover:text-destructive" onClick={() => setDeleteOpen(true)}>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            className="text-destructive hover:text-destructive"
+            onClick={() => setDeleteOpen(true)}
+          >
             <Trash2 className="h-4 w-4" />
           </Button>
           <Button size="sm" onClick={() => void handleRunNow()}>
@@ -322,9 +331,9 @@ export const AutomationDetailPage = () => {
       </div>
 
       {/* Two-column layout — each column scrolls independently */}
-      <div className="grid grid-cols-2 flex-1 min-h-0 overflow-hidden">
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_360px] overflow-hidden border-t border-surface-border/70">
         {/* Left: execution history */}
-        <div className="flex min-w-0 flex-col overflow-hidden pt-6">
+        <div className="flex min-w-0 flex-col overflow-hidden pt-5">
           <h2 className="mb-3 shrink-0 pr-8 text-sm font-medium text-ink-meta">
             {t(k("cron.executionHistory"))}
           </h2>
@@ -347,13 +356,15 @@ export const AutomationDetailPage = () => {
         </div>
 
         {/* Right: instructions */}
-        <div className="flex flex-col overflow-hidden pl-8 pt-6 pb-6 text-sm">
+        <div className="flex min-w-0 flex-col overflow-hidden border-l border-surface-border pl-6 pt-5 pb-6 text-sm">
           <h2 className="mb-3 shrink-0 text-sm font-medium text-ink-meta">
             {t(k("cron.instruction"))}
           </h2>
-          <p className="min-h-0 flex-1 overflow-y-auto whitespace-pre-wrap pb-6 text-ink-body leading-relaxed">
-            {detail.prompt_template}
-          </p>
+          <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#f7f8fa] bg-surface-soft/40 p-4">
+            <p className="whitespace-pre-wrap text-[13px] leading-6 text-ink-body">
+              {detail.prompt_template}
+            </p>
+          </div>
         </div>
       </div>
       </div>
@@ -371,7 +382,7 @@ export const AutomationDetailPage = () => {
           agent_slug: detail.agent_slug,
           trigger: detail.trigger,
           action_kind: (detail.action_kind as ActionKind) ?? "chat",
-          task_worktree: detail.task_worktree ?? false,
+          worktree: detail.worktree ?? false,
         }}
         title={t(k("automation.dialogTitleEditNamed"), { name: detail.name })}
       />

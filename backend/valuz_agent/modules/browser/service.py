@@ -44,12 +44,15 @@ _WRAPPER_NAME = "chrome-devtools"
 def _engine_argv() -> list[str]:
     """The *real* invocation of the ``chrome-devtools`` CLI (what actually runs).
 
-    The packaged desktop app vendors Node + the chrome-devtools-mcp JS tree and
-    sets ``VALUZ_NODE_PATH`` + ``VALUZ_CDT_ENTRY`` (the Electron sidecar; see
+    The packaged desktop app stages the chrome-devtools-mcp JS tree and sets
+    ``VALUZ_NODE_PATH`` + ``VALUZ_CDT_ENTRY`` (the Electron sidecar; see
     docs/design/browser-feature.md §8) — we then invoke ``node <entry>`` by
-    absolute path, bypassing the GUI app's stripped PATH. Without both vars
-    (dev/headless with Node on PATH) we fall back to ``npx`` with the pinned
-    version (``settings.chrome_devtools_version``).
+    absolute path, bypassing the GUI app's stripped PATH. In the packaged app
+    the "node" is the app's own Electron binary run as plain Node
+    (``VALUZ_NODE_IS_ELECTRON=1`` → engine spawns get ``ELECTRON_RUN_AS_NODE=1``
+    via ``_engine_env``). Without both vars (dev/headless with Node on PATH) we
+    fall back to ``npx`` with the pinned version
+    (``settings.chrome_devtools_version``).
 
     Used directly by the host's own management calls (status/start/stop) and
     baked into the ``chrome-devtools`` wrapper exposed to the agent.
@@ -67,6 +70,25 @@ def _engine_argv() -> list[str]:
     ]
 
 
+def _node_is_electron() -> bool:
+    """True when ``VALUZ_NODE_PATH`` is the app's Electron binary run as node."""
+    return os.environ.get("VALUZ_NODE_IS_ELECTRON") == "1"
+
+
+def _engine_env() -> dict[str, str] | None:
+    """Extra env for engine spawns, or ``None`` to inherit as-is.
+
+    Electron-as-node needs ``ELECTRON_RUN_AS_NODE=1`` or the binary opens as a
+    second GUI instance instead of running the CLI. Scoped to engine spawns
+    only — never written into the global ``os.environ``, so it can't leak into
+    claude/codex CLI or other subprocesses. The daemon the CLI re-spawns via
+    ``process.execPath`` inherits this env on its own.
+    """
+    if _node_is_electron():
+        return {**os.environ, "ELECTRON_RUN_AS_NODE": "1"}
+    return None
+
+
 def _is_windows() -> bool:
     return os.name == "nt"
 
@@ -81,12 +103,18 @@ def _wrapper_path(bin_dir: Path) -> Path:
 
 def _wrapper_body(argv: list[str]) -> str:
     """A tiny wrapper that forwards to the real engine argv, so the agent runs a
-    clean ``chrome-devtools <tool>`` instead of a raw ``node <abs>`` / ``npx``."""
+    clean ``chrome-devtools <tool>`` instead of a raw ``node <abs>`` / ``npx``.
+
+    In Electron-as-node mode the wrapper embeds ``ELECTRON_RUN_AS_NODE=1``
+    (agent shells invoke the wrapper directly, so ``_engine_env`` never sees
+    those spawns); the env then propagates to the daemon the CLI re-spawns."""
     if _is_windows():
         quoted = " ".join(f'"{a}"' for a in argv)
-        return f"@echo off\r\n{quoted} %*\r\n"
+        electron_line = 'set "ELECTRON_RUN_AS_NODE=1"\r\n' if _node_is_electron() else ""
+        return f"@echo off\r\n{electron_line}{quoted} %*\r\n"
     quoted = " ".join(shlex.quote(a) for a in argv)
-    return f'#!/bin/sh\nexec {quoted} "$@"\n'
+    electron_line = "export ELECTRON_RUN_AS_NODE=1\n" if _node_is_electron() else ""
+    return f'#!/bin/sh\n{electron_line}exec {quoted} "$@"\n'
 
 
 def _prepend_path(directory: str) -> None:
@@ -143,12 +171,19 @@ def cli_prefix() -> str:
     read — installation happens once at boot via ``ensure_cli_on_path``."""
     if _is_cli_on_path():
         return _WRAPPER_NAME
-    return " ".join(_engine_argv())
+    prefix = " ".join(_engine_argv())
+    if _node_is_electron() and not _is_windows():
+        # Raw-prefix fallback (wrapper install failed): without the env the
+        # Electron binary would open as a GUI instance. POSIX shells accept the
+        # inline assignment; on Windows the wrapper is the only carrier.
+        return f"ELECTRON_RUN_AS_NODE=1 {prefix}"
+    return prefix
 
 
 def node_available() -> bool:
-    """True when the CLI can run — vendored Node + entry imply a bundled runtime;
-    otherwise Node must be on PATH (``npx`` needs it)."""
+    """True when the CLI can run — node path (packaged: the Electron binary as
+    node) + entry imply a bundled runtime; otherwise Node must be on PATH
+    (``npx`` needs it)."""
     if os.environ.get("VALUZ_NODE_PATH") and os.environ.get("VALUZ_CDT_ENTRY"):
         return True
     return shutil.which("node") is not None
@@ -161,6 +196,7 @@ async def _run_cli(*args: str, timeout: float = 60.0) -> tuple[int, str, str]:
         *argv,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        env=_engine_env(),
     )
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)

@@ -50,6 +50,7 @@ class FakeCli:
 def _clear_engine_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VALUZ_NODE_PATH", raising=False)
     monkeypatch.delenv("VALUZ_CDT_ENTRY", raising=False)
+    monkeypatch.delenv("VALUZ_NODE_IS_ELECTRON", raising=False)
 
 
 def test_engine_argv_npx(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,12 +66,60 @@ def test_engine_argv_npx(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_engine_argv_vendored_node_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clear_engine_env(monkeypatch)
     monkeypatch.setenv("VALUZ_NODE_PATH", "/opt/node/bin/node")
     monkeypatch.setenv("VALUZ_CDT_ENTRY", "/opt/cdt/chrome-devtools.js")
     # vendored → invoke node by absolute path, no npx
     assert service._engine_argv() == ["/opt/node/bin/node", "/opt/cdt/chrome-devtools.js"]
     # both vars set imply a bundled runtime → node considered available
     assert service.node_available() is True
+    # a plain node runtime needs no extra spawn env
+    assert service._engine_env() is None
+
+
+# -- Electron-as-node (docs/design/browser-feature.md §8) -------------------
+
+
+def _set_electron_engine_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VALUZ_NODE_PATH", "/Applications/Valuz.app/Contents/MacOS/Valuz")
+    monkeypatch.setenv("VALUZ_CDT_ENTRY", "/opt/cdt/chrome-devtools.js")
+    monkeypatch.setenv("VALUZ_NODE_IS_ELECTRON", "1")
+
+
+def test_engine_env_electron_injects_run_as_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_electron_engine_env(monkeypatch)
+    env = service._engine_env()
+    assert env is not None
+    assert env["ELECTRON_RUN_AS_NODE"] == "1"
+    # scoped to the spawn env — the process's own environ must stay untouched
+    assert "ELECTRON_RUN_AS_NODE" not in os.environ
+
+
+def test_wrapper_body_electron_exports_run_as_node(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_electron_engine_env(monkeypatch)
+    body = service._wrapper_body(service._engine_argv())
+    if service._is_windows():
+        assert 'set "ELECTRON_RUN_AS_NODE=1"' in body
+    else:
+        assert "export ELECTRON_RUN_AS_NODE=1\n" in body
+    # …and without the flag the wrapper stays a plain exec
+    monkeypatch.delenv("VALUZ_NODE_IS_ELECTRON")
+    assert "ELECTRON_RUN_AS_NODE" not in service._wrapper_body(service._engine_argv())
+
+
+def test_cli_prefix_electron_fallback_carries_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    # Wrapper not installed → the raw prefix must still bring the env along
+    # (POSIX inline assignment), or the Electron binary would open as a GUI.
+    _set_electron_engine_env(monkeypatch)
+    _use_tmp_bin(monkeypatch, tmp_path)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    if not service._is_windows():
+        assert service.cli_prefix() == (
+            "ELECTRON_RUN_AS_NODE=1 "
+            "/Applications/Valuz.app/Contents/MacOS/Valuz /opt/cdt/chrome-devtools.js"
+        )
 
 
 def test_engine_argv_partial_env_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:

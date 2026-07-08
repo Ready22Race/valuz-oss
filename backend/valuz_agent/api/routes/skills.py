@@ -93,7 +93,9 @@ async def list_skills(
     from valuz_agent.ports.extensions import ext
 
     data = catalog.model_dump()
-    data["skills"] = await ext.resource_list_hook.apply("skill", data.get("skills", []))
+    data["skills"] = await ext.resource_list_hook.apply(
+        "skill", data.get("skills", []), user_id=user_id
+    )
     return data
 
 

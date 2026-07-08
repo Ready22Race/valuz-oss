@@ -105,6 +105,19 @@ async def test_get_or_create_writes_sidecar_and_resumes(
     assert resumed.base_sha == handle.base_sha  # anchor survives resume
 
 
+async def test_auto_generated_name_is_friendly(
+    svc: WorktreeService, project: FakeProjectRow
+):
+    """D11: unnamed worktrees get a pronounceable adjective-noun-hex slug."""
+    import re
+
+    handle = await svc.get_or_create(USER, project)
+    assert re.fullmatch(r"[a-z]+-[a-z]+-[0-9a-f]{6}", handle.name), handle.name
+    gw.validate_slug(handle.name)  # generator output must satisfy slug rules
+    assert handle.branch == f"valuz/u-{handle.name}"
+    await svc.discard(USER, project, handle.name)
+
+
 async def test_invalid_name_rejected(svc: WorktreeService, project: FakeProjectRow):
     with pytest.raises(InvalidWorktreeName):
         await svc.get_or_create(USER, project, name="../escape")

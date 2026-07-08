@@ -43,23 +43,29 @@ export const ConnectorDetailPanel = ({
   if (!connected) {
     return (
       <aside className="flex h-full flex-col items-center justify-center px-6 text-center">
-        <ConnectorIcon name={name} iconUrl={iconUrl} className="h-12 w-12" />
-        <p className="mt-4 max-w-xs text-sm text-ink-body">
-          {t("connector.notConnectedYet", { name })}
-        </p>
-        {errorMessage ? (
-          <p className="mt-2 max-w-sm text-xs text-error-text">
-            {errorMessage}
+        <div className="w-[300px] rounded-xl px-5 py-8 text-center">
+          <ConnectorIcon
+            name={name}
+            iconUrl={iconUrl}
+            className="mx-auto h-10 w-10 rounded-[10px]"
+          />
+          <p className="mt-3 text-xs leading-[1.6] text-ink-body">
+            {t("connector.notConnectedYet", { name })}
           </p>
-        ) : null}
-        <Button className="mt-4" size="sm" disabled={busy} onClick={onConnect}>
-          {busy ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Plug className="h-3.5 w-3.5" />
-          )}
-          {t("connector.connect")}
-        </Button>
+          {errorMessage ? (
+            <p className="mt-1 text-xs leading-[1.6] text-error-text">
+              {errorMessage}
+            </p>
+          ) : null}
+          <Button className="mt-3" size="sm" disabled={busy} onClick={onConnect}>
+            {busy ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Plug className="h-3.5 w-3.5" />
+            )}
+            {t("connector.connect")}
+          </Button>
+        </div>
       </aside>
     );
   }

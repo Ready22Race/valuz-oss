@@ -25,6 +25,8 @@ import {
 import { toast } from "sonner";
 import {
   projectsApi,
+  filesApi,
+  buildFileRef,
   ApiError,
   sessionsApi,
   providersApi,
@@ -68,6 +70,7 @@ import {
   type AgentSkillItem,
 } from "../lib/agent-skill-items";
 import { toFileTree } from "../lib/file-tree";
+import { resolvedToArtifactFile } from "../lib/resolve-artifact";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 
 /** One tab body: owns its own cursor-paginated feed. Radix unmounts inactive
@@ -103,7 +106,8 @@ const ActivityTabPanel = ({
 
 export const ProjectDetailPage = () => {
   const { t } = useTranslation();
-  const { deleteFile, revealInFinder } = usePlatform();
+  const platform = usePlatform();
+  const { deleteFile, revealInFinder } = platform;
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -340,7 +344,6 @@ export const ProjectDetailPage = () => {
       setMemberDeleteBusy(false);
     }
   }, [id, memberDeleteTarget, loadMembers, t]);
-
 
   // Load this project's member agents + the Library agents the add-agent
   // dialog offers. Non-critical for the project home, so failures are quiet.
@@ -608,9 +611,9 @@ export const ProjectDetailPage = () => {
     expandFolder: pickerExpandFolder,
   } = useKbDocTree(kbPickerOpen);
   const [scheduledTasks, setScheduledTasks] = useState<AutomationItem[]>([]);
-  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(
-    null,
-  );
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<
+    string | null
+  >(null);
   const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
   const [artifactContent, setArtifactContent] =
     useState<ArtifactContent | null>(null);
@@ -838,7 +841,7 @@ export const ProjectDetailPage = () => {
     agent_slug: string;
     trigger: Trigger;
     action_kind: ActionKind;
-    task_worktree: boolean;
+    worktree: boolean;
   }) => {
     // Edit mode: PATCH the existing row. The dialog is stateless and calls the
     // same submit handler for create + edit; ``editTask`` decides which.
@@ -849,7 +852,7 @@ export const ProjectDetailPage = () => {
         agent_slug: data.agent_slug,
         trigger: data.trigger,
         action_kind: data.action_kind,
-        task_worktree: data.task_worktree,
+        worktree: data.worktree,
       });
       toast.success(t("common.saved" as Parameters<typeof t>[0]));
       await reloadScheduledTasks();
@@ -868,7 +871,7 @@ export const ProjectDetailPage = () => {
       prompt_template: data.prompt_template,
       trigger: data.trigger,
       action_kind: data.action_kind,
-      task_worktree: data.task_worktree,
+      worktree: data.worktree,
     });
     toast.success(t("project.taskCreated" as Parameters<typeof t>[0]));
     const schedRes = await automationsApi.listGroups(id);
@@ -954,18 +957,44 @@ export const ProjectDetailPage = () => {
       setArtifactLoading(true);
       setArtifactError(null);
       try {
-        const result = await projectsApi.readFile(id, relPath);
+        // Build the file's absolute identity (project root + project-relative
+        // path), resolve it to an access address, and fetch bytes from that
+        // address — the backend never proxies file streams. See
+        // docs/design/file-address-resolution.md.
+        const root = project?.root_path ?? "";
+        const isAbs = /^(\/|[a-zA-Z]:[\\/])/.test(relPath);
+        const absPath = isAbs
+          ? relPath
+          : root
+            ? `${root.replace(/\/+$/, "")}/${relPath}`
+            : relPath;
+        const descriptor = await filesApi.resolveOne(buildFileRef(absPath));
+        if (!descriptor || descriptor.error || !descriptor.exists) {
+          setArtifact(null);
+          setArtifactContent(null);
+          setArtifactError(
+            t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+          );
+          return;
+        }
+        const result = await resolvedToArtifactFile(descriptor, {
+          projectId: id,
+          relPath,
+          platform,
+        });
         setArtifact(result.artifact);
         setArtifactContent(result.content);
       } catch (error) {
         setArtifact(null);
         setArtifactContent(null);
-        setArtifactError(error instanceof Error ? error.message : String(error));
+        setArtifactError(
+          error instanceof Error ? error.message : String(error),
+        );
       } finally {
         setArtifactLoading(false);
       }
     },
-    [id, searchParams, setSearchParams],
+    [id, project?.root_path, searchParams, setSearchParams, platform, t],
   );
 
   useEffect(() => {
@@ -1244,11 +1273,7 @@ export const ProjectDetailPage = () => {
           id: a.id,
           name: a.filename,
           parseStatus: a.parse_status as
-            | "parsing"
-            | "ready"
-            | "failed"
-            | "native"
-            | undefined,
+            "parsing" | "ready" | "failed" | "native" | undefined,
           sourceKind: a.source_kind,
         }))}
         onRemoveUploadedFile={(attId) => void removeAttachment(attId)}
@@ -1394,175 +1419,186 @@ export const ProjectDetailPage = () => {
           {/* Anchor the content stack at a stable top offset so the project title
           keeps a predictable visual position across desktop window sizes. */}
           <div className="flex flex-1 flex-col items-center px-6 pt-20">
-        <div className="flex w-full min-w-[400px] max-w-[760px] flex-col items-center gap-5">
-          <div className="text-center">
-            <h2 className="text-2xl font-medium leading-tight text-ink-heading">
-              {displayName}
-            </h2>
-            <p className="mt-2 text-sm text-muted-foreground">
-              {t("project.askAgent" as Parameters<typeof t>[0])}
-            </p>
-          </div>
+            <div className="flex w-full min-w-[400px] max-w-[760px] flex-col items-center gap-5">
+              <div className="text-center">
+                <h2 className="text-2xl font-medium leading-tight text-ink-heading">
+                  {displayName}
+                </h2>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {t("project.askAgent" as Parameters<typeof t>[0])}
+                </p>
+              </div>
 
-          <div className="w-full" id="project-composer">
-            <Composer
-              autoFocus
-              wrapperClassName="px-0"
-              value={composerValue}
-              onChange={(v) => {
-                setComposerValue(v);
-                ensureProviderDetails(); // lazy-load provider details on first compose
-              }}
-              mode={composerMode}
-              onModeChange={setComposerMode}
-              onSend={() => {
-                void handleSend();
-              }}
-              // Projects can't attach skills ad-hoc, so the toolbar "add skill"
-              // button stays hidden — but the ``/`` picker is enabled once an
-              // agent is selected so its bound skills are invocable.
-              showSkillButton={false}
-              showSkillSlash={selectedAgentSlug != null}
-              skills={selectedAgentSkillItems}
-              uploadOnAttach
-              existingAttachmentCount={
-                stagedAttachments.filter((a) => !a.consumed_at).length
-              }
-              pinnedAttachments={stagedAttachments
-                .filter((a) => !a.consumed_at)
-                .map((a) => ({
-                  id: a.id,
-                  name: a.filename,
-                  parseStatus: a.parse_status as
-                    | "parsing"
-                    | "ready"
-                    | "failed"
-                    | "native"
-                    | undefined,
-                  sourceKind: a.source_kind,
-                }))}
-              onRemovePinnedAttachment={(attId) => void removeAttachment(attId)}
-              onLocalUpload={handleAttachFiles}
-              onFileDrop={handleAttachFiles}
-              onKBPick={() => void handleOpenKbPicker()}
-              // Project conversations pick a configured agent instead of a
-              // raw model. The session inherits runtime/model/provider/
-              // effort/skills/connectors from the agent; the [+] opens the
-              // same add-agent dialog the config panel uses.
-              agents={composerAgents}
-              selectedAgentSlug={selectedAgentSlug}
-              // First attach mints the chat session, freezing the agent
-              // (ADR-006) — lock the picker once that happens. Only the Chat
-              // mode is frozen by a minted chat session; Task mode keeps its
-              // own pick (kickoff navigates away, so it never mints one here).
-              agentLocked={composerMode === "chat" && chatSessionId != null}
-              onAgentChange={(slug) => {
-                setAgentByMode((m) => ({ ...m, [composerMode]: slug }));
-                setComposerTouched(true);
-              }}
-              onAddAgent={() => setAddAgentOpen(true)}
-              sendDisabled={composerAgents.length === 0 || !selectedAgentSlug}
-              permissionMode={selectedPermissionMode}
-              onPermissionModeChange={(mode) => {
-                setSelectedPermissionMode(mode);
-                setComposerTouched(true);
-              }}
-              worktree={
-                // Chat mode: hidden once a chat session exists (frozen at
-                // creation). Task mode: every kickoff is fresh, so the
-                // toggle is always offered — a worktree task runs lead +
-                // members in ONE shared worktree (design §5).
-                composerMode === "task" || !chatSessionId
-                  ? { available: worktreeAvailable, enabled: worktreeEnabled }
-                  : undefined
-              }
-              onWorktreeToggle={setWorktreeEnabled}
-            />
-            <AttachmentParsingDialog
-              open={parsingConfirmOpen}
-              onConfirm={() => {
-                setParsingConfirmOpen(false);
-                void performChatSend();
-              }}
-              onCancel={() => setParsingConfirmOpen(false)}
-            />
-          </div>
+              <div className="w-full" id="project-composer">
+                <Composer
+                  autoFocus
+                  wrapperClassName="px-0"
+                  value={composerValue}
+                  onChange={(v) => {
+                    setComposerValue(v);
+                    ensureProviderDetails(); // lazy-load provider details on first compose
+                  }}
+                  mode={composerMode}
+                  onModeChange={setComposerMode}
+                  onSend={() => {
+                    void handleSend();
+                  }}
+                  // Projects can't attach skills ad-hoc, so the toolbar "add skill"
+                  // button stays hidden — but the ``/`` picker is enabled once an
+                  // agent is selected so its bound skills are invocable.
+                  showSkillButton={false}
+                  showSkillSlash={selectedAgentSlug != null}
+                  skills={selectedAgentSkillItems}
+                  uploadOnAttach
+                  existingAttachmentCount={
+                    stagedAttachments.filter((a) => !a.consumed_at).length
+                  }
+                  pinnedAttachments={stagedAttachments
+                    .filter((a) => !a.consumed_at)
+                    .map((a) => ({
+                      id: a.id,
+                      name: a.filename,
+                      parseStatus: a.parse_status as
+                        "parsing" | "ready" | "failed" | "native" | undefined,
+                      sourceKind: a.source_kind,
+                    }))}
+                  onRemovePinnedAttachment={(attId) =>
+                    void removeAttachment(attId)
+                  }
+                  onLocalUpload={handleAttachFiles}
+                  onFileDrop={handleAttachFiles}
+                  onKBPick={() => void handleOpenKbPicker()}
+                  // Project conversations pick a configured agent instead of a
+                  // raw model. The session inherits runtime/model/provider/
+                  // effort/skills/connectors from the agent; the [+] opens the
+                  // same add-agent dialog the config panel uses.
+                  agents={composerAgents}
+                  selectedAgentSlug={selectedAgentSlug}
+                  // First attach mints the chat session, freezing the agent
+                  // (ADR-006) — lock the picker once that happens. Only the Chat
+                  // mode is frozen by a minted chat session; Task mode keeps its
+                  // own pick (kickoff navigates away, so it never mints one here).
+                  agentLocked={composerMode === "chat" && chatSessionId != null}
+                  onAgentChange={(slug) => {
+                    setAgentByMode((m) => ({ ...m, [composerMode]: slug }));
+                    setComposerTouched(true);
+                  }}
+                  onAddAgent={() => setAddAgentOpen(true)}
+                  sendDisabled={
+                    composerAgents.length === 0 || !selectedAgentSlug
+                  }
+                  permissionMode={selectedPermissionMode}
+                  onPermissionModeChange={(mode) => {
+                    setSelectedPermissionMode(mode);
+                    setComposerTouched(true);
+                  }}
+                  worktree={
+                    // Chat mode: hidden once a chat session exists (frozen at
+                    // creation). Task mode: every kickoff is fresh, so the
+                    // toggle is always offered — a worktree task runs lead +
+                    // members in ONE shared worktree (design §5).
+                    composerMode === "task" || !chatSessionId
+                      ? {
+                          available: worktreeAvailable,
+                          enabled: worktreeEnabled,
+                        }
+                      : undefined
+                  }
+                  onWorktreeToggle={setWorktreeEnabled}
+                />
+                <AttachmentParsingDialog
+                  open={parsingConfirmOpen}
+                  onConfirm={() => {
+                    setParsingConfirmOpen(false);
+                    void performChatSend();
+                  }}
+                  onCancel={() => setParsingConfirmOpen(false)}
+                />
+              </div>
 
-          {/* Centre history area (PRD-NEXT §3.4): Chat (sessions) and Task
+              {/* Centre history area (PRD-NEXT §3.4): Chat (sessions) and Task
               (lead-dispatch tasks) split into two tabs. The Task tab always
               shows — empty state offers an "add task" affordance. The ref is
               the sentinel ``useListScrollAnchor`` walks up from to find the
               real scroll container (plan §4B). */}
-          <div className="mt-4 w-full pb-6">
-            <Tabs defaultValue="all">
-              <div className="flex items-center border-b border-surface-border">
-                <TabsList
-                  variant="line"
-                  className="h-9 justify-start gap-4 border-0 p-0"
-                >
-                  <TabsTrigger value="all">
-                    {t("activity.filterAll" as Parameters<typeof t>[0])}
-                  </TabsTrigger>
-                  <TabsTrigger value="chat">
-                    {t("project.chatTab" as Parameters<typeof t>[0])}
-                  </TabsTrigger>
-                  <TabsTrigger value="tasks">
-                    {t("project.tasksColumn" as Parameters<typeof t>[0])}
-                  </TabsTrigger>
-                  <TabsTrigger value="automation">
-                    {t("activity.automationTag" as Parameters<typeof t>[0])}
-                  </TabsTrigger>
-                </TabsList>
+              <div className="mt-4 w-full pb-6">
+                <Tabs defaultValue="all">
+                  <div className="flex items-center border-b border-surface-border">
+                    <TabsList
+                      variant="line"
+                      className="h-9 justify-start gap-4 border-0 p-0"
+                    >
+                      <TabsTrigger value="all">
+                        {t("activity.filterAll" as Parameters<typeof t>[0])}
+                      </TabsTrigger>
+                      <TabsTrigger value="chat">
+                        {t("project.chatTab" as Parameters<typeof t>[0])}
+                      </TabsTrigger>
+                      <TabsTrigger value="tasks">
+                        {t("project.tasksColumn" as Parameters<typeof t>[0])}
+                      </TabsTrigger>
+                      <TabsTrigger value="automation">
+                        {t("activity.automationTag" as Parameters<typeof t>[0])}
+                      </TabsTrigger>
+                    </TabsList>
+                  </div>
+                  <TabsContent value="all" className="mt-5">
+                    <ActivityTabPanel
+                      projectId={id}
+                      tab="all"
+                      onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
+                      onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
+                      onRenameConfirm={handleRenameConfirm}
+                      onDeleteSession={handleDeleteSession}
+                      emptyLabel={t(
+                        "project.noSessions" as Parameters<typeof t>[0],
+                      )}
+                    />
+                  </TabsContent>
+                  <TabsContent value="chat" className="mt-5">
+                    <ActivityTabPanel
+                      projectId={id}
+                      tab="chat"
+                      onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
+                      onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
+                      onRenameConfirm={handleRenameConfirm}
+                      onDeleteSession={handleDeleteSession}
+                      emptyLabel={t(
+                        "project.noSessions" as Parameters<typeof t>[0],
+                      )}
+                    />
+                  </TabsContent>
+                  <TabsContent value="tasks" className="mt-5">
+                    <ActivityTabPanel
+                      projectId={id}
+                      tab="task"
+                      onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
+                      onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
+                      onRenameConfirm={handleRenameConfirm}
+                      onDeleteSession={handleDeleteSession}
+                      emptyLabel={t(
+                        "project.noSessions" as Parameters<typeof t>[0],
+                      )}
+                    />
+                  </TabsContent>
+                  <TabsContent value="automation" className="mt-5">
+                    <ActivityTabPanel
+                      projectId={id}
+                      tab="automation"
+                      onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
+                      onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
+                      onRenameConfirm={handleRenameConfirm}
+                      onDeleteSession={handleDeleteSession}
+                      hideScopeTag
+                      emptyLabel={t(
+                        "project.noSessions" as Parameters<typeof t>[0],
+                      )}
+                    />
+                  </TabsContent>
+                </Tabs>
               </div>
-              <TabsContent value="all" className="mt-5">
-                <ActivityTabPanel
-                  projectId={id}
-                  tab="all"
-                  onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
-                  onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
-                  onRenameConfirm={handleRenameConfirm}
-                  onDeleteSession={handleDeleteSession}
-                  emptyLabel={t("project.noSessions" as Parameters<typeof t>[0])}
-                />
-              </TabsContent>
-              <TabsContent value="chat" className="mt-5">
-                <ActivityTabPanel
-                  projectId={id}
-                  tab="chat"
-                  onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
-                  onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
-                  onRenameConfirm={handleRenameConfirm}
-                  onDeleteSession={handleDeleteSession}
-                  emptyLabel={t("project.noSessions" as Parameters<typeof t>[0])}
-                />
-              </TabsContent>
-              <TabsContent value="tasks" className="mt-5">
-                <ActivityTabPanel
-                  projectId={id}
-                  tab="task"
-                  onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
-                  onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
-                  onRenameConfirm={handleRenameConfirm}
-                  onDeleteSession={handleDeleteSession}
-                  emptyLabel={t("project.noSessions" as Parameters<typeof t>[0])}
-                />
-              </TabsContent>
-              <TabsContent value="automation" className="mt-5">
-                <ActivityTabPanel
-                  projectId={id}
-                  tab="automation"
-                  onOpenSession={(sid) => navigate(`/conversation/${sid}`)}
-                  onOpenTask={(taskId) => navigate(`/tasks/${taskId}`)}
-                  onRenameConfirm={handleRenameConfirm}
-                  onDeleteSession={handleDeleteSession}
-                  hideScopeTag
-                  emptyLabel={t("project.noSessions" as Parameters<typeof t>[0])}
-                />
-              </TabsContent>
-            </Tabs>
+            </div>
           </div>
-        </div>
-      </div>
         </>
       )}
 
@@ -1595,7 +1631,7 @@ export const ProjectDetailPage = () => {
                 agent_slug: editTask.agent_slug,
                 trigger: editTask.trigger,
                 action_kind: (editTask.action_kind as ActionKind) ?? "chat",
-                task_worktree: editTask.task_worktree ?? false,
+                worktree: editTask.worktree ?? false,
               }
             : undefined
         }
@@ -1656,13 +1692,10 @@ export const ProjectDetailPage = () => {
           worktreeDiscardTarget
             ? worktreeDiscardTarget.dirtyFiles !== null &&
               worktreeDiscardTarget.aheadCommits !== null
-              ? t(
-                  "project.worktreeDiscardDesc" as Parameters<typeof t>[0],
-                  {
-                    dirty: worktreeDiscardTarget.dirtyFiles,
-                    ahead: worktreeDiscardTarget.aheadCommits,
-                  },
-                )
+              ? t("project.worktreeDiscardDesc" as Parameters<typeof t>[0], {
+                  dirty: worktreeDiscardTarget.dirtyFiles,
+                  ahead: worktreeDiscardTarget.aheadCommits,
+                })
               : t(
                   "project.worktreeDiscardUnknownDesc" as Parameters<
                     typeof t

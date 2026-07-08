@@ -243,9 +243,17 @@ class WriteThroughStore:
         )
 
     async def get_events(
-        self, user_id: str, session_id: str, *, limit: int = 200, offset: int = 0
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        types: Sequence[str] | None = None,
     ) -> list[Event]:
-        return await self._read.get_events(user_id, session_id, limit=limit, offset=offset)
+        return await self._read.get_events(
+            user_id, session_id, limit=limit, offset=offset, types=types
+        )
 
     async def get_events_for_message(
         self, user_id: str, message_id: str, *, limit: int = 200, offset: int = 0

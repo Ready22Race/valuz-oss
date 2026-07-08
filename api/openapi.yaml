@@ -463,6 +463,14 @@ paths:
           required: true
           schema: {type: string}
           description: Relative project file path. May include slashes when URL-encoded by the client.
+        - name: worktree
+          in: query
+          required: false
+          schema: {type: string}
+          description: >
+            Optional worktree name. When set, the path is resolved inside that
+            worktree's checkout (a worktree session's cwd, design D7) instead of
+            the shared project cwd. 404 if the named worktree is gone.
       responses:
         "200":
           description: Artifact descriptor and preview content
@@ -491,6 +499,14 @@ paths:
           required: true
           schema: {type: string}
           description: Relative project file path. May include slashes when URL-encoded by the client.
+        - name: worktree
+          in: query
+          required: false
+          schema: {type: string}
+          description: >
+            Optional worktree name. When set, the path is resolved inside that
+            worktree's checkout instead of the shared project cwd. 404 if the
+            named worktree is gone.
       responses:
         "200":
           description: Raw file bytes

@@ -1,8 +1,28 @@
 import path from "node:path";
-import { Menu, app, ipcMain, nativeImage } from "electron";
+import { Menu, app, ipcMain, nativeImage, protocol } from "electron";
 
 // Override the default "Electron" app name shown in macOS menu bar and tray
 app.setName("Valuz");
+
+// The custom scheme that serves local files to our own renderer must be
+// declared privileged BEFORE the app is ready (module-eval time).
+import {
+  LOCAL_FILE_SCHEME,
+  registerLocalFileProtocolHandler,
+} from "./local-file-protocol";
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: LOCAL_FILE_SCHEME,
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      stream: true,
+      bypassCSP: true,
+    },
+  },
+]);
 import { setupDeepLinkManager } from "./deep-link";
 import { DEEP_LINK_PROTOCOL, parseDeepLink } from "./deep-link-utils";
 import { desktopRuntime } from "./ipc/desktop";
@@ -16,7 +36,11 @@ import {
 } from "./services/system-logs";
 import { createAppTray } from "./tray";
 import { scheduleUpdateCheck, setupUpdater } from "./updater";
-import { closeUpdateWindow, createUpdateWindow, getUpdateWindow } from "./update-window";
+import {
+  closeUpdateWindow,
+  createUpdateWindow,
+  getUpdateWindow,
+} from "./update-window";
 import { createMainWindow, getMainWindow } from "./windows";
 import { DESKTOP_CHANNELS } from "../preload/channels";
 
@@ -30,6 +54,7 @@ const bootstrap = async () => {
     app.dock.setIcon(nativeImage.createFromPath(iconPath));
   }
 
+  registerLocalFileProtocolHandler();
   registerIpcHandlers();
   // Backend log surface: register IPC channels + start tailing the
   // structured JSON file the backend writes (works in dev — where the
@@ -38,12 +63,15 @@ const bootstrap = async () => {
   registerSystemLogIpc();
   startLogTail();
 
-  const updater = setupUpdater({ getMainWindow, getUpdateWindow: () => getUpdateWindow() });
+  const updater = setupUpdater({
+    getMainWindow,
+    getUpdateWindow: () => getUpdateWindow(),
+  });
   // Renderer-driven manual check + restart-to-install. setupUpdater()
   // also wires the periodic auto-check (see scheduleUpdateCheck below);
   // these handlers exist so the UI can drive it on demand.
   ipcMain.handle(DESKTOP_CHANNELS.updaterCheck, () =>
-    updater.checkForUpdates('about'),
+    updater.checkForUpdates("about"),
   );
   ipcMain.handle(DESKTOP_CHANNELS.updaterDownload, () =>
     updater.downloadUpdate(),
@@ -70,7 +98,7 @@ const bootstrap = async () => {
     Menu.setApplicationMenu(
       buildAppMenu({
         getMainWindow,
-        checkForUpdates: () => updater.checkForUpdates('menu'),
+        checkForUpdates: () => updater.checkForUpdates("menu"),
       }),
     );
   applyAppMenu();
@@ -90,7 +118,7 @@ const bootstrap = async () => {
 
   appTray = createAppTray({
     getMainWindow,
-    checkForUpdates: () => updater.checkForUpdates('menu'),
+    checkForUpdates: () => updater.checkForUpdates("menu"),
   });
 
   const deepLinkManager = setupDeepLinkManager({ getMainWindow });

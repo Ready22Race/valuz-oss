@@ -32,6 +32,7 @@
 import { memo, useState } from "react";
 import {
   CheckCircle2,
+  ClipboardList,
   FileEdit,
   FilePenLine,
   Loader2,
@@ -46,6 +47,7 @@ import {
 import { cn } from "../../lib/utils";
 import { useI18n } from "../../hooks/use-i18n";
 import { Button } from "../ui/button";
+import { MarkdownContent } from "./MarkdownContent";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -59,6 +61,7 @@ export type ApprovalCardSubject =
   | "shell_command"
   | "file_change"
   | "mcp_tool_call"
+  | "exit_plan_mode"
   | "tool_input";
 
 export interface ApprovalCardProps {
@@ -113,6 +116,11 @@ const _SUBJECT_META: Record<
     icon: Plug,
     titleKey: "conversation.requiresMcpCall",
     tint: "text-info-text bg-info-light",
+  },
+  exit_plan_mode: {
+    icon: ClipboardList,
+    titleKey: "conversation.requiresPlanApproval",
+    tint: "text-brand bg-brand-light",
   },
   tool_input: {
     icon: Wrench,
@@ -193,6 +201,19 @@ function _renderPayload(
             {argsStr}
           </pre>
         ) : null}
+      </div>
+    );
+  }
+  if (subject === "exit_plan_mode") {
+    // Payload is ``{plan: "<markdown>"}`` (approval_bridge.py). Render the
+    // proposed plan so the user can approve/reject with the plan in view,
+    // rather than the generic tool_name fallback (which would be empty →
+    // "(unknown-tool)"). Bounded + scrollable so a long plan doesn't push
+    // the decision buttons off-screen.
+    const plan = _str(payload.plan);
+    return (
+      <div className="max-h-64 overflow-auto rounded-md bg-surface-2 px-3 py-2">
+        <MarkdownContent content={plan || "(empty plan)"} />
       </div>
     );
   }

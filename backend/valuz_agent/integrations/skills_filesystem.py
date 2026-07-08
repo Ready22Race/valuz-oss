@@ -69,6 +69,41 @@ def _read_text(path: Path) -> str:
             return raw.decode("utf-8", errors="replace")
 
 
+# Parsed-manifest cache keyed by the SKILL.md path, validated by a cheap stat
+# signature (mtime_ns, size). Listing skills used to re-read + re-parse every
+# SKILL.md on every request; on a network filesystem (e.g. cosfs) each read is a
+# remote round-trip, so a catalog list blocked for seconds. The cache is
+# self-validating: an edit changes the stat signature and the entry is refreshed,
+# so it never serves stale metadata (no divergence from the file on disk). Bounded
+# by the number of skill dirs on disk, so it needs no eviction policy.
+_MANIFEST_CACHE: dict[str, tuple[tuple[int, int], dict[str, object], str, str, str]] = {}
+
+
+def _read_manifest_cached(manifest_path: Path) -> tuple[dict[str, object], str, str, str]:
+    """Return ``(metadata, body, raw_manifest, manifest_hash)`` for a SKILL.md.
+
+    Reuses a cached parse when the file is unchanged (same mtime_ns + size),
+    avoiding a re-read + YAML parse on every catalog list. Falls back to a live
+    read when the file can't be stat'd. See ``_MANIFEST_CACHE``.
+    """
+    key = str(manifest_path)
+    try:
+        st = manifest_path.stat()
+        sig: tuple[int, int] | None = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = None
+    cached = _MANIFEST_CACHE.get(key)
+    if cached is not None and sig is not None and cached[0] == sig:
+        _, metadata, body, raw_manifest, manifest_hash = cached
+        return metadata, body, raw_manifest, manifest_hash
+    raw_manifest = _read_text(manifest_path)
+    metadata, body = _extract_frontmatter(raw_manifest)
+    manifest_hash = hashlib.sha256(raw_manifest.encode()).hexdigest()
+    if sig is not None:
+        _MANIFEST_CACHE[key] = (sig, metadata, body, raw_manifest, manifest_hash)
+    return metadata, body, raw_manifest, manifest_hash
+
+
 def _compute_dir_hash(skill_dir: Path) -> str:
     h = hashlib.sha256()
     for f in sorted(skill_dir.rglob("*")):
@@ -217,7 +252,17 @@ def _discover_roots(ctx: RuntimeContext) -> list[tuple[str, Path, str]]:
 class FilesystemSkillSource:
     name = "filesystem"
 
-    def list_skills(self, ctx: RuntimeContext) -> list[SkillManifest]:
+    def list_skills(
+        self, ctx: RuntimeContext, *, compute_content_hash: bool = True
+    ) -> list[SkillManifest]:
+        """List skill manifests discovered on the filesystem.
+
+        ``compute_content_hash`` gates the whole-directory content hash. Computing
+        it reads EVERY file in each skill dir (``_compute_dir_hash``) — cheap
+        locally but very slow on a network filesystem, and only the indexer needs
+        it (change detection). Display/catalog listing passes ``False`` so it reads
+        only each SKILL.md (cached), leaving ``content_hash`` unset.
+        """
         manifests: list[SkillManifest] = []
         for scope, root, source_label in _discover_roots(ctx):
             if not root.exists():
@@ -227,8 +272,7 @@ class FilesystemSkillSource:
                 if manifest_path is None:
                     continue
 
-                raw_manifest = _read_text(manifest_path)
-                metadata, body = _extract_frontmatter(raw_manifest)
+                metadata, body, _raw, manifest_hash = _read_manifest_cached(manifest_path)
                 title = str(metadata.get("name") or skill_dir.name)
                 summary = str(metadata.get("description") or self._summary_from_body(body))
                 tags = metadata.get("tags")
@@ -238,8 +282,7 @@ class FilesystemSkillSource:
                 origin_label = metadata.get("origin-label") or metadata.get("origin_label")
                 version = _coerce_version(metadata.get("version"))
                 folder_created_at = _folder_birthtime(skill_dir)
-                manifest_hash = hashlib.sha256(raw_manifest.encode()).hexdigest()
-                content_hash = _compute_dir_hash(skill_dir)
+                content_hash = _compute_dir_hash(skill_dir) if compute_content_hash else None
                 manifests.append(
                     SkillManifest(
                         id=f"{scope}:{skill_dir.name}",

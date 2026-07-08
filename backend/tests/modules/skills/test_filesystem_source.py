@@ -145,6 +145,39 @@ class TestFilesystemSkillSource:
         assert len(manifests[0].content_hash) == 64
         assert manifests[0].manifest_hash is not None
 
+    def test_should_skip_content_hash_when_disabled(self, tmp_path, monkeypatch):
+        # The display/catalog list passes compute_content_hash=False so it never
+        # reads every file in the skill dir (slow on a network filesystem). Only
+        # ``content_hash`` is skipped; ``manifest_hash`` (from the SKILL.md that
+        # was read anyway) stays populated.
+        _set_user_skills_dir(monkeypatch, tmp_path)
+        skill_dir = tmp_path / "nohash"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text('---\nname: "N"\n---\n\nBody\n')
+
+        manifests = FilesystemSkillSource().list_skills(
+            RuntimeContext(), compute_content_hash=False
+        )
+        assert manifests[0].content_hash is None
+        assert manifests[0].manifest_hash is not None
+
+    def test_manifest_cache_refreshes_on_edit(self, tmp_path, monkeypatch):
+        # The parsed-manifest cache is validated by a stat signature, so an edit
+        # is picked up on the next list — it must never serve stale metadata.
+        _set_user_skills_dir(monkeypatch, tmp_path)
+        skill_dir = tmp_path / "cached"
+        skill_dir.mkdir()
+        md = skill_dir / "SKILL.md"
+        md.write_text('---\nname: "First"\n---\n\nBody\n')
+
+        source = FilesystemSkillSource()
+        assert source.list_skills(RuntimeContext())[0].name == "First"
+
+        # Different length → different stat size → cache signature changes even if
+        # the filesystem's mtime resolution is coarse.
+        md.write_text('---\nname: "Second-longer"\n---\n\nBody\n')
+        assert source.list_skills(RuntimeContext())[0].name == "Second-longer"
+
     def test_should_parse_extended_frontmatter_fields(self, tmp_path, monkeypatch):
         _set_user_skills_dir(monkeypatch, tmp_path)
         skill_dir = tmp_path / "extended"

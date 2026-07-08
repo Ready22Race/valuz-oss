@@ -86,8 +86,8 @@
     "triggerManual": "Manual",
     "updateFailed": "Update failed: {error}",
     "updateSuccess": "Updated \"{name}\"",
-    "taskWorktreeLabel": "Worktree isolation",
-    "taskWorktreeHint": "Each fired task runs in an isolated git worktree — the main workspace stays untouched; a clean worktree is removed when the task finishes."
+    "worktreeLabel": "Worktree isolation",
+    "worktreeHint": "Each fire runs in an isolated git worktree — the main workspace stays untouched; a clean worktree is removed when the run finishes. Requires a git-repo project."
   },
   "backend": {
     "schedule": {
@@ -404,6 +404,7 @@
     "requiresFileChange": "File change request",
     "requiresMcpCall": "MCP tool call request",
     "requiresToolCall": "Tool call request",
+    "requiresPlanApproval": "Plan ready for review",
     "decisionApproved": "Approved",
     "decisionRejected": "Rejected",
     "decisionExpired": "Expired",
@@ -437,7 +438,9 @@
     "worktreeToggleOnHint": "This conversation will run in an isolated git worktree — the main workspace stays untouched.",
     "worktreeToggleOffHint": "Run this conversation in an isolated git worktree (a branch copy of the repo).",
     "worktreeBadgeHint": "This session runs in an isolated git worktree.",
-    "worktreeBadgeGone": "Worktree removed — it will be recreated automatically on your next message."
+    "worktreeBadgeGone": "Worktree removed — it will be recreated automatically on your next message.",
+    "planLabel": "Implementation plan",
+    "enterPlanMode": "Entered plan mode"
   },
   "cron": {
     "actionColumn": "Actions",
@@ -2287,6 +2290,7 @@
       "subtaskSpawned": "Subtask dispatched",
       "subtaskCompleted": "Subtask completed",
       "subtaskFailed": "Subtask failed",
+      "subtaskStopped": "Subtask stopped",
       "subtaskMessage": "Member message",
       "userNote": "Note added",
       "goalRevised": "Goal revised",

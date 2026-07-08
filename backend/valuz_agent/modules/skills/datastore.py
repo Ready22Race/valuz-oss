@@ -87,9 +87,7 @@ class SkillDatastore:
         if row is None:
             return
         row.creation_origin = origin
-        await async_commit_with_retry(
-            self._db, where="SkillDatastore.set_creation_origin_by_slug"
-        )
+        await async_commit_with_retry(self._db, where="SkillDatastore.set_creation_origin_by_slug")
 
     async def set_origin_metadata(self, user_id: str, skill_id: str, origin_json: str) -> None:
         """Stamp import provenance (``origin_json``) on an existing row.
@@ -109,9 +107,7 @@ class SkillDatastore:
         if row is None:
             return
         row.origin_json = origin_json
-        await async_commit_with_retry(
-            self._db, where="SkillDatastore.set_origin_metadata_by_slug"
-        )
+        await async_commit_with_retry(self._db, where="SkillDatastore.set_origin_metadata_by_slug")
 
     async def create(self, user_id: str, row: SkillIndexRow) -> SkillIndexRow:
         row.user_id = user_id
@@ -215,9 +211,7 @@ class SkillDatastore:
         if row is None:
             return
         row.library_enabled = enabled
-        await async_commit_with_retry(
-            self._db, where="SkillDatastore.set_library_enabled_by_slug"
-        )
+        await async_commit_with_retry(self._db, where="SkillDatastore.set_library_enabled_by_slug")
 
     # ------------------------------------------------------------------
     # Filesystem-based project skill config (JSON project-config.json)
@@ -227,6 +221,8 @@ class SkillDatastore:
         self,
         project: _ProjectLike,
         source: FilesystemSkillSource,
+        *,
+        compute_content_hash: bool = True,
     ) -> list[SkillManifest]:
         context = RuntimeContext(
             project=ProjectRef(
@@ -236,7 +232,7 @@ class SkillDatastore:
                 root_path=project.root_path,
             ),
         )
-        manifests = source.list_skills(context)
+        manifests = source.list_skills(context, compute_content_hash=compute_content_hash)
         enabled_paths = self.enabled_skill_paths(project)
 
         items: list[SkillManifest] = []

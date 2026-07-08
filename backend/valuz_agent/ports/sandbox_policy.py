@@ -31,8 +31,9 @@ gate is built for is the commercial fleet (see
 from __future__ import annotations
 
 import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 logger = logging.getLogger("valuz_agent.sandbox")
 
@@ -61,15 +62,16 @@ class SandboxDecision:
     message_params: dict[str, Any] | None = None
 
 
-class SandboxPolicyPort(Protocol):
+class SandboxPolicyPort(ABC):
     """Gate kernel-sandbox provisioning. Called BEFORE the supply face."""
 
+    @abstractmethod
     async def authorize_provision(self, ctx: SandboxProvisionContext) -> SandboxDecision:
         """Return a decision for the attempted sandbox provision."""
         ...
 
 
-class AllowAllSandboxPolicy:
+class AllowAllSandboxPolicy(SandboxPolicyPort):
     """Default policy — every provision is permitted (OSS single-user)."""
 
     async def authorize_provision(self, ctx: SandboxProvisionContext) -> SandboxDecision:

@@ -13,6 +13,7 @@ from valuz_agent.adapters.event_sse_adapter import iter_events_sse
 from valuz_agent.api.deps import get_current_user_id, get_session_service
 from valuz_agent.infra.db import get_async_session
 from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.modules.files.uri import build_valuz_file_uri
 from valuz_agent.modules.sessions.datastore import SessionDatastore
 from valuz_agent.modules.sessions.dto import (
     QueuedInputList,
@@ -1131,7 +1132,11 @@ async def delete_attachment(
 class ArtifactItem(BaseModel):
     id: str
     session_id: str
-    file_path: str  # absolute path the agent wrote; the client opens this
+    file_path: str  # absolute path the agent wrote (kept for back-compat)
+    # Stable file identity — the client passes this to POST /v1/files/resolve to
+    # get an access address (local path or signed URL). Derived from file_path;
+    # not stored. See docs/design/file-address-resolution.md.
+    ref: str
     file_name: str
     file_size: int
     mime_type: str | None = None
@@ -1164,6 +1169,7 @@ async def list_artifacts(
                 id=r.id,
                 session_id=r.session_id,
                 file_path=r.file_path,
+                ref=build_valuz_file_uri(r.file_path),
                 file_name=r.file_name,
                 file_size=r.file_size,
                 mime_type=r.mime_type,

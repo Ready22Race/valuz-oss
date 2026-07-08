@@ -394,7 +394,19 @@ class InProcessAutomationRunner:
                     return
 
                 try:
+                    from valuz_agent.modules.sessions.schemas import SessionWorktreeSpec
+
                     session_svc = self._build_session_service(db)
+                    # Worktree isolation (design §5): a chat automation flagged
+                    # for a worktree runs each fire in its own auto-named git
+                    # worktree of the project repo. Presence of the spec (name
+                    # omitted → auto-generated) opts in; a non-git project 422s
+                    # here and the except-block marks the run failed.
+                    wt_spec = (
+                        SessionWorktreeSpec()
+                        if bool(getattr(row, "worktree", False))
+                        else None
+                    )
                     # Execution identity follows the bound agent — no model /
                     # provider / runtime override surface remains. The agent's
                     # ``AgentConfig`` is the single source of truth.
@@ -404,6 +416,7 @@ class InProcessAutomationRunner:
                         title=f"{t('backend.automation.titlePrefix')} {row.name}",
                         agent_slug=row.agent_slug,
                         user_id=user_id,
+                        worktree=wt_spec,
                     )
                 except Exception as exc:
                     run.status = "failed"
@@ -602,9 +615,9 @@ class InProcessAutomationRunner:
                 title=title or row.name,
                 dispatch_mode="async",
                 created_by="automation",
-                # Task-level worktree (design §5): the automation's flag rides
+                # Worktree isolation (design §5): the automation's flag rides
                 # into every fired task — each run gets its own worktree.
-                worktree=bool(getattr(row, "task_worktree", False)),
+                worktree=bool(getattr(row, "worktree", False)),
                 # The background runner has no request auth context, so the
                 # project lookup in kickoff would otherwise fall back to
                 # user_id=None and fail ("project not found"). Pass the
