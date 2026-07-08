@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
   Bot,
@@ -11,6 +12,7 @@ import {
   LayoutTemplate,
   MoreHorizontal,
   Plus,
+  Store,
   Upload,
   X,
   type LucideIcon,
@@ -99,6 +101,7 @@ export const AgentsPage = () => {
     setMainClassName,
   } = useProjectOutlet();
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
+  const navigate = useNavigate();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
   const [projectMembers, setProjectMembers] = useState<ProjectAgentMember[]>([]);
@@ -492,6 +495,10 @@ export const AgentsPage = () => {
               <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
                 <Download className="h-4 w-4" />
                 {t("agent.pack.import" as Parameters<typeof t>[0])}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => navigate("/marketplace?tab=agents")}>
+                <Store className="h-4 w-4" />
+                {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

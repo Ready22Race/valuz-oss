@@ -16,6 +16,7 @@ export { ProjectsPage } from "./ProjectsPage";
 export { ConversationPage } from "./ConversationPage";
 export { OnboardingFlow } from "./onboarding";
 export { KnowledgePage } from "./KnowledgePage";
+export { MarketplacePage } from "./MarketplacePage";
 export { ProjectDetailPage } from "./ProjectDetailPage";
 export { SettingsPage } from "./SettingsPage";
 export { SkillsPage } from "./SkillsPage";

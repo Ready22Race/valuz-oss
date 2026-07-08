@@ -55,7 +55,18 @@ def _default_user_skill_root(user_id: str | None = None) -> Path:
 
 
 def _read_text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    """Read a manifest tolerantly — imported archives (e.g. SkillHub zips)
+    are not guaranteed UTF-8; Chinese packs show up GBK-encoded, and a strict
+    decode used to 500 the whole import preview. The bytes on disk are never
+    rewritten from this value, so a lossy fallback only affects display."""
+    raw = path.read_bytes()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            return raw.decode("gb18030")
+        except UnicodeDecodeError:
+            return raw.decode("utf-8", errors="replace")
 
 
 # Parsed-manifest cache keyed by the SKILL.md path, validated by a cheap stat

@@ -1,0 +1,1605 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Valuz 能力市场 · SkillHub 接入原型</title>
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <style>
+    :root {
+      --bg: #f8f9fb;
+      --surface: #ffffff;
+      --surface-2: #f2f4f8;
+      --line: #e7eaf0;
+      --line-strong: #d9deea;
+      --text: #181b23;
+      --muted: #697181;
+      --subtle: #969eaa;
+      --brand: #725cf9;
+      --brand-weak: #f0edff;
+      --brand-line: #d9d1ff;
+      --success: #168a52;
+      --warning: #b96c00;
+      --danger: #bf3a3a;
+      --shadow: 0 16px 44px rgba(21, 25, 36, 0.08);
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      letter-spacing: 0;
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      cursor: pointer;
+    }
+
+    .app-shell {
+      display: grid;
+      grid-template-columns: 232px minmax(0, 1fr);
+      min-height: 100vh;
+      background: var(--bg);
+    }
+
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      padding: 18px 14px;
+      border-right: 1px solid var(--line);
+      background: #fbfcfe;
+    }
+
+    .brand-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px 14px;
+    }
+
+    .brand-mark {
+      display: grid;
+      width: 30px;
+      height: 30px;
+      place-items: center;
+      border-radius: 8px;
+      color: white;
+      background: var(--brand);
+      font-weight: 750;
+    }
+
+    .brand-row strong {
+      display: block;
+      font-size: 15px;
+      line-height: 1.2;
+    }
+
+    .brand-row span {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .nav-group {
+      display: grid;
+      gap: 4px;
+    }
+
+    .nav-label {
+      padding: 0 10px 6px;
+      color: var(--subtle);
+      font-size: 11px;
+      font-weight: 650;
+      text-transform: uppercase;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 38px;
+      padding: 0 10px;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+    }
+
+    .nav-item svg {
+      width: 17px;
+      height: 17px;
+      stroke-width: 2;
+    }
+
+    .nav-item.active {
+      background: var(--brand-weak);
+      color: var(--brand);
+      font-weight: 700;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-width: 0;
+      min-height: 100vh;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      min-height: 64px;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.78);
+      backdrop-filter: blur(14px);
+    }
+
+    .crumb {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .crumb strong {
+      color: var(--text);
+      font-size: 14px;
+    }
+
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .icon-button,
+    .text-button,
+    .primary-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 34px;
+      border-radius: 8px;
+      white-space: nowrap;
+    }
+
+    .icon-button {
+      width: 34px;
+      background: var(--surface-2);
+      color: var(--muted);
+    }
+
+    .text-button {
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .primary-button {
+      padding: 0 14px;
+      background: var(--brand);
+      color: white;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .icon-button svg,
+    .text-button svg,
+    .primary-button svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .market {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr);
+      min-height: 0;
+      padding: 22px 24px 24px;
+      gap: 16px;
+    }
+
+    .market-head {
+      display: grid;
+      grid-template-columns: minmax(260px, 1fr) auto;
+      gap: 18px;
+      align-items: end;
+    }
+
+    .headline {
+      min-width: 0;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.2;
+      font-weight: 760;
+    }
+
+    .headline p {
+      margin: 7px 0 0;
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .quick-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .tabs-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .segments {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: 0 1px 2px rgba(20, 24, 32, 0.03);
+    }
+
+    .segment {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 32px;
+      padding: 0 12px;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .segment svg {
+      width: 15px;
+      height: 15px;
+    }
+
+    .segment.active {
+      background: var(--brand);
+      color: white;
+    }
+
+    .search-wrap {
+      position: relative;
+      width: min(360px, 38vw);
+      min-width: 220px;
+    }
+
+    .search-wrap svg {
+      position: absolute;
+      top: 50%;
+      left: 12px;
+      width: 16px;
+      height: 16px;
+      transform: translateY(-50%);
+      color: var(--subtle);
+    }
+
+    .search-wrap input {
+      width: 100%;
+      height: 38px;
+      padding: 0 12px 0 36px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      outline: 0;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 13px;
+    }
+
+    .search-wrap input:focus {
+      border-color: var(--brand-line);
+      box-shadow: 0 0 0 3px rgba(114, 92, 249, 0.12);
+    }
+
+    .market-grid {
+      display: grid;
+      grid-template-columns: 236px minmax(360px, 1fr);
+      gap: 14px;
+      min-height: 0;
+    }
+
+    .panel {
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: 0 1px 2px rgba(20, 24, 32, 0.03);
+      overflow: hidden;
+    }
+
+    .category-rail {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .rail-head,
+    .catalog-head,
+    .detail-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 50px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .rail-head strong,
+    .catalog-head strong,
+    .detail-head strong {
+      font-size: 13px;
+    }
+
+    .rail-list {
+      display: grid;
+      gap: 4px;
+      padding: 10px;
+      overflow: auto;
+    }
+
+    .category-btn {
+      display: grid;
+      grid-template-columns: 20px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 36px;
+      padding: 0 9px;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+    }
+
+    .category-btn svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .category-btn span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+    }
+
+    .category-btn em {
+      color: var(--subtle);
+      font-size: 11px;
+      font-style: normal;
+    }
+
+    .category-btn.active {
+      background: var(--brand-weak);
+      color: var(--brand);
+      font-weight: 740;
+    }
+
+    .catalog-pane {
+      display: grid;
+      grid-template-rows: auto auto auto minmax(0, 1fr);
+      min-height: 0;
+    }
+
+    .catalog-head {
+      min-height: 54px;
+    }
+
+    .catalog-title {
+      min-width: 0;
+    }
+
+    .catalog-title strong {
+      display: block;
+      font-size: 14px;
+    }
+
+    .catalog-title span {
+      display: block;
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .subfilters {
+      display: grid;
+      gap: 10px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfe;
+    }
+
+    .chip-row {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .chip-row::-webkit-scrollbar {
+      display: none;
+    }
+
+    .filter-chip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 28px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .filter-chip.active {
+      border-color: var(--brand-line);
+      background: var(--brand-weak);
+      color: var(--brand);
+    }
+
+    .team-showcase {
+      display: none;
+      gap: 10px;
+      padding: 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+      overflow: visible;
+    }
+
+    .team-showcase.visible {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    }
+
+    .team-card {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      width: 100%;
+      min-height: 128px;
+      padding: 11px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+      color: inherit;
+      text-align: left;
+      transition: border-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
+    }
+
+    .team-card:hover {
+      border-color: var(--line-strong);
+      box-shadow: 0 8px 22px rgba(21, 25, 36, 0.06);
+      transform: translateY(-1px);
+    }
+
+    .team-card .avatar {
+      width: 34px;
+      height: 34px;
+    }
+
+    .team-card .avatar svg {
+      width: 17px;
+      height: 17px;
+    }
+
+    .team-card strong {
+      display: block;
+      overflow: hidden;
+      color: var(--text);
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+    }
+
+    .team-card p {
+      display: -webkit-box;
+      margin: 4px 0 8px;
+      overflow: hidden;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .cards {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      overflow: auto;
+      align-content: start;
+    }
+
+    .item-card {
+      display: grid;
+      grid-template-columns: 42px minmax(0, 1fr) auto;
+      gap: 12px;
+      width: 100%;
+      min-height: 116px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: inherit;
+      text-align: left;
+      transition: border-color 0.14s ease, box-shadow 0.14s ease, transform 0.14s ease;
+    }
+
+    .item-card:hover {
+      border-color: var(--line-strong);
+      box-shadow: 0 8px 24px rgba(21, 25, 36, 0.07);
+      transform: translateY(-1px);
+    }
+
+    .item-card.active {
+      border-color: var(--brand);
+      box-shadow: 0 0 0 3px rgba(114, 92, 249, 0.12);
+    }
+
+    .avatar {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--surface-2);
+      color: var(--brand);
+    }
+
+    .avatar svg {
+      width: 20px;
+      height: 20px;
+    }
+
+    .item-main {
+      min-width: 0;
+    }
+
+    .item-topline {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .item-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 14px;
+      font-weight: 760;
+    }
+
+    .type-pill,
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 20px;
+      padding: 0 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 740;
+      white-space: nowrap;
+    }
+
+    .type-pill {
+      background: var(--brand-weak);
+      color: var(--brand);
+    }
+
+    .badge {
+      border: 1px solid var(--line);
+      background: #fbfcfe;
+      color: var(--muted);
+    }
+
+    .item-desc {
+      display: -webkit-box;
+      min-height: 38px;
+      margin: 7px 0 9px;
+      overflow: hidden;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      color: var(--muted);
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+
+    .meta-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--subtle);
+      font-size: 12px;
+      flex-wrap: wrap;
+    }
+
+    .meta-row span {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .meta-row svg {
+      width: 13px;
+      height: 13px;
+    }
+
+    .item-flags {
+      display: flex;
+      align-items: flex-start;
+      justify-content: flex-end;
+      gap: 5px;
+      flex-wrap: wrap;
+      max-width: 140px;
+    }
+
+    .detail-body {
+      padding: 16px;
+      overflow: auto;
+    }
+
+    .detail-hero {
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr);
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 14px;
+    }
+
+    .detail-hero .avatar {
+      width: 48px;
+      height: 48px;
+    }
+
+    .detail-hero h2 {
+      margin: 0;
+      font-size: 17px;
+      line-height: 1.25;
+    }
+
+    .detail-hero p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .detail-desc {
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin: 18px 0 8px;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 780;
+    }
+
+    .section-title svg {
+      width: 14px;
+      height: 14px;
+      color: var(--brand);
+    }
+
+    .role-list,
+    .file-list,
+    .risk-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .role-card,
+    .file-card,
+    .risk-card {
+      display: grid;
+      gap: 5px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .role-card strong,
+    .risk-card strong {
+      font-size: 12.5px;
+    }
+
+    .role-card p,
+    .risk-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .file-card {
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .file-card code {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11.5px;
+    }
+
+    .tag-cloud {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-size: 11.5px;
+      font-weight: 650;
+    }
+
+    .detail-footer {
+      display: grid;
+      gap: 8px;
+      padding: 12px 14px;
+      border-top: 1px solid var(--line);
+      background: var(--surface);
+    }
+
+    .detail-footer .primary-button {
+      width: 100%;
+      min-height: 38px;
+    }
+
+    .footnote {
+      color: var(--muted);
+      font-size: 11.5px;
+      line-height: 1.45;
+      text-align: center;
+    }
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 28px;
+      background: rgba(17, 20, 29, 0.38);
+      backdrop-filter: blur(8px);
+      z-index: 20;
+    }
+
+    .modal-backdrop.open {
+      display: flex;
+    }
+
+    .preview-modal {
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+      width: min(760px, calc(100vw - 48px));
+      max-height: min(760px, calc(100vh - 48px));
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: 0 24px 80px rgba(13, 18, 30, 0.22);
+      overflow: hidden;
+    }
+
+    .modal-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 54px;
+      padding: 0 14px 0 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .modal-title strong {
+      font-size: 14px;
+    }
+
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 24px;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      max-width: 360px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 650;
+      z-index: 10;
+    }
+
+    .toast.show {
+      display: flex;
+    }
+
+    .toast svg {
+      width: 17px;
+      height: 17px;
+      color: var(--success);
+    }
+
+    @media (max-width: 1180px) {
+      .market-grid {
+        grid-template-columns: 220px minmax(320px, 1fr);
+      }
+    }
+
+    @media (max-width: 860px) {
+      .app-shell {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        display: none;
+      }
+
+      .market {
+        padding: 16px;
+      }
+
+      .market-head,
+      .tabs-row,
+      .market-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .tabs-row {
+        align-items: stretch;
+      }
+
+      .segments,
+      .search-wrap {
+        width: 100%;
+      }
+
+      .segment {
+        flex: 1;
+      }
+
+      .category-rail {
+        max-height: 220px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Valuz 主导航">
+      <div class="brand-row">
+        <div class="brand-mark">V</div>
+        <div>
+          <strong>Valuz</strong>
+          <span>Agent workspace</span>
+        </div>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-label">Workspace</div>
+        <button class="nav-item"><i data-lucide="message-square"></i><span>Chats</span></button>
+        <button class="nav-item"><i data-lucide="folder"></i><span>Projects</span></button>
+        <button class="nav-item"><i data-lucide="bot"></i><span>Agents</span></button>
+        <button class="nav-item"><i data-lucide="zap"></i><span>Skills</span></button>
+        <button class="nav-item active"><i data-lucide="layout-template"></i><span>能力市场</span></button>
+      </div>
+
+      <div class="nav-group">
+        <div class="nav-label">System</div>
+        <button class="nav-item"><i data-lucide="database"></i><span>Knowledge</span></button>
+        <button class="nav-item"><i data-lucide="shield"></i><span>Security</span></button>
+        <button class="nav-item"><i data-lucide="settings"></i><span>Settings</span></button>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="crumb">
+          <span>Home</span>
+          <i data-lucide="chevron-right"></i>
+          <strong>能力市场</strong>
+        </div>
+        <div class="topbar-actions">
+          <button class="icon-button" title="同步"><i data-lucide="refresh-cw"></i></button>
+          <button class="icon-button" title="帮助"><i data-lucide="circle-help"></i></button>
+        </div>
+      </header>
+
+      <section class="market" aria-label="能力市场">
+        <div class="market-head">
+          <div class="headline">
+            <h1>能力市场</h1>
+            <p>从官方模板和 SkillHub 导入 Agent、Agent Team 与 Skill。Skill 安装到 Skill 库，Agent 与 Agent Team 安装到 Agent 库，市场只负责发现、预览和导入。</p>
+          </div>
+          <div class="quick-actions">
+            <button class="text-button" data-jump="agents"><i data-lucide="bot"></i>Agent 库导入</button>
+            <button class="primary-button" data-jump="skills"><i data-lucide="zap"></i>Skill 库导入</button>
+          </div>
+        </div>
+
+        <div class="tabs-row">
+          <div class="segments" role="tablist" aria-label="市场模块">
+            <button class="segment active" data-tab="agents" role="tab"><i data-lucide="bot"></i>Agents</button>
+            <button class="segment" data-tab="skills" role="tab"><i data-lucide="zap"></i>Skills</button>
+          </div>
+          <label class="search-wrap" aria-label="搜索能力">
+            <i data-lucide="search"></i>
+            <input id="searchInput" type="search" placeholder="搜索 Agent、Team、Skill 或分类" />
+          </label>
+        </div>
+
+        <div class="market-grid">
+          <aside class="panel category-rail">
+            <div class="rail-head">
+              <strong>SkillHub 分类</strong>
+              <span class="badge" id="categoryCount">全部</span>
+            </div>
+            <div class="rail-list" id="categoryList"></div>
+          </aside>
+
+          <section class="panel catalog-pane">
+            <div class="catalog-head">
+              <div class="catalog-title">
+                <strong id="catalogTitle">Agents</strong>
+                <span id="catalogSubtitle">优先展示常用 Agent Team，单 Agent 模板作为补充浏览。</span>
+              </div>
+              <span class="badge" id="resultCount">0 items</span>
+            </div>
+            <div class="team-showcase" id="teamShowcase"></div>
+            <div class="subfilters">
+              <div class="chip-row" id="subCategoryFilters" aria-label="子分类筛选"></div>
+            </div>
+            <div class="cards" id="cards"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="previewModal" aria-hidden="true">
+    <section class="preview-modal" role="dialog" aria-modal="true" aria-label="导入预览">
+      <div class="modal-title">
+        <div>
+          <strong>导入预览</strong>
+          <span class="badge" id="detailSource">SkillHub</span>
+        </div>
+        <button class="icon-button" id="closePreview" title="关闭"><i data-lucide="x"></i></button>
+      </div>
+      <div class="detail-body" id="detailBody"></div>
+      <div class="detail-footer">
+        <button class="primary-button" id="installButton"><i data-lucide="plus"></i>添加到库</button>
+        <div class="footnote" id="detailFootnote">安装前需要确认来源、文件、运行成本与权限风险。</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast"><i data-lucide="check-circle"></i><span id="toastText">已加入导入队列</span></div>
+
+  <script>
+    const categories = [
+      { id: "all", name: "全部", icon: "layout-grid" },
+      { id: "office-efficiency", name: "办公效率", icon: "briefcase" },
+      { id: "content-creation", name: "内容创作", icon: "pen-line" },
+      { id: "dev-programming", name: "开发编程", icon: "square-terminal" },
+      { id: "data-analysis", name: "数据分析", icon: "chart-no-axes-combined" },
+      { id: "design-media", name: "设计多媒体", icon: "image" },
+      { id: "ai-agent", name: "AI Agent", icon: "bot" },
+      { id: "knowledge-management", name: "知识管理", icon: "book-open" },
+      { id: "business-ops", name: "商业运营", icon: "megaphone" },
+      { id: "education", name: "教育学习", icon: "graduation-cap" },
+      { id: "professional", name: "行业专业", icon: "building-2" },
+      { id: "it-ops-security", name: "IT 运维与安全", icon: "shield" },
+      { id: "life-service", name: "生活服务", icon: "home" }
+    ];
+
+    const subcategoryNames = {
+      "office-doc": "文档处理",
+      "office-presentation": "演示生成",
+      "office-spreadsheet": "表格处理",
+      "content-article": "文章写作",
+      "content-social": "社媒内容",
+      "content-video": "短视频",
+      "dev-frontend": "前端开发",
+      "dev-testing": "测试验收",
+      "dev-debug": "故障排查",
+      "dev-tooling": "开发工具",
+      "dev-browser": "浏览器自动化",
+      "data-report": "数据报告",
+      "design-image-edit": "图像编辑",
+      "design-video": "视频处理",
+      "agent-workflow": "Agent 工作流",
+      "agent-task-automation": "任务自动化",
+      "knowledge-notes": "笔记管理",
+      "knowledge-retrieval": "知识检索",
+      "knowledge-summary": "摘要提炼",
+      "knowledge-doc-qa": "文档问答",
+      "biz-product": "产品管理",
+      "biz-user-ops": "用户运营",
+      "biz-crm": "客户管理",
+      "edu-tutoring": "辅导教学",
+      "pro-finance": "金融分析",
+      "pro-industry-research": "行业研究",
+      "itops-cloud": "云资源",
+      "itops-security-scan": "安全检查",
+      "life-travel": "出行生活"
+    };
+
+    const catalog = [
+      {
+        id: "qa-team",
+        module: "agents",
+        subtype: "team",
+        name: "Web 质量验收 Agent Team",
+        icon: "users",
+        source: "Valuz 官方 + SkillHub",
+        category: "dev-programming",
+        subcategories: ["dev-testing", "dev-frontend", "dev-browser"],
+        description: "面向前端交付的三角色团队：拆解验收点、执行浏览器测试、整理缺陷证据。",
+        downloads: "官方",
+        stars: "Team",
+        flags: ["免费安装", "需模型调用"],
+        roles: [
+          ["测试策略专家", "拆解目标、覆盖路径和验收口径。"],
+          ["自动化执行专家", "生成并运行 Playwright 检查。"],
+          ["缺陷归因专家", "沉淀失败证据和修复建议。"]
+        ],
+        files: ["agents/qa-strategist.md", "agents/browser-runner.md", "skills/web-tools-guide/"],
+        installTarget: "添加到 Agent 库"
+      },
+      {
+        id: "office-team",
+        module: "agents",
+        subtype: "team",
+        name: "办公交付 Agent Team",
+        icon: "presentation",
+        source: "SkillHub skillsets 转换",
+        category: "office-efficiency",
+        subcategories: ["office-doc", "office-presentation", "office-spreadsheet"],
+        description: "把文档、表格和演示稿串成一次完整办公交付，适合新用户开箱体验。",
+        downloads: "132k",
+        stars: "184",
+        flags: ["免费安装", "可预览文件"],
+        roles: [
+          ["文档整理专家", "改写、摘要和结构化业务文档。"],
+          ["PPT 生成专家", "从提纲生成演示稿结构。"],
+          ["表格分析专家", "清洗数据并输出结论。"]
+        ],
+        files: ["skills/ppt-generator-skill/", "skills/tencent-docs/", "agents/office-team.yaml"],
+        installTarget: "添加到 Agent 库"
+      },
+      {
+        id: "content-team",
+        module: "agents",
+        subtype: "team",
+        name: "内容生产 Agent Team",
+        icon: "pen-line",
+        source: "SkillHub skillsets 转换",
+        category: "content-creation",
+        subcategories: ["content-article", "content-social", "content-video"],
+        description: "覆盖选题、写作、平台改写和发布前质检，适合运营内容批量生产。",
+        downloads: "21k",
+        stars: "132",
+        flags: ["免费安装", "社区来源"],
+        roles: [
+          ["选题专家", "定位受众、角度和标题方向。"],
+          ["写作专家", "生成长文、短文和平台化表达。"],
+          ["质检专家", "检查事实、语气和发布风险。"]
+        ],
+        files: ["agents/content-planner.md", "agents/content-writer.md", "skills/article-polisher/"],
+        installTarget: "添加到 Agent 库"
+      },
+      {
+        id: "bug-agent",
+        module: "agents",
+        subtype: "agent",
+        name: "Bug 排查 Agent",
+        icon: "bug",
+        source: "Valuz 官方模板",
+        category: "dev-programming",
+        subcategories: ["dev-debug", "dev-tooling"],
+        description: "读取上下文、复现问题、定位代码路径，并输出可执行修复方案。",
+        downloads: "官方",
+        stars: "Agent",
+        flags: ["免费安装", "需仓库权限"],
+        roles: [["Bug 排查 Agent", "复现、归因、修复建议和验证闭环。"]],
+        files: ["agents/bug-investigator.md", "skills/repo-search/", "skills/web-tools-guide/"],
+        installTarget: "添加到 Agent 库"
+      },
+      {
+        id: "cloud-agent",
+        module: "agents",
+        subtype: "agent",
+        name: "腾讯云运维 Agent",
+        icon: "cloud",
+        source: "SkillHub 技能组合",
+        category: "it-ops-security",
+        subcategories: ["itops-cloud", "itops-security-scan"],
+        description: "基于 COS、Lighthouse、CloudBase 等 Skill 组合，处理云资源查询和部署检查。",
+        downloads: "18k",
+        stars: "11",
+        flags: ["免费安装", "需 API Key"],
+        roles: [["腾讯云运维 Agent", "管理云资源、生成部署方案、定位服务异常。"]],
+        files: ["skills/tencent-cos/", "skills/tencent-cloud-lighthouse/", "agents/tencent-cloud-agent.md"],
+        installTarget: "添加到 Agent 库"
+      },
+      {
+        id: "pm-master",
+        module: "agents",
+        subtype: "agent",
+        name: "产品经理 Agent",
+        icon: "badge-check",
+        source: "SkillHub",
+        category: "business-ops",
+        subcategories: ["biz-product", "biz-user-ops"],
+        description: "把业务目标转成需求分析、PRD、用户故事和评审材料。",
+        downloads: "11k",
+        stars: "74",
+        flags: ["免费安装", "社区来源"],
+        roles: [["产品经理 Agent", "需求澄清、PRD 编写、评审清单和迭代建议。"]],
+        files: ["skills/pm-master/", "agents/product-manager.md"],
+        installTarget: "添加到 Agent 库"
+      },
+      {
+        id: "web-tools-guide",
+        module: "skills",
+        subtype: "skill",
+        name: "web-tools-guide",
+        icon: "search",
+        source: "SkillHub",
+        category: "dev-programming",
+        subcategories: ["dev-tooling", "dev-browser"],
+        description: "浏览器、搜索和抓取工具使用指南，适合装备给需要查证网页信息的 Agent。",
+        downloads: "174k",
+        stars: "110",
+        flags: ["免费安装", "可预览文件"],
+        roles: [["可装备 Skill", "安装后可挂载给 Agent，提供 web_search、browser、opencli 等调用规范。"]],
+        files: ["SKILL.md", "references/web-search.md", "scripts/check_web_tools.py"],
+        installTarget: "添加到 Skill 库"
+      },
+      {
+        id: "ppt-generator",
+        module: "skills",
+        subtype: "skill",
+        name: "ppt-generator-skill",
+        icon: "presentation",
+        source: "SkillHub",
+        category: "office-efficiency",
+        subcategories: ["office-presentation"],
+        description: "智能 PPT 生成助手，可按主题、行业、风格生成演示稿结构和页面内容。",
+        downloads: "23k",
+        stars: "94",
+        flags: ["免费安装", "可能调用模型"],
+        roles: [["可装备 Skill", "适合挂载给办公 Agent 或 Agent Team 的 PPT 生成角色。"]],
+        files: ["SKILL.md", "templates/pitch-deck.md", "examples/business-report.md"],
+        installTarget: "添加到 Skill 库"
+      },
+      {
+        id: "ima-skills",
+        module: "skills",
+        subtype: "skill",
+        name: "ima-skills",
+        icon: "book-open",
+        source: "SkillHub",
+        category: "knowledge-management",
+        subcategories: ["knowledge-notes", "knowledge-retrieval", "knowledge-summary"],
+        description: "支持对笔记、知识库的读取、写入和检索，适合知识管理与资料整理场景。",
+        downloads: "95k",
+        stars: "348",
+        flags: ["免费安装", "需外部账号"],
+        roles: [["可装备 Skill", "让 Agent 能够围绕知识库进行查找、归纳和持续整理。"]],
+        files: ["SKILL.md", "references/ima-api.md", "scripts/sync_notes.py"],
+        installTarget: "添加到 Skill 库"
+      },
+      {
+        id: "summary-skill",
+        module: "skills",
+        subtype: "skill",
+        name: "PDF 和图片文字提取",
+        icon: "file-search",
+        source: "SkillHub",
+        category: "knowledge-management",
+        subcategories: ["knowledge-summary", "knowledge-doc-qa"],
+        description: "从图片或 PDF 文档中识别并提取文字内容，用于文档问答、摘要和归档。",
+        downloads: "14k",
+        stars: "41",
+        flags: ["免费安装", "本地文件权限"],
+        roles: [["可装备 Skill", "适合挂载给资料整理、合同审阅和知识库维护 Agent。"]],
+        files: ["SKILL.md", "scripts/extract_text.py", "README.md"],
+        installTarget: "添加到 Skill 库"
+      },
+      {
+        id: "ghostcut",
+        module: "skills",
+        subtype: "skill",
+        name: "视频文案一键提取",
+        icon: "clapperboard",
+        source: "SkillHub",
+        category: "design-media",
+        subcategories: ["design-video", "content-video"],
+        description: "从公开视频分享链接提取标题、简介、口播文案和标签，辅助短视频复盘。",
+        downloads: "14k",
+        stars: "87",
+        flags: ["免费安装", "第三方服务"],
+        roles: [["可装备 Skill", "给内容运营 Agent 补充视频素材分析和文案提取能力。"]],
+        files: ["SKILL.md", "scripts/extract_video_copy.py", "references/platforms.md"],
+        installTarget: "添加到 Skill 库"
+      },
+      {
+        id: "finance-skill",
+        module: "skills",
+        subtype: "skill",
+        name: "金融数据查询",
+        icon: "chart-no-axes-combined",
+        source: "SkillHub",
+        category: "professional",
+        subcategories: ["pro-finance", "pro-industry-research"],
+        description: "查询股票、ETF、指数、期货、外汇等金融市场结构化数据，辅助行业研究。",
+        downloads: "12k",
+        stars: "74",
+        flags: ["免费安装", "数据源成本"],
+        roles: [["可装备 Skill", "适合挂载给投研、行业分析和财务尽调 Agent。"]],
+        files: ["SKILL.md", "scripts/query_market_data.py", "references/data-sources.md"],
+        installTarget: "添加到 Skill 库"
+      }
+    ];
+
+    const state = {
+      tab: "agents",
+      category: "all",
+      subcategory: "all",
+      query: "",
+      selectedId: "bug-agent"
+    };
+
+    const icon = (name) => `<i data-lucide="${name}"></i>`;
+    const byId = (id) => document.getElementById(id);
+    const categoryName = (id) => categories.find((category) => category.id === id)?.name || id;
+    const subName = (id) => subcategoryNames[id] || id;
+    const typeName = (item) => item.subtype === "team" ? "Agent Team" : item.subtype === "agent" ? "Agent" : "Skill";
+
+    function tabItems() {
+      return catalog.filter((item) => {
+        return item.module === state.tab;
+      });
+    }
+
+    function visibleItems() {
+      const query = state.query.trim().toLowerCase();
+      return tabItems().filter((item) => {
+        const categoryOk = state.category === "all" || item.category === state.category;
+        const subOk = state.subcategory === "all" || item.subcategories.includes(state.subcategory);
+        const typeOk = state.tab !== "agents" || item.subtype === "agent";
+        const text = [
+          item.name,
+          item.description,
+          item.source,
+          categoryName(item.category),
+          ...item.subcategories.map(subName)
+        ].join(" ").toLowerCase();
+        const queryOk = !query || text.includes(query);
+        return categoryOk && subOk && typeOk && queryOk;
+      });
+    }
+
+    function visibleTeams() {
+      if (state.tab !== "agents") return [];
+      const query = state.query.trim().toLowerCase();
+      return catalog.filter((item) => {
+        const categoryOk = state.category === "all" || item.category === state.category;
+        const subOk = state.subcategory === "all" || item.subcategories.includes(state.subcategory);
+        const text = [
+          item.name,
+          item.description,
+          item.source,
+          categoryName(item.category),
+          ...item.subcategories.map(subName)
+        ].join(" ").toLowerCase();
+        const queryOk = !query || text.includes(query);
+        return item.module === "agents" && item.subtype === "team" && categoryOk && subOk && queryOk;
+      });
+    }
+
+    function ensureSelection(items) {
+      if (!items.some((item) => item.id === state.selectedId)) {
+        state.selectedId = items[0]?.id || tabItems()[0]?.id || catalog[0].id;
+      }
+    }
+
+    function renderCategories() {
+      const items = tabItems();
+      byId("categoryList").innerHTML = categories.map((category) => {
+        const count = category.id === "all"
+          ? items.length
+          : items.filter((item) => item.category === category.id).length;
+        return `
+          <button class="category-btn ${state.category === category.id ? "active" : ""}" data-category="${category.id}">
+            ${icon(category.icon)}
+            <span>${category.name}</span>
+            <em>${count}</em>
+          </button>
+        `;
+      }).join("");
+      byId("categoryCount").textContent = state.category === "all" ? "全部" : categoryName(state.category);
+    }
+
+    function renderFilters() {
+      const subcategories = [...new Set(tabItems()
+        .filter((item) => state.category === "all" || item.category === state.category)
+        .flatMap((item) => item.subcategories))];
+      if (!subcategories.includes(state.subcategory)) state.subcategory = "all";
+
+      byId("subCategoryFilters").innerHTML = [
+        ["all", "全部子分类"],
+        ...subcategories.map((id) => [id, subName(id)])
+      ].map(([id, label]) => `
+        <button class="filter-chip ${state.subcategory === id ? "active" : ""}" data-subcategory="${id}">${label}</button>
+      `).join("");
+    }
+
+    function renderTeamShowcase() {
+      const teams = visibleTeams();
+      byId("teamShowcase").classList.toggle("visible", teams.length > 0);
+      byId("teamShowcase").innerHTML = teams.map((item) => `
+        <button class="team-card" data-item="${item.id}">
+          <div class="avatar">${icon(item.icon)}</div>
+          <div>
+            <strong>${item.name}</strong>
+            <p>${item.description}</p>
+            <span class="type-pill">Agent Team</span>
+          </div>
+        </button>
+      `).join("");
+    }
+
+    function renderCards() {
+      const items = visibleItems();
+      ensureSelection(items);
+      byId("resultCount").textContent = `${items.length} items`;
+      byId("cards").innerHTML = items.map((item) => `
+        <button class="item-card ${state.selectedId === item.id ? "active" : ""}" data-item="${item.id}">
+          <div class="avatar">${icon(item.icon)}</div>
+          <div class="item-main">
+            <div class="item-topline">
+              <span class="item-name">${item.name}</span>
+              <span class="type-pill">${typeName(item)}</span>
+            </div>
+            <div class="item-desc">${item.description}</div>
+            <div class="meta-row">
+              <span>${icon("folder")} ${categoryName(item.category)}</span>
+              <span>${icon("download")} ${item.downloads}</span>
+              <span>${icon("star")} ${item.stars}</span>
+            </div>
+          </div>
+          <div class="item-flags">
+            ${item.flags.map((flag) => `<span class="badge">${flag}</span>`).join("")}
+          </div>
+        </button>
+      `).join("") || `<div class="item-card"><div class="item-main"><strong>没有匹配结果</strong><div class="item-desc">换一个分类、子分类或搜索词。</div></div></div>`;
+    }
+
+    function renderHeaderCopy() {
+      const copy = {
+        agents: ["Agents", "顶部展示常用 Agent Team，列表浏览单 Agent 模板。"],
+        skills: ["Skills", "来自 SkillHub 的技能安装到 Skill 库，之后可装备给 Agent。"]
+      };
+      byId("catalogTitle").textContent = copy[state.tab][0];
+      byId("catalogSubtitle").textContent = copy[state.tab][1];
+      document.querySelectorAll(".segment").forEach((button) => {
+        button.classList.toggle("active", button.dataset.tab === state.tab);
+      });
+    }
+
+    function renderDetail() {
+      const item = catalog.find((candidate) => candidate.id === state.selectedId) || catalog[0];
+      byId("detailSource").textContent = item.source.includes("SkillHub") ? "SkillHub" : "官方";
+      byId("detailBody").innerHTML = `
+        <div class="detail-hero">
+          <div class="avatar">${icon(item.icon)}</div>
+          <div>
+            <h2>${item.name}</h2>
+            <p>${typeName(item)} · ${categoryName(item.category)} · ${item.source}</p>
+          </div>
+        </div>
+        <p class="detail-desc">${item.description}</p>
+
+        <div class="section-title">${icon("tags")}子分类</div>
+        <div class="tag-cloud">
+          ${item.subcategories.map((sub) => `<span class="tag">${subName(sub)}</span>`).join("")}
+        </div>
+
+        <div class="section-title">${icon(item.subtype === "skill" ? "zap" : "users")}导入内容</div>
+        <div class="role-list">
+          ${item.roles.map(([name, desc]) => `
+            <div class="role-card">
+              <strong>${name}</strong>
+              <p>${desc}</p>
+            </div>
+          `).join("")}
+        </div>
+
+        <div class="section-title">${icon("file-text")}文件预览</div>
+        <div class="file-list">
+          ${item.files.map((file) => `
+            <div class="file-card">
+              ${icon(file.endsWith("/") ? "folder" : "file-text")}
+              <code>${file}</code>
+              <span>${item.source.includes("SkillHub") ? "SkillHub" : "Valuz"}</span>
+            </div>
+          `).join("")}
+        </div>
+
+        <div class="section-title">${icon("shield-check")}安全与成本</div>
+        <div class="risk-list">
+          <div class="risk-card">
+            <strong>安装成本</strong>
+            <p>公开内容默认免费安装；模型调用、外部 API、云服务按实际供应商计费。</p>
+          </div>
+          <div class="risk-card">
+            <strong>导入确认</strong>
+            <p>进入正式实现时，下载包需要先展示来源 URL、文件清单、版本和权限风险，再允许导入。</p>
+          </div>
+        </div>
+      `;
+      byId("installButton").innerHTML = `${icon("plus")}${item.installTarget}`;
+      byId("detailFootnote").textContent = item.subtype === "skill"
+        ? "Skill 库导入入口会直接定位到 Marketplace > Skills。"
+        : "Agent 库导入入口会直接定位到 Marketplace > Agents。";
+    }
+
+    function render() {
+      renderHeaderCopy();
+      renderCategories();
+      renderFilters();
+      renderTeamShowcase();
+      renderCards();
+      renderDetail();
+      if (window.lucide) window.lucide.createIcons();
+    }
+
+    function openPreview() {
+      byId("previewModal").classList.add("open");
+      byId("previewModal").setAttribute("aria-hidden", "false");
+      renderDetail();
+      if (window.lucide) window.lucide.createIcons();
+    }
+
+    function closePreview() {
+      byId("previewModal").classList.remove("open");
+      byId("previewModal").setAttribute("aria-hidden", "true");
+    }
+
+    function showToast(message) {
+      byId("toastText").textContent = message;
+      byId("toast").classList.add("show");
+      if (window.lucide) window.lucide.createIcons();
+      window.clearTimeout(showToast.timer);
+      showToast.timer = window.setTimeout(() => byId("toast").classList.remove("show"), 2200);
+    }
+
+    document.addEventListener("click", (event) => {
+      const tab = event.target.closest("[data-tab]");
+      if (tab) {
+        state.tab = tab.dataset.tab;
+        state.category = "all";
+        state.subcategory = "all";
+        state.selectedId = tabItems()[0]?.id || catalog[0].id;
+        render();
+      }
+
+      const jump = event.target.closest("[data-jump]");
+      if (jump) {
+        state.tab = jump.dataset.jump;
+        state.category = "all";
+        state.subcategory = "all";
+        state.selectedId = tabItems()[0]?.id || catalog[0].id;
+        render();
+      }
+
+      const category = event.target.closest("[data-category]");
+      if (category) {
+        state.category = category.dataset.category;
+        state.subcategory = "all";
+        render();
+      }
+
+      const subcategory = event.target.closest("[data-subcategory]");
+      if (subcategory) {
+        state.subcategory = subcategory.dataset.subcategory;
+        render();
+      }
+
+      const item = event.target.closest("[data-item]");
+      if (item) {
+        state.selectedId = item.dataset.item;
+        openPreview();
+      }
+
+      if (event.target.closest("#closePreview") || event.target.id === "previewModal") {
+        closePreview();
+      }
+    });
+
+    byId("searchInput").addEventListener("input", (event) => {
+      state.query = event.target.value;
+      render();
+    });
+
+    byId("installButton").addEventListener("click", () => {
+      const item = catalog.find((candidate) => candidate.id === state.selectedId);
+      showToast(`${item.name} 已加入${item.subtype === "skill" ? " Skill 库" : " Agent 库"}导入队列`);
+      closePreview();
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closePreview();
+    });
+
+    render();
+  </script>
+</body>
+</html>

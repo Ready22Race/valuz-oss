@@ -47,6 +47,7 @@ from valuz_agent.modules.skills.models import (
     SkillImportDirectoryPreviewRequest,
     SkillImportPreviewFile,
     SkillImportUrlConfirmRequest,
+    SkillIndexRow,
     SkillOrigin,
     SkillsCatalog,
     SkillUpdateRequest,
@@ -555,6 +556,16 @@ class SkillLibraryService:
         ``_upsert_skill_row``)."""
         await _upsert_skill_row(user_id, self._ds, manifest)
 
+    async def list_indexed_skills(self, user_id: str) -> list[SkillIndexRow]:
+        """All of the user's ``valuz_skill_index`` rows — the service-API read
+        for sibling modules (e.g. the marketplace checks installed slugs and
+        official-skill state); they must not touch the datastore directly."""
+        return await self._ds.list_skills(user_id)
+
+    async def get_indexed_skill(self, user_id: str, slug: str) -> SkillIndexRow | None:
+        """One index row by slug (None when absent) — see ``list_indexed_skills``."""
+        return await self._ds.get_by_slug(user_id, slug)
+
     async def index_official_skills(self, user_id: str) -> int:
         """Deterministically index the bundled official skills.
 
@@ -836,6 +847,7 @@ class SkillLibraryService:
         skill_dir = Path(skill.path)
         if skill_dir.exists():
             shutil.rmtree(skill_dir)
+        await self._ds.mark_unavailable_by_slug(user_id, skill.slug)
         for project in await self._projects.list_projects(user_id):
             if project.kind == "project":
                 self._ds.remove_skill_path_from_project(project, skill.path)
@@ -1040,7 +1052,7 @@ class SkillLibraryService:
             raise SkillNotFound(f"File not found: {file_path}")
         return SkillFileContent(
             path=file_path,
-            content=target.read_text(encoding="utf-8"),
+            content=_read_text(target),
         )
 
     async def write_skill_file(
@@ -1072,7 +1084,7 @@ class SkillLibraryService:
                 raise ValueError("Path traversal not allowed")
             new_target.parent.mkdir(parents=True, exist_ok=True)
             target.rename(new_target)
-            content = new_target.read_text(encoding="utf-8") if new_target.is_file() else ""
+            content = _read_text(new_target) if new_target.is_file() else ""
             return SkillFileContent(path=action.new_path, content=content)
         elif action.action == "delete":
             if target.is_file():
@@ -1334,7 +1346,7 @@ class SkillLibraryService:
         downloaded = staging_dir / "download"
         downloaded.write_bytes(content)
         suffix = Path(url.split("?")[0]).suffix.lower()
-        if suffix in {".zip", ".tar", ".gz", ".tgz"}:
+        if self._is_archive_file(downloaded, suffix=suffix):
             return self._extract_archive(downloaded, dest=staging_dir / "extract")
         downloaded.rename(staging_dir / "SKILL.md")
         return staging_dir
@@ -1440,6 +1452,18 @@ class SkillLibraryService:
             name=final_name,
         )
         await asyncio.to_thread(shutil.copytree, skill_root, target_dir, dirs_exist_ok=True)
+        manifest_path = _detect_manifest(target_dir)
+        if manifest_path is not None and payload.name:
+            metadata, body = _extract_frontmatter(_read_text(manifest_path))
+            manifest_path.write_text(
+                self._render_manifest(
+                    name=payload.name,
+                    description=str(metadata.get("description") or "Imported URL skill"),
+                    instructions_markdown=body.strip() or "Imported URL skill.",
+                    tags=metadata.get("tags") if isinstance(metadata.get("tags"), list) else None,
+                ),
+                encoding="utf-8",
+            )
 
         project = await self._resolve_project(user_id, payload.project_id)
         if payload.target_scope == "project" and project is not None:
@@ -2031,18 +2055,31 @@ class SkillLibraryService:
             dest if dest is not None else Path(tempfile.mkdtemp(prefix="valuz-skill-import-"))
         )
         staging_dir.mkdir(parents=True, exist_ok=True)
-        suffix = archive_path.suffix.lower()
-        if suffix == ".zip":
+        if zipfile.is_zipfile(archive_path):
             with zipfile.ZipFile(archive_path) as zipped:
                 zipped.extractall(staging_dir)
             return staging_dir
-        if suffix in {".tar", ".gz", ".tgz", ".bz2", ".xz"} or archive_path.name.endswith(
-            (".tar.gz", ".tar.bz2", ".tar.xz")
-        ):
+        if tarfile.is_tarfile(archive_path):
             with tarfile.open(archive_path) as tarred:
                 tarred.extractall(staging_dir)
             return staging_dir
         raise ValueError("Only .zip and .tar archives are supported")
+
+    @staticmethod
+    def _is_archive_file(path: Path, *, suffix: str | None = None) -> bool:
+        """Return true when downloaded bytes are an importable archive.
+
+        Some registry download endpoints, including SkillHub's
+        ``/api/v1/download?slug=...``, redirect to a zip body while the original
+        URL has no archive suffix. Sniff the saved file so those endpoints do
+        not get materialized as a bogus binary ``SKILL.md``.
+        """
+        suffix = (suffix or path.suffix).lower()
+        if suffix in {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz"} or path.name.endswith(
+            (".tar.gz", ".tar.bz2", ".tar.xz")
+        ):
+            return True
+        return zipfile.is_zipfile(path) or tarfile.is_tarfile(path)
 
     def _locate_skill_root(
         self,

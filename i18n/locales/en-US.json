@@ -691,7 +691,8 @@
     "projectTasks": "Project Tasks",
     "assistant": "New chat",
     "connectors": "Connectors",
-    "activity": "Activity"
+    "activity": "Activity",
+    "marketplace": "Marketplace"
   },
   "activity": {
     "running": "Running",
@@ -820,21 +821,21 @@
     "exampleProjectName": "Example project",
     "teams": {
       "investment": {
-        "name": "Investment Research Team",
-        "tagline": "Industry, valuation, tracking, compliance — a deep crew for investment research.",
-        "collab": "Industry Analyst (lead) → Modeler / Tracker / Compliance × 3 → wrap-up."
+        "name": "Industry Analysis",
+        "tagline": "Industry research → financial modeling → earnings tracking → report drafting.",
+        "collab": "Research Lead → Financial Modeler / Earnings Tracker / Report Writer → delivery."
       },
-      "product": {
-        "name": "Product Team",
-        "tagline": "Spec → Design → Build → Test — a crew that takes a product feature from idea to release.",
-        "collab": "PM → Designer → Engineer → QA → regression."
+      "developmentEngineering": {
+        "name": "Software Development",
+        "tagline": "Requirements / design → implementation → review → fixes — turns features into running code.",
+        "collab": "Delivery Lead → Refactoring Specialist / Code Reviewer / Bug Fixer → delivery."
       },
       "custom": {
         "name": "No team for now",
         "tagline": "Just start chatting — get a feel for it first."
       },
       "content": {
-        "name": "Content Team",
+        "name": "Xiaohongshu Content",
         "tagline": "Topic → copy → visuals → publish — a Xiaohongshu content line",
         "collab": "Topic Planner → Note Writer → Visual Designer → Publisher"
       }
@@ -858,22 +859,22 @@
           "duty": "Initiations · morning notes · decks"
         }
       },
-      "product": {
-        "pm": {
-          "name": "Product Manager",
-          "duty": "Break down asks, set the plan, prioritize"
+      "developmentEngineering": {
+        "deliveryLead": {
+          "name": "Delivery Lead",
+          "duty": "Plan implementation and coordinate delivery"
         },
-        "designer": {
-          "name": "Designer",
-          "duty": "UI/UX design and handoff"
+        "refactoringSpecialist": {
+          "name": "Refactoring Specialist",
+          "duty": "Simplify complex code and module boundaries"
         },
-        "engineer": {
-          "name": "Full-stack Engineer",
-          "duty": "Build features, write code"
+        "codeReviewer": {
+          "name": "Code Reviewer",
+          "duty": "Check regressions, architecture, and test gaps"
         },
-        "qa": {
-          "name": "QA",
-          "duty": "Cover the cases, run regression"
+        "bugFixer": {
+          "name": "Bug Fixer",
+          "duty": "Reproduce, find root cause, and fix minimally"
         }
       },
       "content": {
@@ -2315,5 +2316,122 @@
     "viewSession": "View session →",
     "needsConfirm": "Your confirmation needed",
     "goConfirm": "Confirm now"
+  },
+  "marketplace": {
+    "title": "Marketplace",
+    "subtitle": "Discover and import agents, teams, and skills — curated by Valuz, supplied by SkillHub",
+    "tabAgents": "Agents",
+    "tabSkills": "Skills",
+    "searchAgents": "Search agents, scenarios, domains…",
+    "searchSkills": "Search skills, descriptions, tags…",
+    "teamsTitle": "Featured agent teams",
+    "teamsSubtitle": "High-value scenario packs curated by Valuz",
+    "teamsCount": "{count} teams",
+    "singleAgentsTitle": "Single agents",
+    "singleAgentsSubtitle": "Official experts you can import individually",
+    "membersAndSkills": "{members} members · {skills} skills",
+    "filterAll": "All",
+    "categories": "Categories",
+    "skillsTotal": "{count} skills",
+    "skillsSuffix": "{count} skills",
+    "view": "View",
+    "import": "Import",
+    "installed": "Installed",
+    "loadMore": "Load more",
+    "loading": "Loading…",
+    "degradedNotice": "SkillHub is temporarily unreachable — showing Valuz official content only",
+    "empty": "Nothing matches your filters",
+    "importFromMarketplace": "Import from Marketplace",
+    "sourceValuzOfficial": "Valuz Official",
+    "sourceSkillhub": "SkillHub",
+    "sourceSkillhubCurated": "Curated from SkillHub",
+    "badgeFreeInstall": "Free to install",
+    "badgeRequiresApiKey": "Needs API key",
+    "badgeThirdPartyCost": "May incur third-party cost",
+    "badgeReviewedSkillhub": "Reviewed by SkillHub",
+    "badgeReviewedValuz": "Reviewed by Valuz",
+    "badgeCommunity": "Community source",
+    "badgeVerified": "Verified author",
+    "badgeLocked": "Connect Reportify to unlock",
+    "modalTypeSkill": "Skill",
+    "modalTypeAgent": "Agent",
+    "modalTypeTeam": "Agent team",
+    "modalVersion": "Version",
+    "modalSource": "Source",
+    "modalUpdated": "Updated",
+    "modalDownloads": "Downloads",
+    "modalRuntime": "Runtime",
+    "modalEffort": "Effort",
+    "modalCategory": "Category",
+    "modalSkillOverview": "Skill overview",
+    "modalSkillOverviewNone": "No skill overview available",
+    "modalRequiresApiKeyHint": "Configure the corresponding service API key after install.",
+    "modalEvaluationReport": "TRACE evaluation",
+    "modalEvaluationUnknown": "Unknown",
+    "modalSecurityReport": "Security report",
+    "modalSecurityNone": "No security report available",
+    "modalFilesPreview": "Pre-install file preview",
+    "modalFilesCount": "{count} files",
+    "modalRoleInstructions": "Role & instructions",
+    "modalBoundSkills": "Bound skills",
+    "modalConnectors": "Connector requirements",
+    "modalCollaboration": "Collaboration",
+    "modalWorkflow": "Workflow",
+    "modalDeliverables": "Deliverables",
+    "modalUsageNotes": "Usage notes",
+    "connectorRequired": "Required",
+    "connectorOptional": "Optional",
+    "connectorApiKey": "Needs API key",
+    "connectorCost": "May incur cost",
+    "modalMembers": "Team members",
+    "modalMembersCount": "{count}",
+    "roleLead": "Lead",
+    "roleMember": "Member",
+    "memberSkills": "{count} skills",
+    "installTargetSkill": "Installs to: Skill Library",
+    "installTargetAgent": "Installs to: Agent Library",
+    "installSkill": "Import skill",
+    "installAgent": "Install agent",
+    "installTeam": "Install team",
+    "installing": "Installing…",
+    "installProgressTitle": "Installing — this may take a moment",
+    "installProgressTeamHint": "Installing {members} agents and preparing {skills} dependent skills. First-time SkillHub downloads can take a little longer.",
+    "installProgressAgentHint": "Installing the agent and preparing {skills} dependent skills.",
+    "installProgressSkillHint": "Downloading and registering skill files.",
+    "installProgressPreparing": "Checking dependencies and local cache…",
+    "installProgressDownloading": "Downloading or registering dependent skills…",
+    "installProgressCreatingAgents": "Creating agent configuration…",
+    "installProgressFinishing": "Finishing installation…",
+    "teamUse": "Use team",
+    "teamActivationTitle": "Add team to a project",
+    "teamActivationSubtitle": "“{name}” is installed. Choose a project to start, or skip for now.",
+    "teamActivationTarget": "Next: deploy to a project and open the project home",
+    "teamActivationSkip": "Skip for now",
+    "teamLaunchTitle": "Add to project",
+    "teamLaunchHint": "Deploy {count} members to a project. Start with Lead “{lead}” from the project when ready.",
+    "teamLaunchDestination": "Where to use it",
+    "teamLaunchNewProject": "Create new project",
+    "teamLaunchNewProjectHint": "Create a dedicated project for this team",
+    "teamLaunchExistingProject": "Choose existing project",
+    "teamLaunchExistingProjectHint": "Deploy the team into an existing work project",
+    "teamLaunchSelectProject": "Select project",
+    "teamLaunchNoProjects": "No projects available",
+    "teamLaunchProjectName": "Project name",
+    "teamLaunchProjectDirectory": "Project directory",
+    "teamLaunchProjectDirectoryEmpty": "Choose a local directory",
+    "teamLaunchChooseDirectory": "Choose directory",
+    "teamLaunch": "Start team",
+    "teamLaunching": "Starting…",
+    "toastSkillInstalled": "“{name}” added to Skill Library",
+    "toastAgentInstalled": "“{name}” installed to Agent Library",
+    "toastTeamInstalled": "“{name}” added to Agent Library",
+    "toastTeamLaunched": "“{name}” joined the project",
+    "toastAlreadyInstalled": "“{name}” is already in your library",
+    "error": {
+      "installFailed": "Install failed — try again later",
+      "launchFailed": "Failed to start the team — try again later",
+      "projectDirectoryRequired": "Choose a project directory first"
+    },
+    "curatedShelf": "SkillHub featured picks · {count} skills"
   }
 }

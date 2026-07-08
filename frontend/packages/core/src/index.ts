@@ -20,6 +20,7 @@ export * from "./api/runtimes-api";
 export * from "./api/automations-api";
 export * from "./api/sessions-api";
 export * from "./api/settings-api";
+export * from "./api/marketplace-api";
 export * from "./api/skills-api";
 export * from "./api/system-api";
 export * from "./api/tasks-api";

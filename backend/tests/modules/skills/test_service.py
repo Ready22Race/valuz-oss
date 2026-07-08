@@ -16,6 +16,7 @@ from valuz_agent.modules.skills.models import (
     SkillCreateRequest,
     SkillFileAction,
     SkillImportArchiveConfirmRequest,
+    SkillImportUrlConfirmRequest,
     SkillUpdateRequest,
 )
 from valuz_agent.modules.skills.service import SkillLibraryService
@@ -113,6 +114,11 @@ class FakeSkillDatastore:
         row = await self.get_by_slug(user_id, slug)
         if row is not None:
             row.origin_json = origin_json
+
+    async def mark_unavailable_by_slug(self, user_id, slug):
+        row = await self.get_by_slug(user_id, slug)
+        if row is not None:
+            row.status = "unavailable"
 
     async def create(self, user_id, row):
         if not row.id:
@@ -589,6 +595,7 @@ class TestDeleteSkill:
     async def test_should_publish_event_on_confirm_delete(self, svc, skill_root):
         service, bus = svc
         _make_skill_dir(skill_root, "deletable")
+        await service.startup_scan("u")
         catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
 
@@ -596,6 +603,8 @@ class TestDeleteSkill:
         bus.subscribe("skill.changed", lambda **kw: events.append(kw))
         await service.delete_skill("u", skill_id, mode="confirm")
         assert any(e["reason"] == "deleted" for e in events)
+        row = await service._ds.get_by_slug("u", "deletable")
+        assert row is not None and row.status == "unavailable"
 
     async def test_dry_run_should_return_preview(self, svc, skill_root):
         service, _ = svc
@@ -659,6 +668,53 @@ class TestArchiveImport:
 
 
 class TestUrlImport:
+    async def test_should_extract_archive_body_when_url_has_no_archive_suffix(
+        self, svc, skill_root, tmp_path, monkeypatch
+    ):
+        import io
+        import urllib.request
+
+        service, _ = svc
+        from valuz_agent.infra import fs_registry as fsr
+
+        monkeypatch.setattr(fsr.settings, "user_temp_dir", tmp_path / "temp" / "{user_id}")
+
+        archive_bytes = io.BytesIO()
+        with zipfile.ZipFile(archive_bytes, "w") as zf:
+            zf.writestr(
+                "ima-skills/SKILL.md",
+                '---\nname: "ima-skills"\ndescription: "IMA skill"\n---\n\nUse IMA.\n',
+            )
+            zf.writestr("ima-skills/references/api.md", "API docs")
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return archive_bytes.getvalue()
+
+        monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=30: FakeResponse())
+
+        preview = await service.import_url_preview(
+            "u",
+            "https://api.skillhub.cn/api/v1/download?slug=ima-skills",
+        )
+        assert preview.name == "ima-skills"
+
+        imported = await service.confirm_url_import(
+            "u",
+            SkillImportUrlConfirmRequest(preview_id=preview.preview_id, name="ima-skills"),
+        )
+
+        assert imported.slug == "ima-skills"
+        manifest = skill_root / imported.slug / "SKILL.md"
+        assert manifest.read_bytes().startswith(b"---")
+        assert "Use IMA." in manifest.read_text(encoding="utf-8")
+
     async def test_should_raise_preview_expired_after_ttl(self, svc, tmp_path, monkeypatch):
         import time
 
@@ -679,8 +735,6 @@ class TestUrlImport:
             cleanup_root=cleanup_root,
             created_at=time.time() - 700,
         )
-        from valuz_agent.modules.skills.models import SkillImportUrlConfirmRequest
-
         with pytest.raises(PreviewExpired):
             await service.confirm_url_import(
                 "u", SkillImportUrlConfirmRequest(preview_id=preview_id)
@@ -708,6 +762,15 @@ class TestSkillFiles:
         skill_id = catalog.skills[0].id
         result = await service.read_skill_file("u", skill_id, "data.txt")
         assert result.content == "content here"
+
+    async def test_should_read_non_utf8_imported_file_content(self, svc, skill_root):
+        service, _ = svc
+        skill_dir = _make_skill_dir(skill_root, "gbk-file")
+        (skill_dir / "api.md").write_bytes("接口说明".encode("gb18030"))
+        catalog = await service.list_catalog("u", "ws-1")
+        skill_id = catalog.skills[0].id
+        result = await service.read_skill_file("u", skill_id, "api.md")
+        assert result.content == "接口说明"
 
 
 class TestSkillDetail:

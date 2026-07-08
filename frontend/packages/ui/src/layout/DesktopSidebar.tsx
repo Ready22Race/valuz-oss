@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   Plus,
   Settings,
+  Store,
   Trash2,
   Upload,
   Zap,
@@ -102,6 +103,7 @@ export interface DesktopSidebarBottomItem {
     | "settings"
     | "agents"
     | "connectors"
+    | "marketplace"
     | "projectTasks";
   /** Which sidebar region the item renders in (PRD-NEXT §3.4 IA). */
   group: "project" | "library" | "settings";
@@ -123,6 +125,7 @@ const BOTTOM_ICON_MAP = {
   settings: Settings,
   agents: Bot,
   connectors: Link2,
+  marketplace: Store,
   projectTasks: ListTodo,
 } as const;
 

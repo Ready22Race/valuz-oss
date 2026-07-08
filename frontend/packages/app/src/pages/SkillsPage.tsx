@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Search,
   Sparkles,
+  Store,
   Upload,
   Zap,
 } from "lucide-react";
@@ -637,6 +638,10 @@ export const SkillsPage = () => {
               <DropdownMenuItem onSelect={() => openAddDialog("upload")}>
                 <Upload className="h-4 w-4" />
                 {t("skill.upload" as Parameters<typeof t>[0])}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => navigate("/marketplace?tab=skills")}>
+                <Store className="h-4 w-4" />
+                {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

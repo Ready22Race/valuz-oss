@@ -81,8 +81,37 @@ async def svc(tmp_path, monkeypatch) -> AsyncIterator[AgentPackService]:
 
 async def test_list_packs(svc: AgentPackService) -> None:
     packs = await svc.list_packs(USER)
-    assert [p["id"] for p in packs] == ["content", "investment", "product"]
-    assert sum(len(p["roles"]) for p in packs) == 12
+    assert [p["id"] for p in packs] == [
+        "product-strategy",
+        "development-engineering",
+        "investment",
+        "supply-chain-tracking",
+        "competitive-intelligence",
+        "content",
+        "contract-review",
+        "academic-research",
+        "recruiting-evaluation",
+        "chinese-metaphysics",
+    ]
+    assert sum(len(p["roles"]) for p in packs) == 40
+    assert all(
+        {skill for role in p["roles"] for skill in (role.get("skills") or [])} for p in packs
+    )
+    assert all(role.get("skills") for p in packs for role in p["roles"])
+    by_id = {p["id"]: p for p in packs}
+    assert all(s["source"] == "bundled" for s in by_id["investment"]["skills"])
+    assert all(s["source"] == "bundled" for s in by_id["supply-chain-tracking"]["skills"])
+    for pack_id in (
+        "product-strategy",
+        "development-engineering",
+        "competitive-intelligence",
+        "contract-review",
+        "academic-research",
+        "recruiting-evaluation",
+        "chinese-metaphysics",
+    ):
+        assert by_id[pack_id]["skills"]
+        assert all(s["source"] == "skillhub" for s in by_id[pack_id]["skills"])
     for pack in packs:
         assert pack["added"] is False
         assert all(r["in_library"] is False for r in pack["roles"])
@@ -107,6 +136,9 @@ async def test_import_pack_creates_agents(svc: AgentPackService) -> None:
     # the pack's recommended effort wins over the deploy default
     assert analyst.effort == "high"
     assert analyst.source == "custom"
+    assert "## 团队协作（Lead）" in analyst.instructions
+    assert "同一个 Project" in analyst.instructions
+    assert "Financial Modeler" in analyst.instructions
     # 投研 deploys with its global skill set + the Valuz MCPs (search + quotes).
     assert analyst.skills == [
         "sector-overview",
@@ -115,6 +147,23 @@ async def test_import_pack_creates_agents(svc: AgentPackService) -> None:
         "idea-generation",
     ]
     assert analyst.connector_types == ["valuz-search", "valuz-stock"]
+
+
+async def test_import_supply_chain_tracking_pack(svc: AgentPackService) -> None:
+    res = await svc.import_pack(USER, "supply-chain-tracking", **DEPLOY)
+    assert res["created"] == 4
+    assert sorted(r.slug for r in res["roles"]) == [
+        "sct-bottleneck-analyst",
+        "sct-chain-mapper",
+        "sct-evidence-reviewer",
+        "sct-theme-lead",
+    ]
+    lead = next(r for r in res["roles"] if r.slug == "sct-theme-lead")
+    assert lead.name == "Theme Lead"
+    assert lead.skills == ["serenity-unified-skill", "serenity-bottleneck-hunter"]
+    assert lead.connector_types == ["valuz-search", "valuz-stock"]
+    assert "Supply Chain Tracking team" in lead.instructions
+    assert "not investment advice" in lead.instructions
 
 
 async def test_import_pack_registers_connectors(svc: AgentPackService) -> None:
@@ -234,15 +283,38 @@ async def test_partial_import_only_fills_missing(svc: AgentPackService) -> None:
     assert res["skipped"] == 1
 
 
+async def test_import_pack_upgrades_existing_lead_instructions(
+    svc: AgentPackService,
+) -> None:
+    await svc._agents.create_agent(
+        USER,
+        {
+            "slug": "inv-industry-analyst",
+            "name": "manual",
+            "instructions": "old lead instruction",
+            **DEPLOY,
+        },
+    )
+
+    res = await svc.import_pack(USER, "investment", **DEPLOY)
+
+    assert res["created"] == 3
+    assert res["skipped"] == 1
+    lead = next(r for r in res["roles"] if r.slug == "inv-industry-analyst")
+    assert "old lead instruction" in lead.instructions
+    assert "## 团队协作（Lead）" in lead.instructions
+    assert "标准协作流程" in lead.instructions
+
+
 async def test_list_marks_added_after_import(svc: AgentPackService) -> None:
     await svc.import_pack(USER, "investment", **DEPLOY)
     packs = await svc.list_packs(USER)
     inv = next(p for p in packs if p["id"] == "investment")
     assert inv["added"] is True
     assert all(r["in_library"] for r in inv["roles"])
-    content = next(p for p in packs if p["id"] == "content")
-    assert content["added"] is False
-    assert all(not r["in_library"] for r in content["roles"])
+    product_strategy = next(p for p in packs if p["id"] == "product-strategy")
+    assert product_strategy["added"] is False
+    assert all(not r["in_library"] for r in product_strategy["roles"])
 
 
 async def test_product_pack_has_no_equipment(svc: AgentPackService) -> None:

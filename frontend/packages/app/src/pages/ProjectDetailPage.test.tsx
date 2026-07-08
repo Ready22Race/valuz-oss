@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initI18n } from "@valuz/shared/i18n";
@@ -10,8 +10,10 @@ import type { SessionListItem } from "@valuz/shared";
 // ── Shared, hoisted test state the module mocks read from ────────────────────
 const h = vi.hoisted(() => ({
   currentId: "A",
+  currentSearch: "",
   tasksByProject: new Map<string, unknown[]>(),
   sessions: [] as unknown[],
+  members: [] as unknown[],
 }));
 
 const navigate = vi.fn();
@@ -24,7 +26,7 @@ vi.mock("react-router-dom", async (orig) => {
     useNavigate: () => navigate,
     useLocation: () => ({
       pathname: `/projects/${h.currentId}`,
-      search: "",
+      search: h.currentSearch,
       hash: "",
       state: null,
       key: h.currentId,
@@ -116,7 +118,12 @@ vi.mock("../components/AttachmentParsingDialog", () => ({
 // Stub the heavy Composer; keep every other @valuz/ui primitive real.
 vi.mock("@valuz/ui", async (orig) => {
   const actual = await orig<typeof import("@valuz/ui")>();
-  return { ...actual, Composer: () => null };
+  return {
+    ...actual,
+    Composer: (props: { selectedAgentSlug?: string | null }) => (
+      <div data-testid="composer" data-agent={props.selectedAgentSlug ?? ""} />
+    ),
+  };
 });
 
 // Core source modules shared by both the page (via the barrel) and the real
@@ -198,7 +205,7 @@ vi.mock("../../../core/src/api/agents-api", async (orig) => {
     ...actual,
     agentsApi: {
       ...(actual as { agentsApi: object }).agentsApi,
-      listMembers: vi.fn(async () => ({ agents: [] })),
+      listMembers: vi.fn(async () => ({ agents: h.members })),
       listAgents: vi.fn(async () => ({ agents: [] })),
     },
   };
@@ -277,11 +284,12 @@ const session = (over: Partial<SessionListItem>): SessionListItem => ({
   ...over,
 });
 
-function renderPage() {
+function renderPage(entry = `/projects/${h.currentId}`) {
+  h.currentSearch = entry.includes("?") ? entry.slice(entry.indexOf("?")) : "";
   // Wrap in an explicit scroll container so the anchor hook's
   // ``findScrollParent`` resolves to a real scroller (plan review P2 wiring).
   return render(
-    <MemoryRouter initialEntries={[`/projects/${h.currentId}`]}>
+    <MemoryRouter initialEntries={[entry]}>
       <div style={{ overflowY: "auto" }}>
         <ProjectDetailPage />
       </div>
@@ -298,8 +306,10 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
   beforeEach(() => {
     initI18n({ locale: "en-US", fallbackLocale: "en-US" });
     h.currentId = "A";
+    h.currentSearch = "";
     h.tasksByProject = new Map([["A", [task({ id: "t1", title: "Alpha" })]]]);
     h.sessions = [session({ id: "s1", project_id: "A" })];
+    h.members = [];
     useSessionStore.setState({
       sessions: [session({ id: "s1", project_id: "A" })],
     });
@@ -328,6 +338,57 @@ describe("ProjectDetailPage auto-refresh wiring", () => {
     fireEvent.click(getByRole("tab", { name: /task|任务/i }));
     await waitFor(() =>
       expect(container.querySelector('[data-anchor-key="task-t1"]')).toBeTruthy(),
+    );
+  });
+
+  it("defaults the composer to the requested Lead agent from team activation", async () => {
+    h.members = [
+      {
+        member: {
+          id: "pm-lead",
+          project_id: "A",
+          agent_slug: "lead-agent",
+          source_agent_slug: "lead-agent",
+        },
+        agent: {
+          id: "a-lead",
+          name: "Lead Agent",
+          model: "claude-sonnet-4",
+          runtime_provider: "claude_agent",
+          instructions: "",
+          skills: [],
+          connectors: [],
+          provider_id: null,
+          effort: null,
+        },
+      },
+      {
+        member: {
+          id: "pm-member",
+          project_id: "A",
+          agent_slug: "member-agent",
+          source_agent_slug: "member-agent",
+        },
+        agent: {
+          id: "a-member",
+          name: "Member Agent",
+          model: "claude-sonnet-4",
+          runtime_provider: "claude_agent",
+          instructions: "",
+          skills: [],
+          connectors: [],
+          provider_id: null,
+          effort: null,
+        },
+      },
+    ];
+
+    renderPage("/projects/A?agent=lead-agent");
+
+    await waitFor(() =>
+      expect(screen.getByTestId("composer").getAttribute("data-agent")).toBe(
+        "lead-agent",
+      ),
     );
   });
 
