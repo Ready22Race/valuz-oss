@@ -163,7 +163,7 @@ async def resolve_model_provider_for_user(
 # ``LLMChannel`` / ``LLMModel`` / ``LLMChannelDetail`` now live in
 # ``modules.providers.schemas`` — the shared contract OSS / overlay / frontend
 # all speak (ADR-011). The helpers below judge OSS's OWN rows onto that shape;
-# contributed rows (``ext.llm_provider.list()``) arrive pre-judged.
+# contributed rows (``ext.llm_provider.list(user_id=...)``) arrive pre-judged.
 
 # Display order of provider groups in the model picker (smaller = earlier).
 # Mirrors ``modules.settings.model_options`` group ordering.
@@ -1101,7 +1101,7 @@ class ProviderService:
         # When the caller's org locks custom models, hide their own
         # (``source="user"``) providers so they can't be selected — the
         # "禁止使用" half of the lock. Managed/system rows are unaffected.
-        hide_user = await policy.hide_user_providers()
+        hide_user = await policy.hide_user_providers(user_id=user_id)
         user_items = [
             _row_to_list_item(r)
             for r in rows
@@ -1114,7 +1114,7 @@ class ProviderService:
         # append. A contributed row with no selectable models is dropped: a
         # card with nothing to pick is noise (e.g. the 组织模型 card when the
         # org has no model of that protocol).
-        extra_items = [it for it in await ext.llm_provider.list() if it.models]
+        extra_items = [it for it in await ext.llm_provider.list(user_id=user_id) if it.models]
         # Virtual CLI-subscription templates for kinds not yet configured (no DB
         # row exists until the user logs in — see ``_materialize_builtin_subscription``).
         configured_kinds = {r.provider_kind for r in rows}
@@ -1125,7 +1125,7 @@ class ProviderService:
         # (Claude Pro/Max, Codex) when the platform disables member-configured
         # models. Superset of the coarse ``hide_user`` filter above; the default
         # ``AllowAllProviderPolicy`` hides nothing, so OSS behaviour is unchanged.
-        hidden = await policy.hidden_provider_ids(combined)
+        hidden = await policy.hidden_provider_ids(combined, user_id=user_id)
         if hidden:
             combined = [it for it in combined if it.id not in hidden]
         # NB: subscription-login gating is applied in ``get_provider`` (the
@@ -1149,7 +1149,7 @@ class ProviderService:
         # Not a user row — maybe an overlay-contributed (catalog) channel
         # (ADR-011). Catalog ids don't collide with user UUIDs, so checking
         # the user table first is safe.
-        for it in await ext.llm_provider.list():
+        for it in await ext.llm_provider.list(user_id=user_id):
             if it.id == provider_id:
                 return _list_item_to_detail(it)
         # Still nothing: the id may be an unconfigured built-in subscription
@@ -1161,7 +1161,7 @@ class ProviderService:
             return virtual
         raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
-    async def _guard_not_system(self, provider_id: str) -> None:
+    async def _guard_not_system(self, user_id: str, provider_id: str) -> None:
         """Raise ``SystemProviderImmutable`` if id is a non-deletable
         contributed (catalog) row.
 
@@ -1170,7 +1170,7 @@ class ProviderService:
         row's ``deletable`` flag, not its source (ADR-011 治理). The route layer
         maps this to HTTP 409.
         """
-        for it in await ext.llm_provider.list():
+        for it in await ext.llm_provider.list(user_id=user_id):
             if it.id == provider_id and not it.deletable:
                 raise SystemProviderImmutable(provider_id)
 
@@ -1494,7 +1494,7 @@ class ProviderService:
         auth_type: str | None = None,
         models: list[str] | None = None,
     ) -> LLMChannelDetail:
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             # Edit dialog on an unconfigured built-in subscription template: no
@@ -1597,7 +1597,7 @@ class ProviderService:
         ``ModelDiscoveryError`` and translated to 502 by the router.
         ``ProviderNotFound`` becomes 404.
         """
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
@@ -1652,7 +1652,7 @@ class ProviderService:
         }
 
     async def delete_provider(self, user_id: str, provider_id: str) -> None:
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
@@ -1690,7 +1690,7 @@ class ProviderService:
 
         System-managed providers are immutable (403 via ``SystemProviderImmutable``).
         """
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             materialized = await self._materialize_builtin_subscription(user_id, provider_id)
@@ -1755,7 +1755,7 @@ class ProviderService:
         # providers table (no row exists). Users pin a system provider
         # as default through the settings-preferences path
         # (``PATCH /v1/settings/model-defaults``) instead.
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             # Built-in CLI-subscription channels (claude/codex ``/login``) have
@@ -1907,7 +1907,7 @@ class ProviderService:
     # ── Connection Test ──────────────────────────────────────────
 
     async def test_provider(self, user_id: str, provider_id: str) -> ConnectionTestResult:
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
