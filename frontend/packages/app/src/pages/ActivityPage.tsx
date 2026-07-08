@@ -267,8 +267,7 @@ export const ActivityPage = () => {
     setHeader(<PageHeader title={t(tk("nav.activity"))} />);
     setHeaderClassName("h-auto px-5 py-5");
     // Drop the AppShell's default vertical padding for this page —
-    // the page already self-manages top/bottom space (``pt-4`` on the
-    // tab strip, ``pb-12`` at the bottom) and the outer ``py-7`` was
+    // the page already self-manages bottom space (``pb-12``) and the outer ``py-7`` was
     // adding double breathing room that stranded the history list
     // mid-screen.
     setContentInnerClassName("px-6 sm:px-7");
@@ -417,7 +416,7 @@ export const ActivityPage = () => {
 
 
   return (
-    <div className="mx-auto max-w-[760px] pb-12 pt-4">
+    <div className="mx-auto max-w-[760px] pb-12">
       {/* Toolbar — line-tab filter shared with project home / conversation
           right panel for visual consistency. */}
       <Tabs value={filter} onValueChange={(v) => setFilter(v as SourceFilter)}>
