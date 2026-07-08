@@ -5,6 +5,7 @@ import {
   Bot,
   ChevronDown,
   Clock,
+  Compass,
   Download,
   ExternalLink,
   FilePenLine,
@@ -16,10 +17,12 @@ import {
   MoreHorizontal,
   Plus,
   Settings,
+  Star,
   Store,
   Trash2,
   Upload,
   Zap,
+  type LucideIcon,
 } from "lucide-react";
 import { cn } from "../lib/cn";
 import { statusDotClass } from "../components/common/status-tone";
@@ -93,20 +96,14 @@ export interface DesktopSidebarBottomItem {
   id: string;
   label: string;
   href: string;
-  icon:
-    | "assistant"
-    | "knowledge"
-    | "skills"
-    | "scheduled"
-    | "activity"
-    | "system"
-    | "settings"
-    | "agents"
-    | "connectors"
-    | "marketplace"
-    | "projectTasks";
-  /** Which sidebar region the item renders in (PRD-NEXT §3.4 IA). */
-  group: "project" | "library" | "settings";
+  /** Icon id — key of the sidebar icon map; unknown ids fall back to the
+   *  gear icon so plugin-supplied items degrade gracefully. */
+  icon: string;
+  /** Which sidebar region the item renders in (PRD-NEXT §3.4 IA).
+   *  ``main`` = top verbs area, ``library``/``settings`` = bottom-pinned.
+   *  Any other string = a custom labeled group (see ``navGroups`` prop),
+   *  rendered between the main area and the project list. */
+  group: "main" | "library" | "settings" | (string & {});
   /** Optional trailing count badge (e.g. running-runs count on Activity).
    *  Falsy / 0 → no badge. */
   badgeCount?: number;
@@ -115,7 +112,14 @@ export interface DesktopSidebarBottomItem {
   badgeDot?: boolean;
 }
 
-const BOTTOM_ICON_MAP = {
+/** A custom labeled sidebar group (label already translated by the caller);
+ *  items reference it via ``DesktopSidebarBottomItem.group === id``. */
+export interface DesktopSidebarNavGroup {
+  id: string;
+  label: string;
+}
+
+const BOTTOM_ICON_MAP: Record<string, LucideIcon> = {
   assistant: MessageSquare,
   knowledge: BookOpen,
   skills: Zap,
@@ -127,7 +131,14 @@ const BOTTOM_ICON_MAP = {
   connectors: Link2,
   marketplace: Store,
   projectTasks: ListTodo,
-} as const;
+  star: Star,
+  compass: Compass,
+};
+
+/** Icon lookup with a gear fallback for unknown (plugin-supplied) ids. */
+function bottomIcon(id: string): LucideIcon {
+  return BOTTOM_ICON_MAP[id] ?? Settings;
+}
 
 const DefaultNavLink: NavLinkComponent = ({
   to,
@@ -571,6 +582,11 @@ export interface DesktopSidebarProps {
   /** One entry per project project. */
   projectGroups: DesktopSidebarProjectGroup[];
   bottomItems: DesktopSidebarBottomItem[];
+  /** Custom labeled groups (e.g. an edition's "市场" section). Each renders
+   * with a Library-style heading between the main verbs area and the project
+   * list; its items are the ``bottomItems`` whose ``group`` matches the
+   * group id. Order = render order. */
+  navGroups?: DesktopSidebarNavGroup[];
   /** Loose chats + tasks that don't belong to any project — rendered in the
    * "对话 / Chats" group below Projects. Newest first; the sidebar caps the
    * visible count with a "show more" toggle. Pass an empty array / omit to
@@ -627,6 +643,7 @@ export const DesktopSidebar = ({
   activePath,
   activeProjectId = null,
   bottomItems,
+  navGroups = [],
   chats = [],
   sidebarHeader,
   sidebarExtraItems,
@@ -881,9 +898,9 @@ export const DesktopSidebar = ({
                 </TooltipContent>
               </Tooltip>
               {bottomItems
-                .filter((item) => item.group === "project")
+                .filter((item) => item.group === "main")
                 .map((item) => {
-                  const Icon = BOTTOM_ICON_MAP[item.icon];
+                  const Icon = bottomIcon(item.icon);
                   return (
                     <Tooltip key={item.id}>
                       <TooltipTrigger asChild>
@@ -899,6 +916,29 @@ export const DesktopSidebar = ({
                   );
                 })}
               {sidebarExtraItems}
+              {/* Custom-group items (rail mode: flat icon list, no headings) */}
+              {navGroups.flatMap((groupDef) =>
+                bottomItems
+                  .filter((item) => item.group === groupDef.id)
+                  .map((item) => {
+                    const Icon = bottomIcon(item.icon);
+                    return (
+                      <Tooltip key={item.id}>
+                        <TooltipTrigger asChild>
+                          <LinkComponent
+                            to={item.href}
+                            className="flex h-9 w-9 cursor-default items-center justify-center rounded-lg text-ink-body transition-colors duration-[120ms] hover:bg-surface-soft"
+                          >
+                            <Icon className="h-4 w-4" />
+                          </LinkComponent>
+                        </TooltipTrigger>
+                        <TooltipContent side="right">
+                          {item.label}
+                        </TooltipContent>
+                      </Tooltip>
+                    );
+                  }),
+              )}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <LinkComponent
@@ -922,7 +962,7 @@ export const DesktopSidebar = ({
               {bottomItems
                 .filter((item) => item.group === "library")
                 .map((item) => {
-                  const Icon = BOTTOM_ICON_MAP[item.icon];
+                  const Icon = bottomIcon(item.icon);
                   return (
                     <Tooltip key={item.id}>
                       <TooltipTrigger asChild>
@@ -946,7 +986,7 @@ export const DesktopSidebar = ({
               {bottomItems
                 .filter((item) => item.group === "settings")
                 .map((item) => {
-                  const Icon = BOTTOM_ICON_MAP[item.icon];
+                  const Icon = bottomIcon(item.icon);
                   return (
                     <Tooltip key={item.id}>
                       <TooltipTrigger asChild>
@@ -994,9 +1034,9 @@ export const DesktopSidebar = ({
                   紧跟新对话。Library 分组在「项目」之后单独成区，设置固定在
                   sidebar 最底部。 */}
                 {bottomItems
-                  .filter((item) => item.group === "project")
+                  .filter((item) => item.group === "main")
                   .map((item) => {
-                    const Icon = BOTTOM_ICON_MAP[item.icon];
+                    const Icon = bottomIcon(item.icon);
                     return (
                       <SidebarLink
                         key={item.id}
@@ -1028,6 +1068,46 @@ export const DesktopSidebar = ({
                     );
                   })}
                 {sidebarExtraItems}
+                {/* Custom labeled groups (edition-declared, e.g. 市场) —
+                    Library-style heading + items, pinned between the main
+                    verbs and the scrollable project list. */}
+                {navGroups.map((groupDef) => {
+                  const groupItems = bottomItems.filter(
+                    (item) => item.group === groupDef.id,
+                  );
+                  if (groupItems.length === 0) return null;
+                  return (
+                    <div key={groupDef.id} className="pt-2">
+                      <div className="pb-1 pl-[14px] pr-3 pt-1">
+                        <span className="text-[11.5px] font-normal uppercase tracking-[0.06em] text-ink-body">
+                          {groupDef.label}
+                        </span>
+                      </div>
+                      {groupItems.map((item) => {
+                        const Icon = bottomIcon(item.icon);
+                        return (
+                          <SidebarLink
+                            key={item.id}
+                            href={item.href}
+                            active={isActivePath(activePath, item.href)}
+                            LinkComponent={LinkComponent}
+                          >
+                            <Icon
+                              className="h-3.5 w-3.5 shrink-0"
+                              strokeWidth={2}
+                            />
+                            <span>{item.label}</span>
+                            {item.badgeDot ? (
+                              <span className="ml-auto flex items-center">
+                                <span className="h-1.5 w-1.5 rounded-full bg-[#f54b4b]" />
+                              </span>
+                            ) : null}
+                          </SidebarLink>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
               </div>
               {/* Scrollable region: projects + conversations. The block above
                   (新对话 + utility links) stays pinned; this list owns the
@@ -1197,7 +1277,7 @@ export const DesktopSidebar = ({
                     </span>
                   </div>
                   {libraryItems.map((item) => {
-                    const Icon = BOTTOM_ICON_MAP[item.icon];
+                    const Icon = bottomIcon(item.icon);
                     return (
                       <SidebarLink
                         key={item.id}
@@ -1228,7 +1308,7 @@ export const DesktopSidebar = ({
               {bottomItems
                 .filter((item) => item.group === "settings")
                 .map((item) => {
-                  const Icon = BOTTOM_ICON_MAP[item.icon];
+                  const Icon = bottomIcon(item.icon);
                   return (
                     <SidebarLink
                       key={item.id}
