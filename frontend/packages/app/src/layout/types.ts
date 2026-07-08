@@ -8,8 +8,10 @@
 
 import type { ReactNode } from "react";
 import { useOutletContext } from "react-router-dom";
+import type { DirectoryFieldMode } from "./ProjectLayoutBase";
 
 export interface ProjectOutletContext {
+  directoryFieldMode: DirectoryFieldMode;
   setRightPanel: (node: ReactNode | null) => void;
   setHeader: (node: ReactNode | null) => void;
   setHeaderClassName: (cls: string | undefined) => void;

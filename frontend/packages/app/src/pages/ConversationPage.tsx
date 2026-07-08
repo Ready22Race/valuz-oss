@@ -116,7 +116,11 @@ import { buildTurns, useStableTurns, type PlanSubtask } from "@valuz/core";
 import { ConversationTurnList } from "@valuz/ui";
 import { usePlatform } from "@valuz/app/platform";
 import { useHasUsableChannel, useTranslation } from "@valuz/core";
-import { useProjectKbBindings, useKbDocTree } from "@valuz/app/hooks";
+import {
+  useConversationLocalFileLinks,
+  useProjectKbBindings,
+  useKbDocTree,
+} from "@valuz/app/hooks";
 import {
   computePlanAnchors,
   extractToolOutputJson,
@@ -578,7 +582,8 @@ export const ConversationPage = () => {
   const { revealInFinder } = usePlatform();
   const { id = NEW_SESSION_ID } = useParams<{ id: string }>();
   const location = useLocation();
-  const { setRightPanel, setHeader, setHideHeader } = useProjectOutlet();
+  const { directoryFieldMode, setRightPanel, setHeader, setHideHeader } =
+    useProjectOutlet();
   const panelCollapsed = usePanelStore((s) => s.collapsed);
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
   const [searchParams] = useSearchParams();
@@ -1283,6 +1288,21 @@ export const ConversationPage = () => {
     },
     [activeProjectRootPath, activeWorktree, selectedProjectId, t],
   );
+
+  const localFileLinkRootPath = activeWorktree?.path ?? activeProjectRootPath;
+  const localFileLinks = useConversationLocalFileLinks({
+    projectRootPath: localFileLinkRootPath,
+    runtimeMode: directoryFieldMode === "managed" ? "managed" : "local",
+    previewFile: (path) => {
+      void openArtifactFile(path);
+    },
+    openFile: (path) => {
+      void revealInFinder(path);
+    },
+    blockFile: () => {
+      toast.info(t("project.managedDirHint" as Parameters<typeof t>[0]));
+    },
+  });
 
   const handleArtifactReload = useCallback(() => {
     if (selectedArtifactPath) {
@@ -5311,6 +5331,8 @@ export const ConversationPage = () => {
                 renderToolCall={renderToolCall}
                 isToolCardFoldable={isToolCardFoldable}
                 onRevealFile={revealInFinder}
+                isLocalFileHref={localFileLinks.isLocalFileHref}
+                onLocalFileLinkClick={localFileLinks.openLocalFileHref}
                 emptySuggestions={[
                   t(
                     "conversation.newChatSuggestion1" as Parameters<

@@ -629,6 +629,9 @@ interface TurnRowProps {
    * Windows). Wired by the desktop app to the ``open_in_finder`` IPC;
    * webui omits this and the per-row external-link icon hides. */
   onRevealFile?: (filePath: string) => void;
+  /** Predicate + handler for local-path markdown links emitted by an agent. */
+  isLocalFileHref?: (href: string) => boolean;
+  onLocalFileLinkClick?: (href: string) => void;
 }
 
 const TurnRow = memo(
@@ -643,6 +646,8 @@ const TurnRow = memo(
     renderToolCall,
     isToolCardFoldable,
     onRevealFile,
+    isLocalFileHref,
+    onLocalFileLinkClick,
   }: TurnRowProps) {
     const { t } = useI18n();
     const inFlight = sending && isLatest;
@@ -904,6 +909,8 @@ const TurnRow = memo(
                     <MarkdownContent
                       content={block.header}
                       isAnimating={animateHeader}
+                      isLocalFileHref={isLocalFileHref}
+                      onLocalFileLinkClick={onLocalFileLinkClick}
                     />
                   ) : null}
                   {block.items.length > 0 ? (
@@ -984,6 +991,10 @@ interface ConversationTurnListProps {
   isToolCardFoldable?: (tool: PrototypeToolCall) => boolean;
   /** See ``TurnRowProps.onRevealFile``. */
   onRevealFile?: (filePath: string) => void;
+  /** See ``TurnRowProps.isLocalFileHref``. */
+  isLocalFileHref?: (href: string) => boolean;
+  /** See ``TurnRowProps.onLocalFileLinkClick``. */
+  onLocalFileLinkClick?: (href: string) => void;
   emptyTitle?: string;
   emptySuggestions?: string[];
   onEmptySuggestionClick?: (text: string) => void;
@@ -1010,6 +1021,8 @@ export function ConversationTurnList({
   renderToolCall,
   isToolCardFoldable,
   onRevealFile,
+  isLocalFileHref,
+  onLocalFileLinkClick,
   emptyTitle,
   emptySuggestions,
   onEmptySuggestionClick,
@@ -1157,6 +1170,8 @@ export function ConversationTurnList({
                     renderToolCall={renderToolCall}
                     isToolCardFoldable={isToolCardFoldable}
                     onRevealFile={onRevealFile}
+                    isLocalFileHref={isLocalFileHref}
+                    onLocalFileLinkClick={onLocalFileLinkClick}
                   />
                 </div>
               </div>
