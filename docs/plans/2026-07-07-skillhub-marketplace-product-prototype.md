@@ -210,7 +210,7 @@ expert-pack scenes, not raw API scene names. The marketplace architecture uses:
 | 营销增长 | 竞品情报团队、内容增长团队、活动策划团队 |
 | 内容创作 | 视频制作团队、短视频增长团队 |
 | 法务安全 | 合同审查团队、合规审查团队 |
-| 教育学术 | 学术研究团队、统计分析团队、培训课程团队、教学材料团队 |
+| 教育学术 | 学术研究团队、课程设计团队 |
 | 运营人力 | 招聘评估团队 |
 | 特色分类 | 健康报告解读、国学玄学、塔罗星座 |
 
@@ -236,7 +236,7 @@ First visible seed catalog:
 | 营销增长 | 竞品情报 | Broadly useful, low setup, clear business outcome. |
 | 内容创作 | 小红书内容创作 | Keep the bundled Xiaohongshu note workflow as the first content-creation seed; postpone generic video production until the workflow is clearer. |
 | 法务安全 | 合同审核 | Concrete workflow and easier to understand than broad compliance. |
-| 教育学术 | 学术研究 | Broadest academic use case; search/review/write workflow is clear. |
+| 教育学术 | 学术研究、课程设计 | Keep 学术研究 for papers/literature work, and add 课程设计 for turning a topic into syllabus, sessions, exercises, and facilitator notes. |
 | 运营人力 | 招聘评估 | Single clear HR workflow with obvious multi-agent handoff. |
 | 特色分类 | 国学解读 | Most distinctive category signal; position as culture/entertainment. |
 
@@ -256,6 +256,12 @@ Naming and instruction polish:
   invalidation conditions. Any mention of Serenity's claimed track record must
   be treated as method background only (`作者自述 / 未经独立审计`) and should not
   appear as card copy or proof of expected performance.
+- Education/academic Team names should map to user tasks. Keep `课程设计`
+  instead of `培训课程`; it is clearer because the Team turns a topic, audience,
+  and duration into a course outline, session plan, exercises, and facilitator
+  notes. Do not show `统计分析` in this category for now; users perceive it as a
+  data-analysis Team. Do not show `教学材料` until the product explicitly targets
+  teachers with a separate teaching-material workflow.
 - The first Agent in each Team is the Lead. The Lead instruction owns intake,
   task decomposition, member handoff, synthesis, and final delivery.
 - Member Agent instructions should not be one-line role blurbs. Each member
