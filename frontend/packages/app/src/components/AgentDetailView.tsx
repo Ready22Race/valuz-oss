@@ -889,7 +889,7 @@ export const AgentDetailView = ({
                   return (
                     <div
                       key={s}
-                      className="flex items-start gap-3 rounded-[14px] border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
+                      className="flex items-start gap-3 rounded-[14px] bg-card p-3 shadow-[var(--shadow-1)] transition-colors"
                     >
                       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
                         <BookOpen className="h-4 w-4" />
@@ -977,7 +977,7 @@ export const AgentDetailView = ({
                   return (
                     <div
                       key={c}
-                      className="flex items-center gap-3 rounded-[14px] border border-surface-border bg-card p-3 shadow-sm transition-colors hover:border-surface-border-hover"
+                      className="flex items-center gap-3 rounded-[14px] bg-card p-3 shadow-[var(--shadow-1)] transition-colors"
                     >
                       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-surface-soft text-ink-meta">
                         <Plug className="h-4 w-4" />
