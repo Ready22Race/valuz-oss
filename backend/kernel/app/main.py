@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
+from app import config_gate
 from app.config import AppConfig
 from app.dependencies import init_dependencies, shutdown_dependencies
 from app.mcp_toolkit_router import mcp_router_lifespan, mount_mcp_router
@@ -24,6 +25,20 @@ config = AppConfig()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    global config
+    # ── Config gate (snapshot-based sandboxes; default OFF) ───────────────
+    # With KERNEL_CONFIG_WAIT=1 the process boots fully (all imports done)
+    # and BLOCKS here until the host writes KERNEL_CONFIG_FILE, then rebuilds
+    # ``config`` so every field re-reads the just-applied env (AppConfig
+    # fields are default_factory lambdas — construction-time reads). This
+    # lets a micro-VM snapshot freeze a fully-imported kernel and configure
+    # it in milliseconds at resume instead of paying an interpreter restart.
+    # Without the flag this is a single env check — boot path unchanged.
+    # See app/config_gate.py for the full rationale + scope.
+    if config_gate.gate_enabled():
+        await config_gate.wait_for_config()
+        config = AppConfig()
+
     # This lifespan only runs when the kernel app is served STANDALONE
     # (the host mounts the routers directly and never executes it). A
     # standalone kernel exposes session mutation, the full event stream
@@ -70,18 +85,27 @@ app.add_middleware(
 )
 
 
-if config.auth_token:
+@app.middleware("http")
+async def _require_bearer_token(request: Request, call_next: Any) -> Any:
+    """Standalone-kernel auth: every route except /health requires the
+    configured bearer token. The WS run channel enforces the same token
+    inside its handler (HTTP middleware doesn't cover websockets).
 
-    @app.middleware("http")
-    async def _require_bearer_token(request: Request, call_next: Any) -> Any:
-        """Standalone-kernel auth: every route except /health requires the
-        configured bearer token. The WS run channel enforces the same token
-        inside its handler (HTTP middleware doesn't cover websockets)."""
-        if request.url.path != "/health":
-            supplied = request.headers.get("authorization", "")
-            if supplied != f"Bearer {config.auth_token}":
-                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-        return await call_next(request)
+    Registered UNCONDITIONALLY and checked at REQUEST time: under
+    KERNEL_CONFIG_WAIT the auth token arrives at gate release, AFTER this
+    module is imported — the previous import-time ``if config.auth_token``
+    registration would have silently disabled auth for every gated kernel.
+    Reads the module-global ``config``, which lifespan rebuilds at gate
+    release. An empty token passes through, preserving the pre-existing
+    unauthenticated behavior (which lifespan already restricts to the
+    explicit loopback opt-in before serving anything).
+    """
+    token = config.auth_token
+    if token and request.url.path != "/health":
+        supplied = request.headers.get("authorization", "")
+        if supplied != f"Bearer {token}":
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
 
 
 @app.get("/health")
