@@ -79,12 +79,32 @@ export interface NavItemModule {
   position: "top" | "bottom";
   /**
    * Sidebar group the item renders in (v2 IA — PRD-NEXT §3.4):
-   * ``project`` items sit at the top (Assistant, Automation), ``library``
+   * ``main`` items sit at the top (Assistant, Automation), ``library``
    * items sit under the Library section, ``settings`` is bottom-pinned.
-   * Defaults to ``project`` when omitted.
+   * Any other string refers to a custom group declared in
+   * ``EditionProfile.navGroups`` — rendered as a labeled section between
+   * the top main area and the project list. Defaults to ``main``.
    */
-  navGroup?: "project" | "library" | "settings";
+  navGroup?: "main" | "library" | "settings" | (string & {});
+  /**
+   * Sidebar icon id (key of DesktopSidebar's icon map, e.g. "star").
+   * When omitted the app shell falls back to its per-item-id map, then to
+   * a generic gear icon.
+   */
+  icon?: string;
   edition: Edition;
+}
+
+/**
+ * A custom labeled sidebar group declared by an edition/plugin (e.g. a
+ * finance edition's "市场" group holding 关注/发现). Rendered with the same
+ * section-heading treatment as the built-in Library group; nav items opt in
+ * via ``NavItemModule.navGroup === id``.
+ */
+export interface NavGroupModule {
+  id: string;
+  /** i18n key for the group heading. */
+  label: string;
 }
 
 export interface EditionProfile {
@@ -96,5 +116,7 @@ export interface EditionProfile {
   projectPanels: ProjectPanelModule[];
   branding: BrandingProfile;
   navItems: NavItemModule[];
+  /** Custom labeled sidebar groups (order = render order). Optional. */
+  navGroups?: NavGroupModule[];
   capabilities: Capabilities;
 }
