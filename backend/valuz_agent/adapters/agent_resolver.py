@@ -44,6 +44,7 @@ from valuz_agent.adapters.capability_resolver import (
     resolve_skill_slugs_to_paths,
 )
 from valuz_agent.adapters.system_prompt_builder import (
+    OUTPUT_FORMAT_INSTRUCTIONS,
     assemble_session_instructions,
     build_project_system_prompt,
 )
@@ -1004,6 +1005,7 @@ async def build_member_session(
             # wandering back into the main workspace or force-pushing.
             ("worktree-context", worktree_notice or ""),
             ("task-brief", brief),
+            ("output-format", OUTPUT_FORMAT_INSTRUCTIONS),
         ]
     )
 
