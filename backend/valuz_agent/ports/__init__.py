@@ -26,6 +26,13 @@ from valuz_agent.ports.billing import (
     set_billing_port,
 )
 from valuz_agent.ports.docs_runtime import DocsRuntimePort
+from valuz_agent.ports.file_address import (
+    FileAddressResolverPort,
+    LocalFileAddressResolver,
+    ResolvedAddress,
+    get_file_address_resolver,
+    set_file_address_resolver,
+)
 from valuz_agent.ports.llm_provider import (
     LLMProvider,
     NoopLLMProvider,
@@ -74,6 +81,8 @@ __all__ = [
     "CapabilityStatus",
     "ConfigField",
     "DocsRuntimePort",
+    "FileAddressResolverPort",
+    "LocalFileAddressResolver",
     "McpCatalogPort",
     "MeterEvent",
     "NoopBillingProvider",
@@ -98,14 +107,17 @@ __all__ = [
     "SecretResolver",
     "SetupRequirement",
     "SkillRegistryPort",
+    "ResolvedAddress",
     "SplitPolicy",
     "SystemProviderImmutable",
     "ToolProvider",
     "authorize_sandbox_provision",
     "get_billing_port",
+    "get_file_address_resolver",
     "get_provider_policy",
     "get_sandbox_policy",
     "set_billing_port",
+    "set_file_address_resolver",
     "set_provider_policy",
     "set_sandbox_policy",
 ]
