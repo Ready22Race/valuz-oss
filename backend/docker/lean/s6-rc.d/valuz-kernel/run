@@ -4,7 +4,7 @@
 # GATED START. This service ships DOWN (sibling `down` file) so AGS snapshot-start
 # never captures the kernel running with the template's placeholder env. After the
 # snapshot resumes, the host (AgsSandboxBackend.apply_env, over envd) writes the
-# per-user env to ${VALUZ_ENV_FILE} and then `s6-svc -u`s this service — so by the
+# per-user env to ${VALUZ_ENV_FILE} and then `s6-svc -r`s this service — so by the
 # time this run script executes, sourcing that file below gives us the correct
 # per-user env (KERNEL_STORE / VALUZ_DATA_API_* / KERNEL_AUTH_TOKEN). The kernel
 # starts exactly once, already configured. The AGS tool readiness probe is on
@@ -14,10 +14,23 @@
 # S6_KEEP_ENV=1, so `with-contenv` keeps the inherited process env and does NOT
 # read /run/s6/container_environment — writing env there would have no effect.
 #
-# PERSISTENCE. db + logs live on the per-owner COS mount at ~/.valuz-kernel, and
-# ~/.claude / ~/.codex are likewise per-owner COS mounts (all declared in the AGS
-# provision). So they survive sandbox recreation, and the runtime uses its NATIVE
-# home paths — NO CLAUDE_CONFIG_DIR / CODEX_HOME redirect, NO owner-dir glob.
+# DB ON LOCAL DISK (perf). Measured: sqlite's FIRST access over the COS FUSE
+# mount costs ~1.4s (WAL setup + page reads) and every instance's mount is fresh,
+# so a COS-backed kernel.db taxed every cold bootstrap ~2.5-3s (alembic incl.).
+# Under KERNEL_STORE=remote — the only cloud mode — PG is authoritative and the
+# sqlite db is just a write-through buffer, so it lives on LOCAL disk
+# (${VALUZ_KERNEL_DB_DIR:-/app/data}) and is deliberately ephemeral. Set
+# VALUZ_KERNEL_DB_DIR=/home/user/.valuz-kernel to put it back on the COS mount
+# (e.g. a KERNEL_STORE=local deployment that needs db durability).
+#
+# LOGS ON COS (diagnosability). boot.log + serve.log go to the per-owner COS
+# mount at ~/.valuz-kernel so a dead sandbox can still be post-mortemed.
+# ~/.claude / ~/.codex are likewise per-owner COS mounts (declared in the AGS
+# provision) — the runtime uses its NATIVE home paths, no env redirects.
+#
+# SINGLE PROCESS (perf). kernel-launch.py runs the alembic migration via the API
+# and then uvicorn.run() in ONE interpreter — the old two-process boot imported
+# sqlalchemy/alembic twice (~0.5-1s wasted).
 set -eu
 
 # Per-user env applied post-snapshot by the host (see apply_env). Sourced with
@@ -34,11 +47,12 @@ export PYTHONPATH=/app/kernel
 export HOME=/home/user
 cd /app
 
-# Kernel SQLite + logs on the COS mount (diagnosability + local-store durability).
+# Kernel SQLite on local disk (see header); logs on the COS mount.
+DBDIR="${VALUZ_KERNEL_DB_DIR:-/app/data}"
 KDIR=/home/user/.valuz-kernel
-mkdir -p "${KDIR}" 2>/dev/null || true
-chown user:user "${KDIR}" 2>/dev/null || true
-export DATABASE_URL="sqlite+aiosqlite:///${KDIR}/kernel.db"
+mkdir -p "${DBDIR}" "${KDIR}" 2>/dev/null || true
+chown user:user "${DBDIR}" "${KDIR}" 2>/dev/null || true
+export DATABASE_URL="sqlite+aiosqlite:///${DBDIR}/kernel.db"
 
 # Boot marker on the mount (best-effort) so the env/store choice is visible
 # host-side even if the kernel fails to start.
@@ -46,6 +60,5 @@ echo "boot $(date -u 2>/dev/null || true): DATABASE_URL=${DATABASE_URL} KERNEL_S
     >>"${KDIR}/boot.log" 2>/dev/null || true
 chown user:user "${KDIR}/boot.log" 2>/dev/null || true
 
-s6-setuidgid user /app/.venv/bin/python -m alembic -c alembic/kernel/alembic.ini upgrade head
 exec s6-setuidgid user sh -c \
-    "exec /app/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port ${KERNEL_PORT:-8000} --log-level ${LOG_LEVEL:-info} >> '${KDIR}/serve.log' 2>&1"
+    "exec /app/.venv/bin/python /app/kernel-launch.py >> '${KDIR}/serve.log' 2>&1"

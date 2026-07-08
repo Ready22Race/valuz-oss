@@ -68,6 +68,9 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY kernel /app/kernel
 COPY alembic/kernel /app/alembic/kernel
+# Single-process launcher: alembic API migrate + uvicorn.run in ONE interpreter
+# (the old two-process boot imported sqlalchemy/alembic twice, ~0.5-1s wasted).
+COPY docker/lean/kernel-launch.py /app/kernel-launch.py
 
 # Unprivileged user (uid 1000) the kernel service drops to; owns /app so it can
 # read the venv and write the sandbox-local SQLite.
