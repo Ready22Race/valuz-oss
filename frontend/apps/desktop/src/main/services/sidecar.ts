@@ -135,37 +135,10 @@ function resolveRgBinary(): string | null {
 }
 
 /**
- * Locate the bundled Node binary that runs the browser engine.
- *
- * A GUI-launched app gets a stripped PATH that hides the user's Node, so the
- * browser feature ships its own (downloaded + verified at build time by
- * scripts/download-node.sh, staged at libexec/node). See
- * docs/design/browser-feature.md §8.
- *
- * Returns null when not bundled (dev), so the backend falls back to npx.
- */
-function resolveNodeBinary(): string | null {
-  const nodeName = process.platform === "win32" ? "node.exe" : "node";
-
-  const bundled = path.join(process.resourcesPath, "libexec", nodeName);
-  if (fs.existsSync(bundled)) return bundled;
-
-  const devNode = path.join(
-    __dirname,
-    "..",
-    "..",
-    "resources",
-    "libexec",
-    nodeName,
-  );
-  if (fs.existsSync(devNode)) return devNode;
-
-  return null;
-}
-
-/**
  * Locate the bundled chrome-devtools-mcp CLI entry (committed JS tree staged at
- * libexec/chrome-devtools-mcp/node_modules/...). Run as ``node <entry>``.
+ * libexec/chrome-devtools-mcp/node_modules/...). Run as ``node <entry>``, where
+ * "node" is this very Electron binary under ELECTRON_RUN_AS_NODE=1 — no
+ * separate node is shipped (docs/design/browser-feature.md §8).
  *
  * Returns null when not bundled (dev), so the backend falls back to npx.
  */
@@ -272,14 +245,17 @@ export const startSidecar = async (
     env.VALUZ_RG_PATH = rgBinary;
   }
 
-  // Point the backend's browser service at the vendored Node + chrome-devtools-mcp
-  // entry (modules/browser/service.py::_cli_argv). Both must be present; with
-  // them set the backend invokes ``node <entry>`` by absolute path, bypassing
-  // the GUI app's stripped PATH. Absent (dev), it falls back to npx.
-  const nodeBinary = resolveNodeBinary();
+  // Point the backend's browser service at the staged chrome-devtools-mcp
+  // entry, run under THIS Electron binary as plain Node — see
+  // docs/design/browser-feature.md §8. VALUZ_NODE_IS_ELECTRON tells the
+  // backend (modules/browser/service.py) to inject ELECTRON_RUN_AS_NODE=1
+  // into engine spawns; without that flag Electron would open as a second
+  // GUI instance instead of running the CLI. Entry absent (dev) → the
+  // backend falls back to npx.
   const cdtEntry = resolveCdtEntry();
-  if (nodeBinary && cdtEntry) {
-    env.VALUZ_NODE_PATH = nodeBinary;
+  if (cdtEntry) {
+    env.VALUZ_NODE_PATH = process.execPath;
+    env.VALUZ_NODE_IS_ELECTRON = "1";
     env.VALUZ_CDT_ENTRY = cdtEntry;
   }
 
