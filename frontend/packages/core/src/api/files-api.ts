@@ -23,7 +23,11 @@ export function buildFileRef(absPath: string): string {
     .split("/")
     .map((seg) => (seg ? encodeURIComponent(seg) : seg))
     .join("/");
-  return `${FILE_URI_SCHEME}/${encoded}`;
+  // `encoded` already starts with "/" (leading empty segment of an absolute
+  // path), so the scheme adds its own "//" authority separator → three slashes
+  // (valuz-file:///abs). A single "/" here would make the first path segment the
+  // URL host and the backend would reject the ref as invalid.
+  return `${FILE_URI_SCHEME}//${encoded}`;
 }
 
 /** True when ``ref`` is a ``valuz-file://`` URI. */
@@ -56,7 +60,8 @@ export function buildLocalFileUrl(absPath: string): string {
     .split("/")
     .map((seg) => (seg ? encodeURIComponent(seg) : seg))
     .join("/");
-  return `${LOCAL_FILE_URL_SCHEME}/${encoded}`;
+  // Three slashes (valuz-local:///abs) — see buildFileRef.
+  return `${LOCAL_FILE_URL_SCHEME}//${encoded}`;
 }
 
 /**
