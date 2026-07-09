@@ -680,6 +680,35 @@ def _resolve_models(row: ProviderRow) -> list[LLMModel]:
     return models
 
 
+def _models_with_runtimes(row: ProviderRow, compatible: list[str]) -> list[LLMModel]:
+    """Resolve a row's models and stamp each with the runtimes it can drive.
+
+    The runtime set is derived once from the row via the single rule
+    (``runtimes_for``) so the providers list/detail agree with the
+    ``model-options`` read model and the frontend never has to re-derive.
+    A model that already declares its own ``runtimes`` keeps them. When the
+    row resolves to no models but carries a seeded ``default_model`` (a legacy
+    api-key anchor), one synthetic model row is emitted so the picker still
+    surfaces it — and every model row carries a truthful ``runtimes``.
+    """
+    # Lazy import: ``model_options`` imports the provider schemas, so importing
+    # it at module load would cycle (mirrors ``provider_resolver``).
+    from valuz_agent.modules.settings.model_options import runtimes_for
+
+    ch_runtimes = tuple(runtimes_for(compatible, provider_kind=row.provider_kind))
+    stamped = [
+        LLMModel(
+            id=m.id,
+            label=m.label,
+            runtimes=(m.runtimes if m.runtimes is not None else ch_runtimes),
+        )
+        for m in _resolve_models(row)
+    ]
+    if not stamped and row.default_model:
+        stamped.append(LLMModel(id=row.default_model, label=None, runtimes=ch_runtimes))
+    return stamped
+
+
 def _row_to_list_item(row: ProviderRow) -> LLMChannel:
     compatible = _derive_compatible_protocols(row)
     group = _group_for(row.source, row.auth_type)
@@ -698,13 +727,12 @@ def _row_to_list_item(row: ProviderRow) -> LLMChannel:
         protocol=row.protocol,
         effective_protocol=compatible[0],
         compatible_protocols=compatible,
-        # models leave runtimes unset (None) → the picker derives them from
-        # compatible_protocols. OSS user/builtin rows never drive codex (codex
-        # walks its own keychain) except codex-subscription, which runtimes_for
-        # matches by provider_kind.
+        # runtimes are stamped per-model from the single rule (runtimes_for) so
+        # every surface reads them instead of re-deriving. codex-subscription →
+        # ["codex"]; a custom openai-response channel → ["codex", ...] too.
         group=group,
         group_rank=_GROUP_RANK[group],
-        models=_resolve_models(row),
+        models=_models_with_runtimes(row, compatible),
     )
 
 
@@ -758,10 +786,11 @@ def _row_to_detail(row: ProviderRow) -> LLMChannelDetail:
         protocol=row.protocol,
         effective_protocol=compatible[0],
         compatible_protocols=compatible,
-        # models leave runtimes unset (None) → the picker derives them.
+        # runtimes stamped per-model from the single rule (runtimes_for); kept in
+        # lockstep with _row_to_list_item so list and detail never disagree.
         group=group,
         group_rank=_GROUP_RANK[group],
-        models=_resolve_models(row),
+        models=_models_with_runtimes(row, compatible),
         base_url=row.base_url,
         supports_custom_base_url=(
             _PROVIDER_MAP[row.provider_kind].supports_custom_base_url
