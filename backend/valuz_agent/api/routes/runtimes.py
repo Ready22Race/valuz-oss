@@ -27,6 +27,7 @@ from valuz_agent.adapters.runtime_registry import (
     is_runtime_available,
     list_runtimes,
 )
+from valuz_agent.ports.extensions import ext
 
 logger = logging.getLogger(__name__)
 
@@ -44,23 +45,38 @@ class RuntimeListItem(BaseModel):
 
 @router.get("")
 async def list_runtime_endpoints() -> dict[str, list[RuntimeListItem]]:
-    """Return every runtime + live (kernel-reported) availability for the picker."""
-    try:
-        availability = await kernel_client.runtime_availability()
-    except Exception:  # noqa: BLE001
-        # Kernel unreachable: fall back to the local host probe so the picker
-        # still renders (correct for the in-process/bundled case; a remote
-        # kernel outage degrades to the API host's view rather than an error).
-        logger.warning(
-            "kernel runtime_availability failed; falling back to local probe",
-            exc_info=True,
-        )
-        availability = {}
+    """Return every runtime + live availability for the picker.
+
+    Availability source (design §3.3): an ``ext.runtime_availability`` override
+    (a deployment that guarantees its execution image's runtime set — e.g. a
+    controlled cloud sandbox) wins; otherwise the kernel is asked
+    (``runtime_availability``), falling back to the local host probe if the
+    kernel is unreachable.
+    """
+    declared: set[str] | None = None
+    override = ext.runtime_availability
+    if override is not None:
+        declared = override.available_runtimes()
+
+    availability: dict[str, dict] = {}
+    if declared is None:
+        try:
+            availability = await kernel_client.runtime_availability()
+        except Exception:  # noqa: BLE001
+            # Kernel unreachable: fall back to the local host probe so the picker
+            # still renders (correct for the in-process/bundled case; a remote
+            # kernel outage degrades to the API host's view rather than an error).
+            logger.warning(
+                "kernel runtime_availability failed; falling back to local probe",
+                exc_info=True,
+            )
 
     items: list[RuntimeListItem] = []
     for spec in list_runtimes():
-        entry = availability.get(spec.id)
-        if entry is not None:
+        if declared is not None:
+            available = spec.id in declared
+            reason = None if available else "not provisioned in this deployment"
+        elif (entry := availability.get(spec.id)) is not None:
             available = bool(entry.get("available"))
             reason = entry.get("unavailable_reason")
         else:

@@ -27,6 +27,7 @@ from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAdd
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
+from valuz_agent.ports.runtime_availability import RuntimeAvailabilityPort
 from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator, SandboxAllocatorPort
 from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
 
@@ -70,6 +71,11 @@ class Extensions:
         # boundary). The app factory mounts ``cls`` — instantiated by Starlette
         # as ``cls(app, **kwargs)`` — so ``kwargs`` carries any constructor deps.
         self.auth_middleware: tuple[type, dict[str, Any]] = (AuthMiddleware, {})
+        # Optional runtime-availability override (design §3.3). OSS default None →
+        # ``GET /v1/runtimes`` asks the kernel. A deployment that guarantees its
+        # execution image's runtime set (e.g. a controlled cloud sandbox) binds a
+        # provider to declare availability without a per-user sandbox probe.
+        self.runtime_availability: RuntimeAvailabilityPort | None = None
 
 
 ext = Extensions()

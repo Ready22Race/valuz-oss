@@ -95,6 +95,43 @@ def test_codex_available_when_kernel_reports_it(client: TestClient) -> None:
     assert by_id["codex"]["unavailable_reason"] is None
 
 
+class _Override:
+    def __init__(self, ids: set[str]) -> None:
+        self._ids = ids
+
+    def available_runtimes(self) -> set[str]:
+        return self._ids
+
+
+def test_availability_override_wins_over_kernel(client: TestClient) -> None:
+    from valuz_agent.ports.extensions import ext
+
+    # Override declares all available → kernel is not consulted.
+    with (
+        patch.object(
+            ext, "runtime_availability", _Override({"claude_agent", "codex", "deepagents"})
+        ),
+        patch(
+            "valuz_agent.adapters.kernel_client.runtime_availability",
+            new=AsyncMock(side_effect=AssertionError("kernel must not be asked when overridden")),
+        ),
+    ):
+        resp = client.get("/v1/runtimes")
+    by_id = {r["id"]: r for r in resp.json()["runtimes"]}
+    assert all(r["available"] for r in by_id.values())
+
+
+def test_availability_override_marks_missing_runtime_unavailable(client: TestClient) -> None:
+    from valuz_agent.ports.extensions import ext
+
+    with patch.object(ext, "runtime_availability", _Override({"claude_agent", "deepagents"})):
+        resp = client.get("/v1/runtimes")
+    by_id = {r["id"]: r for r in resp.json()["runtimes"]}
+    assert by_id["codex"]["available"] is False
+    assert by_id["codex"]["unavailable_reason"]
+    assert by_id["claude_agent"]["available"] is True
+
+
 def test_falls_back_to_local_probe_when_kernel_unreachable(client: TestClient) -> None:
     # Kernel errors → route degrades to the host is_runtime_available probe so
     # the picker still renders instead of 500-ing.
