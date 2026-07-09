@@ -33,8 +33,18 @@ describe("file-uri codec", () => {
   describe("valuz-local:// round-trip", () => {
     it.each(CONTRACT_PATHS)("build→parse is identity for %s", (path) => {
       const url = buildLocalFileUrl(path);
-      expect(url.startsWith("valuz-local:///")).toBe(true); // canonical three-slash
+      // Fixed ``f`` authority + real path in the path component, so Chromium's
+      // standard-scheme parser can't promote the first segment to the host.
+      expect(url.startsWith("valuz-local://f/")).toBe(true);
       expect(parseLocalFileUrl(url)).toBe(path);
+    });
+
+    it("keeps the leading segment out of the host (the 404 root cause)", () => {
+      // The real path must sit AFTER the pinned host so `/Users` survives —
+      // buildLocalFileUrl("/Users/x") must NOT put "Users" in the authority.
+      const url = buildLocalFileUrl("/Users/River/a.xlsx");
+      expect(new URL(url).host).toBe("f");
+      expect(parseLocalFileUrl(url)).toBe("/Users/River/a.xlsx"); // case preserved
     });
   });
 
@@ -42,16 +52,6 @@ describe("file-uri codec", () => {
     it("folds a two-slash host back so //abs === ///abs", () => {
       expect(parseFileRef("valuz-file://Users/u/a.md")).toBe("/Users/u/a.md");
       expect(parseFileRef("valuz-file:///Users/u/a.md")).toBe("/Users/u/a.md");
-    });
-  });
-
-  describe("valuz-local:// is STRICT (we build it — surface builder bugs)", () => {
-    it("does not silently repair a two-slash url", () => {
-      // A malformed two-slash valuz-local url must NOT resolve to the intended
-      // absolute path — the handler should 404 so a builder regression is loud.
-      expect(parseLocalFileUrl("valuz-local://Users/u/a.md")).not.toBe(
-        "/Users/u/a.md",
-      );
     });
   });
 
