@@ -148,22 +148,6 @@ def _session_owner_user_id(session: object, fallback_user_id: str | None = None)
     return fallback_user_id
 
 
-async def _global_instructions_preamble() -> str:
-    """Deployment-wide session-prompt preamble (ports/global_instructions.py).
-
-    OSS binds no override → empty (the section is skipped by
-    ``assemble_session_instructions``). An overlay's provider prepends
-    platform-level guidance as the first prompt section of every agent-bound
-    session, ahead of the agent's own instructions.
-    """
-    from valuz_agent.ports.extensions import ext
-
-    override = ext.global_instructions
-    if override is None:
-        return ""
-    return await override.global_instructions() or ""
-
-
 async def _enforce_budget(session: object, user_id: str | None = None) -> None:
     """Channel-aware wallet pre-check before a turn runs.
 
@@ -785,12 +769,11 @@ class SessionService:
             OUTPUT_FORMAT_INSTRUCTIONS,
             assemble_session_instructions,
         )
-
-        global_instructions = await _global_instructions_preamble()
+        from valuz_agent.ports.instructions import global_instructions_preamble
 
         instructions = assemble_session_instructions(
             [
-                ("global-instructions", global_instructions),
+                ("global-instructions", await global_instructions_preamble()),
                 ("agent-instructions", agent.instructions or ""),
                 ("project-instructions", project_prompt),
                 ("task-playbook", CHAT_TASK_PLAYBOOK),

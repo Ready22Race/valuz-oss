@@ -49,6 +49,7 @@ from valuz_agent.adapters.system_prompt_builder import (
     build_project_system_prompt,
 )
 from valuz_agent.modules.agents.datastore import ProjectMemberDatastore
+from valuz_agent.ports.instructions import global_instructions_preamble
 
 logger = logging.getLogger(__name__)
 
@@ -891,7 +892,8 @@ async def build_member_session(
 
     Session fields set:
         cwd = run_dir (K-PR3)
-        instructions = agent.instructions + project_prompt
+        instructions = [deployment global preamble +] agent.instructions
+                       + project_prompt
                        + (DISPATCH_PLAYBOOK if is_lead else "") + brief
         metadata["valuz"] = {project_id, agent_slug, task_id, run_kind}
         runtime_provider, model, skills, mcp_servers, permission_mode from agent
@@ -995,6 +997,7 @@ async def build_member_session(
     # skills / brief are delineated instead of one undelimited blob.
     instructions = assemble_session_instructions(
         [
+            ("global-instructions", await global_instructions_preamble()),
             ("agent-instructions", agent.instructions or ""),
             ("project-instructions", project_prompt),
             ("member-roster", roster_block),

@@ -1,7 +1,9 @@
-"""Tests for the global-instructions extension seam.
+"""Tests for the deployment-instructions extension seam (ports/instructions.py).
 
 Proves: the OSS default binds no override (empty preamble); a bound provider's
-text flows through ``_global_instructions_preamble`` and lands as the FIRST
+text flows through ``global_instructions_preamble`` — the single seam helper
+both consumption sites call (``_create_agent_bound_session`` for chat/project,
+``build_member_session`` for task lead/members) — and lands as the FIRST
 prompt section, ahead of the agent's own instructions; an override returning
 ``None``/empty adds nothing (the empty section is skipped by
 ``assemble_session_instructions``).
@@ -16,17 +18,17 @@ import pytest
 
 import valuz_agent.boot.kernel  # noqa: F401 — kernel sys.path side-effect
 from valuz_agent.adapters.system_prompt_builder import assemble_session_instructions
-from valuz_agent.modules.sessions.service import _global_instructions_preamble
 from valuz_agent.ports.extensions import Extensions, ext
+from valuz_agent.ports.instructions import global_instructions_preamble
 
 
 @pytest.fixture
 def restore_override() -> Iterator[None]:
-    original = ext.global_instructions
+    original = ext.instructions
     try:
         yield
     finally:
-        ext.global_instructions = original
+        ext.instructions = original
 
 
 class _StaticProvider:
@@ -38,29 +40,29 @@ class _StaticProvider:
 
 
 def test_oss_default_binds_no_override() -> None:
-    assert Extensions().global_instructions is None
+    assert Extensions().instructions is None
 
 
 async def test_unbound_override_yields_empty_preamble(restore_override: None) -> None:
-    ext.global_instructions = None
-    assert await _global_instructions_preamble() == ""
+    ext.instructions = None
+    assert await global_instructions_preamble() == ""
 
 
 async def test_bound_provider_text_flows_through(restore_override: None) -> None:
-    ext.global_instructions = _StaticProvider("platform policy: be terse")
-    assert await _global_instructions_preamble() == "platform policy: be terse"
+    ext.instructions = _StaticProvider("platform policy: be terse")
+    assert await global_instructions_preamble() == "platform policy: be terse"
 
 
 async def test_none_result_coerces_to_empty(restore_override: None) -> None:
-    ext.global_instructions = _StaticProvider(None)
-    assert await _global_instructions_preamble() == ""
+    ext.instructions = _StaticProvider(None)
+    assert await global_instructions_preamble() == ""
 
 
 async def test_preamble_lands_first_in_assembled_prompt(restore_override: None) -> None:
-    ext.global_instructions = _StaticProvider("org compliance preamble")
+    ext.instructions = _StaticProvider("org compliance preamble")
     prompt = assemble_session_instructions(
         [
-            ("global-instructions", await _global_instructions_preamble()),
+            ("global-instructions", await global_instructions_preamble()),
             ("agent-instructions", "dig deep"),
         ]
     )
@@ -70,10 +72,10 @@ async def test_preamble_lands_first_in_assembled_prompt(restore_override: None) 
 
 
 async def test_empty_preamble_emits_no_section(restore_override: None) -> None:
-    ext.global_instructions = None
+    ext.instructions = None
     prompt = assemble_session_instructions(
         [
-            ("global-instructions", await _global_instructions_preamble()),
+            ("global-instructions", await global_instructions_preamble()),
             ("agent-instructions", "dig deep"),
         ]
     )
