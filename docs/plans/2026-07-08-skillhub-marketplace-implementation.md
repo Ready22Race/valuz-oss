@@ -15,10 +15,10 @@ One PR delivering PRD MVP 1–5 as a working full-stack feature:
   Team packs behind `/v1/marketplace/*`. Curated single-agent templates can
   remain as an internal API capability, but are hidden from the current
   marketplace browse UI.
-- Frontend full-screen Marketplace page (Agents / Skills tabs) per the design,
-  with the shared import-preview modal and toasts.
-- Entry points: sidebar nav item + "Import from Marketplace" actions on the
-  Agents & Skills library pages.
+- Frontend full-screen Marketplace page (Agents / Skills tabs) kept as a shared
+  internal browse surface, with the shared import-preview modal and toasts.
+- Entry points: visible header CTAs on the Agents & Skills library pages.
+  The marketplace route is not exposed as a standalone sidebar nav item.
 
 Out of scope (later): MVP 6 curation pipeline, paid metadata, MCP marketplace,
 and public single-Agent browsing.
@@ -247,9 +247,11 @@ All in shared packages (desktop + webui both get it):
   (members w/ Lead/Member tags, deploy toggle — v1 keep toggle only if
   install API supports it, else omit). Footer: install target note + cancel /
   install. Success → toast (existing toast util) + `installed` state.
-- Library entry points: SkillsPage Add menu + AgentsPage header gain
-  "Import from Marketplace" → navigate `/marketplace` (tab preselected via
-  `?tab=`).
+- Library entry points: SkillsPage header gains a visible "Skill Marketplace"
+  CTA and AgentsPage header gains a visible "Agent Team Marketplace" CTA.
+  Both navigate to `/marketplace` with `?tab=` preselected. Keep legacy add-menu
+  actions only as secondary paths; the primary path must not be hidden behind
+  the `+` menu.
 - i18n: `marketplace.*` namespace + `nav.marketplace` in BOTH
   `i18n/locales/zh-CN.json` and `en-US.json`; regenerate types
   (`cd backend && uv run python ../i18n/scripts/gen_types.py`). Follow

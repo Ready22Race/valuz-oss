@@ -6,9 +6,9 @@
 
 ## Product Positioning
 
-Valuz should ship one unified **Marketplace** entry, but the marketplace is not
-a clone of SkillHub. It is a Valuz-owned discovery and import surface for the
-objects in our own product model:
+Valuz should ship marketplace-backed import flows, but not as a standalone
+top-level sidebar module. The marketplace is a Valuz-owned discovery and import
+surface for the objects in our own product model:
 
 - **Skills** are agent equipment.
 - **Agents** are official or curated expert workers.
@@ -43,7 +43,7 @@ small sections inside `Agents` or `Skills`, not as a third marketplace module.
 
 ## Core IA
 
-The market has only two primary tabs:
+The market surface has only two primary tabs:
 
 | Tab | Contains | Notes |
 |---|---|---|
@@ -54,9 +54,16 @@ Entry points:
 
 | Entry | Opens |
 |---|---|
-| Agent Library "Import from Marketplace" | `Marketplace > Agents` |
-| Skill Library "Import from Marketplace" | `Marketplace > Skills` |
+| Agent Library visible header CTA | `Marketplace > Agents` |
+| Skill Library visible header CTA | `Marketplace > Skills` |
 | Onboarding / first-run scenario suggestion | `Marketplace > Agents`, optionally highlighting a relevant Agent Team |
+
+The `/marketplace` route remains an internal shared browse surface, but it must
+not be shown as an independent primary sidebar tab. Users should encounter
+marketplace supply in the resource module where they already are: Agent Teams in
+the Agent Library, and SkillHub skills in the Skill Library. The CTA should be a
+visible text button in the page header, not only an option hidden under a `+`
+menu.
 
 ## Asset Definitions
 

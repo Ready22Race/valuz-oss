@@ -2342,6 +2342,8 @@
     "degradedNotice": "SkillHub is temporarily unreachable — showing Valuz official content only",
     "empty": "Nothing matches your filters",
     "importFromMarketplace": "Import from Marketplace",
+    "skillMarket": "Skill Marketplace",
+    "agentTeamMarket": "Agent Team Marketplace",
     "sourceValuzOfficial": "Valuz Official",
     "sourceSkillhub": "SkillHub",
     "sourceSkillhubCurated": "Curated from SkillHub",

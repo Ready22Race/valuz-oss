@@ -90,14 +90,6 @@ const personalNavItems: NavItemModule[] = [
     edition: "personal",
   },
   {
-    id: "marketplace",
-    label: "nav.marketplace",
-    href: "/marketplace",
-    position: "bottom",
-    navGroup: "library",
-    edition: "personal",
-  },
-  {
     id: "settings",
     label: "nav.settings",
     href: "/settings",

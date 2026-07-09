@@ -446,6 +446,16 @@ export const AgentsPage = () => {
           {t("agent.title")}
         </span>
         <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            className="h-7 px-2 text-xs"
+            onClick={() => navigate("/marketplace?tab=agents")}
+          >
+            <Store className="h-3.5 w-3.5" />
+            {t("marketplace.agentTeamMarket" as Parameters<typeof t>[0])}
+          </Button>
           <input
             ref={importInputRef}
             type="file"
