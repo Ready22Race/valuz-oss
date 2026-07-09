@@ -62,8 +62,9 @@ The `/marketplace` route remains an internal shared browse surface, but it must
 not be shown as an independent primary sidebar tab. Users should encounter
 marketplace supply in the resource module where they already are: Agent Teams in
 the Agent Library, and SkillHub skills in the Skill Library. The CTA should be a
-visible text button in the page header, not only an option hidden under a `+`
-menu.
+visible lightweight text action in the page header, not only an option hidden
+under a `+` menu. When entered from a resource library, the marketplace must
+carry the source in the URL and show a clear return link back to that library.
 
 ## Asset Definitions
 

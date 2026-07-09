@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowRight,
   CloudOff,
@@ -8,7 +8,7 @@ import {
   Star,
   Store,
 } from "lucide-react";
-import { Button, EmptyState, SearchInput, cn } from "@valuz/ui";
+import { BackLink, Button, EmptyState, SearchInput, cn } from "@valuz/ui";
 import type { MarketplaceCategory, MarketplaceItem } from "@valuz/core";
 import { marketplaceApi, useTranslation } from "@valuz/core";
 import { useProjectOutlet } from "@valuz/app/layout";
@@ -31,6 +31,7 @@ const SKILL_PAGE_SIZE = 30;
  * (curated allowlist, server-side). */
 export function MarketplacePage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const {
     setHideHeader,
     setHeader,
@@ -46,6 +47,15 @@ export function MarketplacePage() {
   );
   const [searchParams, setSearchParams] = useSearchParams();
   const tab: MarketTab = searchParams.get("tab") === "skills" ? "skills" : "agents";
+  const from = searchParams.get("from");
+  const backTarget =
+    from === "skills" ? "/skills" : from === "agents" ? "/agents" : null;
+  const backLabel =
+    from === "skills"
+      ? tr("marketplace.backToSkills")
+      : from === "agents"
+        ? tr("marketplace.backToAgents")
+        : null;
   const setTab = (next: MarketTab) => {
     const params = new URLSearchParams(searchParams);
     params.set("tab", next);
@@ -105,6 +115,13 @@ export function MarketplacePage() {
     <div className="flex h-full min-h-0 flex-col">
       {/* header */}
       <div className="border-b border-surface-border px-6 pt-5">
+        {backTarget && backLabel ? (
+          <BackLink
+            onClick={() => navigate(backTarget)}
+            label={backLabel}
+            className="mb-3"
+          />
+        ) : null}
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">

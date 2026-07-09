@@ -247,11 +247,12 @@ All in shared packages (desktop + webui both get it):
   (members w/ Lead/Member tags, deploy toggle — v1 keep toggle only if
   install API supports it, else omit). Footer: install target note + cancel /
   install. Success → toast (existing toast util) + `installed` state.
-- Library entry points: SkillsPage header gains a visible "Skill Marketplace"
-  CTA and AgentsPage header gains a visible "Agent Team Marketplace" CTA.
-  Both navigate to `/marketplace` with `?tab=` preselected. Keep legacy add-menu
-  actions only as secondary paths; the primary path must not be hidden behind
-  the `+` menu.
+- Library entry points: SkillsPage and AgentsPage headers gain a visible
+  lightweight "Import from Marketplace" text action. Both navigate to
+  `/marketplace` with `?tab=` and `?from=` preselected so MarketplacePage can
+  show a return link to the originating library. Keep legacy add-menu actions
+  only as secondary paths; the primary path must not be hidden behind the `+`
+  menu.
 - i18n: `marketplace.*` namespace + `nav.marketplace` in BOTH
   `i18n/locales/zh-CN.json` and `en-US.json`; regenerate types
   (`cd backend && uv run python ../i18n/scripts/gen_types.py`). Follow

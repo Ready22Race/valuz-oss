@@ -575,16 +575,14 @@ export const SkillsPage = () => {
           {t("sidebar.skills" as Parameters<typeof t>[0])}
         </span>
         <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
-          <Button
+          <button
             type="button"
-            variant="outline"
-            size="xs"
-            className="h-7 px-2 text-xs"
-            onClick={() => navigate("/marketplace?tab=skills")}
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand-light/60 hover:text-brand"
+            onClick={() => navigate("/marketplace?tab=skills&from=skills")}
           >
             <Store className="h-3.5 w-3.5" />
-            {t("marketplace.skillMarket" as Parameters<typeof t>[0])}
-          </Button>
+            {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
+          </button>
           {searchOpen ? (
             <input
               type="text"
@@ -649,7 +647,7 @@ export const SkillsPage = () => {
                 <Upload className="h-4 w-4" />
                 {t("skill.upload" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => navigate("/marketplace?tab=skills")}>
+              <DropdownMenuItem onSelect={() => navigate("/marketplace?tab=skills&from=skills")}>
                 <Store className="h-4 w-4" />
                 {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
