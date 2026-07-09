@@ -22,7 +22,6 @@ export * from "./use-session";
 export * from "./use-session-artifacts";
 export * from "./use-session-attachments";
 export * from "./use-session-events";
-export * from "./use-skill-events";
 export * from "./use-task-events";
 export * from "./use-slots";
 export * from "./use-stable-turns";

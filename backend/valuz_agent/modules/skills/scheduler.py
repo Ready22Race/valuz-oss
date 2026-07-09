@@ -91,9 +91,7 @@ def run_skill_scan() -> None:
 async def _arun_skill_scan() -> None:
     from valuz_agent.api.deps import get_skill_service_for_user
     from valuz_agent.infra.config import settings
-    from valuz_agent.infra.eventbus import event_bus
     from valuz_agent.infra.local_identity import resolve_local_user_id
-    from valuz_agent.modules.skills.events import SKILL_CHANGED
 
     if not settings.initialize_user_content_on_startup:
         logger.info("startup user-content initialization disabled; skill auto-scan skipped")
@@ -107,8 +105,6 @@ async def _arun_skill_scan() -> None:
     try:
         indexed = await svc.startup_scan(owner)
         logger.info("skill auto-scan: indexed %d skill(s)", indexed)
-        # Refresh any open catalog (the same event the manual endpoint emits).
-        event_bus.publish(SKILL_CHANGED, skill_id="*", reason="auto-scan")
     finally:
         try:
             await gen.__anext__()

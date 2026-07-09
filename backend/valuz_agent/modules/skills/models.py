@@ -259,10 +259,9 @@ class SkillSubmissionConfirmRequest(BaseModel):
     """User confirmation of a skill the agent submitted via ``submit_skill``.
 
     Frontend pulls ``summary`` / ``change_kind`` / ``files_touched`` from
-    the original ``tool_use`` event payload and replays them here so the
-    audit log in ``SKILL_CHANGED`` carries the agent-supplied metadata.
-    The actual content lives on disk in the staging dir; the body is
-    informational only.
+    the original ``tool_use`` event payload and replays them here as
+    agent-supplied metadata. The actual content lives on disk in the
+    staging dir; the body is informational only.
     """
 
     summary: str | None = None

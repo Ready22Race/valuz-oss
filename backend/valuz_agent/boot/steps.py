@@ -709,7 +709,6 @@ async def start_skills(app: FastAPI) -> None:
 
     import asyncio
 
-    from valuz_agent.infra.eventbus import event_bus
     from valuz_agent.infra.file_watcher import SkillFileWatcher
     from valuz_agent.integrations.skills_filesystem import (
         _default_user_skill_root,
@@ -721,7 +720,23 @@ async def start_skills(app: FastAPI) -> None:
     # for proposing a skill, so the redundant retroactive scanner
     # was deleted along with its tables, routes, and frontend
     # surface. See the removal commit for the rationale.
-    watcher = SkillFileWatcher(event_bus)
+    #
+    # On an out-of-band edit under the user's skill root the watcher re-indexes
+    # (owner-scoped ``startup_scan``) so the catalog read path reflects the
+    # change within ~300 ms instead of waiting for the next auto-scan tick.
+    async def _reindex_user_skills() -> None:
+        gen = get_skill_service_for_user(owner)
+        svc = await gen.__anext__()
+        try:
+            indexed = await svc.startup_scan(owner)
+            logger.debug("skill file-watcher: reindexed %d skill(s)", indexed)
+        finally:
+            try:
+                await gen.__anext__()
+            except StopAsyncIteration:
+                pass
+
+    watcher = SkillFileWatcher(_reindex_user_skills)
     user_root = _default_user_skill_root(owner)
     if user_root.exists():
         watcher.add_path(user_root)
