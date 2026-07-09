@@ -17,13 +17,20 @@ from valuz_agent.ports.file_address import (
 
 
 class TestUri:
+    # Cross-layer contract: this fixture list is mirrored 1:1 in the frontend's
+    # packages/shared/src/utils/file-uri.test.ts (CONTRACT_PATHS). Both codecs
+    # must round-trip every path identically. Add a nasty path here → add it
+    # there too. The CJK entry is the real "读取失败：HTTP 404" case.
     @pytest.mark.parametrize(
         "path",
         [
             "/data/valuz_data/workspace/u/proj/a.md",
-            "/Users/u/My Proj/r.pdf",
-            "/tmp/name+with&chars.txt",
-            "C:/Users/u/x.txt",
+            "/Users/u/My Proj/r.pdf",  # space
+            "/tmp/name+with&chars.txt",  # + and &
+            "/tmp/a#b.txt",  # fragment delimiter if not encoded
+            "/tmp/a%b.txt",  # literal percent
+            "/Users/river/Valuz/示例项目/晶合集成_688249_财务预测模型.xlsx",  # CJK
+            "C:/Users/u/x.txt",  # windows drive
         ],
     )
     def test_roundtrip(self, path: str) -> None:
