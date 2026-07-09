@@ -590,6 +590,29 @@ export const ConversationPage = () => {
   const { revealInFinder } = platform;
   const { id = NEW_SESSION_ID } = useParams<{ id: string }>();
   const location = useLocation();
+  const promotingSessionIdRef = useRef<string | null>(null);
+  const consumedPromoteSessionIdsRef = useRef<Set<string>>(new Set());
+  const previousRouteSessionIdRef = useRef(id);
+  const skipNextSessionStateResetRef = useRef(false);
+  const [conversationInstanceKey, setConversationInstanceKey] = useState(
+    () => `conversation:${id}`,
+  );
+  useEffect(() => {
+    const previousRouteId = previousRouteSessionIdRef.current;
+    previousRouteSessionIdRef.current = id;
+
+    if (previousRouteId === id) return;
+
+    const isPromote =
+      previousRouteId === NEW_SESSION_ID &&
+      promotingSessionIdRef.current === id;
+    if (isPromote) {
+      promotingSessionIdRef.current = null;
+      return;
+    }
+
+    setConversationInstanceKey(`conversation:${id}`);
+  }, [id]);
   const { directoryFieldMode, setRightPanel, setHeader, setHideHeader } =
     useProjectOutlet();
   const panelCollapsed = usePanelStore((s) => s.collapsed);
@@ -2792,7 +2815,19 @@ export const ConversationPage = () => {
   );
 
   const bootstrap = useCallback(async () => {
-    setLoading(true);
+    const routeState = location.state as {
+      promotedFromNew?: boolean;
+      promotedSessionId?: string;
+    } | null;
+    const isPromoteBootstrap =
+      id !== NEW_SESSION_ID &&
+      (promotingSessionIdRef.current === id ||
+        (routeState?.promotedFromNew === true &&
+          routeState.promotedSessionId === id &&
+          !consumedPromoteSessionIdsRef.current.has(id)));
+    if (!isPromoteBootstrap) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const [wsResponse, chListResponse] = await Promise.all([
@@ -2837,6 +2872,7 @@ export const ConversationPage = () => {
             : null;
         setSelectedProjectId(presetProject ?? "chat-default");
         setSessions([]);
+        selectedSessionIdRef.current = null;
         setSelectedSessionId(null);
         // CRITICAL: also clear the conversation state (events / todos
         // / optimistic pending message) so navigating from a real
@@ -2856,10 +2892,26 @@ export const ConversationPage = () => {
       // itself (composer status + optimistic-merge target).
       try {
         const sessionDetail = await sessionsApi.get(id);
+        const routePromotedSession =
+          routeState?.promotedFromNew === true &&
+          routeState.promotedSessionId === sessionDetail.id &&
+          !consumedPromoteSessionIdsRef.current.has(sessionDetail.id);
+        const isPromotedNewSession =
+          promotingSessionIdRef.current === sessionDetail.id ||
+          routePromotedSession;
+        const wasSameSession =
+          selectedSessionIdRef.current === sessionDetail.id;
         setSessionTriggerMode(sessionDetail.trigger_meta?.mode ?? null);
         setSessionAgentSlug(sessionDetail.agent_slug ?? null);
         setSelectedProjectId(sessionDetail.project_id);
         setSessions([sessionDetailToListItem(sessionDetail)]);
+        selectedSessionIdRef.current = sessionDetail.id;
+        setSelectedSessionId(sessionDetail.id);
+        if (isPromotedNewSession) {
+          promotingSessionIdRef.current = null;
+          consumedPromoteSessionIdsRef.current.add(sessionDetail.id);
+          return;
+        }
         // Skip the events refetch when bootstrap re-fires onto the
         // same session id we're already on — the URL change from
         // ``/conversation/new`` → ``/conversation/{real-id}`` (issued
@@ -2867,9 +2919,6 @@ export const ConversationPage = () => {
         // while an in-flight SSE subscription is already pushing
         // events into local state. Refetching here would clobber the
         // first few streamed deltas with the server's truncated list.
-        const wasSameSession =
-          selectedSessionIdRef.current === sessionDetail.id;
-        setSelectedSessionId(sessionDetail.id);
         if (!wasSameSession) {
           await refreshEvents(sessionDetail.id);
         }
@@ -2882,6 +2931,7 @@ export const ConversationPage = () => {
         setSessionAgentSlug(null);
         setSelectedProjectId(null);
         setSessions([]);
+        selectedSessionIdRef.current = null;
         setSelectedSessionId(null);
         setError("Session not found.");
       }
@@ -2890,9 +2940,11 @@ export const ConversationPage = () => {
         cause instanceof Error ? cause.message : "Failed to load project.",
       );
     } finally {
-      setLoading(false);
+      if (!isPromoteBootstrap) {
+        setLoading(false);
+      }
     }
-  }, [id, refreshEvents, searchParams]);
+  }, [id, location.state, refreshEvents, searchParams]);
 
   useEffect(() => {
     void bootstrap();
@@ -3061,7 +3113,7 @@ export const ConversationPage = () => {
   // is owned by ``useSessionAttachments`` above.
 
   const ensureSession = useCallback(
-    async (navigateOnCreate = true) => {
+    async (navigateOnCreate = false) => {
       if (selectedSession) return selectedSession;
       const sessionProjectId = selectedProjectId ?? "chat-default";
       // For quick-chat (kind="chat"), send the ``"chat-default"`` sentinel so
@@ -3116,6 +3168,10 @@ export const ConversationPage = () => {
       // — which capture ``selectedProjectId`` and friends — see the
       // freshly minted ids. This is what the old ``refreshSessions``
       // race ultimately failed at.
+      selectedSessionIdRef.current = created.id;
+      if (id === NEW_SESSION_ID) {
+        skipNextSessionStateResetRef.current = true;
+      }
       setSelectedSessionId(created.id);
       // Seed the bound agent immediately. Attach-on-upload mints the session
       // WITHOUT navigating (``navigateOnCreate=false``), so the bootstrap effect
@@ -3671,9 +3727,16 @@ export const ConversationPage = () => {
       // navigate→bootstrap churn) it returns cached without navigating, so do
       // the swap here. ``replace:true`` keeps Back from returning to the draft.
       if (id === NEW_SESSION_ID && session.id !== NEW_SESSION_ID) {
+        promotingSessionIdRef.current = session.id;
         navigate(
           `/conversation/${session.id}${isSkillCreatorMode ? "?mode=skill-creator" : ""}`,
-          { replace: true },
+          {
+            replace: true,
+            state: {
+              promotedFromNew: true,
+              promotedSessionId: session.id,
+            },
+          },
         );
       }
 
@@ -4999,6 +5062,10 @@ export const ConversationPage = () => {
   // surface — no data is lost. ``todos`` is already cleared
   // synchronously by ``refreshEvents``.
   useEffect(() => {
+    if (skipNextSessionStateResetRef.current) {
+      skipNextSessionStateResetRef.current = false;
+      return;
+    }
     setSessionAttachments([]);
     setFileTree([]);
     setSelectedArtifactPath(null);
@@ -5321,17 +5388,15 @@ export const ConversationPage = () => {
                 </div>
               ) : null}
               <ConversationTurnList
-                // Remount on session switch so the virtualizer's internal
-                // state (scrollOffset, measurementsCache, itemSizeCache)
-                // starts fresh — without this, residual offsets from the
-                // previous session can position the new session's rows
-                // before ResizeObserver has remeasured them, briefly
-                // overlapping content visually.
-                key={selectedSessionId ?? "new"}
+                // Remount on true session switches so the virtualizer's
+                // internal state starts fresh. The /conversation/new → real-id
+                // promotion keeps this key stable so the first sent turn
+                // doesn't look like a page refresh.
+                key={conversationInstanceKey}
                 turns={effectiveTurns}
                 scrollContainerRef={scrollContainerRef}
                 sending={sending}
-                loading={loading}
+                loading={id === NEW_SESSION_ID ? false : loading}
                 error={error}
                 onRetry={handleRetry}
                 onSwitchModel={handleSwitchModel}
@@ -5530,10 +5595,10 @@ export const ConversationPage = () => {
             </div>
           ) : null}
           <Composer
-            // Remount per route so the textarea's native autoFocus refires when
-            // the user navigates to a different conversation (or back to the
-            // "New Chat" entry); React Router otherwise keeps this page mounted.
-            key={id ?? "new"}
+            // Remount on true conversation switches so native autoFocus refires.
+            // Keep the key stable during /conversation/new → real-id promotion
+            // so first-send does not rebuild the composer.
+            key={conversationInstanceKey}
             value={draft}
             onChange={setDraft}
             // Keep the composer usable while a turn runs — submitting queues a
