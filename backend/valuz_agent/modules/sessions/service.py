@@ -769,9 +769,11 @@ class SessionService:
             OUTPUT_FORMAT_INSTRUCTIONS,
             assemble_session_instructions,
         )
+        from valuz_agent.ports.instructions import global_instructions_preamble
 
         instructions = assemble_session_instructions(
             [
+                ("global-instructions", await global_instructions_preamble()),
                 ("agent-instructions", agent.instructions or ""),
                 ("project-instructions", project_prompt),
                 ("task-playbook", CHAT_TASK_PLAYBOOK),
