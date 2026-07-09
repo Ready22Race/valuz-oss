@@ -134,6 +134,13 @@ class HttpKernelClient:
 
     # -- sessions -----------------------------------------------------
 
+    async def runtime_availability(self) -> dict[str, Any]:
+        # Host-scoped probe — asks the remote kernel (cloud sandbox) which
+        # runtimes it can launch, so the answer reflects the sandbox image, not
+        # the API pod. See design §3.3.
+        result = await self._request("GET", "/api/v1/runtimes/availability")
+        return result["data"]
+
     async def create_session(self, user_id: str, req: CreateSessionRequest) -> SessionData:
         # Dynamic mount: the kernel runs in a sandbox, so its cwd must be
         # reachable there. For a project under the static mounts this is a
