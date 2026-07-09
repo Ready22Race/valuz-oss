@@ -7,7 +7,6 @@ from uuid import uuid4
 
 import pytest
 
-from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.integrations.skills_filesystem import FilesystemSkillSource
 from valuz_agent.modules.skills.contracts import ProjectRef, RuntimeContext, SkillManifest
 from valuz_agent.modules.skills.errors import PreviewExpired, SourceReadonly
@@ -193,13 +192,11 @@ def svc(skill_root, monkeypatch):
     from valuz_agent.infra import fs_registry as fsr
 
     monkeypatch.setattr(fsr.settings, "user_skills_dir", skill_root)
-    bus = EventBus()
     return SkillLibraryService(
         datastore=FakeSkillDatastore(),
         skill_source=FilesystemSkillSource(),
         project_service=FakeProjectService(),
-        event_bus=bus,
-    ), bus
+    )
 
 
 # ── Tests ────────────────────────────────────────────────────────────
@@ -210,7 +207,7 @@ class TestIndexOfficialSkills:
     skills into the index, independent of the best-effort ``startup_scan``."""
 
     async def test_should_upsert_official_skills_into_index(self, svc, tmp_path):
-        service, _bus = svc
+        service = svc
         from valuz_agent.integrations.skills_official import OfficialSkillSource
 
         official_dir = tmp_path / "official"
@@ -228,7 +225,7 @@ class TestIndexOfficialSkills:
         assert all(r.status == "available" for r in rows)
 
     async def test_should_be_idempotent(self, svc, tmp_path):
-        service, _bus = svc
+        service = svc
         from valuz_agent.integrations.skills_official import OfficialSkillSource
 
         official_dir = tmp_path / "official"
@@ -244,7 +241,7 @@ class TestIndexOfficialSkills:
 
 class TestListCatalog:
     async def test_should_return_name_and_description_fields(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "alpha", "Alpha body")
         catalog = await service.list_catalog("u", "ws-1")
         skill = catalog.skills[0]
@@ -254,7 +251,7 @@ class TestListCatalog:
         assert not hasattr(skill, "title")
 
     async def test_should_include_slug_and_tags(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "beta")
         catalog = await service.list_catalog("u", "ws-1")
         skill = catalog.skills[0]
@@ -262,7 +259,7 @@ class TestListCatalog:
         assert skill.tags == ["test"]
 
     async def test_should_include_content_hash(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "hashed")
         catalog = await service.list_catalog("u", "ws-1")
         skill = catalog.skills[0]
@@ -270,7 +267,7 @@ class TestListCatalog:
         assert len(skill.content_hash) == 64
 
     async def test_should_return_empty_when_no_skills(self, svc):
-        service, _ = svc
+        service = svc
         catalog = await service.list_catalog("u", "ws-1")
         assert catalog.skills == []
 
@@ -279,7 +276,7 @@ class TestListCatalog:
     ):
         from valuz_agent.modules.skills.models import SkillIndexRow
 
-        service, _ = svc
+        service = svc
         official_dir = tmp_path / "official" / "skill-creator"
         official_dir.mkdir(parents=True)
         (official_dir / ".bundled-version").write_text("v1", encoding="utf-8")
@@ -322,7 +319,7 @@ class TestListCatalog:
         assert skill.tags == ["official", "test"]
 
     async def test_should_fallback_to_official_source_when_index_is_empty(self, svc, tmp_path):
-        service, _ = svc
+        service = svc
         from valuz_agent.integrations.skills_official import OfficialSkillSource
 
         official_dir = tmp_path / "official"
@@ -338,7 +335,7 @@ class TestListCatalog:
     ):
         from valuz_agent.modules.skills.models import SkillIndexRow
 
-        service, _ = svc
+        service = svc
         user_dir = tmp_path / "user" / "my-skill"
         user_dir.mkdir(parents=True)
 
@@ -387,7 +384,7 @@ class TestListCatalog:
     ):
         # No user rows in the index → fall back to a filesystem scan so a
         # freshly-created (not-yet-indexed) skill is never missing from the catalog.
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "scanned-skill")
 
         catalog = await service.list_catalog("u", "ws-1")
@@ -404,7 +401,7 @@ class TestListCatalog:
         import os as _os
         import time
 
-        service, _ = svc
+        service = svc
         old_dir = _make_skill_dir(skill_root, "old-skill")
         new_dir = _make_skill_dir(skill_root, "new-skill")
         # Force old-skill to be "older" by stamping its mtime back 1h.
@@ -428,7 +425,7 @@ class TestListCatalog:
         """Legacy rows with ``folder_created_at = None`` (the migration
         backfills lazily on the next startup_scan) must land at the end
         so freshly-created skills don't get buried."""
-        service, _ = svc
+        service = svc
         # Two skills with valid birthtime + one stubbed manifest whose
         # source manifest claims None for the timestamp.
         _make_skill_dir(skill_root, "real-1")
@@ -467,7 +464,7 @@ class TestLibraryState:
     picker filters on. Default on; only an explicit off is stored."""
 
     async def test_catalog_overlays_disabled_row(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "alpha")
         _make_skill_dir(skill_root, "beta")
         # Turn alpha off by its catalog row id; beta left at the default (on).
@@ -482,7 +479,7 @@ class TestLibraryState:
         assert by_slug["beta"].library_enabled is True
 
     async def test_builtin_skill_cannot_be_disabled(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         # A built-in skill (``origin-label: Built-in`` frontmatter). Even with its
         # row turned off, the catalog must keep it enabled — built-ins ship with
         # the client and aren't toggleable.
@@ -504,7 +501,7 @@ class TestLibraryState:
     async def test_toggle_returns_updated_and_persists(self, svc, skill_root):
         from valuz_agent.modules.skills.models import SkillIndexRow
 
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "gamma")
         cat = await service.list_catalog("u", "ws-1")
         gamma = next(s for s in cat.skills if s.slug == "gamma")
@@ -529,16 +526,8 @@ class TestLibraryState:
 
 
 class TestCreateSkill:
-    async def test_should_publish_event_on_create(self, svc, skill_root):
-        service, bus = svc
-        events = []
-        bus.subscribe("skill.changed", lambda **kw: events.append(kw))
-        await service.create_skill("u", SkillCreateRequest(name="new-skill", description="desc"))
-        assert len(events) == 1
-        assert events[0]["reason"] == "created"
-
     async def test_should_create_skill_dir_with_manifest(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         result = await service.create_skill(
             "u", SkillCreateRequest(name="created", description="A test")
         )
@@ -549,7 +538,7 @@ class TestCreateSkill:
         """creation_origin is host bookkeeping (valuz_skill_index) — it
         must NOT be written into the user's SKILL.md frontmatter, but
         the returned view still reports the skill as "created"."""
-        service, _ = svc
+        service = svc
         result = await service.create_skill(
             "u", SkillCreateRequest(name="origin-check", description="x")
         )
@@ -560,7 +549,7 @@ class TestCreateSkill:
     async def test_should_expose_creation_origin_via_catalog(self, svc, skill_root):
         """The catalog View must expose ``creation_origin`` sourced from
         the DB index — it's what drives the .agents group's badge."""
-        service, _ = svc
+        service = svc
         await service.create_skill("u", SkillCreateRequest(name="origin-view", description="y"))
         catalog = await service.list_catalog("u", "ws-1")
         match = next(s for s in catalog.skills if s.slug == "origin-view")
@@ -570,7 +559,7 @@ class TestCreateSkill:
         """A skill folder dropped on disk (not created via Valuz) shows
         as ``"discovered"`` — it must NOT get the "创建" badge. This is
         the bug behind the .agents-vs-.claude display confusion."""
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "scanned-skill")
         catalog = await service.list_catalog("u", "ws-1")
         match = next(s for s in catalog.skills if s.slug == "scanned-skill")
@@ -578,36 +567,32 @@ class TestCreateSkill:
 
 
 class TestUpdateSkill:
-    async def test_should_publish_event_on_update(self, svc, skill_root):
-        service, bus = svc
+    async def test_should_rename_skill(self, svc, skill_root):
+        service = svc
         _make_skill_dir(skill_root, "updatable")
         catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
 
-        events = []
-        bus.subscribe("skill.changed", lambda **kw: events.append(kw))
-        await service.update_skill("u", skill_id, SkillUpdateRequest(name="updated-name"))
-        assert len(events) == 1
-        assert events[0]["reason"] == "updated"
+        result = await service.update_skill(
+            "u", skill_id, SkillUpdateRequest(name="updated-name")
+        )
+        assert result.name == "updated-name"
 
 
 class TestDeleteSkill:
-    async def test_should_publish_event_on_confirm_delete(self, svc, skill_root):
-        service, bus = svc
+    async def test_confirm_delete_marks_unavailable(self, svc, skill_root):
+        service = svc
         _make_skill_dir(skill_root, "deletable")
         await service.startup_scan("u")
         catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
 
-        events = []
-        bus.subscribe("skill.changed", lambda **kw: events.append(kw))
         await service.delete_skill("u", skill_id, mode="confirm")
-        assert any(e["reason"] == "deleted" for e in events)
         row = await service._ds.get_by_slug("u", "deletable")
         assert row is not None and row.status == "unavailable"
 
     async def test_dry_run_should_return_preview(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "preview-del")
         catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
@@ -618,7 +603,7 @@ class TestDeleteSkill:
 
 class TestReadonlySkill:
     async def test_should_reject_write_on_readonly_skill(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "locked")
         catalog = await service.list_catalog("u", "ws-1")
         skill = catalog.skills[0]
@@ -636,7 +621,7 @@ class TestReadonlySkill:
 
 class TestArchiveImport:
     async def test_confirm_should_survive_preview_worker_switch(self, svc, tmp_path, monkeypatch):
-        service, _ = svc
+        service = svc
         from valuz_agent.infra import fs_registry as fsr
 
         monkeypatch.setattr(
@@ -674,7 +659,7 @@ class TestUrlImport:
         import io
         import urllib.request
 
-        service, _ = svc
+        service = svc
         from valuz_agent.infra import fs_registry as fsr
 
         monkeypatch.setattr(fsr.settings, "user_temp_dir", tmp_path / "temp" / "{user_id}")
@@ -718,7 +703,7 @@ class TestUrlImport:
     async def test_should_raise_preview_expired_after_ttl(self, svc, tmp_path, monkeypatch):
         import time
 
-        service, _ = svc
+        service = svc
         from valuz_agent.infra import fs_registry as fsr
 
         monkeypatch.setattr(fsr.settings, "user_temp_dir", tmp_path / "temp" / "{user_id}")
@@ -744,7 +729,7 @@ class TestUrlImport:
 
 class TestSkillFiles:
     async def test_should_list_files_in_skill_dir(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         skill_dir = _make_skill_dir(skill_root, "with-files")
         (skill_dir / "extra.txt").write_text("hello")
         catalog = await service.list_catalog("u", "ws-1")
@@ -755,7 +740,7 @@ class TestSkillFiles:
         assert "extra.txt" in paths
 
     async def test_should_read_file_content(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         skill_dir = _make_skill_dir(skill_root, "readable")
         (skill_dir / "data.txt").write_text("content here")
         catalog = await service.list_catalog("u", "ws-1")
@@ -764,7 +749,7 @@ class TestSkillFiles:
         assert result.content == "content here"
 
     async def test_should_read_non_utf8_imported_file_content(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         skill_dir = _make_skill_dir(skill_root, "gbk-file")
         (skill_dir / "api.md").write_bytes("接口说明".encode("gb18030"))
         catalog = await service.list_catalog("u", "ws-1")
@@ -775,7 +760,7 @@ class TestSkillFiles:
 
 class TestSkillDetail:
     async def test_should_return_detail_with_instructions(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "detailed", "Detailed instructions here.")
         catalog = await service.list_catalog("u", "ws-1")
         skill_id = catalog.skills[0].id
@@ -788,7 +773,7 @@ class TestSkillDetail:
 
 class TestTags:
     async def test_should_aggregate_unique_tags(self, svc, skill_root):
-        service, _ = svc
+        service = svc
         _make_skill_dir(skill_root, "tag-a")
         _make_skill_dir(skill_root, "tag-b")
         tags = await service.list_all_tags("u")
@@ -816,7 +801,7 @@ class TestImportFromSessionConfirm:
         return seen
 
     async def test_should_build_skill_body_from_persisted_assistant_events(self, svc, monkeypatch):
-        service, _ = svc
+        service = svc
         seen = self._patch_events(
             monkeypatch,
             [
@@ -836,7 +821,7 @@ class TestImportFromSessionConfirm:
         assert "tool noise" not in body
 
     async def test_should_fall_back_to_description_when_no_assistant_text(self, svc, monkeypatch):
-        service, _ = svc
+        service = svc
         self._patch_events(monkeypatch, [])
         result = await service.import_from_session_confirm(
             "u",

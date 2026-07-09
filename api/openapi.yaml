@@ -1731,19 +1731,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/SkillTagsResponse"
 
-  /v1/skills/events/stream:
-    get:
-      summary: SSE stream for skill change events
-      operationId: skillEventsStream
-      tags: [skills]
-      responses:
-        "200":
-          description: SSE event stream
-          content:
-            text/event-stream:
-              schema:
-                type: string
-
   /v1/skills/{skill_id}:
     get:
       summary: Get skill detail

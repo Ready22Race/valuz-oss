@@ -449,10 +449,6 @@ export const skillsApi = {
   // skills bind on the Agent now (08-agents-module). ``projectCatalog``
   // above stays: it feeds the conversation composer's skill-insert chips.
 
-  eventsStreamUrl(): string {
-    return `${_apiBase}/v1/skills/events/stream`;
-  },
-
   // Scenario B — AI 创建 Skill (chat-driven authoring) ──────────────────
 
   startCreateChat(payload?: {

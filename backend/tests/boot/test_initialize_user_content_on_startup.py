@@ -256,7 +256,7 @@ async def test_start_skills_uses_startup_flag_not_deployment_type(monkeypatch) -
         yield SkillSvc()
 
     class SkillFileWatcher:
-        def __init__(self, _event_bus) -> None:
+        def __init__(self, _reindex) -> None:
             calls.append("watcher")
 
         def add_path(self, _path) -> None:  # noqa: ANN001

@@ -102,7 +102,6 @@ async def get_skill_service_for_user(
                 datastore=ProjectDatastore(db),
                 event_bus=event_bus,
             ),
-            event_bus=event_bus,
             extra_sources=[OfficialSkillSource()],
         )
 

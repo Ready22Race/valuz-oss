@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.integrations.skills_filesystem import (
     FilesystemSkillSource,
@@ -26,10 +25,6 @@ from valuz_agent.modules.projects.service import (
     ProjectService,
 )
 from valuz_agent.modules.skills.datastore import SkillDatastore
-from valuz_agent.modules.skills.events import (
-    PROJECT_SKILLS_CHANGED,
-    SKILL_CHANGED,
-)
 from valuz_agent.modules.skills.models import (
     SessionSkillImportConfirmRequest,
     SkillCopyRequest,
@@ -333,7 +328,6 @@ class SkillLibraryService:
         datastore: SkillDatastore,
         skill_source: FilesystemSkillSource,
         project_service: ProjectService,
-        event_bus: EventBus,
         extra_sources: list | None = None,
         auth_facade: object | None = None,
         remote_registry: object | None = None,
@@ -342,7 +336,6 @@ class SkillLibraryService:
         self._source = skill_source
         self._extra_sources = extra_sources or []
         self._projects = project_service
-        self._bus = event_bus
         self._auth = auth_facade
         self._remote_registry = remote_registry
 
@@ -599,7 +592,6 @@ class SkillLibraryService:
     ) -> SkillsCatalog:
         project = await self._projects.get_project(user_id, project_id)
         self._ds.set_skill_enabled(project, skill_path, enabled)
-        self._bus.publish(PROJECT_SKILLS_CHANGED, project_id=project_id)
         return await self.list_catalog(user_id, project_id)
 
     async def resolve_skill_dirs_for_project(self, user_id: str, project_id: str) -> list[str]:
@@ -660,8 +652,6 @@ class SkillLibraryService:
                 continue
             await self._ds.set_creation_origin_by_slug(user_id, written.slug, "created")
 
-        # Notify any subscribers (frontend uses /v1/skills/events/stream).
-        self._bus.publish(SKILL_CHANGED, skill_id="*", reason="staging-sync")
         return results
 
     async def optimize_from_skill(
@@ -745,8 +735,6 @@ class SkillLibraryService:
         elif payload.add_to_project and project is not None and project.kind == "project":
             self._ds.set_skill_enabled(project, str(skill_dir), True)
         result = await self._finalize_origin(user_id, skill_dir, "created", payload.project_id)
-        self._bus.publish(SKILL_CHANGED, skill_id=result.id, reason="created")
-        self._bus.publish(PROJECT_SKILLS_CHANGED, project_id=payload.project_id or "chat-default")
         return result
 
     async def update_skill(
@@ -780,7 +768,6 @@ class SkillLibraryService:
             encoding="utf-8",
         )
         result = await self._resolve_skill(user_id, skill_id=skill_id, project_id=project_id)
-        self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="updated")
         return result
 
     async def copy_skill(
@@ -851,8 +838,6 @@ class SkillLibraryService:
         for project in await self._projects.list_projects(user_id):
             if project.kind == "project":
                 self._ds.remove_skill_path_from_project(project, skill.path)
-        self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="deleted")
-        self._bus.publish(PROJECT_SKILLS_CHANGED, project_id=project_id or "chat-default")
         return None
 
     async def import_from_session_confirm(
@@ -1151,7 +1136,6 @@ class SkillLibraryService:
         if row is None:
             raise SkillNotFound(skill_id)
         await self._ds.set_library_enabled_by_slug(user_id, skill.slug, enabled)
-        self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="library_state")
         return await self.get_skill_detail(user_id, skill_id)
 
     async def _load_origin(self, user_id: str, slug: str) -> SkillOrigin | None:
@@ -1817,20 +1801,6 @@ class SkillLibraryService:
         # startup_scan above created the row as "discovered"; overwrite it.
         await self._ds.set_creation_origin_by_slug(user_id, skill.slug, "created")
         skill.creation_origin = "created"
-
-        # Notify subscribers — frontend reloads the catalog & cards.
-        self._bus.publish(
-            SKILL_CHANGED,
-            skill_id=skill.id,
-            reason="submission-confirmed",
-            change_kind=change_kind,
-            summary=summary or "",
-            files_touched=list(files_touched or []),
-        )
-        if bound_project_id:
-            self._bus.publish(PROJECT_SKILLS_CHANGED, project_id=bound_project_id)
-        else:
-            self._bus.publish(PROJECT_SKILLS_CHANGED, project_id="chat-default")
 
         return skill, creation_context, bound_project_id
 
