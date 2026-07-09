@@ -24,6 +24,7 @@ from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
 from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAddressResolver
+from valuz_agent.ports.global_instructions import GlobalInstructionsPort
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
@@ -76,6 +77,11 @@ class Extensions:
         # execution image's runtime set (e.g. a controlled cloud sandbox) binds a
         # provider to declare availability without a per-user sandbox probe.
         self.runtime_availability: RuntimeAvailabilityPort | None = None
+        # Optional deployment-wide session-prompt preamble. OSS default None →
+        # agent-bound sessions start with the agent's own instructions. An
+        # overlay binds a provider to prepend platform-level guidance (e.g. org
+        # policy) as the first prompt section of every agent-bound session.
+        self.global_instructions: GlobalInstructionsPort | None = None
 
 
 ext = Extensions()
