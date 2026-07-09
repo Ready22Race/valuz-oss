@@ -26,6 +26,18 @@ export const LOCAL_FILE_URL_SCHEME = "valuz-local:";
 const FILE_URI_PREFIX = `${FILE_URI_SCHEME}//`;
 const LOCAL_FILE_URL_PREFIX = `${LOCAL_FILE_URL_SCHEME}//`;
 
+// valuz-local:// is loaded by Chromium as a ``standard`` scheme (registered
+// privileged in the desktop main process). Chromium's standard-URL parser
+// ALWAYS promotes the first path segment after ``//`` to the host — and
+// lowercases it — so ``valuz-local:///Users/x`` and ``valuz-local://Users/x``
+// BOTH canonicalize to ``valuz-local://users/x`` (host=users, path=/x),
+// silently dropping ``/Users``. Three slashes do NOT help here (unlike
+// valuz-file://, which we parse ourselves and never hand to Chromium). Pin a
+// fixed dummy authority so the real absolute path stays entirely in the path
+// component — case- and unicode-preserved, cross-platform. The handler ignores
+// this host and reads the pathname. (Verified with an Electron repro.)
+const LOCAL_FILE_HOST = "f";
+
 const WIN_DRIVE = /^\/[A-Za-z]:\//;
 
 /**
@@ -91,16 +103,20 @@ export function parseFileRef(ref: string): string | null {
   return decodeUriToAbsPath(ref, true);
 }
 
-/** Build a ``valuz-local://<abs>`` URL from an absolute path (Electron only). */
+/**
+ * Build a ``valuz-local://f/<abs>`` URL from an absolute path (Electron only).
+ * The ``f`` authority is a fixed placeholder — see {@link LOCAL_FILE_HOST}; the
+ * real path lives in the path component so Chromium's standard-scheme parser
+ * can't eat its first segment.
+ */
 export function buildLocalFileUrl(absPath: string): string {
-  return `${LOCAL_FILE_URL_SCHEME}//${encodeAbsPath(absPath)}`;
+  return `${LOCAL_FILE_URL_SCHEME}//${LOCAL_FILE_HOST}${encodeAbsPath(absPath)}`;
 }
 
 /**
- * Extract the absolute path from a ``valuz-local://<abs>`` URL, or null.
- * STRICT — this URL is always built by {@link buildLocalFileUrl}, so a
- * non-canonical (two-slash) form is a bug we want to see, not paper over. Used
- * by the desktop ``valuz-local://`` protocol handler.
+ * Extract the absolute path from a ``valuz-local://f/<abs>`` URL, or null.
+ * Reads the path component only — the ``f`` host is a fixed placeholder and is
+ * ignored. Used by the desktop ``valuz-local://`` protocol handler.
  */
 export function parseLocalFileUrl(url: string): string | null {
   if (!url.startsWith(LOCAL_FILE_URL_PREFIX)) return null;
