@@ -33,6 +33,16 @@ export const useRuntimes = (): UseRuntimesResult => {
 
   useEffect(() => {
     let cancelled = false;
+    // Cache hit and no explicit refresh: runtimes are installed-binary
+    // metadata — near-static — yet every session-create form mount was
+    // refetching despite seeding state from the cache. Serve the cache;
+    // ``refresh()`` (tick > 0) still forces a refetch after an install.
+    if (_cache !== null && tick === 0) {
+      setRuntimes(_cache);
+      setLoading(false);
+      setError(null);
+      return;
+    }
     setLoading(true);
     setError(null);
 

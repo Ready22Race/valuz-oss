@@ -104,8 +104,11 @@ def _read_kernel_pin() -> str:
 async def _count_active_sessions() -> int:
     try:
         # System health metric — count running sessions across every owner.
-        sessions = await data_reader().list_all_sessions(limit=500)
-        return sum(1 for s in sessions if s.status == "running")
+        # Filter on the store side: this endpoint is polled every ~5s by the
+        # desktop status panel, and an unfiltered sweep fetched + serialized
+        # up to 500 full rows just to produce one integer.
+        sessions = await data_reader().list_all_sessions(status="running", limit=500)
+        return len(sessions)
     except Exception:  # noqa: BLE001 — status must never throw
         return 0
 
@@ -164,18 +167,31 @@ async def collect_system_status(*, port: int) -> SystemStatusResponse:
     )
 
 
+_app_version_cache: str | None = None
+
+
 def _read_app_version() -> str:
-    """Read the host package version from ``backend/pyproject.toml``."""
+    """Read the host package version from ``backend/pyproject.toml``.
+
+    Memoized like ``_read_kernel_pin`` — the version cannot change without a
+    process restart, and this runs on every (5s-polled) status call.
+    """
+    global _app_version_cache
+    if _app_version_cache is not None:
+        return _app_version_cache
     here = Path(__file__).resolve()
     pyproject = here.parents[4] / "pyproject.toml"
+    version = "0.0.0"
     try:
         for line in pyproject.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped.startswith("version") and "=" in stripped:
-                return stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                version = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+                break
     except OSError:
         pass
-    return "0.0.0"
+    _app_version_cache = version
+    return version
 
 
 # ── Listening port discovery ───────────────────────────────────────────
