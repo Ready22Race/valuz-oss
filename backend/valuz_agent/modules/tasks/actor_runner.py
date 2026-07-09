@@ -320,8 +320,14 @@ async def run_session_to_idle(
             from valuz_agent.adapters.kernel_client import KernelUnavailableError
             from valuz_agent.modules.sessions.run_orchestrator import _finalize_session
 
+            # ``interrupted`` is a loop-local status (user/host cancelled the
+            # turn) — not a persistable kernel status (``FinalizeSessionRequest``
+            # accepts ``running|idle|terminated`` only). Mirror ``_finalize_actor``:
+            # the session is idle and resumable; the kernel already stamped the
+            # cancellation stop_reason itself.
+            kernel_status = "idle" if final_status == "interrupted" else final_status
             try:
-                await _finalize_session(session_id, content, final_status, error=turn_error)
+                await _finalize_session(session_id, content, kernel_status, error=turn_error)
             except KernelUnavailableError:
                 # Backend shutting down — kernel store already torn down. Finalize
                 # is pointless; boot recovery reconciles this session. Skip quietly
