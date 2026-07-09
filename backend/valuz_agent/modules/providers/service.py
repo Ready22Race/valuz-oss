@@ -709,6 +709,26 @@ def _models_with_runtimes(row: ProviderRow, compatible: list[str]) -> list[LLMMo
     return stamped
 
 
+def _stamp_contributed_runtimes(ch: LLMChannel) -> LLMChannel:
+    """Fill ``None`` per-model runtimes on an overlay-contributed (ADR-011)
+    channel from the single rule, so the providers list/detail carry runtimes for
+    system / org cards too — the frontend reads that field instead of re-deriving.
+    A contributor that declared its own runtimes (e.g. the gateway codex card)
+    keeps them. Mirrors ``_models_with_runtimes`` for the catalog path."""
+    if all(m.runtimes is not None for m in ch.models):
+        return ch
+    from valuz_agent.modules.settings.model_options import runtimes_for
+
+    ch_runtimes = tuple(runtimes_for(ch.compatible_protocols, provider_kind=ch.provider_kind))
+    # ``ch`` is a fresh per-call object from the contributor; ``LLMChannel`` is a
+    # mutable dataclass and ``LLMModel`` is frozen, so rebuild the model rows.
+    ch.models = [
+        m if m.runtimes is not None else LLMModel(id=m.id, label=m.label, runtimes=ch_runtimes)
+        for m in ch.models
+    ]
+    return ch
+
+
 def _row_to_list_item(row: ProviderRow) -> LLMChannel:
     compatible = _derive_compatible_protocols(row)
     group = _group_for(row.source, row.auth_type)
@@ -1143,7 +1163,11 @@ class ProviderService:
         # append. A contributed row with no selectable models is dropped: a
         # card with nothing to pick is noise (e.g. the 组织模型 card when the
         # org has no model of that protocol).
-        extra_items = [it for it in await ext.llm_provider.list(user_id=user_id) if it.models]
+        extra_items = [
+            _stamp_contributed_runtimes(it)
+            for it in await ext.llm_provider.list(user_id=user_id)
+            if it.models
+        ]
         # Virtual CLI-subscription templates for kinds not yet configured (no DB
         # row exists until the user logs in — see ``_materialize_builtin_subscription``).
         configured_kinds = {r.provider_kind for r in rows}
@@ -1180,7 +1204,7 @@ class ProviderService:
         # the user table first is safe.
         for it in await ext.llm_provider.list(user_id=user_id):
             if it.id == provider_id:
-                return _list_item_to_detail(it)
+                return _list_item_to_detail(_stamp_contributed_runtimes(it))
         # Still nothing: the id may be an unconfigured built-in subscription
         # template (virtualized in ``list_providers``) — resolve it so the edit
         # dialog opens instead of erroring with "获取模型详情失败".

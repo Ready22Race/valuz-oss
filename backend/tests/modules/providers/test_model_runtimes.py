@@ -9,7 +9,12 @@ frontend consumes the field instead of re-deriving. See
 from __future__ import annotations
 
 from valuz_agent.modules.providers.models import ProviderRow
-from valuz_agent.modules.providers.service import _row_to_detail, _row_to_list_item
+from valuz_agent.modules.providers.schemas import LLMChannel, LLMModel
+from valuz_agent.modules.providers.service import (
+    _row_to_detail,
+    _row_to_list_item,
+    _stamp_contributed_runtimes,
+)
 
 
 def _row(**kw: object) -> ProviderRow:
@@ -65,6 +70,46 @@ def test_codex_subscription_pins_codex_only() -> None:
         model_ids='["gpt-5-codex"]',
     )
     assert tuple(_row_to_list_item(row).models[0].runtimes or ()) == ("codex",)
+
+
+def _contributed(compatible: str, models: list[LLMModel]) -> LLMChannel:
+    return LLMChannel(
+        id="valuz-org-x",
+        name="组织模型",
+        provider_kind="system",
+        source="org",
+        enabled=True,
+        is_default=False,
+        deletable=False,
+        default_model=None,
+        test_status="never",
+        credential_source="system_managed",
+        auth_type="oauth",
+        protocol=None,
+        effective_protocol=compatible,
+        compatible_protocols=[compatible],
+        group="org",
+        group_rank=30,
+        models=models,
+    )
+
+
+def test_stamp_contributed_fills_none_runtimes() -> None:
+    ch = _contributed("openai-completion", [LLMModel(id="glm", label=None)])
+    out = _stamp_contributed_runtimes(ch)
+    assert tuple(out.models[0].runtimes or ()) == ("deepagents",)
+
+
+def test_stamp_contributed_openai_response_gets_codex() -> None:
+    ch = _contributed("openai-response", [LLMModel(id="doubao", label=None)])
+    out = _stamp_contributed_runtimes(ch)
+    assert tuple(out.models[0].runtimes or ()) == ("codex",)
+
+
+def test_stamp_contributed_preserves_declared_runtimes() -> None:
+    ch = _contributed("openai-response", [LLMModel(id="d", label=None, runtimes=("codex",))])
+    out = _stamp_contributed_runtimes(ch)
+    assert tuple(out.models[0].runtimes or ()) == ("codex",)
 
 
 def test_default_model_only_channel_synthesizes_a_model_row() -> None:
