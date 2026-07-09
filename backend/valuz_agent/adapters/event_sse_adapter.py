@@ -36,6 +36,13 @@ from valuz_agent.infra.sse import shielded
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS = 0.3
+# The DB backfill on queue-timeout exists to cover the subscribe/backfill race
+# and missed events — not as the primary delivery path (the live subscription
+# is). Running it on EVERY 0.3s timeout made each idle SSE stream issue ~3.3
+# empty reads/sec continuously; throttle it while keeping the first idle tick
+# immediate (post-subscribe race coverage) and the queue wait at 0.3s for
+# live responsiveness.
+DB_BACKFILL_INTERVAL_SECONDS = 2.0
 IDLE_HEARTBEAT_SECONDS = 15.0
 
 # History read-routing. Reads are UNIFIED through the DataService: whenever a
@@ -641,6 +648,8 @@ async def iter_events_sse(
             logger.debug("live event subscription unavailable; serving history only", exc_info=True)
 
     pump_task = asyncio.create_task(_pump(), name=f"sse-pump-{session_id}")
+    # 0.0 → 连接后的第一个空闲 tick 立即回读一次(订阅竞态窗口)。
+    last_db_poll = 0.0
     try:
         while True:
             if is_disconnected is not None and is_disconnected():
@@ -655,7 +664,17 @@ async def iter_events_sse(
             if event is None:
                 # Queue timeout. Poll DB for any events we might have
                 # missed (covers the subscribe/backfill race), then
-                # heartbeat if idle.
+                # heartbeat if idle. Throttled: the first idle tick reads
+                # immediately, after that at most every
+                # ``DB_BACKFILL_INTERVAL_SECONDS`` while the live
+                # subscription stays the real-time path.
+                now = asyncio.get_event_loop().time()
+                if now - last_db_poll < DB_BACKFILL_INTERVAL_SECONDS:
+                    if now - last_emit >= IDLE_HEARTBEAT_SECONDS:
+                        yield {"event": "heartbeat", "data": json.dumps({"seq": cursor})}
+                        last_emit = now
+                    continue
+                last_db_poll = now
                 db_frames = await shielded(
                     list_events_after(session_id, user_id=owner_id, after_seq=cursor)
                 )

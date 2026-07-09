@@ -17,6 +17,7 @@ kernel sessions/messages via the kernel's async ``StorePort``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -183,7 +184,7 @@ class RunsService:
         # "automation-triggered" signal for both chats and task leads.
         automation_session_ids = await self._automations.list_run_session_ids(user_id)
 
-        out: list[RunSummary] = []
+        candidates = []
         for sess in sessions:
             task_session = ts_map.get(sess.id)
             # member subtask sessions never surface as standalone runs
@@ -195,10 +196,19 @@ class RunsService:
                     continue
             elif effective not in _FINISHED_RUN_STATUS:
                 continue
+            candidates.append((sess, task_session, effective))
+
+        # Per-run enrichment (`_build` fetches the latest message/event) is
+        # independent per session — run it concurrently instead of one awaited
+        # round-trip per run (the finished view can carry ~100 runs, which
+        # made this loop the dominant cost of the polled overview).
+        async def _build_one(
+            sess: Any, task_session: Any, effective: str
+        ) -> RunSummary | None:
             # Isolate per-session enrichment: a single malformed session must
             # not blank the entire overview. Skip the offender, keep the rest.
             try:
-                summary = await self._build(
+                return await self._build(
                     user_id,
                     sess,
                     task_session,
@@ -214,8 +224,12 @@ class RunsService:
                     "runs overview: skipping session %s — failed to build summary",
                     sess.id,
                 )
-                continue
-            out.append(summary)
+                return None
+
+        built = await asyncio.gather(
+            *(_build_one(sess, task_session, effective) for sess, task_session, effective in candidates)
+        )
+        out: list[RunSummary] = [summary for summary in built if summary is not None]
 
         out.sort(key=lambda r: r.updated_at, reverse=True)
         if status == "running":
