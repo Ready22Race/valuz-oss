@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext } from "react";
+import { parseFileRef } from "@valuz/shared";
 
 export interface ConversationLocalFileLinkOptions {
   projectRootPath: string;
@@ -186,20 +187,25 @@ export function normalizeLocalFileHref(href: string): string {
   const withoutFragment = trimmed.split("#", 1)[0].split("?", 1)[0];
   let path = withoutFragment;
 
-  // ``valuz-file://<abs>`` (the model/artifact file scheme) is treated like
-  // ``file://`` — strip to the absolute path so the usual cwd-relative logic
-  // routes it to preview. See docs/design/file-address-resolution.md.
+  // ``valuz-file://<abs>`` (the model/artifact file scheme) and ``file://`` are
+  // stripped to the absolute path so the usual cwd-relative logic routes them to
+  // preview. See docs/design/file-address-resolution.md.
   const lower = withoutFragment.toLowerCase();
-  if (lower.startsWith("file://") || lower.startsWith("valuz-file://")) {
+  if (lower.startsWith("valuz-file://")) {
+    // Delegate to the single shared parser (tolerant — a model may emit a
+    // two-slash ref). It returns the DECODED absolute path, so finish here
+    // instead of re-decoding below.
+    const parsed = parseFileRef(withoutFragment);
+    if (parsed) return stripMarkdownLineSuffix(parsed);
+    path = withoutFragment.replace(/^valuz-file:\/\//i, "");
+  } else if (lower.startsWith("file://")) {
     try {
       const url = new URL(withoutFragment);
-      // Tolerate a two-slash ref (valuz-file://Users/…): the first path segment
-      // was mis-parsed as the host, so fold it back onto the path — same result
-      // as the canonical three-slash form.
+      // Tolerate a two-slash href — fold the mis-parsed host back onto the path.
       path = (url.host ? `/${url.host}` : "") + url.pathname;
       if (/^\/[a-zA-Z]:\//.test(path)) path = path.slice(1);
     } catch {
-      path = withoutFragment.replace(/^(valuz-)?file:\/\//i, "");
+      path = withoutFragment.replace(/^file:\/\//i, "");
     }
   }
 

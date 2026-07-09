@@ -1,4 +1,5 @@
 export * from "./assert";
+export * from "./file-uri";
 export * from "./format";
 export * from "./id";
 export * from "./safe-storage";
