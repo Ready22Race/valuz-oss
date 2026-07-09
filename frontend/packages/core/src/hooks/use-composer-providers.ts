@@ -1,32 +1,24 @@
 import { useMemo } from "react";
 import type { LLMChannelDetail } from "../api/providers-api";
 
-/** Runtime identifiers used by the runtime filter. Derived server-side
- *  from provider_kind / protocol — not carried on the API wire anymore. */
+/** Runtime identifiers used by the runtime filter. Server-resolved onto each
+ *  model's ``runtimes`` — not re-derived here. */
 export type RuntimeProvider = "claude_agent" | "codex" | "deepagents";
 
 /**
- * A provider is "usable" when picking it in the model dropdown could
- * actually run a turn. The frontend can't fully prove this — only the
- * backend knows whether the OAuth keychain is logged in — but it can
- * cheaply reject the obvious dead-ends:
+ * A provider is "usable" when picking it in the model dropdown could actually
+ * run a turn. The frontend can't fully prove this — only the backend knows
+ * whether the OAuth keychain is logged in — but it can cheaply reject the
+ * obvious dead-ends:
  *
- * - ``credential_source == "secret_ref"``: the user configured an API
- *   key. Usable.
- * - ``credential_source == "account_connection"``: linked to an OAuth
- *   account (e.g. Reportify). Usable while connected; the picker still
- *   shows it so the user can revisit the linked-account UI rather than
- *   hide the option.
+ * - ``credential_source == "secret_ref"``: the user configured an API key. Usable.
+ * - ``credential_source == "account_connection"``: linked OAuth account. Usable.
  * - ``credential_source == "none"`` + ``auth_type == "oauth"``: OAuth
- *   subscription provider (claude /login, codex /login). The host
- *   doesn't store credentials but the runtime SDK reads the CLI's
- *   keychain — so it's usable as long as the user has logged in.
- * - ``credential_source == "none"`` + ``auth_type == "api_key"``: no
- *   credentials configured. Always picks 422 → hide.
+ *   subscription provider (claude /login, codex /login) — usable once logged in.
+ * - ``credential_source == "none"`` + ``auth_type == "api_key"``: no credentials
+ *   configured. Always 422 → hide.
  *
- * Exported because the Settings → Providers list applies the same rule
- * (an unconfigured api_key provider is just noise — picking it goes
- * nowhere). REP-107.
+ * Exported because the Settings → Providers list applies the same rule. REP-107.
  */
 export const providerHasUsableCredentials = (
   c: Pick<LLMChannelDetail, "credential_source" | "auth_type">,
@@ -38,103 +30,21 @@ export const providerHasUsableCredentials = (
 };
 
 /**
- * OAuth-subscription provider kinds — providers backed by these can
- * only run on their dedicated CLI runtime (``claude_agent`` /
- * ``codex``) because authentication lives in that CLI's keychain.
- * They're hidden from the picker for runtime=deepagents (Valuz
- * Agent), which expects an api_key it can read.
- */
-const SUBSCRIPTION_PROVIDER_KINDS = new Set([
-  "claude-subscription",
-  "codex-subscription",
-]);
-
-/** Whether the provider can drive an anthropic-shape session. Trusts
- * the backend's ``compatible_protocols`` first — that field is built
- * from the descriptor's ``supports_protocol_selection`` flag and so
- * correctly marks DeepSeek / 智谱 (GLM) / Moonshot / MiniMax as
- * anthropic capable. Falls back to the row's ``protocol`` /
- * ``provider_kind`` for old API responses that pre-date the field. */
-const ANTHROPIC_PROVIDER_KINDS = new Set(["anthropic", "claude-subscription"]);
-
-/** Can ``c`` drive any of the ``allowed`` wire protocols? Trusts
- * ``compatible_protocols`` (kernel V5+bba3014 source of truth) and falls
- * back to the row's single ``protocol`` / ``provider_kind`` for legacy
- * rows. ``ANTHROPIC_PROVIDER_KINDS`` is only consulted when "anthropic"
- * is in ``allowed`` — provider_kind heuristics aren't trusted for the
- * openai-* / gemini families (their kinds are too noisy). */
-const canDriveAny = (
-  c: Pick<
-    LLMChannelDetail,
-    "compatible_protocols" | "protocol" | "provider_kind"
-  >,
-  allowed: readonly string[],
-): boolean => {
-  if (c.compatible_protocols && c.compatible_protocols.length > 0) {
-    return c.compatible_protocols.some((p) => allowed.includes(p));
-  }
-  // Legacy fallback (pre-bba3014). Hyphen-form openai-* and bare "openai"
-  // both map to "openai-completion" for the purposes of this check.
-  if (c.protocol) {
-    if (allowed.includes(c.protocol)) return true;
-    if (c.protocol === "openai" && allowed.includes("openai-completion")) {
-      return true;
-    }
-  }
-  // Trust provider_kind only for the anthropic side — the openai-* / gemini
-  // kinds are too noisy to infer protocol from.
-  if (
-    allowed.includes("anthropic") &&
-    ANTHROPIC_PROVIDER_KINDS.has(c.provider_kind)
-  ) {
-    return true;
-  }
-  return false;
-};
-
-const canDriveAnthropic = (
-  c: Pick<
-    LLMChannelDetail,
-    "compatible_protocols" | "protocol" | "provider_kind"
-  >,
-): boolean => canDriveAny(c, ["anthropic"]);
-
-/** Wire protocols each runtime's SDK can speak. ``deepagents`` (Valuz
- * Agent) is the multi-shape one — it talks anthropic OR openai-completion
- * OR gemini. ``claude_agent`` and ``codex`` are single-shape (their
- * respective CLIs/SDKs only know one wire). Used together with
- * ``canDriveAny`` to filter providers for the runtime picker. */
-const DEEPAGENTS_PROTOCOLS = [
-  "anthropic",
-  "openai-completion",
-  "gemini",
-] as const;
-const CODEX_PROTOCOLS = ["openai-response"] as const;
-
-/**
- * Transforms enabled LLMChannelDetail[] into flat ModelSelectorItem[]
- * for the Composer model selector dropdown.
+ * Transforms enabled ``LLMChannelDetail[]`` into flat ``ModelSelectorItem[]``
+ * for the composer / agent model selector, keeping only the (provider, model)
+ * pairs whose model can run on ``runtimeFilter``.
  *
- * REP-107 + follow-up: ``runtimeFilter`` controls which providers are
- * surfaced.
- * - ``claude_agent`` / ``codex``: only providers bound to that exact
- *   runtime — those SDKs each speak one wire shape and won't talk to
- *   anything else.
- * - ``deepagents`` (Valuz Agent): every credentialed provider EXCEPT
- *   the OAuth-subscription ones (``claude-subscription`` /
- *   ``codex-subscription``). Valuz Agent is wire-shape-flexible (both
- *   OpenAI and Anthropic) and reads credentials from the provider row,
- *   so it can drive any api_key provider — but it can't authenticate
- *   to a subscription provider because that token lives inside the
- *   provider CLI's keychain, not the host.
- * - ``undefined``: pre-runtime-picker fallback — flatten everything
- *   credentialed.
+ * Runtime compatibility is read verbatim from ``model.runtimes`` — server-resolved
+ * via ``runtimes_for`` (see docs/design/runtime-model-compat-single-source.md).
+ * The hook no longer re-derives it from ``protocol`` / ``provider_kind``:
+ * subscription exclusion, dual-protocol channels, and the openai-response→codex
+ * rule are all already encoded in that field. A channel that resolves to a single
+ * ``default_model`` is materialized backend-side as one model row (carrying
+ * ``runtimes``), so there is no client-side fallback here.
  *
- * API-key providers with no credentials configured (``credential_source ==
- * "none"`` + ``auth_type == "api_key"``) are filtered out: choosing
- * them would always 422 at session-creation, so showing them as picker
- * options is pure noise. The user can re-add them by configuring a key
- * in Settings → Providers.
+ * ``runtimeFilter`` undefined = pre-runtime-picker fallback: every credentialed
+ * model. API-key providers with no credentials are dropped (they always 422 at
+ * session-create, so surfacing them is pure noise).
  */
 export const useComposerProviders = (
   providers: LLMChannelDetail[],
@@ -145,51 +55,19 @@ export const useComposerProviders = (
       providers
         .filter((c) => c.enabled)
         .filter(providerHasUsableCredentials)
-        .filter((c) => {
-          if (!runtimeFilter) return true;
-          if (runtimeFilter === "claude_agent") {
-            // ``compatible_protocols`` is the source of truth — backed
-            // by the descriptor's ``supports_protocol_selection`` flag
-            // server-side, so DeepSeek / 智谱 / Moonshot / MiniMax all
-            // surface here (they speak anthropic via ``<base>/anthropic``)
-            // alongside the single-protocol anthropic providers and the
-            // Claude Pro / Max subscription.
-            return canDriveAnthropic(c);
-          }
-          if (runtimeFilter === "deepagents") {
-            // Exclude OAuth subscription providers — their credentials live
-            // in another CLI's keychain (claude /login, codex /login), so
-            // deepagents (Valuz Agent) can't authenticate to them.
-            if (SUBSCRIPTION_PROVIDER_KINDS.has(c.provider_kind)) return false;
-            // Then require at least one wire protocol the SDK can speak —
-            // protects against system providers bound to other shapes (e.g.
-            // overlay-contributed openai-response channels) leaking in.
-            return canDriveAny(c, DEEPAGENTS_PROTOCOLS);
-          }
-          // codex: the codex CLI reads its own keychain (codex /login) so
-          // the OAuth ``codex-subscription`` kind always belongs here.
-          // Beyond that, allow non-subscription providers that declare
-          // ``openai-response`` compatibility — this is how overlay system
-          // channels (cloud-backend gateway) surface a Codex-runtime card.
-          if (c.provider_kind === "codex-subscription") return true;
-          if (SUBSCRIPTION_PROVIDER_KINDS.has(c.provider_kind)) return false;
-          return canDriveAny(c, CODEX_PROTOCOLS);
-        })
-        .flatMap((c) => {
-          // ADR-011: models are nested rows now — flatten to their ids.
-          const modelIds =
-            c.models.length > 0
-              ? c.models.map((m) => m.id)
-              : c.default_model
-                ? [c.default_model]
-                : [];
-          return modelIds.map((m) => ({
-            providerId: c.id,
-            providerName: c.name,
-            modelId: m,
-            isDefault: c.is_default && m === c.default_model,
-            source: c.source,
-          }));
-        }),
+        .flatMap((c) =>
+          c.models
+            .filter(
+              (m) =>
+                !runtimeFilter || (m.runtimes ?? []).includes(runtimeFilter),
+            )
+            .map((m) => ({
+              providerId: c.id,
+              providerName: c.name,
+              modelId: m.id,
+              isDefault: c.is_default && m.id === c.default_model,
+              source: c.source,
+            })),
+        ),
     [providers, runtimeFilter],
   );

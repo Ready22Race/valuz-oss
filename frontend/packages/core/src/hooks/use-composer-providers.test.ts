@@ -5,11 +5,22 @@ import { describe, expect, it } from "vitest";
 import type { LLMModel } from "@valuz/shared";
 
 import type { LLMChannelDetail } from "../api/providers-api";
-import { useComposerProviders } from "./use-composer-providers";
+import {
+  useComposerProviders,
+  type RuntimeProvider,
+} from "./use-composer-providers";
 
-/** Wrap bare model ids into ADR-011 ``LLMModel`` rows. */
-const mdl = (ids: string[]): LLMModel[] =>
-  ids.map((id) => ({ id, label: null, runtimes: null }));
+/** Wrap bare model ids into ADR-011 ``LLMModel`` rows carrying the
+ *  server-resolved ``runtimes`` the picker filters on. */
+const mdl = (ids: string[], runtimes: RuntimeProvider[]): LLMModel[] =>
+  ids.map((id) => ({ id, label: null, runtimes }));
+
+// Common runtime sets (what the backend ``runtimes_for`` stamps):
+const ANTHROPIC: RuntimeProvider[] = ["claude_agent", "deepagents"];
+const OPENAI_COMPLETION: RuntimeProvider[] = ["deepagents"];
+const OPENAI_RESPONSE: RuntimeProvider[] = ["codex"];
+const CODEX_SUB: RuntimeProvider[] = ["codex"];
+const CLAUDE_SUB: RuntimeProvider[] = ["claude_agent"];
 
 const provider = (
   overrides: Partial<LLMChannelDetail> & Pick<LLMChannelDetail, "id" | "name">,
@@ -42,12 +53,12 @@ describe("useComposerProviders", () => {
       provider({
         id: "ch-anthropic",
         name: "Anthropic",
-        models: mdl(["claude-sonnet-4-6", "claude-opus-4-7"]),
+        models: mdl(["claude-sonnet-4-6", "claude-opus-4-7"], ANTHROPIC),
       }),
       provider({
         id: "ch-openai",
         name: "OpenAI",
-        models: mdl(["gpt-4o"]),
+        models: mdl(["gpt-4o"], OPENAI_COMPLETION),
       }),
     ];
 
@@ -61,16 +72,12 @@ describe("useComposerProviders", () => {
 
   it("filters out disabled providers", () => {
     const providers = [
-      provider({
-        id: "ch-on",
-        name: "On",
-        models: mdl(["m1"]),
-      }),
+      provider({ id: "ch-on", name: "On", models: mdl(["m1"], ANTHROPIC) }),
       provider({
         id: "ch-off",
         name: "Off",
         enabled: false,
-        models: mdl(["m2"]),
+        models: mdl(["m2"], ANTHROPIC),
       }),
     ];
 
@@ -78,48 +85,41 @@ describe("useComposerProviders", () => {
     expect(result.current.map((m) => m.providerId)).toEqual(["ch-on"]);
   });
 
-  it("falls back to default_model when model_options is empty", () => {
+  it("drops credential-less api_key providers", () => {
     const providers = [
       provider({
-        id: "ch-bare",
-        name: "Bare",
-        default_model: "fallback-id",
+        id: "ch-unconfigured",
+        name: "Unconfigured",
+        credential_source: "none",
+        auth_type: "api_key",
+        models: mdl(["m1"], ANTHROPIC),
       }),
     ];
-
     const { result } = renderHook(() => useComposerProviders(providers));
-    expect(result.current).toEqual([
-      {
-        providerId: "ch-bare",
-        providerName: "Bare",
-        modelId: "fallback-id",
-        isDefault: false,
-        source: "managed",
-      },
-    ]);
+    expect(result.current).toEqual([]);
   });
 
-  it("for runtimeFilter=deepagents shows every credentialed provider except OAuth-subscription ones", () => {
+  it("for runtimeFilter=deepagents keeps models whose runtimes include deepagents", () => {
     const providers = [
       provider({
         id: "ch-anthropic",
         name: "Anthropic",
-        provider_kind: "anthropic",
-        models: mdl(["claude-sonnet-4-6"]),
+        models: mdl(["claude-sonnet-4-6"], ANTHROPIC),
       }),
       provider({
         id: "ch-openai",
         name: "OpenAI",
         provider_kind: "openai",
-        models: mdl(["gpt-4o"]),
+        models: mdl(["gpt-4o"], OPENAI_COMPLETION),
       }),
+      // Subscriptions don't run on deepagents (their runtimes omit it).
       provider({
         id: "ch-claude-subscription",
         name: "Claude (订阅)",
         provider_kind: "claude-subscription",
         credential_source: "none",
         auth_type: "oauth",
-        models: mdl(["claude-sonnet-4-6"]),
+        models: mdl(["claude-sonnet-4-6"], CLAUDE_SUB),
       }),
       provider({
         id: "ch-codex-subscription",
@@ -127,7 +127,7 @@ describe("useComposerProviders", () => {
         provider_kind: "codex-subscription",
         credential_source: "none",
         auth_type: "oauth",
-        models: mdl(["gpt-5-codex"]),
+        models: mdl(["gpt-5-codex"], CODEX_SUB),
       }),
     ];
 
@@ -140,86 +140,43 @@ describe("useComposerProviders", () => {
     ]);
   });
 
-  it("for runtimeFilter=claude_agent matches by effective protocol", () => {
-    // claude_agent's supported_protocols == ("anthropic",), so the
-    // picker should surface every anthropic-protocol provider even
-    // when its ``runtime_provider`` column has drifted (e.g. a
-    // non-``compatible`` provider_kind switched to anthropic
-    // protocol — providers/service.py only re-syncs runtime_provider
-    // for ``compatible`` rows).
+  it("for runtimeFilter=claude_agent keeps models whose runtimes include claude_agent", () => {
     const providers = [
-      // Built-in: provider_kind anthropic, protocol blank → derived
-      // anthropic. SHOULD appear.
       provider({
         id: "ch-anthropic",
         name: "Anthropic",
-        provider_kind: "anthropic",
-        protocol: null,
-        models: mdl(["claude-sonnet-4-6"]),
+        models: mdl(["claude-sonnet-4-6"], ANTHROPIC),
       }),
-      // Built-in subscription: provider_kind claude-subscription,
-      // protocol blank → derived anthropic. SHOULD appear.
       provider({
         id: "ch-claude-subscription",
         name: "Claude (订阅)",
         provider_kind: "claude-subscription",
-        protocol: null,
         credential_source: "none",
         auth_type: "oauth",
-        models: mdl(["claude-sonnet-4-6"]),
+        models: mdl(["claude-sonnet-4-6"], CLAUDE_SUB),
       }),
-      // User provider: deepseek kind, anthropic protocol explicit.
-      // SHOULD appear under the protocol-based filter.
-      provider({
-        id: "ch-deepseek-anthropic",
-        name: "DeepSeek (anthropic)",
-        provider_kind: "deepseek",
-        protocol: "anthropic",
-        credential_source: "secret_ref",
-        models: mdl(["deepseek-v4"]),
-      }),
-      // DeepSeek (dual-protocol built-in): backend marks it as both
-      // anthropic + openai capable via ``compatible_protocols``. SHOULD
-      // appear here — runtime drives base_url to ``<base>/anthropic``
-      // at resolve time.
+      // DeepSeek exposing the anthropic wire → claude_agent + deepagents.
       provider({
         id: "ch-deepseek-dual",
         name: "DeepSeek",
         provider_kind: "deepseek",
-        protocol: null,
-        compatible_protocols: ["anthropic", "openai-completion"],
-        credential_source: "secret_ref",
-        models: mdl(["deepseek-v4-flash"]),
+        models: mdl(["deepseek-v4"], ANTHROPIC),
       }),
-      // OpenAI-protocol provider — should NOT appear.
+      // openai-completion only → not claude_agent.
       provider({
         id: "ch-openai",
         name: "OpenAI",
         provider_kind: "openai",
-        protocol: null,
-        compatible_protocols: ["openai-completion"],
-        models: mdl(["gpt-4o"]),
+        models: mdl(["gpt-4o"], OPENAI_COMPLETION),
       }),
-      provider({
-        id: "ch-compat-openai",
-        name: "Custom (OpenAI)",
-        provider_kind: "compatible",
-        protocol: "openai-completion",
-        compatible_protocols: ["openai-completion"],
-        models: mdl(["custom-gpt"]),
-      }),
-      // Codex subscription — speaks openai-response (kernel V5+bba3014
-      // 4-value enum), must be excluded from the deepagents picker
-      // because its credentials live in the codex CLI's keychain.
+      // openai-response only (codex) → not claude_agent.
       provider({
         id: "ch-codex",
         name: "Codex (订阅)",
         provider_kind: "codex-subscription",
-        protocol: null,
-        compatible_protocols: ["openai-response"],
         credential_source: "none",
         auth_type: "oauth",
-        models: mdl(["gpt-5-codex"]),
+        models: mdl(["gpt-5-codex"], CODEX_SUB),
       }),
     ];
 
@@ -229,12 +186,11 @@ describe("useComposerProviders", () => {
     expect(result.current.map((m) => m.providerId)).toEqual([
       "ch-anthropic",
       "ch-claude-subscription",
-      "ch-deepseek-anthropic",
       "ch-deepseek-dual",
     ]);
   });
 
-  it("for runtimeFilter=codex only shows codex-subscription (not claude-subscription)", () => {
+  it("for runtimeFilter=codex keeps openai-response models (subscription + custom/system)", () => {
     const providers = [
       provider({
         id: "ch-codex-subscription",
@@ -242,27 +198,32 @@ describe("useComposerProviders", () => {
         provider_kind: "codex-subscription",
         credential_source: "none",
         auth_type: "oauth",
-        models: mdl(["gpt-5-codex"]),
+        models: mdl(["gpt-5-codex"], CODEX_SUB),
       }),
-      // Claude subscription — codex CLI can't authenticate to Anthropic's
-      // API (reads its own keychain via codex /login), so the picker
-      // intentionally excludes it.
+      // Custom openai-response channel (e.g. Volcengine Ark) → codex too.
+      provider({
+        id: "ch-ark",
+        name: "Custom (Response)",
+        provider_kind: "compatible",
+        protocol: "openai-response",
+        compatible_protocols: ["openai-response"],
+        models: mdl(["doubao-seed"], OPENAI_RESPONSE),
+      }),
+      // Claude subscription — codex can't drive it.
       provider({
         id: "ch-claude-subscription",
         name: "Claude (订阅)",
         provider_kind: "claude-subscription",
         credential_source: "none",
         auth_type: "oauth",
-        models: mdl(["claude-sonnet-4-6"]),
+        models: mdl(["claude-sonnet-4-6"], CLAUDE_SUB),
       }),
-      // OpenAI api_key provider — codex CLI only speaks the Responses
-      // API, not arbitrary openai-compatible endpoints, so the picker
-      // intentionally hides it.
+      // openai-completion api_key → not codex.
       provider({
         id: "ch-openai",
         name: "OpenAI",
         provider_kind: "openai",
-        models: mdl(["gpt-4o"]),
+        models: mdl(["gpt-4o"], OPENAI_COMPLETION),
       }),
     ];
 
@@ -271,23 +232,12 @@ describe("useComposerProviders", () => {
     );
     expect(result.current.map((m) => m.providerId)).toEqual([
       "ch-codex-subscription",
+      "ch-ark",
     ]);
   });
 
-  it("for runtimeFilter=codex also surfaces system providers compatible with openai-response", () => {
-    // Cloud-backend gateway → overlay registers an openai-response system
-    // descriptor (provider_kind="system", compatible_protocols=["openai-response"]).
-    // The codex picker must surface it alongside the OAuth subscription.
+  it("for runtimeFilter=codex surfaces system openai-response channels", () => {
     const providers = [
-      provider({
-        id: "ch-codex-subscription",
-        name: "Codex (订阅)",
-        provider_kind: "codex-subscription",
-        credential_source: "none",
-        auth_type: "oauth",
-        compatible_protocols: ["openai-response"],
-        models: mdl(["gpt-5-codex"]),
-      }),
       provider({
         id: "valuz-channel-codex",
         name: "Valuz 系统模型",
@@ -296,7 +246,7 @@ describe("useComposerProviders", () => {
         credential_source: "system_managed",
         auth_type: "oauth",
         compatible_protocols: ["openai-response"],
-        models: mdl(["gpt-5.4-nano"]),
+        models: mdl(["gpt-5.4-nano"], OPENAI_RESPONSE),
       }),
       // Anthropic-only system provider — must NOT leak into the codex card.
       provider({
@@ -307,7 +257,7 @@ describe("useComposerProviders", () => {
         credential_source: "system_managed",
         auth_type: "oauth",
         compatible_protocols: ["anthropic"],
-        models: mdl(["sys-reportify-pro"]),
+        models: mdl(["sys-reportify-pro"], ANTHROPIC),
       }),
     ];
 
@@ -315,17 +265,12 @@ describe("useComposerProviders", () => {
       useComposerProviders(providers, "codex"),
     );
     expect(result.current.map((m) => m.providerId)).toEqual([
-      "ch-codex-subscription",
       "valuz-channel-codex",
     ]);
   });
 
-  it("for runtimeFilter=deepagents excludes system providers that only speak openai-response", () => {
-    // Mirror of the codex case: the openai-response system provider must
-    // NOT appear under the Deep Agents card (Valuz Agent SDK doesn't speak
-    // the Responses API).
+  it("for runtimeFilter=deepagents excludes openai-response-only system channels", () => {
     const providers = [
-      // Anthropic-capable system provider — SHOULD appear.
       provider({
         id: "valuz-channel",
         name: "Valuz 系统模型",
@@ -334,9 +279,8 @@ describe("useComposerProviders", () => {
         credential_source: "system_managed",
         auth_type: "oauth",
         compatible_protocols: ["anthropic"],
-        models: mdl(["sys-reportify-pro"]),
+        models: mdl(["sys-reportify-pro"], ANTHROPIC),
       }),
-      // openai-response-only system provider — should be filtered out.
       provider({
         id: "valuz-channel-codex",
         name: "Valuz 系统模型",
@@ -345,7 +289,7 @@ describe("useComposerProviders", () => {
         credential_source: "system_managed",
         auth_type: "oauth",
         compatible_protocols: ["openai-response"],
-        models: mdl(["gpt-5.4-nano"]),
+        models: mdl(["gpt-5.4-nano"], OPENAI_RESPONSE),
       }),
     ];
 
@@ -353,85 +297,5 @@ describe("useComposerProviders", () => {
       useComposerProviders(providers, "deepagents"),
     );
     expect(result.current.map((m) => m.providerId)).toEqual(["valuz-channel"]);
-  });
-
-  it("ignores runtimeFilter=undefined (backwards compat)", () => {
-    const providers = [
-      provider({
-        id: "ch-anthropic",
-        name: "Anthropic",
-        models: mdl(["m1"]),
-      }),
-      provider({
-        id: "ch-openai",
-        name: "OpenAI",
-        models: mdl(["m2"]),
-      }),
-    ];
-
-    const { result } = renderHook(() =>
-      useComposerProviders(providers, undefined),
-    );
-    expect(result.current.map((m) => m.providerId)).toEqual([
-      "ch-anthropic",
-      "ch-openai",
-    ]);
-  });
-
-  it("hides api_key providers with no credentials configured", () => {
-    const providers = [
-      // configured — should appear
-      provider({
-        id: "ch-anthropic-configured",
-        name: "Anthropic",
-        credential_source: "secret_ref",
-        models: mdl(["m1"]),
-      }),
-      // empty — should be filtered out
-      provider({
-        id: "ch-anthropic-blank",
-        name: "Anthropic blank",
-        credential_source: "none",
-        auth_type: "api_key",
-        models: mdl(["m2"]),
-      }),
-    ];
-
-    const { result } = renderHook(() => useComposerProviders(providers));
-    expect(result.current.map((m) => m.providerId)).toEqual([
-      "ch-anthropic-configured",
-    ]);
-  });
-
-  it("keeps oauth providers even when credential_source is none (CLI manages keychain)", () => {
-    const providers = [
-      provider({
-        id: "ch-claude-subscription",
-        name: "Claude (订阅)",
-        credential_source: "none",
-        auth_type: "oauth",
-        models: mdl(["claude-sonnet-4-6"]),
-      }),
-    ];
-
-    const { result } = renderHook(() => useComposerProviders(providers));
-    expect(result.current.map((m) => m.providerId)).toEqual([
-      "ch-claude-subscription",
-    ]);
-  });
-
-  it("keeps account_connection providers (Reportify-style OAuth)", () => {
-    const providers = [
-      provider({
-        id: "ch-reportify",
-        name: "Valuz",
-        credential_source: "account_connection",
-        auth_type: "api_key",
-        models: mdl(["reportify-lite"]),
-      }),
-    ];
-
-    const { result } = renderHook(() => useComposerProviders(providers));
-    expect(result.current.map((m) => m.providerId)).toEqual(["ch-reportify"]);
   });
 });
