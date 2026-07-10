@@ -172,9 +172,7 @@ class SkillDatastore:
     # ------------------------------------------------------------------
 
     async def list_library_disabled_ids(self, user_id: str) -> set[str]:
-        """Index-row ids the user has turned OFF in the library. Default is on,
-        so this returns only the explicitly-disabled rows — the set the catalog
-        overlay reads to flip ``SkillView.library_enabled`` by id."""
+        """Index-row ids currently OFF in the library."""
         rows = (
             await self._db.execute(
                 select(SkillIndexRow.id).where(
@@ -186,7 +184,7 @@ class SkillDatastore:
         return set(rows)
 
     async def list_library_disabled_slugs(self, user_id: str) -> set[str]:
-        """Skill slugs the user has turned OFF in the library."""
+        """Skill slugs currently OFF in the library."""
         rows = (
             await self._db.execute(
                 select(SkillIndexRow.slug).where(

@@ -29,6 +29,7 @@ from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPo
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
 from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator, SandboxAllocatorPort
 from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
+from valuz_agent.ports.skill_lifecycle import NoopSkillLifecycleHook, SkillLifecycleHook
 
 
 class Extensions:
@@ -53,6 +54,7 @@ class Extensions:
         # overlay binds a per-user pool allocator (one sandbox per user_id).
         self.sandbox_allocator: SandboxAllocatorPort = BootSingletonAllocator()
         self.resource_list_hook: ResourceListHook = NoopResourceListHook()
+        self.skill_lifecycle: SkillLifecycleHook = NoopSkillLifecycleHook()
         # Resolve a file's absolute path into a client-usable access address
         # (see docs/design/file-address-resolution.md). OSS default returns the
         # local absolute path (bundled desktop reads it directly); the commercial

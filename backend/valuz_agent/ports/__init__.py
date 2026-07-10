@@ -71,6 +71,13 @@ from valuz_agent.ports.sandbox_policy import (
     get_sandbox_policy,
     set_sandbox_policy,
 )
+from valuz_agent.ports.skill_lifecycle import (
+    NoopSkillLifecycleHook,
+    SkillLifecycleHook,
+    SkillSaveOrigin,
+    get_skill_lifecycle_hook,
+    set_skill_lifecycle_hook,
+)
 from valuz_agent.ports.skill_registry import SkillRegistryPort
 from valuz_agent.ports.tool_provider import ToolProvider
 
@@ -87,6 +94,7 @@ __all__ = [
     "MeterEvent",
     "NoopBillingProvider",
     "NoopLLMProvider",
+    "NoopSkillLifecycleHook",
     "ParserBackend",
     "ParserCapabilityNotReady",
     "ParserPlugin",
@@ -107,6 +115,8 @@ __all__ = [
     "SecretResolver",
     "SetupRequirement",
     "SkillRegistryPort",
+    "SkillLifecycleHook",
+    "SkillSaveOrigin",
     "ResolvedAddress",
     "SplitPolicy",
     "SystemProviderImmutable",
@@ -116,8 +126,10 @@ __all__ = [
     "get_file_address_resolver",
     "get_provider_policy",
     "get_sandbox_policy",
+    "get_skill_lifecycle_hook",
     "set_billing_port",
     "set_file_address_resolver",
     "set_provider_policy",
     "set_sandbox_policy",
+    "set_skill_lifecycle_hook",
 ]

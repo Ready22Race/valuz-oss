@@ -1639,7 +1639,7 @@
     "automationFailed": "自动化操作失败",
     "boundToProject": "· 已绑定到 {name}",
     "builtin": "内置",
-    "builtinHint": "随客户端分发 · 不可关闭",
+    "builtinHint": "随客户端分发",
     "cancelled": "已取消,未写入技能库",
     "cannotAccessLink": "无法访问该链接",
     "categoryCustom": "自定义 · User",

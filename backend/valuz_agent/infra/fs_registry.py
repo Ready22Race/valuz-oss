@@ -327,7 +327,7 @@ class FsRegistry:
         """Return the canonical write-target for promoted user skills.
 
         ``settings.user_skills_dir`` is the single source of truth. It defaults
-        to ``~/.agent/skills/`` and may contain ``{user_id}``, matching the
+        to ``~/.agents/skills/`` and may contain ``{user_id}``, matching the
         ``VALUZ_DATA_DIR`` template convention.
 
         ``source`` is kept for API compatibility but ignored: the host
@@ -362,7 +362,7 @@ class FsRegistry:
         Used by ``providers.skills_filesystem`` to surface skills the
         user authored in their Claude Code / Codex CLI before adopting
         Valuz. New promotions never write here — the canonical target
-        is ``user_skill_root()`` (``~/.agent/skills/`` by default).
+        is ``user_skill_root()`` (``~/.agents/skills/`` by default).
         """
         roots: list[Path] = []
         for sub in (".claude/skills", ".codex/skills"):

@@ -172,7 +172,7 @@ export const CreateAgentDialog = ({
     void (async () => {
       const [skillRes, connRes] = await Promise.all([
         skillsApi
-          .list()
+          .list(undefined, { libraryEnabled: true })
           .catch(() => ({ project_id: "", skills: [] as SkillView[] })),
         connectorsApi
           .list()
