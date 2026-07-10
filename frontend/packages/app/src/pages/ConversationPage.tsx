@@ -3120,20 +3120,21 @@ export const ConversationPage = () => {
     refreshFileTree();
   }, [refreshFileTree]);
 
-  // Auto-refresh on turn end: when ``sending`` flips false, the agent
-  // has just finished writing whatever artifacts it was going to. Pull
+  // Auto-refresh on turn end: when the derived ``isBusy`` flips false, the
+  // agent has just finished writing whatever artifacts it was going to. Pull
   // a fresh tree so the panel reflects new files without the user
-  // having to switch projects or hit refresh manually.
-  const prevSendingRef = useRef(sending);
+  // having to switch projects or hit refresh manually. (``isBusy`` rather
+  // than raw ``sending`` so a stuck flag can't suppress the refresh.)
+  const prevBusyRef = useRef(isBusy);
   useEffect(() => {
-    if (prevSendingRef.current && !sending) {
+    if (prevBusyRef.current && !isBusy) {
       refreshFileTree();
       // The agent may have called ``deliver_artifacts`` during the turn —
       // pull the fresh 生成文件 list alongside the file tree.
       void refreshArtifacts();
     }
-    prevSendingRef.current = sending;
-  }, [sending, refreshFileTree, refreshArtifacts]);
+    prevBusyRef.current = isBusy;
+  }, [isBusy, refreshFileTree, refreshArtifacts]);
 
   // Loading server-side attachments on session change + polling parse status
   // is owned by ``useSessionAttachments`` above.
@@ -3688,9 +3689,15 @@ export const ConversationPage = () => {
             window.clearInterval(pollTimer);
             pollTimer = null;
           }
-          setSending(false);
+          // Only the CURRENT subscription may release the loading flag. A
+          // superseded one (a hung stream aborted by the next send's
+          // ``subscribeToSession``) finalises late — an unconditional
+          // ``setSending(false)`` here would clobber the new turn's flag.
+          // Paths that abort AND clear ``abortRef`` themselves (interrupt,
+          // session switch) also reset ``sending`` themselves.
           if (abortRef.current === abort) {
             abortRef.current = null;
+            setSending(false);
           }
         });
     },
@@ -3774,7 +3781,9 @@ export const ConversationPage = () => {
   // The actual send. Attachments are uploaded on attach, so this never
   // uploads — it just mints/reuses the session and posts the message.
   const performSend = async () => {
-    if (!draft.trim() || sending) return;
+    // Re-entrancy guard on the derived ``isBusy`` (not raw ``sending``): a
+    // stuck ``sending`` on a reconciled-idle session must not swallow the send.
+    if (!draft.trim() || isBusy) return;
     // Skill-creator binds an agent (its create flow needs one) — nudge if none.
     // A normal new 临时对话 may now be agentless (a quick chat on the default
     // model), so it sends without an agent pick.
@@ -4089,20 +4098,30 @@ export const ConversationPage = () => {
     subscribeToSession,
   ]);
 
-  // Refetch on a turn boundary (sending → idle): drained items drop and any
-  // blocked / paused state surfaces (session-input-queue §8.4).
-  const prevQueueSendingRef = useRef(false);
+  // Refetch on a turn boundary (busy → idle): drained items drop and any
+  // blocked / paused state surfaces (session-input-queue §8.4). Keyed on the
+  // derived ``isBusy`` (not raw ``sending``) so the resync still fires when a
+  // missed terminal frame leaves ``sending`` stuck and only the status
+  // reconciliation ends the turn.
+  const prevQueueBusyRef = useRef(false);
   useEffect(() => {
-    if (prevQueueSendingRef.current && !sending) void refreshQueue();
-    prevQueueSendingRef.current = sending;
-  }, [sending, refreshQueue]);
+    if (prevQueueBusyRef.current && !isBusy) void refreshQueue();
+    prevQueueBusyRef.current = isBusy;
+  }, [isBusy, refreshQueue]);
 
   // Send entry point. While a turn is running, a follow-up is queued (drains
   // after the active turn). Otherwise it blocks on attachments still parsing —
   // the confirm dialog lets the user wait or submit with only the raw file.
+  //
+  // Routing MUST gate on the derived ``isBusy``, not the raw ``sending`` flag:
+  // ``sending`` can stay stuck true after a missed terminal frame (the exact
+  // case ``deriveTurnActive`` reconciles away for the DISPLAY). Gating here on
+  // the raw flag made a follow-up on a visually-idle session silently detour
+  // through the queue — the backend idle-kick drained it immediately (so it
+  // ran), but a phantom queue bubble stayed pinned under the composer.
   const handleSend = () => {
     if (!draft.trim()) return;
-    if (sending) {
+    if (isBusy) {
       void performEnqueue();
       return;
     }
@@ -5648,7 +5667,7 @@ export const ConversationPage = () => {
               onClick={handleScrollToBottom}
               className={cn(
                 "absolute bottom-full left-1/2 z-20 mb-3 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-surface-border bg-surface shadow-md transition-opacity hover:bg-surface-soft",
-                sending &&
+                isBusy &&
                   "animate-[border-breathe_1.8s_ease-in-out_infinite] border-brand/60",
               )}
             >
