@@ -127,6 +127,7 @@ import {
   computePlanAnchors,
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
+import { deriveTurnActive } from "./conversation-loading";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
@@ -1403,6 +1404,14 @@ export const ConversationPage = () => {
     () => sessions.find((s) => s.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
   );
+
+  // The composer's loading / Stop state (and the streaming logo + "已处理 X 秒"
+  // timer) is DERIVED, not a bare flag: the optimistic ``sending`` gated by the
+  // authoritative, reconciled session status. The instant the session is
+  // terminal the turn is over — so a missed terminal SSE frame can no longer
+  // strand the UI in a loading state. ``sending`` itself stays the internal
+  // send/queue gate; only the displayed state derives from status.
+  const isBusy = deriveTurnActive(sending, selectedSession?.status);
 
   // The agent actually bound to this composer: an existing session is frozen to
   // its ``sessionAgentSlug`` (ADR-006), a fresh draft uses the picker's
@@ -3295,7 +3304,6 @@ export const ConversationPage = () => {
       afterSeq: number,
       opts: {
         requireUserBeforeTerminal?: boolean;
-        expectedUserText?: string;
       } = {},
     ) => {
       if (abortRef.current) {
@@ -3532,13 +3540,36 @@ export const ConversationPage = () => {
         // UI stuck in "agent running" state long after the turn
         // finished.
         const evType = event.event.event_type;
-        if (evType === "message.user") {
-          sawTurnStart =
-            !opts.requireUserBeforeTerminal ||
-            opts.expectedUserText === undefined ||
-            event.event.payload.text === opts.expectedUserText;
+        // Mark the turn as started once THIS turn's opening ``message.user``
+        // arrives. We key on the seq cursor, not on the text: a
+        // ``user_message`` whose seq is beyond the subscription's ``afterSeq``
+        // is unambiguously new (the backend only replays events after that
+        // cursor), so it can only be the message that opened the turn we're
+        // waiting on — while any stale terminal replayed between ``afterSeq``
+        // and it stays correctly ignored.
+        //
+        // The previous exact-text match (``payload.text === expectedUserText``)
+        // broke whenever the kernel rewrote the user message before persisting
+        // it — e.g. session-mode wrapping turns "hi" into "/goal hi"
+        // (orchestrator ``wrap_for_mode``). The echoed text then never equaled
+        // the raw sent text, ``sawTurnStart`` stayed false, the turn's
+        // ``session.idle`` was ignored, the SSE stream never closed, and
+        // ``sending`` stuck true — the composer frozen on the Stop button.
+        if (evType === "message.user" && event.seq > afterSeq) {
+          sawTurnStart = true;
         }
         const status = event.event.payload.status;
+        // Reconcile the authoritative status from the live frame so the derived
+        // loading flag + header pill track the turn without waiting for a poll.
+        if (evType === "session.update" && status) {
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === sessionId
+                ? { ...s, status: status as SessionListItem["status"] }
+                : s,
+            ),
+          );
+        }
         const terminal =
           sawTurnStart &&
           (evType === "session.idle" ||
@@ -3573,14 +3604,67 @@ export const ConversationPage = () => {
         }
       };
 
+      // Reconcile the authoritative session status. The composer's loading state
+      // is DERIVED from ``sessions[].status`` (see ``deriveTurnActive``), so
+      // keeping that status fresh here is what un-sticks the Stop button / loading
+      // logo / "已处理 X 秒" timer when the terminal SSE frame is missed — a
+      // re-subscribe whose ``afterSeq`` is already past the turn's terminal event,
+      // a dropped/deduped frame, or a non-idle ending. It also fixes a stale
+      // "运行中" header pill. Once the turn is genuinely over we also
+      // ``stopSubscription`` so this poll stops spinning.
+      //
+      // ``sawTurnActivity`` seeds ``true`` for non-``requireUserBeforeTerminal``
+      // subscriptions (auto-resume / queue-drain), which are only ever created
+      // for an already-running session — so an ``idle`` reading means the turn
+      // finished, not that it hasn't started (the pre-run window that the
+      // fresh-send path must wait through).
+      let sawTurnActivity = !opts.requireUserBeforeTerminal;
+      let idleReconcileTicks = 0;
       pollTimer = window.setInterval(() => {
         if (stopped) return;
         sessionsApi
           .listEvents(sessionId, maxSeqRef.current)
           .then((response) => {
-            for (const event of response.items) {
-              appendEvent(event);
+            if (response.items.length > 0) {
+              sawTurnActivity = true;
+              idleReconcileTicks = 0;
+              for (const event of response.items) {
+                appendEvent(event);
+              }
+              return;
             }
+            // No new persisted events this tick. After ~2s of silence,
+            // reconcile against the authoritative session status.
+            idleReconcileTicks += 1;
+            if (idleReconcileTicks < 4) return;
+            idleReconcileTicks = 0;
+            void sessionsApi
+              .get(sessionId)
+              .then((detail) => {
+                if (stopped) return;
+                // Push the authoritative status into local state — this drives
+                // the derived loading flag and the header pill.
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.id === sessionId ? { ...s, status: detail.status } : s,
+                  ),
+                );
+                if (
+                  detail.status === "running" ||
+                  detail.status === "created"
+                ) {
+                  sawTurnActivity = true;
+                  return;
+                }
+                // Terminal status. If the turn actually ran (events streamed, or
+                // this subscription was born for a running session), it's done —
+                // stop the poll/stream. The loading UI has already cleared via
+                // the reconciled status regardless of this.
+                if (sawTurnActivity || maxSeqRef.current > afterSeq) {
+                  stopSubscription();
+                }
+              })
+              .catch(() => {});
           })
           .catch(() => {});
       }, 500);
@@ -3724,6 +3808,17 @@ export const ConversationPage = () => {
       sentAt: Date.now(),
     });
     setSending(true);
+    // Optimistically mark the active session running so the derived loading flag
+    // shows immediately (an existing session re-send would otherwise read its
+    // prior ``idle`` status for a beat and flicker). The real status is
+    // reconciled from the POST response + SSE ``session.update`` right after.
+    if (selectedSessionId) {
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === selectedSessionId ? { ...s, status: "running" } : s,
+        ),
+      );
+    }
     setError(null);
     setDraft("");
     setSelectedComposerSkill(null);
@@ -3767,9 +3862,12 @@ export const ConversationPage = () => {
       // Prompt text is sent verbatim — no attachment hint appended.
       const outboundText = text;
 
+      // ``requireUserBeforeTerminal``: don't honor a terminal event until this
+      // turn's own ``message.user`` (seq > the cursor captured here) has been
+      // seen, so a stale replayed ``session.idle`` can't close the stream
+      // before the turn even starts.
       subscribeToSession(session.id, maxSeqRef.current, {
         requireUserBeforeTerminal: true,
-        expectedUserText: outboundText,
       });
 
       const detail = await sessionsApi.sendMessage(
@@ -5412,7 +5510,7 @@ export const ConversationPage = () => {
                 key={conversationInstanceKey}
                 turns={effectiveTurns}
                 scrollContainerRef={scrollContainerRef}
-                sending={sending}
+                sending={isBusy}
                 loading={id === NEW_SESSION_ID ? false : loading}
                 error={error}
                 onRetry={handleRetry}
@@ -5634,7 +5732,7 @@ export const ConversationPage = () => {
             onSend={() => {
               void handleSend();
             }}
-            sending={sending}
+            sending={isBusy}
             onStop={() => interruptRef.current()}
             // Upload cap counts only the *pending* server rows — the
             // ones staged for the next turn. Consumed rows live on in
