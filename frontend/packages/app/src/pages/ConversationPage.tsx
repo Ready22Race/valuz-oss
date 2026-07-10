@@ -3295,7 +3295,6 @@ export const ConversationPage = () => {
       afterSeq: number,
       opts: {
         requireUserBeforeTerminal?: boolean;
-        expectedUserText?: string;
       } = {},
     ) => {
       if (abortRef.current) {
@@ -3532,11 +3531,23 @@ export const ConversationPage = () => {
         // UI stuck in "agent running" state long after the turn
         // finished.
         const evType = event.event.event_type;
-        if (evType === "message.user") {
-          sawTurnStart =
-            !opts.requireUserBeforeTerminal ||
-            opts.expectedUserText === undefined ||
-            event.event.payload.text === opts.expectedUserText;
+        // Mark the turn as started once THIS turn's opening ``message.user``
+        // arrives. We key on the seq cursor, not on the text: a
+        // ``user_message`` whose seq is beyond the subscription's ``afterSeq``
+        // is unambiguously new (the backend only replays events after that
+        // cursor), so it can only be the message that opened the turn we're
+        // waiting on — while any stale terminal replayed between ``afterSeq``
+        // and it stays correctly ignored.
+        //
+        // The previous exact-text match (``payload.text === expectedUserText``)
+        // broke whenever the kernel rewrote the user message before persisting
+        // it — e.g. session-mode wrapping turns "hi" into "/goal hi"
+        // (orchestrator ``wrap_for_mode``). The echoed text then never equaled
+        // the raw sent text, ``sawTurnStart`` stayed false, the turn's
+        // ``session.idle`` was ignored, the SSE stream never closed, and
+        // ``sending`` stuck true — the composer frozen on the Stop button.
+        if (evType === "message.user" && event.seq > afterSeq) {
+          sawTurnStart = true;
         }
         const status = event.event.payload.status;
         const terminal =
@@ -3767,9 +3778,12 @@ export const ConversationPage = () => {
       // Prompt text is sent verbatim — no attachment hint appended.
       const outboundText = text;
 
+      // ``requireUserBeforeTerminal``: don't honor a terminal event until this
+      // turn's own ``message.user`` (seq > the cursor captured here) has been
+      // seen, so a stale replayed ``session.idle`` can't close the stream
+      // before the turn even starts.
       subscribeToSession(session.id, maxSeqRef.current, {
         requireUserBeforeTerminal: true,
-        expectedUserText: outboundText,
       });
 
       const detail = await sessionsApi.sendMessage(
