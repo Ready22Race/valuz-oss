@@ -228,6 +228,7 @@
   "conversation": {
     "addAttachment": "Add attachment",
     "agentReply": "Agent reply",
+    "historyLoadFailed": "Failed to load conversation history — refresh to retry",
     "attachmentParsing": "Parsing",
     "attachmentParsingBody": "Some attachments are still being parsed. Submit anyway? The agent will only be able to read the raw file — parsed content and document search won't be available.",
     "attachmentParsingConfirm": "Submit anyway",

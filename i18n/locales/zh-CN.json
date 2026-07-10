@@ -228,6 +228,7 @@
   "conversation": {
     "addAttachment": "添加附件",
     "agentReply": "Agent 回复",
+    "historyLoadFailed": "对话历史加载失败，请刷新重试",
     "attachmentParsing": "解析中",
     "attachmentParsingBody": "有附件尚未解析完成。仍要提交吗？提交后智能体只能读取原始文件，无法使用解析结果或文档检索。",
     "attachmentParsingConfirm": "仍然提交",
