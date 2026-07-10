@@ -6,8 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-MarketplaceItemType = Literal["skill", "agent_template", "agent_team_template"]
-MarketplaceSource = Literal["skillhub", "valuz_official"]
+MarketplaceItemType = Literal["skill", "agent_template", "agent_team_template", "connector"]
+MarketplaceSource = Literal["skillhub", "valuz_official", "modelscope"]
 MarketplaceBadge = Literal[
     "free_install",
     "requires_api_key",
@@ -18,14 +18,18 @@ MarketplaceBadge = Literal[
     "verified",
     "locked",
 ]
-MarketplaceInstallTarget = Literal["skill_library", "agent_library", "agent_library_project"]
+MarketplaceInstallTarget = Literal[
+    "skill_library", "agent_library", "agent_library_project", "connector_library"
+]
 ConnectorRequirementKind = Literal["required", "optional", "api_key", "cost"]
+MarketplaceConnectorFieldTarget = Literal["env", "header", "param"]
 
 
 class MarketplaceStats(BaseModel):
     downloads: int | None = None
     stars: int | None = None
     installs: int | None = None
+    views: int | None = None
 
 
 class MarketplaceTeamMember(BaseModel):
@@ -39,6 +43,32 @@ class MarketplaceTeamMember(BaseModel):
 class MarketplaceConnectorRequirement(BaseModel):
     name: str
     requirement: ConnectorRequirementKind
+
+
+class MarketplaceConnectorConfigField(BaseModel):
+    key: str
+    name: str
+    target: MarketplaceConnectorFieldTarget
+    label: str
+    required: bool = False
+    secret: bool = False
+    placeholder: str | None = None
+    prefix: str | None = None
+
+
+class MarketplaceConnectorConfig(BaseModel):
+    slug: str
+    transport: Literal["stdio", "http", "sse"]
+    url: str | None = None
+    command: str | None = None
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    headers: dict[str, str] = Field(default_factory=dict)
+    params: dict[str, str] = Field(default_factory=dict)
+    auth_type: Literal["none", "bearer", "oauth"] = "none"
+    fields: list[MarketplaceConnectorConfigField] = Field(default_factory=list)
+    supported: bool = True
+    unsupported_reason: str | None = None
 
 
 class MarketplaceFileEntry(BaseModel):
@@ -118,6 +148,7 @@ class MarketplaceItemDetail(MarketplaceItem):
     files: list[MarketplaceFileEntry] | None = None
     security: MarketplaceSecurityReport | None = None
     evaluation: MarketplaceEvaluationReport | None = None
+    connector_config: MarketplaceConnectorConfig | None = None
 
 
 class MarketplaceItemList(BaseModel):

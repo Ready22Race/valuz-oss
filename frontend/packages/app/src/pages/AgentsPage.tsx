@@ -9,7 +9,6 @@ import {
   Copy,
   Download,
   Folder,
-  LayoutTemplate,
   MoreHorizontal,
   Plus,
   Store,
@@ -46,7 +45,6 @@ import { useProjectOutlet } from "@valuz/app/layout";
 import { pickAgentIcon } from "../components/agent-icons";
 import { AgentDetailView } from "../components/AgentDetailView";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
-import { AgentTemplatesPanel } from "../components/AgentTemplatesPanel";
 import { ImportPackDialog } from "../components/ImportPackDialog";
 import { ExportPackDialog } from "../components/ExportPackDialog";
 
@@ -86,6 +84,8 @@ interface ProjectAgentMember {
   sourceSlug: string;
   agent: Agent;
 }
+
+const AGENT_MARKETPLACE_GUIDE_MAX_COUNT = 3;
 
 function getMemberSourceSlug(member: MemberWithAgent): string | null {
   return member.member.source_agent_slug ?? member.member.agent_slug ?? null;
@@ -133,9 +133,6 @@ export const AgentsPage = () => {
     setCreateOpen(true);
   }, []);
 
-  // Template library: browse official team templates and add a set of roles
-  // into the library in one click (idempotent by fixed slug).
-  const [templatesOpen, setTemplatesOpen] = useState(false);
   // Import a .valuzpack uploaded by the user (preview → confirm).
   const importInputRef = useRef<HTMLInputElement>(null);
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -452,7 +449,7 @@ export const AgentsPage = () => {
             onClick={() => navigate("/marketplace?tab=agents&from=agents")}
           >
             <Store className="h-3.5 w-3.5" />
-            {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
+            {t("marketplace.title" as Parameters<typeof t>[0])}
           </button>
           <input
             ref={importInputRef}
@@ -496,17 +493,9 @@ export const AgentsPage = () => {
                 <Plus className="h-4 w-4" />
                 {t("agent.createAgent" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setTemplatesOpen(true)}>
-                <LayoutTemplate className="h-4 w-4" />
-                {t("agent.template.browse" as Parameters<typeof t>[0])}
-              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => importInputRef.current?.click()}>
                 <Download className="h-4 w-4" />
                 {t("agent.pack.import" as Parameters<typeof t>[0])}
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => navigate("/marketplace?tab=agents&from=agents")}>
-                <Store className="h-4 w-4" />
-                {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -705,6 +694,26 @@ export const AgentsPage = () => {
                 }
               />
             )}
+
+            {visibleAgents.length <= AGENT_MARKETPLACE_GUIDE_MAX_COUNT && (
+              <button
+                type="button"
+                onClick={() =>
+                  navigate("/marketplace?tab=agents&from=agents")
+                }
+                className="mt-5 flex w-full items-center gap-2 border-t border-surface-border px-1 pt-4 text-left text-xs font-medium text-ink-body transition-colors hover:text-brand"
+              >
+                <Store className="h-4 w-4 shrink-0 text-brand" />
+                <span className="min-w-0 flex-1">
+                  {t(
+                    "marketplace.installAgentTeamFromMarketplace" as Parameters<
+                      typeof t
+                    >[0],
+                  )}
+                </span>
+                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-ink-meta" />
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -720,14 +729,6 @@ export const AgentsPage = () => {
           await loadData();
           setActiveSlug(slug);
         }}
-      />
-
-      {/* Template library — browse official team templates, add a set of roles
-          into the library in one click. */}
-      <AgentTemplatesPanel
-        open={templatesOpen}
-        onOpenChange={setTemplatesOpen}
-        onAdded={loadData}
       />
 
       {/* Import a user-supplied .valuzpack (upload → preview → confirm). */}

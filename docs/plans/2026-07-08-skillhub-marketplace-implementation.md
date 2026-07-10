@@ -15,13 +15,29 @@ One PR delivering PRD MVP 1–5 as a working full-stack feature:
   Team packs behind `/v1/marketplace/*`. Curated single-agent templates can
   remain as an internal API capability, but are hidden from the current
   marketplace browse UI.
-- Frontend full-screen Marketplace page (Agents / Skills tabs) kept as a shared
+- Frontend full-screen Marketplace page (Agents / Skills / Connectors tabs) kept as a shared
   internal browse surface, with the shared import-preview modal and toasts.
-- Entry points: visible header CTAs on the Agents & Skills library pages.
+- Entry points: visible header CTAs on the Agents, Skills, and Connector library pages.
   The marketplace route is not exposed as a standalone sidebar nav item.
 
-Out of scope (later): MVP 6 curation pipeline, paid metadata, MCP marketplace,
-and public single-Agent browsing.
+Out of scope (later): MVP 6 curation pipeline, paid metadata, ModelScope OAuth
+deployment, and public single-Agent browsing.
+
+### Connector Marketplace Extension (2026-07-10)
+
+- `ModelScopeClient` calls the anonymous public MCP list/detail OpenAPI without
+  a durable or scheduled cache.
+- Connector browse preserves ModelScope's default order, requests
+  `is_hosted=true`, and pages 20 entries at a time through the documented first
+  100 results. There is no Valuz popularity re-sort or fixed 12-card shelf.
+- Detail parsing whitelists `npx`, `uvx`, HTTPS Streamable HTTP, and HTTPS SSE.
+  Unsupported commands or deployment-only entries return a locked detail.
+- Required environment/header/query fields are represented as typed marketplace
+  config fields; the frontend submits them to the existing `POST /v1/connectors`
+  endpoint. Connector creation, credential storage, OAuth discovery, probing,
+  and status polling stay owned by the connector module.
+- The Connector Library exposes a visible Market action. Its `+` menu remains
+  reserved for custom HTTP and stdio connectors.
 
 ### Agent Team First Implementation Batch
 
@@ -248,11 +264,15 @@ All in shared packages (desktop + webui both get it):
   install API supports it, else omit). Footer: install target note + cancel /
   install. Success → toast (existing toast util) + `installed` state.
 - Library entry points: SkillsPage and AgentsPage headers gain a visible
-  lightweight "Import from Marketplace" text action. Both navigate to
+  lightweight "Marketplace" text action. Both navigate to
   `/marketplace` with `?tab=` and `?from=` preselected so MarketplacePage can
-  show a return link to the originating library. Keep legacy add-menu actions
-  only as secondary paths; the primary path must not be hidden behind the `+`
-  menu.
+  show a return link to the originating library. When the Agent Library contains
+  at most three Agents, render an unframed list-end action that opens the Agents
+  marketplace to install a Team. Remove marketplace and template-browse items
+  from the `+` menus, which remain reserved for direct creation and local imports.
+- Marketplace search state is keyed by tab. `Agents` and `Skills` keep separate
+  query/debounce values so switching tabs never reuses the other catalog's
+  keyword in an API request.
 - i18n: `marketplace.*` namespace + `nav.marketplace` in BOTH
   `i18n/locales/zh-CN.json` and `en-US.json`; regenerate types
   (`cd backend && uv run python ../i18n/scripts/gen_types.py`). Follow

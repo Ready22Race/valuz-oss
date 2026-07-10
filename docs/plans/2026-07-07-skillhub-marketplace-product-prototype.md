@@ -13,6 +13,7 @@ surface for the objects in our own product model:
 - **Skills** are agent equipment.
 - **Agents** are official or curated expert workers.
 - **Agent Teams** are curated scenario packages made of multiple Agents.
+- **Connectors** are MCP services that give Agents access to external tools.
 
 The new product decision is:
 
@@ -21,6 +22,7 @@ The new product decision is:
 | `Skills` | SkillHub skills + Valuz official skills | Can be supplied at scale. SkillHub is the main external source. |
 | `Agents` | Valuz official curated templates | Valuz defines the Agent identity, prompt, runtime, skills, and install behavior. |
 | `Agent Teams` | Valuz official curated templates | Valuz defines the team roles, lead/member relationship, and workflow. |
+| `Connectors` | Valuz built-ins + ModelScope MCP | ModelScope supplies discovery metadata; Valuz owns safety checks, configuration, connection, and runtime state. |
 | SkillHub `skillsets` / "expert packs" | Candidate material only | Use as source material for Valuz curation; do not expose them directly as final Agents or Teams. |
 
 In short:
@@ -35,20 +37,24 @@ The marketplace should avoid these concepts in the primary UI:
 - No top-level `Recommended` tab.
 - No top-level `Agent Team` tab.
 - No top-level `Suite` concept.
-- No MCP marketplace in this phase.
 - Do not bulk mirror all SkillHub expert packs as Agent Teams.
 
 If curation is needed later, it should be shown as ordering, pinned rows, or
-small sections inside `Agents` or `Skills`, not as a third marketplace module.
+small sections inside the relevant resource tab, not as a separate recommendation module.
 
 ## Core IA
 
-The market surface has only two primary tabs:
+The shared market surface has three resource-scoped tabs:
 
 | Tab | Contains | Notes |
 |---|---|---|
 | `Agents` | Valuz official/curated Agent Teams | Current phase leads with Teams only; single Agents stay out of the browse UI until the Team model is stable. |
 | `Skills` | SkillHub skills and Valuz official skills | Uses SkillHub categories/subcategories where available. |
+| `Connectors` | ModelScope MCP services | Shows common popular services by category and connects them through the existing Connector Library. |
+
+Search state is isolated per tab. A keyword entered in `Skills` must not filter
+the `Agents` or `Connectors` catalog after switching tabs, and vice versa. Returning to a tab may
+restore that tab's own keyword.
 
 Entry points:
 
@@ -56,15 +62,21 @@ Entry points:
 |---|---|
 | Agent Library visible header CTA | `Marketplace > Agents` |
 | Skill Library visible header CTA | `Marketplace > Skills` |
+| Connector Library visible header CTA | `Marketplace > Connectors` |
 | Onboarding / first-run scenario suggestion | `Marketplace > Agents`, optionally highlighting a relevant Agent Team |
 
 The `/marketplace` route remains an internal shared browse surface, but it must
 not be shown as an independent primary sidebar tab. Users should encounter
 marketplace supply in the resource module where they already are: Agent Teams in
 the Agent Library, and SkillHub skills in the Skill Library. The CTA should be a
-visible lightweight text action in the page header, not only an option hidden
-under a `+` menu. When entered from a resource library, the marketplace must
-carry the source in the URL and show a clear return link back to that library.
+visible lightweight `Marketplace` text action in the page header, not an option
+hidden under a `+` menu. When entered from a resource library, the marketplace
+must carry the source in the URL and show a clear return link back to that
+library. The Connector Library keeps `+` for custom HTTP/stdio configuration;
+its visible Market action opens ModelScope discovery. When the Agent Library has three or fewer Agents, it may also show a
+contextual list-end action to install an Agent Team from the marketplace. The
+`+` menu is reserved for direct creation and local import actions; it must not
+repeat marketplace or template-browsing entries.
 
 ## Asset Definitions
 
@@ -73,6 +85,35 @@ carry the source in the URL and show a clear return link back to that library.
 | Skill | Reusable method, script, guide, or tool playbook that equips an Agent | Added to Skill Library; can be attached to Agents | SkillHub + Valuz official skills |
 | Agent | One expert worker with name, role, instructions, runtime/model, skills, and connectors | Added to Agent Library | Valuz official curated templates |
 | Agent Team | A scenario package made of multiple Agents with defined responsibilities | Adds multiple Agents into the library; optionally deploys them to a Project | Valuz official curated templates |
+| Connector | A reusable MCP tool service | Added to Connector Library and probed by the existing connector runtime | ModelScope + Valuz built-ins |
+
+## ModelScope Connector Supply
+
+The Connectors tab reads ModelScope's public MCP list in real time. It does not
+maintain a durable mirror or a large hand-curated ID list.
+
+- Category changes call `PUT /openapi/v1/mcp/servers` with
+  `filter.category`; keyword searches use the upstream `search` field.
+- Browse preserves ModelScope's default order and requests only
+  `is_hosted=true` entries, using 20-item pages with Load More up to the
+  documented first 100 results. Valuz does not impose a separate popularity
+  order or a fixed card count.
+- The list response is for discovery only. Opening a card fetches its detail
+  and reads `server_config` before the Connect action is enabled.
+- Direct connection accepts only portable `npx` / `uvx` stdio packages or
+  public HTTPS Streamable HTTP / SSE configurations.
+- Local paths, arbitrary shell commands, and ModelScope-deployment-only entries
+  remain visible but are marked unavailable for direct connection.
+- Required `env_schema` values become explicit setup fields. Secret-looking
+  API key/token/password fields are treated as secrets and are never copied
+  from upstream sample values.
+
+ModelScope's MCP OpenAPI currently exposes `view_count` in list results and
+`github_stars` / `is_verified` in details. These values are displayed as
+context, but ordering remains ModelScope-owned. Hosted filtering intentionally
+trades a small amount of catalog breadth for configurations that have passed
+ModelScope's deployment check; Valuz still validates the selected detail before
+connection.
 
 Current UI rule: the Agents tab shows Agent Teams only. Curated single Agents
 can remain as an internal template resource/API capability, but they should not

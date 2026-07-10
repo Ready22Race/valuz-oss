@@ -581,7 +581,7 @@ export const SkillsPage = () => {
             onClick={() => navigate("/marketplace?tab=skills&from=skills")}
           >
             <Store className="h-3.5 w-3.5" />
-            {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
+            {t("marketplace.title" as Parameters<typeof t>[0])}
           </button>
           {searchOpen ? (
             <input
@@ -646,10 +646,6 @@ export const SkillsPage = () => {
               <DropdownMenuItem onSelect={() => openAddDialog("upload")}>
                 <Upload className="h-4 w-4" />
                 {t("skill.upload" as Parameters<typeof t>[0])}
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => navigate("/marketplace?tab=skills&from=skills")}>
-                <Store className="h-4 w-4" />
-                {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
