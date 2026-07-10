@@ -362,6 +362,7 @@
     "reviewDiffDesc": "逐文件查看本轮对话产生的代码差异。",
     "runFailed": "运行失败",
     "userCancelled": "用户取消了当前对话",
+    "runtimeInterrupted": "对话被中断，可重试",
     "runtimeLocked": "Runtime 在会话创建时已锁定。需要切换请新建对话。",
     "saveSkillSuccess": "已保存 {name} 到技能库",
     "searchSkill": "搜索 Skill...",
