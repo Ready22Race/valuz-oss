@@ -53,7 +53,7 @@ describe("DesktopSidebar", () => {
             label: "定时任务",
             href: "/scheduled",
             icon: "scheduled",
-            group: "project",
+            group: "main",
           },
           {
             id: "settings",

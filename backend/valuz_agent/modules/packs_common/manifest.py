@@ -95,10 +95,12 @@ class PackSkill(BaseModel):
     ``embedded`` → files live under the pack's ``skills/<slug>/`` (user export).
     ``bundled``  → shipped with the app (built-in packs); materialized from
     ``resources/template_skills/`` on import, never carried in the pack.
+    ``skillhub`` → marketplace-curated dependency; the marketplace installer
+    downloads it from SkillHub before creating the pack's agents.
     """
 
     slug: str
-    source: str = "embedded"  # embedded | bundled
+    source: str = "embedded"  # embedded | bundled | skillhub
     name: Text | None = None
     description: Text | None = None
 

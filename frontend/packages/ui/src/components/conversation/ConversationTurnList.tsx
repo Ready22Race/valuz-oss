@@ -629,6 +629,9 @@ interface TurnRowProps {
    * Windows). Wired by the desktop app to the ``open_in_finder`` IPC;
    * webui omits this and the per-row external-link icon hides. */
   onRevealFile?: (filePath: string) => void;
+  /** Predicate + handler for local-path markdown links emitted by an agent. */
+  isLocalFileHref?: (href: string) => boolean;
+  onLocalFileLinkClick?: (href: string) => void;
 }
 
 const TurnRow = memo(
@@ -643,6 +646,8 @@ const TurnRow = memo(
     renderToolCall,
     isToolCardFoldable,
     onRevealFile,
+    isLocalFileHref,
+    onLocalFileLinkClick,
   }: TurnRowProps) {
     const { t } = useI18n();
     const inFlight = sending && isLatest;
@@ -654,8 +659,15 @@ const TurnRow = memo(
       .filter((b) => b.kind === "assistant")
       .map((b) => b.text)
       .join("\n\n");
-    const actionText =
-      assistantText || (turn.cancelled ? t("conversation.userCancelled") : "");
+    // A user cancel and a runtime/system interruption both render as a quiet
+    // grey line, but with distinct labels — a system interruption must NOT read
+    // as "用户取消了当前对话".
+    const interruptLabel = turn.cancelled
+      ? t("conversation.userCancelled")
+      : turn.interrupted
+        ? t("conversation.runtimeInterrupted")
+        : null;
+    const actionText = assistantText || interruptLabel || "";
 
     // Turn-level meta: total elapsed (max of any block's elapsedMs) and
     // whether the turn has any process content worth surfacing as a
@@ -847,7 +859,9 @@ const TurnRow = memo(
                 // Meta marker — render the divider before the fold check so
                 // it stays visible even when the process trail is folded.
                 return (
-                  <CompactionDivider key={`compaction-${turn.id}-${blockIndex}`} />
+                  <CompactionDivider
+                    key={`compaction-${turn.id}-${blockIndex}`}
+                  />
                 );
               }
               if (
@@ -904,6 +918,8 @@ const TurnRow = memo(
                     <MarkdownContent
                       content={block.header}
                       isAnimating={animateHeader}
+                      isLocalFileHref={isLocalFileHref}
+                      onLocalFileLinkClick={onLocalFileLinkClick}
                     />
                   ) : null}
                   {block.items.length > 0 ? (
@@ -926,15 +942,15 @@ const TurnRow = memo(
               </div>
             ) : null}
 
-            {turn.cancelled ? (
+            {interruptLabel ? (
               <div className="py-1.5 text-[13px] italic text-ink-muted">
-                {t("conversation.userCancelled")}
+                {interruptLabel}
               </div>
             ) : null}
 
             {!inFlight &&
             !turn.failedMessage &&
-            (assistantText || turn.cancelled) ? (
+            (assistantText || turn.cancelled || turn.interrupted) ? (
               <MessageActions
                 text={actionText}
                 onRetry={onRetry ? () => onRetry(turn.id) : undefined}
@@ -984,6 +1000,10 @@ interface ConversationTurnListProps {
   isToolCardFoldable?: (tool: PrototypeToolCall) => boolean;
   /** See ``TurnRowProps.onRevealFile``. */
   onRevealFile?: (filePath: string) => void;
+  /** See ``TurnRowProps.isLocalFileHref``. */
+  isLocalFileHref?: (href: string) => boolean;
+  /** See ``TurnRowProps.onLocalFileLinkClick``. */
+  onLocalFileLinkClick?: (href: string) => void;
   emptyTitle?: string;
   emptySuggestions?: string[];
   onEmptySuggestionClick?: (text: string) => void;
@@ -1010,6 +1030,8 @@ export function ConversationTurnList({
   renderToolCall,
   isToolCardFoldable,
   onRevealFile,
+  isLocalFileHref,
+  onLocalFileLinkClick,
   emptyTitle,
   emptySuggestions,
   onEmptySuggestionClick,
@@ -1157,6 +1179,8 @@ export function ConversationTurnList({
                     renderToolCall={renderToolCall}
                     isToolCardFoldable={isToolCardFoldable}
                     onRevealFile={onRevealFile}
+                    isLocalFileHref={isLocalFileHref}
+                    onLocalFileLinkClick={onLocalFileLinkClick}
                   />
                 </div>
               </div>

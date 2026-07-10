@@ -118,6 +118,21 @@ export const revealInFinder = async (path: string): Promise<void> => {
   await bridge.invoke("open_in_finder", { path });
 };
 
+/**
+ * Read a local file's text content over IPC (main-process ``read_file_content``,
+ * large files truncated). Used to preview a ``kind==="local"`` text file without
+ * the backend proxying bytes. Returns ``{ content: null }`` outside Electron.
+ */
+export const readFileContent = async (
+  path: string,
+): Promise<{ content: string | null }> => {
+  const bridge = getBridge();
+  if (!bridge || !path) return { content: null };
+  return (await bridge.invoke("read_file_content", { path })) as {
+    content: string | null;
+  };
+};
+
 export type CliTool = "claude" | "codex";
 export type CliLoginState = "logged_in" | "logged_out" | "unsupported";
 

@@ -7,6 +7,7 @@ import {
   RefreshCw,
   Search,
   Sparkles,
+  Store,
   Upload,
   Zap,
 } from "lucide-react";
@@ -30,7 +31,6 @@ import {
   usePanelStore,
   useResourceCategories,
   useResourceGuard,
-  useSkillEvents,
 } from "@valuz/core";
 import type {
   SkillView,
@@ -246,13 +246,14 @@ export const SkillsPage = () => {
     }
   }, []);
 
-  // Manual rescan: re-index the skill library on disk (the server also emits
-  // SKILL_CHANGED, so ``useSkillEvents(loadSkills)`` refreshes the list).
+  // Manual rescan: re-index the skill library on disk, then reload the list
+  // (the focus revalidation below also picks up out-of-band index changes).
   const handleRescan = useCallback(async () => {
     if (rescanning) return;
     setRescanning(true);
     try {
       const res = await skillsApi.rescan();
+      await loadSkills();
       toast.success(
         t("skill.rescanDone" as Parameters<typeof t>[0], {
           count: res.indexed,
@@ -264,7 +265,7 @@ export const SkillsPage = () => {
     } finally {
       if (mountedRef.current) setRescanning(false);
     }
-  }, [rescanning, t]);
+  }, [rescanning, t, loadSkills]);
 
   // Global library on/off for a skill (slug-keyed on the backend). Optimistic:
   // flip local state immediately, revert if the request fails. Off hides the
@@ -359,7 +360,22 @@ export const SkillsPage = () => {
     panelSetCollapsed(false);
   }, [panelSetCollapsed]);
 
-  useSkillEvents(loadSkills);
+  // Revalidate the catalog when the user returns to the window/tab. Skills can
+  // change out-of-band (periodic auto-scan re-index, the file-watcher re-index
+  // after an external SKILL.md edit, or an agent authoring a skill in another
+  // session), so we refetch on focus rather than holding an SSE push channel
+  // open — mount + on-focus covers every realistic staleness window.
+  useEffect(() => {
+    const revalidate = () => {
+      if (document.visibilityState === "visible") void loadSkills();
+    };
+    window.addEventListener("focus", revalidate);
+    document.addEventListener("visibilitychange", revalidate);
+    return () => {
+      window.removeEventListener("focus", revalidate);
+      document.removeEventListener("visibilitychange", revalidate);
+    };
+  }, [loadSkills]);
 
   /* ── Derived state ─────────────────────────────────────────── */
 
@@ -637,6 +653,10 @@ export const SkillsPage = () => {
               <DropdownMenuItem onSelect={() => openAddDialog("upload")}>
                 <Upload className="h-4 w-4" />
                 {t("skill.upload" as Parameters<typeof t>[0])}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => navigate("/marketplace?tab=skills")}>
+                <Store className="h-4 w-4" />
+                {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

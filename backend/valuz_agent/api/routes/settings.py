@@ -224,7 +224,8 @@ async def patch_model_defaults(
                     await set_default_provider_id(db, None, user_id=user_id)
                     await set_default_model(db, None, user_id=user_id)
                 elif any(
-                    it.id == payload.default_provider_id for it in await ext.llm_provider.list()
+                    it.id == payload.default_provider_id
+                    for it in await ext.llm_provider.list(user_id=user_id)
                 ):
                     # Contributed (catalog) channel (e.g. the commercial
                     # "Valuz 系统模型" channel — ADR-011). It has no providers-table

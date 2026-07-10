@@ -210,7 +210,9 @@ export function parseWorkflowProgress(
     ? (raw.workflowProgress as unknown[])
     : [];
   const workflowProgress: WorkflowAgentProgress[] = progressRaw
-    .filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null)
+    .filter(
+      (a): a is Record<string, unknown> => typeof a === "object" && a !== null,
+    )
     .map((a) => ({
       type: typeof a.type === "string" ? a.type : undefined,
       agentId: typeof a.agentId === "string" ? a.agentId : "",
@@ -221,7 +223,8 @@ export function parseWorkflowProgress(
     .filter((a) => a.agentId.length > 0);
   const state: WorkflowState = {
     runId: typeof raw.runId === "string" ? raw.runId : (payload?.run_id ?? ""),
-    workflowName: typeof raw.workflowName === "string" ? raw.workflowName : null,
+    workflowName:
+      typeof raw.workflowName === "string" ? raw.workflowName : null,
     status: typeof raw.status === "string" ? raw.status : "running",
     agentCount: typeof raw.agentCount === "number" ? raw.agentCount : 0,
     agentsDone: typeof raw.agentsDone === "number" ? raw.agentsDone : 0,
@@ -243,6 +246,7 @@ export function parseWorkflowProgress(
 }
 
 import { createFetchJson, ApiError } from "./fetch-json";
+import { requestRaw } from "./request";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -429,6 +433,12 @@ export interface SessionArtifactItem {
   id: string;
   session_id: string;
   file_path: string;
+  /**
+   * Stable file identity (``valuz-file://<file_path>``). Pass it to
+   * ``filesApi.resolve`` to get an access address (local path or signed URL);
+   * derived by the backend, not stored. See files-api.ts.
+   */
+  ref: string;
   file_name: string;
   file_size: number;
   mime_type: string | null;
@@ -530,14 +540,15 @@ export const sessionsApi = {
       if (afterSeq !== undefined && afterSeq > 0)
         qs.set("after_seq", String(afterSeq));
       const suffix = qs.toString() ? `?${qs}` : "";
-      const url = `${_apiBase}/v1/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`;
-      fetch(url, { signal })
+      requestRaw(
+        `/v1/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`,
+        {
+          baseUrl: _apiBase,
+          headers: { Accept: "text/event-stream" },
+          signal,
+        },
+      )
         .then((res) => {
-          if (!res.ok) {
-            return res.text().then((text) => {
-              reject(new Error(`API ${res.status}: ${text}`));
-            });
-          }
           const reader = res.body?.getReader();
           if (!reader) {
             reject(new Error("No response body"));
@@ -699,12 +710,8 @@ export const sessionsApi = {
    * panel list), recorded by the built-in ``deliver_artifacts`` MCP tool.
    * Durable — the full set is returned every call.
    */
-  listArtifacts(
-    sessionId: string,
-  ): Promise<{ items: SessionArtifactItem[] }> {
-    return fetchJson(
-      `/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`,
-    );
+  listArtifacts(sessionId: string): Promise<{ items: SessionArtifactItem[] }> {
+    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`);
   },
 
   /**

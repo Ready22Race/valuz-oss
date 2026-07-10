@@ -47,7 +47,7 @@ from __future__ import annotations
 # ruff: noqa: I001 — the kernel side-effect import must precede ``app.*``.
 
 from collections.abc import AsyncIterator
-from typing import Any, NoReturn, Protocol
+from typing import Any, NoReturn, Protocol, TypedDict
 
 import valuz_agent.boot.kernel  # noqa: F401  (sys.path side-effect)
 
@@ -126,6 +126,13 @@ def _raise_mapped(exc: HTTPException) -> NoReturn:
 # ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
+
+
+class RuntimeAvailability(TypedDict):
+    """Per-runtime launchability, as reported by the kernel (§3.3)."""
+
+    available: bool
+    unavailable_reason: str | None
 
 
 class KernelClient(Protocol):
@@ -217,6 +224,8 @@ class KernelClient(Protocol):
         attachments: list[dict[str, Any]] | None = None,
         additional_context: str = "",
     ) -> MessageData: ...
+
+    async def runtime_availability(self) -> dict[str, RuntimeAvailability]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -547,6 +556,14 @@ class InProcessKernelClient:
         a remote kernel owns its runtime cache)."""
         await _orchestrator().cleanup(session_id)
 
+    async def runtime_availability(self) -> dict[str, RuntimeAvailability]:
+        # No store/orchestrator needed — a pure binary probe in this process
+        # (host == kernel in-process, so this is the local-host answer).
+        from app.routes.runtimes import get_runtime_availability
+
+        result = await get_runtime_availability()
+        return result["data"]
+
 
 def _make_client() -> KernelClient:
     """Bind the transport for this process from settings.
@@ -650,6 +667,15 @@ async def _kernel_for_existing(user_id: str) -> KernelClient | None:
 
 async def create_session(user_id: str, req: CreateSessionRequest) -> SessionData:
     return await (await _kernel_for(user_id)).create_session(user_id, req)
+
+
+async def runtime_availability() -> dict[str, RuntimeAvailability]:
+    """Per-runtime availability from the process-global kernel client.
+
+    Host-scoped (no ``user_id``) — routes to the process/boot-attached kernel:
+    in-process for the bundled desktop (local-host probe), the boot sandbox when
+    one is attached. A per-user execution kernel is an overlay concern (§8)."""
+    return await client.runtime_availability()
 
 
 async def get_session(user_id: str, session_id: str) -> SessionData | None:

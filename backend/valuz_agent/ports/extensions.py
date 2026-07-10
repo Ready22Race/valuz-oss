@@ -23,9 +23,12 @@ from valuz_agent.api.middleware import AuthMiddleware
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
+from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAddressResolver
+from valuz_agent.ports.instructions import InstructionsPort
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
 from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceListHook
+from valuz_agent.ports.runtime_availability import RuntimeAvailabilityPort
 from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator, SandboxAllocatorPort
 from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
 
@@ -52,6 +55,12 @@ class Extensions:
         # overlay binds a per-user pool allocator (one sandbox per user_id).
         self.sandbox_allocator: SandboxAllocatorPort = BootSingletonAllocator()
         self.resource_list_hook: ResourceListHook = NoopResourceListHook()
+        # Resolve a file's absolute path into a client-usable access address
+        # (see docs/design/file-address-resolution.md). OSS default returns the
+        # local absolute path (bundled desktop reads it directly); the commercial
+        # overlay binds a storage-specific resolver (e.g. COS presigned URLs) for
+        # the cloud deployment. The backend never proxies file bytes.
+        self.file_address_resolver: FileAddressResolverPort = LocalFileAddressResolver()
         # Generic ephemeral cache (e.g. the connector OAuth PKCE handoff). OSS
         # default is a local file cache (single desktop process); the commercial
         # overlay swaps in a Redis-backed cache for the shared multi-process
@@ -63,6 +72,18 @@ class Extensions:
         # boundary). The app factory mounts ``cls`` — instantiated by Starlette
         # as ``cls(app, **kwargs)`` — so ``kwargs`` carries any constructor deps.
         self.auth_middleware: tuple[type, dict[str, Any]] = (AuthMiddleware, {})
+        # Optional runtime-availability override (design §3.3). OSS default None →
+        # ``GET /v1/runtimes`` asks the kernel. A deployment that guarantees its
+        # execution image's runtime set (e.g. a controlled cloud sandbox) binds a
+        # provider to declare availability without a per-user sandbox probe.
+        self.runtime_availability: RuntimeAvailabilityPort | None = None
+        # Optional deployment-level instruction extensions (aggregate port —
+        # today just the global session-prompt preamble; future instruction
+        # kinds extend the same Protocol). OSS default None → sessions start
+        # with the agent's own instructions. An overlay binds a provider to
+        # prepend platform-level guidance (e.g. org policy) as the first
+        # prompt section of every chat/project AND task lead/member session.
+        self.instructions: InstructionsPort | None = None
 
 
 ext = Extensions()

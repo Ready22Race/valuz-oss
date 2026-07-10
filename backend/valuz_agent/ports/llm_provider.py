@@ -9,7 +9,8 @@ appends them next to its own user rows (display) and falls through to
 
 Two methods, two lifecycles:
 
-* ``list``    — display path. Called once per provider-list render. Returns
+* ``list``    — display path. Called once per provider-list render for an
+  explicit ``user_id``. Returns
   self-judged, key-free :class:`~valuz_agent.modules.providers.schemas.LLMChannel`
   rows. The implementation does its own (cached) upstream catalog fetch so one
   enumeration hits the network once.
@@ -24,8 +25,9 @@ OSS binds :class:`NoopLLMProvider` by default (``list → []``,
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from valuz_agent.modules.providers.schemas import LLMChannel
@@ -49,26 +51,23 @@ class ResolvedCredential:
     api_protocol: str
 
 
-@runtime_checkable
-class LLMProvider(Protocol):
+class LLMProvider(ABC):
     """An extra source of provider rows. OSS makes zero judgement on content."""
 
-    async def list(self) -> list[LLMChannel]: ...
+    @abstractmethod
+    async def list(self, *, user_id: str) -> list[LLMChannel]: ...
 
-    async def resolve(
-        self, provider_id: str, *, user_id: str | None = None
-    ) -> ResolvedCredential | None: ...
+    @abstractmethod
+    async def resolve(self, provider_id: str, *, user_id: str) -> ResolvedCredential | None: ...
 
 
-class NoopLLMProvider:
+class NoopLLMProvider(LLMProvider):
     """OSS default: contributes no rows and resolves nothing."""
 
-    async def list(self) -> list[LLMChannel]:
+    async def list(self, *, user_id: str) -> list[LLMChannel]:
         return []
 
-    async def resolve(
-        self, provider_id: str, *, user_id: str | None = None
-    ) -> ResolvedCredential | None:
+    async def resolve(self, provider_id: str, *, user_id: str) -> ResolvedCredential | None:
         return None
 
 

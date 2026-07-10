@@ -557,17 +557,28 @@ class ClaudeAgentRuntime:
                     message="cancelled",
                 )
             elif is_runtime_interruption(exc):
-                # Graceful host stop tore down the claude CLI subprocess
-                # mid-turn ("closed stdout" / broken pipe). This is NOT a
-                # task failure: leave it resumable (``interrupted``) so boot
-                # recovery re-drives the turn — the same outcome a hard kill
-                # gets via ``scan_orphan_runs`` — and suppress the scary
-                # session_error + the on_error hook. Drop buffered stderr so a
+                # The claude CLI subprocess went away mid-turn ("closed stdout"
+                # / broken pipe). Usually a graceful host stop tearing it down —
+                # NOT a task failure — so leave it resumable (``interrupted``)
+                # for boot recovery to re-drive (the same outcome a hard kill
+                # gets via ``scan_orphan_runs``) and suppress the scary
+                # session_error + on_error hook. BUT the same exception shape
+                # also covers a spontaneous crash (OOM, panic, broken pipe to a
+                # dead child): don't swallow the cause — log it and thread it
+                # into the stop_reason so an operator can tell a clean shutdown
+                # from a crash. Category/recovery untouched (they key on
+                # ``category``, not the message). Drop buffered stderr after so a
                 # resumed turn starts fresh.
+                cause = describe_exception(exc)
+                logger.warning(
+                    "claude: runtime process interrupted mid-turn for session %s: %s",
+                    session.id,
+                    cause,
+                )
                 session.stop_reason = Error(
                     category="interrupted",
                     retry_status="terminal",
-                    message="runtime process interrupted",
+                    message=f"runtime process interrupted: {cause}",
                 )
                 self._stderr_buffer.clear()
             else:

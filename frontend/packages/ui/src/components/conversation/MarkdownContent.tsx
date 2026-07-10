@@ -5,7 +5,11 @@ import {
   useState,
   type AnchorHTMLAttributes,
 } from "react";
-import { Streamdown } from "streamdown";
+import {
+  Streamdown,
+  defaultUrlTransform,
+  type UrlTransform,
+} from "streamdown";
 import { code } from "@streamdown/code";
 import { mermaid } from "@streamdown/mermaid";
 import { math } from "@streamdown/math";
@@ -57,10 +61,79 @@ const STREAMDOWN_ICONS = {
   ZoomOutIcon: ZoomOut,
 };
 
+const LOCAL_FILE_HREF_PREFIX = "https://valuz.local-file.invalid/";
+
+function encodeLocalFileHref(href: string): string {
+  return `${LOCAL_FILE_HREF_PREFIX}${encodeURIComponent(href)}`;
+}
+
+function decodeLocalFileHref(href: string): string {
+  if (!href.startsWith(LOCAL_FILE_HREF_PREFIX)) return href;
+  try {
+    return decodeURIComponent(href.slice(LOCAL_FILE_HREF_PREFIX.length));
+  } catch {
+    return href;
+  }
+}
+
+function rewriteLocalFileMarkdownLinks(
+  content: string,
+  isLocalFileHref?: (href: string) => boolean,
+): string {
+  if (!isLocalFileHref) return content;
+  return content.replace(/(\[[^\]\n]+\]\()([^)\n]+)(\))/g, (match) =>
+    rewriteMarkdownLinkMatch(match, isLocalFileHref),
+  );
+}
+
+function rewriteMarkdownLinkMatch(
+  match: string,
+  isLocalFileHref: (href: string) => boolean,
+): string {
+  const destinationStart = match.lastIndexOf("(");
+  if (destinationStart === -1 || !match.endsWith(")")) return match;
+
+  const prefix = match.slice(0, destinationStart + 1);
+  const destination = match.slice(destinationStart + 1, -1);
+  return `${prefix}${rewriteMarkdownLinkDestination(
+    destination,
+    isLocalFileHref,
+  )})`;
+}
+
+function rewriteMarkdownLinkDestination(
+  destination: string,
+  isLocalFileHref: (href: string) => boolean,
+): string {
+  const leading = destination.match(/^\s*/)?.[0] ?? "";
+  const trailing = destination.match(/\s*$/)?.[0] ?? "";
+  const body = destination.slice(
+    leading.length,
+    destination.length - trailing.length,
+  );
+  if (!body) return destination;
+
+  if (body.startsWith("<")) {
+    const end = body.indexOf(">");
+    if (end <= 0) return destination;
+    const href = body.slice(1, end);
+    if (!isLocalFileHref(href)) return destination;
+    return `${leading}<${encodeLocalFileHref(href)}>${body.slice(
+      end + 1,
+    )}${trailing}`;
+  }
+
+  const [href = "", ...rest] = body.split(/(\s[\s\S]*)/);
+  if (!href || !isLocalFileHref(href)) return destination;
+  return `${leading}${encodeLocalFileHref(href)}${rest.join("")}${trailing}`;
+}
+
 interface MarkdownContentProps {
   content: string;
   className?: string;
   isAnimating?: boolean;
+  isLocalFileHref?: (href: string) => boolean;
+  onLocalFileLinkClick?: (href: string) => void;
 }
 
 /**
@@ -502,8 +575,23 @@ export const MarkdownContent = memo(function MarkdownContent({
   content,
   className,
   isAnimating,
+  isLocalFileHref,
+  onLocalFileLinkClick,
 }: MarkdownContentProps) {
   const [pendingUrl, setPendingUrl] = useState<string | null>(null);
+  const renderedContent = useMemo(
+    () => rewriteLocalFileMarkdownLinks(content, isLocalFileHref),
+    [content, isLocalFileHref],
+  );
+  const urlTransform = useCallback<UrlTransform>(
+    (url, key, node) => {
+      if (key === "href" && isLocalFileHref?.(decodeLocalFileHref(url))) {
+        return url;
+      }
+      return defaultUrlTransform(url, key, node);
+    },
+    [isLocalFileHref],
+  );
 
   const components = useMemo(
     () => ({
@@ -518,6 +606,23 @@ export const MarkdownContent = memo(function MarkdownContent({
           "wrap-anywhere font-medium text-primary underline",
           anchorClassName,
         );
+        const localHref = href ? decodeLocalFileHref(href) : href;
+        if (localHref && isLocalFileHref?.(localHref) && onLocalFileLinkClick) {
+          return (
+            <a
+              {...rest}
+              href={localHref}
+              className={baseClass}
+              onClick={(event) => {
+                event.preventDefault();
+                onClick?.(event);
+                onLocalFileLinkClick(localHref);
+              }}
+            >
+              {children}
+            </a>
+          );
+        }
         if (isExternalHref(href)) {
           return (
             <a
@@ -541,7 +646,7 @@ export const MarkdownContent = memo(function MarkdownContent({
         );
       },
     }),
-    [],
+    [isLocalFileHref, onLocalFileLinkClick],
   );
 
   return (
@@ -564,8 +669,9 @@ export const MarkdownContent = memo(function MarkdownContent({
           icons={STREAMDOWN_ICONS}
           isAnimating={isAnimating}
           components={components}
+          urlTransform={urlTransform}
         >
-          {content}
+          {renderedContent}
         </Streamdown>
       </div>
       <ExternalLinkConfirmDialog

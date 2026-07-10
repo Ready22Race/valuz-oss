@@ -43,7 +43,7 @@ export const ConnectorDetailPanel = ({
   if (!connected) {
     return (
       <aside className="flex h-full flex-col items-center justify-center px-6 text-center">
-        <div className="w-[300px] rounded-xl px-5 py-8 text-center">
+        <div className="w-[300px] -translate-y-[100px] rounded-xl px-5 py-8 text-center">
           <ConnectorIcon
             name={name}
             iconUrl={iconUrl}

@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
-from valuz_agent.adapters.system_prompt_builder import assemble_session_instructions
+from valuz_agent.adapters.system_prompt_builder import (
+    OUTPUT_FORMAT_INSTRUCTIONS,
+    assemble_session_instructions,
+)
+
+
+def test_output_format_instructions_reference_valuz_file_scheme() -> None:
+    # The global guidance must name the scheme so the frontend linkify/resolver
+    # contract holds; both session-assembly paths inject it as a section.
+    assert "valuz-file://" in OUTPUT_FORMAT_INSTRUCTIONS
+    out = assemble_session_instructions([("output-format", OUTPUT_FORMAT_INSTRUCTIONS)])
+    assert out == f"<output-format>\n{OUTPUT_FORMAT_INSTRUCTIONS}\n</output-format>"
 
 
 def test_wraps_each_nonempty_block_in_its_tag() -> None:

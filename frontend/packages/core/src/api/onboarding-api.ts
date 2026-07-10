@@ -17,7 +17,7 @@ export const setOnboardingApiBase = (url: string): void => {
 
 /** The three recommended teams — each maps to a built-in Agent Pack imported
  *  and deployed into the example project. */
-export type OnboardingTeamId = "content" | "investment" | "product";
+export type OnboardingTeamId = "content" | "investment" | "development-engineering";
 
 export interface ExampleProjectResponse {
   project_id: string;

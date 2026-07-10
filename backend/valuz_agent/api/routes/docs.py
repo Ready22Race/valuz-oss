@@ -81,7 +81,7 @@ async def list_kbs(
 
     rows = await svc.list_kbs(user_id)
     items = [item.model_dump() if hasattr(item, "model_dump") else item for item in rows]
-    items = await ext.resource_list_hook.apply("kb", items)
+    items = await ext.resource_list_hook.apply("kb", items, user_id=user_id)
     return {"knowledge_bases": items}
 
 

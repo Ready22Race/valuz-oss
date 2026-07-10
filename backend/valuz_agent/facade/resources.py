@@ -558,6 +558,42 @@ class ResourceLibrary:
 
         raise NotImplementedError(f"save({snapshot.kind}) not implemented")
 
+    # ── credentials ───────────────────────────────────────────────────
+
+    async def get_connector_access_token(self, user_id: str, slug: str) -> str | None:
+        """Live OAuth access token of the user's connector ``slug``, or ``None``.
+
+        Read-only overlay seam: editions/overlays whose data plane is
+        authenticated by a connector's OAuth identity (e.g. the built-in
+        research connectors) fetch the bearer here instead of reaching into
+        ``modules.connectors`` internals. A lapsed token is refreshed before
+        returning — the same self-heal the MCP resolver applies — so callers
+        can treat the result as ready to use. Returns ``None`` when the
+        connector is absent, disabled, not OAuth, or holds no token.
+        """
+        import json
+
+        from valuz_agent.adapters.mcp_resolver import _ensure_fresh_oauth_token
+        from valuz_agent.infra.db import async_unit_of_work
+        from valuz_agent.modules.connectors.datastore import ConnectorDatastore
+
+        async with async_unit_of_work() as db:
+            ds = ConnectorDatastore(db)
+            row = await ds.get_by_slug(user_id, slug)
+            if row is None or not row.enabled or row.auth_type != "oauth":
+                return None
+            token_json = row.oauth_token_json
+            if not token_json:
+                return None
+            # Refresh-if-expired shares the resolver's lock + update path.
+            token_json = await _ensure_fresh_oauth_token(row, ds, token_json)
+            try:
+                data = json.loads(token_json)
+            except (json.JSONDecodeError, TypeError):
+                return None
+            token = data.get("access_token", "")
+            return token or None
+
 
 async def get_resource_library() -> AsyncGenerator[ResourceLibrary, None]:
     """FastAPI dependency yielding a request-scoped ``ResourceLibrary``."""

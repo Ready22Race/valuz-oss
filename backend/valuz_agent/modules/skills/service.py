@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
-from valuz_agent.infra.eventbus import EventBus
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.integrations.skills_filesystem import (
     FilesystemSkillSource,
@@ -26,10 +25,6 @@ from valuz_agent.modules.projects.service import (
     ProjectService,
 )
 from valuz_agent.modules.skills.datastore import SkillDatastore
-from valuz_agent.modules.skills.events import (
-    PROJECT_SKILLS_CHANGED,
-    SKILL_CHANGED,
-)
 from valuz_agent.modules.skills.models import (
     SessionSkillImportConfirmRequest,
     SkillCopyRequest,
@@ -47,6 +42,7 @@ from valuz_agent.modules.skills.models import (
     SkillImportDirectoryPreviewRequest,
     SkillImportPreviewFile,
     SkillImportUrlConfirmRequest,
+    SkillIndexRow,
     SkillOrigin,
     SkillsCatalog,
     SkillUpdateRequest,
@@ -332,7 +328,6 @@ class SkillLibraryService:
         datastore: SkillDatastore,
         skill_source: FilesystemSkillSource,
         project_service: ProjectService,
-        event_bus: EventBus,
         extra_sources: list | None = None,
         auth_facade: object | None = None,
         remote_registry: object | None = None,
@@ -341,7 +336,6 @@ class SkillLibraryService:
         self._source = skill_source
         self._extra_sources = extra_sources or []
         self._projects = project_service
-        self._bus = event_bus
         self._auth = auth_facade
         self._remote_registry = remote_registry
 
@@ -555,6 +549,16 @@ class SkillLibraryService:
         ``_upsert_skill_row``)."""
         await _upsert_skill_row(user_id, self._ds, manifest)
 
+    async def list_indexed_skills(self, user_id: str) -> list[SkillIndexRow]:
+        """All of the user's ``valuz_skill_index`` rows — the service-API read
+        for sibling modules (e.g. the marketplace checks installed slugs and
+        official-skill state); they must not touch the datastore directly."""
+        return await self._ds.list_skills(user_id)
+
+    async def get_indexed_skill(self, user_id: str, slug: str) -> SkillIndexRow | None:
+        """One index row by slug (None when absent) — see ``list_indexed_skills``."""
+        return await self._ds.get_by_slug(user_id, slug)
+
     async def index_official_skills(self, user_id: str) -> int:
         """Deterministically index the bundled official skills.
 
@@ -588,7 +592,6 @@ class SkillLibraryService:
     ) -> SkillsCatalog:
         project = await self._projects.get_project(user_id, project_id)
         self._ds.set_skill_enabled(project, skill_path, enabled)
-        self._bus.publish(PROJECT_SKILLS_CHANGED, project_id=project_id)
         return await self.list_catalog(user_id, project_id)
 
     async def resolve_skill_dirs_for_project(self, user_id: str, project_id: str) -> list[str]:
@@ -649,8 +652,6 @@ class SkillLibraryService:
                 continue
             await self._ds.set_creation_origin_by_slug(user_id, written.slug, "created")
 
-        # Notify any subscribers (frontend uses /v1/skills/events/stream).
-        self._bus.publish(SKILL_CHANGED, skill_id="*", reason="staging-sync")
         return results
 
     async def optimize_from_skill(
@@ -734,8 +735,6 @@ class SkillLibraryService:
         elif payload.add_to_project and project is not None and project.kind == "project":
             self._ds.set_skill_enabled(project, str(skill_dir), True)
         result = await self._finalize_origin(user_id, skill_dir, "created", payload.project_id)
-        self._bus.publish(SKILL_CHANGED, skill_id=result.id, reason="created")
-        self._bus.publish(PROJECT_SKILLS_CHANGED, project_id=payload.project_id or "chat-default")
         return result
 
     async def update_skill(
@@ -769,7 +768,6 @@ class SkillLibraryService:
             encoding="utf-8",
         )
         result = await self._resolve_skill(user_id, skill_id=skill_id, project_id=project_id)
-        self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="updated")
         return result
 
     async def copy_skill(
@@ -836,11 +834,10 @@ class SkillLibraryService:
         skill_dir = Path(skill.path)
         if skill_dir.exists():
             shutil.rmtree(skill_dir)
+        await self._ds.mark_unavailable_by_slug(user_id, skill.slug)
         for project in await self._projects.list_projects(user_id):
             if project.kind == "project":
                 self._ds.remove_skill_path_from_project(project, skill.path)
-        self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="deleted")
-        self._bus.publish(PROJECT_SKILLS_CHANGED, project_id=project_id or "chat-default")
         return None
 
     async def import_from_session_confirm(
@@ -1040,7 +1037,7 @@ class SkillLibraryService:
             raise SkillNotFound(f"File not found: {file_path}")
         return SkillFileContent(
             path=file_path,
-            content=target.read_text(encoding="utf-8"),
+            content=_read_text(target),
         )
 
     async def write_skill_file(
@@ -1072,7 +1069,7 @@ class SkillLibraryService:
                 raise ValueError("Path traversal not allowed")
             new_target.parent.mkdir(parents=True, exist_ok=True)
             target.rename(new_target)
-            content = new_target.read_text(encoding="utf-8") if new_target.is_file() else ""
+            content = _read_text(new_target) if new_target.is_file() else ""
             return SkillFileContent(path=action.new_path, content=content)
         elif action.action == "delete":
             if target.is_file():
@@ -1139,7 +1136,6 @@ class SkillLibraryService:
         if row is None:
             raise SkillNotFound(skill_id)
         await self._ds.set_library_enabled_by_slug(user_id, skill.slug, enabled)
-        self._bus.publish(SKILL_CHANGED, skill_id=skill_id, reason="library_state")
         return await self.get_skill_detail(user_id, skill_id)
 
     async def _load_origin(self, user_id: str, slug: str) -> SkillOrigin | None:
@@ -1334,7 +1330,7 @@ class SkillLibraryService:
         downloaded = staging_dir / "download"
         downloaded.write_bytes(content)
         suffix = Path(url.split("?")[0]).suffix.lower()
-        if suffix in {".zip", ".tar", ".gz", ".tgz"}:
+        if self._is_archive_file(downloaded, suffix=suffix):
             return self._extract_archive(downloaded, dest=staging_dir / "extract")
         downloaded.rename(staging_dir / "SKILL.md")
         return staging_dir
@@ -1440,6 +1436,18 @@ class SkillLibraryService:
             name=final_name,
         )
         await asyncio.to_thread(shutil.copytree, skill_root, target_dir, dirs_exist_ok=True)
+        manifest_path = _detect_manifest(target_dir)
+        if manifest_path is not None and payload.name:
+            metadata, body = _extract_frontmatter(_read_text(manifest_path))
+            manifest_path.write_text(
+                self._render_manifest(
+                    name=payload.name,
+                    description=str(metadata.get("description") or "Imported URL skill"),
+                    instructions_markdown=body.strip() or "Imported URL skill.",
+                    tags=metadata.get("tags") if isinstance(metadata.get("tags"), list) else None,
+                ),
+                encoding="utf-8",
+            )
 
         project = await self._resolve_project(user_id, payload.project_id)
         if payload.target_scope == "project" and project is not None:
@@ -1794,20 +1802,6 @@ class SkillLibraryService:
         await self._ds.set_creation_origin_by_slug(user_id, skill.slug, "created")
         skill.creation_origin = "created"
 
-        # Notify subscribers — frontend reloads the catalog & cards.
-        self._bus.publish(
-            SKILL_CHANGED,
-            skill_id=skill.id,
-            reason="submission-confirmed",
-            change_kind=change_kind,
-            summary=summary or "",
-            files_touched=list(files_touched or []),
-        )
-        if bound_project_id:
-            self._bus.publish(PROJECT_SKILLS_CHANGED, project_id=bound_project_id)
-        else:
-            self._bus.publish(PROJECT_SKILLS_CHANGED, project_id="chat-default")
-
         return skill, creation_context, bound_project_id
 
     async def dismiss_submission(self, user_id: str, session_id: str, slug: str) -> bool:
@@ -2031,18 +2025,31 @@ class SkillLibraryService:
             dest if dest is not None else Path(tempfile.mkdtemp(prefix="valuz-skill-import-"))
         )
         staging_dir.mkdir(parents=True, exist_ok=True)
-        suffix = archive_path.suffix.lower()
-        if suffix == ".zip":
+        if zipfile.is_zipfile(archive_path):
             with zipfile.ZipFile(archive_path) as zipped:
                 zipped.extractall(staging_dir)
             return staging_dir
-        if suffix in {".tar", ".gz", ".tgz", ".bz2", ".xz"} or archive_path.name.endswith(
-            (".tar.gz", ".tar.bz2", ".tar.xz")
-        ):
+        if tarfile.is_tarfile(archive_path):
             with tarfile.open(archive_path) as tarred:
                 tarred.extractall(staging_dir)
             return staging_dir
         raise ValueError("Only .zip and .tar archives are supported")
+
+    @staticmethod
+    def _is_archive_file(path: Path, *, suffix: str | None = None) -> bool:
+        """Return true when downloaded bytes are an importable archive.
+
+        Some registry download endpoints, including SkillHub's
+        ``/api/v1/download?slug=...``, redirect to a zip body while the original
+        URL has no archive suffix. Sniff the saved file so those endpoints do
+        not get materialized as a bogus binary ``SKILL.md``.
+        """
+        suffix = (suffix or path.suffix).lower()
+        if suffix in {".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz"} or path.name.endswith(
+            (".tar.gz", ".tar.bz2", ".tar.xz")
+        ):
+            return True
+        return zipfile.is_zipfile(path) or tarfile.is_tarfile(path)
 
     def _locate_skill_root(
         self,

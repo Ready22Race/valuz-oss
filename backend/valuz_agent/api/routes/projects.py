@@ -21,7 +21,6 @@ from valuz_agent.modules.project_packs.errors import (
 from valuz_agent.modules.project_packs.service import ProjectPackService
 from valuz_agent.modules.projects.models import ProjectCreateRequest
 from valuz_agent.modules.projects.service import (
-    ArtifactFileResponse,
     ProjectDeletePreview,
     ProjectDetail,
     ProjectListItem,
@@ -103,14 +102,10 @@ async def upload_project_files(
     try:
         for upload in files:
             data = await upload.read()
-            rel = await svc.write_file(
-                user_id, project_id, upload.filename or "", data
-            )
+            rel = await svc.write_file(user_id, project_id, upload.filename or "", data)
             written.append(rel)
     except KeyError as exc:
-        raise HTTPException(
-            status_code=404, detail=f"Unknown project: {project_id}"
-        ) from exc
+        raise HTTPException(status_code=404, detail=f"Unknown project: {project_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"project_id": project_id, "written": written}
@@ -168,57 +163,12 @@ async def list_files(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.get("/{project_id}/files/{file_path:path}")
-async def read_file(
-    project_id: str,
-    file_path: str,
-    worktree: str | None = None,
-    user_id: str = Depends(get_current_user_id),
-    svc: ProjectService = Depends(get_project_service),
-) -> ArtifactFileResponse:
-    try:
-        return await svc.read_file(user_id, project_id, file_path, worktree=worktree)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@router.get("/{project_id}/raw-files/{file_path:path}", response_model=None)
-async def read_raw_file(
-    project_id: str,
-    file_path: str,
-    worktree: str | None = None,
-    user_id: str = Depends(get_current_user_id),
-    svc: ProjectService = Depends(get_project_service),
-) -> FileResponse | StreamingResponse:
-    try:
-        resource = await svc.resolve_file_resource(
-            user_id, project_id, file_path, worktree=worktree
-        )
-        media_type = resource.mime_type or "application/octet-stream"
-        if resource.path is None:
-            if resource.data is None:
-                raise FileNotFoundError(file_path)
-            return StreamingResponse(iter([resource.data]), media_type=media_type)
-        return FileResponse(
-            resource.path,
-            media_type=media_type,
-            filename=resource.name,
-            content_disposition_type="inline",
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+# File CONTENT is no longer served by the API: the single-file read
+# (``/files/{path}``) and raw download (``/raw-files/{path}``) endpoints were
+# removed. A file's bytes are fetched by the client from an access address it
+# gets via ``POST /v1/files/resolve`` (local path / presigned URL) — the backend
+# never proxies file streams. The directory-tree ``GET /files`` above stays.
+# See docs/design/file-address-resolution.md.
 
 
 @router.get("/{project_id}/delete-preview")

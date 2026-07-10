@@ -43,7 +43,7 @@ export const ConnectorIcon = ({
     return (
       <div
         className={cn(
-          "flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-white",
+          "flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border-[0.5px] border-surface-border bg-white",
           className,
         )}
       >

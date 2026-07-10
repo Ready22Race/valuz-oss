@@ -186,7 +186,7 @@ async def list_agents(
 
     rows = await svc.list_agents(user_id, source=source)
     items = [AgentResponse.model_validate(r).model_dump() for r in rows]
-    items = await ext.resource_list_hook.apply("agent", items)
+    items = await ext.resource_list_hook.apply("agent", items, user_id=user_id)
     return {"agents": items}
 
 

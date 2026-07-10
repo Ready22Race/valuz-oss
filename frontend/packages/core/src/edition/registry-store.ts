@@ -4,6 +4,7 @@ import type { Edition, EditionProfile, FeatureFlags } from "./profile";
 import type {
   BrandingProfile,
   DesktopRouteModule,
+  NavGroupModule,
   NavItemModule,
   ServiceDescriptor,
   SettingsSectionModule,
@@ -27,6 +28,7 @@ interface RegistryState {
   services: ServiceDescriptor[];
   branding: BrandingProfile;
   navItems: NavItemModule[];
+  navGroups: NavGroupModule[];
   capabilities: Capabilities;
   slots: SlotMap;
 
@@ -89,6 +91,7 @@ export const useRegistryStore = create<RegistryState>((set) => ({
   services: [...seed.services],
   branding: seed.branding,
   navItems: [...seed.navItems],
+  navGroups: [...(seed.navGroups ?? [])],
   capabilities: { ...seed.capabilities },
   slots: {},
 
@@ -106,6 +109,7 @@ export const useRegistryStore = create<RegistryState>((set) => ({
       services: [...personalProfile.services],
       branding: personalProfile.branding,
       navItems: [...personalProfile.navItems],
+      navGroups: [...(personalProfile.navGroups ?? [])],
       capabilities: { ...personalProfile.capabilities },
     });
   },
@@ -120,6 +124,7 @@ export const useRegistryStore = create<RegistryState>((set) => ({
       services: [...profile.services],
       branding: profile.branding,
       navItems: [...profile.navItems],
+      navGroups: [...(profile.navGroups ?? [])],
       capabilities: { ...profile.capabilities },
     }),
 
@@ -241,6 +246,7 @@ export const getRegistrySnapshot = (): EditionProfile => {
     services: state.services,
     branding: state.branding,
     navItems: state.navItems,
+    navGroups: state.navGroups,
     capabilities: state.capabilities,
   };
 };

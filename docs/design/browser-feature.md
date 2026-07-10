@@ -83,8 +83,8 @@ agent ──shell(skill)──> chrome-devtools navigate/snapshot/click/… ─�
 
 ## 5. 配置与打包
 
-- **环境变量**:`VALUZ_BROWSER_MODE`(`managed`|`attach`)、`VALUZ_BROWSER_ATTACH_URL`(默认 `http://127.0.0.1:9222`)、`VALUZ_CHROME_DEVTOOLS_VERSION`(pin)、`VALUZ_NODE_PATH` + `VALUZ_CDT_ENTRY`(vendored node + CLI 入口,设置后免 `npx`;见 §8)。
-- **Node 运行时**:dev 经 `npx`(需本机 Node ≥ 20)。**打包桌面版自带 node** —— 否则 GUI app 的精简 PATH 看不到用户的 node,功能跑不起来。存储:node 与 chrome-devtools-mcp 均构建时拉取(仓库只 commit pin);决策、根因与组件见 **§8**。
+- **环境变量**:`VALUZ_BROWSER_MODE`(`managed`|`attach`)、`VALUZ_BROWSER_ATTACH_URL`(默认 `http://127.0.0.1:9222`)、`VALUZ_CHROME_DEVTOOLS_VERSION`(pin)、`VALUZ_NODE_PATH` + `VALUZ_CDT_ENTRY`(node 运行时 + CLI 入口,设置后免 `npx`)、`VALUZ_NODE_IS_ELECTRON`(=1 时 `VALUZ_NODE_PATH` 是 Electron 二进制,引擎 spawn 需注入 `ELECTRON_RUN_AS_NODE=1`;见 §8)。
+- **Node 运行时**:dev 经 `npx`(需本机 Node ≥ 20)。**打包桌面版复用 Electron 内置 node**(`ELECTRON_RUN_AS_NODE`,方案 B)—— GUI app 的精简 PATH 看不到用户的 node,而 Electron 本体就是一个 node。chrome-devtools-mcp JS 树构建时拉取(仓库只 commit pin);决策、根因与组件见 **§8**。
 
 ---
 
@@ -101,7 +101,7 @@ agent ──shell(skill)──> chrome-devtools navigate/snapshot/click/… ─�
 
 - **P3 安全模型实现**(按 §6 触发条件)。
 - **P4 可视面板**:把浏览器嵌进 Electron `WebContentsView` 侧栏(desktop-only),attach 同一 CDP 目标。
-- **node/CLI vendoring**(出货阻断,desktop)—— 决策 = "vendor 真实 node",根因 + 计划见 **§8**。
+- **node/CLI vendoring**(出货阻断,desktop)—— 决策 = "复用 Electron 内置 node"(方案 B,2026-07-07 起;此前为 vendor 真实 node),根因 + 计划见 **§8**。
 - **Settings 模式切换 UI + 持久化**(当前 `managed`/`attach` 经 env;UI 切换待加)。
 - **可部署的 per-agent skill**:当前 browser skill 始终注入;可改为按 agent 部署的目录 skill。
 
@@ -109,34 +109,38 @@ agent ──shell(skill)──> chrome-devtools navigate/snapshot/click/… ─�
 
 ## 8. 运行时依赖与 vendoring(desktop)
 
-> 状态:**Implemented**(2026-06-17,范围 desktop-only)。决策:**自带一个真实 node**(方案 A);**不复用 Electron 内置 node**(方案 B,spike 否决)。存储策略:**node 与 chrome-devtools-mcp 均构建时拉取,仓库只 commit pin**(见下)。
+> 状态:**Implemented**。2026-06-17 落地方案 A(自带真实 node);**2026-07-07 改为方案 B:复用 Electron 内置 node**(`ELECTRON_RUN_AS_NODE`),不再自带独立 node —— 当年否决 B 的"无法 shim"结论经复核有误(见事实 2)。存储策略:**chrome-devtools-mcp 构建时拉取,仓库只 commit pin**(见下)。
 
-**两条已证实的事实(决定了为什么必须 vendor):**
+**两条事实(第 2 条于 2026-07-07 修正结论):**
 
-1. **打包后的 macOS app 看不到系统 node。** GUI(Finder/Dock)启动的 app 拿到精简的 launchd PATH(`/usr/bin:/bin:/usr/sbin:/sbin`),不含 nvm/Homebrew;`sidecar.ts` 只 `{...process.env}`、直接 `spawn`、不补 PATH。实测:本机 node 在 `~/.nvm/...`,精简 PATH 下 `which node` = NOT FOUND。→ **即使用户装了 node,现状的打包桌面版 browser 功能也跑不起来**(仅终端启动的 dev、或 node 恰在系统 PATH 时可用)。`rg` 不受影响,因为 sidecar 用绝对路径 `VALUZ_RG_PATH`,与 PATH 无关 —— 这正是要照搬的范式。
+1. **打包后的 macOS app 看不到系统 node。** GUI(Finder/Dock)启动的 app 拿到精简的 launchd PATH(`/usr/bin:/bin:/usr/sbin:/sbin`),不含 nvm/Homebrew;`sidecar.ts` 只 `{...process.env}`、直接 `spawn`、不补 PATH。实测:本机 node 在 `~/.nvm/...`,精简 PATH 下 `which node` = NOT FOUND。→ **即使用户装了 node,打包桌面版也不能依赖 PATH 上的 node**(仅终端启动的 dev、或 node 恰在系统 PATH 时可用)。`rg` 不受影响,因为 sidecar 用绝对路径 `VALUZ_RG_PATH`,与 PATH 无关 —— 这正是照搬的范式。
 
-2. **不能复用 Electron 内置 node(方案 B 被 spike 否决)。** `ELECTRON_RUN_AS_NODE=1` 下 `process.versions.electron` 仍有值且 `process.defaultApp=undefined`,导致 chrome-devtools-mcp 依赖的 yargs `hideBin` 走 `argv.slice(1)`(误判为"打包 Electron app")而非 `slice(2)`,脚本路径漏进参数 → CLI 解析全错(`Unknown argument: …/chrome-devtools.js`)。顶层调用尚可用 shim 矫正,但 `start` 会经 `process.execPath` 再 spawn **daemon**、在包内部再次 `hideBin` 误切,**无法 shim** → B 对本引擎不可行。
+2. **Electron 内置 node 可以复用(方案 B 可行)—— 2026-06-17 spike 的"无法 shim"结论已被实证推翻(2026-07-07)。** 当年的**观察**正确:`ELECTRON_RUN_AS_NODE=1` 下 `process.versions.electron` 仍有值且 `process.defaultApp=undefined`,yargs `hideBin` 误判为"打包 Electron app"走 `argv.slice(1)` 而非 `slice(2)`,脚本路径漏进 positional → 子命令解析全错(已复现:`status` 打出 usage 而非执行)。但**结论**错了:"`start` 经 `process.execPath` 再 spawn daemon、无法 shim"只对*入口包装式* shim 成立 —— daemon 的 spawn 是 `env: {...process.env, …}`(`build/src/daemon/client.js`),**环境变量完整继承**,所以凡随 env 传播的修正(env 预载,或直接 patch 掉 hideBin 的误判)自动覆盖 daemon 及其后代(watchdog / update-check 同为 `execPath` spawn + env 继承)。**已端到端验证**(Electron 36.9.5 + chrome-devtools-mcp@1.2.0):shim 下 `start → status → stop` 全链路正确,daemon 进程即 Electron 二进制、其内部 yargs 参数解析全对。当年 spike 只试了入口包装(确实覆盖不到 daemon),未试 env 级注入。
 
-**方案 A(选定):自带真实 node + chrome-devtools-mcp JS 树,`node <entry>` 绝对路径调用(沿用 `rg` 的绝对路径范式)。**
+**方案 B(现行):Electron 二进制当 node 用(`ELECTRON_RUN_AS_NODE=1`)+ 构建期 patch,`<electron> <entry>` 绝对路径调用(仍沿用 `rg` 的绝对路径范式)。**
 
-存储策略(**两半都构建时拉取,仓库只 commit pin**):
+- **shim 形态选"构建期 patch"而非 NODE_OPTIONS 预载**:Phase A4 `npm ci` 之后、staging 之前,`scripts/patch-cdt-electron-node.cjs` 给 bundled third_party 的 `isBundledElectronApp()` 补上 `&& !process.env.ELECTRON_RUN_AS_NODE`。单点定义、所有进程(CLI/daemon/watchdog)共用;版本 pin,patch 稳定,预期文本缺失即 build fail-loud;且不依赖 `EnableNodeOptionsEnvironmentVariable` fuse。
+- **代价/前提(采纳时已知)**:要求打包 app 的 **`RunAsNode` fuse 保持开启**(Electron 默认开;本仓库未动 fuses)。Electron 加固指南建议生产应用关闭该 fuse(签名二进制可被本地攻击者当通用 node 解释器滥用)。**若未来安全加固需要关 fuse,回退方案 A**(vendor 真实 node;`scripts/download-node.sh` 在 git 历史中)。
+- 收益:每平台包体 −~100MB 未压缩(DMG −~30MB);CI 少一个平台相关下载步骤;air-gap 顾虑减半(只剩 npm ci)。
+
+存储策略(**构建时拉取,仓库只 commit pin**):
 
 | 件 | 体量 | 存储 | 理由 |
 |---|---|---|---|
-| chrome-devtools-mcp JS 树 | ~17MB,**平台无关**(依赖 `puppeteer-core`/`ws`/`yargs` 已打进 `build/`,一份通吃)| 只 commit `package.json` + `package-lock.json`;`node_modules` 构建时 `npm ci` 生成,**不进 git** | 整棵 ~350 文件的第三方树进 git 无收益(node 已构建时下载,air-gap 本就没了);完整性靠 lockfile 的 integrity SHA(`npm ci` 校验)|
-| node 二进制 | ~100MB × 4 平台 | **构建时下载 + SHA256 校验**,不进 git | commit 会给 git 历史永久 +~0.4GB(本仓库无 git-LFS);完整性靠 pin 版本 + 校验和而非提交物 |
+| chrome-devtools-mcp JS 树 | ~17MB,**平台无关**(依赖 `puppeteer-core`/`ws`/`yargs` 已打进 `build/`,一份通吃)| 只 commit `package.json` + `package-lock.json`;`node_modules` 构建时 `npm ci` 生成,**不进 git** | 整棵 ~350 文件的第三方树进 git 无收益;完整性靠 lockfile 的 integrity SHA(`npm ci` 校验)|
+| node 运行时 | 0(复用 Electron 本体)| — | 方案 B:`ELECTRON_RUN_AS_NODE`;独立 node 二进制及 `backend/vendor/node/`、`scripts/download-node.sh` 已随方案 A 退役 |
 
 代价:打包需联网(release CI 有网);本特性不支持完全 air-gapped 的桌面构建。
 
 已落地组件:
 1. **JS pin**:`backend/vendor/chrome-devtools-mcp/{package.json,package-lock.json}`(commit;`node_modules` gitignored;刷新/bump 用 `scripts/vendor-chrome-devtools-mcp.sh`)。
-2. **node**:`scripts/download-node.sh`(pin Node 22 LTS,从 nodejs.org 下载、按 `SHASUMS256.txt` 校验、只取 `node` 可执行文件);`backend/vendor/node/` 仅留 README + `.gitignore`。
-3. **`build-desktop.sh` Phase A4**:`npm ci --omit=dev` 装 chrome-devtools-mcp → stage 进 `libexec/chrome-devtools-mcp/`,下载 node 进 `libexec/node`(`--skip-node` 跳过;dist tag → node target 的映射在此)。
-4. **`sidecar.ts`**:设 `VALUZ_NODE_PATH`(`libexec/node`)+ `VALUZ_CDT_ENTRY`(`libexec/chrome-devtools-mcp/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools.js`)为绝对路径,绕开 GUI app 的精简 PATH。
-5. **`modules/browser/service.py`**:`_engine_argv()` 是*真实*调用 —— 两个 env 都设 → `[node, entry]`;否则 `npx`(仅 dev/带系统 node 的 headless)。host 自己的 status/start/stop 直接用它。`node_available()`:两个 env 都设即可用,否则探测系统 node。
-6. **友好命令 `chrome-devtools`(显示友好)**:绝对路径前缀会原样显示在客户端工具卡里、很丑。故 `ensure_cli_on_path()` 在 **boot** 时(早于任何 session spawn —— env 在 spawn 时被继承,不是实时)往 `FsRegistry.browser_bin_dir()`(`~/.valuz-oss/bin`)写一个 wrapper(posix `sh` / win `.cmd`,内容 `exec <engine argv> "$@"`),并把该目录 **prepend 进 `os.environ["PATH"]`**;三 runtime 的 agent shell 都继承此 PATH —— Claude SDK 继承父 env、Codex `dict(os.environ)`、DeepAgents `LocalShellBackend(inherit_env=True)`(**其默认是空 env、无 PATH,必须显式开启**,否则连 wrapper/npx/node 都解析不到 → exit 127)。于是 `cli_prefix()` 返回 `chrome-devtools`,agent 跑/显示的就是 `chrome-devtools take_snapshot …`;wrapper 装不上时回退到真实前缀。dev 与打包一致(dev 底层仍 npx)。
+2. **Electron-as-node patch**:`scripts/patch-cdt-electron-node.cjs` —— 见上;由 Phase A4 在 `npm ci` 后调用,幂等,预期文本变化(upstream bump)时 fail-loud 提醒同步。
+3. **`build-desktop.sh` Phase A4**:`npm ci --omit=dev` 装 chrome-devtools-mcp → patch → stage 进 `libexec/chrome-devtools-mcp/`(`--skip-node` 跳过整个 phase;顺带清理旧版本遗留的 `libexec/node`)。
+4. **`sidecar.ts`**:staged CDT 树存在时,设 `VALUZ_NODE_PATH=process.execPath`(即 Electron 本体)+ `VALUZ_NODE_IS_ELECTRON=1` + `VALUZ_CDT_ENTRY`(`libexec/chrome-devtools-mcp/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools.js`)为绝对路径,绕开 GUI app 的精简 PATH。
+5. **`modules/browser/service.py`**:`_engine_argv()` 是*真实*调用 —— 两个 env 都设 → `[node, entry]`;否则 `npx`(仅 dev/带系统 node 的 headless)。host 自己的 status/start/stop 直接用它。`node_available()`:两个 env 都设即可用,否则探测系统 node。**`VALUZ_NODE_IS_ELECTRON=1` 时,引擎 spawn env 注入 `ELECTRON_RUN_AS_NODE=1`(`_engine_env()`)—— 只注入引擎相关 spawn,绝不进全局 `os.environ`**(否则会漏进 claude/codex CLI 等其他子进程;env var 本身只对 Electron 二进制生效,但作用域仍收紧到位)。缺了它 Electron 会以 GUI 模式启动(弹第二个 Valuz 实例)而不是当 node 用。
+6. **友好命令 `chrome-devtools`(显示友好)**:绝对路径前缀会原样显示在客户端工具卡里、很丑。故 `ensure_cli_on_path()` 在 **boot** 时(早于任何 session spawn —— env 在 spawn 时被继承,不是实时)往 `FsRegistry.browser_bin_dir()`(`~/.valuz-oss/bin`)写一个 wrapper(posix `sh` / win `.cmd`,内容 `exec <engine argv> "$@"`;Electron-as-node 模式下 wrapper 内嵌 `export ELECTRON_RUN_AS_NODE=1` / win `set`,daemon 再 spawn 靠 env 继承自动带上),并把该目录 **prepend 进 `os.environ["PATH"]`**;三 runtime 的 agent shell 都继承此 PATH —— Claude SDK 继承父 env、Codex `dict(os.environ)`、DeepAgents `LocalShellBackend(inherit_env=True)`(**其默认是空 env、无 PATH,必须显式开启**,否则连 wrapper/npx/node 都解析不到 → exit 127)。于是 `cli_prefix()` 返回 `chrome-devtools`,agent 跑/显示的就是 `chrome-devtools take_snapshot …`;wrapper 装不上时回退到真实前缀。dev 与打包一致(dev 底层仍 npx)。
 7. **gate**:引擎不可用(env 未全设且系统无 node)时,`capability_resolver.always_on_skill_paths` 不注入 browser skill、`boot/steps` 不注册 `browser_start`/`browser_stop`(也不装 wrapper),避免 headless/TUI 广告一个跑不起来的功能。
 
-**平台矩阵**:node 覆盖桌面构建目标(mac arm64/x64、linux arm64、win x64;由 `VALUZ_DIST_TAG` 映射到 node release token);JS 树一份共享。
+**平台矩阵**:node 运行时 = 各平台自己的 Electron 本体(mac arm64/x64、linux arm64、win x64 天然全覆盖,无需 dist tag → node target 映射);JS 树一份共享。
 
-**范围与边界**:desktop-only。headless/TUI 暂不支持(将来支持时:把 node+包打进 valuz-server 的 PyInstaller bundle + `sys._MEIPASS` 自定位,见 `_detect_rg` 的 frozen 分支)。**Chrome 仍由用户自带**(puppeteer-core 按安装位置查找,不受 PATH 影响)。
+**范围与边界**:desktop-only。headless/TUI 暂不支持(将来支持时:无 Electron 可复用 → 届时重新引入独立 node —— 恢复 `scripts/download-node.sh`(git 历史)或把 node+包打进 valuz-server 的 PyInstaller bundle + `sys._MEIPASS` 自定位,见 `_detect_rg` 的 frozen 分支)。**Chrome 仍由用户自带**(puppeteer-core 按安装位置查找,不受 PATH 影响)。

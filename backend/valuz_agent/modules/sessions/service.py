@@ -765,10 +765,15 @@ class SessionService:
         # playbooks (DISPATCH_PLAYBOOK / COMMITTED_LEAD_PLAYBOOK) and never
         # flow through this code path.
         from valuz_agent.adapters.agent_resolver import CHAT_TASK_PLAYBOOK
-        from valuz_agent.adapters.system_prompt_builder import assemble_session_instructions
+        from valuz_agent.adapters.system_prompt_builder import (
+            OUTPUT_FORMAT_INSTRUCTIONS,
+            assemble_session_instructions,
+        )
+        from valuz_agent.ports.instructions import global_instructions_preamble
 
         instructions = assemble_session_instructions(
             [
+                ("global-instructions", await global_instructions_preamble()),
                 ("agent-instructions", agent.instructions or ""),
                 ("project-instructions", project_prompt),
                 ("task-playbook", CHAT_TASK_PLAYBOOK),
@@ -776,6 +781,7 @@ class SessionService:
                     "worktree-context",
                     self._worktree_notice(wt_handle) if wt_handle else "",
                 ),
+                ("output-format", OUTPUT_FORMAT_INSTRUCTIONS),
             ]
         )
 

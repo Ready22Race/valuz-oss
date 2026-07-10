@@ -13,19 +13,24 @@ filesystem, so the commercial overlay swaps in a Redis-backed cache via
 from __future__ import annotations
 
 import json
+from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Protocol
 
 from valuz_agent.infra.time_utils import now_ms
 
 
-class CachePort(Protocol):
+class CachePort(ABC):
+    @abstractmethod
     async def get(self, key: str) -> str | None: ...
+
+    @abstractmethod
     async def set(self, key: str, value: str, *, ttl_seconds: int | None = None) -> None: ...
+
+    @abstractmethod
     async def delete(self, key: str) -> None: ...
 
 
-class FileCache:
+class FileCache(CachePort):
     """Filesystem cache — the OSS / desktop default.
 
     Each key is one JSON file ``{expires_at, value}``; a read past ``expires_at``

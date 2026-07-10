@@ -116,6 +116,7 @@ const NAV_ICON_MAP: Record<string, DesktopSidebarBottomItem["icon"]> = {
   settings: "settings",
   agents: "agents",
   connectors: "connectors",
+  marketplace: "marketplace",
 };
 
 function useNavItems(): DesktopSidebarBottomItem[] {
@@ -127,10 +128,22 @@ function useNavItems(): DesktopSidebarBottomItem[] {
     id: item.id,
     label: t(item.label as Parameters<typeof t>[0]),
     href: item.href,
-    icon: NAV_ICON_MAP[item.id] ?? "settings",
-    group: item.navGroup ?? "project",
+    // Profile-declared icon id wins (plugins bring their own); fall back to
+    // the built-in per-id map, then to the generic gear.
+    icon: item.icon ?? NAV_ICON_MAP[item.id] ?? "settings",
+    group: item.navGroup ?? "main",
     badgeCount: item.id === "activity" ? runningCount : undefined,
     badgeDot: item.id === "connectors" ? connectorAlert : undefined,
+  }));
+}
+
+/** Custom labeled sidebar groups from the active profile, labels translated. */
+function useNavGroups(): { id: string; label: string }[] {
+  const { t } = useTranslation();
+  const navGroups = useRegistryStore((state) => state.navGroups);
+  return navGroups.map((group) => ({
+    id: group.id,
+    label: t(group.label as Parameters<typeof t>[0]),
   }));
 }
 
@@ -155,6 +168,7 @@ export function ProjectLayoutBase({
   const { t } = useTranslation();
   const branding = useBranding();
   const navItemsList = useNavItems();
+  const navGroupsList = useNavGroups();
   const desktopRoutes = useRegistryStore((state) => state.desktopRoutes);
   const fetchSessions = useSessionStore((state) => state.fetchSessions);
   const openConversationProjectId = useSessionStore(
@@ -554,6 +568,7 @@ export function ProjectLayoutBase({
   }, [desktopRoutes, location.pathname, branding.appName, t]);
 
   const outletContext: ProjectOutletContext = {
+    directoryFieldMode,
     setRightPanel,
     setHeader: setPageHeader,
     setHeaderClassName,
@@ -796,6 +811,7 @@ export function ProjectLayoutBase({
             activeProjectId={activeProjectId}
             projectGroups={projectGroups}
             bottomItems={navItemsList}
+            navGroups={navGroupsList}
             chats={chatItems}
             onRecentRename={(sessionId, newName) => {
               const trimmed = newName.trim();

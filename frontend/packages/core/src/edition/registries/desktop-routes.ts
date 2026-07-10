@@ -83,6 +83,15 @@ export const personalDesktopRoutes: DesktopRouteModule[] = [
     edition: "personal",
   },
   {
+    id: "marketplace",
+    path: "/marketplace",
+    label: "nav.marketplace",
+    description: "Discover and import agents, teams, and skills.",
+    layout: "project",
+    showInNav: true,
+    edition: "personal",
+  },
+  {
     id: "skill-detail",
     path: "/skills/:skillId",
     label: "Skill Detail",

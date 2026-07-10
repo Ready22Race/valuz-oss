@@ -55,13 +55,13 @@ export interface TeamMember {
 
 /**
  * A team the user can pick in step 4. The first three are the recommended
- * Agent Packs (内容 / 投研 / 产研) — picking one imports that pack's agents and
+ * Agent Packs (内容 / 投研 / 软件开发) — picking one imports that pack's agents and
  * deploys them into the example project; the rosters here mirror the deployed
  * packs. The last ("custom") has no fixed roster and routes to the "skip team"
  * path. The pack manifests (backend ``resources/agent_packs/``) are the source
  * of truth; these previews carry only onboarding's curated name/duty copy.
  */
-export type TeamId = "content" | "investment" | "product" | "custom";
+export type TeamId = "content" | "investment" | "development-engineering" | "custom";
 
 export interface TeamPreset {
   id: TeamId;
@@ -138,32 +138,32 @@ export const TEAMS: TeamPreset[] = [
     ],
   },
   {
-    id: "product",
-    emoji: "🛠️",
-    nameKey: "onboarding.teams.product.name",
-    taglineKey: "onboarding.teams.product.tagline",
-    collabKey: "onboarding.teams.product.collab",
+    id: "development-engineering",
+    emoji: "⌘",
+    nameKey: "onboarding.teams.developmentEngineering.name",
+    taglineKey: "onboarding.teams.developmentEngineering.tagline",
+    collabKey: "onboarding.teams.developmentEngineering.collab",
     members: [
       {
-        avatar: "🧠",
-        nameKey: "onboarding.roles.product.pm.name",
+        avatar: "⌘",
+        nameKey: "onboarding.roles.developmentEngineering.deliveryLead.name",
         tag: "lead",
-        dutyKey: "onboarding.roles.product.pm.duty",
+        dutyKey: "onboarding.roles.developmentEngineering.deliveryLead.duty",
       },
       {
-        avatar: "🎨",
-        nameKey: "onboarding.roles.product.designer.name",
-        dutyKey: "onboarding.roles.product.designer.duty",
+        avatar: "↻",
+        nameKey: "onboarding.roles.developmentEngineering.refactoringSpecialist.name",
+        dutyKey: "onboarding.roles.developmentEngineering.refactoringSpecialist.duty",
       },
       {
-        avatar: "💻",
-        nameKey: "onboarding.roles.product.engineer.name",
-        dutyKey: "onboarding.roles.product.engineer.duty",
+        avatar: "✓",
+        nameKey: "onboarding.roles.developmentEngineering.codeReviewer.name",
+        dutyKey: "onboarding.roles.developmentEngineering.codeReviewer.duty",
       },
       {
-        avatar: "🧪",
-        nameKey: "onboarding.roles.product.qa.name",
-        dutyKey: "onboarding.roles.product.qa.duty",
+        avatar: "⚑",
+        nameKey: "onboarding.roles.developmentEngineering.bugFixer.name",
+        dutyKey: "onboarding.roles.developmentEngineering.bugFixer.duty",
       },
     ],
   },

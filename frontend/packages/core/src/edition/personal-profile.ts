@@ -46,7 +46,7 @@ const personalNavItems: NavItemModule[] = [
     label: "sidebar.automation",
     href: "/automations",
     position: "top",
-    navGroup: "project",
+    navGroup: "main",
     edition: "personal",
   },
   {
@@ -54,7 +54,7 @@ const personalNavItems: NavItemModule[] = [
     label: "nav.activity",
     href: "/activity",
     position: "top",
-    navGroup: "project",
+    navGroup: "main",
     edition: "personal",
   },
   {
@@ -85,6 +85,14 @@ const personalNavItems: NavItemModule[] = [
     id: "knowledge",
     label: "nav.knowledge",
     href: "/knowledge",
+    position: "bottom",
+    navGroup: "library",
+    edition: "personal",
+  },
+  {
+    id: "marketplace",
+    label: "nav.marketplace",
+    href: "/marketplace",
     position: "bottom",
     navGroup: "library",
     edition: "personal",

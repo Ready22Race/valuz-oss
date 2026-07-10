@@ -275,6 +275,162 @@ class TestKbListSmoke:
 
 
 # ---------------------------------------------------------------------------
+# Connector OAuth access token seam (``get_connector_access_token``)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def connector_oauth_db(monkeypatch):
+    """In-memory async SQLite seeded with connector + attr + oauth tables.
+
+    Same monkeypatch pattern as ``agent_db`` above, scoped to the three
+    connector-related tables (main row + the two side tables the OAuth token
+    and header/param creds live in).
+    """
+    import valuz_agent.infra.db as db_mod
+    from valuz_agent.modules.connectors.models import (
+        ConnectorAttrRow,
+        ConnectorOAuthRow,
+        ConnectorRow,
+    )
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(
+            lambda c: Base.metadata.create_all(
+                c,
+                tables=[
+                    ConnectorRow.__table__,
+                    ConnectorAttrRow.__table__,
+                    ConnectorOAuthRow.__table__,
+                ],
+            )
+        )
+
+    session_factory = async_sessionmaker(bind=engine, expire_on_commit=False)
+    monkeypatch.setattr(db_mod, "AsyncSessionLocal", session_factory)
+    yield session_factory
+    await engine.dispose()
+
+
+async def _make_connector(
+    session_factory,
+    *,
+    user_id: str = USER_ID,
+    slug: str,
+    auth_type: str = "oauth",
+    enabled: bool = True,
+    access_token: str | None = None,
+    expires_at: int | None = None,
+) -> None:
+    """Insert a connector row (+ its OAuth side row) via the real datastore.
+
+    Goes through ``ConnectorDatastore.create`` (not a raw INSERT) so the
+    side-table split (``ConnectorOAuthRow``) is persisted exactly the way the
+    service layer does it — see ``test_connector_credential_split.py``.
+    """
+    import json
+
+    from valuz_agent.modules.connectors.datastore import ConnectorDatastore
+    from valuz_agent.modules.connectors.models import ConnectorRow
+
+    row = ConnectorRow(
+        slug=slug,
+        display_name=slug,
+        connector_type="builtin",
+        transport="http",
+        url="https://mcp.example.test/mcp",
+        auth_type=auth_type,
+        enabled=enabled,
+    )
+    if access_token is not None:
+        row.oauth_token_json = json.dumps({"access_token": access_token, "refresh_token": "r1"})
+    if expires_at is not None:
+        row.oauth_token_expires_at = expires_at
+
+    session = session_factory()
+    try:
+        await ConnectorDatastore(session).create(user_id, row)
+    finally:
+        await session.close()
+
+
+class TestConnectorAccessToken:
+    """``ResourceLibrary.get_connector_access_token`` — connector OAuth seam.
+
+    Read-only facade method editions use to authenticate a data plane against
+    a connector's OAuth identity (e.g. ``valuz-search``) without importing
+    ``modules.connectors`` internals directly.
+    """
+
+    async def test_returns_token_for_connected_oauth_connector(self, connector_oauth_db) -> None:
+        from valuz_agent.infra.time_utils import now_ms
+
+        await _make_connector(
+            connector_oauth_db,
+            slug="valuz-search",
+            access_token="tok-abc123",
+            expires_at=now_ms() + 3_600_000,
+        )
+
+        lib = ResourceLibrary()
+        token = await lib.get_connector_access_token(USER_ID, "valuz-search")
+        assert token == "tok-abc123"
+
+    async def test_returns_none_when_token_json_empty(self, connector_oauth_db) -> None:
+        await _make_connector(
+            connector_oauth_db,
+            slug="valuz-search",
+            access_token=None,
+        )
+
+        lib = ResourceLibrary()
+        token = await lib.get_connector_access_token(USER_ID, "valuz-search")
+        assert token is None
+
+    async def test_returns_none_when_slug_not_found(self, connector_oauth_db) -> None:
+        lib = ResourceLibrary()
+        token = await lib.get_connector_access_token(USER_ID, "does-not-exist")
+        assert token is None
+
+    async def test_returns_none_when_auth_type_not_oauth(self, connector_oauth_db) -> None:
+        from valuz_agent.infra.time_utils import now_ms
+
+        await _make_connector(
+            connector_oauth_db,
+            slug="custom-http",
+            auth_type="none",
+            access_token="tok-should-be-ignored",
+            expires_at=now_ms() + 3_600_000,
+        )
+
+        lib = ResourceLibrary()
+        token = await lib.get_connector_access_token(USER_ID, "custom-http")
+        assert token is None
+
+    async def test_returns_none_when_connector_disabled(self, connector_oauth_db) -> None:
+        """Bonus case: the facade also gates on ``enabled`` (disabled connectors
+        must not hand out a live token even if OAuth creds are still stored)."""
+        from valuz_agent.infra.time_utils import now_ms
+
+        await _make_connector(
+            connector_oauth_db,
+            slug="valuz-search",
+            enabled=False,
+            access_token="tok-abc123",
+            expires_at=now_ms() + 3_600_000,
+        )
+
+        lib = ResourceLibrary()
+        token = await lib.get_connector_access_token(USER_ID, "valuz-search")
+        assert token is None
+
+
+# ---------------------------------------------------------------------------
 # Project kind — list + get + save-raises (smoke via fake services)
 # ---------------------------------------------------------------------------
 

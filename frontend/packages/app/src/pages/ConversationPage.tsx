@@ -37,6 +37,8 @@ import {
   useSessionStore,
   useProjectStore,
   projectsApi,
+  filesApi,
+  buildFileRef,
   providersApi,
   skillsApi,
   usePanelStore,
@@ -116,7 +118,11 @@ import { buildTurns, useStableTurns, type PlanSubtask } from "@valuz/core";
 import { ConversationTurnList } from "@valuz/ui";
 import { usePlatform } from "@valuz/app/platform";
 import { useHasUsableChannel, useTranslation } from "@valuz/core";
-import { useProjectKbBindings, useKbDocTree } from "@valuz/app/hooks";
+import {
+  useConversationLocalFileLinks,
+  useProjectKbBindings,
+  useKbDocTree,
+} from "@valuz/app/hooks";
 import {
   computePlanAnchors,
   extractToolOutputJson,
@@ -130,6 +136,7 @@ import {
   type AgentSkillItem,
 } from "../lib/agent-skill-items";
 import { getLastTempAgent, setLastTempAgent } from "../lib/last-temp-agent";
+import { resolvedToArtifactFile } from "../lib/resolve-artifact";
 
 /** True while a workflow snapshot's status denotes an in-flight run (vs a
  *  terminal ``completed`` / ``killed`` / ``failed`` verb). Used to decide
@@ -153,7 +160,10 @@ function toFileTree(nodes: ProjectFileNode[], prefix = ""): FileTreeNode[] {
   });
 }
 
-function resolveConversationArtifactPath(path: string, rootPath: string): string {
+function resolveConversationArtifactPath(
+  path: string,
+  rootPath: string,
+): string {
   if (!path) return path;
   if (path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path)) return path;
   if (!rootPath) return path;
@@ -535,7 +545,8 @@ function parseAutomationCreateInput(input: unknown): {
         : undefined;
   return {
     name: typeof p.name === "string" ? p.name : "",
-    prompt_template: typeof p.prompt_template === "string" ? p.prompt_template : "",
+    prompt_template:
+      typeof p.prompt_template === "string" ? p.prompt_template : "",
     trigger:
       trigger && typeof trigger === "object"
         ? (trigger as import("@valuz/core").Trigger)
@@ -575,10 +586,35 @@ function automationTriggerSummary(
 
 export const ConversationPage = () => {
   const { t } = useTranslation();
-  const { revealInFinder } = usePlatform();
+  const platform = usePlatform();
+  const { revealInFinder } = platform;
   const { id = NEW_SESSION_ID } = useParams<{ id: string }>();
   const location = useLocation();
-  const { setRightPanel, setHeader, setHideHeader } = useProjectOutlet();
+  const promotingSessionIdRef = useRef<string | null>(null);
+  const consumedPromoteSessionIdsRef = useRef<Set<string>>(new Set());
+  const previousRouteSessionIdRef = useRef(id);
+  const skipNextSessionStateResetRef = useRef(false);
+  const [conversationInstanceKey, setConversationInstanceKey] = useState(
+    () => `conversation:${id}`,
+  );
+  useEffect(() => {
+    const previousRouteId = previousRouteSessionIdRef.current;
+    previousRouteSessionIdRef.current = id;
+
+    if (previousRouteId === id) return;
+
+    const isPromote =
+      previousRouteId === NEW_SESSION_ID &&
+      promotingSessionIdRef.current === id;
+    if (isPromote) {
+      promotingSessionIdRef.current = null;
+      return;
+    }
+
+    setConversationInstanceKey(`conversation:${id}`);
+  }, [id]);
+  const { directoryFieldMode, setRightPanel, setHeader, setHideHeader } =
+    useProjectOutlet();
   const panelCollapsed = usePanelStore((s) => s.collapsed);
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
   const [searchParams] = useSearchParams();
@@ -1217,9 +1253,9 @@ export const ConversationPage = () => {
     useState<SkillView | null>(null);
   const [projectSkills, setProjectSkills] = useState<SkillView[]>([]);
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
-  const [selectedArtifactPath, setSelectedArtifactPath] = useState<string | null>(
-    null,
-  );
+  const [selectedArtifactPath, setSelectedArtifactPath] = useState<
+    string | null
+  >(null);
   const [artifact, setArtifact] = useState<ArtifactDescriptor | null>(null);
   const [artifactContent, setArtifactContent] =
     useState<ArtifactContent | null>(null);
@@ -1229,8 +1265,7 @@ export const ConversationPage = () => {
   const activeProject = useMemo(
     () =>
       (projects.find((w) => w.id === selectedProjectId) as
-        | ProjectDetail
-        | undefined) ?? null,
+        ProjectDetail | undefined) ?? null,
     [selectedProjectId, projects],
   );
   const activeProjectRootPath = useMemo(() => {
@@ -1244,45 +1279,67 @@ export const ConversationPage = () => {
   // Derived from ``sessions`` (not ``selectedSession``, declared below) so the
   // callbacks above it can depend on it without a temporal-dead-zone error.
   const activeWorktree = useMemo(
-    () =>
-      sessions.find((s) => s.id === selectedSessionId)?.worktree ?? null,
+    () => sessions.find((s) => s.id === selectedSessionId)?.worktree ?? null,
     [sessions, selectedSessionId],
   );
 
   const openArtifactFile = useCallback(
     async (path: string) => {
       if (!selectedProjectId || selectedProjectId === "chat-default") return;
-      const normalized = toConversationRelativeArtifactPath(
-        path,
-        activeProjectRootPath,
-      );
-      if (!normalized) {
-        setSelectedArtifactPath(path);
-        setArtifact(null);
-        setArtifactContent(null);
-        setArtifactLoading(false);
-        setArtifactError(t("task.artifactOpenInFinder" as Parameters<typeof t>[0]));
-        return;
-      }
-      setSelectedArtifactPath(normalized);
+      // Session cwd = the worktree checkout when present, else the project cwd.
+      const root = activeWorktree?.path ?? activeProjectRootPath;
+      const normalized = toConversationRelativeArtifactPath(path, root);
+      const absPath = resolveConversationArtifactPath(path, root);
+      setSelectedArtifactPath(normalized ?? path);
       setArtifactLoading(true);
       setArtifactError(null);
       try {
-        const result = await projectsApi.readFile(selectedProjectId, normalized, {
-          worktree: activeWorktree?.name ?? undefined,
+        // Resolve the file's identity to an access address (local path or a
+        // signed URL); the client fetches bytes from that address — the backend
+        // never proxies file streams. See docs/design/file-address-resolution.md.
+        const descriptor = await filesApi.resolveOne(buildFileRef(absPath));
+        if (!descriptor || descriptor.error || !descriptor.exists) {
+          setArtifact(null);
+          setArtifactContent(null);
+          setArtifactError(
+            t("task.artifactOpenInFinder" as Parameters<typeof t>[0]),
+          );
+          return;
+        }
+        const result = await resolvedToArtifactFile(descriptor, {
+          projectId: selectedProjectId,
+          relPath: normalized ?? descriptor.name,
+          platform,
         });
         setArtifact(result.artifact);
         setArtifactContent(result.content);
       } catch (error) {
         setArtifact(null);
         setArtifactContent(null);
-        setArtifactError(error instanceof Error ? error.message : String(error));
+        setArtifactError(
+          error instanceof Error ? error.message : String(error),
+        );
       } finally {
         setArtifactLoading(false);
       }
     },
-    [activeProjectRootPath, activeWorktree, selectedProjectId, t],
+    [activeProjectRootPath, activeWorktree, platform, selectedProjectId, t],
   );
+
+  const localFileLinkRootPath = activeWorktree?.path ?? activeProjectRootPath;
+  const localFileLinks = useConversationLocalFileLinks({
+    projectRootPath: localFileLinkRootPath,
+    runtimeMode: directoryFieldMode === "managed" ? "managed" : "local",
+    previewFile: (path) => {
+      void openArtifactFile(path);
+    },
+    openFile: (path) => {
+      void revealInFinder(path);
+    },
+    blockFile: () => {
+      toast.info(t("project.managedDirHint" as Parameters<typeof t>[0]));
+    },
+  });
 
   const handleArtifactReload = useCallback(() => {
     if (selectedArtifactPath) {
@@ -1309,7 +1366,10 @@ export const ConversationPage = () => {
   const handleArtifactOpenExternal = useCallback(() => {
     if (!selectedArtifactPath) return;
     void revealInFinder(
-      resolveConversationArtifactPath(selectedArtifactPath, activeProjectRootPath),
+      resolveConversationArtifactPath(
+        selectedArtifactPath,
+        activeProjectRootPath,
+      ),
     );
   }, [activeProjectRootPath, revealInFinder, selectedArtifactPath]);
 
@@ -1545,7 +1605,10 @@ export const ConversationPage = () => {
       if (!sid) return;
       setProposalStates((prev) => ({
         ...prev,
-        [toolId]: { ...(prev[toolId] || { state: "pending" }), state: "confirming" },
+        [toolId]: {
+          ...(prev[toolId] || { state: "pending" }),
+          state: "confirming",
+        },
       }));
       try {
         const res = await agentsApi.confirmProposal(sid, spec);
@@ -1601,7 +1664,10 @@ export const ConversationPage = () => {
       if (!sid) return;
       setAutomationProposalStates((prev) => ({
         ...prev,
-        [toolId]: { ...(prev[toolId] || { state: "pending" }), state: "confirming" },
+        [toolId]: {
+          ...(prev[toolId] || { state: "pending" }),
+          state: "confirming",
+        },
       }));
       try {
         const res = await automationsApi.confirmProposal(sid, {
@@ -1617,7 +1683,9 @@ export const ConversationPage = () => {
           ...prev,
           [toolId]: { state: "confirmed", automationId: res.automation_id },
         }));
-        toast.success(t("automation.proposalCreated" as Parameters<typeof t>[0]));
+        toast.success(
+          t("automation.proposalCreated" as Parameters<typeof t>[0]),
+        );
       } catch (cause) {
         const msg =
           cause instanceof Error
@@ -1732,7 +1800,8 @@ export const ConversationPage = () => {
         if (block.kind !== "tool") continue;
         const tname = block.tool.title || "";
         if (!isToolNamed(tname, "automation")) continue;
-        if (parseAutomationCreateInput(block.tool.input)) ids.push(block.tool.id);
+        if (parseAutomationCreateInput(block.tool.input))
+          ids.push(block.tool.id);
       }
     }
     return ids.join(",");
@@ -1761,7 +1830,10 @@ export const ConversationPage = () => {
             if (cur && cur.state !== "pending") continue;
             const hit = res.confirmed[id];
             if (hit) {
-              next[id] = { state: "confirmed", automationId: hit.automation_id };
+              next[id] = {
+                state: "confirmed",
+                automationId: hit.automation_id,
+              };
               changed = true;
             }
           }
@@ -1899,7 +1971,7 @@ export const ConversationPage = () => {
       if (!isAsk) return false;
       return Boolean(
         askUserQuestionAnswersByToolId[tool.id] ??
-          askUserQuestionLocalAnswers[tool.id],
+        askUserQuestionLocalAnswers[tool.id],
       );
     },
     [askUserQuestionAnswersByToolId, askUserQuestionLocalAnswers],
@@ -1943,7 +2015,9 @@ export const ConversationPage = () => {
           // The automation page is at ``/automations`` and reads
           // ``?automation=<id>`` for direct linking. Soft navigation keeps the
           // conversation mounted in the project sidebar.
-          navigate(`/automations?automation=${encodeURIComponent(automationId)}`);
+          navigate(
+            `/automations?automation=${encodeURIComponent(automationId)}`,
+          );
         };
 
         // ``create`` PROPOSES — render a propose→confirm card (mirrors
@@ -1962,8 +2036,10 @@ export const ConversationPage = () => {
           // generic renderer until something lands.
           if (!inputSpec && !proposal && !validationError) return null;
           const cardName = proposal?.name ?? inputSpec?.name ?? "";
-          const cardPrompt = proposal?.prompt_template ?? inputSpec?.prompt_template;
-          const confirmTrigger = proposal?.trigger ?? inputSpec?.trigger ?? null;
+          const cardPrompt =
+            proposal?.prompt_template ?? inputSpec?.prompt_template;
+          const confirmTrigger =
+            proposal?.trigger ?? inputSpec?.trigger ?? null;
           const cardTriggerHuman =
             proposal?.trigger_human_readable ??
             automationTriggerSummary(confirmTrigger, t);
@@ -1971,7 +2047,8 @@ export const ConversationPage = () => {
             proposal?.action_kind ?? inputSpec?.action_kind ?? "chat";
           const cardWorktree =
             proposal?.worktree ?? inputSpec?.worktree ?? false;
-          const cardAgentName = proposal?.agent_name ?? inputSpec?.agent_slug ?? null;
+          const cardAgentName =
+            proposal?.agent_name ?? inputSpec?.agent_slug ?? null;
           const entry = automationProposalStates[tool.id] || {
             state: "pending" as const,
           };
@@ -2038,8 +2115,7 @@ export const ConversationPage = () => {
       // returns ``{task_id, title, status}`` but the kernel wraps tool output
       // as a content-block repr (``[{'type': 'text', 'text': '{...}'}]``), so
       // extract the fields by regex rather than JSON.parse-ing the whole blob.
-      const isCreateTask =
-        isToolNamed(name, "create_task");
+      const isCreateTask = isToolNamed(name, "create_task");
       if (isCreateTask && tool.output) {
         const idMatch = tool.output.match(/"task_id"\s*:\s*"([^"]+)"/);
         const taskId = idMatch?.[1];
@@ -2095,8 +2171,7 @@ export const ConversationPage = () => {
       // submit click). The local mirror keeps the card swap latency
       // at zero — the user never sees the read-only fill-content card
       // between submit and the kernel ack.
-      const isAskUserQuestion =
-        isToolNamed(name, "AskUserQuestion");
+      const isAskUserQuestion = isToolNamed(name, "AskUserQuestion");
       if (isAskUserQuestion) {
         const parsed = parseAskUserQuestionInput(tool.input);
         if (parsed && parsed.questions.length > 0) {
@@ -2126,8 +2201,7 @@ export const ConversationPage = () => {
       // ``propose_agent`` — natural-language agent creation. Renders a card
       // letting the user create + deploy the proposed agent. Tool name comes
       // through plain or MCP-bridged (``mcp__harness__propose_agent``).
-      const isProposeAgent =
-        isToolNamed(name, "propose_agent");
+      const isProposeAgent = isToolNamed(name, "propose_agent");
       if (isProposeAgent) {
         let spec: {
           name?: string;
@@ -2178,8 +2252,7 @@ export const ConversationPage = () => {
         );
       }
 
-      const isSubmit =
-        isToolNamed(name, "submit_skill");
+      const isSubmit = isToolNamed(name, "submit_skill");
       if (!isSubmit) return null;
       let parsed: {
         slug?: string;
@@ -2608,7 +2681,8 @@ export const ConversationPage = () => {
               subject: ra.subject as ApprovalCardSubject,
               payload: ra.payload,
               availableDecisions: ra.available_decisions,
-              sessionRulePreviewDisplay: ra.session_rule_preview?.display ?? null,
+              sessionRulePreviewDisplay:
+                ra.session_rule_preview?.display ?? null,
               originalInput: ra.original_input,
               receivedAt: ev.timestamp,
             });
@@ -2741,14 +2815,24 @@ export const ConversationPage = () => {
   );
 
   const bootstrap = useCallback(async () => {
-    setLoading(true);
+    const routeState = location.state as {
+      promotedFromNew?: boolean;
+      promotedSessionId?: string;
+    } | null;
+    const isPromoteBootstrap =
+      id !== NEW_SESSION_ID &&
+      (promotingSessionIdRef.current === id ||
+        (routeState?.promotedFromNew === true &&
+          routeState.promotedSessionId === id &&
+          !consumedPromoteSessionIdsRef.current.has(id)));
+    if (!isPromoteBootstrap) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const [wsResponse, chListResponse] = await Promise.all([
         projectsApi.list(),
-        providersApi
-          .list()
-          .catch(() => ({ providers: [] as LLMChannel[] })),
+        providersApi.list().catch(() => ({ providers: [] as LLMChannel[] })),
       ]);
       setProjects(wsResponse.projects);
       const details = await Promise.all(
@@ -2788,6 +2872,7 @@ export const ConversationPage = () => {
             : null;
         setSelectedProjectId(presetProject ?? "chat-default");
         setSessions([]);
+        selectedSessionIdRef.current = null;
         setSelectedSessionId(null);
         // CRITICAL: also clear the conversation state (events / todos
         // / optimistic pending message) so navigating from a real
@@ -2807,10 +2892,26 @@ export const ConversationPage = () => {
       // itself (composer status + optimistic-merge target).
       try {
         const sessionDetail = await sessionsApi.get(id);
+        const routePromotedSession =
+          routeState?.promotedFromNew === true &&
+          routeState.promotedSessionId === sessionDetail.id &&
+          !consumedPromoteSessionIdsRef.current.has(sessionDetail.id);
+        const isPromotedNewSession =
+          promotingSessionIdRef.current === sessionDetail.id ||
+          routePromotedSession;
+        const wasSameSession =
+          selectedSessionIdRef.current === sessionDetail.id;
         setSessionTriggerMode(sessionDetail.trigger_meta?.mode ?? null);
         setSessionAgentSlug(sessionDetail.agent_slug ?? null);
         setSelectedProjectId(sessionDetail.project_id);
         setSessions([sessionDetailToListItem(sessionDetail)]);
+        selectedSessionIdRef.current = sessionDetail.id;
+        setSelectedSessionId(sessionDetail.id);
+        if (isPromotedNewSession) {
+          promotingSessionIdRef.current = null;
+          consumedPromoteSessionIdsRef.current.add(sessionDetail.id);
+          return;
+        }
         // Skip the events refetch when bootstrap re-fires onto the
         // same session id we're already on — the URL change from
         // ``/conversation/new`` → ``/conversation/{real-id}`` (issued
@@ -2818,9 +2919,6 @@ export const ConversationPage = () => {
         // while an in-flight SSE subscription is already pushing
         // events into local state. Refetching here would clobber the
         // first few streamed deltas with the server's truncated list.
-        const wasSameSession =
-          selectedSessionIdRef.current === sessionDetail.id;
-        setSelectedSessionId(sessionDetail.id);
         if (!wasSameSession) {
           await refreshEvents(sessionDetail.id);
         }
@@ -2833,6 +2931,7 @@ export const ConversationPage = () => {
         setSessionAgentSlug(null);
         setSelectedProjectId(null);
         setSessions([]);
+        selectedSessionIdRef.current = null;
         setSelectedSessionId(null);
         setError("Session not found.");
       }
@@ -2841,9 +2940,11 @@ export const ConversationPage = () => {
         cause instanceof Error ? cause.message : "Failed to load project.",
       );
     } finally {
-      setLoading(false);
+      if (!isPromoteBootstrap) {
+        setLoading(false);
+      }
     }
-  }, [id, refreshEvents, searchParams]);
+  }, [id, location.state, refreshEvents, searchParams]);
 
   useEffect(() => {
     void bootstrap();
@@ -3011,158 +3112,165 @@ export const ConversationPage = () => {
   // Loading server-side attachments on session change + polling parse status
   // is owned by ``useSessionAttachments`` above.
 
-  const ensureSession = useCallback(async (navigateOnCreate = true) => {
-    if (selectedSession) return selectedSession;
-    const sessionProjectId = selectedProjectId ?? "chat-default";
-    // For quick-chat (kind="chat"), send the ``"chat-default"`` sentinel so
-    // the backend allocates a fresh, isolated chat project + cwd for this
-    // session. Project conversations keep passing their real project id.
-    const isChat =
-      sessionProjectId === "chat-default" || activeProject?.kind === "chat";
-    // 09-assistant §2.1/§2.2: every session binds to an agent — project
-    // conversations to the chosen 派驻 member, 临时对话 to the picked "我的"
-    // agent. There is no agentless path; the backend derives
-    // runtime/model/provider/effort/skills/connectors from the agent, so the
-    // model-picker fields below are ignored when it resolves the brain.
-    // Skill-creator must bind an agent; a normal conversation may be agentless
-    // (the create below sends ``agent_slug: undefined`` → backend chat path).
-    if (isSkillCreatorMode && !selectedAgentSlug) {
-      throw new Error("No agent selected.");
-    }
-    let created: Awaited<ReturnType<typeof sessionsApi.create>>;
-    if (isSkillCreatorMode) {
-      // Skill-creator draft: mint through the skills launcher so the
-      // session carries trigger_meta + creation_context (the
-      // ``submit_skill`` confirm flow reads them), bound to the agent
-      // picked in the composer — same UX as 新对话.
-      const start = await skillsApi.startCreate({
-        context:
-          skillKindParam === "project" && skillProjectParam
-            ? { kind: "project", project_id: skillProjectParam }
-            : { kind: skillKindParam === "chat" ? "chat" : "skills_library" },
-        agent_slug: selectedAgentSlug,
-        provider_id: selectedProviderId ?? undefined,
-        model_id: selectedModelId ?? undefined,
-      });
-      created = await sessionsApi.get(start.session_id);
-    } else {
-      created = await sessionsApi.create({
-        project_id: isChat ? "chat-default" : sessionProjectId,
-        agent_slug: selectedAgentSlug ?? undefined,
-        provider_id: selectedProviderId ?? undefined,
-        model_id: selectedModelId ?? undefined,
-        runtime_id: selectedRuntimeId ?? undefined,
-        mcp_provider_slugs:
-          selectedMcpSlugs.length > 0 ? selectedMcpSlugs : undefined,
-        permission_mode: selectedPermissionMode,
-        effort: selectedEffort,
-      });
-    }
-    // 10-new-conversation-guidance slice 3: remember which agent this 临时对话
-    // used so the next new conversation pre-selects it.
-    if (isChat && selectedAgentSlug) setLastTempAgent(selectedAgentSlug);
-    // Update local state IMMEDIATELY (before navigate / sendMessage)
-    // so the rest of ``handleSend`` and the SSE subscription closures
-    // — which capture ``selectedProjectId`` and friends — see the
-    // freshly minted ids. This is what the old ``refreshSessions``
-    // race ultimately failed at.
-    setSelectedSessionId(created.id);
-    // Seed the bound agent immediately. Attach-on-upload mints the session
-    // WITHOUT navigating (``navigateOnCreate=false``), so the bootstrap effect
-    // — which normally sets ``sessionAgentSlug`` from the fetched detail on a
-    // URL change — never fires. Without this, the moment ``selectedSession``
-    // turns truthy the composer flips ``selectedSession ? sessionAgentSlug :
-    // selectedAgentSlug`` to a null agent and the picker looks deselected. The
-    // session was just created with ``selectedAgentSlug``, so that is the
-    // authoritative bound agent.
-    setSessionAgentSlug(selectedAgentSlug);
-    const createdItem = sessionDetailToListItem(created);
-    setSessions([createdItem]);
-    // Push the new session into the global session store IMMEDIATELY
-    // so the sidebar's "New Chat" group renders it on this same render
-    // tick — no waiting for the post-navigate ``fetchSidebarSessions``
-    // round-trip. Same optimistic pattern the existing in-flight
-    // message handler uses (around line 1450 below).
-    setSidebarSessions(
-      sidebarSessions.some((s) => s.id === createdItem.id)
-        ? sidebarSessions.map((s) =>
-            s.id === createdItem.id ? createdItem : s,
-          )
-        : [createdItem, ...sidebarSessions],
-    );
-    if (created.project_id !== selectedProjectId) {
-      // Quick-chat: the backend just minted a fresh project + cwd
-      // for this session. Pull the authoritative ``ProjectDetail``
-      // (cwd lives on the backend — host writes flow through
-      // ``fs_registry`` and we never derive it locally) and merge.
-      try {
-        const wsDetail = await projectsApi.get(created.project_id);
-        setProjects((prev) => {
-          const filtered = prev.filter((w) => w.id !== wsDetail.id);
-          return [...filtered, wsDetail];
-        });
-        // Also push into the global project store so the layout's
-        // "New Chat" filter (``allProjects.filter(kind === "chat")``)
-        // immediately sees this row — without it, the new session
-        // would still be filtered out of the chat group until the
-        // path-change ``fetchProjects`` round-trip completes.
-        upsertProject(wsDetail);
-      } catch {
-        /* non-fatal — file tree falls back gracefully */
+  const ensureSession = useCallback(
+    async (navigateOnCreate = false) => {
+      if (selectedSession) return selectedSession;
+      const sessionProjectId = selectedProjectId ?? "chat-default";
+      // For quick-chat (kind="chat"), send the ``"chat-default"`` sentinel so
+      // the backend allocates a fresh, isolated chat project + cwd for this
+      // session. Project conversations keep passing their real project id.
+      const isChat =
+        sessionProjectId === "chat-default" || activeProject?.kind === "chat";
+      // 09-assistant §2.1/§2.2: every session binds to an agent — project
+      // conversations to the chosen 派驻 member, 临时对话 to the picked "我的"
+      // agent. There is no agentless path; the backend derives
+      // runtime/model/provider/effort/skills/connectors from the agent, so the
+      // model-picker fields below are ignored when it resolves the brain.
+      // Skill-creator must bind an agent; a normal conversation may be agentless
+      // (the create below sends ``agent_slug: undefined`` → backend chat path).
+      if (isSkillCreatorMode && !selectedAgentSlug) {
+        throw new Error("No agent selected.");
       }
-      setSelectedProjectId(created.project_id);
-    }
-    void fetchSidebarSessions();
-    // Promote the URL from ``/conversation/new`` (or any other
-    // fresh-entry path) to ``/conversation/{real-id}`` so the page
-    // is no longer stuck on a sentinel. ``replace: true`` keeps the
-    // back button from taking the user back to an empty draft.
-    // Bootstrap re-fires under the new URL but its events refetch
-    // is gated on ``sessionDetail.id !== selectedSessionIdRef.current``
-    // — we just set the ref, so the in-flight SSE subscription is
-    // not disturbed.
-    // Attach-on-upload mints the session WITHOUT navigating (navigateOnCreate
-    // = false): staying on ``/conversation/new`` until the user actually sends
-    // mirrors the project-detail composer and avoids the navigate→bootstrap
-    // churn that was dropping the freshly-attached file from the panel. The
-    // send path navigates explicitly (see ``performSend``).
-    if (id === NEW_SESSION_ID && navigateOnCreate) {
-      navigate(
-        `/conversation/${created.id}${isSkillCreatorMode ? "?mode=skill-creator" : ""}`,
-        { replace: true },
+      let created: Awaited<ReturnType<typeof sessionsApi.create>>;
+      if (isSkillCreatorMode) {
+        // Skill-creator draft: mint through the skills launcher so the
+        // session carries trigger_meta + creation_context (the
+        // ``submit_skill`` confirm flow reads them), bound to the agent
+        // picked in the composer — same UX as 新对话.
+        const start = await skillsApi.startCreate({
+          context:
+            skillKindParam === "project" && skillProjectParam
+              ? { kind: "project", project_id: skillProjectParam }
+              : { kind: skillKindParam === "chat" ? "chat" : "skills_library" },
+          agent_slug: selectedAgentSlug,
+          provider_id: selectedProviderId ?? undefined,
+          model_id: selectedModelId ?? undefined,
+        });
+        created = await sessionsApi.get(start.session_id);
+      } else {
+        created = await sessionsApi.create({
+          project_id: isChat ? "chat-default" : sessionProjectId,
+          agent_slug: selectedAgentSlug ?? undefined,
+          provider_id: selectedProviderId ?? undefined,
+          model_id: selectedModelId ?? undefined,
+          runtime_id: selectedRuntimeId ?? undefined,
+          mcp_provider_slugs:
+            selectedMcpSlugs.length > 0 ? selectedMcpSlugs : undefined,
+          permission_mode: selectedPermissionMode,
+          effort: selectedEffort,
+        });
+      }
+      // 10-new-conversation-guidance slice 3: remember which agent this 临时对话
+      // used so the next new conversation pre-selects it.
+      if (isChat && selectedAgentSlug) setLastTempAgent(selectedAgentSlug);
+      // Update local state IMMEDIATELY (before navigate / sendMessage)
+      // so the rest of ``handleSend`` and the SSE subscription closures
+      // — which capture ``selectedProjectId`` and friends — see the
+      // freshly minted ids. This is what the old ``refreshSessions``
+      // race ultimately failed at.
+      selectedSessionIdRef.current = created.id;
+      if (id === NEW_SESSION_ID) {
+        skipNextSessionStateResetRef.current = true;
+      }
+      setSelectedSessionId(created.id);
+      // Seed the bound agent immediately. Attach-on-upload mints the session
+      // WITHOUT navigating (``navigateOnCreate=false``), so the bootstrap effect
+      // — which normally sets ``sessionAgentSlug`` from the fetched detail on a
+      // URL change — never fires. Without this, the moment ``selectedSession``
+      // turns truthy the composer flips ``selectedSession ? sessionAgentSlug :
+      // selectedAgentSlug`` to a null agent and the picker looks deselected. The
+      // session was just created with ``selectedAgentSlug``, so that is the
+      // authoritative bound agent.
+      setSessionAgentSlug(selectedAgentSlug);
+      const createdItem = sessionDetailToListItem(created);
+      setSessions([createdItem]);
+      // Push the new session into the global session store IMMEDIATELY
+      // so the sidebar's "New Chat" group renders it on this same render
+      // tick — no waiting for the post-navigate ``fetchSidebarSessions``
+      // round-trip. Same optimistic pattern the existing in-flight
+      // message handler uses (around line 1450 below).
+      setSidebarSessions(
+        sidebarSessions.some((s) => s.id === createdItem.id)
+          ? sidebarSessions.map((s) =>
+              s.id === createdItem.id ? createdItem : s,
+            )
+          : [createdItem, ...sidebarSessions],
       );
-    }
-    return created;
-  }, [
-    selectedProjectId,
-    activeProject?.kind,
-    fetchSidebarSessions,
-    sidebarSessions,
-    setSidebarSessions,
-    upsertProject,
-    selectedSession,
-    selectedProviderId,
-    selectedModelId,
-    selectedRuntimeId,
-    selectedMcpSlugs,
-    // ADR-013/ADR-006: ``selectedPermissionMode`` is read inside this
-    // callback at session creation time. Without it in the deps array
-    // the closure stays bound to the initial ``"full_access"`` value
-    // and the chat-default session is silently created with the wrong
-    // mode — the conversation page composer then reflects that wrong
-    // value (locked) after navigate, which is the user-visible
-    // "default permission picked, full access shown" regression.
-    // Project-detail flow has no equivalent bug because its
-    // ``handleSend`` is a plain function (no closure cache).
-    selectedPermissionMode,
-    selectedEffort,
-    selectedAgentSlug,
-    isSkillCreatorMode,
-    skillKindParam,
-    skillProjectParam,
-    id,
-    navigate,
-  ]);
+      if (created.project_id !== selectedProjectId) {
+        // Quick-chat: the backend just minted a fresh project + cwd
+        // for this session. Pull the authoritative ``ProjectDetail``
+        // (cwd lives on the backend — host writes flow through
+        // ``fs_registry`` and we never derive it locally) and merge.
+        try {
+          const wsDetail = await projectsApi.get(created.project_id);
+          setProjects((prev) => {
+            const filtered = prev.filter((w) => w.id !== wsDetail.id);
+            return [...filtered, wsDetail];
+          });
+          // Also push into the global project store so the layout's
+          // "New Chat" filter (``allProjects.filter(kind === "chat")``)
+          // immediately sees this row — without it, the new session
+          // would still be filtered out of the chat group until the
+          // path-change ``fetchProjects`` round-trip completes.
+          upsertProject(wsDetail);
+        } catch {
+          /* non-fatal — file tree falls back gracefully */
+        }
+        setSelectedProjectId(created.project_id);
+      }
+      void fetchSidebarSessions();
+      // Promote the URL from ``/conversation/new`` (or any other
+      // fresh-entry path) to ``/conversation/{real-id}`` so the page
+      // is no longer stuck on a sentinel. ``replace: true`` keeps the
+      // back button from taking the user back to an empty draft.
+      // Bootstrap re-fires under the new URL but its events refetch
+      // is gated on ``sessionDetail.id !== selectedSessionIdRef.current``
+      // — we just set the ref, so the in-flight SSE subscription is
+      // not disturbed.
+      // Attach-on-upload mints the session WITHOUT navigating (navigateOnCreate
+      // = false): staying on ``/conversation/new`` until the user actually sends
+      // mirrors the project-detail composer and avoids the navigate→bootstrap
+      // churn that was dropping the freshly-attached file from the panel. The
+      // send path navigates explicitly (see ``performSend``).
+      if (id === NEW_SESSION_ID && navigateOnCreate) {
+        navigate(
+          `/conversation/${created.id}${isSkillCreatorMode ? "?mode=skill-creator" : ""}`,
+          { replace: true },
+        );
+      }
+      return created;
+    },
+    [
+      selectedProjectId,
+      activeProject?.kind,
+      fetchSidebarSessions,
+      sidebarSessions,
+      setSidebarSessions,
+      upsertProject,
+      selectedSession,
+      selectedProviderId,
+      selectedModelId,
+      selectedRuntimeId,
+      selectedMcpSlugs,
+      // ADR-013/ADR-006: ``selectedPermissionMode`` is read inside this
+      // callback at session creation time. Without it in the deps array
+      // the closure stays bound to the initial ``"full_access"`` value
+      // and the chat-default session is silently created with the wrong
+      // mode — the conversation page composer then reflects that wrong
+      // value (locked) after navigate, which is the user-visible
+      // "default permission picked, full access shown" regression.
+      // Project-detail flow has no equivalent bug because its
+      // ``handleSend`` is a plain function (no closure cache).
+      selectedPermissionMode,
+      selectedEffort,
+      selectedAgentSlug,
+      isSkillCreatorMode,
+      skillKindParam,
+      skillProjectParam,
+      id,
+      navigate,
+    ],
+  );
 
   const subscribeToSession = useCallback(
     (
@@ -3619,9 +3727,16 @@ export const ConversationPage = () => {
       // navigate→bootstrap churn) it returns cached without navigating, so do
       // the swap here. ``replace:true`` keeps Back from returning to the draft.
       if (id === NEW_SESSION_ID && session.id !== NEW_SESSION_ID) {
+        promotingSessionIdRef.current = session.id;
         navigate(
           `/conversation/${session.id}${isSkillCreatorMode ? "?mode=skill-creator" : ""}`,
-          { replace: true },
+          {
+            replace: true,
+            state: {
+              promotedFromNew: true,
+              promotedSessionId: session.id,
+            },
+          },
         );
       }
 
@@ -3898,9 +4013,7 @@ export const ConversationPage = () => {
         .catch(() => ({ items: [] as SessionEventDTO[] }));
       if (selectedSessionIdRef.current !== sessionId) return;
       if (
-        missed.items.some(
-          (event) => event.event.event_type === "message.user",
-        )
+        missed.items.some((event) => event.event.event_type === "message.user")
       ) {
         setPendingUserMessage(null);
       }
@@ -3961,10 +4074,7 @@ export const ConversationPage = () => {
     (
       pendingId: string,
       decision:
-        | "approve"
-        | "approve_with_changes"
-        | "approve_for_session"
-        | "reject",
+        "approve" | "approve_with_changes" | "approve_for_session" | "reject",
       opts?: {
         message?: string;
         modifiedInput?: Record<string, unknown>;
@@ -4534,22 +4644,14 @@ export const ConversationPage = () => {
     if (selectedSession.permission_mode) {
       setSelectedPermissionMode(
         selectedSession.permission_mode as
-          | "default"
-          | "auto_review"
-          | "full_access",
+          "default" | "auto_review" | "full_access",
       );
     }
     // Kernel V5+bba3014: reconcile the effort selector to the live
     // session so live-reconcile PATCHes start from the persisted value.
     setSelectedEffort(
       (selectedSession.effort as
-        | "low"
-        | "medium"
-        | "high"
-        | "xhigh"
-        | "max"
-        | null
-        | undefined) ?? null,
+        "low" | "medium" | "high" | "xhigh" | "max" | null | undefined) ?? null,
     );
   }, [
     selectedSession?.id,
@@ -4793,11 +4895,7 @@ export const ConversationPage = () => {
       size: formatFileSize(a.size_bytes),
       sourceKind: a.source_kind,
       parseStatus: a.parse_status as
-        | "parsing"
-        | "ready"
-        | "failed"
-        | "native"
-        | undefined,
+        "parsing" | "ready" | "failed" | "native" | undefined,
     }));
     // Agent-delivered artifacts → the curated "生成文件" panel section.
     const generatedFiles = sessionArtifacts.map((a) => ({
@@ -4964,6 +5062,10 @@ export const ConversationPage = () => {
   // surface — no data is lost. ``todos`` is already cleared
   // synchronously by ``refreshEvents``.
   useEffect(() => {
+    if (skipNextSessionStateResetRef.current) {
+      skipNextSessionStateResetRef.current = false;
+      return;
+    }
     setSessionAttachments([]);
     setFileTree([]);
     setSelectedArtifactPath(null);
@@ -5232,9 +5334,7 @@ export const ConversationPage = () => {
             <EmptyState
               icon={<Settings />}
               title={t("conversation.noModel" as Parameters<typeof t>[0])}
-              message={t(
-                "conversation.noModelHint" as Parameters<typeof t>[0],
-              )}
+              message={t("conversation.noModelHint" as Parameters<typeof t>[0])}
               action={
                 <Button
                   type="button"
@@ -5288,17 +5388,15 @@ export const ConversationPage = () => {
                 </div>
               ) : null}
               <ConversationTurnList
-                // Remount on session switch so the virtualizer's internal
-                // state (scrollOffset, measurementsCache, itemSizeCache)
-                // starts fresh — without this, residual offsets from the
-                // previous session can position the new session's rows
-                // before ResizeObserver has remeasured them, briefly
-                // overlapping content visually.
-                key={selectedSessionId ?? "new"}
+                // Remount on true session switches so the virtualizer's
+                // internal state starts fresh. The /conversation/new → real-id
+                // promotion keeps this key stable so the first sent turn
+                // doesn't look like a page refresh.
+                key={conversationInstanceKey}
                 turns={effectiveTurns}
                 scrollContainerRef={scrollContainerRef}
                 sending={sending}
-                loading={loading}
+                loading={id === NEW_SESSION_ID ? false : loading}
                 error={error}
                 onRetry={handleRetry}
                 onSwitchModel={handleSwitchModel}
@@ -5311,6 +5409,8 @@ export const ConversationPage = () => {
                 renderToolCall={renderToolCall}
                 isToolCardFoldable={isToolCardFoldable}
                 onRevealFile={revealInFinder}
+                isLocalFileHref={localFileLinks.isLocalFileHref}
+                onLocalFileLinkClick={localFileLinks.openLocalFileHref}
                 emptySuggestions={[
                   t(
                     "conversation.newChatSuggestion1" as Parameters<
@@ -5495,10 +5595,10 @@ export const ConversationPage = () => {
             </div>
           ) : null}
           <Composer
-            // Remount per route so the textarea's native autoFocus refires when
-            // the user navigates to a different conversation (or back to the
-            // "New Chat" entry); React Router otherwise keeps this page mounted.
-            key={id ?? "new"}
+            // Remount on true conversation switches so native autoFocus refires.
+            // Keep the key stable during /conversation/new → real-id promotion
+            // so first-send does not rebuild the composer.
+            key={conversationInstanceKey}
             value={draft}
             onChange={setDraft}
             // Keep the composer usable while a turn runs — submitting queues a
@@ -5540,11 +5640,7 @@ export const ConversationPage = () => {
                 id: a.id,
                 name: a.filename,
                 parseStatus: a.parse_status as
-                  | "parsing"
-                  | "ready"
-                  | "failed"
-                  | "native"
-                  | undefined,
+                  "parsing" | "ready" | "failed" | "native" | undefined,
                 sourceKind: a.source_kind,
               }))}
             onRemovePinnedAttachment={handleRemoveSessionAttachment}
@@ -5583,9 +5679,7 @@ export const ConversationPage = () => {
             // when the active project isn't a project, and a change to
             // ``null`` maps back to the sentinel. Frozen once a session exists.
             projects={composerProjects}
-            selectedProjectId={
-              isProjectProject ? selectedProjectId : null
-            }
+            selectedProjectId={isProjectProject ? selectedProjectId : null}
             projectLocked={selectedSession != null}
             onProjectChange={(idOrNull) => {
               setSelectedProjectId(idOrNull ?? "chat-default");

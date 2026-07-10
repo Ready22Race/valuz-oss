@@ -163,7 +163,7 @@ async def resolve_model_provider_for_user(
 # ``LLMChannel`` / ``LLMModel`` / ``LLMChannelDetail`` now live in
 # ``modules.providers.schemas`` — the shared contract OSS / overlay / frontend
 # all speak (ADR-011). The helpers below judge OSS's OWN rows onto that shape;
-# contributed rows (``ext.llm_provider.list()``) arrive pre-judged.
+# contributed rows (``ext.llm_provider.list(user_id=...)``) arrive pre-judged.
 
 # Display order of provider groups in the model picker (smaller = earlier).
 # Mirrors ``modules.settings.model_options`` group ordering.
@@ -680,6 +680,55 @@ def _resolve_models(row: ProviderRow) -> list[LLMModel]:
     return models
 
 
+def _models_with_runtimes(row: ProviderRow, compatible: list[str]) -> list[LLMModel]:
+    """Resolve a row's models and stamp each with the runtimes it can drive.
+
+    The runtime set is derived once from the row via the single rule
+    (``runtimes_for``) so the providers list/detail agree with the
+    ``model-options`` read model and the frontend never has to re-derive.
+    A model that already declares its own ``runtimes`` keeps them. When the
+    row resolves to no models but carries a seeded ``default_model`` (a legacy
+    api-key anchor), one synthetic model row is emitted so the picker still
+    surfaces it — and every model row carries a truthful ``runtimes``.
+    """
+    # Lazy import: ``model_options`` imports the provider schemas, so importing
+    # it at module load would cycle (mirrors ``provider_resolver``).
+    from valuz_agent.modules.settings.model_options import runtimes_for
+
+    ch_runtimes = tuple(runtimes_for(compatible, provider_kind=row.provider_kind))
+    stamped = [
+        LLMModel(
+            id=m.id,
+            label=m.label,
+            runtimes=(m.runtimes if m.runtimes is not None else ch_runtimes),
+        )
+        for m in _resolve_models(row)
+    ]
+    if not stamped and row.default_model:
+        stamped.append(LLMModel(id=row.default_model, label=None, runtimes=ch_runtimes))
+    return stamped
+
+
+def _stamp_contributed_runtimes(ch: LLMChannel) -> LLMChannel:
+    """Fill ``None`` per-model runtimes on an overlay-contributed (ADR-011)
+    channel from the single rule, so the providers list/detail carry runtimes for
+    system / org cards too — the frontend reads that field instead of re-deriving.
+    A contributor that declared its own runtimes (e.g. the gateway codex card)
+    keeps them. Mirrors ``_models_with_runtimes`` for the catalog path."""
+    if all(m.runtimes is not None for m in ch.models):
+        return ch
+    from valuz_agent.modules.settings.model_options import runtimes_for
+
+    ch_runtimes = tuple(runtimes_for(ch.compatible_protocols, provider_kind=ch.provider_kind))
+    # ``ch`` is a fresh per-call object from the contributor; ``LLMChannel`` is a
+    # mutable dataclass and ``LLMModel`` is frozen, so rebuild the model rows.
+    ch.models = [
+        m if m.runtimes is not None else LLMModel(id=m.id, label=m.label, runtimes=ch_runtimes)
+        for m in ch.models
+    ]
+    return ch
+
+
 def _row_to_list_item(row: ProviderRow) -> LLMChannel:
     compatible = _derive_compatible_protocols(row)
     group = _group_for(row.source, row.auth_type)
@@ -698,13 +747,12 @@ def _row_to_list_item(row: ProviderRow) -> LLMChannel:
         protocol=row.protocol,
         effective_protocol=compatible[0],
         compatible_protocols=compatible,
-        # models leave runtimes unset (None) → the picker derives them from
-        # compatible_protocols. OSS user/builtin rows never drive codex (codex
-        # walks its own keychain) except codex-subscription, which runtimes_for
-        # matches by provider_kind.
+        # runtimes are stamped per-model from the single rule (runtimes_for) so
+        # every surface reads them instead of re-deriving. codex-subscription →
+        # ["codex"]; a custom openai-response channel → ["codex", ...] too.
         group=group,
         group_rank=_GROUP_RANK[group],
-        models=_resolve_models(row),
+        models=_models_with_runtimes(row, compatible),
     )
 
 
@@ -758,10 +806,11 @@ def _row_to_detail(row: ProviderRow) -> LLMChannelDetail:
         protocol=row.protocol,
         effective_protocol=compatible[0],
         compatible_protocols=compatible,
-        # models leave runtimes unset (None) → the picker derives them.
+        # runtimes stamped per-model from the single rule (runtimes_for); kept in
+        # lockstep with _row_to_list_item so list and detail never disagree.
         group=group,
         group_rank=_GROUP_RANK[group],
-        models=_resolve_models(row),
+        models=_models_with_runtimes(row, compatible),
         base_url=row.base_url,
         supports_custom_base_url=(
             _PROVIDER_MAP[row.provider_kind].supports_custom_base_url
@@ -1101,7 +1150,7 @@ class ProviderService:
         # When the caller's org locks custom models, hide their own
         # (``source="user"``) providers so they can't be selected — the
         # "禁止使用" half of the lock. Managed/system rows are unaffected.
-        hide_user = await policy.hide_user_providers()
+        hide_user = await policy.hide_user_providers(user_id=user_id)
         user_items = [
             _row_to_list_item(r)
             for r in rows
@@ -1114,7 +1163,11 @@ class ProviderService:
         # append. A contributed row with no selectable models is dropped: a
         # card with nothing to pick is noise (e.g. the 组织模型 card when the
         # org has no model of that protocol).
-        extra_items = [it for it in await ext.llm_provider.list() if it.models]
+        extra_items = [
+            _stamp_contributed_runtimes(it)
+            for it in await ext.llm_provider.list(user_id=user_id)
+            if it.models
+        ]
         # Virtual CLI-subscription templates for kinds not yet configured (no DB
         # row exists until the user logs in — see ``_materialize_builtin_subscription``).
         configured_kinds = {r.provider_kind for r in rows}
@@ -1125,7 +1178,7 @@ class ProviderService:
         # (Claude Pro/Max, Codex) when the platform disables member-configured
         # models. Superset of the coarse ``hide_user`` filter above; the default
         # ``AllowAllProviderPolicy`` hides nothing, so OSS behaviour is unchanged.
-        hidden = await policy.hidden_provider_ids(combined)
+        hidden = await policy.hidden_provider_ids(combined, user_id=user_id)
         if hidden:
             combined = [it for it in combined if it.id not in hidden]
         # NB: subscription-login gating is applied in ``get_provider`` (the
@@ -1149,9 +1202,9 @@ class ProviderService:
         # Not a user row — maybe an overlay-contributed (catalog) channel
         # (ADR-011). Catalog ids don't collide with user UUIDs, so checking
         # the user table first is safe.
-        for it in await ext.llm_provider.list():
+        for it in await ext.llm_provider.list(user_id=user_id):
             if it.id == provider_id:
-                return _list_item_to_detail(it)
+                return _list_item_to_detail(_stamp_contributed_runtimes(it))
         # Still nothing: the id may be an unconfigured built-in subscription
         # template (virtualized in ``list_providers``) — resolve it so the edit
         # dialog opens instead of erroring with "获取模型详情失败".
@@ -1161,7 +1214,7 @@ class ProviderService:
             return virtual
         raise ProviderNotFound(f"Provider {provider_id!r} not found")
 
-    async def _guard_not_system(self, provider_id: str) -> None:
+    async def _guard_not_system(self, user_id: str, provider_id: str) -> None:
         """Raise ``SystemProviderImmutable`` if id is a non-deletable
         contributed (catalog) row.
 
@@ -1170,7 +1223,7 @@ class ProviderService:
         row's ``deletable`` flag, not its source (ADR-011 治理). The route layer
         maps this to HTTP 409.
         """
-        for it in await ext.llm_provider.list():
+        for it in await ext.llm_provider.list(user_id=user_id):
             if it.id == provider_id and not it.deletable:
                 raise SystemProviderImmutable(provider_id)
 
@@ -1494,7 +1547,7 @@ class ProviderService:
         auth_type: str | None = None,
         models: list[str] | None = None,
     ) -> LLMChannelDetail:
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             # Edit dialog on an unconfigured built-in subscription template: no
@@ -1597,7 +1650,7 @@ class ProviderService:
         ``ModelDiscoveryError`` and translated to 502 by the router.
         ``ProviderNotFound`` becomes 404.
         """
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
@@ -1652,7 +1705,7 @@ class ProviderService:
         }
 
     async def delete_provider(self, user_id: str, provider_id: str) -> None:
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")
@@ -1690,7 +1743,7 @@ class ProviderService:
 
         System-managed providers are immutable (403 via ``SystemProviderImmutable``).
         """
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             materialized = await self._materialize_builtin_subscription(user_id, provider_id)
@@ -1755,7 +1808,7 @@ class ProviderService:
         # providers table (no row exists). Users pin a system provider
         # as default through the settings-preferences path
         # (``PATCH /v1/settings/model-defaults``) instead.
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             # Built-in CLI-subscription channels (claude/codex ``/login``) have
@@ -1907,7 +1960,7 @@ class ProviderService:
     # ── Connection Test ──────────────────────────────────────────
 
     async def test_provider(self, user_id: str, provider_id: str) -> ConnectionTestResult:
-        await self._guard_not_system(provider_id)
+        await self._guard_not_system(user_id, provider_id)
         row = await self._ds.get_by_id(user_id, provider_id)
         if not row:
             raise ProviderNotFound(f"Provider {provider_id!r} not found")

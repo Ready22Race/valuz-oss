@@ -1,7 +1,7 @@
 """Onboarding helpers — wire up the first-run sample project / assistant.
 
 POST /v1/onboarding/example-project
-  Body: { "team_id": "content" | "investment" | "product" }
+  Body: { "team_id": "content" | "investment" | "development-engineering" }
   Creates the example project directory, binds it as a project, imports the
   chosen recommended pack's agents into the user's library, and deploys them
   into that project. Also ensures the Valuz Helper exists in the library so the
@@ -61,7 +61,7 @@ router = APIRouter(prefix="/v1/onboarding", tags=["onboarding"])
 # so a user who skips onboarding keeps an empty library.
 # ---------------------------------------------------------------------------
 
-TeamId = Literal["content", "investment", "product"]
+TeamId = Literal["content", "investment", "development-engineering"]
 
 
 def _resolve_project_name() -> str:

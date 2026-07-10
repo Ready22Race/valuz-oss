@@ -128,6 +128,15 @@ class SkillDatastore:
         )
         await async_commit_with_retry(self._db, where="SkillDatastore.delete")
 
+    async def mark_unavailable_by_slug(self, user_id: str, slug: str) -> None:
+        row = await self.get_by_slug(user_id, slug)
+        if row is None:
+            return
+        row.status = "unavailable"
+        await async_commit_with_retry(
+            self._db, where="SkillDatastore.mark_unavailable_by_slug"
+        )
+
     async def list_project_skills(
         self, user_id: str, project_id: str
     ) -> list[ProjectSkillConfigRow]:
