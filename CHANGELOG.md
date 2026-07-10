@@ -7,6 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-11
+
+### Added
+
+- **Project worktrees** — project sessions can run isolated on git worktrees:
+  session-level isolation with re-entry self-heal for historical worktree
+  sessions (#422 @Ready22Race); worktrees for chat automations, a task-level
+  worktree switch (lead + members share one worktree), and a worktree-scoped
+  file tree (#429 @Ready22Race); friendly auto-names with a 6-hex suffix
+  (#435 @Ready22Race).
+- **Marketplace** — a SkillHub marketplace with skills, agent teams, and
+  library entrypoints (#459 @zhourongyu), extended with ModelScope connectors
+  (#485 @zhourongyu).
+- **Local file links** — artifacts and file mentions in a conversation are now
+  real, clickable links backed by a `valuz-file://` scheme and a
+  `/v1/files/resolve` endpoint: resolver port + endpoint (#455 @Ready22Race),
+  session-side file refs + linkify guidance (#456 @Ready22Race), local file
+  links in conversation markdown (#457 @hanjixin), and the client-side
+  resolver (#458 @Ready22Race) — hardened by a single-source URI codec and
+  scheme fixes (#460, #467, #469 @Ready22Race).
+- **Plan mode** — plan-mode cards render in conversations, and ExitPlanMode
+  approvals work in long sessions (#439 @jiaoqsh).
+- **New subscription models** — `claude-sonnet-5` in the Claude subscription
+  list (#476, #478 @St0neWan9) and the GPT-5.6 family (sol / terra / luna) in
+  the Codex subscription list (#480 @jiaoqsh).
+- **Runtime ↔ model compatibility single-sourced** — provider rows now carry
+  which runtimes each model supports, with kernel-reported runtime
+  availability (#473 @Ready22Race).
+- **Edition / overlay extension points** — a `sidebarFooter` slot
+  (#443 @St0neWan9), edition-defined custom nav groups with the "project"
+  group renamed "main" (#464 @St0neWan9), a connector OAuth access-token read
+  seam (#465 @St0neWan9), a deployment-level instructions extension point
+  (`InstructionsPort`) wired through task lead/member sessions
+  (#474 @jiaoqsh), and owner threaded through provider ports (#449 @homeant).
+- **Cloud / sandbox** — config-gated kernel startup (`KERNEL_CONFIG_WAIT`) for
+  snapshot sandboxes (#446 @Ready22Race).
+- **Desktop** — after a healthy start, the previous version's update package
+  is purged (#418 @St0neWan9).
+
+### Changed
+
+- **Skills catalog performance** — the catalog is served from the DB index
+  instead of a filesystem rescan (#434 @Ready22Race), no longer blocks the
+  event loop (#431 @Ready22Race), reindexes on file-watch — dropping the
+  skill-change SSE, with the frontend sharing one skill event stream
+  (#471 @Ready22Race, #470 @hanjixin) — and reuses indexed official skills
+  (#423 @homeant).
+- **Desktop footprint** — the browser engine runs on Electron-as-node so the
+  bundled Node.js is dropped (#448 @jiaoqsh), and app.asar is significantly
+  smaller (#450 @hanjixin).
+- **Frontend request layer** — a shared request cache dedupes polled fetches
+  (#461 @hanjixin), with a test enforcing shared API request usage
+  (#463 @hanjixin).
+- **Host hot paths** — cheap fixes for polled endpoints and idle SSE streams
+  (#479 @St0neWan9).
+- **UI polish** — ask-question card tags (#421), dropdown menus (#430),
+  sidebar + agent breadcrumbs (#436, #437), agent detail width (#438),
+  automation detail layout (#451), agent card shadow token (#452), and
+  connector/activity spacing (#462) (all @yy83000812).
+
+### Fixed
+
+- **Conversation reliability** — blank/frozen conversation pages are healed by
+  reconciling the event stream on unexpected close, in-place conversation
+  transitions, and root error/loading fallbacks (#491 @Ready22Race); a
+  promoted session no longer skips its history load on reload
+  (#483 @Ready22Race); the composer is released when a mode-wrapped turn ends
+  (#484 @Ready22Race); follow-up sends route on the reconciled busy state
+  (#486 @St0neWan9); new-conversation promotion state is preserved
+  (#466 @hanjixin); attach+remove no longer leaves an undeletable empty
+  session (#416 @St0neWan9).
+- **SSE reconnects** back off exponentially, with a slow retry on 401/403
+  (#487 @St0neWan9).
+- **Tasks** — user-interrupt semantics, member await-liveness, and
+  stopped-task resume (#428 @Ready22Race); `run_session_to_idle` finalizes an
+  interrupted session as idle (#475 @St0neWan9).
+- **Decision inbox** — reconciled against durable truth so pending questions
+  can't vanish (#426 @zhourongyu).
+- **Codex runtime** — special tool cards are no longer lost on
+  slash-namespaced MCP tool names (#424 @Ready22Race); dotted MCP header/env
+  overrides work, and a runtime interruption reports distinctly from a user
+  cancel (#482 @Ready22Race).
+- **Kernel** — ChatAnthropic no longer falls back to 4096 max_tokens for
+  unknown models (#492 @jiaoqsh); the global-instructions preamble applies on
+  the raw/no-agent session path (#488 @jiaoqsh).
+- **Providers** — no more infinite enable loop on legacy seeded subscription
+  rows (#420 @zhourongyu).
+- **Skills** — builtin skills materialize into a per-user official-skills dir
+  on remote sandboxes (#419 @Ready22Race).
+- **Activity** — deleting a session removes it from the feed, no ghost rows
+  (#417 @St0neWan9).
+- **Agents** — AgentDetailView no longer crashes outside a project outlet
+  (#440 @jiaoqsh).
+- **Desktop / packaging** — startup no longer hard-fails at a fixed
+  health-check deadline (#444 @St0neWan9); the kernel package ships in the
+  backend distribution (#441 @homeant).
+- **Sidebar** — the Chats section header stays visible with no history
+  (#447 @St0neWan9).
+- **Connectors** — detail panel rendering fixed (#427 @yy83000812).
+
+### Docs & Chore
+
+- Design docs: codex worktree survey + friendly worktree auto-names
+  (#432 @Ready22Race), file address resolution (#454 @Ready22Race), and
+  runtime/model compatibility single-sourcing (#468, #472 @Ready22Race).
+- Deps: openai-codex bumped to 0.1.0b3 so codex installs natively on glibc
+  Linux (#442 @Ready22Race); only `openai-codex` is maintained as the
+  dependency, with the cli-bin prerelease hint moved to a uv constraint
+  (#481 @jiaoqsh).
+
 ## [0.3.1] - 2026-07-03
 
 ### Added
