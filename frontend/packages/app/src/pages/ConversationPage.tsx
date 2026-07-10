@@ -2819,7 +2819,18 @@ export const ConversationPage = () => {
       promotedFromNew?: boolean;
       promotedSessionId?: string;
     } | null;
+    // The promotion fast-path (skip the loading flash + skip the history
+    // refetch) is only valid while a send is genuinely IN FLIGHT — that live
+    // subscription is what fills ``events`` for the freshly promoted session,
+    // so the refetch is redundant and the loader would just flash. On a cold
+    // page reload there is no in-flight send: ``history.state`` still carries
+    // ``promotedFromNew`` (the hash router restores it across refreshes) and
+    // the ``promotingSessionIdRef`` / ``consumedPromoteSessionIdsRef`` refs
+    // reset with the page, so without this ``isSendInFlightRef`` guard bootstrap
+    // would replay the promotion skip on every refresh — never calling
+    // ``refreshEvents`` — and leave the conversation body blank.
     const isPromoteBootstrap =
+      isSendInFlightRef.current &&
       id !== NEW_SESSION_ID &&
       (promotingSessionIdRef.current === id ||
         (routeState?.promotedFromNew === true &&
@@ -2896,9 +2907,15 @@ export const ConversationPage = () => {
           routeState?.promotedFromNew === true &&
           routeState.promotedSessionId === sessionDetail.id &&
           !consumedPromoteSessionIdsRef.current.has(sessionDetail.id);
+        // Same guard as ``isPromoteBootstrap`` above: only treat this as a
+        // promotion — and therefore SKIP ``refreshEvents`` — while a send is
+        // in flight (the live subscription is already streaming this turn's
+        // events in). On a reload the restored ``promotedFromNew`` state must
+        // NOT suppress the history load, or the transcript stays empty.
         const isPromotedNewSession =
-          promotingSessionIdRef.current === sessionDetail.id ||
-          routePromotedSession;
+          isSendInFlightRef.current &&
+          (promotingSessionIdRef.current === sessionDetail.id ||
+            routePromotedSession);
         const wasSameSession =
           selectedSessionIdRef.current === sessionDetail.id;
         setSessionTriggerMode(sessionDetail.trigger_meta?.mode ?? null);
