@@ -127,6 +127,7 @@ import {
   computePlanAnchors,
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
+import { deriveTurnActive } from "./conversation-loading";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
@@ -1403,6 +1404,14 @@ export const ConversationPage = () => {
     () => sessions.find((s) => s.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
   );
+
+  // The composer's loading / Stop state (and the streaming logo + "已处理 X 秒"
+  // timer) is DERIVED, not a bare flag: the optimistic ``sending`` gated by the
+  // authoritative, reconciled session status. The instant the session is
+  // terminal the turn is over — so a missed terminal SSE frame can no longer
+  // strand the UI in a loading state. ``sending`` itself stays the internal
+  // send/queue gate; only the displayed state derives from status.
+  const isBusy = deriveTurnActive(sending, selectedSession?.status);
 
   // The agent actually bound to this composer: an existing session is frozen to
   // its ``sessionAgentSlug`` (ADR-006), a fresh draft uses the picker's
@@ -3550,6 +3559,17 @@ export const ConversationPage = () => {
           sawTurnStart = true;
         }
         const status = event.event.payload.status;
+        // Reconcile the authoritative status from the live frame so the derived
+        // loading flag + header pill track the turn without waiting for a poll.
+        if (evType === "session.update" && status) {
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === sessionId
+                ? { ...s, status: status as SessionListItem["status"] }
+                : s,
+            ),
+          );
+        }
         const terminal =
           sawTurnStart &&
           (evType === "session.idle" ||
@@ -3584,16 +3604,21 @@ export const ConversationPage = () => {
         }
       };
 
-      // Safety net for a missed terminal frame. ``sending`` (Stop button /
-      // loading logo / "已处理 X 秒" timer) is released only when the terminal
-      // SSE frame reaches ``appendEvent`` and trips ``stopSubscription``. That
-      // frame can be lost when the subscription lifecycle races — a re-subscribe
-      // whose ``afterSeq`` is already past the turn's ``session.idle``, or a
-      // dropped/deduped frame — leaving ``sending`` stuck true on an already-
-      // idle session (and this very poll spinning forever at a fixed cursor).
-      // So every few idle ticks we reconcile against the authoritative session
-      // status and close the stream if the turn has run and the session settled.
-      let sawActivity = false;
+      // Reconcile the authoritative session status. The composer's loading state
+      // is DERIVED from ``sessions[].status`` (see ``deriveTurnActive``), so
+      // keeping that status fresh here is what un-sticks the Stop button / loading
+      // logo / "已处理 X 秒" timer when the terminal SSE frame is missed — a
+      // re-subscribe whose ``afterSeq`` is already past the turn's terminal event,
+      // a dropped/deduped frame, or a non-idle ending. It also fixes a stale
+      // "运行中" header pill. Once the turn is genuinely over we also
+      // ``stopSubscription`` so this poll stops spinning.
+      //
+      // ``sawTurnActivity`` seeds ``true`` for non-``requireUserBeforeTerminal``
+      // subscriptions (auto-resume / queue-drain), which are only ever created
+      // for an already-running session — so an ``idle`` reading means the turn
+      // finished, not that it hasn't started (the pre-run window that the
+      // fresh-send path must wait through).
+      let sawTurnActivity = !opts.requireUserBeforeTerminal;
       let idleReconcileTicks = 0;
       pollTimer = window.setInterval(() => {
         if (stopped) return;
@@ -3601,7 +3626,7 @@ export const ConversationPage = () => {
           .listEvents(sessionId, maxSeqRef.current)
           .then((response) => {
             if (response.items.length > 0) {
-              sawActivity = true;
+              sawTurnActivity = true;
               idleReconcileTicks = 0;
               for (const event of response.items) {
                 appendEvent(event);
@@ -3609,7 +3634,7 @@ export const ConversationPage = () => {
               return;
             }
             // No new persisted events this tick. After ~2s of silence,
-            // reconcile against session status as the source of truth.
+            // reconcile against the authoritative session status.
             idleReconcileTicks += 1;
             if (idleReconcileTicks < 4) return;
             idleReconcileTicks = 0;
@@ -3617,24 +3642,25 @@ export const ConversationPage = () => {
               .get(sessionId)
               .then((detail) => {
                 if (stopped) return;
-                if (detail.status === "running") {
-                  sawActivity = true;
+                // Push the authoritative status into local state — this drives
+                // the derived loading flag and the header pill.
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.id === sessionId ? { ...s, status: detail.status } : s,
+                  ),
+                );
+                if (
+                  detail.status === "running" ||
+                  detail.status === "created"
+                ) {
+                  sawTurnActivity = true;
                   return;
                 }
-                const terminalStatus =
-                  detail.status === "idle" ||
-                  detail.status === "failed" ||
-                  detail.status === "cancelled" ||
-                  detail.status === "archived";
-                // Only stop once the turn has actually run — events streamed in
-                // (via this poll or the live stream, so ``maxSeqRef`` advanced
-                // past ``afterSeq``) or a prior tick saw ``running``. This
-                // avoids aborting during the brief idle/created window before
-                // the kernel flips a just-sent turn to ``running``.
-                if (
-                  terminalStatus &&
-                  (sawActivity || maxSeqRef.current > afterSeq)
-                ) {
+                // Terminal status. If the turn actually ran (events streamed, or
+                // this subscription was born for a running session), it's done —
+                // stop the poll/stream. The loading UI has already cleared via
+                // the reconciled status regardless of this.
+                if (sawTurnActivity || maxSeqRef.current > afterSeq) {
                   stopSubscription();
                 }
               })
@@ -3782,6 +3808,17 @@ export const ConversationPage = () => {
       sentAt: Date.now(),
     });
     setSending(true);
+    // Optimistically mark the active session running so the derived loading flag
+    // shows immediately (an existing session re-send would otherwise read its
+    // prior ``idle`` status for a beat and flicker). The real status is
+    // reconciled from the POST response + SSE ``session.update`` right after.
+    if (selectedSessionId) {
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === selectedSessionId ? { ...s, status: "running" } : s,
+        ),
+      );
+    }
     setError(null);
     setDraft("");
     setSelectedComposerSkill(null);
@@ -5473,7 +5510,7 @@ export const ConversationPage = () => {
                 key={conversationInstanceKey}
                 turns={effectiveTurns}
                 scrollContainerRef={scrollContainerRef}
-                sending={sending}
+                sending={isBusy}
                 loading={id === NEW_SESSION_ID ? false : loading}
                 error={error}
                 onRetry={handleRetry}
@@ -5695,7 +5732,7 @@ export const ConversationPage = () => {
             onSend={() => {
               void handleSend();
             }}
-            sending={sending}
+            sending={isBusy}
             onStop={() => interruptRef.current()}
             // Upload cap counts only the *pending* server rows — the
             // ones staged for the next turn. Consumed rows live on in
