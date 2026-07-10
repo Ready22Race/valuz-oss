@@ -44,11 +44,21 @@ subscribe(() => void setMenuLocale(getLocale()));
 initParserPlugins();
 
 // Hydrate edition overlay before React mounts so the router sees
-// the correct routes from the first render.
-hydrateOverlayIfPresent().then(() => {
-  ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>,
-  );
-});
+// the correct routes from the first render. The overlay is optional —
+// a hydration failure must NOT block the mount (a bare ``.then`` here
+// meant any rejection left a permanently white window, since ``render``
+// was never called and nothing logged the cause).
+hydrateOverlayIfPresent()
+  .catch((cause: unknown) => {
+    console.error(
+      "[boot] edition overlay hydration failed — continuing with the base profile",
+      cause,
+    );
+  })
+  .then(() => {
+    ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+      <React.StrictMode>
+        <App />
+      </React.StrictMode>,
+    );
+  });

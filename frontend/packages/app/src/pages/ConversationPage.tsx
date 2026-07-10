@@ -1259,6 +1259,23 @@ export const ConversationPage = () => {
   const [selectedComposerSkill, setSelectedComposerSkill] =
     useState<SkillView | null>(null);
   const [projectSkills, setProjectSkills] = useState<SkillView[]>([]);
+
+  // Residual-state sweep for in-place session transitions. The layout used
+  // to remount this whole page on every pathname change, which incidentally
+  // wiped composer/turn-scoped state; conversation routes now transition in
+  // place (so the ``new`` → ``{id}`` promotion survives), so anything the
+  // remount used to clean must be cleared explicitly. Keyed on
+  // ``conversationInstanceKey``, which changes exactly on TRUE session
+  // switches — stable across the promotion (where ``handleSend`` owns this
+  // state) and a no-op on mount (everything is still at its initial value).
+  useEffect(() => {
+    setDraft("");
+    setSelectedComposerSkill(null);
+    setRetryCounts({});
+    setAutoApprovedNotices([]);
+    userScrolledRef.current = false;
+  }, [conversationInstanceKey]);
+
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<
     string | null

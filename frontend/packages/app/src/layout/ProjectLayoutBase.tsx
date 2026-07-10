@@ -85,6 +85,7 @@ import { useAgentDeployPicker } from "../components/agent-deploy-picker";
 import { AgentCheckboxList } from "../components/AgentDeployField";
 import { ExportProjectDialog } from "../components/ExportProjectDialog";
 import { ImportProjectDialog } from "../components/ImportProjectDialog";
+import { outletTransitionKey } from "./outlet-key";
 import type { ProjectOutletContext } from "./types";
 
 export type DirectoryFieldMode = "input" | "picker" | "managed";
@@ -916,7 +917,10 @@ export function ProjectLayoutBase({
         }
       >
         <div
-          key={location.pathname}
+          // Keyed so a page change replays the enter animation — except
+          // within the conversation family, which transitions in place
+          // (see ``outletTransitionKey``).
+          key={outletTransitionKey(location.pathname)}
           className="h-full min-h-0 animate-page-enter"
         >
           <Outlet context={outletContext} />

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { providersApi } from "@valuz/core";
+import { ErrorBoundary, LogoShimmer } from "@valuz/ui";
 import { StartupScreen } from "./components/StartupScreen";
 import { UpdaterListener } from "./components/UpdaterListener";
 import { UpdateToast } from "./components/UpdateToast";
@@ -62,7 +63,15 @@ export const App = () => {
   // the provider crashes the renderer before the backend is ready.
   let content = null;
   if (checking || (ready && !setupChecked)) {
-    content = null;
+    // Startup gates (services status probe / onboarding check) used to
+    // render literally nothing here — a plain white window with no hint
+    // of life for however long they took (the onboarding probe can retry
+    // for several seconds against a slow backend). Show the shimmer.
+    content = (
+      <div className="flex h-screen items-center justify-center">
+        <LogoShimmer size="md" />
+      </div>
+    );
   } else if (!ready) {
     content = (
       <StartupScreen
@@ -83,5 +92,14 @@ export const App = () => {
     );
   }
 
-  return <ElectronPlatformProvider>{content}</ElectronPlatformProvider>;
+  // Root boundary: without it, any uncaught render/effect throw above the
+  // layout-level boundary (router root, layout hooks, startup branches)
+  // unmounts the entire tree — a permanently white window that only a
+  // reload can recover. Degrade to the "Something went wrong" fallback
+  // with a Retry instead.
+  return (
+    <ElectronPlatformProvider>
+      <ErrorBoundary>{content}</ErrorBoundary>
+    </ElectronPlatformProvider>
+  );
 };
