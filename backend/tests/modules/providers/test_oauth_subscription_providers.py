@@ -76,7 +76,7 @@ def test_codex_subscription_default_model_is_gpt_5_5() -> None:
 def test_claude_subscription_recommends_pinned_anthropic_models() -> None:
     """Pinned IDs from https://code.claude.com/docs/en/model-config — version
     aliases (sonnet/opus/haiku) intentionally NOT in the list per product
-    decision (具体版本号 over alias). Sourced from
+    decision (concrete version ids over aliases). Sourced from
     resources/subscription_models.json."""
     provider = get_provider("claude-subscription")
     assert set(provider.model_options) == {
@@ -93,10 +93,16 @@ def test_claude_subscription_recommends_pinned_anthropic_models() -> None:
 def test_codex_subscription_recommends_known_codex_models() -> None:
     """Per https://developers.openai.com/codex/models. Includes the Pro-only
     ``gpt-5.3-codex-spark`` preview — listing it lets Pro users pick it;
-    lower tiers will fail at SDK call time. Sourced from
-    resources/subscription_models.json."""
+    lower tiers will fail at SDK call time. The 5.6 family lists the three
+    concrete tiers (sol = flagship, terra = price/performance, luna =
+    high-volume); the ``gpt-5.6`` alias routes to sol and is intentionally
+    NOT listed (concrete version ids over aliases, same as the claude list).
+    Sourced from resources/subscription_models.json."""
     provider = get_provider("codex-subscription")
     assert set(provider.model_options) == {
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
         "gpt-5.5",
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -110,6 +116,7 @@ def test_subscription_models_carry_backend_labels() -> None:
     """The curated subscription_models.json ships server-authoritative display
     names so the frontend doesn't have to label these ids itself."""
     codex = get_provider("codex-subscription")
+    assert codex.model_labels["gpt-5.6-sol"] == "GPT 5.6 Sol"
     assert codex.model_labels["gpt-5.5"] == "GPT 5.5"
     assert codex.model_labels["gpt-5.3-codex-spark"] == "GPT 5.3 Codex Spark"
     claude = get_provider("claude-subscription")
