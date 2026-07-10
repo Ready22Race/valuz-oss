@@ -3567,14 +3567,61 @@ export const ConversationPage = () => {
         }
       };
 
+      // Safety net for a missed terminal frame. ``sending`` (Stop button /
+      // loading logo / "已处理 X 秒" timer) is released only when the terminal
+      // SSE frame reaches ``appendEvent`` and trips ``stopSubscription``. That
+      // frame can be lost when the subscription lifecycle races — a re-subscribe
+      // whose ``afterSeq`` is already past the turn's ``session.idle``, or a
+      // dropped/deduped frame — leaving ``sending`` stuck true on an already-
+      // idle session (and this very poll spinning forever at a fixed cursor).
+      // So every few idle ticks we reconcile against the authoritative session
+      // status and close the stream if the turn has run and the session settled.
+      let sawActivity = false;
+      let idleReconcileTicks = 0;
       pollTimer = window.setInterval(() => {
         if (stopped) return;
         sessionsApi
           .listEvents(sessionId, maxSeqRef.current)
           .then((response) => {
-            for (const event of response.items) {
-              appendEvent(event);
+            if (response.items.length > 0) {
+              sawActivity = true;
+              idleReconcileTicks = 0;
+              for (const event of response.items) {
+                appendEvent(event);
+              }
+              return;
             }
+            // No new persisted events this tick. After ~2s of silence,
+            // reconcile against session status as the source of truth.
+            idleReconcileTicks += 1;
+            if (idleReconcileTicks < 4) return;
+            idleReconcileTicks = 0;
+            void sessionsApi
+              .get(sessionId)
+              .then((detail) => {
+                if (stopped) return;
+                if (detail.status === "running") {
+                  sawActivity = true;
+                  return;
+                }
+                const terminalStatus =
+                  detail.status === "idle" ||
+                  detail.status === "failed" ||
+                  detail.status === "cancelled" ||
+                  detail.status === "archived";
+                // Only stop once the turn has actually run — events streamed in
+                // (via this poll or the live stream, so ``maxSeqRef`` advanced
+                // past ``afterSeq``) or a prior tick saw ``running``. This
+                // avoids aborting during the brief idle/created window before
+                // the kernel flips a just-sent turn to ``running``.
+                if (
+                  terminalStatus &&
+                  (sawActivity || maxSeqRef.current > afterSeq)
+                ) {
+                  stopSubscription();
+                }
+              })
+              .catch(() => {});
           })
           .catch(() => {});
       }, 500);
