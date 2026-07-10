@@ -559,6 +559,7 @@ I18nKey = Literal[
     "conversation.generatedFiles",
     "conversation.generatedFilesCount",
     "conversation.goToSettings",
+    "conversation.historyLoadFailed",
     "conversation.indexing",
     "conversation.inputPlaceholder",
     "conversation.interruptFailed",

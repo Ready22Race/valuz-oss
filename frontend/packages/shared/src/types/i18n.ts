@@ -553,6 +553,7 @@ export type KnownI18nKey =
   | "conversation.generatedFiles"
   | "conversation.generatedFilesCount"
   | "conversation.goToSettings"
+  | "conversation.historyLoadFailed"
   | "conversation.indexing"
   | "conversation.inputPlaceholder"
   | "conversation.interruptFailed"

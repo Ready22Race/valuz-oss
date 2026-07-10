@@ -1173,6 +1173,12 @@ export const ConversationPage = () => {
   // sees their input rendered twice + the loading dots vanish mid-stream.
   const isSendInFlightRef = useRef(false);
   const maxSeqRef = useRef(0);
+  // Consecutive unexpected-close reconnect attempts for the live events
+  // stream. Reset whenever a live frame is delivered (a healthy stream)
+  // and on every session switch; capped so a session whose stream is
+  // repeatedly cut (dead proxy, wedged server) degrades to the
+  // status-reconcile path instead of reconnecting forever.
+  const streamReconnectAttemptsRef = useRef(0);
   // Earliest seq currently in ``events``. Used as the cursor for the
   // upward "load older turns" pager. Starts at ``Infinity`` so the first
   // ``listEventsWindow`` call (which omits ``before_seq``) targets the
@@ -1253,6 +1259,23 @@ export const ConversationPage = () => {
   const [selectedComposerSkill, setSelectedComposerSkill] =
     useState<SkillView | null>(null);
   const [projectSkills, setProjectSkills] = useState<SkillView[]>([]);
+
+  // Residual-state sweep for in-place session transitions. The layout used
+  // to remount this whole page on every pathname change, which incidentally
+  // wiped composer/turn-scoped state; conversation routes now transition in
+  // place (so the ``new`` → ``{id}`` promotion survives), so anything the
+  // remount used to clean must be cleared explicitly. Keyed on
+  // ``conversationInstanceKey``, which changes exactly on TRUE session
+  // switches — stable across the promotion (where ``handleSend`` owns this
+  // state) and a no-op on mount (everything is still at its initial value).
+  useEffect(() => {
+    setDraft("");
+    setSelectedComposerSkill(null);
+    setRetryCounts({});
+    setAutoApprovedNotices([]);
+    userScrolledRef.current = false;
+  }, [conversationInstanceKey]);
+
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<
     string | null
@@ -2623,6 +2646,7 @@ export const ConversationPage = () => {
     minSeqRef.current = Number.POSITIVE_INFINITY;
     hasMoreOlderRef.current = false;
     setHasMoreOlder(false);
+    streamReconnectAttemptsRef.current = 0;
     if (!sessionId) {
       return;
     }
@@ -2709,6 +2733,12 @@ export const ConversationPage = () => {
       hasMoreOlderRef.current = false;
       setHasMoreOlder(false);
       setTodos(null);
+      // A failed history load used to be swallowed here, leaving an
+      // existing session rendering a permanently blank transcript with
+      // no error and no retry path (the empty state is welcome-gated to
+      // ``/conversation/new`` only). Surface it so the user sees an
+      // error card instead of a white page.
+      setError(_t("conversation.historyLoadFailed" as I18nKey));
     }
   }, []);
 
@@ -3670,20 +3700,110 @@ export const ConversationPage = () => {
           .catch(() => {});
       }, 500);
 
+      // A live stream can end for reasons other than "turn finished and
+      // fully delivered" — a proxy cutting the localhost connection, a
+      // server-side hiccup, a dropped socket. Treating every close as
+      // completion silently loses the rest of the turn (verified
+      // incident: the kernel finished its reply in 8s, but the stream
+      // died right after the first ``thinking`` frame — the transcript
+      // froze with no error, no spinner, and no retry, because nothing
+      // ever fetched the remaining events). On an unexpected close:
+      //   1. gap-fill whatever the stream missed from the DB;
+      //   2. if the turn is still live (status running/created),
+      //      re-subscribe from the advanced cursor with exponential
+      //      backoff (capped attempts, reset on healthy delivery);
+      //   3. otherwise run the normal end-of-turn bookkeeping.
+      // A close we initiated ourselves (terminal event seen →
+      // ``stopSubscription``; session switch / unmount / superseding
+      // subscribe / interrupt → ``abort``) is fully handled by its
+      // closer and skips all of this.
+      let reconciled = false;
+      const reconcileStreamEnd = async () => {
+        // Idempotent: wired to both ``.then`` and ``.catch`` of the
+        // stream promise, so a handler-side rejection can't run it twice.
+        if (reconciled || stopped || abort.signal.aborted) return;
+        reconciled = true;
+        try {
+          const resp = await sessionsApi.listEvents(
+            sessionId,
+            maxSeqRef.current,
+          );
+          if (stopped || abort.signal.aborted) return;
+          for (const event of resp.items) {
+            // May deliver the turn's terminal event → ``stopSubscription``.
+            appendEvent(event);
+          }
+        } catch {
+          // Gap-fill is best-effort — the status check below still
+          // decides between reconnect and shutdown.
+        }
+        if (stopped || abort.signal.aborted) return;
+        let status: string | null = null;
+        try {
+          const detail = await sessionsApi.get(sessionId);
+          if (stopped || abort.signal.aborted) return;
+          status = detail.status;
+          // Push the authoritative status so the derived busy flag and
+          // header pill stay truthful while we decide what to do next.
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === sessionId
+                ? { ...s, status: detail.status as SessionListItem["status"] }
+                : s,
+            ),
+          );
+        } catch {
+          // Unknown status — treat like a live turn and let the capped
+          // reconnect path retry (a transient GET failure shouldn't
+          // strand a streaming turn).
+        }
+        if (stopped || abort.signal.aborted) return;
+        if (status === null || status === "running" || status === "created") {
+          const attempt = streamReconnectAttemptsRef.current;
+          if (attempt >= 5) {
+            stopSubscription();
+            return;
+          }
+          streamReconnectAttemptsRef.current = attempt + 1;
+          const delay = Math.min(1000 * 2 ** attempt, 15000);
+          window.setTimeout(() => {
+            if (stopped || abort.signal.aborted) return;
+            // A newer subscription (fresh send / session switch) owns
+            // the page now — it covers this turn's tail itself.
+            if (abortRef.current) return;
+            if (isSendInFlightRef.current) return;
+            if (selectedSessionIdRef.current !== sessionId) return;
+            subscribeToSession(
+              sessionId,
+              maxSeqRef.current,
+              sawTurnStart ? {} : opts,
+            );
+          }, delay);
+          return;
+        }
+        // Terminal status: the turn is genuinely over — run the normal
+        // end-of-turn bookkeeping (session row + sidebar refresh).
+        stopSubscription();
+      };
+      // Never let a reconcile rejection escape past ``.finally`` as an
+      // unhandled promise rejection — every recoverable branch inside is
+      // already try/caught; this is the belt-and-braces wrapper.
+      const safeReconcileStreamEnd = () => reconcileStreamEnd().catch(() => {});
+
       sessionsApi
         .subscribeEvents(
           sessionId,
           (event) => {
+            // A delivered frame means the stream is healthy — reset the
+            // unexpected-close backoff.
+            streamReconnectAttemptsRef.current = 0;
             appendEvent(event);
           },
           afterSeq,
           abort.signal,
         )
-        .then(() => {
-          void refreshActiveSession(sessionId);
-          void fetchSidebarSessions();
-        })
-        .catch(() => {})
+        .then(safeReconcileStreamEnd)
+        .catch(safeReconcileStreamEnd)
         .finally(() => {
           if (pollTimer !== null) {
             window.clearInterval(pollTimer);
@@ -4901,6 +5021,32 @@ export const ConversationPage = () => {
       return false;
     };
 
+    // A turn can start AND finish inside one poll interval — an instant
+    // provider failure, a trivial cached reply. Both terminal exits below
+    // used to give up silently, so a fast turn whose events landed after
+    // the history fetch never rendered (permanently blank transcript
+    // until a manual refresh). Reconcile instead: if the DB has events
+    // past our cursor, open a replay subscribe — it renders them and
+    // self-terminates on the replayed terminal event (the same proven
+    // path as the queue-drain follower). Gated on ``items.length > 0``
+    // so a quiet idle never hangs a bare SSE open.
+    const reconcileFinishedTurn = () => {
+      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+      const sid = selectedSessionId;
+      void sessionsApi
+        .listEvents(sid, maxSeqRef.current)
+        .then((resp) => {
+          if (cancelled || abortRef.current || isSendInFlightRef.current) {
+            return;
+          }
+          if (selectedSessionIdRef.current !== sid) return;
+          if (resp.items.length > 0) {
+            subscribeToSession(sid, maxSeqRef.current);
+          }
+        })
+        .catch(() => {});
+    };
+
     sessionsApi
       .get(selectedSessionId)
       .then((detail) => {
@@ -4909,8 +5055,16 @@ export const ConversationPage = () => {
           setTodos(detail.todos);
         }
         if (tryResume(detail)) return;
-        // The session has already settled — nothing to poll for.
-        if (isTerminalStatus(detail.status)) return;
+        // The session has already settled — nothing to poll for. Still
+        // run one delayed reconcile: on a promoted new conversation the
+        // history fetch can race the first turn, and an instant-failing
+        // turn may already be terminal here with its events unfetched.
+        // The delay lets ``refreshEvents`` hydrate ``maxSeqRef`` first so
+        // the common case is a cheap empty read.
+        if (isTerminalStatus(detail.status)) {
+          window.setTimeout(reconcileFinishedTurn, 1200);
+          return;
+        }
 
         // Status race window: a schedule-driven session (or any caller
         // that creates a session a hair before its first turn flips to
@@ -4940,6 +5094,10 @@ export const ConversationPage = () => {
               }
               if (isTerminalStatus(next.status)) {
                 stopPoll();
+                // The turn ran to completion between ticks (created →
+                // running → idle inside one interval) — fetch what it
+                // produced instead of abandoning it unrendered.
+                reconcileFinishedTurn();
               }
             })
             .catch(() => {

@@ -31,8 +31,12 @@ vi.mock("./hooks/use-desktop-startup", () => ({
   useDesktopStartup: () => startupState,
 }));
 
+let routerThrows = false;
 vi.mock("./routes/router", () => ({
-  AppRouter: () => <div>Desktop app ready</div>,
+  AppRouter: () => {
+    if (routerThrows) throw new Error("boom");
+    return <div>Desktop app ready</div>;
+  },
 }));
 
 vi.mock("@valuz/app/lib/onboarding", () => ({
@@ -42,6 +46,33 @@ vi.mock("@valuz/app/lib/onboarding", () => ({
 describe("startup screen under the platform provider", () => {
   beforeEach(() => {
     startupState = { ...initialStartupState };
+    routerThrows = false;
+  });
+
+  it("shows a loader (not a blank window) while startup is still checking", () => {
+    // Regression: the checking / setup-probe gates rendered ``null`` — a
+    // plain white window with no hint of life.
+    startupState.checking = true;
+    const { container } = render(<App />);
+
+    expect(container.querySelector('img[src="./logo.png"]')).not.toBeNull();
+  });
+
+  it("degrades to the error fallback when the routed shell throws", async () => {
+    // Regression: with no boundary above the router, an uncaught render
+    // throw unmounted the whole tree — a permanently white window.
+    startupState.ready = true;
+    routerThrows = true;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      render(<App />);
+      expect(await screen.findByText("Something went wrong.")).toBeTruthy();
+      expect(
+        await screen.findByRole("button", { name: "Retry" }),
+      ).toBeTruthy();
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("renders the not-ready branch without a usePlatform provider crash", async () => {
