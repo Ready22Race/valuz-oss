@@ -1,5 +1,6 @@
 #!/command/with-contenv bash
-# Valuz kernel s6 service (lean image). Non-root (uid 1000) via s6-setuidgid.
+# Valuz kernel s6 service (lean image). Runs as ROOT (codex needs to own its
+# CODEX_HOME on the COS mount; claude allowed as root via IS_SANDBOX=1).
 #
 # CONFIG-GATED START (KERNEL_CONFIG_WAIT=1, set in the Dockerfile). The service
 # starts at boot: kernel-launch.py migrates the local db and uvicorn imports the
@@ -66,5 +67,9 @@ echo "boot $(date -u 2>/dev/null || true): DATABASE_URL=${DATABASE_URL} KERNEL_S
     >>"${KDIR}/boot.log" 2>/dev/null || true
 chown user:user "${KDIR}/boot.log" 2>/dev/null || true
 
-exec s6-setuidgid user sh -c \
+# ROOT: the kernel runs as root so codex can own/chmod its CODEX_HOME on the
+# per-owner COS mount (COS/virtiofs presents all objects as root and ignores
+# chown, so a uid-1000 codex can't set up ~/.codex → app-server dies). claude
+# tolerates root via IS_SANDBOX=1 (set in the Dockerfile). See the sandbox ADR.
+exec sh -c \
     "exec /app/.venv/bin/python /app/kernel-launch.py >> '${KDIR}/serve.log' 2>&1"

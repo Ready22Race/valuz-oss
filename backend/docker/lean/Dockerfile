@@ -98,6 +98,7 @@ RUN chmod +x /etc/s6-overlay/s6-rc.d/envd/run /etc/s6-overlay/s6-rc.d/valuz-kern
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     S6_KEEP_ENV=1 \
+    IS_SANDBOX=1 \
     KERNEL_CONFIG_WAIT=1
 
 EXPOSE 8000 49983
