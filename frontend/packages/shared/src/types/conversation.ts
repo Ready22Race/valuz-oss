@@ -1,10 +1,7 @@
 /* ── Tool call types ──────────────────────────────────────── */
 
 export type PrototypeToolCallStatus =
-  | "success"
-  | "running"
-  | "cached"
-  | "error";
+  "success" | "running" | "cached" | "error";
 
 export type PrototypeToolCallKind = "kb" | "fetch" | "skill" | "file" | "bash";
 
@@ -58,6 +55,12 @@ export interface ConversationTurn {
    *  than the ``ErrorMessageCard`` a genuine failure gets. Optional: absent is
    *  treated as ``false``. */
   cancelled?: boolean;
+  /** The run ended because the runtime/agent subprocess was torn down or
+   *  crashed mid-turn (``category === "interrupted"`` — NOT a user action).
+   *  Rendered as the same quiet grey line as ``cancelled`` but with a distinct
+   *  label so a system interruption is not misattributed to the user ("用户取消
+   *  了当前对话"). Optional: absent is treated as ``false``. */
+  interrupted?: boolean;
   attachments?: ConversationTurnAttachment[];
   /** Unix epoch milliseconds (UTC). */
   userTimestamp?: number;

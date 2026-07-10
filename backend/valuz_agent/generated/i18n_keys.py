@@ -630,6 +630,7 @@ I18nKey = Literal[
     "conversation.reviewDiff",
     "conversation.reviewDiffDesc",
     "conversation.runFailed",
+    "conversation.runtimeInterrupted",
     "conversation.runtimeLocked",
     "conversation.saveSkillSuccess",
     "conversation.searchSkill",
