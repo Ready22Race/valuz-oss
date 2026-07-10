@@ -17,7 +17,10 @@ from collections.abc import Iterator
 import pytest
 
 import valuz_agent.boot.kernel  # noqa: F401 — kernel sys.path side-effect
-from valuz_agent.adapters.system_prompt_builder import assemble_session_instructions
+from valuz_agent.adapters.system_prompt_builder import (
+    assemble_session_instructions,
+    prepend_global_instructions,
+)
 from valuz_agent.ports.extensions import Extensions, ext
 from valuz_agent.ports.instructions import global_instructions_preamble
 
@@ -81,3 +84,38 @@ async def test_empty_preamble_emits_no_section(restore_override: None) -> None:
     )
     assert "global-instructions" not in prompt
     assert prompt.startswith("<agent-instructions>")
+
+
+# --- raw/no-agent path (quick chat) -------------------------------------
+# ``create_session`` without an ``agent_slug`` builds a bare project prompt
+# instead of going through the full ``assemble_session_instructions`` list;
+# it applies the preamble via ``prepend_global_instructions``.
+
+
+async def test_raw_path_prepends_preamble_before_project_prompt(
+    restore_override: None,
+) -> None:
+    ext.instructions = _StaticProvider("org compliance preamble")
+    prompt = await prepend_global_instructions("You are working in project X.")
+    assert prompt == (
+        "<global-instructions>\norg compliance preamble\n</global-instructions>"
+        "\n\nYou are working in project X."
+    )
+
+
+async def test_raw_path_empty_preamble_keeps_prompt_byte_identical(
+    restore_override: None,
+) -> None:
+    ext.instructions = None
+    assert await prepend_global_instructions("You are working in project X.") == (
+        "You are working in project X."
+    )
+
+
+async def test_raw_path_preamble_alone_when_no_project_prompt(
+    restore_override: None,
+) -> None:
+    ext.instructions = _StaticProvider("org compliance preamble")
+    assert await prepend_global_instructions("") == (
+        "<global-instructions>\norg compliance preamble\n</global-instructions>"
+    )

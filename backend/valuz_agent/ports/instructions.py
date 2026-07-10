@@ -3,16 +3,19 @@
 An **aggregate** port: each method contributes one kind of deployment-owned
 instruction text to session-prompt assembly. Today it carries one —
 ``global_instructions``, a platform-wide preamble prepended as the FIRST
-prompt section (``<global-instructions>``) of every agent-bound chat/project
-session AND every task lead/member session. Future instruction kinds (e.g.
+prompt section (``<global-instructions>``) of every session — agent-bound
+chat/project, raw/no-agent quick chat, and task lead/member. Future
+instruction kinds (e.g.
 per-role or compliance addenda) extend this same Protocol rather than adding
 new ``ext`` attributes.
 
 OSS binds no override (``None``); sessions carry only agent/project-level
 instructions. An overlay binds a provider at startup via ``ext.instructions``.
 
-Consumption sites (both go through ``global_instructions_preamble`` below):
+Consumption sites (all go through ``global_instructions_preamble`` below):
 - ``modules/sessions/service._create_agent_bound_session`` (chat/project)
+- ``modules/sessions/service.create_session`` raw/no-agent branch (quick chat,
+  skill-creator, agent-less scheduled runs)
 - ``adapters/agent_resolver.build_member_session`` (task lead + members)
 """
 

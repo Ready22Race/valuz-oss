@@ -1153,6 +1153,17 @@ class SessionService:
             instructions_md=project_ctx.instructions_md if project_ctx else None,
         )
 
+        # Deployment-level preamble (InstructionsPort) — the raw/no-agent path
+        # covers quick chat, skill-creator sessions, and agent-less scheduled
+        # runs, so it must carry the ``<global-instructions>`` section too,
+        # same as the agent-bound and task paths. OSS binds no override →
+        # no-op, prompt unchanged.
+        from valuz_agent.adapters.system_prompt_builder import (
+            prepend_global_instructions,
+        )
+
+        session_instructions = await prepend_global_instructions(session_instructions)
+
         # Build the valuz metadata blob.
         valuz_meta: dict[str, object] = {
             "name": title,
