@@ -15,13 +15,29 @@ One PR delivering PRD MVP 1–5 as a working full-stack feature:
   Team packs behind `/v1/marketplace/*`. Curated single-agent templates can
   remain as an internal API capability, but are hidden from the current
   marketplace browse UI.
-- Frontend full-screen Marketplace page (Agents / Skills tabs) per the design,
-  with the shared import-preview modal and toasts.
-- Entry points: sidebar nav item + "Import from Marketplace" actions on the
-  Agents & Skills library pages.
+- Frontend full-screen Marketplace page (Agents / Skills / Connectors tabs) kept as a shared
+  internal browse surface, with the shared import-preview modal and toasts.
+- Entry points: visible header CTAs on the Agents, Skills, and Connector library pages.
+  The marketplace route is not exposed as a standalone sidebar nav item.
 
-Out of scope (later): MVP 6 curation pipeline, paid metadata, MCP marketplace,
-and public single-Agent browsing.
+Out of scope (later): MVP 6 curation pipeline, paid metadata, ModelScope OAuth
+deployment, and public single-Agent browsing.
+
+### Connector Marketplace Extension (2026-07-10)
+
+- `ModelScopeClient` calls the anonymous public MCP list/detail OpenAPI without
+  a durable or scheduled cache.
+- Connector browse preserves ModelScope's default order, requests
+  `is_hosted=true`, and pages 20 entries at a time through the documented first
+  100 results. There is no Valuz popularity re-sort or fixed 12-card shelf.
+- Detail parsing whitelists `npx`, `uvx`, HTTPS Streamable HTTP, and HTTPS SSE.
+  Unsupported commands or deployment-only entries return a locked detail.
+- Required environment/header/query fields are represented as typed marketplace
+  config fields; the frontend submits them to the existing `POST /v1/connectors`
+  endpoint. Connector creation, credential storage, OAuth discovery, probing,
+  and status polling stay owned by the connector module.
+- The Connector Library exposes a visible Market action. Its `+` menu remains
+  reserved for custom HTTP and stdio connectors.
 
 ### Agent Team First Implementation Batch
 
@@ -35,29 +51,42 @@ Agent Team marketplace architecture:
 |---|---|
 | 产品设计 | `product-strategy`, `design-prototype` |
 | 技术工程 | `development-engineering`, `qa-testing` |
-| 金融投资 | `investment` |
+| 金融投资 | `investment`, `supply-chain-tracking` |
 | 营销增长 | `competitive-intelligence`, `content-growth`, `campaign-event` |
-| 内容创作 | `video-production`, `short-video-growth` |
+| 内容创作 | `content`, `short-video-growth` |
 | 法务安全 | `contract-review`, `compliance-review` |
-| 教育学术 | `academic-research`, `statistical-analysis`, `training-program`, `teaching-material` |
+| 教育学术 | `academic-research`, `training-program` |
 | 运营人力 | `recruiting-evaluation` |
 | 特色分类 | `health-report`, `chinese-metaphysics`, `tarot-astrology` |
 
-The legacy broad `product`, Xiaohongshu `content`, and `risk-control` packs can
-remain on disk for compatibility/onboarding experiments, but they are not shown
-in the current marketplace Team list unless the owner explicitly adds them back.
+The legacy broad `product`, `statistical-analysis`, `teaching-material`,
+`video-production`, and `risk-control` packs can remain on disk for
+compatibility/curation experiments, but they are not shown in the current
+marketplace Team list unless the owner explicitly adds them back. `统计分析`
+should return only with a future data-intelligence shelf; `教学材料` should wait
+until teacher-oriented workflows become a product target.
 
-First visible seed list (one representative Team per category):
+Visible marketplace Team list:
 
 1. `product-strategy`
-2. `development-engineering`
-3. `investment`
-4. `competitive-intelligence`
-5. `video-production`
-6. `contract-review`
-7. `academic-research`
-8. `recruiting-evaluation`
-9. `chinese-metaphysics`
+2. `design-prototype`
+3. `development-engineering`
+4. `qa-testing`
+5. `investment`
+6. `supply-chain-tracking`
+7. `competitive-intelligence`
+8. `content-growth`
+9. `campaign-event`
+10. `content`
+11. `short-video-growth`
+12. `contract-review`
+13. `compliance-review`
+14. `academic-research`
+15. `training-program`
+16. `recruiting-evaluation`
+17. `chinese-metaphysics`
+18. `health-report`
+19. `tarot-astrology`
 
 Other category Teams can exist as manifests/candidates but should not be added
 to `BUILTIN_PACK_IDS` until they are ready to show in the marketplace.
@@ -234,9 +263,16 @@ All in shared packages (desktop + webui both get it):
   (members w/ Lead/Member tags, deploy toggle — v1 keep toggle only if
   install API supports it, else omit). Footer: install target note + cancel /
   install. Success → toast (existing toast util) + `installed` state.
-- Library entry points: SkillsPage Add menu + AgentsPage header gain
-  "Import from Marketplace" → navigate `/marketplace` (tab preselected via
-  `?tab=`).
+- Library entry points: SkillsPage and AgentsPage headers gain a visible
+  lightweight "Marketplace" text action. Both navigate to
+  `/marketplace` with `?tab=` and `?from=` preselected so MarketplacePage can
+  show a return link to the originating library. When the Agent Library contains
+  at most three Agents, render an unframed list-end action that opens the Agents
+  marketplace to install a Team. Remove marketplace and template-browse items
+  from the `+` menus, which remain reserved for direct creation and local imports.
+- Marketplace search state is keyed by tab. `Agents` and `Skills` keep separate
+  query/debounce values so switching tabs never reuses the other catalog's
+  keyword in an API request.
 - i18n: `marketplace.*` namespace + `nav.marketplace` in BOTH
   `i18n/locales/zh-CN.json` and `en-US.json`; regenerate types
   (`cd backend && uv run python ../i18n/scripts/gen_types.py`). Follow

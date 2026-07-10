@@ -2882,8 +2882,8 @@ paths:
                 $ref: "#/components/schemas/ApiError"
 
   # ------------------------------------------------------------------
-  # Marketplace — normalized discovery/import catalog over SkillHub +
-  # Valuz official skills + curated agent / agent-team templates.
+  # Marketplace — normalized discovery/import catalog over SkillHub,
+  # ModelScope MCP, and Valuz-curated agent / agent-team templates.
   # The client never talks to SkillHub directly; this layer normalizes
   # every source into one item shape (see MarketplaceItem).
   # ------------------------------------------------------------------
@@ -2896,14 +2896,15 @@ paths:
       description: |
         Category rail data for one marketplace tab. `kind=skill` returns the
         curated SkillHub category allowlist with per-category counts;
-        `kind=agent` returns the curated agent/team scenario categories. When
-        the SkillHub upstream is unreachable the response degrades to an
+        `kind=agent` returns the curated agent/team scenario categories;
+        `kind=connector` returns common ModelScope MCP categories. When an
+        upstream is unreachable the response degrades to an
         empty list with `degraded: true` instead of failing.
       parameters:
         - in: query
           name: kind
           required: true
-          schema: {type: string, enum: [skill, agent]}
+          schema: {type: string, enum: [skill, agent, connector]}
       responses:
         "200":
           description: Categories listed
@@ -2921,13 +2922,15 @@ paths:
         Paged catalog browse for one item type. Skill queries push category /
         search filters down to SkillHub (curated category allowlist only —
         Valuz-official skills ship with the client and are never market
-        items); agent / team queries serve Valuz-curated templates.
-        `degraded: true` marks a SkillHub outage.
+        items); agent / team queries serve Valuz-curated templates; connector
+        queries read ModelScope in real time, preserve its default order, and
+        request hosted entries in pages through the first 100 results.
+        `degraded: true` marks an upstream outage.
       parameters:
         - in: query
           name: type
           required: true
-          schema: {type: string, enum: [skill, agent_template, agent_team_template]}
+          schema: {type: string, enum: [skill, agent_template, agent_team_template, connector]}
         - in: query
           name: category
           required: false
@@ -2939,7 +2942,7 @@ paths:
         - in: query
           name: source
           required: false
-          schema: {type: string, enum: [skillhub, valuz_official]}
+          schema: {type: string, enum: [skillhub, valuz_official, modelscope]}
         - in: query
           name: q
           required: false
@@ -3325,6 +3328,7 @@ components:
         downloads: {type: integer, nullable: true}
         stars: {type: integer, nullable: true}
         installs: {type: integer, nullable: true}
+        views: {type: integer, nullable: true}
     MarketplaceTeamMember:
       type: object
       required: [name, role, lead]
@@ -3342,6 +3346,44 @@ components:
         requirement:
           type: string
           enum: [required, optional, api_key, cost]
+    MarketplaceConnectorConfigField:
+      type: object
+      required: [key, name, target, label, required, secret]
+      properties:
+        key: {type: string}
+        name: {type: string, description: "Actual environment/header/query parameter name."}
+        target: {type: string, enum: [env, header, param]}
+        label: {type: string}
+        required: {type: boolean}
+        secret: {type: boolean}
+        placeholder: {type: string, nullable: true}
+        prefix: {type: string, nullable: true}
+    MarketplaceConnectorConfig:
+      type: object
+      required: [slug, transport, args, env, headers, params, auth_type, fields, supported]
+      properties:
+        slug: {type: string}
+        transport: {type: string, enum: [stdio, http, sse]}
+        url: {type: string, nullable: true}
+        command: {type: string, nullable: true}
+        args:
+          type: array
+          items: {type: string}
+        env:
+          type: object
+          additionalProperties: {type: string}
+        headers:
+          type: object
+          additionalProperties: {type: string}
+        params:
+          type: object
+          additionalProperties: {type: string}
+        auth_type: {type: string, enum: [none, bearer, oauth]}
+        fields:
+          type: array
+          items: {$ref: "#/components/schemas/MarketplaceConnectorConfigField"}
+        supported: {type: boolean}
+        unsupported_reason: {type: string, nullable: true}
     MarketplaceFileEntry:
       type: object
       required: [path]
@@ -3403,10 +3445,10 @@ components:
         id: {type: string}
         type:
           type: string
-          enum: [skill, agent_template, agent_team_template]
+          enum: [skill, agent_template, agent_team_template, connector]
         source:
           type: string
-          enum: [skillhub, valuz_official]
+          enum: [skillhub, valuz_official, modelscope]
         source_ref: {type: string, description: "SkillHub slug / template id / pack id."}
         title: {type: string}
         subtitle: {type: string, nullable: true, description: "Agent role line; null for skills."}
@@ -3432,7 +3474,7 @@ components:
           items: {$ref: "#/components/schemas/MarketplaceTeamMember"}
         install_target:
           type: string
-          enum: [skill_library, agent_library, agent_library_project]
+          enum: [skill_library, agent_library, agent_library_project, connector_library]
         installed: {type: boolean}
         locked: {type: boolean, default: false, description: "Present but not installable (e.g. official skill requires Reportify)."}
     MarketplaceItemDetail:
@@ -3480,6 +3522,10 @@ components:
               nullable: true
               allOf:
                 - $ref: "#/components/schemas/MarketplaceEvaluationReport"
+            connector_config:
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/MarketplaceConnectorConfig"
     MarketplaceItemList:
       type: object
       required: [items, total, page, page_size, degraded]

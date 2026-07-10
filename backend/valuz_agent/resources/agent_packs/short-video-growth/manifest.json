@@ -3,7 +3,7 @@
   "kind": "agent-pack",
   "collection": {
     "id": "short-video-growth",
-    "name": { "zh-CN": "短视频增长 Team", "en-US": "Short Video Growth Team" },
+    "name": { "zh-CN": "短视频增长", "en-US": "Short Video Growth" },
     "description": { "zh-CN": "爆款拆解、脚本创作、标题钩子、发布优化，聚焦短视频内容增长", "en-US": "Viral teardown, script writing, hooks, titles, and publish optimization for short-video growth" },
     "scenario": { "zh-CN": "内容创作", "en-US": "Content Creation" },
     "icon": "trending-up"

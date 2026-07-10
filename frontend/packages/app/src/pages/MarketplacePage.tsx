@@ -1,18 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowRight,
   CloudOff,
   Download,
+  Eye,
+  Plug,
   Sparkles,
   Star,
   Store,
 } from "lucide-react";
-import { Button, EmptyState, SearchInput, cn } from "@valuz/ui";
+import { BackLink, Button, EmptyState, SearchInput, cn } from "@valuz/ui";
 import type { MarketplaceCategory, MarketplaceItem } from "@valuz/core";
 import { marketplaceApi, useTranslation } from "@valuz/core";
 import { useProjectOutlet } from "@valuz/app/layout";
 import { MarketplaceImportDialog } from "../components/MarketplaceImportDialog";
+import { MarketplaceConnectorDialog } from "../components/MarketplaceConnectorDialog";
 import {
   MarketplaceBadgePill,
   MarketplaceSourcePill,
@@ -21,9 +24,10 @@ import {
   tintFor,
 } from "../components/marketplace-ui";
 
-type MarketTab = "agents" | "skills";
+type MarketTab = "agents" | "skills" | "connectors";
 
 const SKILL_PAGE_SIZE = 30;
+const CONNECTOR_PAGE_SIZE = 20;
 
 /** Full-screen marketplace — two tabs (Agents / Skills) per the product
  * prototype (docs/plans/2026-07-07-skillhub-marketplace-product-prototype.md).
@@ -31,6 +35,7 @@ const SKILL_PAGE_SIZE = 30;
  * (curated allowlist, server-side). */
 export function MarketplacePage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const {
     setHideHeader,
     setHeader,
@@ -45,24 +50,65 @@ export function MarketplacePage() {
     [t],
   );
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab: MarketTab = searchParams.get("tab") === "skills" ? "skills" : "agents";
+  const requestedTab = searchParams.get("tab");
+  const tab: MarketTab =
+    requestedTab === "skills" || requestedTab === "connectors" ? requestedTab : "agents";
+  const [queries, setQueries] = useState<Record<MarketTab, string>>({
+    agents: "",
+    skills: "",
+    connectors: "",
+  });
+  const [debouncedQueries, setDebouncedQueries] = useState<Record<MarketTab, string>>({
+    agents: "",
+    skills: "",
+    connectors: "",
+  });
+  const query = queries[tab];
+  const debouncedQuery = debouncedQueries[tab];
+  const setQuery = (value: string) => {
+    setQueries((prev) => ({ ...prev, [tab]: value }));
+  };
+  const from = searchParams.get("from");
+  const backTarget =
+    from === "skills"
+      ? "/skills"
+      : from === "agents"
+        ? "/agents"
+        : from === "connectors"
+          ? "/connectors"
+          : null;
+  const backLabel =
+    from === "skills"
+      ? tr("marketplace.backToSkills")
+      : from === "agents"
+        ? tr("marketplace.backToAgents")
+        : from === "connectors"
+          ? tr("marketplace.backToConnectors")
+          : null;
   const setTab = (next: MarketTab) => {
     const params = new URLSearchParams(searchParams);
     params.set("tab", next);
     setSearchParams(params, { replace: true });
   };
 
-  // Debounced search shared by both tabs.
-  const [query, setQuery] = useState("");
-  const [debouncedQuery, setDebouncedQuery] = useState("");
+  // Each catalog owns its query so a Skill keyword never filters Agent Teams.
   useEffect(() => {
-    const timer = setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    const timer = setTimeout(() => {
+      setDebouncedQueries((prev) => ({ ...prev, [tab]: query.trim() }));
+    }, 300);
     return () => clearTimeout(timer);
-  }, [query]);
+  }, [query, tab]);
 
   const [dialogItem, setDialogItem] = useState<MarketplaceItem | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [connectorItem, setConnectorItem] = useState<MarketplaceItem | null>(null);
+  const [connectorOpen, setConnectorOpen] = useState(false);
   const openItem = (item: MarketplaceItem) => {
+    if (item.type === "connector") {
+      setConnectorItem(item);
+      setConnectorOpen(true);
+      return;
+    }
     setDialogItem(item);
     setDialogOpen(true);
   };
@@ -105,6 +151,13 @@ export function MarketplacePage() {
     <div className="flex h-full min-h-0 flex-col">
       {/* header */}
       <div className="border-b border-surface-border px-6 pt-5">
+        {backTarget && backLabel ? (
+          <BackLink
+            onClick={() => navigate(backTarget)}
+            label={backLabel}
+            className="mb-3"
+          />
+        ) : null}
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-2">
@@ -119,14 +172,18 @@ export function MarketplacePage() {
             value={query}
             onChange={setQuery}
             placeholder={
-              tab === "agents" ? tr("marketplace.searchAgents") : tr("marketplace.searchSkills")
+              tab === "agents"
+                ? tr("marketplace.searchAgents")
+                : tab === "skills"
+                  ? tr("marketplace.searchSkills")
+                  : tr("marketplace.searchConnectors")
             }
             className="w-[250px]"
           />
         </div>
         {/* tabs */}
         <div className="mt-3 flex gap-5">
-          {(["agents", "skills"] as const).map((key) => (
+          {(["agents", "skills", "connectors"] as const).map((key) => (
             <button
               key={key}
               type="button"
@@ -136,7 +193,11 @@ export function MarketplacePage() {
                 tab === key ? "font-semibold text-ink-heading" : "text-ink-body",
               )}
             >
-              {key === "agents" ? tr("marketplace.tabAgents") : tr("marketplace.tabSkills")}
+              {key === "agents"
+                ? tr("marketplace.tabAgents")
+                : key === "skills"
+                  ? tr("marketplace.tabSkills")
+                  : tr("marketplace.tabConnectors")}
               <span
                 className={cn(
                   "absolute inset-x-0 -bottom-px h-0.5 rounded-full",
@@ -155,8 +216,15 @@ export function MarketplacePage() {
           onOpen={openItem}
           withInstalled={withInstalled}
         />
-      ) : (
+      ) : tab === "skills" ? (
         <SkillsTab
+          q={debouncedQuery}
+          tr={tr}
+          onOpen={openItem}
+          withInstalled={withInstalled}
+        />
+      ) : (
+        <ConnectorsTab
           q={debouncedQuery}
           tr={tr}
           onOpen={openItem}
@@ -169,6 +237,12 @@ export function MarketplacePage() {
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         onInstalled={markInstalled}
+      />
+      <MarketplaceConnectorDialog
+        item={connectorItem}
+        open={connectorOpen}
+        onOpenChange={setConnectorOpen}
+        onConnected={markInstalled}
       />
     </div>
   );
@@ -508,6 +582,197 @@ function SkillsTab({ q, tr, onOpen, withInstalled }: TabProps) {
         )}
       </div>
     </div>
+  );
+}
+
+/* ── Connectors tab ──────────────────────────────────────────── */
+
+function ConnectorsTab({ q, tr, onOpen, withInstalled }: TabProps) {
+  const [categories, setCategories] = useState<MarketplaceCategory[]>([]);
+  const [category, setCategory] = useState<string | null>(null);
+  const [items, setItems] = useState<MarketplaceItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [degraded, setDegraded] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const requestSeq = useRef(0);
+
+  useEffect(() => {
+    marketplaceApi
+      .categories("connector")
+      .then((res) => setCategories(res.categories))
+      .catch(() => setCategories([]));
+  }, []);
+
+  const load = useCallback(
+    (nextPage: number, append: boolean) => {
+      const seq = (requestSeq.current += 1);
+      setLoading(true);
+      marketplaceApi
+        .list({
+          type: "connector",
+          source: "modelscope",
+          category: category ?? undefined,
+          q: q || undefined,
+          page: nextPage,
+          page_size: CONNECTOR_PAGE_SIZE,
+        })
+        .then((res) => {
+          if (seq !== requestSeq.current) return;
+          setItems((prev) => (append ? [...prev, ...res.items] : res.items));
+          setTotal(res.total);
+          setPage(nextPage);
+          setDegraded(res.degraded);
+        })
+        .catch(() => {
+          if (seq !== requestSeq.current) return;
+          if (!append) {
+            setItems([]);
+            setTotal(0);
+          }
+          setDegraded(true);
+        })
+        .finally(() => {
+          if (seq === requestSeq.current) setLoading(false);
+        });
+    },
+    [category, q],
+  );
+
+  useEffect(() => {
+    load(1, false);
+  }, [load]);
+
+  const visible = withInstalled(items);
+  const hasMore =
+    !degraded && items.length < total && page * CONNECTOR_PAGE_SIZE < 100;
+  return (
+    <div className="flex min-h-0 flex-1">
+      <div className="w-[190px] flex-none overflow-y-auto border-r border-surface-border px-2.5 py-4">
+        <div className="px-2 pb-1.5 font-mono text-[11px] uppercase tracking-wider text-ink-meta">
+          {tr("marketplace.categories")}
+        </div>
+        <RailItem
+          label={tr("marketplace.filterAll")}
+          count={null}
+          active={category === null}
+          onClick={() => setCategory(null)}
+        />
+        {categories.map((entry) => (
+          <RailItem
+            key={entry.key}
+            label={entry.label}
+            count={null}
+            active={category === entry.key}
+            onClick={() => setCategory(entry.key)}
+          />
+        ))}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 pb-7 pt-4">
+        {degraded && <DegradedNotice tr={tr} />}
+        <div className="mb-3 flex items-center gap-2">
+          <Plug className="h-3.5 w-3.5 text-brand" />
+          <span className="text-xs text-ink-body">
+            {q
+              ? tr("marketplace.connectorSearchResults", { count: visible.length })
+              : tr("marketplace.connectorPopular", { count: visible.length })}
+          </span>
+        </div>
+        {visible.length === 0 && !loading ? (
+          <EmptyState title={tr("marketplace.empty")} />
+        ) : (
+          <>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
+              {visible.map((connector) => (
+                <ConnectorMarketCard
+                  key={connector.id}
+                  connector={connector}
+                  tr={tr}
+                  onOpen={onOpen}
+                />
+              ))}
+            </div>
+            {hasMore ? (
+              <div className="mt-5 flex justify-center">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={loading}
+                  onClick={() => load(page + 1, true)}
+                >
+                  {loading ? tr("marketplace.loading") : tr("marketplace.loadMore")}
+                </Button>
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ConnectorMarketCard({
+  connector,
+  tr,
+  onOpen,
+}: {
+  connector: MarketplaceItem;
+  tr: Tr;
+  onOpen: (item: MarketplaceItem) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(connector)}
+      className="flex min-h-[150px] w-full flex-col rounded-xl border border-surface-border bg-surface p-3.5 text-left transition hover:-translate-y-px hover:shadow-md"
+    >
+      <div className="mb-2.5 flex items-start gap-2.5">
+        <ItemIcon item={connector} size="md" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[13.5px] font-semibold tracking-tight text-ink-heading">
+            {connector.title}
+          </div>
+          <div className="mt-1 flex items-center gap-1.5">
+            <MarketplaceSourcePill source={connector.source} />
+            {connector.category_label ? (
+              <span className="truncate text-[10.5px] text-ink-meta">
+                {connector.category_label}
+              </span>
+            ) : null}
+          </div>
+        </div>
+        {connector.installed ? (
+          <span className="rounded bg-surface-soft px-1.5 py-0.5 text-[10px] font-medium text-ink-meta">
+            {tr("marketplace.connected")}
+          </span>
+        ) : null}
+      </div>
+      <div className="line-clamp-2 min-h-9 text-xs leading-relaxed text-ink-body">
+        {connector.description || tr("marketplace.connectorNoDescription")}
+      </div>
+      <div className="mt-auto flex items-center justify-between border-t border-surface-border pt-2.5">
+        <div className="flex items-center gap-3 text-[11px] tabular-nums text-ink-body">
+          {connector.stats.views != null ? (
+            <span className="inline-flex items-center gap-1">
+              <Eye className="h-3 w-3" />
+              {formatCount(connector.stats.views)}
+            </span>
+          ) : null}
+          {connector.stats.stars != null && connector.stats.stars > 0 ? (
+            <span className="inline-flex items-center gap-1">
+              <Star className="h-3 w-3" />
+              {formatCount(connector.stats.stars)}
+            </span>
+          ) : null}
+        </div>
+        <span className="text-xs font-medium text-brand">
+          {connector.installed
+            ? tr("marketplace.connected")
+            : tr("marketplace.viewConnector")}
+        </span>
+      </div>
+    </button>
   );
 }
 

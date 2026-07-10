@@ -29,6 +29,7 @@ from valuz_agent.modules.marketplace.models import (
     MarketplaceItemDetail,
     MarketplaceItemList,
 )
+from valuz_agent.modules.marketplace.modelscope import ModelScopeClient
 from valuz_agent.modules.marketplace.service import MarketplaceService
 from valuz_agent.modules.marketplace.skillhub import SkillHubClient
 from valuz_agent.modules.skills.service import SkillLibraryService
@@ -47,6 +48,11 @@ def _skillhub_client() -> SkillHubClient:
     return SkillHubClient()
 
 
+@lru_cache(maxsize=1)
+def _modelscope_client() -> ModelScopeClient:
+    return ModelScopeClient()
+
+
 async def _get_marketplace_service(
     db: AsyncSession = Depends(get_async_session),
     skill_service: SkillLibraryService = Depends(get_skill_service),
@@ -61,6 +67,8 @@ async def _get_marketplace_service(
         skill_service=skill_service,
         agent_service=agent_svc,
         pack_service=AgentPackService(agent_svc),
+        modelscope=_modelscope_client(),
+        connector_service=connector_svc,
     )
 
 
@@ -71,7 +79,7 @@ async def _get_marketplace_service(
 
 @router.get("/v1/marketplace/categories", response_model=MarketplaceCategoryList)
 async def list_marketplace_categories(
-    kind: Literal["skill", "agent"] = Query(...),
+    kind: Literal["skill", "agent", "connector"] = Query(...),
     user_id: str = Depends(get_current_user_id),
     svc: MarketplaceService = Depends(_get_marketplace_service),
 ) -> MarketplaceCategoryList:
@@ -82,10 +90,10 @@ async def list_marketplace_categories(
 
 @router.get("/v1/marketplace/items", response_model=MarketplaceItemList)
 async def list_marketplace_items(
-    type: Literal["skill", "agent_template", "agent_team_template"] = Query(...),
+    type: Literal["skill", "agent_template", "agent_team_template", "connector"] = Query(...),
     category: str | None = Query(default=None),
     subcategory: str | None = Query(default=None),
-    source: Literal["skillhub", "valuz_official"] | None = Query(default=None),
+    source: Literal["skillhub", "valuz_official", "modelscope"] | None = Query(default=None),
     q: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=30, ge=1, le=100),

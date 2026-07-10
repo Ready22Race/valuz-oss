@@ -4,8 +4,8 @@
   "collection": {
     "id": "qa-testing",
     "name": {
-      "zh-CN": "QA 测试 Team",
-      "en-US": "QA Testing Team"
+      "zh-CN": "QA 测试",
+      "en-US": "QA Testing"
     },
     "description": {
       "zh-CN": "测试策略、用例设计、自动化测试、回归验收，适合发布前质量把关",

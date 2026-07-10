@@ -19,6 +19,7 @@ from valuz_agent.modules.marketplace.errors import (
     MarketplaceItemNotFound,
     MarketplaceUpstreamError,
 )
+from valuz_agent.modules.marketplace.modelscope import ModelScopeUnavailableError
 from valuz_agent.modules.marketplace.service import (
     CURATED_SKILL_CATEGORIES,
     MarketplaceInstallResult,
@@ -100,6 +101,43 @@ class FakeSkillHub:
 
     def download_url(self, slug: str) -> str:
         return f"https://hub.example/api/v1/download?slug={slug}"
+
+
+class FakeModelScope:
+    def __init__(self) -> None:
+        self.rows: list[dict[str, Any]] = []
+        self.total = 0
+        self.detail: dict[str, Any] | None = None
+        self.details: dict[str, dict[str, Any]] = {}
+        self.calls: list[dict[str, Any]] = []
+        self.unavailable = False
+
+    async def list_servers(self, **params: Any) -> tuple[list[dict[str, Any]], int]:
+        if self.unavailable:
+            raise ModelScopeUnavailableError("down")
+        self.calls.append(params)
+        return self.rows, self.total
+
+    async def server_detail(self, server_id: str) -> dict[str, Any]:
+        if self.unavailable:
+            raise ModelScopeUnavailableError("down")
+        if server_id in self.details:
+            return self.details[server_id]
+        if self.detail is None:
+            raise ModelScopeUnavailableError("down")
+        assert self.detail["id"] == server_id
+        return self.detail
+
+    async def server_detail_cached(self, server_id: str) -> dict[str, Any]:
+        return await self.server_detail(server_id)
+
+
+class FakeConnectorService:
+    def __init__(self) -> None:
+        self.slugs: set[str] = set()
+
+    async def list_connectors(self, user_id: str) -> list[SimpleNamespace]:
+        return [SimpleNamespace(slug=slug) for slug in self.slugs]
 
 
 def _index_row(slug: str, **overrides: Any) -> SimpleNamespace:
@@ -217,16 +255,164 @@ def env():  # type: ignore[no-untyped-def]
     skill_svc = FakeSkillService()
     agent_svc = FakeAgentService()
     pack_svc = FakePackService()
+    modelscope = FakeModelScope()
+    connector_svc = FakeConnectorService()
     svc = MarketplaceService(
         skillhub=hub,  # type: ignore[arg-type]
         skill_service=skill_svc,  # type: ignore[arg-type]
         agent_service=agent_svc,  # type: ignore[arg-type]
         pack_service=pack_svc,  # type: ignore[arg-type]
+        modelscope=modelscope,  # type: ignore[arg-type]
+        connector_service=connector_svc,  # type: ignore[arg-type]
     )
     return SimpleNamespace(
         svc=svc, hub=hub, skill_ds=skill_svc, skill_svc=skill_svc,
-        agent_svc=agent_svc, pack_svc=pack_svc,
+        agent_svc=agent_svc, pack_svc=pack_svc, modelscope=modelscope,
+        connector_svc=connector_svc,
     )
+
+
+# ---------------------------------------------------------------------------
+# Connector catalog
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_connector_category_preserves_modelscope_order_and_marks_installed(env):  # type: ignore[no-untyped-def]
+    env.modelscope.rows = [
+        {
+            "id": "owner/quiet",
+            "name": "Quiet",
+            "description": "quiet",
+            "view_count": 2,
+            "categories": ["developer-tools"],
+        },
+        {
+            "id": "owner/popular",
+            "name": "Popular",
+            "description": "popular",
+            "view_count": 900,
+            "categories": ["developer-tools"],
+        },
+    ]
+    env.modelscope.total = 2
+    env.connector_svc.slugs = {"modelscope-owner-popular"}
+
+    out = await env.svc.list_items(
+        USER, type_="connector", category="developer-tools", page_size=24
+    )
+
+    assert [item.source_ref for item in out.items] == ["owner/quiet", "owner/popular"]
+    assert out.items[1].installed is True
+    assert out.items[1].stats.views == 900
+    assert env.modelscope.calls == [
+        {
+            "category": "developer-tools",
+            "search": None,
+            "is_hosted": True,
+            "page": 1,
+            "page_size": 24,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_connector_list_uses_readme_summary_when_description_is_missing(env):  # type: ignore[no-untyped-def]
+    env.modelscope.rows = [
+        {
+            "id": "owner/readme-only",
+            "name": "README only",
+            "description": "",
+            "categories": ["research-and-data"],
+        },
+        {
+            "id": "owner/no-copy",
+            "name": "No copy",
+            "description": "",
+            "categories": ["finance"],
+            "author": "ExampleOrg",
+        },
+    ]
+    env.modelscope.details = {
+        "owner/readme-only": {
+            "id": "owner/readme-only",
+            "readme": (
+                "# README only\n\n"
+                "[![build](https://example.test/badge.svg)](https://example.test)\n\n"
+                "这是来自官方 README 的有效功能介绍，可用于检索并整理研究资料。\n\n"
+                "```shell\nnpx example\n```"
+            ),
+        },
+        "owner/no-copy": {
+            "id": "owner/no-copy",
+            "name": "No copy",
+            "categories": ["finance"],
+            "author": "ExampleOrg",
+        },
+    }
+    env.modelscope.total = 2
+
+    out = await env.svc.list_items(USER, type_="connector", page_size=20)
+
+    assert out.items[0].description == (
+        "这是来自官方 README 的有效功能介绍，可用于检索并整理研究资料。"
+    )
+    assert "ExampleOrg" in out.items[1].description
+    assert "Finance MCP service" in out.items[1].description
+
+
+@pytest.mark.asyncio
+async def test_connector_detail_accepts_uvx_and_builds_secret_env_field(env):  # type: ignore[no-untyped-def]
+    env.modelscope.detail = {
+        "id": "@amap/amap-maps",
+        "name": "Amap",
+        "description": "maps",
+        "server_config": [
+            {
+                "mcpServers": {
+                    "amap": {
+                        "command": "npx",
+                        "args": ["-y", "@amap/amap-maps-mcp-server"],
+                        "env": {"AMAP_MAPS_API_KEY": ""},
+                    }
+                }
+            }
+        ],
+        "env_schema": {
+            "properties": {"AMAP_MAPS_API_KEY": {"description": "高德 API Key"}},
+            "required": ["AMAP_MAPS_API_KEY"],
+        },
+    }
+    item_id = f"modelscope:connector:{env.svc._modelscope_ref('@amap/amap-maps')}"
+
+    detail = await env.svc.get_item(USER, item_id)
+
+    assert detail.locked is False
+    assert detail.connector_config is not None
+    assert detail.connector_config.command == "npx"
+    field = detail.connector_config.fields[0]
+    assert (field.target, field.name, field.required, field.secret) == (
+        "env", "AMAP_MAPS_API_KEY", True, True
+    )
+
+
+@pytest.mark.asyncio
+async def test_connector_detail_locks_unsupported_command(env):  # type: ignore[no-untyped-def]
+    env.modelscope.detail = {
+        "id": "owner/local-path",
+        "name": "Unsafe local path",
+        "description": "not portable",
+        "server_config": [
+            {"mcpServers": {"unsafe": {"command": "python", "args": ["/tmp/server.py"]}}}
+        ],
+    }
+    item_id = f"modelscope:connector:{env.svc._modelscope_ref('owner/local-path')}"
+
+    detail = await env.svc.get_item(USER, item_id)
+
+    assert detail.locked is True
+    assert detail.connector_config is not None
+    assert detail.connector_config.supported is False
 
 
 # ---------------------------------------------------------------------------

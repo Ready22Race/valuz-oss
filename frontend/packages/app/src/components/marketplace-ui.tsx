@@ -14,6 +14,7 @@ import {
   LineChart,
   Mic,
   PenLine,
+  Plug,
   Search,
   Sparkles,
   Table2,
@@ -34,6 +35,7 @@ const NAMED_ICONS: Record<string, LucideIcon> = {
   gem: Gem,
   users: Users,
   sparkles: Sparkles,
+  plug: Plug,
 };
 
 export function marketplaceIcon(name?: string | null): LucideIcon {
@@ -94,11 +96,13 @@ export function MarketplaceBadgePill({ badge }: { badge: MarketplaceBadge }) {
 const SOURCE_LABEL_KEYS: Record<MarketplaceSource, string> = {
   skillhub: "marketplace.sourceSkillhub",
   valuz_official: "marketplace.sourceValuzOfficial",
+  modelscope: "marketplace.sourceModelScope",
 };
 
 const SOURCE_STYLES: Record<MarketplaceSource, { bg: string; fg: string }> = {
   skillhub: { bg: "var(--surface-soft)", fg: "var(--ink-meta)" },
   valuz_official: { bg: "var(--brand-light)", fg: "var(--brand-700)" },
+  modelscope: { bg: "#e0f2fe", fg: "#0369a1" },
 };
 
 export function MarketplaceSourcePill({ source }: { source: MarketplaceSource }) {

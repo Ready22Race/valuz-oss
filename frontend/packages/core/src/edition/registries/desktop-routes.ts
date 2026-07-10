@@ -88,7 +88,7 @@ export const personalDesktopRoutes: DesktopRouteModule[] = [
     label: "nav.marketplace",
     description: "Discover and import agents, teams, and skills.",
     layout: "project",
-    showInNav: true,
+    showInNav: false,
     edition: "personal",
   },
   {

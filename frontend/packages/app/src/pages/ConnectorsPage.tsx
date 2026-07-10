@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { Link2, Plus, Search, Trash2 } from "lucide-react";
+import { Link2, Plus, Search, Store, Trash2 } from "lucide-react";
 import {
   CategorizedList,
   Button,
@@ -148,6 +149,7 @@ function buildConnectorCategories(
 
 export const ConnectorsPage = () => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const {
     setHeader,
     setHideHeader,
@@ -393,6 +395,21 @@ export const ConnectorsPage = () => {
     [loadAll],
   );
 
+  // Marketplace installs navigate here while the backend is still probing the
+  // MCP process. Resume that probe on arrival so a stale `connecting` snapshot
+  // cannot remain on screen after the backend has already settled.
+  useEffect(() => {
+    const connecting = connectors.find((c) => c.status === "connecting");
+    if (!connecting) return;
+    pollStatus(connecting.id);
+    return () => {
+      if (pollRef.current) {
+        clearTimeout(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [connectors, pollStatus]);
+
   // Page-owned create + poll, shared by direct connect, the credentials
   // dialog, and the custom add dialog.
   const runConnect = useCallback(
@@ -565,6 +582,14 @@ export const ConnectorsPage = () => {
           {t("connector.title")}
         </span>
         <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
+          <button
+            type="button"
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand-light/60 hover:text-brand"
+            onClick={() => navigate("/marketplace?tab=connectors&from=connectors")}
+          >
+            <Store className="h-3.5 w-3.5" />
+            {t("marketplace.title" as Parameters<typeof t>[0])}
+          </button>
           {searchOpen ? (
             <input
               type="text"
@@ -668,19 +693,35 @@ export const ConnectorsPage = () => {
                 }
                 // available (uninstalled catalog entry)
                 const cf = entry.item;
+                const catalogKey = `catalog:${cf.connector.slug}`;
                 return (
                   <ConnectorListItem
                     name={cf.connector.display_name}
                     iconUrl={cf.iconUrl}
                     active={isSelected}
-                    onClick={() => setActiveKey(`catalog:${cf.connector.slug}`)}
+                    onClick={() => setActiveKey(catalogKey)}
                     actions={
-                      <ResourceActionSlot
-                        resourceType="connector"
-                        resource={
-                          cf.connector as unknown as Record<string, unknown>
-                        }
-                      />
+                      <div className="flex shrink-0 items-center gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          loading={busyKey === catalogKey}
+                          className="text-brand hover:bg-brand-light/60 hover:text-brand"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleConnectCatalog(cf.connector);
+                          }}
+                        >
+                          {t("connector.connect")}
+                        </Button>
+                        <ResourceActionSlot
+                          resourceType="connector"
+                          resource={
+                            cf.connector as unknown as Record<string, unknown>
+                          }
+                        />
+                      </div>
                     }
                   />
                 );
