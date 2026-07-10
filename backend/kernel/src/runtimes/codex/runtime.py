@@ -508,15 +508,32 @@ class CodexRuntime:
                     message="cancelled",
                 )
             elif is_runtime_interruption(exc):
-                # Graceful host stop tore down the codex subprocess mid-turn
-                # ("closed stdout" / broken pipe). This is NOT a task failure:
-                # leave it resumable (``interrupted``) so boot recovery
-                # re-drives the turn — the same outcome a hard kill gets via
-                # ``scan_orphan_runs`` — and suppress the scary session_error.
+                # The codex subprocess went away mid-turn ("closed stdout" /
+                # broken pipe). Usually a graceful host stop tearing it down —
+                # NOT a task failure — so leave it resumable (``interrupted``)
+                # for boot recovery to re-drive (the same outcome a hard kill
+                # gets via ``scan_orphan_runs``) and suppress the scary
+                # session_error. BUT the same exception shape also covers a
+                # spontaneous crash (upstream stream drop, OOM, panic, bad
+                # config): ``TransportClosedError`` carries the codex
+                # ``stderr_tail`` and a wrapped group hides the real leaf. This
+                # layer can't see the host drain flag (that lives in
+                # ``valuz_agent.modules.tasks``), so we can't reclassify — but we
+                # MUST NOT swallow the cause: log it and thread it into the
+                # stop_reason so an operator can tell a clean shutdown from a
+                # crash instead of staring at a bare "runtime process
+                # interrupted". Keeps category/recovery untouched (they key on
+                # ``category``, not the message — see recovery.py).
+                cause = describe_exception(exc)
+                logger.warning(
+                    "codex: runtime process interrupted mid-turn for session %s: %s",
+                    session.id,
+                    cause,
+                )
                 session.stop_reason = Error(
                     category="interrupted",
                     retry_status="terminal",
-                    message="runtime process interrupted",
+                    message=f"runtime process interrupted: {cause}",
                 )
             else:
                 # See ``describe_exception``: a wrapped ``ExceptionGroup`` would
@@ -524,9 +541,7 @@ class CodexRuntime:
                 # TaskGroup" — unwrap to the leaf and log the traceback (this
                 # branch previously logged nothing).
                 cause = describe_exception(exc)
-                logger.exception(
-                    "codex: turn failed for session %s: %s", session.id, cause
-                )
+                logger.exception("codex: turn failed for session %s: %s", session.id, cause)
                 session.stop_reason = Error(
                     category="execution_error",
                     retry_status="exhausted",
@@ -1245,11 +1260,15 @@ def _build_config_overrides(
     1. ``Session.mcp_servers`` -> ``mcp_servers.<name>.{url|command,...}``.
        Codex auto-detects transport: presence of ``command`` -> stdio,
        presence of ``url`` -> remote HTTP. Stdio entries emit
-       ``command`` / ``args`` / ``env_vars`` / ``[mcp_servers.X.env]``
-       per the Codex TOML spec; ``env_vars`` is passed through verbatim
-       so codex resolves it against its own process env at child-spawn
-       time (token values therefore never appear in the overrides
-       string).
+       ``command`` / ``args`` / ``env_vars`` and a dotted
+       ``mcp_servers.X.env.<KEY>`` per var; remote entries emit ``url`` and a
+       dotted ``mcp_servers.X.http_headers.<KEY>`` per header. Map fields
+       (``env`` / ``http_headers``) are emitted ONE dotted key at a time, never
+       as an inline table ``{ … }`` — codex's ``-c`` parser reads an inline
+       table as a string and aborts at startup ("invalid type: string …
+       expected a map"); see ``_toml_key``. ``env_vars`` is passed through
+       verbatim so codex resolves it against its own process env at child-spawn
+       time (token values therefore never appear in the overrides string).
     2. ``Session.model_provider`` -> a synthetic ``[model_providers.harness]``
        block plus ``model = "..."`` / ``model_provider = "harness"`` so the
        codex subprocess routes through the user-supplied gateway.
@@ -1269,14 +1288,24 @@ def _build_config_overrides(
                 overrides.append(f"mcp_servers.{cfg.name}.args={_toml_array(cfg.args)}")
             if cfg.env_vars:
                 overrides.append(f"mcp_servers.{cfg.name}.env_vars={_toml_array(cfg.env_vars)}")
-            if cfg.env:
-                inline = ", ".join(f"{k} = {_toml_quote(v)}" for k, v in cfg.env.items())
-                overrides.append(f"mcp_servers.{cfg.name}.env={{ {inline} }}")
+            # ``env`` is a TOML map: emit one dotted key per var, NOT an inline
+            # table — codex's ``-c`` parser rejects ``env={ … }`` as a string
+            # (see ``_toml_key``).
+            for k, v in cfg.env.items():
+                overrides.append(f"mcp_servers.{cfg.name}.env.{_toml_key(k)}={_toml_quote(v)}")
             continue
         overrides.append(f"mcp_servers.{cfg.name}.url={_toml_quote(cfg.url)}")
         if cfg.headers:
-            inline = ", ".join(f"{k} = {_toml_quote(v)}" for k, v in cfg.headers.items())
-            overrides.append(f"mcp_servers.{cfg.name}.http_headers={{ {inline} }}")
+            # ``http_headers`` is a TOML map: emit one dotted key per header, NOT
+            # an inline table. ``http_headers={ Authorization = "…" }`` makes
+            # codex abort at startup with "invalid type: string … expected a
+            # map" (see ``_toml_key``), which surfaced as a bogus
+            # ``runtime process interrupted`` for every session with a
+            # header-bearing HTTP MCP server.
+            for k, v in cfg.headers.items():
+                overrides.append(
+                    f"mcp_servers.{cfg.name}.http_headers.{_toml_key(k)}={_toml_quote(v)}"
+                )
 
     if expose_toolkit:
         base = os.getenv(CODEX_TOOLKIT_BASE_URL_ENV) or CODEX_TOOLKIT_BASE_URL_DEFAULT
@@ -1425,6 +1454,26 @@ def _toml_quote(value: str) -> str:
 def _toml_array(values: tuple[str, ...] | list[str]) -> str:
     """Render a sequence of strings as a TOML inline array literal."""
     return "[" + ", ".join(_toml_quote(v) for v in values) + "]"
+
+
+_BARE_KEY_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+
+
+def _toml_key(key: str) -> str:
+    """Render one TOML dotted-key segment (bare when safe, else quoted).
+
+    Bare for a TOML bare-key (``A-Za-z0-9_-``); otherwise a quoted key segment.
+    Used to emit ``http_headers`` / ``env`` maps ONE dotted key at a time —
+    codex's ``-c k=v`` parser does NOT accept an inline-table RHS. Passing
+    ``mcp_servers.X.http_headers={ Authorization = "…" }`` makes codex read the
+    whole ``{ … }`` as a *string* and abort at startup with
+    ``invalid type: string … expected a map in mcp_servers.X.http_headers``
+    (verified against codex-cli 0.137.0-alpha.4 in-sandbox). The dotted form
+    ``mcp_servers.X.http_headers.Authorization="…"`` parses as a table entry.
+    """
+    if key and all(c in _BARE_KEY_CHARS for c in key):
+        return key
+    return _toml_quote(key)
 
 
 def _stop_reason_from_turn(turn_done: TurnCompletedNotification) -> StopReason:

@@ -440,13 +440,23 @@ class DeepAgentsRuntime:
         except Exception as exc:
             session.status = "idle"
             if is_runtime_interruption(exc):
-                # Graceful host stop tore down the runtime subprocess mid-turn —
-                # resumable ``interrupted``, not a task failure (see codex
-                # runtime for the full rationale). Suppress session_error.
+                # The runtime subprocess went away mid-turn — usually a graceful
+                # host stop (resumable ``interrupted``, not a task failure; see
+                # codex runtime for the full rationale, and suppress
+                # session_error), but the same shape also covers a spontaneous
+                # crash. Don't swallow the cause: log it and thread it into the
+                # stop_reason so an operator can tell a clean shutdown from a
+                # crash. Category/recovery untouched (they key on ``category``).
+                cause = describe_exception(exc)
+                logger.warning(
+                    "deepagents: runtime process interrupted mid-turn for session %s: %s",
+                    session.id,
+                    cause,
+                )
                 session.stop_reason = Error(
                     category="interrupted",
                     retry_status="terminal",
-                    message="runtime process interrupted",
+                    message=f"runtime process interrupted: {cause}",
                 )
             else:
                 # See ``describe_exception``: a langgraph / MCP ``ClientSession``
@@ -455,9 +465,7 @@ class DeepAgentsRuntime:
                 # unwrap to the leaf so the reason survives, and log the
                 # traceback (this branch previously logged nothing).
                 cause = describe_exception(exc)
-                logger.exception(
-                    "deepagents: turn failed for session %s: %s", session.id, cause
-                )
+                logger.exception("deepagents: turn failed for session %s: %s", session.id, cause)
                 session.stop_reason = Error(
                     category="execution_error",
                     retry_status="exhausted",
