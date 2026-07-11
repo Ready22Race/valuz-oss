@@ -17,6 +17,12 @@
 #   scripts/dev.sh frontend            # just the desktop dev shell
 #   VALUZ_BACKEND_PORT=18080 scripts/dev.sh
 #   VALUZ_RELOAD=1 scripts/dev.sh      # uvicorn --reload
+#   VALUZ_DATA_DIR=~/.valuz-oss scripts/dev.sh   # opt back into another data dir
+#
+# Data isolation: dev runs on ~/.valuz-oss-dev by default, NEVER on the
+# packaged app's ~/.valuz-oss. A dev backend carrying newer migrations stamps
+# the store ahead of the released build, and the released build then refuses
+# to boot (fail-loud schema guard in boot/schema.py).
 #
 # Logs: backend writes to .ai/dev/backend.log, frontend to .ai/dev/frontend.log.
 # Both also tee to the foreground so Ctrl+C surfaces failures fast.
@@ -34,6 +40,11 @@ LOG_DIR="$ROOT_DIR/.ai/dev"
 BACKEND_PORT="${VALUZ_BACKEND_PORT:-8000}"
 RELOAD_FLAG=""
 [[ "${VALUZ_RELOAD:-}" == "1" ]] && RELOAD_FLAG="--reload"
+
+# Dev data isolation (see header). VALUZ_LOG_DIR must be pinned too — the
+# backend's log dir deliberately does not derive from data_dir (infra/config.py).
+export VALUZ_DATA_DIR="${VALUZ_DATA_DIR:-$HOME/.valuz-oss-dev}"
+export VALUZ_LOG_DIR="${VALUZ_LOG_DIR:-$VALUZ_DATA_DIR/logs}"
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -70,9 +81,12 @@ cleanup() {
     for pid in ${PIDS[@]+"${PIDS[@]}"}; do
         kill "$pid" 2>/dev/null || true
     done
-    # Kill any straggling Electron windows the dev shell spawned.
-    pkill -f "Valuz.app" 2>/dev/null || true
-    pkill -f "concurrently.*vite" 2>/dev/null || true
+    # Kill only stragglers the dev shell itself spawned: the dev Electron and
+    # the vite/concurrently tree running out of THIS repo's node_modules.
+    # Never pattern-match "Valuz.app" here — that also matches the installed
+    # production app under /Applications and kills it on every Ctrl+C.
+    pkill -f "$FRONTEND_DIR/node_modules/.*[Ee]lectron" 2>/dev/null || true
+    pkill -f "$FRONTEND_DIR/node_modules/.*(vite|concurrently)" 2>/dev/null || true
     wait 2>/dev/null || true
     ok "stopped"
 }
