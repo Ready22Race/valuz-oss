@@ -41,6 +41,7 @@ import valuz_agent.modules.agents.models  # noqa: F401,E402
 import valuz_agent.modules.automations.models  # noqa: F401,E402
 import valuz_agent.modules.connectors.models  # noqa: F401,E402
 import valuz_agent.modules.docs.models  # noqa: F401,E402
+import valuz_agent.modules.marketplace.install_store  # noqa: F401,E402
 import valuz_agent.modules.parser.models  # noqa: F401,E402
 import valuz_agent.modules.projects.models  # noqa: F401,E402
 import valuz_agent.modules.providers.models  # noqa: F401,E402

@@ -3526,6 +3526,16 @@ components:
               nullable: true
               allOf:
                 - $ref: "#/components/schemas/MarketplaceConnectorConfig"
+            install_manifest:
+              type: object
+              nullable: true
+              description: |
+                Opaque, type-varies-by-`type` install payload from the market
+                index: skill -> {download_url, sha256?, size_bytes?};
+                agent_template -> an AgentTemplateDef-shaped object;
+                agent_team_template -> a pack manifest object (skill deps
+                rewritten to {slug, source: "url", download_url}). Only the
+                market index sets this field.
     MarketplaceItemList:
       type: object
       required: [items, total, page, page_size, degraded]
