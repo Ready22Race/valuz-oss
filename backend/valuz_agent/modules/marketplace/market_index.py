@@ -24,12 +24,16 @@ When ``Settings.marketplace_index_base_url`` is left empty (the OSS default),
 the client does not talk to a fixed host — it races
 ``Settings.marketplace_index_candidates`` (concurrent ``GET {candidate}
 /healthz``, 2s timeout each) and pins the first candidate to answer 2xx as
-the process-wide resolved base url (see :func:`resolve_index_base_url`). The
-pin is cleared (triggering a re-race on the next request) after
-``_MAX_CONSECUTIVE_FAILURES`` consecutive request failures against it, so a
-candidate that goes down mid-process gets replaced without a restart. An
-explicit ``base_url`` passed to the constructor (i.e. a non-empty
-``Settings.marketplace_index_base_url``) always skips the race — it is used
+the process-wide resolved base url (see :func:`resolve_index_base_url`).
+
+The race runs EXACTLY ONCE per process and its outcome — winner or
+no-candidate-reachable — is final for the process lifetime: no per-request
+re-probing, no failure-triggered re-race. Boot kicks it off in the background
+(``boot/steps.resolve_marketplace_index``) so the outcome is normally already
+settled before the first marketplace request; if every candidate was down at
+startup, requests fail fast into the direct-source fallback until restart.
+An explicit ``base_url`` passed to the constructor (i.e. a non-empty
+``Settings.marketplace_index_base_url``) skips the race entirely — it is used
 verbatim for the client's lifetime.
 """
 
@@ -55,22 +59,18 @@ _CATEGORIES_TTL = 600.0
 _LIST_TTL = 60.0
 _DETAIL_TTL = 300.0
 
-# How many consecutive request failures against the pinned base url before
-# the pin is dropped and the next request re-races the candidates.
-_MAX_CONSECUTIVE_FAILURES = 3
-
 
 class MarketIndexUnavailableError(Exception):
     """The market index could not be reached or returned an unusable payload."""
 
 
 # ---------------------------------------------------------------------------
-# Candidate racing — process-wide pinned base url resolution
+# Candidate racing — once per process, outcome final
 # ---------------------------------------------------------------------------
 
 _pin_lock = asyncio.Lock()
 _pinned_base_url: str | None = None
-_pinned_at: float | None = None
+_race_completed = False
 
 
 async def _probe_candidate(candidate: str, client: httpx.AsyncClient | None) -> str | None:
@@ -115,29 +115,66 @@ async def resolve_index_base_url(
     candidates: list[str], *, client: httpx.AsyncClient | None = None
 ) -> str:
     """Resolve (and pin, process-wide) the market index base url from the
-    first ``candidates`` entry whose ``/healthz`` answers 2xx. Cached until
-    :func:`clear_pinned_base_url` runs (explicit reset, or automatically
-    after ``_MAX_CONSECUTIVE_FAILURES`` consecutive request failures)."""
-    global _pinned_base_url, _pinned_at
-    if _pinned_base_url is not None:
-        return _pinned_base_url
-    async with _pin_lock:
-        if _pinned_base_url is not None:  # re-check: another waiter may have won the race
+    first ``candidates`` entry whose ``/healthz`` answers 2xx.
+
+    The race runs at most once per process and its outcome is final: a winner
+    is returned forever after; total failure raises
+    ``MarketIndexUnavailableError`` immediately (no network) on every later
+    call until the process restarts (or a test calls
+    :func:`clear_pinned_base_url`)."""
+    global _pinned_base_url, _race_completed
+    if _race_completed:
+        if _pinned_base_url is not None:
             return _pinned_base_url
-        winner = await _race_candidates(candidates, client)
+        raise MarketIndexUnavailableError(
+            f"no market index candidate was reachable at startup: {candidates}"
+        )
+    async with _pin_lock:
+        if _race_completed:  # re-check: another waiter may have finished the race
+            if _pinned_base_url is not None:
+                return _pinned_base_url
+            raise MarketIndexUnavailableError(
+                f"no market index candidate was reachable at startup: {candidates}"
+            )
+        try:
+            winner = await _race_candidates(candidates, client)
+        except MarketIndexUnavailableError:
+            _race_completed = True
+            logger.warning(
+                "market index: no candidate reachable, staying unresolved for this process: %s",
+                candidates,
+            )
+            raise
         _pinned_base_url = winner
-        _pinned_at = time.monotonic()
+        _race_completed = True
         logger.info("market index resolved to %s", winner)
         return winner
 
 
+def resolve_index_in_background() -> asyncio.Task[None] | None:
+    """Kick the once-per-process candidate race off at boot so the outcome is
+    settled before the first marketplace request. No-op (returns ``None``)
+    when an explicit ``marketplace_index_base_url`` is configured. The task
+    swallows the total-failure error — it is already recorded as the final
+    outcome and every later request surfaces it."""
+    if settings.marketplace_index_base_url:
+        return None
+
+    async def _run() -> None:
+        try:
+            await resolve_index_base_url(list(settings.marketplace_index_candidates))
+        except MarketIndexUnavailableError:
+            pass
+
+    return asyncio.create_task(_run(), name="marketplace-index-resolve")
+
+
 def clear_pinned_base_url() -> None:
-    """Drop the process-wide pin so the next resolution re-races the
-    candidates. Called automatically on repeated request failures; also
-    exposed for tests that need a clean slate between cases."""
-    global _pinned_base_url, _pinned_at
+    """Reset the process-wide race outcome. Test hook only — production code
+    never re-races within a process."""
+    global _pinned_base_url, _race_completed
     _pinned_base_url = None
-    _pinned_at = None
+    _race_completed = False
 
 
 class MarketIndexClient:
@@ -160,7 +197,6 @@ class MarketIndexClient:
             self._candidates = list(candidates)
         else:
             self._candidates = list(settings.marketplace_index_candidates)
-        self._consecutive_failures = 0
         self._cache: dict[str, tuple[float, Any]] = {}
 
     @property
@@ -176,21 +212,6 @@ class MarketIndexClient:
             return self._explicit_base_url
         return await resolve_index_base_url(self._candidates, client=self._client)
 
-    def _on_request_failure(self) -> None:
-        if self._explicit_base_url:
-            return  # fixed base — no pin to clear, no race to retrigger.
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-            logger.warning(
-                "market index base url failed %d consecutive requests — clearing pin",
-                self._consecutive_failures,
-            )
-            clear_pinned_base_url()
-            self._consecutive_failures = 0
-
-    def _on_request_success(self) -> None:
-        self._consecutive_failures = 0
-
     # -- low-level ---------------------------------------------------------
 
     async def _get_json(self, path: str, params: dict[str, Any]) -> Any:
@@ -204,17 +225,13 @@ class MarketIndexClient:
                 async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
                     resp = await client.get(url, params=query)
             resp.raise_for_status()
-            payload = resp.json()
+            return resp.json()
         except httpx.HTTPError as exc:
             logger.warning("market index request failed: %s %s: %s", path, query, exc)
-            self._on_request_failure()
             raise MarketIndexUnavailableError(str(exc)) from exc
         except ValueError as exc:  # non-JSON body
             logger.warning("market index returned non-JSON for %s: %s", path, exc)
-            self._on_request_failure()
             raise MarketIndexUnavailableError("invalid JSON from market index") from exc
-        self._on_request_success()
-        return payload
 
     def _cached(self, key: str) -> Any | None:
         entry = self._cache.get(key)
