@@ -1,5 +1,5 @@
 """MarketplaceService — reads and install-orchestrates against the market
-index, the SOLE marketplace data source (see
+index, the PRIMARY marketplace data source (see
 ``docs/cloud-marketplace/design/oss.md``).
 
 - Discovery (categories / items / item detail) is a straight pass-through to
@@ -21,19 +21,30 @@ index, the SOLE marketplace data source (see
 
 Index outages must never blank the marketplace: list/category reads degrade
 to empty results with ``degraded: true``; detail/install reads raise
-``MarketplaceUpstreamError`` (502).
+``MarketplaceUpstreamError`` (502) — UNLESS ``Settings.marketplace_direct_fallback``
+is on, in which case it falls through to
+:mod:`valuz_agent.modules.marketplace.direct_fallback` — SkillHub / ModelScope
+for ``skill``/``connector``, the built-in agent-template resource file /
+agent-pack manifests for ``agent_template``/``agent_team_template`` (the
+pre-market-index sources) — and is still marked ``degraded: true`` (non-channel
+content, even the local built-in one). With the flag off, everything degrades
+to empty exactly as it did with no fallback at all. See ``direct_fallback``'s
+module docstring for the full contract.
 """
 
 from __future__ import annotations
 
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from valuz_agent.i18n import get_locale
+from valuz_agent.infra.config import settings
 from valuz_agent.modules.agent_packs.manifest import AgentPackManifest
 from valuz_agent.modules.agent_packs.service import AgentPackService
 from valuz_agent.modules.agents.service import AgentService, MemberAlreadyExistsError
+from valuz_agent.modules.marketplace import direct_fallback
 from valuz_agent.modules.marketplace.errors import (
     MarketplaceItemNotFound,
     MarketplaceUpstreamError,
@@ -46,9 +57,12 @@ from valuz_agent.modules.marketplace.market_index import (
 from valuz_agent.modules.marketplace.models import (
     MarketplaceCategoryList,
     MarketplaceInstallResult,
+    MarketplaceItem,
     MarketplaceItemDetail,
     MarketplaceItemList,
 )
+from valuz_agent.modules.marketplace.modelscope import ModelScopeClient
+from valuz_agent.modules.marketplace.skillhub import SkillHubClient
 from valuz_agent.modules.packs_common.manifest import PackManifest, resolve_text
 from valuz_agent.modules.skills.models import SkillImportUrlConfirmRequest
 from valuz_agent.modules.skills.service import SkillLibraryService
@@ -57,6 +71,24 @@ if TYPE_CHECKING:
     from valuz_agent.modules.connectors.service import ConnectorService
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Direct-fallback client singletons — lazily constructed, process-wide (same
+# style as the market index client factory in ``api/routes/marketplace.py``).
+# Only ever touched when the market index is unreachable AND
+# ``settings.marketplace_direct_fallback`` is on.
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=1)
+def _skillhub_client() -> SkillHubClient:
+    return SkillHubClient()
+
+
+@lru_cache(maxsize=1)
+def _modelscope_client() -> ModelScopeClient:
+    return ModelScopeClient()
 
 
 class MarketplaceService:
@@ -85,8 +117,30 @@ class MarketplaceService:
         try:
             payload = await self._index.categories(kind, get_locale())
         except MarketIndexUnavailableError:
+            fallback = await self._fallback_categories(user_id, kind)
+            if fallback is not None:
+                return fallback
             return MarketplaceCategoryList(categories=[], degraded=True)
         return MarketplaceCategoryList.model_validate(payload)
+
+    async def _fallback_categories(self, user_id: str, kind: str) -> MarketplaceCategoryList | None:
+        """``None`` means the flag is off — the caller degrades to empty in
+        that case. A non-``None`` result is always marked ``degraded``
+        regardless of the fallback read's own success, since it isn't
+        channel-managed content."""
+        if not settings.marketplace_direct_fallback:
+            return None
+        if kind == "skill":
+            result = await direct_fallback.skill_categories(_skillhub_client())
+        elif kind == "connector":
+            result = direct_fallback.connector_categories()
+        elif kind == "agent":
+            packs = await self._packs.list_packs(user_id)
+            result = direct_fallback.agent_categories(packs)
+        else:
+            return None
+        result.degraded = True
+        return result
 
     # ------------------------------------------------------------------
     # Items
@@ -116,6 +170,18 @@ class MarketplaceService:
                 locale=get_locale(),
             )
         except MarketIndexUnavailableError:
+            fallback = await self._fallback_list_items(
+                user_id,
+                type_=type_,
+                category=category,
+                subcategory=subcategory,
+                source=source,
+                q=q,
+                page=page,
+                page_size=page_size,
+            )
+            if fallback is not None:
+                return fallback
             return MarketplaceItemList(
                 items=[], total=0, page=page, page_size=page_size, degraded=True
             )
@@ -125,13 +191,83 @@ class MarketplaceService:
             item.installed = self._recompute_installed(item, installed_refs)
         return result
 
+    async def _fallback_list_items(
+        self,
+        user_id: str,
+        *,
+        type_: str,
+        category: str | None,
+        subcategory: str | None,
+        source: str | None,
+        q: str | None,
+        page: int,
+        page_size: int,
+    ) -> MarketplaceItemList | None:
+        """``None`` means the flag is off. A non-``None`` result is always
+        marked ``degraded``."""
+        if not settings.marketplace_direct_fallback:
+            return None
+        if type_ == "skill":
+            installed = await self._installed_refs(user_id, "skill")
+            result = await direct_fallback.list_skills(
+                _skillhub_client(),
+                category=category,
+                subcategory=subcategory,
+                q=q,
+                page=page,
+                page_size=page_size,
+                installed_slugs=installed,
+            )
+        elif type_ == "connector":
+            if source not in (None, "modelscope"):
+                return MarketplaceItemList(
+                    items=[], total=0, page=page, page_size=page_size, degraded=True
+                )
+            installed = await self._installed_refs(user_id, "connector")
+            result = await direct_fallback.list_connectors(
+                _modelscope_client(),
+                category=category,
+                q=q,
+                page=page,
+                page_size=page_size,
+                installed_slugs=installed,
+            )
+        elif type_ == "agent_template":
+            library = await self._installed_refs(user_id, "agent_template")
+            result = direct_fallback.list_agent_templates(
+                category=category, source=source, q=q, library_slugs=library
+            )
+        elif type_ == "agent_team_template":
+            result = await direct_fallback.list_team_templates(
+                self._packs, user_id, category=category, q=q
+            )
+        else:
+            return None
+        result.degraded = True
+        return result
+
     async def get_item(self, user_id: str, item_id: str) -> MarketplaceItemDetail:
-        ns, _kind, _ref = self._parse_item_id(item_id)
+        ns, kind, ref = self._parse_item_id(item_id)
+        if settings.marketplace_direct_fallback:
+            if ns == "skillhub" and kind == "skill":
+                installed = await self._installed_refs(user_id, "skill")
+                return await direct_fallback.skill_detail(_skillhub_client(), ref, installed)
+            if ns == "modelscope" and kind == "connector":
+                installed = await self._installed_refs(user_id, "connector")
+                server_id = direct_fallback.decode_connector_ref(ref)
+                return await direct_fallback.connector_detail(
+                    _modelscope_client(), server_id, installed
+                )
+            if ns == "valuz" and kind == "agent":
+                library = await self._installed_refs(user_id, "agent_template")
+                return direct_fallback.agent_template_detail(ref, library)
+            if ns == "valuz" and kind == "team":
+                return await direct_fallback.team_detail(self._packs, user_id, ref)
         if ns != "market":
-            # ``valuz:*`` / ``skillhub:*`` / ``modelscope:*`` — the direct-source
-            # namespaces this service used before the market index. No local
-            # template resolution remains for them; kept only so old bookmarks
-            # / deep links 404 cleanly instead of erroring.
+            # ``valuz:*`` / ``skillhub:*`` / ``modelscope:*`` — the
+            # direct-source namespaces this service used before the market
+            # index. With direct fallback off they land here so old
+            # bookmarks / deep links 404 cleanly.
             raise MarketplaceItemNotFound(f"Unknown marketplace item: {item_id}")
         try:
             payload = await self._index.item_detail(item_id, get_locale())
@@ -230,10 +366,191 @@ class MarketplaceService:
                 model=model,
                 effort=effort,
             )
+        if settings.marketplace_direct_fallback:
+            if ns == "skillhub" and kind == "skill":
+                return await self._install_skillhub_skill_fallback(user_id, item_id, ref)
+            if ns == "valuz" and kind == "agent":
+                return await self._install_agent_template_fallback(
+                    user_id,
+                    item_id,
+                    ref,
+                    runtime=runtime,
+                    provider_id=provider_id,
+                    model=model,
+                    effort=effort,
+                )
+            if ns == "valuz" and kind == "team":
+                return await self._install_team_fallback(
+                    user_id,
+                    item_id,
+                    ref,
+                    runtime=runtime,
+                    provider_id=provider_id,
+                    model=model,
+                    effort=effort,
+                )
         # ``market:connector:*`` never reaches here — the frontend reads
         # ``connector_config`` off the detail and calls POST /v1/connectors
-        # directly. ``valuz:*`` bookmarks and anything else 404.
+        # directly. ``modelscope:connector:*`` install goes through that same
+        # frontend path (``connectorsApi.create``), never through this
+        # method. Direct-source ids with fallback off, and anything else, 404.
         raise MarketplaceItemNotFound(f"Unknown marketplace item: {item_id}")
+
+    async def _install_skillhub_skill_fallback(
+        self, user_id: str, item_id: str, slug: str
+    ) -> MarketplaceInstallResult:
+        """Restores the pre-market-index SkillHub install path
+        (``1280e99f``'s ``_install_skillhub_skill``), reusing the shared
+        URL-import pipeline. A successful install still writes provenance —
+        unlike the pre-index era, ``MarketplaceInstallStore`` exists now —
+        tagged ``source_channel="direct-fallback"`` so it's distinguishable
+        from index-sourced installs."""
+        from valuz_agent.modules.marketplace.skillhub import SkillHubUnavailableError
+
+        hub = _skillhub_client()
+        result, content_hash = await self._install_skill_from_url(
+            user_id, item_id, slug, hub.download_url(slug), allow_rename=True
+        )
+        if result.installed_ref:
+            version = "0.0.0"
+            try:
+                raw_detail = await hub.skill_detail(slug)
+            except SkillHubUnavailableError:
+                raw_detail = None
+            if raw_detail is not None:
+                skill = raw_detail.get("skill") or {}
+                latest = raw_detail.get("latestVersion") or {}
+                version = str(latest.get("version") or skill.get("version") or "0.0.0")
+            await self._installs.record(
+                user_id,
+                item_id=item_id,
+                item_type="skill",
+                installed_ref=result.installed_ref,
+                version=version,
+                source_channel="direct-fallback",
+                content_hash=content_hash,
+            )
+        return result
+
+    async def _install_agent_template_fallback(
+        self,
+        user_id: str,
+        item_id: str,
+        template_id: str,
+        *,
+        runtime: str | None,
+        provider_id: str | None,
+        model: str | None,
+        effort: str | None,
+    ) -> MarketplaceInstallResult:
+        """Restores the pre-market-index built-in template install path
+        (``1280e99f``'s ``_install_agent_template``): the payload comes from
+        the bundled ``agent_templates.json`` instead of an index manifest."""
+        from valuz_agent.modules.marketplace.templates import load_agent_templates
+
+        tpl = next((t for t in load_agent_templates() if t.id == template_id), None)
+        if tpl is None:
+            raise MarketplaceItemNotFound(f"Unknown agent template: {template_id}")
+        payload: dict[str, Any] = {
+            "slug": tpl.slug,
+            "name": resolve_text(tpl.name),
+            "description": resolve_text(tpl.role),
+            "instructions": resolve_text(tpl.instructions),
+            "avatar": tpl.icon,
+            "effort": effort or tpl.effort,
+        }
+        if runtime:
+            payload["runtime"] = runtime
+        if model:
+            payload["model"] = model
+        if provider_id:
+            payload["provider_id"] = provider_id
+        status: Literal["installed", "already_installed"] = "installed"
+        try:
+            row = await self._agents.create_agent(user_id, payload)
+            installed_ref = row.slug
+        except MemberAlreadyExistsError:
+            status = "already_installed"
+            installed_ref = tpl.slug
+        await self._installs.record(
+            user_id,
+            item_id=item_id,
+            item_type="agent_template",
+            installed_ref=installed_ref,
+            version="0.0.0",
+            source_channel="direct-fallback",
+        )
+        logger.info(
+            "marketplace installed built-in agent template %s as %s", item_id, installed_ref
+        )
+        return MarketplaceInstallResult(item_id=item_id, status=status, installed_ref=installed_ref)
+
+    async def _install_team_fallback(
+        self,
+        user_id: str,
+        item_id: str,
+        pack_id: str,
+        *,
+        runtime: str | None,
+        provider_id: str | None,
+        model: str | None,
+        effort: str | None,
+    ) -> MarketplaceInstallResult:
+        """Restores the pre-market-index built-in pack install path
+        (``1280e99f``'s ``_install_team``): the pack ships with the client,
+        so this imports it directly (SkillHub skill dependencies first)
+        instead of reading an index manifest."""
+        from valuz_agent.modules.agent_packs.errors import PackNotFound
+
+        hub = _skillhub_client()
+        try:
+            pack = await self._packs.get_pack(user_id, pack_id)
+            for dep in pack.get("skills") or []:
+                if not isinstance(dep, dict) or dep.get("source") != "skillhub":
+                    continue
+                slug = str(dep.get("slug") or "")
+                if not slug:
+                    continue
+                await self._install_skill_from_url(
+                    user_id,
+                    f"skillhub:skill:{slug}",
+                    slug,
+                    hub.download_url(slug),
+                    allow_rename=False,
+                )
+            result = await self._packs.import_pack(
+                user_id,
+                pack_id,
+                runtime=runtime or "claude_agent",
+                provider_id=provider_id or "",
+                model=model or "",
+                effort=effort,
+            )
+        except PackNotFound as exc:
+            raise MarketplaceItemNotFound(f"Unknown team template: {pack_id}") from exc
+        created = int(result.get("created") or 0)
+        skipped = int(result.get("skipped") or 0)
+        await self._installs.record(
+            user_id,
+            item_id=item_id,
+            item_type="agent_team_template",
+            installed_ref=pack_id,
+            version="0.0.0",
+            source_channel="direct-fallback",
+        )
+        logger.info(
+            "marketplace installed built-in team pack %s (created=%d skipped=%d)",
+            item_id,
+            created,
+            skipped,
+        )
+        return MarketplaceInstallResult(
+            item_id=item_id,
+            status="installed" if created > 0 else "already_installed",
+            installed_ref=pack_id,
+            created=created,
+            skipped=skipped,
+        )
 
     async def _fetch_install_manifest(self, item_id: str) -> dict[str, Any]:
         try:

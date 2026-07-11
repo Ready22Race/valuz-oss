@@ -22,6 +22,7 @@ from typing import Any
 
 import pytest
 
+from valuz_agent.infra.config import settings
 from valuz_agent.modules.agents.service import MemberAlreadyExistsError
 from valuz_agent.modules.marketplace.errors import (
     MarketplaceItemNotFound,
@@ -170,6 +171,17 @@ class FakeConnectorService:
 
     async def list_connectors(self, user_id: str) -> list[SimpleNamespace]:
         return [SimpleNamespace(slug=slug) for slug in self.slugs]
+
+
+@pytest.fixture(autouse=True)
+def _no_direct_fallback(monkeypatch):  # type: ignore[no-untyped-def]
+    """This suite exercises the pure index pass-through/degrade behavior with
+    in-memory fakes only (no network) — direct-source fallback (SkillHub /
+    ModelScope) is covered separately in ``test_marketplace_direct_fallback.py``
+    with its own hub/ms fakes. Force the flag off here so an index-outage case
+    can't accidentally reach the real network through the lazily-constructed
+    fallback clients."""
+    monkeypatch.setattr(settings, "marketplace_direct_fallback", False)
 
 
 @pytest.fixture()

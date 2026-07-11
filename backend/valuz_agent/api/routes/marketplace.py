@@ -45,9 +45,13 @@ router = APIRouter(tags=["marketplace"])
 
 @lru_cache(maxsize=1)
 def _market_index_client() -> MarketIndexClient:
-    """Process-wide market index client so its TTL cache spans requests."""
+    """Process-wide market index client so its TTL cache (and, when the base
+    url is resolved lazily, the candidate-race pin) span requests. An
+    explicit ``marketplace_index_base_url`` skips candidate racing entirely;
+    left empty (the OSS default), the client races
+    ``marketplace_index_candidates`` on first use."""
     return MarketIndexClient(
-        settings.marketplace_index_base_url, settings.marketplace_index_channel
+        settings.marketplace_index_base_url or None, settings.marketplace_index_channel
     )
 
 
