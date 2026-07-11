@@ -55,19 +55,23 @@ class SkillHubClient:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
-        self._client = client  # injected in tests; None → one client per call
+        # Injected in tests; otherwise created lazily on first use and kept
+        # for the client's lifetime so requests reuse pooled connections
+        # instead of paying a TCP+TLS handshake per call.
+        self._client = client
         self._cache: dict[str, tuple[float, Any]] = {}
 
     # -- low-level ---------------------------------------------------------
 
+    def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=_TIMEOUT_SECONDS)
+        return self._client
+
     async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{self._base}{path}"
         try:
-            if self._client is not None:
-                resp = await self._client.get(url, params=params)
-            else:
-                async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-                    resp = await client.get(url, params=params)
+            resp = await self._ensure_client().get(url, params=params)
             resp.raise_for_status()
             return resp.json()
         except httpx.HTTPError as exc:
