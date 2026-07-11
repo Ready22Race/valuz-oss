@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://modelscope.cn/openapi/v1"
 _TIMEOUT_SECONDS = 15.0
+# Keeps fallback tab switches snappy — same window as the SkillHub list TTL.
+_LIST_TTL = 60.0
 
 
 class ModelScopeUnavailableError(Exception):
@@ -29,11 +31,20 @@ class ModelScopeClient:
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._base = base_url.rstrip("/")
+        # Injected in tests; otherwise created lazily on first use and kept
+        # for the client's lifetime so requests reuse pooled connections
+        # instead of paying a TCP+TLS handshake per call.
         self._client = client
         self._detail_semaphore = asyncio.Semaphore(2)
         self._detail_tasks: dict[str, asyncio.Task[dict[str, Any]]] = {}
         self._detail_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._detail_failures: dict[str, float] = {}
+        self._list_cache: dict[str, tuple[float, tuple[list[dict[str, Any]], int]]] = {}
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=_TIMEOUT_SECONDS)
+        return self._client
 
     async def _request_json(
         self,
@@ -44,11 +55,7 @@ class ModelScopeClient:
     ) -> dict[str, Any]:
         url = f"{self._base}{path}"
         try:
-            if self._client is not None:
-                response = await self._client.request(method, url, json=json)
-            else:
-                async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-                    response = await client.request(method, url, json=json)
+            response = await self._ensure_client().request(method, url, json=json)
             response.raise_for_status()
             payload = response.json()
         except httpx.HTTPError as exc:
@@ -73,6 +80,10 @@ class ModelScopeClient:
         safe_page_size = max(1, min(page_size, 100))
         if safe_page * safe_page_size > 100:
             return [], 0
+        cache_key = f"{category}|{search}|{is_hosted}|{safe_page}|{safe_page_size}"
+        hit = self._list_cache.get(cache_key)
+        if hit is not None and monotonic() - hit[0] < _LIST_TTL:
+            return hit[1]
         body: dict[str, Any] = {
             "page_number": safe_page,
             "page_size": safe_page_size,
@@ -93,7 +104,12 @@ class ModelScopeClient:
         servers = data.get("mcp_server_list")
         if not isinstance(servers, list):
             raise ModelScopeUnavailableError("unexpected ModelScope list payload")
-        return [row for row in servers if isinstance(row, dict)], int(data.get("total_count") or 0)
+        result = (
+            [row for row in servers if isinstance(row, dict)],
+            int(data.get("total_count") or 0),
+        )
+        self._list_cache[cache_key] = (monotonic(), result)
+        return result
 
     async def server_detail(self, server_id: str) -> dict[str, Any]:
         payload = await self._request_json("GET", f"/mcp/servers/{quote(server_id, safe='')}")

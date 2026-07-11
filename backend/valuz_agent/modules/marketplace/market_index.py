@@ -58,6 +58,11 @@ _HEALTHZ_TIMEOUT_SECONDS = 2.0
 _CATEGORIES_TTL = 600.0
 _LIST_TTL = 60.0
 _DETAIL_TTL = 300.0
+# After a failed request, further requests within this window raise
+# immediately (no network) so the direct-source fallback serves instantly;
+# once it lapses the next request probes the index again and a success
+# clears the memo.
+_FAILURE_MEMO_TTL = 60.0
 
 
 class MarketIndexUnavailableError(Exception):
@@ -192,12 +197,21 @@ class MarketIndexClient:
         # lazily" — see ``_resolve_base``.
         self._explicit_base_url = base_url.rstrip("/") if base_url else None
         self.channel = channel
-        self._client = client  # injected in tests; None → one client per call
+        # Injected in tests; otherwise created lazily on first use and kept
+        # for the client's lifetime so requests reuse pooled connections
+        # instead of paying a TCP+TLS handshake per call.
+        self._client = client
         if candidates is not None:
             self._candidates = list(candidates)
         else:
             self._candidates = list(settings.marketplace_index_candidates)
         self._cache: dict[str, tuple[float, Any]] = {}
+        # Negative memo: after a failed request, every request within
+        # ``_FAILURE_MEMO_TTL`` raises immediately without touching the
+        # network, so the direct-source fallback serves instantly instead of
+        # paying a doomed index round-trip per marketplace call. Cleared by
+        # the next successful request (checked once the TTL lapses).
+        self._down_until = 0.0
 
     @property
     def base_url(self) -> str | None:
@@ -214,24 +228,31 @@ class MarketIndexClient:
 
     # -- low-level ---------------------------------------------------------
 
+    def _ensure_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=_TIMEOUT_SECONDS)
+        return self._client
+
     async def _get_json(self, path: str, params: dict[str, Any]) -> Any:
+        if time.monotonic() < self._down_until:
+            raise MarketIndexUnavailableError("market index unavailable (memoized)")
         base = await self._resolve_base()
         url = f"{base}{path}"
         query = {**params, "channel": self.channel}
         try:
-            if self._client is not None:
-                resp = await self._client.get(url, params=query)
-            else:
-                async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
-                    resp = await client.get(url, params=query)
+            resp = await self._ensure_client().get(url, params=query)
             resp.raise_for_status()
-            return resp.json()
+            payload = resp.json()
         except httpx.HTTPError as exc:
             logger.warning("market index request failed: %s %s: %s", path, query, exc)
+            self._down_until = time.monotonic() + _FAILURE_MEMO_TTL
             raise MarketIndexUnavailableError(str(exc)) from exc
         except ValueError as exc:  # non-JSON body
             logger.warning("market index returned non-JSON for %s: %s", path, exc)
+            self._down_until = time.monotonic() + _FAILURE_MEMO_TTL
             raise MarketIndexUnavailableError("invalid JSON from market index") from exc
+        self._down_until = 0.0
+        return payload
 
     def _cached(self, key: str) -> Any | None:
         entry = self._cache.get(key)

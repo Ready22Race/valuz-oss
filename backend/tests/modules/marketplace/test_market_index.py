@@ -151,3 +151,40 @@ async def test_unexpected_shape_maps_to_unavailable() -> None:
     client = _client(handler)
     with pytest.raises(MarketIndexUnavailableError):
         await client.categories("skill", "en-US")
+
+
+@pytest.mark.asyncio
+async def test_failure_memo_skips_network_within_ttl() -> None:
+    """After a failed request every request inside the memo window raises
+    immediately with ZERO network calls, so the direct-source fallback serves
+    instantly instead of paying a doomed index round-trip per marketplace
+    call. A success after the window clears the memo."""
+    calls: list[str] = []
+    state = {"healthy": False}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if state["healthy"]:
+            return httpx.Response(200, json={"categories": [], "degraded": False})
+        return httpx.Response(500, json={"error": "boom"})
+
+    client = _client(handler)
+
+    with pytest.raises(MarketIndexUnavailableError):
+        await client.categories("skill", "en-US")
+    assert len(calls) == 1
+
+    # Memoized window: different kinds/locales all fail fast, no HTTP.
+    for kind, locale in (("skill", "fr-FR"), ("connector", "en-US"), ("agent", "zh-CN")):
+        with pytest.raises(MarketIndexUnavailableError):
+            await client.categories(kind, locale)
+    assert len(calls) == 1
+
+    # Window lapsed (simulated) + upstream recovered → request goes out,
+    # succeeds, and clears the memo.
+    state["healthy"] = True
+    client._down_until = 0.0  # noqa: SLF001
+    payload = await client.categories("skill", "en-US")
+    assert payload == {"categories": [], "degraded": False}
+    assert len(calls) == 2
+    assert client._down_until == 0.0  # noqa: SLF001
