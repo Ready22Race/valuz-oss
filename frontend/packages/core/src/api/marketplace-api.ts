@@ -12,10 +12,7 @@ const fetchJson = createFetchJson(() => _apiBase);
 
 /** Mirrors ``api/openapi.yaml`` → Marketplace* schemas (hand-synced). */
 export type MarketplaceItemType =
-  | "skill"
-  | "agent_template"
-  | "agent_team_template"
-  | "connector";
+  "skill" | "agent_template" | "agent_team_template" | "connector";
 export type MarketplaceSource = "skillhub" | "valuz_official" | "modelscope";
 export type MarketplaceBadge =
   | "free_install"
@@ -32,10 +29,7 @@ export type MarketplaceInstallTarget =
   | "agent_library_project"
   | "connector_library";
 export type MarketplaceConnectorRequirementKind =
-  | "required"
-  | "optional"
-  | "api_key"
-  | "cost";
+  "required" | "optional" | "api_key" | "cost";
 
 export interface MarketplaceStats {
   downloads?: number | null;
@@ -102,7 +96,8 @@ export interface MarketplaceSecurityReport {
 }
 
 export interface MarketplaceEvaluationDimension {
-  key: "trust" | "reliability" | "adaptability" | "convention" | "effectiveness";
+  key:
+    "trust" | "reliability" | "adaptability" | "convention" | "effectiveness";
   code: "T" | "R" | "A" | "C" | "E";
   label: string;
   score?: number | null;
@@ -156,6 +151,9 @@ export interface MarketplaceItemDetail extends MarketplaceItem {
   security?: MarketplaceSecurityReport | null;
   evaluation?: MarketplaceEvaluationReport | null;
   connector_config?: MarketplaceConnectorConfig | null;
+  /** Opaque, type-varies-by-`type` install payload from the market index.
+   * Not consumed by the frontend — carried for type parity with the backend. */
+  install_manifest?: Record<string, unknown> | null;
 }
 
 export interface MarketplaceItemList {
@@ -163,7 +161,7 @@ export interface MarketplaceItemList {
   total: number;
   page: number;
   page_size: number;
-  /** True when SkillHub was unreachable and results are official-only. */
+  /** True when the market index was unreachable and results are empty/partial. */
   degraded: boolean;
 }
 
@@ -203,7 +201,9 @@ export interface MarketplaceListParams {
 }
 
 export const marketplaceApi = {
-  categories(kind: "skill" | "agent" | "connector"): Promise<MarketplaceCategoryList> {
+  categories(
+    kind: "skill" | "agent" | "connector",
+  ): Promise<MarketplaceCategoryList> {
     return fetchJson(`/v1/marketplace/categories?kind=${kind}`);
   },
 
@@ -224,8 +224,11 @@ export const marketplaceApi = {
   },
 
   install(itemId: string): Promise<MarketplaceInstallResult> {
-    return fetchJson(`/v1/marketplace/items/${encodeURIComponent(itemId)}:install`, {
-      method: "POST",
-    });
+    return fetchJson(
+      `/v1/marketplace/items/${encodeURIComponent(itemId)}:install`,
+      {
+        method: "POST",
+      },
+    );
   },
 };

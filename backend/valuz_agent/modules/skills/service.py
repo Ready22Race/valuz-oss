@@ -838,7 +838,22 @@ class SkillLibraryService:
         for project in await self._projects.list_projects(user_id):
             if project.kind == "project":
                 self._ds.remove_skill_path_from_project(project, skill.path)
+        await self._cleanup_marketplace_install(user_id, skill.slug)
         return None
+
+    async def _cleanup_marketplace_install(self, user_id: str, slug: str) -> None:
+        """Best-effort marketplace provenance cleanup for a deleted skill —
+        a market-installed skill loses its ``marketplace_install`` row so a
+        later reinstall re-establishes fresh provenance instead of looking
+        "already tracked" against stale state. Never blocks the delete
+        itself: a test double datastore without a real session, or any
+        storage hiccup, is swallowed."""
+        try:
+            from valuz_agent.modules.marketplace.install_store import MarketplaceInstallStore
+
+            await MarketplaceInstallStore(self._ds.session).remove_by_ref(user_id, slug)
+        except Exception:  # noqa: BLE001 — best-effort; missing provenance is harmless
+            logger.warning("marketplace install cleanup failed for skill %s", slug, exc_info=True)
 
     async def import_from_session_confirm(
         self,

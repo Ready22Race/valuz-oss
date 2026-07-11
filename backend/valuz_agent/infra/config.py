@@ -259,6 +259,19 @@ class Settings(BaseSettings):
     # and sets VALUZ_CDT_PATH instead of npx.
     chrome_devtools_version: str = "1.2.0"
 
+    # ── Marketplace ──────────────────────────────────────────────────
+    # The market index is the SOLE marketplace data source (skill /
+    # connector / agent template / team template discovery). Defaults to
+    # Valuz cloud's public marketplace API; a self-hosted deployment can
+    # point this at a compatible implementation. ``marketplace_index_channel``
+    # tags every request so the index can scope results/entitlements per
+    # edition/build. Override with VALUZ_MARKETPLACE_INDEX_BASE_URL /
+    # VALUZ_MARKETPLACE_INDEX_CHANNEL. See
+    # docs/cloud-marketplace/design/oss.md — there is no "direct source"
+    # fallback mode; an unreachable index degrades the marketplace UI.
+    marketplace_index_base_url: str = "https://cloud.valuz.dev"
+    marketplace_index_channel: str = "oss"
+
     model_config = {"env_prefix": "VALUZ_"}
 
 

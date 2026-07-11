@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -149,6 +149,12 @@ class MarketplaceItemDetail(MarketplaceItem):
     security: MarketplaceSecurityReport | None = None
     evaluation: MarketplaceEvaluationReport | None = None
     connector_config: MarketplaceConnectorConfig | None = None
+    # Opaque, type-varies-by-``type`` install payload from the market index:
+    # skill → {download_url, sha256?, size_bytes?}; agent_template →
+    # an AgentTemplateDef-shaped object; agent_team_template → a pack
+    # manifest object (skill deps rewritten to {slug, source:"url",
+    # download_url}). Never produced locally — only the index sets it.
+    install_manifest: dict[str, Any] | None = None
 
 
 class MarketplaceItemList(BaseModel):

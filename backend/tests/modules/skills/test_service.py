@@ -591,6 +591,39 @@ class TestDeleteSkill:
         row = await service._ds.get_by_slug("u", "deletable")
         assert row is not None and row.status == "unavailable"
 
+    async def test_confirm_delete_cleans_up_marketplace_install_row(
+        self, svc, skill_root, monkeypatch
+    ):
+        """Wiring check for the marketplace-provenance cleanup hook: a real
+        session-backed removal is covered end-to-end in
+        tests/modules/marketplace/test_marketplace_install_cleanup.py; this
+        only asserts delete_skill calls it with the deleted skill's slug.
+        The datastore fake has no real DB session, so the hook's own
+        best-effort try/except must not swallow this monkeypatched call."""
+        _make_skill_dir(skill_root, "market-installed")
+        await svc.startup_scan("u")
+        catalog = await svc.list_catalog("u", "ws-1")
+        skill_id = catalog.skills[0].id
+
+        calls: list[tuple[str, str]] = []
+
+        class _StubInstallStore:
+            def __init__(self, session):
+                pass
+
+            async def remove_by_ref(self, user_id: str, installed_ref: str) -> None:
+                calls.append((user_id, installed_ref))
+
+        svc._ds.session = object()
+        monkeypatch.setattr(
+            "valuz_agent.modules.marketplace.install_store.MarketplaceInstallStore",
+            _StubInstallStore,
+        )
+
+        await svc.delete_skill("u", skill_id, mode="confirm")
+
+        assert calls == [("u", "market-installed")]
+
     async def test_dry_run_should_return_preview(self, svc, skill_root):
         service = svc
         _make_skill_dir(skill_root, "preview-del")
