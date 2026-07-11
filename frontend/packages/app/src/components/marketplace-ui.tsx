@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import type { MarketplaceBadge, MarketplaceSource } from "@valuz/core";
 import { useTranslation } from "@valuz/core";
+import { Badge } from "@valuz/ui";
 
 const NAMED_ICONS: Record<string, LucideIcon> = {
   chart: LineChart,
@@ -99,22 +100,15 @@ const SOURCE_LABEL_KEYS: Record<MarketplaceSource, string> = {
   modelscope: "marketplace.sourceModelScope",
 };
 
-const SOURCE_STYLES: Record<MarketplaceSource, { bg: string; fg: string }> = {
-  skillhub: { bg: "var(--surface-soft)", fg: "var(--ink-meta)" },
-  valuz_official: { bg: "var(--brand-light)", fg: "var(--brand-700)" },
-  modelscope: { bg: "#e0f2fe", fg: "#0369a1" },
-};
-
+// One neutral look for every source — per-source colors made the cards read
+// inconsistently across tabs. Uses the Badge primitive (metaNeutral) so the
+// pill follows the design-system sizing/rounding/background tokens.
 export function MarketplaceSourcePill({ source }: { source: MarketplaceSource }) {
   const { t } = useTranslation();
-  const style = SOURCE_STYLES[source];
   return (
-    <span
-      className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium"
-      style={{ background: style.bg, color: style.fg }}
-    >
+    <Badge variant="metaNeutral">
       {t(SOURCE_LABEL_KEYS[source] as Parameters<typeof t>[0])}
-    </span>
+    </Badge>
   );
 }
 
