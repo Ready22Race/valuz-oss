@@ -1,15 +1,14 @@
 """Market index base-url candidate racing.
 
 Covers ``resolve_index_base_url`` / ``MarketIndexClient``'s lazy-base mode:
-concurrent ``GET {candidate}/healthz`` racing, process-wide pinning, skipping
-the race entirely when an explicit base url is configured, and re-racing
-after repeated request failures against the pinned candidate. No real
-network — every case runs over an ``httpx.MockTransport``.
+concurrent ``GET {candidate}/healthz`` racing, once-per-process pinning
+(the outcome — winner or nothing-reachable — is final for the process
+lifetime; no per-request re-probing), and skipping the race entirely when an
+explicit base url is configured. No real network — every case runs over an
+``httpx.MockTransport``.
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 import httpx
 import pytest
@@ -130,45 +129,86 @@ async def test_explicit_base_url_skips_candidate_race() -> None:
 
 
 @pytest.mark.asyncio
-async def test_consecutive_failures_clear_pin_and_retrigger_race() -> None:
-    """After N consecutive request failures against the pinned candidate, the
-    next request re-races — and can land on a different winner if the
-    previous one has since gone unhealthy."""
-    state: dict[str, Any] = {"phase": "first-race", "categories_calls_to_good": 0}
+async def test_race_runs_once_and_winner_is_final() -> None:
+    """The race runs exactly once per process: later requests reuse the
+    pinned winner without any further healthz probing — even when requests
+    against it keep failing."""
+    probes: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         host = f"{request.url.scheme}://{request.url.host}"
         if request.url.path == "/healthz":
-            if state["phase"] == "first-race":
-                # Only GOOD is healthy the first time around.
-                return httpx.Response(200 if host == GOOD else 503, json={})
-            # Second race: GOOD has since gone down, BAD (renamed reality:
-            # now healthy) answers instead.
-            return httpx.Response(200 if host == BAD else 503, json={})
-        # Real categories endpoint: GOOD always 500s once pinned (simulating
-        # its API — not its healthz — failing), BAD always succeeds.
-        if host == GOOD:
-            return httpx.Response(500, json={"error": "boom"})
-        return httpx.Response(200, json={"categories": [], "degraded": False})
+            probes.append(host)
+            return httpx.Response(200 if host == GOOD else 503, json={})
+        # The pinned candidate's API keeps failing (e.g. route not deployed):
+        # this must NOT trigger a re-race.
+        return httpx.Response(500, json={"error": "boom"})
 
     client, _ = _client_for(handler, [BAD, GOOD])
 
-    # First race pins GOOD (only healthy candidate at this point).
+    for locale in ("en-US", "fr-FR", "de-DE", "ja-JP"):
+        with pytest.raises(MarketIndexUnavailableError):
+            await client.categories("skill", locale)
+        assert market_index._pinned_base_url == GOOD  # noqa: SLF001
+
+    assert sorted(set(probes)) == sorted({BAD, GOOD})
+    assert len(probes) == 2  # one probe per candidate, ever
+
+
+@pytest.mark.asyncio
+async def test_failed_race_outcome_is_sticky_and_fails_fast() -> None:
+    """A total race failure is final for the process: later requests raise
+    immediately without probing again."""
+    probes: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/healthz":
+            probes.append(f"{request.url.scheme}://{request.url.host}")
+        return httpx.Response(503, json={"ok": False})
+
+    client, _ = _client_for(handler, [BAD, GOOD])
+
     with pytest.raises(MarketIndexUnavailableError):
         await client.categories("skill", "en-US")
-    assert market_index._pinned_base_url == GOOD  # noqa: SLF001
+    first_round = len(probes)
+    assert first_round == 2
 
-    # 2 more consecutive failures (3 total) should clear the pin.
     with pytest.raises(MarketIndexUnavailableError):
         await client.categories("skill", "fr-FR")
-    assert market_index._pinned_base_url == GOOD  # noqa: SLF001
-    state["phase"] = "second-race"
     with pytest.raises(MarketIndexUnavailableError):
         await client.categories("skill", "de-DE")
-    assert market_index._pinned_base_url is None  # noqa: SLF001
+    assert len(probes) == first_round  # no re-probing, ever
 
-    # Next request re-races; BAD is now the only healthy candidate and its
-    # categories endpoint actually succeeds.
-    payload = await client.categories("skill", "ja-JP")
-    assert payload == {"categories": [], "degraded": False}
-    assert market_index._pinned_base_url == BAD  # noqa: SLF001
+
+@pytest.mark.asyncio
+async def test_resolve_in_background_pins_at_startup(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The boot hook races once in the background; a no-op with an explicit
+    base url configured."""
+    import asyncio
+
+    from valuz_agent.infra.config import settings
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/healthz":
+            host = f"{request.url.scheme}://{request.url.host}"
+            return httpx.Response(200 if host == GOOD else 503, json={})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(settings, "marketplace_index_base_url", "https://pinned.example")
+    assert market_index.resolve_index_in_background() is None
+
+    monkeypatch.setattr(settings, "marketplace_index_base_url", "")
+    monkeypatch.setattr(settings, "marketplace_index_candidates", [BAD, GOOD])
+    transport = httpx.MockTransport(handler)
+
+    real_resolve = market_index.resolve_index_base_url
+
+    async def resolve_with_mock_transport(candidates, *, client=None):  # type: ignore[no-untyped-def]
+        async with httpx.AsyncClient(transport=transport) as mock_client:
+            return await real_resolve(candidates, client=mock_client)
+
+    monkeypatch.setattr(market_index, "resolve_index_base_url", resolve_with_mock_transport)
+    task = market_index.resolve_index_in_background()
+    assert task is not None
+    await asyncio.wait_for(task, timeout=2)
+    assert market_index._pinned_base_url == GOOD  # noqa: SLF001

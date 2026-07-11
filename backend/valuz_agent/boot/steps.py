@@ -315,8 +315,7 @@ async def init_kernel(app: FastAPI) -> None:
         # spawn time). Lets the agent run a clean ``chrome-devtools <tool>``.
         if not _startup_user_content_enabled():
             logger.info(
-                "startup user-content initialization disabled; "
-                "browser CLI bootstrap skipped"
+                "startup user-content initialization disabled; browser CLI bootstrap skipped"
             )
         elif browser_service.ensure_cli_on_path():
             logger.info("browser CLI installed on PATH (chrome-devtools)")
@@ -646,6 +645,21 @@ def warm_token_estimator() -> None:
 
     try:
         prewarm_token_estimator()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def resolve_marketplace_index() -> None:
+    """Kick off the once-per-process market index candidate race in the
+    background so the endpoint is settled by the time the marketplace UI
+    makes its first request. The outcome (winner or nothing-reachable) is
+    final for the process lifetime — requests never re-probe. No-op when an
+    explicit ``marketplace_index_base_url`` is configured. Best-effort,
+    never fatal."""
+    from valuz_agent.modules.marketplace.market_index import resolve_index_in_background
+
+    try:
+        resolve_index_in_background()
     except Exception:  # noqa: BLE001
         pass
 
