@@ -2321,11 +2321,11 @@
   },
   "marketplace": {
     "title": "市场",
-    "subtitle": "发现并导入 Agents、Agent 团队、技能与连接器",
+    "subtitle": "发现并添加智能体、智能体团队、技能与连接器",
     "tabAgents": "智能体",
     "tabSkills": "技能",
     "tabConnectors": "连接器",
-    "searchAgents": "搜索 Agent、场景、领域…",
+    "searchAgents": "搜索智能体、场景、领域…",
     "searchSkills": "搜索技能、描述、标签…",
     "searchConnectors": "搜索 MCP、能力、作者…",
     "teamsTitle": "精选 Agent 团队",
