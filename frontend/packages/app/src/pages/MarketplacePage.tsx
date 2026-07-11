@@ -1,17 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import {
-  ArrowRight,
-  Bot,
-  CloudOff,
-  Download,
-  Eye,
-  Plug,
-  Sparkles,
-  Star,
-  Store,
-  Zap,
-} from "lucide-react";
+import { Bot, CloudOff, Plug, Sparkles, Store, Zap } from "lucide-react";
 import { BackLink, Button, SearchInput, cn } from "@valuz/ui";
 import type { MarketplaceCategory, MarketplaceItem } from "@valuz/core";
 import { marketplaceApi, useTranslation } from "@valuz/core";
@@ -285,11 +274,19 @@ function TemplateCard({
       onClick={() => onOpen(item)}
       className="flex min-h-[120px] w-full flex-col rounded-xl border border-surface-border bg-surface p-3.5 text-left transition hover:-translate-y-px hover:shadow-md"
     >
-      <div className="mb-2.5 flex items-center gap-2.5">
+      <div className="mb-2 flex items-start gap-2.5">
         <ItemIcon item={item} size="md" />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13.5px] font-semibold tracking-tight text-ink-heading">
             {item.title}
+          </div>
+          <div className="mt-1 flex items-center gap-1.5">
+            <MarketplaceSourcePill source={item.source} />
+            {item.category_label ? (
+              <span className="truncate text-[10.5px] text-ink-meta">
+                {item.category_label}
+              </span>
+            ) : null}
           </div>
         </div>
         {item.installed && (
@@ -302,10 +299,17 @@ function TemplateCard({
         {item.description}
       </div>
       <div className="mt-auto flex items-center justify-between">
-        <span className="text-[11.5px] text-ink-meta">
-          {item.category_label ?? ""}
+        <span className="font-mono text-[10.5px] tabular-nums text-ink-body">
+          {item.version ? `v${item.version}` : ""}
         </span>
-        <ArrowRight className="h-4 w-4 text-ink-muted" />
+        <span
+          className={cn(
+            "text-xs font-medium",
+            item.installed ? "text-ink-meta" : "text-brand",
+          )}
+        >
+          {item.installed ? tr("marketplace.added") : tr("marketplace.add")}
+        </span>
       </div>
     </button>
   );
@@ -453,7 +457,7 @@ function AgentsTab({ q, tr, onOpen, withInstalled }: TabProps) {
               title={tr("marketplace.teamsTitle")}
               count={tr("marketplace.teamsCount", { count: teamItems.length })}
             />
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
               {teamItems.map((team) => (
                 <TeamCard key={team.id} team={team} tr={tr} onOpen={onOpen} />
               ))}
@@ -469,7 +473,7 @@ function AgentsTab({ q, tr, onOpen, withInstalled }: TabProps) {
                 count: templateItems.length,
               })}
             />
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
               {templateItems.map((item) => (
                 <TemplateCard
                   key={item.id}
@@ -502,11 +506,19 @@ function TeamCard({
       onClick={() => onOpen(team)}
       className="flex min-h-[154px] w-full flex-col rounded-xl border border-surface-border bg-surface p-3.5 text-left transition hover:-translate-y-px hover:shadow-md"
     >
-      <div className="mb-2.5 flex items-center gap-2.5">
+      <div className="mb-2 flex items-start gap-2.5">
         <ItemIcon item={team} size="md" />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13.5px] font-semibold tracking-tight text-ink-heading">
             {team.title}
+          </div>
+          <div className="mt-1 flex items-center gap-1.5">
+            <MarketplaceSourcePill source={team.source} />
+            {team.category_label ? (
+              <span className="truncate text-[10.5px] text-ink-meta">
+                {team.category_label}
+              </span>
+            ) : null}
           </div>
         </div>
         {team.installed && (
@@ -515,31 +527,41 @@ function TeamCard({
           </span>
         )}
       </div>
-      <div className="mb-3 line-clamp-2 min-h-[37px] text-xs leading-relaxed text-ink-body">
+      <div className="mb-2 flex items-center">
+        {members.slice(0, 4).map((m) => {
+          const tint = tintFor(m.name);
+          return (
+            <div
+              key={m.name}
+              className="-ml-1.5 flex h-6 w-6 items-center justify-center rounded-full border-2 border-surface text-[10px] font-semibold first:ml-0"
+              style={{ background: tint.bg, color: tint.fg }}
+            >
+              {m.name.slice(0, 1)}
+            </div>
+          );
+        })}
+        <span className="ml-2 text-[11.5px] text-ink-body">
+          {tr("marketplace.membersAndSkills", {
+            members: members.length,
+            skills: team.skill_count ?? 0,
+          })}
+        </span>
+      </div>
+      <div className="mb-2.5 line-clamp-1 min-h-[18px] text-xs leading-relaxed text-ink-body">
         {team.description}
       </div>
-      <div className="mt-auto flex items-center justify-between">
-        <div className="flex items-center">
-          {members.slice(0, 4).map((m) => {
-            const tint = tintFor(m.name);
-            return (
-              <div
-                key={m.name}
-                className="-ml-1.5 flex h-6 w-6 items-center justify-center rounded-full border-2 border-surface text-[10px] font-semibold first:ml-0"
-                style={{ background: tint.bg, color: tint.fg }}
-              >
-                {m.name.slice(0, 1)}
-              </div>
-            );
-          })}
-          <span className="ml-2 text-[11.5px] text-ink-body">
-            {tr("marketplace.membersAndSkills", {
-              members: members.length,
-              skills: team.skill_count ?? 0,
-            })}
-          </span>
-        </div>
-        <ArrowRight className="h-4 w-4 text-ink-muted" />
+      <div className="mt-auto flex items-center justify-between border-t border-surface-border pt-2.5">
+        <span className="font-mono text-[10.5px] tabular-nums text-ink-body">
+          {team.version ? `v${team.version}` : ""}
+        </span>
+        <span
+          className={cn(
+            "text-xs font-medium",
+            team.installed ? "text-ink-meta" : "text-brand",
+          )}
+        >
+          {team.installed ? tr("marketplace.added") : tr("marketplace.add")}
+        </span>
       </div>
     </button>
   );
@@ -646,7 +668,7 @@ function SkillsTab({ q, tr, onOpen, withInstalled }: TabProps) {
         />
         {
           <>
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-3">
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
               {visible.map((skill) => (
                 <SkillMarketCard
                   key={skill.id}
@@ -702,8 +724,9 @@ function ConnectorsTab({ q, tr, onOpen, withInstalled }: TabProps) {
       setLoading(true);
       marketplaceApi
         .list({
+          // No source filter: the index channel composes connectors from all
+          // origins (crawled + manually curated), not just ModelScope.
           type: "connector",
-          source: "modelscope",
           category: category ?? undefined,
           q: q || undefined,
           page: nextPage,
@@ -754,7 +777,7 @@ function ConnectorsTab({ q, tr, onOpen, withInstalled }: TabProps) {
           <RailItem
             key={entry.key}
             label={entry.label}
-            count={null}
+            count={entry.count ?? null}
             active={category === entry.key}
             onClick={() => setCategory(entry.key)}
           />
@@ -820,7 +843,7 @@ function ConnectorMarketCard({
       onClick={() => onOpen(connector)}
       className="flex min-h-[150px] w-full flex-col rounded-xl border border-surface-border bg-surface p-3.5 text-left transition hover:-translate-y-px hover:shadow-md"
     >
-      <div className="mb-2.5 flex items-start gap-2.5">
+      <div className="mb-2 flex items-start gap-2.5">
         <ItemIcon item={connector} size="md" />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[13.5px] font-semibold tracking-tight text-ink-heading">
@@ -841,28 +864,22 @@ function ConnectorMarketCard({
           </span>
         ) : null}
       </div>
-      <div className="line-clamp-2 min-h-9 text-xs leading-relaxed text-ink-body">
+      <div className="mb-2.5 line-clamp-2 min-h-9 text-xs leading-relaxed text-ink-body">
         {connector.description || tr("marketplace.connectorNoDescription")}
       </div>
       <div className="mt-auto flex items-center justify-between border-t border-surface-border pt-2.5">
-        <div className="flex items-center gap-3 text-[11px] tabular-nums text-ink-body">
-          {connector.stats.views != null ? (
-            <span className="inline-flex items-center gap-1">
-              <Eye className="h-3 w-3" />
-              {formatCount(connector.stats.views)}
-            </span>
-          ) : null}
-          {connector.stats.stars != null && connector.stats.stars > 0 ? (
-            <span className="inline-flex items-center gap-1">
-              <Star className="h-3 w-3" />
-              {formatCount(connector.stats.stars)}
-            </span>
-          ) : null}
-        </div>
-        <span className="text-xs font-medium text-brand">
+        <span className="font-mono text-[10.5px] tabular-nums text-ink-body">
+          {connector.version ? `v${connector.version}` : ""}
+        </span>
+        <span
+          className={cn(
+            "text-xs font-medium",
+            connector.installed ? "text-ink-meta" : "text-brand",
+          )}
+        >
           {connector.installed
-            ? tr("marketplace.connected")
-            : tr("marketplace.viewConnector")}
+            ? tr("marketplace.added")
+            : tr("marketplace.add")}
         </span>
       </div>
     </button>
@@ -925,8 +942,13 @@ function SkillMarketCard({
           <div className="truncate text-[13px] font-semibold tracking-tight text-ink-heading">
             {skill.title}
           </div>
-          <div className="mt-1 flex flex-wrap gap-1.5">
+          <div className="mt-1 flex items-center gap-1.5">
             <MarketplaceSourcePill source={skill.source} />
+            {skill.category_label ? (
+              <span className="truncate text-[10.5px] text-ink-meta">
+                {skill.category_label}
+              </span>
+            ) : null}
             {setupBadges.map((badge) => (
               <MarketplaceBadgePill key={badge} badge={badge} />
             ))}
@@ -937,27 +959,16 @@ function SkillMarketCard({
         {skill.description}
       </div>
       <div className="mt-auto flex items-center justify-between border-t border-surface-border pt-2.5">
-        <div className="flex items-center gap-2.5 text-[11px] tabular-nums text-ink-body">
-          {skill.stats.downloads != null && (
-            <span className="inline-flex items-center gap-1">
-              <Download className="h-[11px] w-[11px]" />
-              {formatCount(skill.stats.downloads)}
-            </span>
+        <span className="font-mono text-[10.5px] tabular-nums text-ink-body">
+          {skill.version ? `v${skill.version}` : ""}
+        </span>
+        <span
+          className={cn(
+            "text-xs font-medium",
+            skill.installed ? "text-ink-meta" : "text-brand",
           )}
-          {skill.stats.stars != null && (
-            <span className="inline-flex items-center gap-1">
-              <Star className="h-[11px] w-[11px]" />
-              {formatCount(skill.stats.stars)}
-            </span>
-          )}
-          {skill.version && (
-            <span className="font-mono text-[10.5px]">{skill.version}</span>
-          )}
-        </div>
-        <span className="text-xs font-medium text-brand">
-          {skill.installed
-            ? tr("marketplace.installed")
-            : tr("marketplace.import")}
+        >
+          {skill.installed ? tr("marketplace.added") : tr("marketplace.add")}
         </span>
       </div>
     </button>

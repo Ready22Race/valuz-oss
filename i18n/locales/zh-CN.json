@@ -2337,7 +2337,6 @@
     "categories": "分类",
     "skillsSuffix": "{count} 技能",
     "view": "查看",
-    "import": "导入",
     "installed": "已安装",
     "loadMore": "加载更多",
     "loading": "加载中…",
@@ -2362,7 +2361,6 @@
     "modalTypeTeam": "Agent 团队",
     "modalTypeConnector": "连接器",
     "connectorNoDescription": "暂无介绍",
-    "viewConnector": "查看并连接",
     "connected": "已添加",
     "connectConnector": "添加连接器",
     "connectorLoadFailed": "连接器详情加载失败",
@@ -2456,6 +2454,8 @@
     "countTotal": "共 {count} 个",
     "countShown": "展示 {count} 个",
     "templatesTitle": "官方 Agent 模板",
-    "templatesCount": "{count} 个模板"
+    "templatesCount": "{count} 个模板",
+    "add": "添加",
+    "added": "已添加"
   }
 }

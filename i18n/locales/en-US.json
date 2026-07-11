@@ -2337,7 +2337,6 @@
     "categories": "Categories",
     "skillsSuffix": "{count} skills",
     "view": "View",
-    "import": "Import",
     "installed": "Installed",
     "loadMore": "Load more",
     "loading": "Loading…",
@@ -2362,7 +2361,6 @@
     "modalTypeTeam": "Agent team",
     "modalTypeConnector": "Connector",
     "connectorNoDescription": "No description available",
-    "viewConnector": "View and connect",
     "connected": "Added",
     "connectConnector": "Add connector",
     "connectorLoadFailed": "Could not load connector details",
@@ -2456,6 +2454,8 @@
     "countTotal": "{count} total",
     "countShown": "{count} shown",
     "templatesTitle": "Official agent templates",
-    "templatesCount": "{count} templates"
+    "templatesCount": "{count} templates",
+    "add": "Add",
+    "added": "Added"
   }
 }
