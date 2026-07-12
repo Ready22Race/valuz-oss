@@ -34,6 +34,12 @@ import {
   agentsApi,
   automationsApi,
   connectorsApi,
+  getDefaultExecutionTarget,
+  getEntityOrigin,
+  recordEntityOrigin,
+  resolveApiBase,
+  useEntityOrigin,
+  useExecutionTargets,
   useSessionStore,
   useProjectStore,
   projectsApi,
@@ -107,7 +113,6 @@ import {
   type SkillSubmissionState,
   type UploadedFileItem,
   type ComposerAgentItem,
-  type ComposerProjectItem,
   type ComposerConnector,
 } from "@valuz/ui";
 import { modelLabel } from "@valuz/shared";
@@ -132,6 +137,8 @@ import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
+import { OriginBadge } from "../components/ExecutionLocationPicker";
+import { ExecutionLocationBar } from "../components/ExecutionLocationBar";
 import {
   resolveAgentSkillItems,
   type AgentSkillItem,
@@ -655,6 +662,16 @@ export const ConversationPage = () => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (agentParam) setSelectedAgentSlug(agentParam);
   }, [agentParam]);
+  // Deep-link origin fast path (multi-target editions): a share/notification
+  // link can carry ``?origin=cloud`` so the page routes to the owning backend
+  // without a probe round-trip. The edition adapter validates the value;
+  // single-target builds have no adapter → no-op.
+  const originParam = searchParams.get("origin");
+  useEffect(() => {
+    if (originParam && id && id !== NEW_SESSION_ID) {
+      recordEntityOrigin(id, originParam);
+    }
+  }, [originParam, id]);
   // Set when this conversation was opened from a task's "view session" link
   // (TaskDetailPage). Drives the breadcrumb back-to-task affordance in the
   // header so a subtask/lead session isn't a navigational dead end.
@@ -922,6 +939,21 @@ export const ConversationPage = () => {
   const [selectedEffort, setSelectedEffort] = useState<
     "low" | "medium" | "high" | "xhigh" | "max" | null
   >(null);
+
+  // Multi-target editions: where a NEW quick/temp chat runs. ``null`` follows
+  // the registered default; single-target builds register nothing and the
+  // picker renders nothing. Locked at session creation (ADR-006 semantics) —
+  // project conversations don't get a choice, they follow the project's
+  // origin. See docs (commercial): execution-location-per-entity.
+  const executionTargets = useExecutionTargets();
+  const [execTargetId, setExecTargetId] = useState<string | null>(null);
+  const resolveExecTarget = useCallback(() => {
+    if (executionTargets.length === 0) return undefined;
+    return (
+      executionTargets.find((target) => target.id === execTargetId) ??
+      getDefaultExecutionTarget()
+    );
+  }, [executionTargets, execTargetId]);
 
   // Connector selection — only meaningful for new sessions (locked at creation
   // per ADR-006). The picker UI was removed from the composer; we still
@@ -2393,19 +2425,27 @@ export const ConversationPage = () => {
   // 09-assistant: the 📁 chip's dropdown options — every project project.
   // ``ProjectListItem`` carries no member count, so the count is left
   // undefined for now (chip renders fine without it).
-  const composerProjects = useMemo<ComposerProjectItem[]>(
-    () =>
-      projects
-        .filter((w) => w.kind === "project")
-        .map((w) => ({ id: w.id, name: w.name })),
-    [projects],
-  );
-
   // 09-assistant: whether the conversation currently targets 临时对话
   // (chat-default / non-project). The page stores the ``"chat-default"``
   // sentinel for 临时, so derive temp-ness from the resolved project kind
   // rather than a literal null.
   const isTempConversation = activeProject?.kind !== "project";
+
+  // The attached strip under the composer owns the 📁 project choice for a
+  // NEW conversation (replacing the composer's old toolbar chip) and keeps
+  // showing the bound context on existing ones. All editions render it; the
+  // location chip inside it only appears on multi-target builds.
+  const execBarLocked = !(selectedSession == null && isNewSession);
+  // Observed origin of the open session — drives the locked bar's location
+  // chip (multi-target editions; undefined on single-target/unknown).
+  const sessionExecOrigin = useEntityOrigin(selectedSessionId, "session");
+  const execBarProjects = useMemo(
+    () =>
+      projects
+        .filter((w) => w.kind === "project")
+        .map((w) => ({ id: w.id, name: w.name, execOrigin: w.exec_origin })),
+    [projects],
+  );
 
   // Agent options for the composer's 🤖 chip. Candidates depend on the 📁
   // chip: 临时对话 → the "我的" library (``myAgents``); a project → its
@@ -3205,17 +3245,44 @@ export const ConversationPage = () => {
         });
         created = await sessionsApi.get(start.session_id);
       } else {
-        created = await sessionsApi.create({
-          project_id: isChat ? "chat-default" : sessionProjectId,
-          agent_slug: selectedAgentSlug ?? undefined,
-          provider_id: selectedProviderId ?? undefined,
-          model_id: selectedModelId ?? undefined,
-          runtime_id: selectedRuntimeId ?? undefined,
-          mcp_provider_slugs:
-            selectedMcpSlugs.length > 0 ? selectedMcpSlugs : undefined,
-          permission_mode: selectedPermissionMode,
-          effort: selectedEffort,
-        });
+        // Multi-target routing: a quick/temp chat runs on the target the
+        // composer picker chose; a project conversation always follows its
+        // project's observed origin. Single-target builds resolve both to
+        // ``undefined`` → module-default base, unchanged behaviour.
+        const chatTarget = isChat ? resolveExecTarget() : undefined;
+        const projectOrigin = !isChat
+          ? getEntityOrigin(sessionProjectId, "project")
+          : undefined;
+        const createBaseUrl = isChat
+          ? chatTarget?.baseUrl
+          : resolveApiBase({ projectId: sessionProjectId }, "") || undefined;
+        // On a REMOTE target, provider_id / model / runtime / connector picks
+        // reference THIS backend's rows — meaningless (400) on the other
+        // backend. Drop them so the owning backend resolves its own defaults;
+        // symbolic fields (agent_slug / permission_mode / effort) stay.
+        const remoteCreate = chatTarget?.remote === true;
+        created = await sessionsApi.create(
+          {
+            project_id: isChat ? "chat-default" : sessionProjectId,
+            agent_slug: selectedAgentSlug ?? undefined,
+            provider_id: remoteCreate
+              ? undefined
+              : (selectedProviderId ?? undefined),
+            model_id: remoteCreate ? undefined : (selectedModelId ?? undefined),
+            runtime_id: remoteCreate
+              ? undefined
+              : (selectedRuntimeId ?? undefined),
+            mcp_provider_slugs:
+              !remoteCreate && selectedMcpSlugs.length > 0
+                ? selectedMcpSlugs
+                : undefined,
+            permission_mode: selectedPermissionMode,
+            effort: selectedEffort,
+          },
+          createBaseUrl ? { baseUrl: createBaseUrl } : undefined,
+        );
+        const originTag = isChat ? chatTarget?.id : projectOrigin;
+        if (originTag) recordEntityOrigin(created.id, originTag);
       }
       // 10-new-conversation-guidance slice 3: remember which agent this 临时对话
       // used so the next new conversation pre-selects it.
@@ -3326,6 +3393,9 @@ export const ConversationPage = () => {
       skillProjectParam,
       id,
       navigate,
+      // Multi-target routing: the chosen execution target is read at
+      // creation time — same closure-staleness trap as permission mode.
+      resolveExecTarget,
     ],
   );
 
@@ -5585,6 +5655,10 @@ export const ConversationPage = () => {
                 }
                 pending={effectiveTurns.length === 0}
               />
+              {/* Execution origin (multi-target editions): where this
+                  session's backend lives. Locked at creation; renders
+                  nothing on single-target builds. */}
+              <OriginBadge entityId={selectedSessionId} kind="session" />
               {sessionAgentSlug ? (
                 <Badge variant="metaBrand" className="shrink-0">
                   <Bot className="h-3 w-3" />
@@ -5970,17 +6044,35 @@ export const ConversationPage = () => {
             // ``"chat-default"`` sentinel for 临时, so the chip sees ``null``
             // when the active project isn't a project, and a change to
             // ``null`` maps back to the sentinel. Frozen once a session exists.
-            projects={composerProjects}
-            selectedProjectId={isProjectProject ? selectedProjectId : null}
-            projectLocked={selectedSession != null}
-            onProjectChange={(idOrNull) => {
-              setSelectedProjectId(idOrNull ?? "chat-default");
-              // The picked skill belongs to the previous project scope —
-              // drop it so a project-scoped skill can't leak into a 临时 send
-              // (and vice versa). availableSkills reloads off the new id.
-              setSelectedComposerSkill(null);
-              setComposerTouched(true);
-            }}
+            footerBar={
+              <ExecutionLocationBar
+                locked={execBarLocked}
+                lockedOriginId={sessionExecOrigin}
+                targetId={execTargetId}
+                onTargetChange={(tid) => {
+                  setExecTargetId(tid);
+                  // A project belongs to ONE backend — switching location
+                  // resets the pick back to 临时对话.
+                  const current = projects.find(
+                    (w) => w.id === selectedProjectId,
+                  );
+                  if (current && (current.exec_origin ?? "local") !== tid) {
+                    setSelectedProjectId("chat-default");
+                    setSelectedComposerSkill(null);
+                  }
+                  setComposerTouched(true);
+                }}
+                projects={execBarProjects}
+                selectedProjectId={isProjectProject ? selectedProjectId : null}
+                onProjectChange={(idOrNull) => {
+                  setSelectedProjectId(idOrNull ?? "chat-default");
+                  // Same scope rule as the old toolbar chip: skills don't
+                  // survive a project-scope change.
+                  setSelectedComposerSkill(null);
+                  setComposerTouched(true);
+                }}
+              />
+            }
             onAddAgent={
               isProjectProject && selectedProjectId
                 ? () =>

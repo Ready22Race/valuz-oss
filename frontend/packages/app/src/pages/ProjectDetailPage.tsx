@@ -28,6 +28,9 @@ import {
   filesApi,
   buildFileRef,
   ApiError,
+  getEntityOrigin,
+  recordEntityOrigin,
+  resolveApiBase,
   sessionsApi,
   providersApi,
   automationsApi,
@@ -813,11 +816,19 @@ export const ProjectDetailPage = () => {
       // empty (no turns); valuz already handles cleanup of zero-turn
       // sessions on next index.
       try {
-        const session = await sessionsApi.create({
-          project_id: id ?? undefined,
-          agent_slug: selectedAgentSlug ?? undefined,
-          permission_mode: selectedPermissionMode,
-        });
+        // Project sessions follow the project's execution origin
+        // (multi-target editions; "" → module default, unchanged for OSS).
+        const projectBaseUrl = id ? resolveApiBase({ projectId: id }, "") : "";
+        const session = await sessionsApi.create(
+          {
+            project_id: id ?? undefined,
+            agent_slug: selectedAgentSlug ?? undefined,
+            permission_mode: selectedPermissionMode,
+          },
+          projectBaseUrl ? { baseUrl: projectBaseUrl } : undefined,
+        );
+        const projectOrigin = id ? getEntityOrigin(id, "project") : undefined;
+        if (projectOrigin) recordEntityOrigin(session.id, projectOrigin);
         await sessionsApi.addKbAttachments(session.id, ids);
         navigate(`/conversation/${session.id}`);
       } catch {
@@ -1079,17 +1090,25 @@ export const ProjectDetailPage = () => {
   const ensureChatSession = async (): Promise<{ id: string }> => {
     if (chatSessionId) return { id: chatSessionId };
     if (!selectedAgentSlug) throw new Error("no-agent-selected");
-    const session = await sessionsApi.create({
-      project_id: id,
-      agent_slug: selectedAgentSlug,
-      permission_mode: selectedPermissionMode,
-      // Presence of the object opts into worktree isolation; a name set by
-      // "continue in this worktree" fast-resumes that worktree, otherwise
-      // one is auto-named. Omitted = main workspace. Frozen per session.
-      ...(worktreeEnabled
-        ? { worktree: worktreeName ? { name: worktreeName } : {} }
-        : {}),
-    });
+    // Project sessions follow the project's execution origin (multi-target
+    // editions; "" → module default, unchanged for OSS).
+    const projectBaseUrl = resolveApiBase({ projectId: id }, "");
+    const session = await sessionsApi.create(
+      {
+        project_id: id,
+        agent_slug: selectedAgentSlug,
+        permission_mode: selectedPermissionMode,
+        // Presence of the object opts into worktree isolation; a name set by
+        // "continue in this worktree" fast-resumes that worktree, otherwise
+        // one is auto-named. Omitted = main workspace. Frozen per session.
+        ...(worktreeEnabled
+          ? { worktree: worktreeName ? { name: worktreeName } : {} }
+          : {}),
+      },
+      projectBaseUrl ? { baseUrl: projectBaseUrl } : undefined,
+    );
+    const projectOrigin = getEntityOrigin(id, "project");
+    if (projectOrigin) recordEntityOrigin(session.id, projectOrigin);
     setChatSessionId(session.id);
     return { id: session.id };
   };
@@ -1164,6 +1183,11 @@ export const ProjectDetailPage = () => {
           // worktree; clean ones auto-remove at finish.
           worktree: worktreeEnabled,
         });
+        // Tasks follow their project's execution origin (multi-target
+        // editions) — record it so the task detail / event stream / commit
+        // calls route to the owning backend.
+        const projectOrigin = getEntityOrigin(id, "project");
+        if (projectOrigin) recordEntityOrigin(task.id, projectOrigin);
         toast.success(t("task.kickedOff"));
         setComposerValue("");
         navigate(`/tasks/${encodeURIComponent(task.id)}`);

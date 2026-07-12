@@ -15,6 +15,7 @@ import { BUCKET_KEY, groupByTimeBucket } from "../lib/time-buckets";
 import { RenameInput } from "./RenameInput";
 import { RowActionsMenu } from "./RowActionsMenu";
 import { formatCreatedAt } from "./format-created-at";
+import { OriginBadge } from "./ExecutionLocationPicker";
 
 // Session status -> i18n key for the right-edge Badge on chat rows. The feed
 // carries the RAW kernel status, so an abnormally-ended chat (a user interrupt
@@ -180,6 +181,8 @@ export const ActivityFeedList = ({
               <span className="truncate">{scopeText}</span>
             </span>
           )}
+          {/* Execution origin (multi-target editions; fan-out tags rows). */}
+          <OriginBadge origin={item.exec_origin} />
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-heading">
             {item.title}
           </span>

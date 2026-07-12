@@ -61,6 +61,7 @@ import {
   type MemberWithAgent,
   type TaskDetail,
   type TaskEvent,
+  recordEntityOrigin,
 } from "@valuz/core";
 import type { FileTreeNode } from "@valuz/ui";
 import { useProjectOutlet } from "@valuz/app/layout";
@@ -373,6 +374,15 @@ export const TaskDetailPage = () => {
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
   const selectedFileParam = searchParams.get("file");
+
+  // Deep-link origin fast path (multi-target editions): task links can carry
+  // ``?origin=cloud`` so every task-scoped call below routes to the owning
+  // backend without a probe. The edition adapter validates the value;
+  // single-target builds have no adapter -> no-op.
+  const originParam = searchParams.get("origin");
+  useEffect(() => {
+    if (originParam && taskId) recordEntityOrigin(taskId, originParam);
+  }, [originParam, taskId]);
 
   // revise-goal dialog (note dialog removed — backend wasn't reading
   // user_note events back into lead context, so the action was a no-op

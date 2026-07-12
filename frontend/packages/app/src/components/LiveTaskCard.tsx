@@ -28,6 +28,8 @@ import {
   useTranslation,
   type PlanSubtask,
   type TaskEvent,
+  getEntityOrigin,
+  recordEntityOrigin,
 } from "@valuz/core";
 import { Badge } from "@valuz/ui";
 
@@ -243,6 +245,13 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
     [scheduleRefetchPlan],
   );
 
+  // Seed the draft task's origin from its caller session BEFORE the event
+  // subscription below resolves its stream URL (multi-target editions).
+  useEffect(() => {
+    const sessionOrigin = getEntityOrigin(callerSessionId, "session");
+    if (sessionOrigin) recordEntityOrigin(taskId, sessionOrigin);
+  }, [taskId, callerSessionId]);
+
   useTaskEvents(taskId, handleEvent);
 
   const counts = useMemo(() => {
@@ -261,6 +270,10 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
     if (busy) return;
     setBusy("commit");
     try {
+      // A draft task minted inside a routed session lives on that session's
+      // backend — seed its origin before the first task-scoped call.
+      const sessionOrigin = getEntityOrigin(callerSessionId, "session");
+      if (sessionOrigin) recordEntityOrigin(taskId, sessionOrigin);
       await tasksApi.commit(taskId, { caller_session_id: callerSessionId });
     } catch (err) {
       console.warn("commit_task from LiveTaskCard failed", err);
