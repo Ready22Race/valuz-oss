@@ -70,7 +70,7 @@ export interface ExecutionLocationBarProps {
 const CHIP_CLASS =
   "flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs text-ink-body outline-none";
 const CHIP_INTERACTIVE_CLASS =
-  "cursor-default transition-colors hover:bg-surface-border focus-visible:bg-surface-border data-[state=open]:bg-surface-border";
+  "cursor-default transition-colors hover:bg-surface-border data-[state=open]:bg-surface-border";
 
 export function ExecutionLocationBar({
   targetId,
@@ -168,7 +168,11 @@ export function ExecutionLocationBar({
                 <ChevronDown className="h-3 w-3 shrink-0 text-ink-muted" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="min-w-[160px]">
+            <DropdownMenuContent
+              align="start"
+              className="min-w-[160px]"
+              onCloseAutoFocus={(e) => e.preventDefault()}
+            >
               {targets.map((target) => {
                 const Icon = targetIcon(target.id);
                 return (
@@ -209,7 +213,11 @@ export function ExecutionLocationBar({
               <ChevronDown className="h-3 w-3 shrink-0 text-ink-muted" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="min-w-[220px]">
+          <DropdownMenuContent
+            align="start"
+            className="min-w-[220px]"
+            onCloseAutoFocus={(e) => e.preventDefault()}
+          >
             <DropdownMenuItem
               onSelect={() => onProjectChange(null)}
               className="flex items-center gap-2"
