@@ -16,6 +16,7 @@ export function createFetchJson(getBase: () => string) {
     path: string,
     init?: RequestOptions,
   ): Promise<T> {
-    return requestJson<T>(path, { ...init, baseUrl: getBase() });
+    // Caller-supplied baseUrl wins (per-request routing); module default otherwise.
+    return requestJson<T>(path, { ...init, baseUrl: init?.baseUrl ?? getBase() });
   };
 }

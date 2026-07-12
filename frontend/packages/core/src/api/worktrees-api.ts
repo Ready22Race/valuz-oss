@@ -1,6 +1,7 @@
 import type { WorktreeListResponse } from "@valuz/shared";
 
 import { createFetchJson } from "./fetch-json";
+import { resolveApiBase } from "./base-resolver";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -11,6 +12,8 @@ export const setWorktreesApiBase = (url: string): void => {
 };
 
 const fetchJson = createFetchJson(() => _apiBase);
+const projectBase = (projectId: string): string =>
+  resolveApiBase({ projectId }, _apiBase);
 
 /**
  * Project worktrees — `/v1/projects/{id}/worktrees`. Git is the source of
@@ -22,6 +25,7 @@ export const worktreesApi = {
   list(projectId: string): Promise<WorktreeListResponse> {
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/worktrees`,
+      { baseUrl: projectBase(projectId) },
     );
   },
 
@@ -39,7 +43,7 @@ export const worktreesApi = {
     const qs = opts?.force ? "?force=true" : "";
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/worktrees/${encodeURIComponent(name)}${qs}`,
-      { method: "DELETE" },
+      { method: "DELETE", baseUrl: projectBase(projectId) },
     );
   },
 };

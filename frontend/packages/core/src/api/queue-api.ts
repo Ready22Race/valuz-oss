@@ -5,6 +5,7 @@
  * ``*-api`` modules (no OpenAPI codegen is wired today).
  */
 
+import { resolveApiBase } from "./base-resolver";
 import { createFetchJson } from "./fetch-json";
 
 let _apiBase =
@@ -44,6 +45,9 @@ export interface QueuedInputList {
 
 const fetchJson = createFetchJson(() => _apiBase);
 
+const sessionBase = (sessionId: string): string =>
+  resolveApiBase({ sessionId }, _apiBase);
+
 const enc = encodeURIComponent;
 const jsonInit = (method: string, body?: unknown): RequestInit => ({
   method,
@@ -53,7 +57,9 @@ const jsonInit = (method: string, body?: unknown): RequestInit => ({
 
 export const queueApi = {
   list(sessionId: string): Promise<QueuedInputList> {
-    return fetchJson<QueuedInputList>(`/v1/sessions/${enc(sessionId)}/queue`);
+    return fetchJson<QueuedInputList>(`/v1/sessions/${enc(sessionId)}/queue`, {
+      baseUrl: sessionBase(sessionId),
+    });
   },
 
   enqueue(
@@ -68,7 +74,7 @@ export const queueApi = {
     if (opts.modelId) body.model_id = opts.modelId;
     return fetchJson<QueuedInputList>(
       `/v1/sessions/${enc(sessionId)}/queue`,
-      jsonInit("POST", body),
+      { ...jsonInit("POST", body), baseUrl: sessionBase(sessionId) },
     );
   },
 
@@ -79,21 +85,21 @@ export const queueApi = {
   ): Promise<QueuedInputList> {
     return fetchJson<QueuedInputList>(
       `/v1/sessions/${enc(sessionId)}/queue/${enc(queueId)}`,
-      jsonInit("PATCH", { prompt }),
+      { ...jsonInit("PATCH", { prompt }), baseUrl: sessionBase(sessionId) },
     );
   },
 
   remove(sessionId: string, queueId: string): Promise<QueuedInputList> {
     return fetchJson<QueuedInputList>(
       `/v1/sessions/${enc(sessionId)}/queue/${enc(queueId)}`,
-      jsonInit("DELETE"),
+      { ...jsonInit("DELETE"), baseUrl: sessionBase(sessionId) },
     );
   },
 
   resume(sessionId: string): Promise<QueuedInputList> {
     return fetchJson<QueuedInputList>(
       `/v1/sessions/${enc(sessionId)}/queue/resume`,
-      jsonInit("POST"),
+      { ...jsonInit("POST"), baseUrl: sessionBase(sessionId) },
     );
   },
 
@@ -101,7 +107,7 @@ export const queueApi = {
   steer(sessionId: string, queueId: string): Promise<QueuedInputList> {
     return fetchJson<QueuedInputList>(
       `/v1/sessions/${enc(sessionId)}/queue/${enc(queueId)}/steer`,
-      jsonInit("POST"),
+      { ...jsonInit("POST"), baseUrl: sessionBase(sessionId) },
     );
   },
 };

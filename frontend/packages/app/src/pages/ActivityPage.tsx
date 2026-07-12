@@ -27,6 +27,7 @@ import {
 } from "@valuz/shared";
 import { ActivityFeedList } from "@valuz/app/components";
 import { useProjectOutlet } from "@valuz/app/layout";
+import { OriginBadge } from "../components/ExecutionLocationPicker";
 
 type SourceFilter = "all" | "chat" | "task" | "automation";
 
@@ -200,6 +201,8 @@ const RunningCard = ({
           {elapsed && (
             <span className="shrink-0 tabular-nums">· {elapsed}</span>
           )}
+          {/* Execution origin (multi-target editions). */}
+          <OriginBadge origin={run.exec_origin} />
         </span>
         {statusChip}
       </div>

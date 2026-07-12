@@ -442,7 +442,8 @@
     "worktreeBadgeHint": "此会话在独立的 git worktree 中运行。",
     "worktreeBadgeGone": "该 worktree 已被删除，下次发送消息时会自动重建。",
     "planLabel": "实施计划",
-    "enterPlanMode": "进入计划模式"
+    "enterPlanMode": "进入计划模式",
+    "execSelectProject": "选择项目（可选）"
   },
   "cron": {
     "actionColumn": "操作",
@@ -1078,7 +1079,16 @@
     "worktreeDiscard": "丢弃 worktree",
     "worktreeDiscardTitle": "丢弃此 worktree？",
     "worktreeDiscardDesc": "其中有 {dirty} 个未提交文件、{ahead} 个未合并提交。丢弃将永久删除该 worktree 目录及其分支。",
-    "worktreeDiscardUnknownDesc": "其状态无法核实。丢弃将永久删除该 worktree 目录及其分支。"
+    "worktreeDiscardUnknownDesc": "其状态无法核实。丢弃将永久删除该 worktree 目录及其分支。",
+    "execLocation": "运行位置",
+    "initialFiles": "初始文件（可选）",
+    "initialFilesHint": "云端项目使用托管工作目录；可选择一个本地文件夹作为初始内容上传。",
+    "pickFolder": "选择文件夹",
+    "initialFilesPicked": "已选 {count} 个文件",
+    "initialFilesTooLarge": "文件夹过大（超过 {maxFiles} 个文件或 {maxMb}MB），请精简后重试",
+    "initialFilesUploading": "正在上传初始文件…",
+    "initialFilesUploaded": "初始文件上传完成（{count} 个）",
+    "initialFilesFailed": "初始文件上传失败，可稍后在项目里重新上传"
   },
   "schedule": {
     "create": "创建定时任务",
@@ -1794,7 +1804,8 @@
     "starting": "启动中",
     "stopAutoScroll": "停止自动滚动到底部",
     "version": "版本",
-    "warnings": "{count} 个警告"
+    "warnings": "{count} 个警告",
+    "execTargetUnreachable": "部分服务暂时不可达（{targets}），列表可能不完整"
   },
   "time": {
     "day": "{count} 天",

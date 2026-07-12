@@ -1,5 +1,6 @@
 import type { EffortLevel } from "@valuz/shared";
 import { createFetchJson } from "./fetch-json";
+import { resolveApiBase } from "./base-resolver";
 import { invalidateRequestCache } from "./request";
 
 let _apiBase =
@@ -146,6 +147,8 @@ export interface ProposeAgentConfirmResult {
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
+const projectBase = (projectId: string): string =>
+  resolveApiBase({ projectId }, _apiBase);
 const AGENTS_TAG = "agents";
 const AGENTS_CACHE_TTL_MS = 30_000;
 const AGENTS_LIST_CACHE = { ttlMs: AGENTS_CACHE_TTL_MS, tags: [AGENTS_TAG] };
@@ -222,7 +225,7 @@ export const agentsApi = {
   listMembers(projectId: string): Promise<{ agents: MemberWithAgent[] }> {
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/agents`,
-      { cache: projectAgentsCache(projectId) },
+      { cache: projectAgentsCache(projectId), baseUrl: projectBase(projectId) },
     );
   },
 
@@ -237,6 +240,7 @@ export const agentsApi = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        baseUrl: projectBase(projectId),
       },
     );
     invalidateAgents(projectId);
@@ -253,6 +257,7 @@ export const agentsApi = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        baseUrl: projectBase(projectId),
       },
     );
     invalidateAgents(projectId);
@@ -271,6 +276,7 @@ export const agentsApi = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        baseUrl: resolveApiBase({ sessionId }, _apiBase),
       },
     );
     invalidateAgents(result.project_id);
@@ -280,7 +286,7 @@ export const agentsApi = {
   async deleteMember(projectId: string, agentSlug: string): Promise<void> {
     await fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentSlug)}`,
-      { method: "DELETE" },
+      { method: "DELETE", baseUrl: projectBase(projectId) },
     );
     invalidateAgents(projectId);
   },

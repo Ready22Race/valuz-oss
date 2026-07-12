@@ -1,3 +1,4 @@
+import { resolveApiBase } from "./base-resolver";
 import { createFetchJson } from "./fetch-json";
 
 let _apiBase =
@@ -189,12 +190,18 @@ export interface PlanWritePayload {
 
 const fetchJson = createFetchJson(() => _apiBase);
 
+const projectBase = (projectId: string): string =>
+  resolveApiBase({ projectId }, _apiBase);
+const taskBase = (taskId: string): string =>
+  resolveApiBase({ taskId }, _apiBase);
+
 export const tasksApi = {
   kickoff(projectId: string, payload: KickoffTaskPayload): Promise<Task> {
     return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: projectBase(projectId),
     });
   },
 
@@ -205,10 +212,10 @@ export const tasksApi = {
     // ``init`` (e.g. an ``AbortSignal`` for the project-detail auto-refresh
     // poller) is forwarded to ``fetchJson`` → ``fetch``. Existing callers pass
     // nothing, so their behaviour is unchanged.
-    return fetchJson(
-      `/v1/projects/${encodeURIComponent(projectId)}/tasks`,
-      init,
-    );
+    return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}/tasks`, {
+      ...init,
+      baseUrl: projectBase(projectId),
+    });
   },
 
   /** Global cross-project task list, newest activity first. Backs the
@@ -219,11 +226,15 @@ export const tasksApi = {
   },
 
   getTask(taskId: string): Promise<TaskDetail> {
-    return fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}`);
+    return fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}`, {
+      baseUrl: taskBase(taskId),
+    });
   },
 
   listEvents(taskId: string): Promise<{ events: TaskEvent[] }> {
-    return fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}/events`);
+    return fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}/events`, {
+      baseUrl: taskBase(taskId),
+    });
   },
 
   /** SSE endpoint URL for a task's event timeline. Subscribers connect with
@@ -232,7 +243,7 @@ export const tasksApi = {
    * is monotonic per task — no gaps possible). */
   eventsStreamUrl(taskId: string, afterSeq = 0): string {
     const cursor = afterSeq > 0 ? `?after_seq=${afterSeq}` : "";
-    return `${_apiBase}/v1/tasks/${encodeURIComponent(taskId)}/events/stream${cursor}`;
+    return `${taskBase(taskId)}/v1/tasks/${encodeURIComponent(taskId)}/events/stream${cursor}`;
   },
 
   intervene(taskId: string, payload: IntervenePayload): Promise<Task> {
@@ -240,6 +251,7 @@ export const tasksApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: taskBase(taskId),
     });
   },
 
@@ -257,6 +269,7 @@ export const tasksApi = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        baseUrl: projectBase(projectId),
       },
     );
   },
@@ -270,6 +283,7 @@ export const tasksApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: taskBase(taskId),
     });
   },
 
@@ -282,6 +296,7 @@ export const tasksApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: taskBase(taskId),
     });
   },
 
@@ -295,6 +310,7 @@ export const tasksApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: taskBase(taskId),
     });
   },
 
@@ -305,6 +321,7 @@ export const tasksApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: taskBase(taskId),
     });
   },
 
@@ -315,11 +332,14 @@ export const tasksApi = {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: taskBase(taskId),
     });
   },
 
   /** Read the plan snapshot + ready keys + counts + current_version. */
   getPlan(taskId: string): Promise<PlanResponse> {
-    return fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}/plan`);
+    return fetchJson(`/v1/tasks/${encodeURIComponent(taskId)}/plan`, {
+      baseUrl: taskBase(taskId),
+    });
   },
 };

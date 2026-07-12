@@ -8,6 +8,9 @@ export interface ProjectCardProps {
   name: string
   note: string
   href?: string
+  /** Optional trailing node on the name row — multi-target editions pass an
+   * execution-origin badge here. */
+  badge?: React.ReactNode
   onDelete?: () => void
   LinkComponent?: React.ComponentType<{
     to: string
@@ -20,6 +23,7 @@ export const ProjectCard: FC<ProjectCardProps> = ({
   name,
   note,
   href,
+  badge,
   onDelete,
   LinkComponent,
 }) => {
@@ -34,7 +38,10 @@ export const ProjectCard: FC<ProjectCardProps> = ({
           <FolderOpen className="h-4 w-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium text-ink-heading">{name}</div>
+          <div className="flex items-center gap-1.5">
+            <span className="truncate text-sm font-medium text-ink-heading">{name}</span>
+            {badge ?? null}
+          </div>
           <div className="mt-0.5 truncate text-xs text-ink-body">{note}</div>
         </div>
         {onDelete ? (

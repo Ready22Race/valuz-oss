@@ -77,6 +77,9 @@ export interface DesktopSidebarProjectGroup {
   /** This project's chats + tasks, newest first. The sidebar caps the
    *  visible count and offers a "show more" toggle. */
   items?: DesktopSidebarRecentItem[];
+  /** Replaces the default folder glyph — multi-target editions pass an
+   * execution-origin icon (local/cloud) here. */
+  icon?: ReactNode;
 }
 
 /** A task entry in the sidebar's "任务" section. Tasks are split out from
@@ -419,14 +422,26 @@ const ProjectRow = ({
             chevron column pushing the icon inward. A pinned (currently-open)
             project shows only the folder — no collapse chevron. */}
         <div className="relative flex h-4 w-4 items-center justify-start">
-          <FolderOpen
-            className={cn(
-              "h-3.5 w-3.5 shrink-0 text-ink-meta",
-              expandable && !pinned && "group-hover:opacity-0",
-            )}
-            strokeWidth={2}
-            aria-hidden="true"
-          />
+          {project.icon ? (
+            <span
+              className={cn(
+                "flex h-3.5 w-3.5 shrink-0 items-center justify-center text-ink-meta",
+                expandable && !pinned && "group-hover:opacity-0",
+              )}
+              aria-hidden="true"
+            >
+              {project.icon}
+            </span>
+          ) : (
+            <FolderOpen
+              className={cn(
+                "h-3.5 w-3.5 shrink-0 text-ink-meta",
+                expandable && !pinned && "group-hover:opacity-0",
+              )}
+              strokeWidth={2}
+              aria-hidden="true"
+            />
+          )}
           {expandable && !pinned && (
             <button
               type="button"
@@ -569,6 +584,9 @@ export interface DesktopSidebarRecentItem {
   /** ``true`` when the run is currently in the live ``running`` pool;
    * decorates the row with a brand-tinted pulsing dot. */
   isRunning?: boolean;
+  /** Optional icon rendered BEFORE the title — multi-target editions pass
+   * an execution-origin icon (local/cloud) here. */
+  leadingIcon?: ReactNode;
 }
 
 export interface DesktopSidebarProps {
@@ -767,6 +785,7 @@ export const DesktopSidebar = ({
             : "text-ink-meta hover:bg-surface-soft hover:text-ink-heading",
         )}
       >
+        {item.leadingIcon ?? null}
         <span className="min-w-0 flex-1 truncate">{item.title}</span>
         {(item.isRunning || showRowMenu) && (
           <span className="relative flex h-5 w-5 shrink-0 items-center justify-center">

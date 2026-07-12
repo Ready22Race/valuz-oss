@@ -442,7 +442,8 @@
     "worktreeBadgeHint": "This session runs in an isolated git worktree.",
     "worktreeBadgeGone": "Worktree removed — it will be recreated automatically on your next message.",
     "planLabel": "Implementation plan",
-    "enterPlanMode": "Entered plan mode"
+    "enterPlanMode": "Entered plan mode",
+    "execSelectProject": "Select a project (optional)"
   },
   "cron": {
     "actionColumn": "Actions",
@@ -1078,7 +1079,16 @@
     "worktreeDiscard": "Discard worktree",
     "worktreeDiscardTitle": "Discard this worktree?",
     "worktreeDiscardDesc": "It has {dirty} uncommitted file(s) and {ahead} unmerged commit(s). Discarding permanently deletes the worktree directory and its branch.",
-    "worktreeDiscardUnknownDesc": "Its state could not be verified. Discarding permanently deletes the worktree directory and its branch."
+    "worktreeDiscardUnknownDesc": "Its state could not be verified. Discarding permanently deletes the worktree directory and its branch.",
+    "execLocation": "Execution location",
+    "initialFiles": "Initial files (optional)",
+    "initialFilesHint": "Cloud projects use a managed working directory; optionally pick a local folder to upload as initial content.",
+    "pickFolder": "Choose folder",
+    "initialFilesPicked": "{count} files selected",
+    "initialFilesTooLarge": "Folder too large (over {maxFiles} files or {maxMb}MB) — trim it and retry",
+    "initialFilesUploading": "Uploading initial files…",
+    "initialFilesUploaded": "Initial files uploaded ({count})",
+    "initialFilesFailed": "Initial file upload failed — you can re-upload from the project later"
   },
   "schedule": {
     "create": "Create Schedule",
@@ -1794,7 +1804,8 @@
     "starting": "Starting",
     "stopAutoScroll": "Stop auto-scroll",
     "version": "Version",
-    "warnings": "{count} warnings"
+    "warnings": "{count} warnings",
+    "execTargetUnreachable": "Some services are unreachable ({targets}) — lists may be incomplete"
   },
   "time": {
     "day": "{count}d",

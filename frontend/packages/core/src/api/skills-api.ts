@@ -1,4 +1,5 @@
 import { createFetchJson } from "./fetch-json";
+import { resolveApiBase } from "./base-resolver";
 import { invalidateRequestCache } from "./request";
 
 let _apiBase =
@@ -205,8 +206,13 @@ export const skillsApi = {
     const qs = projectId
       ? `?project_id=${encodeURIComponent(projectId)}`
       : "";
+    // Project-scoped catalog follows the project's execution origin
+    // (multi-target editions); the global catalog stays on the default.
     return fetchJson(`/v1/skills${qs}`, {
       cache: skillsCatalogCache(projectId),
+      baseUrl: projectId
+        ? resolveApiBase({ projectId }, "") || undefined
+        : undefined,
     });
   },
 
@@ -214,7 +220,11 @@ export const skillsApi = {
     const qs = projectId
       ? `?project_id=${encodeURIComponent(projectId)}`
       : "";
-    return fetchJson(`/v1/skills/${encodeURIComponent(skillId)}${qs}`);
+    return fetchJson(`/v1/skills/${encodeURIComponent(skillId)}${qs}`, {
+      baseUrl: projectId
+        ? resolveApiBase({ projectId }, "") || undefined
+        : undefined,
+    });
   },
 
   async create(payload: SkillCreateRequest): Promise<SkillView> {

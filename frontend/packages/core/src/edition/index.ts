@@ -4,6 +4,9 @@ export * from "./personal-profile";
 export * from "./registries";
 export * from "./resolve";
 export * from "./branding";
+export * from "./execution-targets";
+export * from "./entity-origin";
+export * from "./list-fanout";
 export { hydrateOverlayIfPresent } from "./hydrate-overlay";
 
 import type { EditionProfile } from "./profile";
