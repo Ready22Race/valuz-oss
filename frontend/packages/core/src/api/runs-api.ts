@@ -1,4 +1,6 @@
 import { createFetchJson } from "./fetch-json";
+import { fanOutTargets, getListFanOutTargets } from "../edition/list-fanout";
+import { recordEntityOrigins } from "../edition/entity-origin";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -37,17 +39,49 @@ export interface RunSummary {
   model: string | null;
   runtime: string | null;
   updated_at: number;
+  /** CLIENT-side tag on multi-target editions: which execution target
+   * answered the row (e.g. "local"/"cloud"). Never sent by the server. */
+  exec_origin?: string;
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const runsApi = {
-  list(params?: {
+  async list(params?: {
     status?: "running" | "finished";
   }): Promise<{ runs: RunSummary[] }> {
     const qs = new URLSearchParams();
     if (params?.status) qs.set("status", params.status);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/runs${suffix}`);
+    // Multi-target editions: fan out + tag ``exec_origin`` + feed the origin
+    // index (session / task / project ids all ride on a run row). Zero
+    // targets (OSS) keeps the single-backend path unchanged.
+    if (getListFanOutTargets().length === 0) {
+      return fetchJson(`/v1/runs${suffix}`);
+    }
+    const outcome = await fanOutTargets((target) =>
+      fetchJson<{ runs: RunSummary[] }>(`/v1/runs${suffix}`, {
+        baseUrl: target.baseUrl,
+      }),
+    );
+    const seen = new Set<string>();
+    const merged: RunSummary[] = [];
+    for (const { target, value } of outcome.values) {
+      const entries: Array<[string, string]> = [];
+      for (const run of value.runs) {
+        entries.push([run.session_id, target.id]);
+        if (run.task_id) entries.push([run.task_id, target.id]);
+        if (run.project_id) entries.push([run.project_id, target.id]);
+      }
+      recordEntityOrigins(entries);
+      for (const run of value.runs) {
+        if (seen.has(run.session_id)) continue;
+        seen.add(run.session_id);
+        merged.push({ ...run, exec_origin: target.id });
+      }
+    }
+    // Interleave both backends by recency instead of target order.
+    merged.sort((a, b) => b.updated_at - a.updated_at);
+    return { runs: merged };
   },
 };

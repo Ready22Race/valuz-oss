@@ -27,6 +27,9 @@ export interface ActivityItem {
   project_name: string | null;
   /** Unix epoch ms — interleave key + the value inside the keyset cursor. */
   sort_at: number;
+  /** CLIENT-side tag on multi-target editions: which execution target
+   * answered the row (e.g. "local"/"cloud"). Never sent by the server. */
+  exec_origin?: string;
 }
 
 export interface ActivityPage {
@@ -38,18 +41,21 @@ export interface ActivityPage {
 const fetchJson = createFetchJson(() => _apiBase);
 
 export const activityApi = {
-  list(params: {
-    projectId?: string | null;
-    tab?: ActivityTab;
-    limit?: number;
-    cursor?: string | null;
-  }): Promise<ActivityPage> {
+  list(
+    params: {
+      projectId?: string | null;
+      tab?: ActivityTab;
+      limit?: number;
+      cursor?: string | null;
+    },
+    opts?: { baseUrl?: string },
+  ): Promise<ActivityPage> {
     const qs = new URLSearchParams();
     if (params.projectId) qs.set("project_id", params.projectId);
     if (params.tab) qs.set("tab", params.tab);
     if (params.limit) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/activity${suffix}`);
+    return fetchJson(`/v1/activity${suffix}`, { baseUrl: opts?.baseUrl });
   },
 };

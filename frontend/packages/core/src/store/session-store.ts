@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import type { SessionListItem } from "@valuz/shared";
 import { sessionsApi } from "../api/sessions-api";
+import { resolveApiBase } from "../api/base-resolver";
+import { getEntityOrigin, recordEntityOrigin } from "../edition/entity-origin";
 
 interface SessionStoreState {
   sessions: SessionListItem[];
@@ -135,10 +137,18 @@ export const useSessionStore = create<SessionStoreState>((set) => ({
     }),
 
   createSession: async (projectId: string, title?: string) => {
-    const detail = await sessionsApi.create({
-      project_id: projectId,
-      title,
-    });
+    // Project sessions follow the project's execution origin (multi-target
+    // editions; "" -> module default, unchanged for OSS single-backend).
+    const projectBaseUrl = resolveApiBase({ projectId }, "");
+    const detail = await sessionsApi.create(
+      {
+        project_id: projectId,
+        title,
+      },
+      projectBaseUrl ? { baseUrl: projectBaseUrl } : undefined,
+    );
+    const projectOrigin = getEntityOrigin(projectId, "project");
+    if (projectOrigin) recordEntityOrigin(detail.id, projectOrigin);
     const item: SessionListItem = {
       id: detail.id,
       project_id: detail.project_id,
