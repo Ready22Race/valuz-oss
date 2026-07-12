@@ -2961,6 +2961,9 @@ export const ConversationPage = () => {
             ? projectParam
             : null;
         setSelectedProjectId(presetProject ?? "chat-default");
+        // Preset project (e.g. home-page footer bar hand-off): same reveal
+        // rule as an in-page pick.
+        if (presetProject) panelSetCollapsed(false);
         setSessions([]);
         selectedSessionIdRef.current = null;
         setSelectedSessionId(null);
@@ -6070,6 +6073,9 @@ export const ConversationPage = () => {
                   // survive a project-scope change.
                   setSelectedComposerSkill(null);
                   setComposerTouched(true);
+                  // A project always has meaningful panel content (file
+                  // tree / KB / members) — reveal the right panel on pick.
+                  if (idOrNull) panelSetCollapsed(false);
                 }}
               />
             }
