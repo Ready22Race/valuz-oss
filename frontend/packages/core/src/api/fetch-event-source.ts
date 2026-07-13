@@ -96,6 +96,13 @@ export function fetchEventSource(
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (closed) {
+          // Belt and braces: the abort should already have rejected the
+          // read, but if the transport ignored it, stop parsing and drop
+          // the connection here instead of streaming into a closed sink.
+          void reader.cancel();
+          break;
+        }
         buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
         let sep: number;
         while ((sep = buf.indexOf("\n\n")) !== -1) {

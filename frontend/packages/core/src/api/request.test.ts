@@ -5,6 +5,7 @@ import {
   clearRequestCacheForTests,
   invalidateRequestCache,
   requestJson,
+  requestRaw,
 } from "./request";
 
 function jsonResponse(body: unknown, init?: ResponseInit): Response {
@@ -126,6 +127,30 @@ describe("request", () => {
     await vi.advanceTimersByTimeAsync(50);
 
     await assertion;
+  });
+
+  it("keeps a caller abort effective after the response headers arrive", async () => {
+    // SSE regression: ``fetch()`` resolves at headers, but the body streams
+    // on. A subscriber's close() (abort) issued AFTER that moment must still
+    // reach the underlying request, or the stream lingers as a zombie
+    // connection until the browser's 6-per-host pool starves.
+    let fetchSignal: AbortSignal | null | undefined;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      fetchSignal = init?.signal;
+      return new Response("", {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+
+    const controller = new AbortController();
+    await requestRaw("/v1/stream", {
+      baseUrl: "http://api.test",
+      signal: controller.signal,
+    });
+
+    controller.abort();
+    expect(fetchSignal?.aborted).toBe(true);
   });
 
   it("does not cache GET requests unless cache options are supplied", async () => {
