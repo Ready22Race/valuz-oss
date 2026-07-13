@@ -11,7 +11,9 @@
     "test:watch": "vitest --config vitest.config.ts",
     "test:e2e": "playwright test --config e2e/playwright.config.ts",
     "typecheck": "turbo run typecheck",
-    "lint": "turbo run lint",
+    "lint": "turbo run lint && pnpm design-audit",
+    "design-audit": "node scripts/design-audit.mjs",
+    "design-audit:update": "node scripts/design-audit.mjs --update-baseline",
     "clean": "turbo run clean"
   },
   "devDependencies": {
