@@ -66,10 +66,11 @@ def patched(tmp_path, monkeypatch):  # noqa: ANN001, ANN201
     monkeypatch.setattr(prefs, "get_memory_auto_extract", _true)
     monkeypatch.setattr(prefs, "get_memory_custom_instructions", _no_custom)
 
-    calls = {"create": 0, "run": 0, "delete": 0}
+    calls = {"create": 0, "run": 0, "delete": 0, "create_reqs": []}
 
-    async def _create(_uid, _req):  # noqa: ANN001, ANN202
+    async def _create(_uid, req):  # noqa: ANN001, ANN202
         calls["create"] += 1
+        calls["create_reqs"].append(req)
 
     async def _delete(_uid, _sid):  # noqa: ANN001, ANN202
         calls["delete"] += 1
@@ -120,6 +121,38 @@ def test_end_to_end_writes_memory(patched):
     asyncio.run(run_extraction_for_session("s1", "u1"))
     assert "user is an investor" in memory_store.read_entries("u1", "global")
     assert calls["create"] == 1 and calls["delete"] == 1
+
+
+def test_review_sessions_share_one_fixed_cwd(patched):
+    """Runtimes key per-project artifacts on the session cwd (claude-agent-sdk
+    keeps transcripts under ~/.claude/projects/<encoded-cwd>/). A per-call uuid
+    cwd leaked one such directory per extraction — the review cwd must be one
+    FIXED path, identical across extractions and free of the session id."""
+    monkeypatch, calls = patched
+    payload = json.dumps(
+        {"ops": [{"action": "add", "target": "global", "content": "user is an investor"}]}
+    )
+    long_text = (
+        "I'm an investor focused on semiconductors; reply in Chinese, keep answers "
+        "concise, and always cite primary sources rather than secondary research. "
+    ) * 2
+    _wire_session(
+        monkeypatch,
+        valuz={"locked_provider_id": "p1", "project_id": None},
+        messages=[
+            SimpleNamespace(
+                user_message=SimpleNamespace(text=long_text), assistant_message="Understood."
+            )
+        ],
+        assistant=payload,
+    )
+    asyncio.run(run_extraction_for_session("s1", "u1"))
+    asyncio.run(run_extraction_for_session("s1", "u1"))
+    reqs = calls["create_reqs"]
+    assert len(reqs) == 2
+    assert reqs[0].cwd == reqs[1].cwd
+    assert reqs[0].cwd.endswith("memory-review")
+    assert reqs[0].id not in reqs[0].cwd and reqs[1].id not in reqs[1].cwd
 
 
 def test_triviality_gate_skips_short(patched):

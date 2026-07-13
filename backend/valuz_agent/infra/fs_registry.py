@@ -610,6 +610,19 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    # ---- FS-13 — memory review scratch cwd (memory-system-design §7.2) ----
+    #
+    # ONE fixed cwd shared by every ephemeral extraction session. Runtimes key
+    # per-project artifacts on the session cwd (claude-agent-sdk keeps
+    # transcripts under ``~/.claude/projects/<encoded-cwd>/``), so a fresh cwd
+    # per review leaked one such directory per extraction. The review session
+    # is no-tools and never writes here — sharing is safe.
+
+    def memory_review_cwd(self, user_id: str) -> Path:
+        path = self.data_dir(user_id) / "memory-review"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
 
 fs_registry = FsRegistry()
 
