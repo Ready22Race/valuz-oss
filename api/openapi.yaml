@@ -597,6 +597,11 @@ paths:
   /v1/tasks/{task_id}:intervene:
     post:
       summary: User intervention on a task (note/revise_goal/pause/resume/stop)
+      description: >-
+        For action=resume, the optional `text` field carries a user
+        instruction that rides along with the resume — it is recorded as a
+        `user_inject` task event and embedded in the respawned lead's
+        recovery brief.
       operationId: interveneTask
       tags: [tasks]
       parameters:
@@ -3041,6 +3046,65 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /v1/notifications:
+    get:
+      summary: Open notifications + unread count (the unified attention ledger)
+      description: |
+        The single, backend-reconciled account of "things needing the user" —
+        questions (kind=question) and task failures (kind=task_failed) alike.
+        Supersedes /v1/decisions/* and the interim /v1/tasks/attention.
+      operationId: listNotifications
+      tags: [notifications]
+      responses:
+        "200":
+          description: Open notifications
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationListResponse"
+  /v1/notifications/stream:
+    get:
+      summary: SSE stream of notification changes (snapshot/added/updated/resolved)
+      operationId: streamNotifications
+      tags: [notifications]
+      responses:
+        "200":
+          description: SSE stream
+  /v1/notifications:read-all:
+    post:
+      summary: Mark all of the caller's notifications read
+      operationId: markAllNotificationsRead
+      tags: [notifications]
+      responses:
+        "200":
+          description: OK
+  /v1/notifications/{notification_id}:read:
+    post:
+      summary: Mark one notification read
+      operationId: markNotificationRead
+      tags: [notifications]
+      parameters:
+        - name: notification_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: OK
+  /v1/notifications/{notification_id}:dismiss:
+    post:
+      summary: Dismiss (resolve) one notification
+      operationId: dismissNotification
+      tags: [notifications]
+      parameters:
+        - name: notification_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: OK
+
 components:
   schemas:
     ArtifactCapabilities:
@@ -4082,6 +4146,34 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TaskEvent"
+    NotificationEntry:
+      type: object
+      required: [id, kind, title, body, action, urgency, payload, created_at]
+      properties:
+        id: {type: string}
+        kind: {type: string, description: "question | task_failed | …"}
+        title: {type: string}
+        body: {type: string}
+        route: {type: string, nullable: true}
+        action: {type: string, description: "answer | resume | none"}
+        urgency: {type: string, description: "actionable | info"}
+        task_id: {type: string, nullable: true}
+        project_id: {type: string, nullable: true}
+        session_id: {type: string, nullable: true}
+        pending_id: {type: string, nullable: true}
+        payload: {type: object, additionalProperties: true}
+        created_at: {type: integer, format: int64}
+        read_at: {type: integer, format: int64, nullable: true}
+        resolved_at: {type: integer, format: int64, nullable: true}
+    NotificationListResponse:
+      type: object
+      required: [entries, unread]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationEntry"
+        unread: {type: integer}
     InterveneRequest:
       type: object
       required: [action]

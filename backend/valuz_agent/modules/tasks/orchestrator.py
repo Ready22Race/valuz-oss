@@ -813,8 +813,11 @@ class TaskOrchestrator:
         *,
         actor: str = "user",
         user_id: str | None = None,
+        instruction: str | None = None,
     ) -> dict[str, Any]:
-        return await self._recovery.resume_task(task_id, project_id, actor=actor, user_id=user_id)
+        return await self._recovery.resume_task(
+            task_id, project_id, actor=actor, user_id=user_id, instruction=instruction
+        )
 
     async def stop_member(self, session_id: str, user_id: str | None = None) -> bool:
         return await self._recovery.stop_member(session_id, user_id=user_id)

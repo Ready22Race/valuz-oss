@@ -2,7 +2,7 @@ export * from "./agent-store";
 export * from "./app-store";
 export * from "./auth-store";
 export * from "./chat-store";
-export * from "./decision-store";
+export * from "./notification-store";
 export * from "./panel-store";
 export * from "./updater-store";
 export * from "./service-store";

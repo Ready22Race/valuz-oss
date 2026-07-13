@@ -32,6 +32,10 @@ export const DESKTOP_CHANNELS = {
   updaterShowWindow: "updater:show-window",
   updaterGetState: "updater:get-state",
   setMenuLocale: "set_menu_locale",
+  // Desktop notification bridge (task attention & reliability).
+  notify: "desktop_notify",
+  setBadgeCount: "desktop_set_badge_count",
+  bounce: "desktop_bounce",
 } as const;
 
 export const DESKTOP_EVENTS = {
@@ -43,4 +47,7 @@ export const DESKTOP_EVENTS = {
   updaterProgress: "updater:progress",
   updaterDownloaded: "updater:downloaded",
   updaterError: "updater:error",
+  // Fired when the user clicks a native notification — payload carries the
+  // in-app route the renderer should navigate to.
+  notificationClicked: "notification-clicked",
 } as const;

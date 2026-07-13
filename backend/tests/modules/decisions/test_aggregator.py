@@ -26,7 +26,7 @@ from valuz_agent.infra.database import Base
 from valuz_agent.modules.decisions.aggregator import DecisionAggregator
 from valuz_agent.modules.decisions.service import enrich_pending
 from valuz_agent.modules.projects.models import ProjectRow
-from valuz_agent.modules.tasks.models import TaskRow, TaskSessionRow
+from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
 
 @pytest.fixture
@@ -41,6 +41,7 @@ def db_factory(tmp_path, monkeypatch):
         tables=[
             TaskRow.__table__,
             TaskSessionRow.__table__,
+            TaskEventRow.__table__,
             ProjectRow.__table__,
         ],
     )
@@ -264,6 +265,73 @@ def test_remove_entry_on_action_resolved(db_factory) -> None:
     assert len(_snap(agg, "local-test-owner")) == 1
     _handle(agg, "local-test-owner", "sub-sess", _resolved_event())
     assert _snap(agg, "local-test-owner") == []
+
+
+def _task_events(db_factory, task_id="t1"):
+    from sqlalchemy import select
+
+    db = db_factory()
+    try:
+        return list(
+            db.execute(
+                select(TaskEventRow)
+                .filter_by(task_id=task_id)
+                .order_by(TaskEventRow.sequence)
+            )
+            .scalars()
+            .all()
+        )
+    finally:
+        db.close()
+
+
+def test_requires_action_emits_awaiting_user_task_event(db_factory) -> None:
+    """A task-driven question mirrors onto the task's OWN timeline as an
+    ``awaiting_user`` event (so the task page isn't stuck showing "Running"
+    while it's actually blocked on the user), with the question text + a
+    ``pending_id`` for dedup/correlation."""
+    _seed(db_factory)
+    agg = DecisionAggregator()
+    _prep(agg, _subtask_session())
+    _handle(agg, "local-test-owner", "sub-sess", _requires_action_event())
+
+    evs = _task_events(db_factory)
+    awaiting = [e for e in evs if e.type == "awaiting_user"]
+    assert len(awaiting) == 1
+    assert awaiting[0].payload["pending_id"] == "p1"
+    assert awaiting[0].payload["question"] == "棋盘布局选哪种？"
+    assert awaiting[0].payload["subtask_key"] == "arch-design"
+    assert awaiting[0].session_id == "sub-sess"
+
+
+def test_awaiting_user_task_event_deduped_on_reemit(db_factory) -> None:
+    """The kernel re-emits ``requires_action`` (it doesn't dedupe); the task
+    timeline must NOT gain a second ``awaiting_user`` row for the same
+    pending_id."""
+    _seed(db_factory)
+    agg = DecisionAggregator()
+    _prep(agg, _subtask_session())
+    _handle(agg, "local-test-owner", "sub-sess", _requires_action_event())
+    _handle(agg, "local-test-owner", "sub-sess", _requires_action_event())
+
+    awaiting = [e for e in _task_events(db_factory) if e.type == "awaiting_user"]
+    assert len(awaiting) == 1
+
+
+def test_action_resolved_emits_user_answered_task_event(db_factory) -> None:
+    """Resolving the question appends a matching ``user_answered`` event
+    (the awaiting/answered pair bookends the wait on the timeline)."""
+    _seed(db_factory)
+    agg = DecisionAggregator()
+    _prep(agg, _subtask_session())
+    _handle(agg, "local-test-owner", "sub-sess", _requires_action_event())
+    _handle(agg, "local-test-owner", "sub-sess", _resolved_event())
+
+    types = [e.type for e in _task_events(db_factory)]
+    assert "awaiting_user" in types
+    assert "user_answered" in types
+    answered = [e for e in _task_events(db_factory) if e.type == "user_answered"]
+    assert answered[0].payload["pending_id"] == "p1"
 
 
 # ---- subscriber fan-out ---------------------------------------------

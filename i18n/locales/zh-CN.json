@@ -2324,11 +2324,17 @@
       "subtaskReviewApproveReason": "✓ 审核通过：{feedback}",
       "subtaskReviewRework": "⚠ 打回重做：{feedback}",
       "subtaskReviewReworkNoFeedback": "⚠ 打回重做",
-      "leadWorking": "Lead 正在执行…"
+      "leadWorking": "Lead 正在执行…",
+      "userInject": "用户指令",
+      "awaitingUser": "等待用户回答",
+      "userAnswered": "用户已回答"
     },
     "viewSession": "查看会话 →",
     "needsConfirm": "需要你确认",
-    "goConfirm": "去确认"
+    "goConfirm": "去确认",
+    "resumePlaceholder": "补充说明或新的指示，回车恢复任务（可留空直接恢复）",
+    "resumeWithInstruction": "发送并恢复",
+    "awaitingUserChip": "等待你确认"
   },
   "marketplace": {
     "title": "市场",
@@ -2468,5 +2474,19 @@
     "templatesCount": "{count} 个模板",
     "add": "添加",
     "added": "已添加"
+  },
+  "notification": {
+    "notifQuestionTitle": "{agent} 需要你确认",
+    "notifFailureTitle": "任务受阻",
+    "notifFailureBody": "{task} 需要你处理",
+    "inboxTitle": "通知",
+    "emptyTitle": "没有待处理的通知",
+    "emptyHint": "有人问你、或任务受阻时会出现在这里",
+    "badgeTooltip": "{count} 项待处理",
+    "kindQuestion": "待回答",
+    "kindFailure": "任务受阻",
+    "resume": "恢复任务",
+    "dismiss": "忽略",
+    "openTask": "查看任务"
   }
 }

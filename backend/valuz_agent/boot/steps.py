@@ -596,6 +596,12 @@ async def start_automation_runner(app: FastAPI) -> None:
     # (ADR-011) keeps DB access safe.
     await automation_failure_monitor.startup()
 
+    # Task watchdog: detect a lead that died without finalizing (the hole boot
+    # recovery can't see mid-process) → mark blocked so it surfaces + resumes.
+    from valuz_agent.modules.tasks.health_monitor import task_health_monitor
+
+    await task_health_monitor.startup()
+
     if not _startup_user_content_enabled():
         logger.info("startup user-content initialization disabled; docs/skills scanners skipped")
         return
@@ -765,7 +771,9 @@ async def stop_automation_runner(app: FastAPI) -> None:
     from valuz_agent.modules.automations.in_process_runner import (
         automation_runner,
     )
+    from valuz_agent.modules.tasks.health_monitor import task_health_monitor
 
+    await task_health_monitor.shutdown()
     await automation_failure_monitor.shutdown()
     await automation_runner.shutdown()
 
@@ -802,6 +810,11 @@ async def stop_decision_aggregator(app: FastAPI) -> None:
     agg = getattr(app.state, "decision_aggregator", None)
     if agg is not None:
         await agg.stop()
+    # Close any open notification SSE streams cleanly (the ledger itself is
+    # durable — nothing to flush, just release subscribers).
+    from valuz_agent.modules.notifications.service import notification_service
+
+    await notification_service.stop()
 
 
 def mark_boot_complete() -> None:
