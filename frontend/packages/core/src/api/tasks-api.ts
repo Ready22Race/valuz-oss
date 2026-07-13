@@ -241,10 +241,14 @@ export const tasksApi = {
   /** SSE endpoint URL for a task's event timeline. Subscribers connect with
    * ``fetchEventSource(() => eventsStreamUrl(id, lastSeq), …)`` and remember the
    * last received ``sequence`` so a reconnect resumes from the cursor (cursor
-   * is monotonic per task — no gaps possible). */
-  eventsStreamUrl(taskId: string, afterSeq = 0): string {
-    const cursor = afterSeq > 0 ? `?after_seq=${afterSeq}` : "";
-    return `${taskBase(taskId)}/v1/tasks/${encodeURIComponent(taskId)}/events/stream${cursor}`;
+   * is monotonic per task — no gaps possible). ``keepAlive`` asks the server
+   * not to terminal-close the stream of a finished task (``stream_end``). */
+  eventsStreamUrl(taskId: string, afterSeq = 0, keepAlive = false): string {
+    const params = new URLSearchParams();
+    if (afterSeq > 0) params.set("after_seq", String(afterSeq));
+    if (keepAlive) params.set("keep_alive", "1");
+    const qs = params.toString();
+    return `${taskBase(taskId)}/v1/tasks/${encodeURIComponent(taskId)}/events/stream${qs ? `?${qs}` : ""}`;
   },
 
   intervene(taskId: string, payload: IntervenePayload): Promise<Task> {

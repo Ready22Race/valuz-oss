@@ -116,7 +116,7 @@ export function ExecutionLocationBar({
   const locationChipBody =
     effectiveTarget && LocationIcon ? (
       <>
-        <LocationIcon className="h-3.5 w-3.5 shrink-0 text-ink-meta" />
+        <LocationIcon className="h-3.5 w-3.5 shrink-0" />
         <span className="max-w-[120px] truncate">
           {t(effectiveTarget.labelKey as TK)}
         </span>
@@ -125,7 +125,12 @@ export function ExecutionLocationBar({
 
   const projectChipBody = (
     <>
-      <FolderOpen className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
+      <FolderOpen
+        className={cn(
+          "h-3.5 w-3.5 shrink-0",
+          selectedProject || locked ? "text-ink-heading" : "text-ink-muted",
+        )}
+      />
       <span
         className={cn(
           "max-w-[220px] truncate",
@@ -241,7 +246,7 @@ export function ExecutionLocationBar({
                 onSelect={() => onProjectChange(project.id)}
                 className="flex items-center gap-2"
               >
-                <FolderOpen className="h-4 w-4 shrink-0 text-ink-muted" />
+                <FolderOpen className="h-4 w-4 shrink-0" />
                 <span className="min-w-0 flex-1 truncate text-sm">
                   {project.name}
                 </span>

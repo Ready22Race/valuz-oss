@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING
 
 from valuz_agent.infra.db_urls import (
     db_url_async,
-    is_sqlite_runtime,
     kernel_db_url,
     kernel_db_url_async,
     sqlite_path_from_url,
@@ -258,7 +257,6 @@ async def init_kernel_dependencies() -> None:
     configures the data service purely via env vars, loaded at boot.
     """
     _set_kernel_env()
-    import app.dependencies as kernel_deps
     from app.config import AppConfig
     from app.dependencies import init_dependencies
 
@@ -268,30 +266,13 @@ async def init_kernel_dependencies() -> None:
     # explicitly (host → kernel_client → route → store), so there is nothing to
     # fall back to. Reads/writes that reach the kernel always carry an owner.
 
-    # The kernel's engine factory (kernel/src/adapters/sqlalchemy_store/engine.py)
-    # sets journal_mode=WAL but NOT busy_timeout, so kernel connections run with
-    # SQLite's default busy_timeout=0. The kernel is the highest-frequency writer
-    # during a turn (every coalesced event delta), so with timeout 0 it raises
-    # "database is locked" *instantly* the moment the host's sync engine holds the
-    # write lock — no wait, no retry. The host engine was hardened to 15s
-    # (infra/database) but this kernel half of the SAME file was not, which is the
-    # real source of the dispatch/scheduler lock storms. Attach the missing PRAGMA
-    # to the kernel engine here (at the host seam), then dispose the pool so live
-    # connections reconnect with it. The tidier home is the kernel's engine
-    # factory — fold busy_timeout in there when next touching it.
-    if is_sqlite_runtime() and getattr(kernel_deps, "_engine", None) is not None:
-        from sqlalchemy import event as _sa_event
-
-        kernel_engine = kernel_deps._engine
-
-        @_sa_event.listens_for(kernel_engine.sync_engine, "connect")
-        def _kernel_busy_timeout(dbapi_conn, _connection_record):  # type: ignore[no-untyped-def]
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA busy_timeout=15000")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.close()
-
-        await kernel_engine.dispose()
+    # busy_timeout=15000 + synchronous=NORMAL now live in the kernel's engine
+    # factory (kernel/src/adapters/sqlalchemy_store/engine.py), so BOTH kernel
+    # engines — the local kernel.db engine AND the durable engine on the host's
+    # valuz.db — connect hardened. The former host-seam patch here only covered
+    # the local engine, leaving the durable engine (the highest-frequency
+    # valuz.db writer during a turn) at busy_timeout=0 — the source of the
+    # turn-time lock storms that starved every read endpoint.
 
 
 async def shutdown_kernel_dependencies() -> None:
