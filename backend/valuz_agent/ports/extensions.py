@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from valuz_agent.api.middleware import AuthMiddleware
+from valuz_agent.infra.asset_store import AssetStore, LocalAssetStore
 from valuz_agent.infra.fs_registry import fs_registry
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
@@ -66,23 +67,21 @@ class Extensions:
         # overlay swaps in a Redis-backed cache for the shared multi-process
         # backend.
         self.cache: CachePort = FileCache(fs_registry.cache_dir())
+        # Owner-scoped byte/blob store. The OSS desktop build keeps the
+        # existing on-disk layout under the local data root; shared deployments
+        # can swap this with an object-store-backed implementation.
+        self.asset_store: AssetStore = LocalAssetStore(fs_registry.shared_root())
         # The request auth middleware as a ``(cls, kwargs)`` tuple. Defaults to
         # the OSS ``AuthMiddleware``; the commercial overlay swaps in a subclass
         # (e.g. one that publishes extra per-request ContextVars with a reset
         # boundary). The app factory mounts ``cls`` — instantiated by Starlette
         # as ``cls(app, **kwargs)`` — so ``kwargs`` carries any constructor deps.
         self.auth_middleware: tuple[type, dict[str, Any]] = (AuthMiddleware, {})
-        # Optional runtime-availability override (design §3.3). OSS default None →
-        # ``GET /v1/runtimes`` asks the kernel. A deployment that guarantees its
-        # execution image's runtime set (e.g. a controlled cloud sandbox) binds a
-        # provider to declare availability without a per-user sandbox probe.
+        # Optional runtime-availability override. OSS asks the kernel; managed
+        # deployments may bind a provider for their controlled runtime image.
         self.runtime_availability: RuntimeAvailabilityPort | None = None
-        # Optional deployment-level instruction extensions (aggregate port —
-        # today just the global session-prompt preamble; future instruction
-        # kinds extend the same Protocol). OSS default None → sessions start
-        # with the agent's own instructions. An overlay binds a provider to
-        # prepend platform-level guidance (e.g. org policy) as the first
-        # prompt section of every chat/project AND task lead/member session.
+        # Optional deployment-level instruction extensions. OSS leaves this
+        # unbound so sessions start with the agent's own instructions.
         self.instructions: InstructionsPort | None = None
 
 
