@@ -4970,6 +4970,13 @@ export const ConversationPage = () => {
     const jump = () => {
       const node = scrollContainerRef.current;
       if (cancelled || !node) return;
+      // The burst exists to survive the multi-frame settle of the initial
+      // transcript paint — not to fight the user. Once a real scroll gesture
+      // has landed (wheel/keydown/touchmove; the ref resets on session
+      // switch), the user owns the viewport: a late timer (up to 1s) yanking
+      // them back to the bottom reads as the page "snapping away" from the
+      // history they just scrolled up to.
+      if (userScrolledRef.current) return;
       node.scrollTop = node.scrollHeight;
       setShowScrollBottom(false);
     };
