@@ -11,8 +11,9 @@ export const setMarketplaceApiBase = (url: string): void => {
 const fetchJson = createFetchJson(() => _apiBase);
 
 /** Mirrors ``api/openapi.yaml`` → Marketplace* schemas (hand-synced). */
-export type MarketplaceItemType = "skill" | "agent_template" | "agent_team_template";
-export type MarketplaceSource = "skillhub" | "valuz_official";
+export type MarketplaceItemType =
+  "skill" | "agent_template" | "agent_team_template" | "connector";
+export type MarketplaceSource = "skillhub" | "valuz_official" | "modelscope";
 export type MarketplaceBadge =
   | "free_install"
   | "requires_api_key"
@@ -25,17 +26,16 @@ export type MarketplaceBadge =
 export type MarketplaceInstallTarget =
   | "skill_library"
   | "agent_library"
-  | "agent_library_project";
+  | "agent_library_project"
+  | "connector_library";
 export type MarketplaceConnectorRequirementKind =
-  | "required"
-  | "optional"
-  | "api_key"
-  | "cost";
+  "required" | "optional" | "api_key" | "cost";
 
 export interface MarketplaceStats {
   downloads?: number | null;
   stars?: number | null;
   installs?: number | null;
+  views?: number | null;
 }
 
 export interface MarketplaceTeamMember {
@@ -49,6 +49,32 @@ export interface MarketplaceTeamMember {
 export interface MarketplaceConnectorRequirement {
   name: string;
   requirement: MarketplaceConnectorRequirementKind;
+}
+
+export interface MarketplaceConnectorConfigField {
+  key: string;
+  name: string;
+  target: "env" | "header" | "param";
+  label: string;
+  required: boolean;
+  secret: boolean;
+  placeholder?: string | null;
+  prefix?: string | null;
+}
+
+export interface MarketplaceConnectorConfig {
+  slug: string;
+  transport: "stdio" | "http" | "sse";
+  url?: string | null;
+  command?: string | null;
+  args: string[];
+  env: Record<string, string>;
+  headers: Record<string, string>;
+  params: Record<string, string>;
+  auth_type: "none" | "bearer" | "oauth";
+  fields: MarketplaceConnectorConfigField[];
+  supported: boolean;
+  unsupported_reason?: string | null;
 }
 
 export interface MarketplaceFileEntry {
@@ -70,7 +96,8 @@ export interface MarketplaceSecurityReport {
 }
 
 export interface MarketplaceEvaluationDimension {
-  key: "trust" | "reliability" | "adaptability" | "convention" | "effectiveness";
+  key:
+    "trust" | "reliability" | "adaptability" | "convention" | "effectiveness";
   code: "T" | "R" | "A" | "C" | "E";
   label: string;
   score?: number | null;
@@ -123,6 +150,10 @@ export interface MarketplaceItemDetail extends MarketplaceItem {
   files?: MarketplaceFileEntry[] | null;
   security?: MarketplaceSecurityReport | null;
   evaluation?: MarketplaceEvaluationReport | null;
+  connector_config?: MarketplaceConnectorConfig | null;
+  /** Opaque, type-varies-by-`type` install payload from the market index.
+   * Not consumed by the frontend — carried for type parity with the backend. */
+  install_manifest?: Record<string, unknown> | null;
 }
 
 export interface MarketplaceItemList {
@@ -130,7 +161,7 @@ export interface MarketplaceItemList {
   total: number;
   page: number;
   page_size: number;
-  /** True when SkillHub was unreachable and results are official-only. */
+  /** True when the market index was unreachable and results are empty/partial. */
   degraded: boolean;
 }
 
@@ -170,7 +201,9 @@ export interface MarketplaceListParams {
 }
 
 export const marketplaceApi = {
-  categories(kind: "skill" | "agent"): Promise<MarketplaceCategoryList> {
+  categories(
+    kind: "skill" | "agent" | "connector",
+  ): Promise<MarketplaceCategoryList> {
     return fetchJson(`/v1/marketplace/categories?kind=${kind}`);
   },
 
@@ -191,8 +224,11 @@ export const marketplaceApi = {
   },
 
   install(itemId: string): Promise<MarketplaceInstallResult> {
-    return fetchJson(`/v1/marketplace/items/${encodeURIComponent(itemId)}:install`, {
-      method: "POST",
-    });
+    return fetchJson(
+      `/v1/marketplace/items/${encodeURIComponent(itemId)}:install`,
+      {
+        method: "POST",
+      },
+    );
   },
 };

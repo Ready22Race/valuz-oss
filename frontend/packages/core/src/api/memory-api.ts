@@ -7,6 +7,7 @@
  */
 
 import { createFetchJson } from "./fetch-json";
+import { resolveApiBase } from "./base-resolver";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -44,6 +45,10 @@ export interface MemorySettingsPatch {
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
+// Project memory follows the project's execution origin (multi-target
+// editions); no project id / unknown id -> module default.
+const maybeProjectBase = (projectId?: string): string | undefined =>
+  projectId ? resolveApiBase({ projectId }, "") || undefined : undefined;
 
 const jsonInit = (method: string, body: unknown): RequestInit => ({
   method,
@@ -54,7 +59,9 @@ const jsonInit = (method: string, body: unknown): RequestInit => ({
 export const memoryApi = {
   getMemory(projectId?: string): Promise<MemoryView> {
     const q = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
-    return fetchJson<MemoryView>(`/v1/memory${q}`);
+    return fetchJson<MemoryView>(`/v1/memory${q}`, {
+      baseUrl: maybeProjectBase(projectId),
+    });
   },
 
   patchSettings(payload: MemorySettingsPatch): Promise<MemorySettings> {
@@ -69,13 +76,19 @@ export const memoryApi = {
     old_text: string;
     project_id?: string;
   }): Promise<MemoryView> {
-    return fetchJson<MemoryView>("/v1/memory/entry", jsonInit("DELETE", payload));
+    return fetchJson<MemoryView>("/v1/memory/entry", {
+      ...jsonInit("DELETE", payload),
+      baseUrl: maybeProjectBase(payload.project_id),
+    });
   },
 
   clearScope(payload: {
     target: MemoryTarget;
     project_id?: string;
   }): Promise<MemoryView> {
-    return fetchJson<MemoryView>("/v1/memory/scope", jsonInit("DELETE", payload));
+    return fetchJson<MemoryView>("/v1/memory/scope", {
+      ...jsonInit("DELETE", payload),
+      baseUrl: maybeProjectBase(payload.project_id),
+    });
   },
 };

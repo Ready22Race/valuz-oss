@@ -1,4 +1,5 @@
 import { createFetchJson } from "./fetch-json";
+import { resolveApiBase } from "./base-resolver";
 import { invalidateRequestCache } from "./request";
 
 let _apiBase =
@@ -218,8 +219,13 @@ export const skillsApi = {
       qs.set("library_enabled", String(options.libraryEnabled));
     }
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    // Project-scoped catalog follows the project's execution origin
+    // (multi-target editions); the global catalog stays on the default.
     return fetchJson(`/v1/skills${suffix}`, {
       cache: skillsCatalogCache(projectId, options),
+      baseUrl: projectId
+        ? resolveApiBase({ projectId }, "") || undefined
+        : undefined,
     });
   },
 
@@ -227,7 +233,11 @@ export const skillsApi = {
     const qs = projectId
       ? `?project_id=${encodeURIComponent(projectId)}`
       : "";
-    return fetchJson(`/v1/skills/${encodeURIComponent(skillId)}${qs}`);
+    return fetchJson(`/v1/skills/${encodeURIComponent(skillId)}${qs}`, {
+      baseUrl: projectId
+        ? resolveApiBase({ projectId }, "") || undefined
+        : undefined,
+    });
   },
 
   async create(payload: SkillCreateRequest): Promise<SkillView> {
@@ -461,10 +471,6 @@ export const skillsApi = {
   // Project skill *binding* (scan / setSkillState / overwrite) removed —
   // skills bind on the Agent now (08-agents-module). ``projectCatalog``
   // above stays: it feeds the conversation composer's skill-insert chips.
-
-  eventsStreamUrl(): string {
-    return `${_apiBase}/v1/skills/events/stream`;
-  },
 
   // Scenario B — AI 创建 Skill (chat-driven authoring) ──────────────────
 

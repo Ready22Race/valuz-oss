@@ -1,4 +1,5 @@
 import { createFetchJson } from "./fetch-json";
+import { resolveApiBase } from "./base-resolver";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -125,6 +126,8 @@ export interface DocsHealth {
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
+const projectBase = (projectId: string): string =>
+  resolveApiBase({ projectId }, _apiBase);
 
 const jsonPost = (body: unknown): RequestInit => ({
   method: "POST",
@@ -272,22 +275,25 @@ export const docsApi = {
 
 export const bindingApi = {
   list(projectId: string): Promise<{ bindings: BindingItem[] }> {
-    return fetchJson(`/v1/projects/${projectId}/kb-bindings`);
+    return fetchJson(`/v1/projects/${projectId}/kb-bindings`, {
+      baseUrl: projectBase(projectId),
+    });
   },
 
   update(
     projectId: string,
     bindings: Array<{ binding_kind: string; target_id: string }>,
   ): Promise<{ bindings: BindingItem[] }> {
-    return fetchJson(
-      `/v1/projects/${projectId}/kb-bindings`,
-      jsonPut({ bindings }),
-    );
+    return fetchJson(`/v1/projects/${projectId}/kb-bindings`, {
+      ...jsonPut({ bindings }),
+      baseUrl: projectBase(projectId),
+    });
   },
 
   removeAll(projectId: string): Promise<{ ok: boolean }> {
     return fetchJson(`/v1/projects/${projectId}/kb-bindings`, {
       method: "DELETE",
+      baseUrl: projectBase(projectId),
     });
   },
 };

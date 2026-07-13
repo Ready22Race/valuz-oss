@@ -218,9 +218,7 @@ class AgentService:
             runtime_provider=row.runtime,
             instructions=row.instructions,
             skills=tuple(row.skills or []),
-            mcp_servers=await self._resolve_mcp_servers(
-                connector_bindings, user_id=owner_user_id
-            ),
+            mcp_servers=await self._resolve_mcp_servers(connector_bindings, user_id=owner_user_id),
             permission_mode="full_access",
             effort=row.effort or None,
             metadata=metadata,
@@ -341,6 +339,20 @@ class AgentService:
         await _before_agent_delete_hook(user_id, existing)
         if not await self._agents.delete(user_id, slug):
             raise AgentNotFoundError(slug)
+        await self._cleanup_marketplace_install(user_id, slug)
+
+    async def _cleanup_marketplace_install(self, user_id: str, slug: str) -> None:
+        """Best-effort marketplace provenance cleanup for a deleted agent —
+        see the identical hook in ``modules/skills/service.py`` for the
+        rationale. Never blocks the delete itself (a narrow-schema test
+        engine without the ``marketplace_install`` table, or any storage
+        hiccup, is swallowed)."""
+        try:
+            from valuz_agent.modules.marketplace.install_store import MarketplaceInstallStore
+
+            await MarketplaceInstallStore(self._db).remove_by_ref(user_id, slug)
+        except Exception:  # noqa: BLE001 — best-effort; missing provenance is harmless
+            logger.warning("marketplace install cleanup failed for agent %s", slug, exc_info=True)
 
     # ------------------------------------------------------------------
     # Member list
@@ -490,7 +502,7 @@ class AgentService:
                 "connector_types": connector_types,
                 "provider_id": provider_id,
                 "effort": effort,
-            }
+            },
         )
         return await self.deploy_agent(
             user_id,

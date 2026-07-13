@@ -1,10 +1,18 @@
-"""MarketplaceService — normalization + install orchestration over fakes.
+"""MarketplaceService — index pass-through + install orchestration.
 
-No network, no DB: the SkillHub client, skill datastore/service, agent and
-pack services are all replaced with in-memory fakes exposing exactly the
-methods the service consumes. Covers the normalized item shape, the curated
-category allowlist, graceful SkillHub degradation, and every install path's
-idempotency contract.
+No network, no DB: the market index client, skill/agent/pack/connector
+services, and the install-provenance store are all replaced with in-memory
+fakes exposing exactly the methods the service consumes. Covers:
+
+- category/item/detail pass-through, Pydantic-validated from the index's raw
+  payload, with ``installed`` recomputed against local library state;
+- the degraded matrix (index outage → empty+degraded for list/categories,
+  ``MarketplaceUpstreamError`` for detail/install);
+- the three ``market:*`` install dispatch paths (skill / agent_template /
+  agent_team_template) and their provenance writes, including the
+  "reinstalling an already-installed item still records provenance" rule;
+- legacy (``valuz:*`` / ``skillhub:*`` / ``modelscope:*``) and malformed ids
+  404ing instead of resolving locally.
 """
 
 from __future__ import annotations
@@ -14,107 +22,93 @@ from typing import Any
 
 import pytest
 
+from valuz_agent.infra.config import settings
 from valuz_agent.modules.agents.service import MemberAlreadyExistsError
 from valuz_agent.modules.marketplace.errors import (
     MarketplaceItemNotFound,
     MarketplaceUpstreamError,
 )
-from valuz_agent.modules.marketplace.service import (
-    CURATED_SKILL_CATEGORIES,
-    MarketplaceInstallResult,
-    MarketplaceService,
-)
-from valuz_agent.modules.marketplace.skillhub import SkillHubUnavailableError
+from valuz_agent.modules.marketplace.market_index import MarketIndexUnavailableError
+from valuz_agent.modules.marketplace.service import MarketplaceService
+from valuz_agent.modules.packs_common.manifest import PackManifest
 from valuz_agent.modules.skills.errors import SkillImportFailed
 
 USER = "user-1"
 
 
-def _hub_skill(slug: str, **overrides: Any) -> dict[str, Any]:
+def _item(
+    item_id: str,
+    *,
+    type_: str,
+    source_ref: str,
+    source: str = "valuz_official",
+    install_target: str = "skill_library",
+    **overrides: Any,
+) -> dict[str, Any]:
     base: dict[str, Any] = {
-        "slug": slug,
-        "name": slug.title(),
-        "description": f"{slug} description",
-        "description_zh": f"{slug} 描述",
-        "iconUrl": f"https://cdn.example/{slug}.png",
-        "category": "data-analysis",
-        "subCategories": [{"key": "data-insight", "name": "数据洞察"}],
-        "downloads": 100,
-        "stars": 5,
-        "installs": 10,
-        "version": "1.0.0",
-        "source": "clawhub",
-        "verified": False,
-        "labels": {"requires_api_key": "false"},
+        "id": item_id,
+        "type": type_,
+        "source": source,
+        "source_ref": source_ref,
+        "title": source_ref,
+        "description": f"{source_ref} description",
+        "badges": [],
+        "install_target": install_target,
+        "installed": False,
     }
     base.update(overrides)
     return base
 
 
-class FakeSkillHub:
+class FakeMarketIndexClient:
     def __init__(self) -> None:
-        self.skills: list[dict[str, Any]] = []  # search results (list_skills)
-        self.total = 0
-        self.showcase: list[dict[str, Any]] = []  # curated shelf (browse)
+        self.channel = "oss"
+        self.categories_payload: dict[str, Any] = {"categories": [], "degraded": False}
+        self.items_payload: dict[str, Any] = {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "page_size": 30,
+            "degraded": False,
+        }
+        self.details: dict[str, dict[str, Any]] = {}
         self.unavailable = False
-        self.detail_payload: dict[str, Any] | None = None
-        self.evaluation_payload: dict[str, Any] | None = None
-        self.files_payload: list[dict[str, Any]] = []
+        self.categories_calls: list[dict[str, Any]] = []
         self.list_calls: list[dict[str, Any]] = []
+        self.detail_calls: list[str] = []
 
     def _check(self) -> None:
         if self.unavailable:
-            raise SkillHubUnavailableError("down")
+            raise MarketIndexUnavailableError("down")
 
-    async def categories(self) -> list[dict[str, Any]]:
+    async def categories(self, kind: str, locale: str) -> dict[str, Any]:
         self._check()
-        return [
-            {"key": key, "name": f"{key}-zh", "nameEn": f"{key}-en"}
-            for key in (*CURATED_SKILL_CATEGORIES, "life-service", "design-media")
-        ]
+        self.categories_calls.append({"kind": kind, "locale": locale})
+        return self.categories_payload
 
-    async def recommended_skills(self) -> list[dict[str, Any]]:
-        self._check()
-        return self.showcase
-
-    async def list_skills(self, **params: Any) -> tuple[list[dict[str, Any]], int]:
+    async def list_items(self, **params: Any) -> dict[str, Any]:
         self._check()
         self.list_calls.append(params)
-        return self.skills, self.total
+        return self.items_payload
 
-    async def skill_detail(self, slug: str) -> dict[str, Any]:
+    async def item_detail(self, item_id: str, locale: str) -> dict[str, Any]:
         self._check()
-        if self.detail_payload is None:
-            raise SkillHubUnavailableError("no detail")
-        return self.detail_payload
-
-    async def skill_files(self, slug: str) -> list[dict[str, Any]]:
-        self._check()
-        return self.files_payload
-
-    async def skill_evaluation(self, slug: str) -> dict[str, Any]:
-        self._check()
-        if self.evaluation_payload is None:
-            raise SkillHubUnavailableError("no evaluation")
-        return self.evaluation_payload
-
-    def download_url(self, slug: str) -> str:
-        return f"https://hub.example/api/v1/download?slug={slug}"
+        self.detail_calls.append(item_id)
+        if item_id not in self.details:
+            raise MarketIndexUnavailableError(f"no detail for {item_id}")
+        return self.details[item_id]
 
 
-def _index_row(slug: str, **overrides: Any) -> SimpleNamespace:
-    base = dict(
-        id=f"id-{slug}",
-        slug=slug,
-        name=slug,
-        description=f"{slug} desc",
-        scope="user",
-        status="available",
-        is_locked=False,
-        library_enabled=True,
-    )
-    base.update(overrides)
-    return SimpleNamespace(**base)
+class FakeInstallStore:
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+        self.removed: list[tuple[str, str]] = []
+
+    async def record(self, user_id: str, **kwargs: Any) -> None:
+        self.records.append({"user_id": user_id, **kwargs})
+
+    async def remove_by_ref(self, user_id: str, installed_ref: str) -> None:
+        self.removed.append((user_id, installed_ref))
 
 
 class FakeSkillService:
@@ -124,11 +118,10 @@ class FakeSkillService:
     def __init__(self) -> None:
         self.rows: list[SimpleNamespace] = []
         self.preview = SimpleNamespace(
-            preview_id="pv-1", name="imported-skill", name_conflict=False, suggested_name=None
+            preview_id="pv-1", name="fresh", name_conflict=False, suggested_name=None
         )
         self.preview_error: Exception | None = None
         self.confirmed: list[Any] = []
-        self.enabled: list[tuple[str, bool]] = []
 
     async def list_indexed_skills(self, user_id: str) -> list[SimpleNamespace]:
         return self.rows
@@ -143,10 +136,8 @@ class FakeSkillService:
 
     async def confirm_url_import(self, user_id: str, payload: Any) -> SimpleNamespace:
         self.confirmed.append(payload)
-        return SimpleNamespace(slug=payload.name or "imported-skill")
-
-    async def set_library_enabled(self, user_id: str, skill_id: str, enabled: bool) -> None:
-        self.enabled.append((skill_id, enabled))
+        slug = payload.name or "imported-skill"
+        return SimpleNamespace(slug=slug, content_hash=f"hash-of-{slug}")
 
 
 class FakeAgentService:
@@ -166,254 +157,280 @@ class FakeAgentService:
 
 class FakePackService:
     def __init__(self) -> None:
-        self.packs = [
-            {
-                "id": "investment",
-                "name": "投研 Team",
-                "description": "端到端投研",
-                "scenario": "金融投资",
-                "icon": "gem",
-                "added": False,
-                "roles": [
-                    {
-                        "slug": "inv-analyst",
-                        "name": "行业分析师",
-                        "description": "行业研究",
-                        "skills": ["comps", "sector-overview"],
-                        "connector_types": ["valuz-stock"],
-                    },
-                    {
-                        "slug": "inv-modeler",
-                        "name": "建模师",
-                        "description": "财务建模",
-                        "skills": ["comps"],
-                        "connector_types": [],
-                    },
-                ],
-            }
-        ]
         self.import_result: dict[str, Any] = {"created": 2, "skipped": 0, "roles": []}
         self.import_calls: list[dict[str, Any]] = []
 
-    async def list_packs(self, user_id: str) -> list[dict[str, Any]]:
-        return self.packs
-
-    async def get_pack(self, user_id: str, pack_id: str) -> dict[str, Any]:
-        from valuz_agent.modules.agent_packs.errors import PackNotFound
-
-        for p in self.packs:
-            if p["id"] == pack_id:
-                return p
-        raise PackNotFound()
-
-    async def import_pack(self, user_id: str, pack_id: str, **kwargs: Any) -> dict[str, Any]:
-        self.import_calls.append({"pack_id": pack_id, **kwargs})
+    async def import_manifest(self, user_id: str, manifest: Any, **kwargs: Any) -> dict[str, Any]:
+        self.import_calls.append({"manifest": manifest, **kwargs})
         return self.import_result
+
+
+class FakeConnectorService:
+    def __init__(self) -> None:
+        self.slugs: set[str] = set()
+
+    async def list_connectors(self, user_id: str) -> list[SimpleNamespace]:
+        return [SimpleNamespace(slug=slug) for slug in self.slugs]
+
+
+@pytest.fixture(autouse=True)
+def _no_direct_fallback(monkeypatch):  # type: ignore[no-untyped-def]
+    """This suite exercises the pure index pass-through/degrade behavior with
+    in-memory fakes only (no network) — direct-source fallback (SkillHub /
+    ModelScope) is covered separately in ``test_marketplace_direct_fallback.py``
+    with its own hub/ms fakes. Force the flag off here so an index-outage case
+    can't accidentally reach the real network through the lazily-constructed
+    fallback clients."""
+    monkeypatch.setattr(settings, "marketplace_direct_fallback", False)
 
 
 @pytest.fixture()
 def env():  # type: ignore[no-untyped-def]
-    hub = FakeSkillHub()
+    index = FakeMarketIndexClient()
     skill_svc = FakeSkillService()
     agent_svc = FakeAgentService()
     pack_svc = FakePackService()
+    connector_svc = FakeConnectorService()
+    installs = FakeInstallStore()
     svc = MarketplaceService(
-        skillhub=hub,  # type: ignore[arg-type]
+        index=index,  # type: ignore[arg-type]
         skill_service=skill_svc,  # type: ignore[arg-type]
         agent_service=agent_svc,  # type: ignore[arg-type]
         pack_service=pack_svc,  # type: ignore[arg-type]
+        installs=installs,  # type: ignore[arg-type]
+        connector_service=connector_svc,  # type: ignore[arg-type]
     )
     return SimpleNamespace(
-        svc=svc, hub=hub, skill_ds=skill_svc, skill_svc=skill_svc,
-        agent_svc=agent_svc, pack_svc=pack_svc,
+        svc=svc,
+        index=index,
+        skill_svc=skill_svc,
+        agent_svc=agent_svc,
+        pack_svc=pack_svc,
+        connector_svc=connector_svc,
+        installs=installs,
     )
 
 
 # ---------------------------------------------------------------------------
-# Skill listing
+# Categories / list — pass-through + installed recompute + degraded matrix
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_skill_items_normalized_with_badges(env):  # type: ignore[no-untyped-def]
-    env.hub.showcase = [
-        _hub_skill("plain"),
-        _hub_skill("keyed", labels={"requires_api_key": "true"}),
-        _hub_skill("communal", source="community", verified=True),
-    ]
-    out = await env.svc.list_items(USER, type_="skill")
-    assert not out.degraded
-    by_ref = {i.source_ref: i for i in out.items}
-    assert by_ref["plain"].id == "skillhub:skill:plain"
-    assert by_ref["plain"].badges == []
-    assert "requires_api_key" in by_ref["keyed"].badges
-    assert {"verified", "community"} <= set(by_ref["communal"].badges)
-    assert by_ref["plain"].install_target == "skill_library"
-    assert by_ref["plain"].subcategories == ["数据洞察"]
-
-
-@pytest.mark.asyncio
-async def test_skillhub_unavailable_index_row_is_not_installed(env):  # type: ignore[no-untyped-def]
-    env.hub.showcase = [_hub_skill("ima-skills")]
-    env.skill_svc.rows = [SimpleNamespace(slug="ima-skills", status="unavailable")]
-    out = await env.svc.list_items(USER, type_="skill")
-    assert out.items[0].installed is False
-
-
-@pytest.mark.asyncio
-async def test_skillhub_missing_index_path_is_not_installed(env, tmp_path):  # type: ignore[no-untyped-def]
-    env.hub.showcase = [_hub_skill("ima-skills")]
-    env.skill_svc.rows = [
-        SimpleNamespace(
-            slug="ima-skills",
-            status="available",
-            source_path=str(tmp_path / "deleted-skill"),
-        )
-    ]
-    out = await env.svc.list_items(USER, type_="skill")
-    assert out.items[0].installed is False
-
-
-@pytest.mark.asyncio
-async def test_browse_serves_official_showcase_paged(env):  # type: ignore[no-untyped-def]
-    env.hub.showcase = [_hub_skill(f"s{i}") for i in range(45)]
-    page1 = await env.svc.list_items(USER, type_="skill", page_size=30)
-    assert page1.total == 45 and len(page1.items) == 30
-    assert env.hub.list_calls == []  # browse never crawls the catalog
-    page2 = await env.svc.list_items(USER, type_="skill", page=2, page_size=30)
-    assert [i.source_ref for i in page2.items] == [f"s{i}" for i in range(30, 45)]
-
-
-@pytest.mark.asyncio
-async def test_browse_category_filters_within_showcase(env):  # type: ignore[no-untyped-def]
-    env.hub.showcase = [
-        _hub_skill("d1"),
-        _hub_skill("design", category="design-media"),
-    ]
-    out = await env.svc.list_items(USER, type_="skill", category="design-media")
-    assert [i.source_ref for i in out.items] == ["design"] and out.total == 1
-
-
-@pytest.mark.asyncio
-async def test_search_hits_full_catalog_scoped_to_allowlist(env):  # type: ignore[no-untyped-def]
-    env.hub.skills = [
-        _hub_skill("ok"),
-        _hub_skill("mystic", category="mysticism"),
-    ]
-    env.hub.total = 1671
-    out = await env.svc.list_items(USER, type_="skill", q="pdf")
-    assert [i.source_ref for i in out.items] == ["ok"]  # junk verticals dropped
-    assert out.total == 1671  # search keeps the full catalog depth
-    (call,) = env.hub.list_calls
-    assert call["keyword"] == "pdf"
-
-
-@pytest.mark.asyncio
-async def test_skill_items_marks_installed_from_index(env):  # type: ignore[no-untyped-def]
-    env.hub.showcase = [_hub_skill("have"), _hub_skill("lack")]
-    env.skill_ds.rows = [_index_row("have")]
-    out = await env.svc.list_items(USER, type_="skill")
-    flags = {i.source_ref: i.installed for i in out.items if i.source == "skillhub"}
-    assert flags == {"have": True, "lack": False}
-
-
-@pytest.mark.asyncio
-async def test_skill_items_never_include_official_skills(env):  # type: ignore[no-untyped-def]
-    # Product decision: official skills ship with the client and never
-    # appear as market items — the Skills tab is SkillHub-only.
-    env.hub.showcase = [_hub_skill("remote")]
-    env.skill_ds.rows = [
-        _index_row("official-a", scope="official"),
-        _index_row("user-skill", scope="user"),
-    ]
-    out = await env.svc.list_items(USER, type_="skill")
-    assert all(i.source == "skillhub" for i in out.items)
-
-
-@pytest.mark.asyncio
-async def test_skill_items_degrade_empty_when_hub_down(env):  # type: ignore[no-untyped-def]
-    env.hub.unavailable = True
-    out = await env.svc.list_items(USER, type_="skill")
-    assert out.degraded and out.items == [] and out.total == 0
-
-
-# ---------------------------------------------------------------------------
-# Categories
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_skill_categories_derive_from_showcase(env):  # type: ignore[no-untyped-def]
-    env.hub.showcase = [
-        _hub_skill("a"),  # data-analysis
-        _hub_skill("b"),
-        _hub_skill("c", category="ai-agent"),
-        _hub_skill("d", category="design-media"),  # curator extra, not in allowlist
-    ]
+async def test_list_categories_passes_through_index_payload(env):  # type: ignore[no-untyped-def]
+    env.index.categories_payload = {
+        "categories": [{"key": "data-analysis", "label": "Data analysis", "count": 3}],
+        "degraded": False,
+    }
     out = await env.svc.list_categories(USER, "skill")
-    # Allowlist order first, curator extras after; counts are the shelf's own.
-    assert [(c.key, c.count) for c in out.categories] == [
-        ("data-analysis", 2),
-        ("ai-agent", 1),
-        ("design-media", 1),
-    ]
-    # Label resolves through the upstream category names (locale-dependent).
-    assert out.categories[0].label.startswith("data-analysis-")
-    assert not out.degraded
+    assert [(c.key, c.count) for c in out.categories] == [("data-analysis", 3)]
+    assert (env.index.categories_calls[0]["kind"]) == "skill"
 
 
 @pytest.mark.asyncio
-async def test_skill_categories_degrade_when_hub_down(env):  # type: ignore[no-untyped-def]
-    env.hub.unavailable = True
+async def test_list_categories_degrades_on_index_outage(env):  # type: ignore[no-untyped-def]
+    env.index.unavailable = True
     out = await env.svc.list_categories(USER, "skill")
     assert out.degraded and out.categories == []
 
 
 @pytest.mark.asyncio
-async def test_agent_categories_derived_from_team_templates_only(env):  # type: ignore[no-untyped-def]
-    out = await env.svc.list_categories(USER, "agent")
-    assert [(c.key, c.label, c.count) for c in out.categories] == [
-        ("金融投资", "金融投资", 1)
+async def test_list_items_degrades_on_index_outage(env):  # type: ignore[no-untyped-def]
+    env.index.unavailable = True
+    out = await env.svc.list_items(USER, type_="skill")
+    assert out.degraded and out.items == [] and out.total == 0
+
+
+@pytest.mark.asyncio
+async def test_list_items_recomputes_installed_for_skills(env):  # type: ignore[no-untyped-def]
+    env.index.items_payload = {
+        "items": [
+            _item("market:skill:have", type_="skill", source_ref="have", source="skillhub"),
+            _item("market:skill:lack", type_="skill", source_ref="lack", source="skillhub"),
+        ],
+        "total": 2,
+        "page": 1,
+        "page_size": 30,
+        "degraded": False,
+    }
+    env.skill_svc.rows = [SimpleNamespace(slug="have", status="available", source_path=None)]
+    out = await env.svc.list_items(USER, type_="skill")
+    flags = {i.source_ref: i.installed for i in out.items}
+    assert flags == {"have": True, "lack": False}
+
+
+@pytest.mark.asyncio
+async def test_list_items_installed_skill_row_must_exist_on_disk(env, tmp_path):  # type: ignore[no-untyped-def]
+    env.index.items_payload = {
+        "items": [
+            _item("market:skill:ghost", type_="skill", source_ref="ghost", source="skillhub")
+        ],
+        "total": 1,
+        "page": 1,
+        "page_size": 30,
+        "degraded": False,
+    }
+    env.skill_svc.rows = [
+        SimpleNamespace(slug="ghost", status="available", source_path=str(tmp_path / "deleted"))
     ]
-
-
-# ---------------------------------------------------------------------------
-# Agent / team templates
-# ---------------------------------------------------------------------------
+    out = await env.svc.list_items(USER, type_="skill")
+    assert out.items[0].installed is False
 
 
 @pytest.mark.asyncio
-async def test_agent_templates_listed_with_filters(env):  # type: ignore[no-untyped-def]
-    everything = await env.svc.list_items(USER, type_="agent_template")
-    assert everything.total == 8
-    finance = await env.svc.list_items(USER, type_="agent_template", category="finance")
-    assert [i.source_ref for i in finance.items] == ["equity-research"]
-    official = await env.svc.list_items(USER, type_="agent_template", source="valuz_official")
-    assert all(i.source == "valuz_official" for i in official.items)
-    assert official.total == 8
-
-
-@pytest.mark.asyncio
-async def test_agent_template_installed_flag(env):  # type: ignore[no-untyped-def]
+async def test_list_items_recomputes_installed_for_agent_templates(env):  # type: ignore[no-untyped-def]
     env.agent_svc.slugs = {"mkt-equity-research"}
+    env.index.items_payload = {
+        "items": [
+            _item(
+                "market:agent:equity-research",
+                type_="agent_template",
+                source_ref="mkt-equity-research",
+                install_target="agent_library",
+            ),
+            _item(
+                "market:agent:longform-writer",
+                type_="agent_template",
+                source_ref="mkt-longform-writer",
+                install_target="agent_library",
+            ),
+        ],
+        "total": 2,
+        "page": 1,
+        "page_size": 30,
+        "degraded": False,
+    }
     out = await env.svc.list_items(USER, type_="agent_template")
     flags = {i.source_ref: i.installed for i in out.items}
-    assert flags["equity-research"] is True
-    assert flags["longform-writer"] is False
+    assert flags == {"mkt-equity-research": True, "mkt-longform-writer": False}
 
 
 @pytest.mark.asyncio
-async def test_team_templates_expose_members_and_lead(env):  # type: ignore[no-untyped-def]
+async def test_list_items_recomputes_installed_for_team_templates(env):  # type: ignore[no-untyped-def]
+    env.agent_svc.slugs = {"investment-lead"}
+    env.index.items_payload = {
+        "items": [
+            _item(
+                "market:team:investment",
+                type_="agent_team_template",
+                source_ref="investment-lead",
+                install_target="agent_library",
+            ),
+        ],
+        "total": 1,
+        "page": 1,
+        "page_size": 30,
+        "degraded": False,
+    }
     out = await env.svc.list_items(USER, type_="agent_team_template")
-    (team,) = out.items
-    assert team.id == "valuz:team:investment"
-    assert team.members is not None and team.members[0].lead
-    assert team.skill_count == 2  # union of role skills
-    assert team.install_target == "agent_library"
-    by_category = await env.svc.list_items(
-        USER, type_="agent_team_template", category="金融投资"
+    assert out.items[0].installed is True
+
+
+@pytest.mark.asyncio
+async def test_team_installed_requires_all_member_slugs(env):  # type: ignore[no-untyped-def]
+    """When the index card carries members, "installed" means every member
+    agent is present locally (pack semantics) — source_ref (the collection id)
+    only serves as the fallback when members are absent."""
+    members = [
+        {"slug": "invest-lead", "name": "Lead", "role": "lead", "lead": True},
+        {"slug": "invest-analyst", "name": "Analyst", "role": "analyst", "lead": False},
+    ]
+    env.index.items_payload = {
+        "items": [
+            _item(
+                "market:team:investment",
+                type_="agent_team_template",
+                source_ref="investment",  # collection id, never an agent slug
+                install_target="agent_library",
+                members=members,
+            ),
+        ],
+        "total": 1,
+        "page": 1,
+        "page_size": 30,
+        "degraded": False,
+    }
+    env.agent_svc.slugs = {"invest-lead"}  # one member missing
+    out = await env.svc.list_items(USER, type_="agent_team_template")
+    assert out.items[0].installed is False
+
+    env.agent_svc.slugs = {"invest-lead", "invest-analyst"}  # all present
+    out = await env.svc.list_items(USER, type_="agent_team_template")
+    assert out.items[0].installed is True
+
+
+@pytest.mark.asyncio
+async def test_list_items_recomputes_installed_for_connectors(env):  # type: ignore[no-untyped-def]
+    env.connector_svc.slugs = {"modelscope-owner-popular"}
+    env.index.items_payload = {
+        "items": [
+            _item(
+                "market:connector:owner-popular",
+                type_="connector",
+                source_ref="modelscope-owner-popular",
+                source="modelscope",
+                install_target="connector_library",
+            ),
+        ],
+        "total": 1,
+        "page": 1,
+        "page_size": 30,
+        "degraded": False,
+    }
+    out = await env.svc.list_items(USER, type_="connector")
+    assert out.items[0].installed is True
+
+
+@pytest.mark.asyncio
+async def test_list_items_connector_installed_false_without_connector_service(env):  # type: ignore[no-untyped-def]
+    svc = MarketplaceService(
+        index=env.index,  # type: ignore[arg-type]
+        skill_service=env.skill_svc,  # type: ignore[arg-type]
+        agent_service=env.agent_svc,  # type: ignore[arg-type]
+        pack_service=env.pack_svc,  # type: ignore[arg-type]
+        installs=env.installs,  # type: ignore[arg-type]
+        connector_service=None,
     )
-    assert [i.source_ref for i in by_category.items] == ["investment"]
+    env.index.items_payload = {
+        "items": [
+            _item(
+                "market:connector:x",
+                type_="connector",
+                source_ref="x",
+                source="modelscope",
+                install_target="connector_library",
+            ),
+        ],
+        "total": 1,
+        "page": 1,
+        "page_size": 30,
+        "degraded": False,
+    }
+    out = await svc.list_items(USER, type_="connector")
+    assert out.items[0].installed is False
+
+
+@pytest.mark.asyncio
+async def test_list_items_forwards_filters_and_locale(env):  # type: ignore[no-untyped-def]
+    await env.svc.list_items(
+        USER,
+        type_="skill",
+        category="data-analysis",
+        subcategory="insight",
+        source="skillhub",
+        q="pdf",
+        page=2,
+        page_size=10,
+    )
+    (call,) = env.index.list_calls
+    assert call["type_"] == "skill"
+    assert call["category"] == "data-analysis"
+    assert call["subcategory"] == "insight"
+    assert call["source"] == "skillhub"
+    assert call["q"] == "pdf"
+    assert call["page"] == 2
+    assert call["page_size"] == 10
+    assert "locale" in call
 
 
 # ---------------------------------------------------------------------------
@@ -422,224 +439,373 @@ async def test_team_templates_expose_members_and_lead(env):  # type: ignore[no-u
 
 
 @pytest.mark.asyncio
-async def test_skillhub_detail_maps_files_and_security(env):  # type: ignore[no-untyped-def]
-    env.hub.detail_payload = {
-        "skill": {
-            **_hub_skill("agent-memory"),
-            "displayName": "Agent Memory",
-            "description": None,
-            "description_zh": None,
-            "summary_zh": "这是来自详情接口的技能简介。",
-            "stats": {"downloads": 5, "stars": 1, "installs": 2},
-            "sourceUrl": "https://clawhub.ai/x/agent-memory",
-            "updated_at": 1783469566392,
-        },
-        "owner": {"displayName": "dennis"},
-        "latestVersion": {"version": "1.0.0"},
-        "securityReports": {
-            "keen": {"status": "benign", "statusText": "安全", "reportUrl": "https://r/1"},
-            "sanbu": {"status": "benign", "statusText": "无风险", "reportUrl": "https://r/2"},
-        },
+async def test_get_item_returns_detail_and_recomputes_installed(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:skill:foo"] = {
+        **_item("market:skill:foo", type_="skill", source_ref="foo", source="skillhub"),
+        "owner": "Acme",
     }
-    env.hub.files_payload = [{"path": "SKILL.md", "size": 1385, "sha256": "x"}]
-    env.hub.evaluation_payload = {
-        "userSummary": "这个 Skill 质量不错，值得一试。",
-        "dimensions": {
-            "trust": {"items": {"scan": {"score": 5}}, "userReason": "无 P0/P1 风险"},
-            "reliability": {"items": {"func": {"score": 4}, "stability": {"score": 4}}},
-            "adaptability": {"items": {"boundary": {"score": 4.5}}},
-            "convention": {"items": {"docQuality": {"score": 5}}},
-            "effectiveness": {"items": {"usability": {"score": 4.5}}},
-        },
-    }
-    detail = await env.svc.get_item(USER, "skillhub:skill:agent-memory")
-    assert detail.title == "Agent Memory"
-    assert detail.description == "这是来自详情接口的技能简介。"
-    assert detail.owner == "dennis"
-    assert detail.security is not None and detail.security.status == "benign"
-    assert "reviewed_skillhub" in detail.badges
-    assert detail.files is not None and detail.files[0].path == "SKILL.md"
-    assert detail.origin_url == "https://clawhub.ai/x/agent-memory"
-    assert detail.updated_at is not None
-    assert detail.evaluation is not None
-    assert detail.evaluation.system == "TRACE"
-    assert detail.evaluation.score == 4.6
-    assert detail.evaluation.rating == "优秀"
-    assert [d.code for d in detail.evaluation.dimensions] == ["T", "R", "A", "C", "E"]
+    env.skill_svc.rows = [SimpleNamespace(slug="foo", status="available", source_path=None)]
+    detail = await env.svc.get_item(USER, "market:skill:foo")
+    assert detail.owner == "Acme"
+    assert detail.installed is True
 
 
 @pytest.mark.asyncio
-async def test_agent_template_detail_has_instructions(env):  # type: ignore[no-untyped-def]
-    detail = await env.svc.get_item(USER, "valuz:agent:equity-research")
-    assert detail.instructions
-    assert detail.bound_skills and len(detail.bound_skills) == 6
-    assert detail.connectors is not None and any(
-        c.requirement == "required" for c in detail.connectors
-    )
+async def test_get_item_raises_upstream_error_on_index_outage(env):  # type: ignore[no-untyped-def]
+    env.index.unavailable = True
+    with pytest.raises(MarketplaceUpstreamError):
+        await env.svc.get_item(USER, "market:skill:foo")
 
 
 @pytest.mark.asyncio
-async def test_team_detail_lists_bound_skills(env):  # type: ignore[no-untyped-def]
-    detail = await env.svc.get_item(USER, "valuz:team:investment")
-    assert detail.bound_skills == ["comps", "sector-overview"]
-    assert detail.members is not None and len(detail.members) == 2
-    assert detail.instructions and "行业分析师" in detail.instructions
-    assert detail.workflow == [
-        "行业分析师：行业研究",
-        "建模师：财务建模",
-        "汇总交付：整合各成员结果，形成可复用的最终成果包",
-    ]
-    assert detail.deliverables is not None and "行业研究纪要" in detail.deliverables
-
-
-@pytest.mark.asyncio
-async def test_unknown_item_ids_raise_not_found(env):  # type: ignore[no-untyped-def]
-    for bad in ("nope", "valuz:agent:missing", "valuz:team:missing", "valuz:skill:x", "x:y:z"):
+async def test_get_item_rejects_legacy_and_malformed_ids(env):  # type: ignore[no-untyped-def]
+    for bad in (
+        "valuz:agent:missing",
+        "valuz:team:missing",
+        "skillhub:skill:x",
+        "modelscope:connector:x",
+        "nope",
+    ):
         with pytest.raises(MarketplaceItemNotFound):
             await env.svc.get_item(USER, bad)
 
 
 # ---------------------------------------------------------------------------
-# Install
+# Install — market:skill:*
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_install_skillhub_skill_runs_url_pipeline(env):  # type: ignore[no-untyped-def]
-    result = await env.svc.install(USER, "skillhub:skill:fresh")
+async def test_install_market_skill_runs_url_pipeline_and_records_provenance(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:skill:fresh"] = {
+        **_item("market:skill:fresh", type_="skill", source_ref="fresh", source="skillhub"),
+        "version": "2.0.0",
+        "install_manifest": {"download_url": "https://cdn.example/fresh.zip"},
+    }
+    result = await env.svc.install(USER, "market:skill:fresh")
     assert result.status == "installed"
+    assert result.installed_ref == "fresh"
     (payload,) = env.skill_svc.confirmed
     assert payload.preview_id == "pv-1"
     assert payload.name == "fresh"
+    (record,) = env.installs.records
+    assert record["item_id"] == "market:skill:fresh"
+    assert record["item_type"] == "skill"
+    assert record["installed_ref"] == "fresh"
+    assert record["version"] == "2.0.0"
+    assert record["source_channel"] == "oss"
+    assert record["content_hash"] == "hash-of-fresh"
 
 
 @pytest.mark.asyncio
-async def test_install_skillhub_skill_falls_back_to_slug_name(env):  # type: ignore[no-untyped-def]
-    # SkillHub catalog slugs must remain stable even if the archive manifest
-    # previews under a friendlier or staging-derived name.
-    env.skill_svc.preview = SimpleNamespace(
-        preview_id="pv-3", name="skill-url-6acdc6aa", name_conflict=False, suggested_name=None
-    )
-    result = await env.svc.install(USER, "skillhub:skill:fresh")
-    assert result.installed_ref == "fresh"
-
-
-@pytest.mark.asyncio
-async def test_install_skillhub_skill_uses_suggested_name_on_conflict(env):  # type: ignore[no-untyped-def]
+async def test_install_market_skill_uses_suggested_name_on_conflict(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:skill:fresh"] = {
+        **_item("market:skill:fresh", type_="skill", source_ref="fresh", source="skillhub"),
+        "install_manifest": {"download_url": "https://cdn.example/fresh.zip"},
+    }
     env.skill_svc.preview = SimpleNamespace(
         preview_id="pv-2", name="taken", name_conflict=True, suggested_name="taken-2"
     )
-    result = await env.svc.install(USER, "skillhub:skill:fresh")
+    result = await env.svc.install(USER, "market:skill:fresh")
     assert result.installed_ref == "taken-2"
 
 
 @pytest.mark.asyncio
-async def test_install_skillhub_skill_idempotent(env):  # type: ignore[no-untyped-def]
-    env.skill_ds.rows = [_index_row("fresh")]
-    result = await env.svc.install(USER, "skillhub:skill:fresh")
+async def test_install_market_skill_idempotent_still_records_provenance(env):  # type: ignore[no-untyped-def]
+    env.skill_svc.rows = [
+        SimpleNamespace(
+            slug="fresh", status="available", source_path=None, content_hash="existing-hash"
+        )
+    ]
+    env.index.details["market:skill:fresh"] = {
+        **_item("market:skill:fresh", type_="skill", source_ref="fresh", source="skillhub"),
+        "version": "1.0.0",
+        "install_manifest": {"download_url": "https://cdn.example/fresh.zip"},
+    }
+    result = await env.svc.install(USER, "market:skill:fresh")
     assert result.status == "already_installed"
     assert env.skill_svc.confirmed == []
+    (record,) = env.installs.records
+    assert record["installed_ref"] == "fresh"
+    assert record["content_hash"] == "existing-hash"
 
 
 @pytest.mark.asyncio
-async def test_install_skillhub_fetch_failure_maps_to_upstream_error(env):  # type: ignore[no-untyped-def]
+async def test_install_market_skill_missing_download_url_raises_upstream_error(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:skill:fresh"] = {
+        **_item("market:skill:fresh", type_="skill", source_ref="fresh", source="skillhub"),
+        "install_manifest": {},
+    }
+    with pytest.raises(MarketplaceUpstreamError):
+        await env.svc.install(USER, "market:skill:fresh")
+
+
+@pytest.mark.asyncio
+async def test_install_missing_manifest_raises_upstream_error(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:skill:fresh"] = _item(
+        "market:skill:fresh", type_="skill", source_ref="fresh", source="skillhub"
+    )
+    with pytest.raises(MarketplaceUpstreamError):
+        await env.svc.install(USER, "market:skill:fresh")
+
+
+@pytest.mark.asyncio
+async def test_install_index_outage_raises_upstream_error(env):  # type: ignore[no-untyped-def]
+    env.index.unavailable = True
+    with pytest.raises(MarketplaceUpstreamError):
+        await env.svc.install(USER, "market:skill:fresh")
+
+
+@pytest.mark.asyncio
+async def test_install_market_skill_fetch_failure_maps_to_upstream_error(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:skill:fresh"] = {
+        **_item("market:skill:fresh", type_="skill", source_ref="fresh", source="skillhub"),
+        "install_manifest": {"download_url": "https://cdn.example/fresh.zip"},
+    }
     env.skill_svc.preview_error = SkillImportFailed("Failed to fetch URL: boom")
     with pytest.raises(MarketplaceUpstreamError):
-        await env.svc.install(USER, "skillhub:skill:fresh")
+        await env.svc.install(USER, "market:skill:fresh")
 
 
 @pytest.mark.asyncio
-async def test_install_skillhub_validation_failure_propagates(env):  # type: ignore[no-untyped-def]
+async def test_install_market_skill_validation_failure_propagates(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:skill:fresh"] = {
+        **_item("market:skill:fresh", type_="skill", source_ref="fresh", source="skillhub"),
+        "install_manifest": {"download_url": "https://cdn.example/fresh.zip"},
+    }
     env.skill_svc.preview_error = SkillImportFailed("No SKILL.md found in the fetched content")
     with pytest.raises(SkillImportFailed):
-        await env.svc.install(USER, "skillhub:skill:fresh")
+        await env.svc.install(USER, "market:skill:fresh")
+
+
+# ---------------------------------------------------------------------------
+# Install — market:agent:*
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_install_official_skill_id_rejected(env):  # type: ignore[no-untyped-def]
-    env.skill_ds.rows = [_index_row("off", scope="official", library_enabled=False)]
-    with pytest.raises(MarketplaceItemNotFound):
-        await env.svc.install(USER, "valuz:skill:off")
-
-
-@pytest.mark.asyncio
-async def test_install_agent_template_creates_agent_with_defaults(env):  # type: ignore[no-untyped-def]
+async def test_install_agent_template_creates_agent_from_manifest(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:agent:meeting-notes"] = {
+        **_item(
+            "market:agent:meeting-notes",
+            type_="agent_template",
+            source_ref="meeting-notes",
+            install_target="agent_library",
+        ),
+        "version": "1.0.0",
+        "install_manifest": {
+            "slug": "mkt-meeting-notes",
+            "name": "Meeting Notes",
+            "role": "Summarizes meetings",
+            "instructions": "Do the thing",
+            "icon": "notes",
+            "effort": "low",
+        },
+    }
     result = await env.svc.install(
         USER,
-        "valuz:agent:meeting-notes",
+        "market:agent:meeting-notes",
         runtime="deepagents",
         provider_id="prov-1",
         model="m-1",
-        effort="low",
+        effort="high",
     )
     assert result.status == "installed"
+    assert result.installed_ref == "mkt-meeting-notes"
     (payload,) = env.agent_svc.created
     assert payload["slug"] == "mkt-meeting-notes"
     assert payload["runtime"] == "deepagents"
     assert payload["model"] == "m-1"
-    assert payload["instructions"]
+    assert payload["provider_id"] == "prov-1"
+    assert payload["effort"] == "high"  # caller-resolved effort wins over the manifest default
+    assert payload["instructions"] == "Do the thing"
+    (record,) = env.installs.records
+    assert record["item_type"] == "agent_template"
+    assert record["installed_ref"] == "mkt-meeting-notes"
+    assert record["version"] == "1.0.0"
+
+
+@pytest.mark.asyncio
+async def test_install_agent_template_resolves_localized_text(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:agent:x"] = {
+        **_item(
+            "market:agent:x",
+            type_="agent_template",
+            source_ref="x",
+            install_target="agent_library",
+        ),
+        "install_manifest": {
+            "slug": "mkt-x",
+            "name": {"zh-CN": "会议纪要", "en-US": "Meeting Notes"},
+        },
+    }
+    await env.svc.install(
+        USER, "market:agent:x", runtime="r", provider_id="p", model="m", effort=None
+    )
+    (payload,) = env.agent_svc.created
+    assert payload["name"] in ("会议纪要", "Meeting Notes")
 
 
 @pytest.mark.asyncio
 async def test_install_agent_template_idempotent(env):  # type: ignore[no-untyped-def]
     env.agent_svc.slugs = {"mkt-meeting-notes"}
+    env.index.details["market:agent:meeting-notes"] = {
+        **_item(
+            "market:agent:meeting-notes",
+            type_="agent_template",
+            source_ref="meeting-notes",
+            install_target="agent_library",
+        ),
+        "install_manifest": {"slug": "mkt-meeting-notes", "name": "Meeting Notes"},
+    }
     result = await env.svc.install(
-        USER, "valuz:agent:meeting-notes", runtime="deepagents",
-        provider_id="p", model="m", effort=None,
+        USER,
+        "market:agent:meeting-notes",
+        runtime="r",
+        provider_id="p",
+        model="m",
+        effort=None,
     )
     assert result.status == "already_installed"
+    assert result.installed_ref == "mkt-meeting-notes"
+    (record,) = env.installs.records
+    assert record["installed_ref"] == "mkt-meeting-notes"
+
+
+# ---------------------------------------------------------------------------
+# Install — market:team:*
+# ---------------------------------------------------------------------------
+
+
+def _team_manifest(**skill_overrides: Any) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "kind": "agent-pack",
+        "collection": {
+            "id": "investment",
+            "name": "Investment",
+            "description": "",
+            "scenario": "Finance",
+            "icon": "gem",
+        },
+        "agents": [
+            {
+                "slug": "inv-lead",
+                "name": "Lead",
+                "description": "",
+                "instructions": "",
+                "skills": ["comps", "superpowers-tdd"],
+                "connectors": [],
+            },
+        ],
+        "skills": [
+            {"slug": "comps", "source": "bundled"},
+            {
+                "slug": "superpowers-tdd",
+                "source": "url",
+                "download_url": "https://cdn.example/superpowers-tdd.zip",
+            },
+        ],
+        "connectors": [],
+    }
 
 
 @pytest.mark.asyncio
-async def test_install_team_delegates_to_pack_service(env):  # type: ignore[no-untyped-def]
+async def test_install_team_installs_url_dependencies_then_imports_manifest(env):  # type: ignore[no-untyped-def]
+    env.index.details["market:team:investment"] = {
+        **_item(
+            "market:team:investment",
+            type_="agent_team_template",
+            source_ref="investment",
+            install_target="agent_library",
+        ),
+        "version": "3.0.0",
+        "install_manifest": _team_manifest(),
+    }
     result = await env.svc.install(
-        USER, "valuz:team:investment", runtime="claude_agent",
-        provider_id="p", model="m", effort="high",
+        USER,
+        "market:team:investment",
+        runtime="claude_agent",
+        provider_id="p",
+        model="m",
+        effort="high",
     )
     assert result.status == "installed" and result.created == 2
+    (payload,) = env.skill_svc.confirmed
+    assert payload.name == "superpowers-tdd"
     (call,) = env.pack_svc.import_calls
-    assert call["pack_id"] == "investment" and call["runtime"] == "claude_agent"
+    assert call["manifest"].collection.id == "investment"
+    assert call["runtime"] == "claude_agent"
+    assert call["effort"] == "high"
+    (record,) = env.installs.records
+    assert record["item_type"] == "agent_team_template"
+    assert record["installed_ref"] == "investment"
+    assert record["version"] == "3.0.0"
 
 
 @pytest.mark.asyncio
-async def test_install_team_installs_skillhub_dependencies_before_pack_import(
-    env, monkeypatch  # type: ignore[no-untyped-def]
-) -> None:
-    env.pack_svc.packs[0]["skills"] = [
-        {"slug": "superpowers-tdd", "source": "skillhub"},
-        {"slug": "sector-overview", "source": "bundled"},
-    ]
-    calls: list[tuple[str, str, bool, int]] = []
-
-    async def _fake_install_skillhub_skill(
-        user_id: str,
-        item_id: str,
-        slug: str,
-        *,
-        allow_rename: bool = True,
-    ) -> MarketplaceInstallResult:
-        calls.append((item_id, slug, allow_rename, len(env.pack_svc.import_calls)))
-        return MarketplaceInstallResult(
-            item_id=item_id, status="installed", installed_ref=slug
-        )
-
-    monkeypatch.setattr(env.svc, "_install_skillhub_skill", _fake_install_skillhub_skill)
-
-    result = await env.svc.install(
-        USER, "valuz:team:investment", runtime="claude_agent",
-        provider_id="p", model="m", effort="high",
-    )
-
-    assert result.status == "installed"
-    assert calls == [("skillhub:skill:superpowers-tdd", "superpowers-tdd", False, 0)]
-    assert len(env.pack_svc.import_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_install_team_already_added(env):  # type: ignore[no-untyped-def]
+async def test_install_team_already_installed(env):  # type: ignore[no-untyped-def]
     env.pack_svc.import_result = {"created": 0, "skipped": 3, "roles": []}
+    env.index.details["market:team:investment"] = {
+        **_item(
+            "market:team:investment",
+            type_="agent_team_template",
+            source_ref="investment",
+            install_target="agent_library",
+        ),
+        "install_manifest": _team_manifest(),
+    }
     result = await env.svc.install(
-        USER, "valuz:team:investment", runtime="claude_agent",
-        provider_id="p", model="m", effort=None,
+        USER,
+        "market:team:investment",
+        runtime="claude_agent",
+        provider_id="p",
+        model="m",
+        effort=None,
     )
     assert result.status == "already_installed" and result.skipped == 3
+
+
+@pytest.mark.asyncio
+async def test_install_team_accepts_unified_pack_manifest(env):  # type: ignore[no-untyped-def]
+    manifest = {
+        "schema_version": 2,
+        "kind": "valuz-pack",
+        "agents": [],
+        "skills": [],
+        "connectors": [],
+        "collection": {"id": "growth", "name": "Growth"},
+    }
+    env.index.details["market:team:growth"] = {
+        **_item(
+            "market:team:growth",
+            type_="agent_team_template",
+            source_ref="growth",
+            install_target="agent_library",
+        ),
+        "install_manifest": manifest,
+    }
+    await env.svc.install(
+        USER, "market:team:growth", runtime="r", provider_id="p", model="m", effort=None
+    )
+    (call,) = env.pack_svc.import_calls
+    assert isinstance(call["manifest"], PackManifest)
+    assert call["manifest"].collection.id == "growth"
+
+
+# ---------------------------------------------------------------------------
+# Install — rejected namespaces/kinds
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_install_unknown_ids_raise_not_found(env):  # type: ignore[no-untyped-def]
+    for bad in (
+        "market:connector:foo",
+        "valuz:agent:x",
+        "valuz:team:x",
+        "skillhub:skill:x",
+        "nope",
+    ):
+        with pytest.raises(MarketplaceItemNotFound):
+            await env.svc.install(USER, bad)

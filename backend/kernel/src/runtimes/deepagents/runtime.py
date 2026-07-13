@@ -440,13 +440,23 @@ class DeepAgentsRuntime:
         except Exception as exc:
             session.status = "idle"
             if is_runtime_interruption(exc):
-                # Graceful host stop tore down the runtime subprocess mid-turn —
-                # resumable ``interrupted``, not a task failure (see codex
-                # runtime for the full rationale). Suppress session_error.
+                # The runtime subprocess went away mid-turn — usually a graceful
+                # host stop (resumable ``interrupted``, not a task failure; see
+                # codex runtime for the full rationale, and suppress
+                # session_error), but the same shape also covers a spontaneous
+                # crash. Don't swallow the cause: log it and thread it into the
+                # stop_reason so an operator can tell a clean shutdown from a
+                # crash. Category/recovery untouched (they key on ``category``).
+                cause = describe_exception(exc)
+                logger.warning(
+                    "deepagents: runtime process interrupted mid-turn for session %s: %s",
+                    session.id,
+                    cause,
+                )
                 session.stop_reason = Error(
                     category="interrupted",
                     retry_status="terminal",
-                    message="runtime process interrupted",
+                    message=f"runtime process interrupted: {cause}",
                 )
             else:
                 # See ``describe_exception``: a langgraph / MCP ``ClientSession``
@@ -455,9 +465,7 @@ class DeepAgentsRuntime:
                 # unwrap to the leaf so the reason survives, and log the
                 # traceback (this branch previously logged nothing).
                 cause = describe_exception(exc)
-                logger.exception(
-                    "deepagents: turn failed for session %s: %s", session.id, cause
-                )
+                logger.exception("deepagents: turn failed for session %s: %s", session.id, cause)
                 session.stop_reason = Error(
                     category="execution_error",
                     retry_status="exhausted",
@@ -997,6 +1005,13 @@ class DeepAgentsRuntime:
                 kwargs["base_url"] = self.model_provider.base_url
             if effort is not None:
                 kwargs["effort"] = effort
+            # Unset max_tokens lets ChatAnthropic default from its profile
+            # registry, which bottoms out at 4096 for model names it doesn't
+            # know (gateway aliases, compatible third-party models) — pass an
+            # explicit cap for those so long answers don't truncate.
+            max_tokens = _resolve_anthropic_max_tokens(self.model)
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
             return ChatAnthropic(**kwargs)
 
         if protocol == "gemini":
@@ -1240,6 +1255,47 @@ def _map_effort_for_gemini(effort: str) -> str:
     if effort in {"low", "medium", "high"}:
         return effort
     return "medium"
+
+
+# Explicit ``max_tokens`` for anthropic-protocol models langchain's profile
+# registry doesn't know. 32k is Claude Code's own default output cap: valid
+# for every current Claude model and battle-tested against the
+# anthropic-compatible gateways where unknown names actually occur.
+_ANTHROPIC_UNKNOWN_MODEL_MAX_TOKENS = 32_000
+
+
+def _resolve_anthropic_max_tokens(model: str) -> int | None:
+    """Resolve an explicit ``max_tokens`` for ``ChatAnthropic``, or ``None``.
+
+    ``ChatAnthropic`` fills an unset ``max_tokens`` from a bundled per-model
+    profile registry keyed by EXACT model name; any name it doesn't know —
+    gateway aliases like ``openrouter/claude-sonnet-4-5`` or
+    anthropic-compatible third-party models — silently falls back to 4096,
+    which truncates long answers with ``stop_reason: max_tokens``.
+
+    Returns ``None`` on a registry hit (ChatAnthropic's own per-model default
+    is correct — e.g. 64k for sonnet-4-x, 128k for opus-4-6+). On a miss,
+    retries with a leading ``vendor/`` gateway prefix stripped and forwards
+    that profile's cap; otherwise returns the safe fallback above.
+    """
+    try:
+        from langchain_anthropic.chat_models import _get_default_model_profile
+    except ImportError:
+        # Private helper moved in a langchain-anthropic upgrade: we can no
+        # longer tell known names from unknown, so degrade to pre-workaround
+        # behavior (knowns stay correct, unknowns fall back to langchain's
+        # 4096). test_deepagents_max_tokens pins the import so the upgrade
+        # PR revisits this instead of shipping the regression silently.
+        return None
+
+    if _get_default_model_profile(model).get("max_output_tokens") is not None:
+        return None
+    tail = model.rsplit("/", 1)[-1]
+    if tail != model:
+        cap = _get_default_model_profile(tail).get("max_output_tokens")
+        if cap is not None:
+            return int(cap)
+    return _ANTHROPIC_UNKNOWN_MODEL_MAX_TOKENS
 
 
 def _extract_full_text(output: Any) -> str:

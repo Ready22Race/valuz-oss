@@ -245,6 +245,9 @@ export function parseWorkflowProgress(
   };
 }
 
+import { resolveApiBase } from "./base-resolver";
+import { fanOutTargets, getListFanOutTargets } from "../edition/list-fanout";
+import { recordEntityOrigins } from "../edition/entity-origin";
 import { createFetchJson, ApiError } from "./fetch-json";
 import { requestRaw } from "./request";
 
@@ -447,31 +450,69 @@ export interface SessionArtifactItem {
 
 const fetchJson = createFetchJson(() => _apiBase);
 
+/** Entity-scoped base: the edition resolver may pin a session to another
+ *  backend (multi-target routing); falls back to the module base. */
+const sessionBase = (sessionId: string): string =>
+  resolveApiBase({ sessionId }, _apiBase);
+
 export type SessionStreamCallback = (event: SessionEventDTO) => void;
 
 export const sessionsApi = {
-  list(
+  async list(
     projectId?: string,
     init?: { signal?: AbortSignal },
   ): Promise<{ sessions: SessionListItem[] }> {
     const qs = new URLSearchParams();
     if (projectId) qs.set("project_id", projectId);
     const suffix = qs.toString() ? `?${qs}` : "";
-    // ``init`` (e.g. an ``AbortSignal`` for the project-detail auto-refresh
-    // poller) is forwarded to ``fetchJson`` → ``fetch``. Existing callers pass
-    // nothing, so their behaviour is unchanged.
-    return fetchJson(`/v1/sessions${suffix}`, init);
+    // Project-scoped lists live entirely on the project's backend — route by
+    // the project's observed origin instead of fanning out.
+    if (projectId) {
+      return fetchJson(`/v1/sessions${suffix}`, {
+        ...init,
+        baseUrl: resolveApiBase({ projectId }, _apiBase),
+      });
+    }
+    // Global list on a multi-target edition: fan out, tag ``exec_origin``,
+    // feed the origin index. Zero targets (OSS) keeps the single-backend
+    // path unchanged. ``init`` (e.g. an ``AbortSignal``) is forwarded.
+    if (getListFanOutTargets().length === 0) {
+      return fetchJson(`/v1/sessions${suffix}`, init);
+    }
+    const outcome = await fanOutTargets((target) =>
+      fetchJson<{ sessions: SessionListItem[] }>(`/v1/sessions${suffix}`, {
+        ...init,
+        baseUrl: target.baseUrl,
+      }),
+    );
+    const seen = new Set<string>();
+    const merged: SessionListItem[] = [];
+    for (const { target, value } of outcome.values) {
+      recordEntityOrigins(value.sessions.map((row) => [row.id, target.id]));
+      for (const session of value.sessions) {
+        if (seen.has(session.id)) continue;
+        seen.add(session.id);
+        merged.push({ ...session, exec_origin: target.id });
+      }
+    }
+    return { sessions: merged };
   },
 
   get(sessionId: string): Promise<SessionDetail> {
-    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}`);
+    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
+      baseUrl: sessionBase(sessionId),
+    });
   },
 
-  create(payload: SessionCreateRequest): Promise<SessionDetail> {
+  create(
+    payload: SessionCreateRequest,
+    opts?: { baseUrl?: string },
+  ): Promise<SessionDetail> {
     return fetchJson("/v1/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: opts?.baseUrl,
     });
   },
 
@@ -485,6 +526,7 @@ export const sessionsApi = {
     const suffix = qs.toString() ? `?${qs}` : "";
     return fetchJson(
       `/v1/sessions/${encodeURIComponent(sessionId)}/events${suffix}`,
+      { baseUrl: sessionBase(sessionId) },
     );
   },
 
@@ -510,6 +552,7 @@ export const sessionsApi = {
     qs.set("turn_limit", String(opts.turnLimit ?? 20));
     return fetchJson(
       `/v1/sessions/${encodeURIComponent(sessionId)}/events/window?${qs}`,
+      { baseUrl: sessionBase(sessionId) },
     );
   },
 
@@ -526,6 +569,7 @@ export const sessionsApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      baseUrl: sessionBase(sessionId),
     });
   },
 
@@ -543,7 +587,7 @@ export const sessionsApi = {
       requestRaw(
         `/v1/sessions/${encodeURIComponent(sessionId)}/events/stream${suffix}`,
         {
-          baseUrl: _apiBase,
+          baseUrl: sessionBase(sessionId),
           headers: { Accept: "text/event-stream" },
           signal,
         },
@@ -623,6 +667,7 @@ export const sessionsApi = {
       `/v1/sessions/${encodeURIComponent(sessionId)}/interrupt`,
       {
         method: "POST",
+        baseUrl: sessionBase(sessionId),
       },
     );
   },
@@ -630,6 +675,7 @@ export const sessionsApi = {
   cancel(sessionId: string): Promise<SessionDetail> {
     return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}/cancel`, {
       method: "POST",
+      baseUrl: sessionBase(sessionId),
     });
   },
 
@@ -638,6 +684,7 @@ export const sessionsApi = {
       `/v1/sessions/${encodeURIComponent(sessionId)}/regenerate`,
       {
         method: "POST",
+        baseUrl: sessionBase(sessionId),
       },
     );
   },
@@ -646,6 +693,7 @@ export const sessionsApi = {
     const qs = new URLSearchParams({ name });
     return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}?${qs}`, {
       method: "PATCH",
+      baseUrl: sessionBase(sessionId),
     });
   },
 
@@ -653,6 +701,7 @@ export const sessionsApi = {
     try {
       await fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}`, {
         method: "DELETE",
+        baseUrl: sessionBase(sessionId),
       });
     } catch (err) {
       // DELETE is idempotent: a session that's already gone is a successful
@@ -668,7 +717,9 @@ export const sessionsApi = {
   // Per-session attached skill list. skill-creator is always active and is
   // not included in this list.
   getExtraSkills(sessionId: string): Promise<{ skill_ids: string[] }> {
-    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}/skills`);
+    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}/skills`, {
+      baseUrl: sessionBase(sessionId),
+    });
   },
 
   setExtraSkills(
@@ -679,6 +730,7 @@ export const sessionsApi = {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ skill_ids: skillIds }),
+      baseUrl: sessionBase(sessionId),
     });
   },
 
@@ -693,6 +745,7 @@ export const sessionsApi = {
       {
         method: "POST",
         body: form,
+        baseUrl: sessionBase(sessionId),
       },
     );
   },
@@ -702,6 +755,7 @@ export const sessionsApi = {
   ): Promise<{ items: SessionAttachmentItem[] }> {
     return fetchJson(
       `/v1/sessions/${encodeURIComponent(sessionId)}/attachments`,
+      { baseUrl: sessionBase(sessionId) },
     );
   },
 
@@ -711,7 +765,10 @@ export const sessionsApi = {
    * Durable — the full set is returned every call.
    */
   listArtifacts(sessionId: string): Promise<{ items: SessionArtifactItem[] }> {
-    return fetchJson(`/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`);
+    return fetchJson(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+      { baseUrl: sessionBase(sessionId) },
+    );
   },
 
   /**
@@ -730,6 +787,7 @@ export const sessionsApi = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ doc_ids: docIds }),
+        baseUrl: sessionBase(sessionId),
       },
     );
   },
@@ -743,7 +801,7 @@ export const sessionsApi = {
   deleteAttachment(sessionId: string, attachmentId: string): Promise<void> {
     return fetchJson(
       `/v1/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`,
-      { method: "DELETE" },
+      { method: "DELETE", baseUrl: sessionBase(sessionId) },
     );
   },
 
@@ -766,6 +824,7 @@ export const sessionsApi = {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ permission_mode: permissionMode }),
+        baseUrl: sessionBase(sessionId),
       },
     );
   },
@@ -788,6 +847,7 @@ export const sessionsApi = {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ effort }),
+      baseUrl: sessionBase(sessionId),
     });
   },
 
@@ -805,6 +865,7 @@ export const sessionsApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
+      baseUrl: sessionBase(sessionId),
     });
   },
 };

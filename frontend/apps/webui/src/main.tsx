@@ -24,10 +24,20 @@ hydrateTheme();
 // see parser-plugins/src/index.ts for the ordering contract.
 initParserPlugins();
 
-hydrateOverlayIfPresent().then(() => {
-  createRoot(document.getElementById("root")!).render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  );
-});
+// The overlay is optional — a hydration failure must NOT block the mount
+// (a bare ``.then`` here meant any rejection left a permanently white
+// page, since ``render`` was never called and nothing logged the cause).
+hydrateOverlayIfPresent()
+  .catch((cause: unknown) => {
+    console.error(
+      "[boot] edition overlay hydration failed — continuing with the base profile",
+      cause,
+    );
+  })
+  .then(() => {
+    createRoot(document.getElementById("root")!).render(
+      <StrictMode>
+        <App />
+      </StrictMode>,
+    );
+  });

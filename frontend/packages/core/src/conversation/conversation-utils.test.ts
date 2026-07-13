@@ -462,6 +462,39 @@ describe("buildTurns — user interrupt", () => {
   });
 });
 
+describe("buildTurns — runtime interrupt (not user cancel)", () => {
+  it("marks session.idle with category 'interrupted' as interrupted, not cancelled", () => {
+    const bare = buildTurns([
+      evt(1, "message.user", { text: "hi", message_id: "u1" }),
+      evt(2, "session.idle", { stop_reason: "interrupted" }),
+    ]);
+    expect(bare[0]!.interrupted).toBe(true);
+    expect(bare[0]!.cancelled).toBeFalsy();
+
+    const serialized = buildTurns([
+      evt(1, "message.user", { text: "hi", message_id: "u1" }),
+      evt(2, "session.idle", {
+        stop_reason: JSON.stringify({ category: "interrupted" }),
+      }),
+    ]);
+    expect(serialized[0]!.interrupted).toBe(true);
+    expect(serialized[0]!.cancelled).toBeFalsy();
+  });
+
+  it("run.failed with category 'interrupted' is interrupted, not a hard failure", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "go", message_id: "u1" }),
+      evt(2, "run.failed", {
+        category: "interrupted",
+        message: "runtime process interrupted: boom",
+      }),
+    ]);
+    expect(turns[0]!.interrupted).toBe(true);
+    expect(turns[0]!.cancelled).toBeFalsy();
+    expect(turns[0]!.failedMessage).toBeNull();
+  });
+});
+
 describe("buildTurns — attachment names", () => {
   it("derives the attachment name from source_path (original file)", () => {
     const turns = buildTurns([
@@ -534,8 +567,7 @@ describe("buildTurns — compaction marker", () => {
 describe("buildTurns — tool input/output streaming", () => {
   const toolBlock = (turn: ReturnType<typeof buildTurns>[number]) =>
     turn.blocks.find((b) => b.kind === "tool") as
-      | Extract<(typeof turn.blocks)[number], { kind: "tool" }>
-      | undefined;
+      Extract<(typeof turn.blocks)[number], { kind: "tool" }> | undefined;
 
   it("builds a running card from the first input_delta, before tool.call.started", () => {
     const turns = buildTurns([
@@ -618,7 +650,10 @@ describe("buildTurns — tool input/output streaming", () => {
         message_id: "a1",
       }),
       evt(3, "tool.call.output_delta", { tool_use_id: "t1", text: "partial" }),
-      evt(4, "tool.call.completed", { tool_use_id: "t1", content: "full output" }),
+      evt(4, "tool.call.completed", {
+        tool_use_id: "t1",
+        content: "full output",
+      }),
     ]);
 
     const tool = toolBlock(turns[0]!);

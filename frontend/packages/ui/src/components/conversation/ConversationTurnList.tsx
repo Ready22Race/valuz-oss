@@ -659,8 +659,15 @@ const TurnRow = memo(
       .filter((b) => b.kind === "assistant")
       .map((b) => b.text)
       .join("\n\n");
-    const actionText =
-      assistantText || (turn.cancelled ? t("conversation.userCancelled") : "");
+    // A user cancel and a runtime/system interruption both render as a quiet
+    // grey line, but with distinct labels — a system interruption must NOT read
+    // as "用户取消了当前对话".
+    const interruptLabel = turn.cancelled
+      ? t("conversation.userCancelled")
+      : turn.interrupted
+        ? t("conversation.runtimeInterrupted")
+        : null;
+    const actionText = assistantText || interruptLabel || "";
 
     // Turn-level meta: total elapsed (max of any block's elapsedMs) and
     // whether the turn has any process content worth surfacing as a
@@ -852,7 +859,9 @@ const TurnRow = memo(
                 // Meta marker — render the divider before the fold check so
                 // it stays visible even when the process trail is folded.
                 return (
-                  <CompactionDivider key={`compaction-${turn.id}-${blockIndex}`} />
+                  <CompactionDivider
+                    key={`compaction-${turn.id}-${blockIndex}`}
+                  />
                 );
               }
               if (
@@ -933,15 +942,15 @@ const TurnRow = memo(
               </div>
             ) : null}
 
-            {turn.cancelled ? (
+            {interruptLabel ? (
               <div className="py-1.5 text-[13px] italic text-ink-muted">
-                {t("conversation.userCancelled")}
+                {interruptLabel}
               </div>
             ) : null}
 
             {!inFlight &&
             !turn.failedMessage &&
-            (assistantText || turn.cancelled) ? (
+            (assistantText || turn.cancelled || turn.interrupted) ? (
               <MessageActions
                 text={actionText}
                 onRetry={onRetry ? () => onRetry(turn.id) : undefined}
@@ -1240,6 +1249,20 @@ export function ConversationTurnList({
       ) : null}
 
       {sending && turns.length === 0 ? (
+        <div className="mt-[26px] flex items-start gap-3">
+          <div className="flex items-center py-2.5">
+            <LogoShimmer />
+          </div>
+        </div>
+      ) : null}
+
+      {/* Transcript still loading with nothing on screen yet: show the
+          shimmer instead of literally nothing. Every history load used to
+          render an empty body for its whole duration (the welcome state is
+          gated to new chats), which read as a blank white page whenever the
+          bootstrap fetch chain was slow. Mutually exclusive with the
+          ``sending`` shimmer above. */}
+      {!sending && loading && turns.length === 0 ? (
         <div className="mt-[26px] flex items-start gap-3">
           <div className="flex items-center py-2.5">
             <LogoShimmer />

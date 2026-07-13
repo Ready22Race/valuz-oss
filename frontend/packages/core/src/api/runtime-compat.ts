@@ -1,146 +1,34 @@
 /**
- * Single source of truth for runtime ↔ provider compatibility.
- *
- * The rules here drive three call sites and they all need to agree:
+ * Runtime ↔ provider compatibility for the three Settings surfaces that need it:
  *  1. Composer / quick-chat model picker (useComposerProviders).
- *  2. Settings → Default-config card (Connection dropdown is filtered by
- *     the chosen Runtime).
- *  3. Settings → Provider list (each row shows "可用于：X / Y" so the
- *     user can tell at a glance which runtimes a freshly-added DeepSeek
- *     channel will work with).
+ *  2. Settings → Default-config card (Connection dropdown filtered by Runtime).
+ *  3. Settings → Provider list ("可用于：X / Y" badges).
  *
- * Compatibility is NOT just "protocol matches". Two additional rules:
- *  - codex runtime can only authenticate to ``codex-subscription``.
- *    The codex CLI reads its own keychain and won't accept a plain
- *    OpenAI API key, so listing api-key OpenAI providers under codex is
- *    a UX trap.
- *  - deepagents (Valuz Agent) reads credentials from the provider row
- *    directly. It can drive any api-key provider regardless of wire
- *    shape, BUT it can't authenticate to subscription providers
- *    (``claude-subscription`` / ``codex-subscription``) because those
- *    tokens live in the provider CLI's keychain, not on the host.
+ * Compatibility is read verbatim from each model's server-resolved ``runtimes``
+ * (derived once in the backend ``runtimes_for``; see
+ * docs/design/runtime-model-compat-single-source.md). This module no longer
+ * re-derives it from ``protocol`` / ``provider_kind`` — a provider is compatible
+ * with a runtime iff at least one of its models declares that runtime.
  */
 
-import type {
-  ApiProtocol,
-  LLMChannelDetail,
-  LLMChannel,
-} from "./providers-api";
-import {
-  ALLOWED_PROTOCOLS_BY_RUNTIME,
-  type RuntimeKey,
-} from "./runtime-protocols";
+import type { LLMChannel, LLMChannelDetail } from "./providers-api";
 import type { RuntimeId } from "./sessions-api";
 
-const SUBSCRIPTION_PROVIDER_KINDS = new Set([
-  "claude-subscription",
-  "codex-subscription",
-]);
+/** Subset of a provider this module needs — accepts both LLMChannel and
+ *  LLMChannelDetail (both carry per-model ``runtimes``). */
+type CompatProvider = Pick<LLMChannel, "models">;
 
-const ANTHROPIC_PROVIDER_KINDS = new Set(["anthropic", "claude-subscription"]);
-
-/** Subset of a provider this module needs. Accepts both LLMChannel
- *  and LLMChannelDetail, plus any future shape that carries these fields. */
-type CompatProvider = Pick<
-  LLMChannel,
-  "provider_kind" | "protocol" | "effective_protocol" | "compatible_protocols"
->;
-
-/**
- * Legacy 2-value protocol values for back-compat with pre-bba3014
- * payloads. Older backends emit ``"openai" | "anthropic"`` instead of
- * the 4-value hyphen form; we widen the check accordingly when the row
- * still uses the legacy shape.
- */
-const ALL_OPENAI_HYPHEN_PROTOCOLS: ReadonlySet<string> = new Set([
-  "openai",
-  "openai-completion",
-  "openai-response",
-]);
-
-const speaksAnyProtocolFrom = (
-  p: CompatProvider,
-  allowed: readonly ApiProtocol[],
-): boolean => {
-  if (p.compatible_protocols && p.compatible_protocols.length > 0) {
-    return p.compatible_protocols.some((proto) =>
-      (allowed as readonly string[]).includes(proto),
-    );
-  }
-  // Legacy fallback for callers/payloads predating ``compatible_protocols``.
-  // Map the row's bare ``protocol`` value (or ``provider_kind``) onto the
-  // 4-value allowlist as best we can.
-  const raw = (p.protocol ?? "").toLowerCase();
-  if (raw === "anthropic") return allowed.includes("anthropic");
-  if (ALL_OPENAI_HYPHEN_PROTOCOLS.has(raw)) {
-    // Legacy bare "openai" → openai-completion (DeepAgents-compatible).
-    const inferred: ApiProtocol =
-      raw === "openai-response" ? "openai-response" : "openai-completion";
-    return allowed.includes(inferred);
-  }
-  if (raw === "gemini") return allowed.includes("gemini");
-  if (ANTHROPIC_PROVIDER_KINDS.has(p.provider_kind)) {
-    return allowed.includes("anthropic");
-  }
-  return allowed.includes("openai-completion");
-};
-
-/** Decide whether a single (provider, runtime) pair can actually run.
- *  Mirrors the filter inside useComposerProviders so all three picker
- *  surfaces stay in lock-step. Now driven by the backend's
- *  ``factory.ALLOWED_PROTOCOLS_BY_RUNTIME`` 4-value allowlist
- *  (kernel V5+bba3014). */
+/** Whether a provider can run on ``runtime`` — true iff one of its models
+ *  declares it. Mirrors the model-level filter in useComposerProviders. */
 export const isProviderRuntimeCompatible = (
   provider: CompatProvider,
   runtime: RuntimeId,
-): boolean => {
-  if (runtime === "deepagents") {
-    // Excludes subscription-only providers — their CLI keychain isn't
-    // accessible to the deepagents (Valuz Agent) runtime. Otherwise any
-    // wire shape the runtime's allowlist accepts is fair game.
-    if (SUBSCRIPTION_PROVIDER_KINDS.has(provider.provider_kind)) {
-      return false;
-    }
-    return speaksAnyProtocolFrom(
-      provider,
-      ALLOWED_PROTOCOLS_BY_RUNTIME.deepagents,
-    );
-  }
-  if (runtime === "claude_agent") {
-    // Claude Code SDK only sends anthropic-shape requests, so the
-    // provider has to be able to speak anthropic — even a DeepSeek that
-    // happens to expose both shapes qualifies.
-    return speaksAnyProtocolFrom(
-      provider,
-      ALLOWED_PROTOCOLS_BY_RUNTIME.claude_agent,
-    );
-  }
-  // codex: its own ChatGPT subscription, OR a system/gateway provider that
-  // serves the Responses API. The codex CLI can't drive a bare user-supplied
-  // OpenAI api_key endpoint (walks its own keychain), but the kernel codex
-  // runtime *can* target a managed ``base_url`` with ``wire_api="responses"``
-  // — so a ``source="system"`` channel speaking ``openai-response`` (the Valuz
-  // channel) is usable too.
-  if (provider.provider_kind === "codex-subscription") {
-    return true;
-  }
-  if (provider.provider_kind === "system") {
-    return speaksAnyProtocolFrom(provider, ALLOWED_PROTOCOLS_BY_RUNTIME.codex);
-  }
-  return false;
-};
-
-// Type-only assertion: the runtime allowlist matches the 4-value
-// ``ApiProtocol`` enum. ``RuntimeKey`` is imported but otherwise unused;
-// this satisfies-cast keeps the import live for the type system.
-const _ALLOWLIST_TYPE_CHECK: Record<RuntimeKey, readonly ApiProtocol[]> =
-  ALLOWED_PROTOCOLS_BY_RUNTIME;
-void _ALLOWLIST_TYPE_CHECK;
+): boolean => provider.models.some((m) => (m.runtimes ?? []).includes(runtime));
 
 const ALL_RUNTIMES: RuntimeId[] = ["claude_agent", "codex", "deepagents"];
 
-/** Every runtime this provider could plausibly run on. Used by the
- *  Settings → Providers list to render "可用于" badges. */
+/** Every runtime this provider could plausibly run on — the union of its
+ *  models' ``runtimes``. Used by the Settings → Providers list "可用于" badges. */
 export const compatibleRuntimes = (p: CompatProvider): RuntimeId[] =>
   ALL_RUNTIMES.filter((r) => isProviderRuntimeCompatible(p, r));
 
@@ -150,14 +38,9 @@ export const RUNTIME_DISPLAY_NAME: Record<RuntimeId, string> = {
   deepagents: "Deep Agents",
 };
 
-/** Helper for callers that have a LLMChannelDetail (models known) and need
- *  the same filter as useComposerProviders flattened in line. Returns
- *  ``true`` if the provider has at least one model that could run on the
- *  given runtime. */
+/** Whether ``p`` has at least one model that could run on ``runtime``. Kept as a
+ *  named helper for callers holding a full ``LLMChannelDetail``. */
 export const providerHasUsableModelForRuntime = (
   p: LLMChannelDetail,
   runtime: RuntimeId,
-): boolean => {
-  if (!isProviderRuntimeCompatible(p, runtime)) return false;
-  return p.models.length > 0 || !!p.default_model;
-};
+): boolean => isProviderRuntimeCompatible(p, runtime);

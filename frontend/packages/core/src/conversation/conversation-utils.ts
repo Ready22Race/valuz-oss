@@ -69,24 +69,42 @@ const elapsedSince = (
   return end - start;
 };
 
-const isUserInterruptValue = (value: unknown): boolean => {
-  if (typeof value !== "string") return false;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === "user_interrupt" || normalized === "interrupted") {
-    return true;
-  }
+/**
+ * Classify a ``stop_reason`` / ``category`` value as a user cancel vs a
+ * runtime/system interruption vs neither.
+ *
+ * Both render as a quiet grey line (not an ``ErrorMessageCard``), but they carry
+ * DIFFERENT labels: ``user_interrupt`` is the user pressing Stop; ``interrupted``
+ * is the agent subprocess being torn down / crashing mid-turn (see the kernel's
+ * ``is_runtime_interruption``). Collapsing the two made a runtime crash render as
+ * "用户取消了当前对话" — blaming the user for a system failure. Keep them apart.
+ *
+ * Accepts the bare string or a serialized ``{type|category}`` object.
+ */
+const interruptKind = (value: unknown): "user" | "runtime" | null => {
+  const classify = (s: string): "user" | "runtime" | null => {
+    const n = s.trim().toLowerCase();
+    if (n === "user_interrupt") return "user";
+    if (n === "interrupted") return "runtime";
+    return null;
+  };
+  if (typeof value !== "string") return null;
+  const direct = classify(value);
+  if (direct) return direct;
   try {
     const parsed = JSON.parse(value) as unknown;
-    if (!parsed || typeof parsed !== "object") return false;
+    if (!parsed || typeof parsed !== "object") return null;
     const obj = parsed as Record<string, unknown>;
-    return (
-      obj.type === "user_interrupt" ||
-      obj.category === "user_interrupt" ||
-      obj.type === "interrupted" ||
-      obj.category === "interrupted"
-    );
+    for (const key of ["type", "category"] as const) {
+      const v = obj[key];
+      if (typeof v === "string") {
+        const c = classify(v);
+        if (c) return c;
+      }
+    }
+    return null;
   } catch {
-    return false;
+    return null;
   }
 };
 
@@ -319,8 +337,10 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     }
 
     if (eventType === "session.idle") {
-      if (isUserInterruptValue(payload.stop_reason) && currentTurn) {
-        currentTurn.cancelled = true;
+      if (currentTurn) {
+        const kind = interruptKind(payload.stop_reason);
+        if (kind === "user") currentTurn.cancelled = true;
+        else if (kind === "runtime") currentTurn.interrupted = true;
       }
       continue;
     }
@@ -531,10 +551,15 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
     }
 
     if (eventType === "run.failed") {
-      if (isUserInterruptValue(payload.category)) {
+      const kind = interruptKind(payload.category);
+      if (kind === "user") {
         // User cancelled the run — render a quiet grey line, not the
         // ``ErrorMessageCard`` (with retry / switch-model) a real failure gets.
         turn.cancelled = true;
+      } else if (kind === "runtime") {
+        // Runtime/agent subprocess torn down or crashed mid-turn — same quiet
+        // grey line, but a distinct label (NOT "user cancelled").
+        turn.interrupted = true;
       } else {
         turn.failedMessage =
           payload.message ??

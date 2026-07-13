@@ -17,15 +17,24 @@ logger = logging.getLogger(__name__)
 # Marketplace display order. First role of a pack reads as its lead.
 BUILTIN_PACK_IDS: tuple[str, ...] = (
     "product-strategy",
+    "design-prototype",
     "development-engineering",
+    "qa-testing",
     "investment",
     "supply-chain-tracking",
     "competitive-intelligence",
+    "content-growth",
+    "campaign-event",
     "content",
+    "short-video-growth",
     "contract-review",
+    "compliance-review",
     "academic-research",
+    "training-program",
     "recruiting-evaluation",
     "chinese-metaphysics",
+    "health-report",
+    "tarot-astrology",
 )
 
 # The teams onboarding recommends. Keep this aligned with the Marketplace's

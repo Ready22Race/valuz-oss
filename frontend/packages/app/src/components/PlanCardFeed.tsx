@@ -28,6 +28,8 @@ import {
   type PlanResponse,
   type PlanSubtask,
   type TaskEvent,
+  getEntityOrigin,
+  recordEntityOrigin,
 } from "@valuz/core";
 import { PlanCard } from "./PlanCard";
 
@@ -162,11 +164,22 @@ function SinglePlanCardWatcher(props: SingleWatcherProps): ReactElement {
     [card, onNewVersion],
   );
 
+  // Seed the draft task's origin from its caller session BEFORE the event
+  // subscription below resolves its stream URL (multi-target editions).
+  useEffect(() => {
+    const sessionOrigin = getEntityOrigin(sessionId, "session");
+    if (sessionOrigin) recordEntityOrigin(card.taskId, sessionOrigin);
+  }, [card.taskId, sessionId]);
+
   // Only the latest card for a task polls — older cards are frozen.
   useTaskEvents(isLatest ? card.taskId : null, handleEvent);
 
   const handleExecute = useCallback(async () => {
     try {
+      // A draft task minted inside a routed session lives on that session's
+      // backend — seed its origin before the first task-scoped call.
+      const sessionOrigin = getEntityOrigin(sessionId, "session");
+      if (sessionOrigin) recordEntityOrigin(card.taskId, sessionOrigin);
       await tasksApi.commit(card.taskId, { caller_session_id: sessionId });
     } catch {
       // Surface failure via console; the page-level toast wiring is

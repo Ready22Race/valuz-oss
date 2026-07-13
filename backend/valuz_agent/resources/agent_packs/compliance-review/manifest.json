@@ -3,7 +3,7 @@
   "kind": "agent-pack",
   "collection": {
     "id": "compliance-review",
-    "name": { "zh-CN": "合规审查 Team", "en-US": "Compliance Review Team" },
+    "name": { "zh-CN": "合规审查", "en-US": "Compliance Review" },
     "description": { "zh-CN": "业务流程、隐私数据、监管要求和审计报告的合规初审团队", "en-US": "First-pass compliance review for workflows, privacy data, regulatory requirements, and audit reports" },
     "scenario": { "zh-CN": "法务安全", "en-US": "Legal & Safety" },
     "icon": "shield-check"

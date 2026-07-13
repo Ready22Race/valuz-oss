@@ -34,6 +34,12 @@ import {
   agentsApi,
   automationsApi,
   connectorsApi,
+  getDefaultExecutionTarget,
+  getEntityOrigin,
+  recordEntityOrigin,
+  resolveApiBase,
+  useEntityOrigin,
+  useExecutionTargets,
   useSessionStore,
   useProjectStore,
   projectsApi,
@@ -107,7 +113,6 @@ import {
   type SkillSubmissionState,
   type UploadedFileItem,
   type ComposerAgentItem,
-  type ComposerProjectItem,
   type ComposerConnector,
 } from "@valuz/ui";
 import { modelLabel } from "@valuz/shared";
@@ -127,10 +132,13 @@ import {
   computePlanAnchors,
   extractToolOutputJson,
 } from "./conversation-plan-anchors";
+import { deriveTurnActive } from "./conversation-loading";
 import { LiveTaskCard } from "../components/LiveTaskCard";
 import { QueuedInputsBar } from "../components/QueuedInputsBar";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
 import { CreateAgentDialog } from "../components/CreateAgentDialog";
+import { OriginBadge } from "../components/ExecutionLocationPicker";
+import { ExecutionLocationBar } from "../components/ExecutionLocationBar";
 import {
   resolveAgentSkillItems,
   type AgentSkillItem,
@@ -654,6 +662,16 @@ export const ConversationPage = () => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (agentParam) setSelectedAgentSlug(agentParam);
   }, [agentParam]);
+  // Deep-link origin fast path (multi-target editions): a share/notification
+  // link can carry ``?origin=cloud`` so the page routes to the owning backend
+  // without a probe round-trip. The edition adapter validates the value;
+  // single-target builds have no adapter → no-op.
+  const originParam = searchParams.get("origin");
+  useEffect(() => {
+    if (originParam && id && id !== NEW_SESSION_ID) {
+      recordEntityOrigin(id, originParam);
+    }
+  }, [originParam, id]);
   // Set when this conversation was opened from a task's "view session" link
   // (TaskDetailPage). Drives the breadcrumb back-to-task affordance in the
   // header so a subtask/lead session isn't a navigational dead end.
@@ -922,6 +940,21 @@ export const ConversationPage = () => {
     "low" | "medium" | "high" | "xhigh" | "max" | null
   >(null);
 
+  // Multi-target editions: where a NEW quick/temp chat runs. ``null`` follows
+  // the registered default; single-target builds register nothing and the
+  // picker renders nothing. Locked at session creation (ADR-006 semantics) —
+  // project conversations don't get a choice, they follow the project's
+  // origin. See docs (commercial): execution-location-per-entity.
+  const executionTargets = useExecutionTargets();
+  const [execTargetId, setExecTargetId] = useState<string | null>(null);
+  const resolveExecTarget = useCallback(() => {
+    if (executionTargets.length === 0) return undefined;
+    return (
+      executionTargets.find((target) => target.id === execTargetId) ??
+      getDefaultExecutionTarget()
+    );
+  }, [executionTargets, execTargetId]);
+
   // Connector selection — only meaningful for new sessions (locked at creation
   // per ADR-006). The picker UI was removed from the composer; we still
   // pre-select every connected connector at session-creation time so the
@@ -1172,6 +1205,12 @@ export const ConversationPage = () => {
   // sees their input rendered twice + the loading dots vanish mid-stream.
   const isSendInFlightRef = useRef(false);
   const maxSeqRef = useRef(0);
+  // Consecutive unexpected-close reconnect attempts for the live events
+  // stream. Reset whenever a live frame is delivered (a healthy stream)
+  // and on every session switch; capped so a session whose stream is
+  // repeatedly cut (dead proxy, wedged server) degrades to the
+  // status-reconcile path instead of reconnecting forever.
+  const streamReconnectAttemptsRef = useRef(0);
   // Earliest seq currently in ``events``. Used as the cursor for the
   // upward "load older turns" pager. Starts at ``Infinity`` so the first
   // ``listEventsWindow`` call (which omits ``before_seq``) targets the
@@ -1252,6 +1291,23 @@ export const ConversationPage = () => {
   const [selectedComposerSkill, setSelectedComposerSkill] =
     useState<SkillView | null>(null);
   const [projectSkills, setProjectSkills] = useState<SkillView[]>([]);
+
+  // Residual-state sweep for in-place session transitions. The layout used
+  // to remount this whole page on every pathname change, which incidentally
+  // wiped composer/turn-scoped state; conversation routes now transition in
+  // place (so the ``new`` → ``{id}`` promotion survives), so anything the
+  // remount used to clean must be cleared explicitly. Keyed on
+  // ``conversationInstanceKey``, which changes exactly on TRUE session
+  // switches — stable across the promotion (where ``handleSend`` owns this
+  // state) and a no-op on mount (everything is still at its initial value).
+  useEffect(() => {
+    setDraft("");
+    setSelectedComposerSkill(null);
+    setRetryCounts({});
+    setAutoApprovedNotices([]);
+    userScrolledRef.current = false;
+  }, [conversationInstanceKey]);
+
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<
     string | null
@@ -1403,6 +1459,14 @@ export const ConversationPage = () => {
     () => sessions.find((s) => s.id === selectedSessionId) ?? null,
     [selectedSessionId, sessions],
   );
+
+  // The composer's loading / Stop state (and the streaming logo + "已处理 X 秒"
+  // timer) is DERIVED, not a bare flag: the optimistic ``sending`` gated by the
+  // authoritative, reconciled session status. The instant the session is
+  // terminal the turn is over — so a missed terminal SSE frame can no longer
+  // strand the UI in a loading state. ``sending`` itself stays the internal
+  // send/queue gate; only the displayed state derives from status.
+  const isBusy = deriveTurnActive(sending, selectedSession?.status);
 
   // The agent actually bound to this composer: an existing session is frozen to
   // its ``sessionAgentSlug`` (ADR-006), a fresh draft uses the picker's
@@ -2361,19 +2425,27 @@ export const ConversationPage = () => {
   // 09-assistant: the 📁 chip's dropdown options — every project project.
   // ``ProjectListItem`` carries no member count, so the count is left
   // undefined for now (chip renders fine without it).
-  const composerProjects = useMemo<ComposerProjectItem[]>(
-    () =>
-      projects
-        .filter((w) => w.kind === "project")
-        .map((w) => ({ id: w.id, name: w.name })),
-    [projects],
-  );
-
   // 09-assistant: whether the conversation currently targets 临时对话
   // (chat-default / non-project). The page stores the ``"chat-default"``
   // sentinel for 临时, so derive temp-ness from the resolved project kind
   // rather than a literal null.
   const isTempConversation = activeProject?.kind !== "project";
+
+  // The attached strip under the composer owns the 📁 project choice for a
+  // NEW conversation (replacing the composer's old toolbar chip) and keeps
+  // showing the bound context on existing ones. All editions render it; the
+  // location chip inside it only appears on multi-target builds.
+  const execBarLocked = !(selectedSession == null && isNewSession);
+  // Observed origin of the open session — drives the locked bar's location
+  // chip (multi-target editions; undefined on single-target/unknown).
+  const sessionExecOrigin = useEntityOrigin(selectedSessionId, "session");
+  const execBarProjects = useMemo(
+    () =>
+      projects
+        .filter((w) => w.kind === "project")
+        .map((w) => ({ id: w.id, name: w.name, execOrigin: w.exec_origin })),
+    [projects],
+  );
 
   // Agent options for the composer's 🤖 chip. Candidates depend on the 📁
   // chip: 临时对话 → the "我的" library (``myAgents``); a project → its
@@ -2614,6 +2686,7 @@ export const ConversationPage = () => {
     minSeqRef.current = Number.POSITIVE_INFINITY;
     hasMoreOlderRef.current = false;
     setHasMoreOlder(false);
+    streamReconnectAttemptsRef.current = 0;
     if (!sessionId) {
       return;
     }
@@ -2700,6 +2773,12 @@ export const ConversationPage = () => {
       hasMoreOlderRef.current = false;
       setHasMoreOlder(false);
       setTodos(null);
+      // A failed history load used to be swallowed here, leaving an
+      // existing session rendering a permanently blank transcript with
+      // no error and no retry path (the empty state is welcome-gated to
+      // ``/conversation/new`` only). Surface it so the user sees an
+      // error card instead of a white page.
+      setError(_t("conversation.historyLoadFailed" as I18nKey));
     }
   }, []);
 
@@ -2819,7 +2898,18 @@ export const ConversationPage = () => {
       promotedFromNew?: boolean;
       promotedSessionId?: string;
     } | null;
+    // The promotion fast-path (skip the loading flash + skip the history
+    // refetch) is only valid while a send is genuinely IN FLIGHT — that live
+    // subscription is what fills ``events`` for the freshly promoted session,
+    // so the refetch is redundant and the loader would just flash. On a cold
+    // page reload there is no in-flight send: ``history.state`` still carries
+    // ``promotedFromNew`` (the hash router restores it across refreshes) and
+    // the ``promotingSessionIdRef`` / ``consumedPromoteSessionIdsRef`` refs
+    // reset with the page, so without this ``isSendInFlightRef`` guard bootstrap
+    // would replay the promotion skip on every refresh — never calling
+    // ``refreshEvents`` — and leave the conversation body blank.
     const isPromoteBootstrap =
+      isSendInFlightRef.current &&
       id !== NEW_SESSION_ID &&
       (promotingSessionIdRef.current === id ||
         (routeState?.promotedFromNew === true &&
@@ -2871,6 +2961,9 @@ export const ConversationPage = () => {
             ? projectParam
             : null;
         setSelectedProjectId(presetProject ?? "chat-default");
+        // Preset project (e.g. home-page footer bar hand-off): same reveal
+        // rule as an in-page pick.
+        if (presetProject) panelSetCollapsed(false);
         setSessions([]);
         selectedSessionIdRef.current = null;
         setSelectedSessionId(null);
@@ -2896,9 +2989,15 @@ export const ConversationPage = () => {
           routeState?.promotedFromNew === true &&
           routeState.promotedSessionId === sessionDetail.id &&
           !consumedPromoteSessionIdsRef.current.has(sessionDetail.id);
+        // Same guard as ``isPromoteBootstrap`` above: only treat this as a
+        // promotion — and therefore SKIP ``refreshEvents`` — while a send is
+        // in flight (the live subscription is already streaming this turn's
+        // events in). On a reload the restored ``promotedFromNew`` state must
+        // NOT suppress the history load, or the transcript stays empty.
         const isPromotedNewSession =
-          promotingSessionIdRef.current === sessionDetail.id ||
-          routePromotedSession;
+          isSendInFlightRef.current &&
+          (promotingSessionIdRef.current === sessionDetail.id ||
+            routePromotedSession);
         const wasSameSession =
           selectedSessionIdRef.current === sessionDetail.id;
         setSessionTriggerMode(sessionDetail.trigger_meta?.mode ?? null);
@@ -3094,20 +3193,21 @@ export const ConversationPage = () => {
     refreshFileTree();
   }, [refreshFileTree]);
 
-  // Auto-refresh on turn end: when ``sending`` flips false, the agent
-  // has just finished writing whatever artifacts it was going to. Pull
+  // Auto-refresh on turn end: when the derived ``isBusy`` flips false, the
+  // agent has just finished writing whatever artifacts it was going to. Pull
   // a fresh tree so the panel reflects new files without the user
-  // having to switch projects or hit refresh manually.
-  const prevSendingRef = useRef(sending);
+  // having to switch projects or hit refresh manually. (``isBusy`` rather
+  // than raw ``sending`` so a stuck flag can't suppress the refresh.)
+  const prevBusyRef = useRef(isBusy);
   useEffect(() => {
-    if (prevSendingRef.current && !sending) {
+    if (prevBusyRef.current && !isBusy) {
       refreshFileTree();
       // The agent may have called ``deliver_artifacts`` during the turn —
       // pull the fresh 生成文件 list alongside the file tree.
       void refreshArtifacts();
     }
-    prevSendingRef.current = sending;
-  }, [sending, refreshFileTree, refreshArtifacts]);
+    prevBusyRef.current = isBusy;
+  }, [isBusy, refreshFileTree, refreshArtifacts]);
 
   // Loading server-side attachments on session change + polling parse status
   // is owned by ``useSessionAttachments`` above.
@@ -3148,17 +3248,44 @@ export const ConversationPage = () => {
         });
         created = await sessionsApi.get(start.session_id);
       } else {
-        created = await sessionsApi.create({
-          project_id: isChat ? "chat-default" : sessionProjectId,
-          agent_slug: selectedAgentSlug ?? undefined,
-          provider_id: selectedProviderId ?? undefined,
-          model_id: selectedModelId ?? undefined,
-          runtime_id: selectedRuntimeId ?? undefined,
-          mcp_provider_slugs:
-            selectedMcpSlugs.length > 0 ? selectedMcpSlugs : undefined,
-          permission_mode: selectedPermissionMode,
-          effort: selectedEffort,
-        });
+        // Multi-target routing: a quick/temp chat runs on the target the
+        // composer picker chose; a project conversation always follows its
+        // project's observed origin. Single-target builds resolve both to
+        // ``undefined`` → module-default base, unchanged behaviour.
+        const chatTarget = isChat ? resolveExecTarget() : undefined;
+        const projectOrigin = !isChat
+          ? getEntityOrigin(sessionProjectId, "project")
+          : undefined;
+        const createBaseUrl = isChat
+          ? chatTarget?.baseUrl
+          : resolveApiBase({ projectId: sessionProjectId }, "") || undefined;
+        // On a REMOTE target, provider_id / model / runtime / connector picks
+        // reference THIS backend's rows — meaningless (400) on the other
+        // backend. Drop them so the owning backend resolves its own defaults;
+        // symbolic fields (agent_slug / permission_mode / effort) stay.
+        const remoteCreate = chatTarget?.remote === true;
+        created = await sessionsApi.create(
+          {
+            project_id: isChat ? "chat-default" : sessionProjectId,
+            agent_slug: selectedAgentSlug ?? undefined,
+            provider_id: remoteCreate
+              ? undefined
+              : (selectedProviderId ?? undefined),
+            model_id: remoteCreate ? undefined : (selectedModelId ?? undefined),
+            runtime_id: remoteCreate
+              ? undefined
+              : (selectedRuntimeId ?? undefined),
+            mcp_provider_slugs:
+              !remoteCreate && selectedMcpSlugs.length > 0
+                ? selectedMcpSlugs
+                : undefined,
+            permission_mode: selectedPermissionMode,
+            effort: selectedEffort,
+          },
+          createBaseUrl ? { baseUrl: createBaseUrl } : undefined,
+        );
+        const originTag = isChat ? chatTarget?.id : projectOrigin;
+        if (originTag) recordEntityOrigin(created.id, originTag);
       }
       // 10-new-conversation-guidance slice 3: remember which agent this 临时对话
       // used so the next new conversation pre-selects it.
@@ -3269,6 +3396,9 @@ export const ConversationPage = () => {
       skillProjectParam,
       id,
       navigate,
+      // Multi-target routing: the chosen execution target is read at
+      // creation time — same closure-staleness trap as permission mode.
+      resolveExecTarget,
     ],
   );
 
@@ -3278,7 +3408,6 @@ export const ConversationPage = () => {
       afterSeq: number,
       opts: {
         requireUserBeforeTerminal?: boolean;
-        expectedUserText?: string;
       } = {},
     ) => {
       if (abortRef.current) {
@@ -3515,13 +3644,36 @@ export const ConversationPage = () => {
         // UI stuck in "agent running" state long after the turn
         // finished.
         const evType = event.event.event_type;
-        if (evType === "message.user") {
-          sawTurnStart =
-            !opts.requireUserBeforeTerminal ||
-            opts.expectedUserText === undefined ||
-            event.event.payload.text === opts.expectedUserText;
+        // Mark the turn as started once THIS turn's opening ``message.user``
+        // arrives. We key on the seq cursor, not on the text: a
+        // ``user_message`` whose seq is beyond the subscription's ``afterSeq``
+        // is unambiguously new (the backend only replays events after that
+        // cursor), so it can only be the message that opened the turn we're
+        // waiting on — while any stale terminal replayed between ``afterSeq``
+        // and it stays correctly ignored.
+        //
+        // The previous exact-text match (``payload.text === expectedUserText``)
+        // broke whenever the kernel rewrote the user message before persisting
+        // it — e.g. session-mode wrapping turns "hi" into "/goal hi"
+        // (orchestrator ``wrap_for_mode``). The echoed text then never equaled
+        // the raw sent text, ``sawTurnStart`` stayed false, the turn's
+        // ``session.idle`` was ignored, the SSE stream never closed, and
+        // ``sending`` stuck true — the composer frozen on the Stop button.
+        if (evType === "message.user" && event.seq > afterSeq) {
+          sawTurnStart = true;
         }
         const status = event.event.payload.status;
+        // Reconcile the authoritative status from the live frame so the derived
+        // loading flag + header pill track the turn without waiting for a poll.
+        if (evType === "session.update" && status) {
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === sessionId
+                ? { ...s, status: status as SessionListItem["status"] }
+                : s,
+            ),
+          );
+        }
         const terminal =
           sawTurnStart &&
           (evType === "session.idle" ||
@@ -3556,40 +3708,189 @@ export const ConversationPage = () => {
         }
       };
 
+      // Reconcile the authoritative session status. The composer's loading state
+      // is DERIVED from ``sessions[].status`` (see ``deriveTurnActive``), so
+      // keeping that status fresh here is what un-sticks the Stop button / loading
+      // logo / "已处理 X 秒" timer when the terminal SSE frame is missed — a
+      // re-subscribe whose ``afterSeq`` is already past the turn's terminal event,
+      // a dropped/deduped frame, or a non-idle ending. It also fixes a stale
+      // "运行中" header pill. Once the turn is genuinely over we also
+      // ``stopSubscription`` so this poll stops spinning.
+      //
+      // ``sawTurnActivity`` seeds ``true`` for non-``requireUserBeforeTerminal``
+      // subscriptions (auto-resume / queue-drain), which are only ever created
+      // for an already-running session — so an ``idle`` reading means the turn
+      // finished, not that it hasn't started (the pre-run window that the
+      // fresh-send path must wait through).
+      let sawTurnActivity = !opts.requireUserBeforeTerminal;
+      let idleReconcileTicks = 0;
       pollTimer = window.setInterval(() => {
         if (stopped) return;
         sessionsApi
           .listEvents(sessionId, maxSeqRef.current)
           .then((response) => {
-            for (const event of response.items) {
-              appendEvent(event);
+            if (response.items.length > 0) {
+              sawTurnActivity = true;
+              idleReconcileTicks = 0;
+              for (const event of response.items) {
+                appendEvent(event);
+              }
+              return;
             }
+            // No new persisted events this tick. After ~2s of silence,
+            // reconcile against the authoritative session status.
+            idleReconcileTicks += 1;
+            if (idleReconcileTicks < 4) return;
+            idleReconcileTicks = 0;
+            void sessionsApi
+              .get(sessionId)
+              .then((detail) => {
+                if (stopped) return;
+                // Push the authoritative status into local state — this drives
+                // the derived loading flag and the header pill.
+                setSessions((prev) =>
+                  prev.map((s) =>
+                    s.id === sessionId ? { ...s, status: detail.status } : s,
+                  ),
+                );
+                if (
+                  detail.status === "running" ||
+                  detail.status === "created"
+                ) {
+                  sawTurnActivity = true;
+                  return;
+                }
+                // Terminal status. If the turn actually ran (events streamed, or
+                // this subscription was born for a running session), it's done —
+                // stop the poll/stream. The loading UI has already cleared via
+                // the reconciled status regardless of this.
+                if (sawTurnActivity || maxSeqRef.current > afterSeq) {
+                  stopSubscription();
+                }
+              })
+              .catch(() => {});
           })
           .catch(() => {});
       }, 500);
+
+      // A live stream can end for reasons other than "turn finished and
+      // fully delivered" — a proxy cutting the localhost connection, a
+      // server-side hiccup, a dropped socket. Treating every close as
+      // completion silently loses the rest of the turn (verified
+      // incident: the kernel finished its reply in 8s, but the stream
+      // died right after the first ``thinking`` frame — the transcript
+      // froze with no error, no spinner, and no retry, because nothing
+      // ever fetched the remaining events). On an unexpected close:
+      //   1. gap-fill whatever the stream missed from the DB;
+      //   2. if the turn is still live (status running/created),
+      //      re-subscribe from the advanced cursor with exponential
+      //      backoff (capped attempts, reset on healthy delivery);
+      //   3. otherwise run the normal end-of-turn bookkeeping.
+      // A close we initiated ourselves (terminal event seen →
+      // ``stopSubscription``; session switch / unmount / superseding
+      // subscribe / interrupt → ``abort``) is fully handled by its
+      // closer and skips all of this.
+      let reconciled = false;
+      const reconcileStreamEnd = async () => {
+        // Idempotent: wired to both ``.then`` and ``.catch`` of the
+        // stream promise, so a handler-side rejection can't run it twice.
+        if (reconciled || stopped || abort.signal.aborted) return;
+        reconciled = true;
+        try {
+          const resp = await sessionsApi.listEvents(
+            sessionId,
+            maxSeqRef.current,
+          );
+          if (stopped || abort.signal.aborted) return;
+          for (const event of resp.items) {
+            // May deliver the turn's terminal event → ``stopSubscription``.
+            appendEvent(event);
+          }
+        } catch {
+          // Gap-fill is best-effort — the status check below still
+          // decides between reconnect and shutdown.
+        }
+        if (stopped || abort.signal.aborted) return;
+        let status: string | null = null;
+        try {
+          const detail = await sessionsApi.get(sessionId);
+          if (stopped || abort.signal.aborted) return;
+          status = detail.status;
+          // Push the authoritative status so the derived busy flag and
+          // header pill stay truthful while we decide what to do next.
+          setSessions((prev) =>
+            prev.map((s) =>
+              s.id === sessionId
+                ? { ...s, status: detail.status as SessionListItem["status"] }
+                : s,
+            ),
+          );
+        } catch {
+          // Unknown status — treat like a live turn and let the capped
+          // reconnect path retry (a transient GET failure shouldn't
+          // strand a streaming turn).
+        }
+        if (stopped || abort.signal.aborted) return;
+        if (status === null || status === "running" || status === "created") {
+          const attempt = streamReconnectAttemptsRef.current;
+          if (attempt >= 5) {
+            stopSubscription();
+            return;
+          }
+          streamReconnectAttemptsRef.current = attempt + 1;
+          const delay = Math.min(1000 * 2 ** attempt, 15000);
+          window.setTimeout(() => {
+            if (stopped || abort.signal.aborted) return;
+            // A newer subscription (fresh send / session switch) owns
+            // the page now — it covers this turn's tail itself.
+            if (abortRef.current) return;
+            if (isSendInFlightRef.current) return;
+            if (selectedSessionIdRef.current !== sessionId) return;
+            subscribeToSession(
+              sessionId,
+              maxSeqRef.current,
+              sawTurnStart ? {} : opts,
+            );
+          }, delay);
+          return;
+        }
+        // Terminal status: the turn is genuinely over — run the normal
+        // end-of-turn bookkeeping (session row + sidebar refresh).
+        stopSubscription();
+      };
+      // Never let a reconcile rejection escape past ``.finally`` as an
+      // unhandled promise rejection — every recoverable branch inside is
+      // already try/caught; this is the belt-and-braces wrapper.
+      const safeReconcileStreamEnd = () => reconcileStreamEnd().catch(() => {});
 
       sessionsApi
         .subscribeEvents(
           sessionId,
           (event) => {
+            // A delivered frame means the stream is healthy — reset the
+            // unexpected-close backoff.
+            streamReconnectAttemptsRef.current = 0;
             appendEvent(event);
           },
           afterSeq,
           abort.signal,
         )
-        .then(() => {
-          void refreshActiveSession(sessionId);
-          void fetchSidebarSessions();
-        })
-        .catch(() => {})
+        .then(safeReconcileStreamEnd)
+        .catch(safeReconcileStreamEnd)
         .finally(() => {
           if (pollTimer !== null) {
             window.clearInterval(pollTimer);
             pollTimer = null;
           }
-          setSending(false);
+          // Only the CURRENT subscription may release the loading flag. A
+          // superseded one (a hung stream aborted by the next send's
+          // ``subscribeToSession``) finalises late — an unconditional
+          // ``setSending(false)`` here would clobber the new turn's flag.
+          // Paths that abort AND clear ``abortRef`` themselves (interrupt,
+          // session switch) also reset ``sending`` themselves.
           if (abortRef.current === abort) {
             abortRef.current = null;
+            setSending(false);
           }
         });
     },
@@ -3673,7 +3974,9 @@ export const ConversationPage = () => {
   // The actual send. Attachments are uploaded on attach, so this never
   // uploads — it just mints/reuses the session and posts the message.
   const performSend = async () => {
-    if (!draft.trim() || sending) return;
+    // Re-entrancy guard on the derived ``isBusy`` (not raw ``sending``): a
+    // stuck ``sending`` on a reconciled-idle session must not swallow the send.
+    if (!draft.trim() || isBusy) return;
     // Skill-creator binds an agent (its create flow needs one) — nudge if none.
     // A normal new 临时对话 may now be agentless (a quick chat on the default
     // model), so it sends without an agent pick.
@@ -3707,6 +4010,17 @@ export const ConversationPage = () => {
       sentAt: Date.now(),
     });
     setSending(true);
+    // Optimistically mark the active session running so the derived loading flag
+    // shows immediately (an existing session re-send would otherwise read its
+    // prior ``idle`` status for a beat and flicker). The real status is
+    // reconciled from the POST response + SSE ``session.update`` right after.
+    if (selectedSessionId) {
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === selectedSessionId ? { ...s, status: "running" } : s,
+        ),
+      );
+    }
     setError(null);
     setDraft("");
     setSelectedComposerSkill(null);
@@ -3750,9 +4064,12 @@ export const ConversationPage = () => {
       // Prompt text is sent verbatim — no attachment hint appended.
       const outboundText = text;
 
+      // ``requireUserBeforeTerminal``: don't honor a terminal event until this
+      // turn's own ``message.user`` (seq > the cursor captured here) has been
+      // seen, so a stale replayed ``session.idle`` can't close the stream
+      // before the turn even starts.
       subscribeToSession(session.id, maxSeqRef.current, {
         requireUserBeforeTerminal: true,
-        expectedUserText: outboundText,
       });
 
       const detail = await sessionsApi.sendMessage(
@@ -3974,20 +4291,30 @@ export const ConversationPage = () => {
     subscribeToSession,
   ]);
 
-  // Refetch on a turn boundary (sending → idle): drained items drop and any
-  // blocked / paused state surfaces (session-input-queue §8.4).
-  const prevQueueSendingRef = useRef(false);
+  // Refetch on a turn boundary (busy → idle): drained items drop and any
+  // blocked / paused state surfaces (session-input-queue §8.4). Keyed on the
+  // derived ``isBusy`` (not raw ``sending``) so the resync still fires when a
+  // missed terminal frame leaves ``sending`` stuck and only the status
+  // reconciliation ends the turn.
+  const prevQueueBusyRef = useRef(false);
   useEffect(() => {
-    if (prevQueueSendingRef.current && !sending) void refreshQueue();
-    prevQueueSendingRef.current = sending;
-  }, [sending, refreshQueue]);
+    if (prevQueueBusyRef.current && !isBusy) void refreshQueue();
+    prevQueueBusyRef.current = isBusy;
+  }, [isBusy, refreshQueue]);
 
   // Send entry point. While a turn is running, a follow-up is queued (drains
   // after the active turn). Otherwise it blocks on attachments still parsing —
   // the confirm dialog lets the user wait or submit with only the raw file.
+  //
+  // Routing MUST gate on the derived ``isBusy``, not the raw ``sending`` flag:
+  // ``sending`` can stay stuck true after a missed terminal frame (the exact
+  // case ``deriveTurnActive`` reconciles away for the DISPLAY). Gating here on
+  // the raw flag made a follow-up on a visually-idle session silently detour
+  // through the queue — the backend idle-kick drained it immediately (so it
+  // ran), but a phantom queue bubble stayed pinned under the composer.
   const handleSend = () => {
     if (!draft.trim()) return;
-    if (sending) {
+    if (isBusy) {
       void performEnqueue();
       return;
     }
@@ -4767,6 +5094,32 @@ export const ConversationPage = () => {
       return false;
     };
 
+    // A turn can start AND finish inside one poll interval — an instant
+    // provider failure, a trivial cached reply. Both terminal exits below
+    // used to give up silently, so a fast turn whose events landed after
+    // the history fetch never rendered (permanently blank transcript
+    // until a manual refresh). Reconcile instead: if the DB has events
+    // past our cursor, open a replay subscribe — it renders them and
+    // self-terminates on the replayed terminal event (the same proven
+    // path as the queue-drain follower). Gated on ``items.length > 0``
+    // so a quiet idle never hangs a bare SSE open.
+    const reconcileFinishedTurn = () => {
+      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+      const sid = selectedSessionId;
+      void sessionsApi
+        .listEvents(sid, maxSeqRef.current)
+        .then((resp) => {
+          if (cancelled || abortRef.current || isSendInFlightRef.current) {
+            return;
+          }
+          if (selectedSessionIdRef.current !== sid) return;
+          if (resp.items.length > 0) {
+            subscribeToSession(sid, maxSeqRef.current);
+          }
+        })
+        .catch(() => {});
+    };
+
     sessionsApi
       .get(selectedSessionId)
       .then((detail) => {
@@ -4775,8 +5128,16 @@ export const ConversationPage = () => {
           setTodos(detail.todos);
         }
         if (tryResume(detail)) return;
-        // The session has already settled — nothing to poll for.
-        if (isTerminalStatus(detail.status)) return;
+        // The session has already settled — nothing to poll for. Still
+        // run one delayed reconcile: on a promoted new conversation the
+        // history fetch can race the first turn, and an instant-failing
+        // turn may already be terminal here with its events unfetched.
+        // The delay lets ``refreshEvents`` hydrate ``maxSeqRef`` first so
+        // the common case is a cheap empty read.
+        if (isTerminalStatus(detail.status)) {
+          window.setTimeout(reconcileFinishedTurn, 1200);
+          return;
+        }
 
         // Status race window: a schedule-driven session (or any caller
         // that creates a session a hair before its first turn flips to
@@ -4806,6 +5167,10 @@ export const ConversationPage = () => {
               }
               if (isTerminalStatus(next.status)) {
                 stopPoll();
+                // The turn ran to completion between ticks (created →
+                // running → idle inside one interval) — fetch what it
+                // produced instead of abandoning it unrendered.
+                reconcileFinishedTurn();
               }
             })
             .catch(() => {
@@ -5293,6 +5658,10 @@ export const ConversationPage = () => {
                 }
                 pending={effectiveTurns.length === 0}
               />
+              {/* Execution origin (multi-target editions): where this
+                  session's backend lives. Locked at creation; renders
+                  nothing on single-target builds. */}
+              <OriginBadge entityId={selectedSessionId} kind="session" />
               {sessionAgentSlug ? (
                 <Badge variant="metaBrand" className="shrink-0">
                   <Bot className="h-3 w-3" />
@@ -5395,7 +5764,7 @@ export const ConversationPage = () => {
                 key={conversationInstanceKey}
                 turns={effectiveTurns}
                 scrollContainerRef={scrollContainerRef}
-                sending={sending}
+                sending={isBusy}
                 loading={id === NEW_SESSION_ID ? false : loading}
                 error={error}
                 onRetry={handleRetry}
@@ -5533,7 +5902,7 @@ export const ConversationPage = () => {
               onClick={handleScrollToBottom}
               className={cn(
                 "absolute bottom-full left-1/2 z-20 mb-3 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-surface-border bg-surface shadow-md transition-opacity hover:bg-surface-soft",
-                sending &&
+                isBusy &&
                   "animate-[border-breathe_1.8s_ease-in-out_infinite] border-brand/60",
               )}
             >
@@ -5617,7 +5986,7 @@ export const ConversationPage = () => {
             onSend={() => {
               void handleSend();
             }}
-            sending={sending}
+            sending={isBusy}
             onStop={() => interruptRef.current()}
             // Upload cap counts only the *pending* server rows — the
             // ones staged for the next turn. Consumed rows live on in
@@ -5678,17 +6047,38 @@ export const ConversationPage = () => {
             // ``"chat-default"`` sentinel for 临时, so the chip sees ``null``
             // when the active project isn't a project, and a change to
             // ``null`` maps back to the sentinel. Frozen once a session exists.
-            projects={composerProjects}
-            selectedProjectId={isProjectProject ? selectedProjectId : null}
-            projectLocked={selectedSession != null}
-            onProjectChange={(idOrNull) => {
-              setSelectedProjectId(idOrNull ?? "chat-default");
-              // The picked skill belongs to the previous project scope —
-              // drop it so a project-scoped skill can't leak into a 临时 send
-              // (and vice versa). availableSkills reloads off the new id.
-              setSelectedComposerSkill(null);
-              setComposerTouched(true);
-            }}
+            footerBar={
+              <ExecutionLocationBar
+                locked={execBarLocked}
+                lockedOriginId={sessionExecOrigin}
+                targetId={execTargetId}
+                onTargetChange={(tid) => {
+                  setExecTargetId(tid);
+                  // A project belongs to ONE backend — switching location
+                  // resets the pick back to 临时对话.
+                  const current = projects.find(
+                    (w) => w.id === selectedProjectId,
+                  );
+                  if (current && (current.exec_origin ?? "local") !== tid) {
+                    setSelectedProjectId("chat-default");
+                    setSelectedComposerSkill(null);
+                  }
+                  setComposerTouched(true);
+                }}
+                projects={execBarProjects}
+                selectedProjectId={isProjectProject ? selectedProjectId : null}
+                onProjectChange={(idOrNull) => {
+                  setSelectedProjectId(idOrNull ?? "chat-default");
+                  // Same scope rule as the old toolbar chip: skills don't
+                  // survive a project-scope change.
+                  setSelectedComposerSkill(null);
+                  setComposerTouched(true);
+                  // A project always has meaningful panel content (file
+                  // tree / KB / members) — reveal the right panel on pick.
+                  if (idOrNull) panelSetCollapsed(false);
+                }}
+              />
+            }
             onAddAgent={
               isProjectProject && selectedProjectId
                 ? () =>

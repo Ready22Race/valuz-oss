@@ -259,6 +259,41 @@ class Settings(BaseSettings):
     # and sets VALUZ_CDT_PATH instead of npx.
     chrome_devtools_version: str = "1.2.0"
 
+    # ── Marketplace ──────────────────────────────────────────────────
+    # The market index is the PRIMARY marketplace data source (skill /
+    # connector / agent template / team template discovery).
+    #
+    # Empty (default) means: race the ``marketplace_index_candidates`` at
+    # startup — concurrent ``GET {candidate}/healthz`` — and pin the first
+    # candidate to answer 2xx as the resolved base url for the life of the
+    # process (re-raced after repeated request failures). Set this explicitly
+    # (env ``VALUZ_MARKETPLACE_INDEX_BASE_URL``) to skip the race entirely and
+    # always use that base url — this is how a commercial/self-hosted build
+    # pins a specific index without candidate racing.
+    #
+    # ``marketplace_index_channel`` tags every request so the index can scope
+    # results/entitlements per edition/build. Override with
+    # VALUZ_MARKETPLACE_INDEX_CHANNEL.
+    marketplace_index_base_url: str = ""
+    marketplace_index_candidates: list[str] = [
+        "https://api.valuz.io",
+        "https://api.valuz.cn",
+    ]
+    marketplace_index_channel: str = "oss"
+
+    # Whether an unreachable market index may fall back to querying the
+    # legacy direct sources (SkillHub / ModelScope) for the ``skill`` /
+    # ``connector`` tabs — never for ``agent`` categories/items, which have no
+    # direct-source equivalent and simply degrade to empty. Results served
+    # this way are marked ``degraded: true`` regardless of whether the direct
+    # source itself succeeded, since it isn't channel-managed content.
+    #
+    # OSS defaults this on so the marketplace stays usable when the index is
+    # down. Commercial/vertical builds that must not let clients bypass the
+    # index's channel controls set this False at their startup path (env
+    # ``VALUZ_MARKETPLACE_DIRECT_FALLBACK=0``).
+    marketplace_direct_fallback: bool = True
+
     model_config = {"env_prefix": "VALUZ_"}
 
 

@@ -1,5 +1,3 @@
-import asyncio
-import json
 import tempfile
 from pathlib import Path
 from typing import Annotated
@@ -11,26 +9,19 @@ from fastapi import (
     Form,
     HTTPException,
     Query,
-    Request,
     Response,
     UploadFile,
     status,
 )
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
 
 from valuz_agent.api.deps import (
     get_current_user_id,
     get_session_service,
     get_skill_service,
 )
-from valuz_agent.infra.eventbus import event_bus
 from valuz_agent.modules.sessions.schemas import SessionModelSelection
 from valuz_agent.modules.sessions.service import SessionService
-from valuz_agent.modules.skills.events import (
-    PROJECT_SKILLS_CHANGED,
-    SKILL_CHANGED,
-)
 from valuz_agent.modules.skills.models import (
     SessionSkillImportConfirmRequest,
     SkillCopyRequest,
@@ -136,56 +127,17 @@ async def rescan_skills(
     svc: SkillLibraryService = Depends(get_skill_service),
     user_id: str = Depends(get_current_user_id),
 ) -> SkillRescanResponse:
-    """Re-discover every skill on disk and refresh the index, then notify open
-    catalogs (via ``SKILL_CHANGED``) so they re-fetch. The manual counterpart of
-    the boot scan + periodic auto-scan — surfaced so a user who just added a
-    team or dropped a skill folder can pick it up without restarting."""
+    """Re-discover every skill on disk and refresh the index. The manual
+    counterpart of the boot scan + periodic auto-scan — surfaced so a user who
+    just added a team or dropped a skill folder can pick it up without
+    restarting. Clients see the fresh index on their next fetch (the Skills
+    page revalidates on navigate + window focus)."""
     indexed = await svc.startup_scan(user_id)
-    event_bus.publish(SKILL_CHANGED, skill_id="*", reason="rescan")
     return SkillRescanResponse(indexed=indexed)
 
 
 # ------------------------------------------------------------------
 # Import endpoints (static paths before {skill_id})
-# ------------------------------------------------------------------
-
-
-@router.get("/v1/skills/events/stream")
-async def skill_events_stream(request: Request) -> EventSourceResponse:
-    queue: asyncio.Queue[dict] = asyncio.Queue()  # type: ignore[type-arg]
-
-    def _on_skill_changed(**payload: object) -> None:
-        queue.put_nowait({"event": SKILL_CHANGED, "data": json.dumps(payload, default=str)})
-
-    def _on_project_changed(**payload: object) -> None:
-        queue.put_nowait(
-            {"event": PROJECT_SKILLS_CHANGED, "data": json.dumps(payload, default=str)}
-        )
-
-    event_bus.subscribe(SKILL_CHANGED, _on_skill_changed)
-    event_bus.subscribe(PROJECT_SKILLS_CHANGED, _on_project_changed)
-
-    async def _event_generator():
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    yield item
-                except TimeoutError:
-                    yield {"event": "ping", "data": ""}
-        finally:
-            handlers = event_bus._handlers.get(SKILL_CHANGED, [])
-            if _on_skill_changed in handlers:
-                handlers.remove(_on_skill_changed)
-            handlers = event_bus._handlers.get(PROJECT_SKILLS_CHANGED, [])
-            if _on_project_changed in handlers:
-                handlers.remove(_on_project_changed)
-
-    return EventSourceResponse(_event_generator())
-
-
 # ------------------------------------------------------------------
 
 
@@ -520,8 +472,7 @@ async def confirm_skill_submission(
     Body fields (``summary``, ``change_kind``, ``files_touched``) are
     informational — the SKILL.md the agent wrote into staging is the
     source of truth. The frontend pulls them from the original
-    ``tool_use`` event so they ride along to the ``SKILL_CHANGED``
-    event for downstream subscribers.
+    ``tool_use`` event to render the confirmation card.
     """
     body = payload or SkillSubmissionConfirmRequest()
     try:

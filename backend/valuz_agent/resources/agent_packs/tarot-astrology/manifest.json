@@ -3,7 +3,7 @@
   "kind": "agent-pack",
   "collection": {
     "id": "tarot-astrology",
-    "name": { "zh-CN": "塔罗星座 Team", "en-US": "Tarot & Astrology Team" },
+    "name": { "zh-CN": "塔罗星座", "en-US": "Tarot & Astrology" },
     "description": { "zh-CN": "塔罗牌阵、星座运势、内容化解读，定位为娱乐和文化内容", "en-US": "Tarot spreads, zodiac readings, and content-style interpretation for entertainment" },
     "scenario": { "zh-CN": "特色分类", "en-US": "Specialty" },
     "icon": "stars"

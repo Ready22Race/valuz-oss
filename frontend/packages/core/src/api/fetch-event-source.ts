@@ -61,11 +61,17 @@ function parseFrame(raw: string): SSEFrame | null {
 export function fetchEventSource(
   getUrl: () => string,
   onFrame: (frame: SSEFrame) => void,
-  opts: { reconnectDelayMs?: number } = {},
+  opts: { reconnectDelayMs?: number; maxReconnectDelayMs?: number } = {},
 ): () => void {
   const reconnectDelayMs = opts.reconnectDelayMs ?? 1000;
+  const maxReconnectDelayMs = opts.maxReconnectDelayMs ?? 30_000;
   let closed = false;
   let controller: AbortController | null = null;
+  // Exponential backoff between failed connects. A flat 1s retry hammered
+  // the backend when the failure is persistent — most visibly a 401 before
+  // login (auth-carrying streams like /v1/decisions/stream retried every
+  // second, forever). Reset to the base delay after a successful connect.
+  let delayMs = reconnectDelayMs;
 
   const connect = async (): Promise<void> => {
     if (closed) return;
@@ -75,7 +81,15 @@ export function fetchEventSource(
         headers: { Accept: "text/event-stream" },
         signal: controller.signal,
       });
+      if (res.status === 401 || res.status === 403) {
+        // Unauthorized won't heal in a second — jump straight to the max
+        // delay. A later login is picked up on the next (slow) retry.
+        delayMs = maxReconnectDelayMs;
+        throw new Error(`SSE ${res.status}`);
+      }
       if (!res.ok || !res.body) throw new Error(`SSE ${res.status}`);
+      // Connected — restore the fast-reconnect behaviour for real drops.
+      delayMs = reconnectDelayMs;
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -94,7 +108,12 @@ export function fetchEventSource(
       // Drop / abort / non-200 — fall through to reconnect (silent, like
       // EventSource). ``close()`` sets ``closed`` so abort doesn't loop.
     }
-    if (!closed) setTimeout(connect, reconnectDelayMs);
+    if (!closed) {
+      setTimeout(connect, delayMs);
+      // Double AFTER scheduling: first failed retry keeps the base delay,
+      // repeated failures back off up to the cap.
+      delayMs = Math.min(delayMs * 2, maxReconnectDelayMs);
+    }
   };
 
   void connect();

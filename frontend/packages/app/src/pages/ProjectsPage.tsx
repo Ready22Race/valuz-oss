@@ -31,6 +31,11 @@ import type { DirectoryFieldMode } from "../layout";
 import { useAgentDeployPicker } from "../components/agent-deploy-picker";
 import { AgentCheckboxList } from "../components/AgentDeployField";
 import { ImportProjectDialog } from "../components/ImportProjectDialog";
+import {
+  ProjectLocationFields,
+  useProjectExecutionLocation,
+} from "../components/ProjectLocationFields";
+import { OriginBadge } from "../components/ExecutionLocationPicker";
 
 export const ProjectsPage = ({
   directoryFieldMode = "picker",
@@ -61,6 +66,9 @@ export const ProjectsPage = ({
   // Initial members for the create dialog (shared with the sidebar entry).
   const memberPicker = useAgentDeployPicker();
   const managedDirectory = directoryFieldMode === "managed";
+  // Execution location for the create dialog (multi-target editions; inert
+  // no-target state on single-backend builds).
+  const execLocation = useProjectExecutionLocation();
 
   const fetchProjects = useCallback(async () => {
     try {
@@ -139,12 +147,17 @@ export const ProjectsPage = ({
   const handleCreate = async () => {
     const trimmedName = newName.trim();
     const trimmedPath = newRootPath.trim();
-    if (!trimmedName || (!managedDirectory && !trimmedPath)) return;
+    // A remote execution target has no access to this machine's paths — the
+    // backend allocates a managed cwd and the picked folder uploads after.
+    const managed = managedDirectory || execLocation.isRemoteTarget;
+    if (!trimmedName || (!managed && !trimmedPath)) return;
     setCreateError("");
     setBusy(true);
     try {
-      const created = await projectsApi.create(
-        managedDirectory
+      // Routes to the chosen execution target and records the project's
+      // origin BEFORE the deploys below, so they hit the same backend.
+      const created = await execLocation.createProjectAt(
+        managed
           ? { name: trimmedName }
           : { name: trimmedName, root_path: trimmedPath },
       );
@@ -159,10 +172,33 @@ export const ProjectsPage = ({
       toast.success(
         t("project.created" as Parameters<typeof t>[0], { name: trimmedName }),
       );
+      if (
+        execLocation.isRemoteTarget &&
+        execLocation.initialFiles.length > 0
+      ) {
+        toast.info(
+          t("project.initialFilesUploading" as Parameters<typeof t>[0]),
+        );
+        void execLocation
+          .uploadInitialFiles(created.id)
+          .then((count) =>
+            toast.success(
+              t("project.initialFilesUploaded" as Parameters<typeof t>[0], {
+                count,
+              }),
+            ),
+          )
+          .catch(() =>
+            toast.error(
+              t("project.initialFilesFailed" as Parameters<typeof t>[0]),
+            ),
+          );
+      }
       setNewName("");
       setNewDesc("");
       setNewRootPath("");
       memberPicker.reset();
+      execLocation.reset();
       setCreateOpen(false);
       void fetchProjects();
     } catch (err) {
@@ -232,6 +268,12 @@ export const ProjectsPage = ({
             name={project.name}
             note={project.root_path || ""}
             href={`/projects/${project.id}`}
+            badge={
+              // Execution origin (multi-target editions; fan-out tags rows).
+              project.exec_origin ? (
+                <OriginBadge origin={project.exec_origin} />
+              ) : undefined
+            }
             onDelete={() => setDeleteTarget(project)}
             LinkComponent={Link}
           />
@@ -254,6 +296,7 @@ export const ProjectsPage = ({
           if (!open) {
             setCreateError("");
             memberPicker.reset();
+            execLocation.reset();
           }
         }}
         title={t("common.create" as Parameters<typeof t>[0])}
@@ -270,7 +313,14 @@ export const ProjectsPage = ({
             onChange={(e) => setNewName(e.target.value)}
           />
         </FormField>
-        {managedDirectory ? (
+        <ProjectLocationFields state={execLocation} />
+        {execLocation.isRemoteTarget ? (
+          // Remote target: managed cwd + the optional initial-folder upload
+          // above replace the local directory binding entirely.
+          createError ? (
+            <p className="text-xs text-destructive">{createError}</p>
+          ) : null
+        ) : managedDirectory ? (
           <FormField
             label={t("project.projectDir" as Parameters<typeof t>[0])}
             error={createError || undefined}

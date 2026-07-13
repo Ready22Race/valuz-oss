@@ -22,6 +22,14 @@ class SkillDatastore:
         self._db = db
         self._config_name = "project-config.json"
 
+    @property
+    def session(self) -> AsyncSession:
+        """The bound DB session — a narrow, intentional escape hatch for
+        cross-module hooks that need this datastore's session (e.g. the
+        marketplace-install-provenance cleanup on skill delete) without
+        reaching into a sibling module's own datastore."""
+        return self._db
+
     # ------------------------------------------------------------------
     # DB-backed SkillIndexRow CRUD (retained for future startup_scan)
     # ------------------------------------------------------------------
@@ -133,9 +141,7 @@ class SkillDatastore:
         if row is None:
             return
         row.status = "unavailable"
-        await async_commit_with_retry(
-            self._db, where="SkillDatastore.mark_unavailable_by_slug"
-        )
+        await async_commit_with_retry(self._db, where="SkillDatastore.mark_unavailable_by_slug")
 
     async def list_project_skills(
         self, user_id: str, project_id: str
