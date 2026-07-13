@@ -64,6 +64,7 @@ import {
 } from "@valuz/core";
 import { modelLabel, type WorktreeItem } from "@valuz/shared";
 import { t as _t } from "@valuz/shared/i18n";
+import { ExecutionLocationBar } from "../components/ExecutionLocationBar";
 import { useProjectOutlet } from "@valuz/app/layout";
 import { usePlatform } from "@valuz/app/platform";
 import { useProjectKbBindings, useKbDocTree } from "@valuz/app/hooks";
@@ -1457,6 +1458,32 @@ export const ProjectDetailPage = () => {
                 <Composer
                   autoFocus
                   wrapperClassName="px-0"
+                  // Same context strip the standalone composer carries — here
+                  // permanently locked: a project owns its execution location
+                  // (本地/云端) and obviously its own 📁, so both chips are a
+                  // static display. This is where "is this a local or cloud
+                  // project" is answered while working inside one.
+                  footerBar={
+                    <ExecutionLocationBar
+                      locked
+                      lockedOriginId={project?.exec_origin ?? "local"}
+                      targetId={null}
+                      onTargetChange={() => {}}
+                      projects={
+                        project
+                          ? [
+                              {
+                                id: project.id,
+                                name: project.name,
+                                execOrigin: project.exec_origin ?? "local",
+                              },
+                            ]
+                          : []
+                      }
+                      selectedProjectId={project ? project.id : null}
+                      onProjectChange={() => {}}
+                    />
+                  }
                   value={composerValue}
                   onChange={(v) => {
                     setComposerValue(v);
