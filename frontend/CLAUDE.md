@@ -207,52 +207,24 @@ The canonical design doc is `docs/desktop/FRONTEND-ARCH.md` in the sibling `repo
 
 ## UI Component Spec
 
-> Mandatory conventions for the `@valuz/ui` component library. All tokens are defined in `packages/ui/src/styles/project.css`.
+`frontend/docs/design/DESIGN.md` is the single source of truth for visual
+design, component variants, color semantics, typography, radius, shadow, icon,
+focus, and badge rules. If this file and `DESIGN.md` disagree, follow
+`DESIGN.md` and update this file.
 
-### Border Radius
+Mandatory rules for new or changed UI:
 
-| Element | Tailwind | Token |
-|---------|----------|-------|
-| Button / Input / Textarea / Select / TabsTrigger / Checkbox | `rounded-md` | 6px |
-| Dialog / Drawer / IconBox(md) / code blocks | `rounded-lg` | 8px |
-| Card / DropdownMenu / Popover / EmptyState / IconBox(lg) | `rounded-xl` | 10px |
-| SectionCard / ActionCardGrid icon | `rounded-2xl` | 12px |
-| Badge / Switch / Avatar / StatusPill | `rounded-full` | — |
+- Read `frontend/docs/design/DESIGN.md` before adding a page, component, or new visual pattern.
+- Use semantic tokens from `packages/ui/src/styles/project.css`; do not hardcode colors or Tailwind palette color classes.
+- Use existing primitives and business components from `@valuz/ui` first. If the same style pattern appears twice, promote it into `packages/ui`.
+- Button variants are those defined by `DESIGN.md` §7. Do not introduce or use `secondary` as a new emphasis level.
+- Badge/status/meta/role tags must follow the `DESIGN.md` §7 tag taxonomy; do not mix status, ownership/meta, and role colors.
+- Typography, radius, shadow, icon sizes, icon stroke widths, and focus states must use the `DESIGN.md` token scale. Avoid arbitrary pixel utilities such as `text-[12.5px]`, `rounded-[7px]`, and hand-written `shadow-[...]`.
+- Any intentional exception must be documented next to the code and must explain why the existing token/component system is insufficient.
 
-Rule: do not use arbitrary values (e.g. `rounded-[7px]`). When no case matches, pick the next smaller adjacent value.
-
-### Semantic Colors
-
-**Text:** `text-ink-heading` (titles) / `text-ink-label` (form labels, buttons) / `text-ink-body` (body copy, descriptions) / `text-ink-meta` (timestamps, metadata) / `text-ink-muted` (placeholder icons) / `text-ink-disabled` (disabled state)
-
-**Surface / background:** `bg-surface` (cards) / `bg-surface-soft` (hover background) / `bg-surface-2` (secondary background) / `bg-surface-muted` (dividers, SegmentedControl)
-
-**Border:** `border-surface-border` (default) / `border-surface-border-strong` (strong border) / `border-surface-border-hover` (hover state)
-
-**Status colors:** use paired `bg-success-light` + `text-success-text`; the same applies to warning / error / info.
-
-**Brand:** `bg-brand` / `text-brand` (CTA, active state) / `bg-brand-light` (light brand background) / `text-brand-secondary`
-
-Rule: hardcoding hex colors is forbidden. All colors must be referenced through semantic tokens.
-
-### Interaction States
-
-- **Focus:** `focus-visible:border-ring focus-visible:ring-[1px] focus-visible:ring-ring/50`. Use `focus-visible`, not `focus`.
-- **Hover:** Button default `hover:bg-primary/90`; outline `hover:bg-surface-2`; ghost `hover:bg-accent`; interactive Cards use the `card-interactive` utility class.
-- **Active (Radix):** use the `data-[state=active]` selector.
-- **Disabled:** `disabled:pointer-events-none disabled:opacity-50`.
-
-### Primitive Index
-
-| Component | Location | Notes |
-|-----------|----------|--------|
-| Button | `ui/button` | variant: default/destructive/outline/secondary/ghost/link · size: default/xs/sm/lg/icon · `loading`/`asChild` |
-| Card | `ui/card` | compound: CardHeader/CardTitle/CardDescription/CardAction/CardContent/CardFooter · add `card-interactive` for interactive use |
-| Tabs | `ui/tabs` | variant: default (pill) / line (underline) · orientation: horizontal/vertical |
-| Dialog | `ui/dialog` | compound: DialogHeader/DialogContent/DialogFooter · `showCloseButton` · long content uses `flex-1 overflow-y-auto` |
-| Badge | `ui/badge` | variant: default/secondary/outline/ghost/brand/success/warning/error/destructive |
-| Item | `ui/item` | compound: ItemMedia/ItemContent/ItemTitle/ItemDescription/ItemActions · variant: default/outline/muted · `asChild` |
-| Other primitives | `ui/*` | Input · Textarea · Select(sm/default) · Switch(sm/default) · Checkbox · SegmentedControl · Tooltip · Popover · DropdownMenu · Sheet · Drawer · ScrollArea · Skeleton · Spinner · Avatar |
+`pnpm lint` runs `scripts/design-audit.mjs`, which compares current design-rule
+violations against `scripts/design-audit-baseline.json`. Existing debt is
+tracked in that baseline; new violations must not increase the counts.
 
 ### Business Component Reference
 
