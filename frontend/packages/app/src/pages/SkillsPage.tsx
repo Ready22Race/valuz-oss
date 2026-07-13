@@ -175,7 +175,13 @@ function badgeForCategory(
   | { label: string; tone: "default" | "valuz" | "claude" | "codex" }
   | undefined {
   if (categoryId === "official") {
-    return { label: t("skill.originBuiltin"), tone: "default" };
+    return {
+      label:
+        skill.origin_label === "Built-in"
+          ? t("skill.originBuiltin")
+          : t("skill.official"),
+      tone: "default",
+    };
   }
   if (categoryId === "agents") {
     if (skill.creation_origin === "created") {

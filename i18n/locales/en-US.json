@@ -1681,7 +1681,7 @@
     "groupAgents": "Agents",
     "groupClaude": "Claude",
     "groupCodex": "Codex",
-    "groupOfficial": "Built-in",
+    "groupOfficial": "Official",
     "importFailed": "Import failed: {error}",
     "importName": "Import name",
     "imported": "Skill \"{name}\" imported",

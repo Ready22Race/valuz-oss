@@ -1681,7 +1681,7 @@
     "groupAgents": "Agents",
     "groupClaude": "Claude",
     "groupCodex": "Codex",
-    "groupOfficial": "内置",
+    "groupOfficial": "官方",
     "importFailed": "导入失败: {error}",
     "importName": "导入名称",
     "imported": "Skill「{name}」已导入",
