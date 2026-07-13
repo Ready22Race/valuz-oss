@@ -1,5 +1,7 @@
 import logging
 import sys
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -45,8 +47,28 @@ from valuz_agent.infra.fs_registry import fs_registry
 
 logger = logging.getLogger("valuz_agent.api")
 
+LifespanHook = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 
-def create_app(api_prefix: list[str] | None = None) -> FastAPI:
+
+def _build_lifespan(lifespan_hooks: list[LifespanHook] | None) -> LifespanHook:
+    if not lifespan_hooks:
+        return lifespan
+
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+        async with lifespan(app):
+            async with AsyncExitStack() as stack:
+                for hook in lifespan_hooks:
+                    await stack.enter_async_context(hook(app))
+                yield
+
+    return _lifespan
+
+
+def create_app(
+    api_prefix: list[str] | None = None,
+    lifespan_hooks: list[LifespanHook] | None = None,
+) -> FastAPI:
     """Build the host FastAPI application.
 
     ``api_prefix`` prepends one or more base paths to the whole public HTTP
@@ -59,6 +81,9 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
     ``backend_base_url``; they are mounted under EACH configured base path (not
     just root) so a kernel whose ``backend_base_url`` carries the ingress
     sub-path — e.g. a cloud sandbox reachable only through it — resolves them too.
+
+    ``lifespan_hooks`` lets overlays contribute resource lifecycles without
+    mutating the returned app with deprecated startup/shutdown events.
     """
     if getattr(sys, "frozen", False):
         from valuz_agent.infra.local_identity import resolve_local_user_id
@@ -73,7 +98,7 @@ def create_app(api_prefix: list[str] | None = None) -> FastAPI:
         version="0.1.0",
         docs_url="/docs" if settings.debug else None,
         redoc_url=None,
-        lifespan=lifespan,
+        lifespan=_build_lifespan(lifespan_hooks),
     )
 
     @app.exception_handler(RequestValidationError)

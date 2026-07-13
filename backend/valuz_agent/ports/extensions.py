@@ -22,8 +22,17 @@ from typing import Any
 from valuz_agent.api.middleware import AuthMiddleware
 from valuz_agent.infra.asset_store import AssetStore, LocalAssetStore
 from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.ports.agent_lifecycle import AgentLifecycleHook, NoopAgentLifecycleHook
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
+from valuz_agent.ports.connector_lifecycle import (
+    ConnectorLifecycleHook,
+    NoopConnectorLifecycleHook,
+)
+from valuz_agent.ports.connector_oauth_refresh import (
+    ConnectorOAuthRefreshPort,
+    LocalConnectorOAuthRefreshProvider,
+)
 from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAddressResolver
 from valuz_agent.ports.instructions import InstructionsPort
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
@@ -32,6 +41,7 @@ from valuz_agent.ports.resource_list_hook import NoopResourceListHook, ResourceL
 from valuz_agent.ports.runtime_availability import RuntimeAvailabilityPort
 from valuz_agent.ports.sandbox_allocator import BootSingletonAllocator, SandboxAllocatorPort
 from valuz_agent.ports.sandbox_policy import AllowAllSandboxPolicy, SandboxPolicyPort
+from valuz_agent.ports.skill_lifecycle import NoopSkillLifecycleHook, SkillLifecycleHook
 
 
 class Extensions:
@@ -56,6 +66,12 @@ class Extensions:
         # overlay binds a per-user pool allocator (one sandbox per user_id).
         self.sandbox_allocator: SandboxAllocatorPort = BootSingletonAllocator()
         self.resource_list_hook: ResourceListHook = NoopResourceListHook()
+        self.skill_lifecycle: SkillLifecycleHook = NoopSkillLifecycleHook()
+        self.agent_lifecycle: AgentLifecycleHook = NoopAgentLifecycleHook()
+        self.connector_lifecycle: ConnectorLifecycleHook = NoopConnectorLifecycleHook()
+        self.connector_oauth_refresh: ConnectorOAuthRefreshPort = (
+            LocalConnectorOAuthRefreshProvider()
+        )
         # Resolve a file's absolute path into a client-usable access address
         # (see docs/design/file-address-resolution.md). OSS default returns the
         # local absolute path (bundled desktop reads it directly); the commercial

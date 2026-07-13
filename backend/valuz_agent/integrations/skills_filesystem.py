@@ -199,44 +199,66 @@ def _coerce_version(raw: object) -> int | None:
     return n if n > 0 else None
 
 
+def _path_key(path: Path) -> Path:
+    """Return a stable key for deduping configured and compatibility roots."""
+    try:
+        return path.expanduser().resolve(strict=False)
+    except OSError:
+        return path.expanduser().absolute()
+
+
+def _append_scan_root(
+    roots: list[tuple[str, Path, str]],
+    seen: set[Path],
+    scope: str,
+    root: Path,
+    source_label: str,
+    *,
+    include_missing: bool = False,
+) -> None:
+    key = _path_key(root)
+    if key in seen:
+        return
+    if include_missing or root.exists():
+        roots.append((scope, root, source_label))
+        seen.add(key)
+
+
 def _discover_roots(ctx: RuntimeContext) -> list[tuple[str, Path, str]]:
     """Enumerate every directory we should scan for user/project skills.
 
-    The canonical user write-target is ``FsRegistry.user_skill_root()`` —
-    ``settings.user_skills_dir``.
-    Legacy ``~/.claude/skills`` and ``~/.codex/skills`` are still
-    surfaced as read-only sources so skills authored in those CLIs
-    don't disappear. Source labels stay distinct so the UI can tell
-    the user where a skill came from.
+    The configured user write-target is ``FsRegistry.user_skill_root()`` —
+    ``settings.user_skills_dir`` / ``VALUZ_USER_SKILLS_DIR``.  The Open Agent
+    Skills standard root (``~/.agents/skills``) plus legacy
+    ``~/.claude/skills`` and ``~/.codex/skills`` are also surfaced as
+    read-only sources so skills authored in other CLIs don't disappear.
+    Source labels stay distinct so the UI can tell the user where a skill came
+    from.
     """
     roots: list[tuple[str, Path, str]] = []
     seen: set[Path] = set()
 
-    has_configured_user_dir = settings.user_skills_dir != Path.home() / ".agent" / "skills"
-
     valuz_root = _default_user_skill_root(ctx.user_id)
-    if valuz_root.exists():
-        roots.append(("user", valuz_root, "valuz"))
-        seen.add(valuz_root)
+    _append_scan_root(roots, seen, "user", valuz_root, "valuz", include_missing=True)
 
-    if not has_configured_user_dir:
-        # The leaf-and-parent shape check below maps each legacy root to
-        # the right source label, which drives the .claude / .codex
-        # top-level group on the skill management page.
-        for legacy in fs_registry.legacy_user_skill_roots():
-            if legacy in seen:
-                continue
-            if legacy.name == "skills" and legacy.parent.name == ".claude":
-                label = "claude"
-            elif legacy.name == "skills" and legacy.parent.name == ".codex":
-                label = "codex"
-            else:
-                # Defensive: if ``legacy_user_skill_roots`` ever adds a
-                # new path, fall through to the Valuz bucket rather than
-                # silently mislabel it.
-                label = "valuz"
-            roots.append(("user", legacy, label))
-            seen.add(legacy)
+    # Always scan the standards location, even when VALUZ_USER_SKILLS_DIR is a
+    # custom write target. This keeps OSS and commercial local discovery
+    # consistent: configured root + ~/.agents + ~/.claude + ~/.codex.
+    _append_scan_root(roots, seen, "user", Path.home() / ".agents" / "skills", "valuz")
+
+    # The leaf-and-parent shape check below maps each compatibility root to the
+    # right source label, which drives the .claude / .codex top-level group on
+    # the skill management page.
+    for legacy in fs_registry.legacy_user_skill_roots():
+        if legacy.name == "skills" and legacy.parent.name == ".claude":
+            label = "claude"
+        elif legacy.name == "skills" and legacy.parent.name == ".codex":
+            label = "codex"
+        else:
+            # Defensive: if ``legacy_user_skill_roots`` ever adds a new path,
+            # fall through to the Valuz bucket rather than silently mislabel it.
+            label = "valuz"
+        _append_scan_root(roots, seen, "user", legacy, label)
 
     if not roots:
         roots.append(("user", valuz_root, "valuz"))

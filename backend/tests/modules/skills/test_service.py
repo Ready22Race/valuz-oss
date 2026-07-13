@@ -122,6 +122,7 @@ class FakeSkillDatastore:
     async def create(self, user_id, row):
         if not row.id:
             row.id = uuid4().hex
+        row.user_id = user_id
         self._rows[row.id] = row
         return row
 
@@ -133,12 +134,27 @@ class FakeSkillDatastore:
         return list(self._rows.values())
 
     async def list_library_disabled_ids(self, user_id):
-        return set(getattr(self, "_library_disabled", set()))
+        row_ids = {
+            row.id
+            for row in self._rows.values()
+            if getattr(row, "user_id", user_id) == user_id
+            and getattr(row, "library_enabled", True) is False
+        }
+        return row_ids | set(getattr(self, "_library_disabled", set()))
 
     async def list_library_disabled_slugs(self, user_id):
-        return set(getattr(self, "_library_disabled_slugs", set()))
+        slugs = {
+            row.slug
+            for row in self._rows.values()
+            if getattr(row, "user_id", user_id) == user_id
+            and getattr(row, "library_enabled", True) is False
+        }
+        return slugs | set(getattr(self, "_library_disabled_slugs", set()))
 
     async def set_library_enabled(self, user_id, skill_id, enabled):
+        row = self._rows.get(skill_id)
+        if row is not None:
+            row.library_enabled = enabled
         disabled = getattr(self, "_library_disabled", set())
         disabled_slugs = getattr(self, "_library_disabled_slugs", set())
         slug = skill_id.split(":", 1)[1] if ":" in skill_id else None
@@ -154,6 +170,9 @@ class FakeSkillDatastore:
         self._library_disabled_slugs = disabled_slugs
 
     async def set_library_enabled_by_slug(self, user_id, slug, enabled):
+        row = await self.get_by_slug(user_id, slug)
+        if row is not None:
+            row.library_enabled = enabled
         disabled = getattr(self, "_library_disabled_slugs", set())
         if enabled:
             disabled.discard(slug)
@@ -187,8 +206,11 @@ def skill_root(tmp_path):
 
 
 @pytest.fixture
-def svc(skill_root, monkeypatch):
+def svc(skill_root, tmp_path, monkeypatch):
     skill_root.mkdir(parents=True, exist_ok=True)
+    test_home = tmp_path / ".test-home"
+    test_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", lambda: test_home)
     from valuz_agent.infra import fs_registry as fsr
 
     monkeypatch.setattr(fsr.settings, "user_skills_dir", skill_root)
@@ -461,16 +483,15 @@ class TestListCatalog:
 
 class TestLibraryState:
     """Global library on/off switch — the field the new-conversation ``/``
-    picker filters on. Default on; only an explicit off is stored."""
+    picker filters on. Scanned user skills default off; deliberate create/import
+    flows opt skills back in."""
 
-    async def test_catalog_overlays_disabled_row(self, svc, skill_root):
+    async def test_scanned_skills_default_off_and_preserve_enabled_row(self, svc, skill_root):
         service = svc
         _make_skill_dir(skill_root, "alpha")
         _make_skill_dir(skill_root, "beta")
-        # Turn alpha off by its catalog row id; beta left at the default (on).
-        cat0 = await service.list_catalog("u", "ws-1")
-        alpha_id = next(s for s in cat0.skills if s.slug == "alpha").id
-        await service._ds.set_library_enabled("u", alpha_id, False)
+        await service.startup_scan("u")
+        await service._ds.set_library_enabled_by_slug("u", "beta", True)
 
         catalog = await service.list_catalog("u", "ws-1")
         by_slug = {s.slug: s for s in catalog.skills}
@@ -478,11 +499,10 @@ class TestLibraryState:
         assert by_slug["alpha"].library_enabled is False
         assert by_slug["beta"].library_enabled is True
 
-    async def test_builtin_skill_cannot_be_disabled(self, svc, skill_root):
+    async def test_builtin_skill_can_be_disabled(self, svc, skill_root):
         service = svc
-        # A built-in skill (``origin-label: Built-in`` frontmatter). Even with its
-        # row turned off, the catalog must keep it enabled — built-ins ship with
-        # the client and aren't toggleable.
+        # A built-in skill (``origin-label: Built-in`` frontmatter) defaults on,
+        # but still honors the library switch when a user hides it.
         d = skill_root / "skill-creator"
         d.mkdir(parents=True)
         (d / "SKILL.md").write_text(
@@ -496,7 +516,7 @@ class TestLibraryState:
         catalog = await service.list_catalog("u", "ws-1")
         sc = next(s for s in catalog.skills if s.slug == "skill-creator")
         assert sc.origin_label == "Built-in"
-        assert sc.library_enabled is True
+        assert sc.library_enabled is False
 
     async def test_toggle_returns_updated_and_persists(self, svc, skill_root):
         from valuz_agent.modules.skills.models import SkillIndexRow
@@ -505,7 +525,7 @@ class TestLibraryState:
         _make_skill_dir(skill_root, "gamma")
         cat = await service.list_catalog("u", "ws-1")
         gamma = next(s for s in cat.skills if s.slug == "gamma")
-        assert gamma.library_enabled is True
+        assert gamma.library_enabled is False
         # Seed the index row so the service can resolve id → slug.
         service._ds._rows[gamma.id] = SkillIndexRow(
             id=gamma.id,
@@ -532,6 +552,7 @@ class TestCreateSkill:
             "u", SkillCreateRequest(name="created", description="A test")
         )
         assert result.name == "created"
+        assert result.library_enabled is True
         assert (Path(result.path) / "SKILL.md").exists()
 
     async def test_should_not_write_creation_origin_into_skill_md(self, svc, skill_root):
@@ -564,6 +585,7 @@ class TestCreateSkill:
         catalog = await service.list_catalog("u", "ws-1")
         match = next(s for s in catalog.skills if s.slug == "scanned-skill")
         assert match.creation_origin == "discovered"
+        assert match.library_enabled is False
 
 
 class TestUpdateSkill:

@@ -638,12 +638,13 @@ export function ProjectLayoutBase({
       </span>
     ));
   const resolvedRightPanel = controlledRightPanel ?? rightPanel;
-  // Skills / Connectors use the right-panel slot for a master-detail layout
+  // Skills / Connectors / Agents use the right-panel slot for a master-detail layout
   // (list + detail), not a collapsible side panel — so the collapse toggle
   // is meaningless there and is hidden.
   const suppressRightPanelToggle =
     location.pathname.startsWith("/skills") ||
-    location.pathname.startsWith("/connectors");
+    location.pathname.startsWith("/connectors") ||
+    location.pathname.startsWith("/agents");
   const rightPanelToggle =
     resolvedRightPanel && !suppressRightPanelToggle ? (
       <TooltipProvider delayDuration={150}>

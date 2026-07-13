@@ -175,7 +175,13 @@ function badgeForCategory(
   | { label: string; tone: "default" | "valuz" | "claude" | "codex" }
   | undefined {
   if (categoryId === "official") {
-    return { label: t("skill.originBuiltin"), tone: "default" };
+    return {
+      label:
+        skill.origin_label === "Built-in"
+          ? t("skill.originBuiltin")
+          : t("skill.official"),
+      tone: "default",
+    };
   }
   if (categoryId === "agents") {
     if (skill.creation_origin === "created") {
@@ -702,32 +708,20 @@ export const SkillsPage = () => {
                         // propagation so toggling never opens the detail panel.
                         onClick={(e) => e.stopPropagation()}
                       >
-                        {(() => {
-                          // Built-in skills ship with the client: always on and
-                          // not toggleable (the switch is checked + disabled).
-                          const isBuiltin = skill.origin_label === "Built-in";
-                          return (
-                            <Switch
-                              size="sm"
-                              checked={
-                                isBuiltin || skill.library_enabled !== false
-                              }
-                              disabled={isBuiltin}
-                              onCheckedChange={(v) =>
-                                void handleToggleLibrary(skill, v)
-                              }
-                              aria-label={t(
-                                (isBuiltin
-                                  ? "skill.builtinHint"
-                                  : skill.library_enabled !== false
-                                    ? "skill.libraryEnabledTip"
-                                    : "skill.libraryDisabledTip") as Parameters<
-                                  typeof t
-                                >[0],
-                              )}
-                            />
-                          );
-                        })()}
+                        <Switch
+                          size="sm"
+                          checked={skill.library_enabled !== false}
+                          onCheckedChange={(v) =>
+                            void handleToggleLibrary(skill, v)
+                          }
+                          aria-label={t(
+                            (skill.library_enabled !== false
+                              ? "skill.libraryEnabledTip"
+                              : "skill.libraryDisabledTip") as Parameters<
+                              typeof t
+                            >[0],
+                          )}
+                        />
                         <ResourceActionSlot
                           resourceType="skill"
                           resource={
