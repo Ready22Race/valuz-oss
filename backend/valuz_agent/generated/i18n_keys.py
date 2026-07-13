@@ -2014,6 +2014,7 @@ I18nKey = Literal[
     "task.durationSec",
     "task.event.goalRevised",
     "task.event.kickoff",
+    "task.event.kickoffFailed",
     "task.event.leadWorking",
     "task.event.paused",
     "task.event.planAdd",
