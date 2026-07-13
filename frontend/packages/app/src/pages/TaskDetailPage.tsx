@@ -73,7 +73,11 @@ import { toFileTree } from "../lib/file-tree";
 import { resolvedToArtifactFile } from "../lib/resolve-artifact";
 import { TaskStatusLabel } from "../components/TaskStatusLabel";
 import { NotificationCard } from "../components/NotificationInbox";
-import { useLeadFollowUpChat, useAskUserQuestionCards } from "../hooks";
+import {
+  useLeadFollowUpChat,
+  useAskUserQuestionCards,
+  useSkillSubmissionCards,
+} from "../hooks";
 import { deriveDeliverable } from "./task-detail/deliverable";
 
 interface EventMeta {
@@ -88,6 +92,14 @@ const EVENT_META: Record<string, EventMeta> = {
     icon: Flag,
     node: "bg-brand/10 text-brand",
     labelKey: "task.event.kickoff",
+  },
+  // Kickoff couldn't start the lead (missing credentials / build failure).
+  // Without this entry the row fell back to the generic "kickoff" label and
+  // read as "任务已发起" on a run that actually failed.
+  kickoff_failed: {
+    icon: XCircle,
+    node: "bg-red-500/10 text-red-500",
+    labelKey: "task.event.kickoffFailed",
   },
   subtask_spawned: {
     icon: Send,
@@ -157,6 +169,14 @@ const EVENT_META: Record<string, EventMeta> = {
     labelKey: "task.event.resumed",
   },
   stopped: {
+    icon: Square,
+    node: "bg-ink-meta/10 text-ink-body",
+    labelKey: "task.event.stopped",
+  },
+  // finish_task with a stopped final status. Same terminal-stop semantics as
+  // ``stopped`` above, so it reuses that label; distinct type only because the
+  // backend tags the lead-emitted finish path separately.
+  task_stopped: {
     icon: Square,
     node: "bg-ink-meta/10 text-ink-body",
     labelKey: "task.event.stopped",
@@ -378,6 +398,9 @@ export const TaskDetailPage = () => {
   const [members, setMembers] = useState<MemberWithAgent[]>([]);
   const [fileTree, setFileTree] = useState<FileTreeNode[]>([]);
   const [rootPath, setRootPath] = useState<string>("");
+  // Project display name — only used as the "已绑定到 X" label on a
+  // project-bound skill save in the follow-up chat.
+  const [projectName, setProjectName] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [selectedArtifactPath, setSelectedArtifactPath] = useState<
@@ -486,6 +509,7 @@ export const TaskDetailPage = () => {
     if (!projectId) {
       setFileTree([]);
       setRootPath("");
+      setProjectName("");
       return;
     }
     let cancelled = false;
@@ -497,6 +521,7 @@ export const TaskDetailPage = () => {
     ]).then(([ws, filesRes]) => {
       if (cancelled) return;
       setRootPath(ws?.cwd ?? "");
+      setProjectName(ws?.name ?? "");
       setFileTree(toFileTree(filesRes.files));
     });
     return () => {
@@ -754,6 +779,25 @@ export const TaskDetailPage = () => {
     events: followUp.events,
     sessionId: isCompleted ? leadSessionId : null,
   });
+  // Render the Lead's ``submit_skill`` tool as the skill-creator proposal card
+  // (save / dismiss) — a follow-up tweak can spin up a skill just like the main
+  // chat, so the card must work here too.
+  const skillCards = useSkillSubmissionCards({
+    sessionId: isCompleted ? leadSessionId : null,
+    turns: followUp.turns,
+    sending: followUp.sending,
+    projectLabel: projectName || null,
+  });
+  // Compose the follow-up tool-card renderers: skill submission first, then the
+  // AskUserQuestion card; the first non-null wins, otherwise the turn list
+  // falls back to the generic tool card.
+  const renderSkillCard = skillCards.renderToolCall;
+  const renderAskCard = askCards.renderToolCall;
+  const renderFollowUpToolCall = useCallback(
+    (tool: { id: string; title: string; input?: string; output?: string }) =>
+      renderSkillCard(tool) ?? renderAskCard(tool),
+    [renderSkillCard, renderAskCard],
+  );
 
   // Completed tasks stop polling (the 3s poll above is active-only), so the
   // deliverable card is kept fresh by streaming task events instead: when the
@@ -1623,7 +1667,7 @@ export const TaskDetailPage = () => {
                   sending={followUp.sending}
                   loading={false}
                   error={null}
-                  renderToolCall={askCards.renderToolCall}
+                  renderToolCall={renderFollowUpToolCall}
                 />
               )}
             </div>
@@ -1963,6 +2007,13 @@ function resolveActor(
   if (
     type === "task_completed" ||
     type === "task_failed" ||
+    // ``task_blocked`` (lead turn errored / left unresolved subtasks) and
+    // ``task_stopped`` (finish_task with stopped status) both carry the lead
+    // SESSION id as actor — same lead-decision path as task_completed. Without
+    // them here resolveActor falls through and renders the raw session UUID
+    // instead of the lead's role name (the "kickoff 失败时展示 id" bug).
+    type === "task_blocked" ||
+    type === "task_stopped" ||
     type === "kickoff_failed" ||
     type === "task_planned" ||
     type === "plan_revised" ||

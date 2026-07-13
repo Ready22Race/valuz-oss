@@ -2022,6 +2022,7 @@ export type KnownI18nKey =
   | "task.event.awaitingUser"
   | "task.event.goalRevised"
   | "task.event.kickoff"
+  | "task.event.kickoffFailed"
   | "task.event.leadWorking"
   | "task.event.paused"
   | "task.event.planAdd"
