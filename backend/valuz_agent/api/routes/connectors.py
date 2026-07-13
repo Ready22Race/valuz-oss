@@ -955,7 +955,10 @@ async def oauth_callback(
         row.tool_count = tool_count
         row.last_tested_at = now_ms()
         row.updated_at = now_ms()
-        await ds.update(row)
+        updated = await ds.update(row)
+        from valuz_agent.modules.connectors.service import after_connector_oauth_authorized_hook
+
+        await after_connector_oauth_authorized_hook(user_id, updated)
 
         logger.info(
             "Connector %s (%s) OAuth connected, tool_count=%s",
@@ -1350,8 +1353,6 @@ async def _probe_connector(
     import httpx
     from mcp.client.session import ClientSession
 
-    from valuz_agent.infra.config import settings as _settings
-
     view = await svc.get_connector(user_id, connector_id)
     if view is None:
         return TestConnectorResponse(ok=False, error="Connector not found")
@@ -1525,18 +1526,17 @@ async def _probe_connector(
             # the fresh token before giving up (a hard failure leaves the caller
             # to re-authorize).
             if view.auth_type == "oauth" and row2 is not None and _is_unauthorized(exc):
-                from valuz_agent.integrations.connector_oauth import try_refresh_connector_token
-
-                new_access = await try_refresh_connector_token(
-                    row2,
-                    redirect_uri=f"{_settings.backend_base_url}/v1/connectors/oauth/callback",
-                    now_ms=now_ms(),
+                refreshed_json = await ext.connector_oauth_refresh.refresh_after_unauthorized(
+                    row=row2,
+                    connectors=svc._ds,
+                    token_json=row2.oauth_token_json,
                 )
-                if not new_access:
+                if not refreshed_json:
                     raise
-                # Persist the refreshed token columns before retrying the probe.
-                await svc._ds.update(row2)
-                ov_headers["Authorization"] = f"Bearer {new_access}"
+                from mcp.shared.auth import OAuthToken
+
+                token = OAuthToken.model_validate_json(refreshed_json)
+                ov_headers["Authorization"] = f"Bearer {token.access_token}"
                 tool_infos = await _attempt()
             else:
                 raise

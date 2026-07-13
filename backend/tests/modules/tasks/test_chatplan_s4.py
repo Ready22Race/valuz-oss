@@ -250,25 +250,49 @@ def test_inject_into_completed_task_rejects(db_factory, tmp_path):
     assert result["reason"] == "TASK_NOT_ACTIVE"
 
 
-def test_inject_into_stopped_task_rejects(db_factory, tmp_path):
+def test_inject_into_stopped_task_revives_via_resume(db_factory, tmp_path, monkeypatch):
+    """Injecting into a halted (stopped) task no longer bounces with
+    TASK_NOT_ACTIVE — it revives the task through ``resume_task`` with the
+    text riding along as the resume instruction ("说句话就能继续")."""
+    from valuz_agent.modules.tasks import orchestrator as orch_mod
+
     _seed_task(db_factory, tmp_path, status="stopped")
-    mailbox_registry.register("lead-sess-1")
+    calls: list[dict] = []
+
+    async def _fake_resume(task_id, project_id, **kw):
+        calls.append({"task_id": task_id, "project_id": project_id, **kw})
+        return {"ok": True, "prior_status": "stopped", "resumed": True}
+
+    monkeypatch.setattr(orch_mod.task_orchestrator, "resume_task", _fake_resume)
     result = asyncio.run(
         messaging.inject_into_task(
             task_id="t1",
             project_id="w1",
-            text="hi",
+            text="继续,并且优先做数据核对",
             from_session_id="chat-session-1",
             user_id=LOCAL_USER_ID,
         )
     )
-    assert result["delivered"] is False
-    assert result["reason"] == "TASK_NOT_ACTIVE"
+    assert result["delivered"] is True
+    assert result["reason"] == "TASK_RESUMED"
+    assert result["lead_session_id"] == "lead-sess-1"
+    assert calls and calls[0]["instruction"] == "继续,并且优先做数据核对"
 
 
-def test_inject_into_paused_task_is_allowed(db_factory, tmp_path):
+def test_inject_into_paused_task_revives_via_resume(db_factory, tmp_path, monkeypatch):
+    """Paused went the same way: the pause tears the lead loop down
+    (mailbox unregistered), so mailbox delivery could only ever race —
+    inject now resumes the task with the text as instruction."""
+    from valuz_agent.modules.tasks import orchestrator as orch_mod
+
     _seed_task(db_factory, tmp_path, status="paused")
-    mailbox_registry.register("lead-sess-1")
+    calls: list[dict] = []
+
+    async def _fake_resume(task_id, project_id, **kw):
+        calls.append({"task_id": task_id, "project_id": project_id, **kw})
+        return {"ok": True, "prior_status": "paused", "resumed": True}
+
+    monkeypatch.setattr(orch_mod.task_orchestrator, "resume_task", _fake_resume)
     result = asyncio.run(
         messaging.inject_into_task(
             task_id="t1",
@@ -279,7 +303,31 @@ def test_inject_into_paused_task_is_allowed(db_factory, tmp_path):
         )
     )
     assert result["delivered"] is True
-    assert result["reason"] is None
+    assert result["reason"] == "TASK_RESUMED"
+    assert calls and calls[0]["instruction"] == "resume soon please"
+
+
+def test_inject_into_blocked_task_revive_failure_reports(db_factory, tmp_path, monkeypatch):
+    """A failed revive must not masquerade as delivery."""
+    from valuz_agent.modules.tasks import orchestrator as orch_mod
+
+    _seed_task(db_factory, tmp_path, status="blocked")
+
+    async def _fake_resume(task_id, project_id, **kw):
+        return {"ok": False, "error": "boom", "prior_status": "blocked"}
+
+    monkeypatch.setattr(orch_mod.task_orchestrator, "resume_task", _fake_resume)
+    result = asyncio.run(
+        messaging.inject_into_task(
+            task_id="t1",
+            project_id="w1",
+            text="hi",
+            from_session_id="chat-session-1",
+            user_id=LOCAL_USER_ID,
+        )
+    )
+    assert result["delivered"] is False
+    assert result["reason"] == "RESUME_FAILED"
 
 
 # ── no lead run row at all ──────────────────────────────────────────────

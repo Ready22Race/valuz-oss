@@ -1,7 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Boolean, Index, String, Text, true
+from sqlalchemy import BigInteger, Boolean, Index, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from valuz_agent.infra.database import Base, PrimaryKeyMixin, TimestampMixin, UserMixin
@@ -55,13 +55,14 @@ class SkillIndexRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     origin_json: Mapped[str | None] = mapped_column(Text, default=None)
     deletable: Mapped[bool] = mapped_column(Boolean, default=True)
     # Global library on/off switch for THIS skill row (the row the Skills page
-    # shows — i.e. the dedup-winning representative for the slug). Default on;
-    # ``startup_scan`` preserves it across rescans (the upsert never rewrites
-    # it, like ``creation_origin``). Off hides the skill from a new (non-project)
-    # conversation's inline ``/`` picker; never affects runtime loading or an
-    # agent's own ``/`` (which read source paths, not this flag).
+    # shows — i.e. the dedup-winning representative for the slug). Scanned user
+    # skills default off; deliberate create / import flows and official skills
+    # opt back in. ``startup_scan`` preserves the flag across rescans (the upsert
+    # never rewrites it, like ``creation_origin``). Off hides the skill from a new
+    # (non-project) conversation's inline ``/`` picker; never affects runtime
+    # loading or an agent's own ``/`` (which read source paths, not this flag).
     library_enabled: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=True, server_default=true()
+        Boolean, nullable=False, default=False, server_default=false()
     )
 
 
@@ -100,9 +101,10 @@ class SkillView(BaseModel):
     path: str
     enabled: bool = False
     # Global library switch (user-scoped, slug-keyed) — distinct from ``enabled``
-    # (per-project). Defaults on; turning it off in the Skills page hides the
-    # skill from a new (non-project) conversation's inline ``/`` picker.
-    library_enabled: bool = True
+    # (per-project). Scanned user skills default off; enabling it in the Skills
+    # page makes the skill available to a new (non-project) conversation's inline
+    # ``/`` picker.
+    library_enabled: bool = False
     tags: list[str] = Field(default_factory=list)
     slug: str = ""
     icon: str | None = None

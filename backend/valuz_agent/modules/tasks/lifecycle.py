@@ -353,7 +353,7 @@ class LifecycleService:
                 # the cause. The old ``"failed"`` write left an out-of-enum,
                 # un-resumable status stuck forever.
                 await task_ds.update_task_status(user_id, task_id, "blocked")
-                await event_ds.append_event(
+                kickoff_ev = await event_ds.append_event(
                     user_id,
                     project_id=project_id,
                     task_id=task_id,
@@ -361,6 +361,16 @@ class LifecycleService:
                     actor=created_by,
                     session_id=None,
                     payload={"error": gap},
+                )
+                from valuz_agent.modules.tasks import messaging as _msg
+
+                await _msg.record_task_failure_notification(
+                    task_id=task_id,
+                    project_id=project_id,
+                    event_id=kickoff_ev.id,
+                    event_type="kickoff_failed",
+                    reason=gap,
+                    user_id=user_id,
                 )
                 raise ValueError(gap)
 
@@ -949,7 +959,7 @@ class LifecycleService:
                 # lead-turn-error to distinguish from the unresolved-subtasks
                 # blocked case below.
                 await task_ds.update_task_status(user_id, task_id, "blocked")
-                await event_ds.append_event(
+                blocked_ev = await event_ds.append_event(
                     user_id,
                     project_id=project_id,
                     task_id=task_id,
@@ -963,6 +973,16 @@ class LifecycleService:
                         "pending_subtasks": unresolved,
                     },
                 )
+                from valuz_agent.modules.tasks import messaging as _msg
+
+                await _msg.record_task_failure_notification(
+                    task_id=task_id,
+                    project_id=project_id,
+                    event_id=blocked_ev.id,
+                    event_type="task_blocked",
+                    reason=error_msg,
+                    user_id=user_id,
+                )
                 logger.warning(
                     "auto-finalize: task %s -> blocked (lead turn error: %s, category=%s)",
                     task_id,
@@ -974,7 +994,7 @@ class LifecycleService:
                 # Lead stopped with planned work undispatched — surface as blocked
                 # (not a hard error, but not done either).
                 await task_ds.update_task_status(user_id, task_id, "blocked")
-                await event_ds.append_event(
+                blocked_ev = await event_ds.append_event(
                     user_id,
                     project_id=project_id,
                     task_id=task_id,
@@ -982,6 +1002,16 @@ class LifecycleService:
                     actor=lead_session_id,
                     session_id=lead_session_id,
                     payload={"reason": "unresolved_subtasks", "pending_subtasks": unresolved},
+                )
+                from valuz_agent.modules.tasks import messaging as _msg
+
+                await _msg.record_task_failure_notification(
+                    task_id=task_id,
+                    project_id=project_id,
+                    event_id=blocked_ev.id,
+                    event_type="task_blocked",
+                    reason="子任务未全部完成，Lead 未收尾",
+                    user_id=user_id,
                 )
                 logger.warning(
                     "auto-finalize: task %s -> blocked (unresolved=%s); lead ended without "

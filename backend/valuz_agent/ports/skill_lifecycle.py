@@ -1,0 +1,81 @@
+"""Skill lifecycle extension hook.
+
+OSS keeps skill filesystem/index behavior in ``SkillLibraryService``. Overlays
+can bind this hook to mirror successful skill writes/deletes to external
+systems without replacing HTTP routes or middleware.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from valuz_agent.modules.skills.models import SkillView
+
+SkillSaveOrigin = Literal["created", "imported"]
+
+
+class SkillLifecycleHook(ABC):
+    """Callbacks around user-visible skill writes and deletes."""
+
+    @abstractmethod
+    async def after_skill_saved(
+        self,
+        *,
+        user_id: str,
+        skill: "SkillView",
+        creation_origin: SkillSaveOrigin,
+    ) -> None:
+        """Called after a user-visible skill has been written and indexed."""
+        ...
+
+    @abstractmethod
+    async def before_skill_delete(
+        self,
+        *,
+        user_id: str,
+        skill: "SkillView",
+    ) -> None:
+        """Called before a skill is deleted locally; raising aborts deletion."""
+        ...
+
+
+class NoopSkillLifecycleHook(SkillLifecycleHook):
+    async def after_skill_saved(
+        self,
+        *,
+        user_id: str,
+        skill: "SkillView",
+        creation_origin: SkillSaveOrigin,
+    ) -> None:
+        return None
+
+    async def before_skill_delete(
+        self,
+        *,
+        user_id: str,
+        skill: "SkillView",
+    ) -> None:
+        return None
+
+
+def get_skill_lifecycle_hook() -> SkillLifecycleHook:
+    from valuz_agent.ports.extensions import ext
+
+    return ext.skill_lifecycle
+
+
+def set_skill_lifecycle_hook(hook: SkillLifecycleHook) -> None:
+    from valuz_agent.ports.extensions import ext
+
+    ext.skill_lifecycle = hook
+
+
+__all__ = [
+    "NoopSkillLifecycleHook",
+    "SkillLifecycleHook",
+    "SkillSaveOrigin",
+    "get_skill_lifecycle_hook",
+    "set_skill_lifecycle_hook",
+]

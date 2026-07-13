@@ -237,12 +237,23 @@ class RecoveryService:
         return recovered
 
     async def _recover_one_task(
-        self, task_id: str, project_id: str, user_id: str | None = None
+        self,
+        task_id: str,
+        project_id: str,
+        user_id: str | None = None,
+        *,
+        lead_instruction: str | None = None,
     ) -> bool:
         """Reconcile one active task's members + re-drive its lead.
 
         Used by both Layer 1 (startup) and Layer 2 (user 'resume'). Returns False
         if the task isn't recoverable (gone / no lead run).
+
+        ``lead_instruction`` (Layer 2 only): a free-text user instruction that
+        rides along with the resume — appended to the lead's recovery brief in
+        the same ``<user-instruction>`` envelope ``inject_into_task`` uses, so
+        "回复并恢复" is one atomic step instead of resume-then-hope-the-mailbox
+        -delivery-races-the-respawn.
         """
         from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
         from valuz_agent.modules.tasks.recovery import reconcile
@@ -393,6 +404,14 @@ class RecoveryService:
             + "\n\n请先调用 get_plan 对齐当前状态,然后继续编排:派发未决子任务、"
             "审核 in_review、重试 rework;全部完成后调用 finish_task。\n</system-recovery>"
         )
+        if lead_instruction and lead_instruction.strip():
+            lead_brief += (
+                '\n<user-instruction source="resume">\n'
+                + lead_instruction.strip()
+                + "\n</user-instruction>\n"
+                "用户在恢复任务时附带了上面的指令——它是权威的用户意图,请优先据此调整编排"
+                "(必要时 modify_plan / rework)再继续。"
+            )
         asyncio.create_task(
             self._actor.run_actor_loop(
                 session_id=lead_session_id,
@@ -525,9 +544,15 @@ class RecoveryService:
         *,
         actor: str = "user",
         user_id: str | None = None,
+        instruction: str | None = None,
     ) -> dict[str, Any]:
         """User-initiated resume of a ``paused`` / ``blocked`` / ``stopped`` /
         ``completed`` task.
+
+        ``instruction`` — optional free-text user guidance that rides along
+        with the resume (":intervene action=resume text=…" / chat inject on a
+        halted task). Recorded as a ``user_inject`` event and embedded in the
+        respawned lead's recovery brief (see ``_recover_one_task``).
 
         Flips the task back to ``active`` then reconciles + respawns members
         and re-drives the lead via the shared ``_recover_one_task`` machine
@@ -573,30 +598,39 @@ class RecoveryService:
             if task is None:
                 return {"ok": False, "error": f"task {task_id!r} not found", "prior_status": None}
             prior_status = task.status
-            if prior_status not in ("paused", "blocked", "stopped", "completed"):
+            # ``failed`` is a LEGACY status (pre-dates folding task failure
+            # into ``blocked``); old rows still carry it and were stranded —
+            # no action bar, resume rejected. Treat it exactly like blocked.
+            if prior_status not in ("paused", "blocked", "stopped", "completed", "failed"):
                 return {
                     "ok": False,
                     "error": (
                         f"resume_task rejected: task is {prior_status!r}, only "
                         "'paused', 'blocked', 'stopped', or 'completed' tasks "
-                        "can be resumed. 'abandoned' is hard-terminal (draft "
-                        "discarded, nothing to revive) and 'draft' must be "
-                        "launched with commit_task. Reopening a 'completed' "
-                        "task is for supplementing/adjusting its subtasks; a "
-                        "genuinely new goal should be a fresh follow-up task."
+                        "(or legacy 'failed' rows) can be resumed. 'abandoned' "
+                        "is hard-terminal (draft discarded, nothing to revive) "
+                        "and 'draft' must be launched with commit_task. "
+                        "Reopening a 'completed' task is for supplementing/"
+                        "adjusting its subtasks; a genuinely new goal should "
+                        "be a fresh follow-up task."
                     ),
                     "prior_status": prior_status,
                 }
             # Belt-and-suspenders: confirm the transition the state machine
             # accepts. paused/blocked/stopped/completed → active are all legal.
-            assert_transition(prior_status, "active")
+            # Legacy ``failed`` is outside the enum — ``update_task_status``
+            # tolerates unknown *source* statuses precisely for this case, so
+            # skip the formal check there.
+            if prior_status != "failed":
+                assert_transition(prior_status, "active")
             await task_ds.update_task_status(user_id, task_id, "active")
             # When reviving a stopped OR completed task: finish_task previously
             # marked the lead run as "completed" and broadcast shutdown to
             # members. _recover_one_task respawns the lead unconditionally, but
             # the run row still showing "completed" would lie about reality —
-            # fix it so listings + UI reflect the live state.
-            if prior_status in ("stopped", "completed"):
+            # fix it so listings + UI reflect the live state. Legacy ``failed``
+            # rows may carry any run status — normalise them the same way.
+            if prior_status in ("stopped", "completed", "failed"):
                 runs = await run_ds.list_runs(user_id, task_id)
                 lead_run = next((r for r in runs if r.kind == "lead"), None)
                 if lead_run is not None and lead_run.status != "active":
@@ -613,7 +647,30 @@ class RecoveryService:
                 actor=actor,
                 payload={"from": prior_status},
             )
-        ok = await self._recover_one_task(task_id, project_id, user_id=user_id)
+            if instruction and instruction.strip():
+                # Timeline record of what the user asked for alongside the
+                # resume — same event type the chat-inject path appends, so
+                # the detail page renders both uniformly.
+                await event_ds.append_event(
+                    user_id,
+                    project_id,
+                    task_id,
+                    "user_inject",
+                    actor=actor,
+                    payload={"text": instruction.strip(), "via": "resume"},
+                )
+        # Clear any open "task failed" notification — the user is dealing with
+        # it now, so it mustn't keep the badge lit (docs/design/notifications.md).
+        try:
+            from valuz_agent.modules.notifications.service import notification_service
+
+            await notification_service.resolve_task(user_id or "", task_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("resume_task: failed to clear failure notification", exc_info=True)
+
+        ok = await self._recover_one_task(
+            task_id, project_id, user_id=user_id, lead_instruction=instruction
+        )
         return {"ok": ok, "prior_status": prior_status, "resumed": ok}
 
     async def stop_member(self, session_id: str, user_id: str | None = None) -> bool:

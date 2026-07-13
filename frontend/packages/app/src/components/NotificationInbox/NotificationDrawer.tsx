@@ -1,61 +1,58 @@
 /**
- * Right-side slide-over listing every pending decision across all
- * task-driven sessions (ADR-022). Open/close is store-driven (not a
- * trigger) so the topbar badge and ⌘-anything can both toggle it.
- *
- * Renders one ``DecisionEntryCard`` per pending, oldest-first. Empty
- * state is a gentle hint — the drawer can be opened with zero pendings
- * (e.g. the user clicked the badge just as the last one resolved).
+ * Right-side slide-over listing every open notification (questions + task
+ * failures), newest first (docs/design/notifications.md). Store-driven open
+ * state so the topbar badge toggles it. Renders one ``NotificationCard`` per
+ * entry, dispatched by kind.
  */
 
 import { type ReactElement } from "react";
 
 import {
-  useDecisionIsOpen,
-  useDecisionPending,
-  useDecisionStore,
+  useNotifications,
+  useNotificationIsOpen,
+  useNotificationStore,
   useTranslation,
 } from "@valuz/core";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@valuz/ui";
 import type { I18nKey } from "@valuz/shared";
 
-import { DecisionEntryCard } from "./DecisionEntryCard";
+import { NotificationCard } from "./NotificationCard";
 
-export function DecisionDrawer(): ReactElement {
+export function NotificationDrawer(): ReactElement {
   const { t } = useTranslation();
-  const isOpen = useDecisionIsOpen();
-  const pending = useDecisionPending();
-  const setOpen = useDecisionStore((s) => s.setOpen);
+  const isOpen = useNotificationIsOpen();
+  const entries = useNotifications();
+  const setOpen = useNotificationStore((s) => s.setOpen);
 
   return (
     <Sheet open={isOpen} onOpenChange={setOpen}>
       <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-md">
         <SheetHeader className="border-b border-surface-border px-4 py-3">
           <SheetTitle className="text-base">
-            {t("decisionInbox.title" as I18nKey)}
-            {pending.length > 0 && (
+            {t("notification.inboxTitle" as I18nKey)}
+            {entries.length > 0 && (
               <span className="ml-2 text-sm font-normal text-ink-muted">
-                · {pending.length}
+                · {entries.length}
               </span>
             )}
           </SheetTitle>
         </SheetHeader>
 
-        {pending.length === 0 ? (
+        {entries.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-            <span className="text-3xl opacity-40">📭</span>
+            <span className="text-3xl opacity-40">🔔</span>
             <p className="text-sm font-medium text-ink-body">
-              {t("decisionInbox.emptyTitle" as I18nKey)}
+              {t("notification.emptyTitle" as I18nKey)}
             </p>
             <p className="text-xs text-ink-muted">
-              {t("decisionInbox.emptyHint" as I18nKey)}
+              {t("notification.emptyHint" as I18nKey)}
             </p>
           </div>
         ) : (
           <div className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
-            {pending.map((entry) => (
-              <DecisionEntryCard
-                key={entry.pending_id}
+            {entries.map((entry) => (
+              <NotificationCard
+                key={entry.id}
                 entry={entry}
                 onNavigateAway={() => setOpen(false)}
               />

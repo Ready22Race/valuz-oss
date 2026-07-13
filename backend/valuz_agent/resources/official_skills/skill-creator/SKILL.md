@@ -86,7 +86,7 @@ predictable location relative to your **current working directory**:
 ```
 
 Always use this path. Never write skill drafts to `/tmp/`,
-`~/.agent/skills/`, or any other absolute path you might guess —
+`~/.agents/skills/`, or any other absolute path you might guess —
 they're invisible to the host's submission flow. If you accidentally
 wrote files elsewhere, `mv` them into `./.skill-staging/{slug}/`
 before calling `submit_skill`.
@@ -127,7 +127,7 @@ submit_skill(
 The user sees a card in chat with the skill name, summary, change kind,
 and the list of files. They can save it to their library or discard it.
 If they save:
-- All entries write the skill to `~/.agent/skills/{slug}/`.
+- All entries write the skill to `~/.agents/skills/{slug}/`.
 - A "project" entry also binds the new skill to the active project.
 - A "chat" or "skills_library" entry just adds it to the library.
 

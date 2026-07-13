@@ -17,6 +17,7 @@ import {
   installCliToPath,
   uninstallCliFromPath,
 } from "./install-cli";
+import { registerNotificationHandlers } from "./notifications";
 
 export const registerIpcHandlers = () => {
   const handlers = serviceHandlers(desktopRuntime);
@@ -24,6 +25,8 @@ export const registerIpcHandlers = () => {
   for (const [channel, handler] of Object.entries(handlers)) {
     ipcMain.handle(channel, handler);
   }
+
+  registerNotificationHandlers();
 
   ipcMain.handle("select_directory", async () => {
     const win = getMainWindow();

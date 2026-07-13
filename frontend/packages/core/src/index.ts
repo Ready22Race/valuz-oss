@@ -7,7 +7,7 @@ export * from "./api/providers-api";
 export * from "./api/runtime-compat";
 export * from "./api/runtime-protocols";
 export * from "./api/connectors-api";
-export * from "./api/decisions-api";
+export * from "./api/notifications-api";
 export * from "./api/docs-api";
 export * from "./api/base-resolver";
 export * from "./api/fetch-json";
