@@ -5,7 +5,9 @@ After creation the user must go to the Connectors page to authorize/connect.
 
 Wire shape::
 
-    POST /internal/mcp/connectors/mcp
+    POST /_internal/mcp/connectors/mcp
+      (also served at the legacy ``/internal/mcp/connectors/mcp`` — ADR-013
+      dual-mount, see ``api/app.py::_mount_internal``)
       headers:
         X-Valuz-Internal:   <per-process token>
         X-Valuz-Session-Id: <kernel session id>  (informational only)
@@ -539,12 +541,18 @@ def connectors_mcp_session_manager_run() -> Any:
 
 
 def build_connectors_mcp_asgi() -> Any:
-    """Return an ASGI app to mount at ``/internal/mcp/connectors``."""
+    """Return an ASGI app to mount at ``/_internal/mcp/connectors`` (and,
+    dual-mounted for pre-ADR-013 session compatibility,
+    ``/internal/mcp/connectors`` — see ``api/app.py::_mount_internal``)."""
     return build_internal_mcp_asgi(_mcp.streamable_http_app())
 
 
 def connectors_mcp_url(*, base_url: str) -> str:
-    return f"{base_url.rstrip('/')}/internal/mcp/connectors/mcp"
+    """ADR-013: newly created sessions get the ``/_internal/...`` path;
+    ``/internal/...`` stays mounted so session snapshots that persisted the
+    pre-rename URL keep working on restore (see ``api/app.py::_mount_internal``,
+    removed the next OSS major version)."""
+    return f"{base_url.rstrip('/')}/_internal/mcp/connectors/mcp"
 
 
 __all__ = [

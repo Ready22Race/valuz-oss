@@ -113,7 +113,7 @@ async def main() -> int:
         async with httpx.AsyncClient(timeout=10) as c:
             # 3) WRITE through the sandbox -> RemoteStoreHttp -> data service -> DB.
             create = await c.post(
-                f"{endpoint.base_url}/api/v1/sessions",
+                f"{endpoint.base_url}/kernel/v1/sessions",
                 headers=hdr,
                 json={
                     "id": sid,
@@ -129,7 +129,7 @@ async def main() -> int:
             _ok("write through sandbox (create_session) succeeded")
 
             # 4) READ through the sandbox -> data service.
-            listed = await c.get(f"{endpoint.base_url}/api/v1/sessions", headers=hdr)
+            listed = await c.get(f"{endpoint.base_url}/kernel/v1/sessions", headers=hdr)
             ids = [s["id"] for s in listed.json()["data"]]
             assert sid in ids, f"session not visible through sandbox: {ids}"
             _ok("read through sandbox returns the session from the data service")

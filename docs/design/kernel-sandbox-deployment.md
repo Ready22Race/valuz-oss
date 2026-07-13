@@ -77,7 +77,7 @@ host 与（沙箱内）kernel 之间的全部交互归纳为六个抽象面：
 ```
  用户机器 (host)                                沙箱 (kernel)
 ┌─────────────────────────┐                 ┌─────────────────────────┐
-│ UI · valuz_* 业务表       │ ──①供给──────▶  │ valuz-server /api/v1     │
+│ UI · valuz_* 业务表       │ ──①供给──────▶  │ kernel /kernel/v1       │
 │ SandboxProvider 驱动      │ ──②控制──────▶  │ sessions/messages/events │
 │ host-MCP 工具面           │ ◀─③事件────────│ runtimes (claude/codex/  │
 │ FsRegistry (host 域)      │ ◀─④工具回调────│            deepagents)   │
@@ -533,7 +533,7 @@ egress sidecar；microVM → 网关。CMA 的「cloud sandbox 网络默认关闭
 | 面 | 证据 |
 |----|------|
 | ② 控制面 | host 经 `HttpKernelClient` 全程对话远端 kernel（httpx 日志可见每次 REST 调用）；host 业务 DB 与 kernel DB 完全分家 |
-| ③ 事件面 | `DecisionAggregator` 启动即经 HTTP SSE 订阅远端 `GET /api/v1/events/stream` 200 — 全局事件流跨进程工作 |
+| ③ 事件面 | `DecisionAggregator` 启动即经 HTTP SSE 订阅远端 `GET /kernel/v1/events/stream`（ADR-013；上游默认 `/api`）200 — 全局事件流跨进程工作 |
 | 鉴权 | token 链路（`VALUZ_KERNEL_TOKEN` → `KERNEL_AUTH_TOKEN`）正常 |
 | 容错 | boot 不因 kernel 缝异常而失败（异常被捕获记日志） |
 

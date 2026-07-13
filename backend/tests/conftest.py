@@ -8,7 +8,6 @@ from functools import wraps
 # regression test (``test_parse_pool_offload``) re-enables the pool explicitly.
 os.environ.setdefault("VALUZ_PARSE_POOL_DISABLED", "1")
 
-
 # ---------------------------------------------------------------------------
 # Owner context — explicit-identity semantics (no implicit fallback).
 #

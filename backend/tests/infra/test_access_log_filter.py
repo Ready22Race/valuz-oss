@@ -2,9 +2,10 @@
 
 ``uvicorn.access`` prints one INFO line per request, parallel to valuz's own
 structured access log. High-frequency UI polls (``/v1/runs``,
-``/v1/system/status``, kernel ``/internal/mcp``) would flood the console / log
-file, so ``_AccessLogPathFilter`` drops them. These tests pin which paths are
-silenced and that the install is idempotent. See ``infra/logging.py``.
+``/v1/system/status``, kernel ``/_internal/mcp`` — and the legacy
+loopback plane) would flood the console / log file, so
+``_AccessLogPathFilter`` drops them. These tests pin which paths are silenced
+and that the install is idempotent. See ``infra/logging.py``.
 """
 
 from __future__ import annotations
@@ -39,13 +40,13 @@ def _access_record(request_target: str) -> logging.LogRecord:
         "/v1/runs?status=running",  # query string ignored
         "/v1/runs/123",  # sub-path
         "/v1/system/status",
-        "/internal/mcp/foo",
+        "/_internal/mcp/foo",
         # MCP OAuth-discovery probes — both the bare root probe and the
         # per-mount nested form the streamable-HTTP client issues.
         "/.well-known/oauth-authorization-server",
-        "/.well-known/oauth-authorization-server/internal/mcp/toolkit/base/mcp",
+        "/.well-known/oauth-authorization-server/_internal/mcp/toolkit/base/mcp",
         "/.well-known/oauth-protected-resource",
-        "/.well-known/oauth-protected-resource/internal/mcp/docs/mcp",
+        "/.well-known/oauth-protected-resource/_internal/mcp/docs/mcp",
     ],
 )
 def test_silenced_paths_are_dropped(target: str) -> None:

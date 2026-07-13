@@ -37,7 +37,10 @@ def data_service_env(*, owner_user_id: str, host_callback_url: str) -> dict[str,
     return {
         "KERNEL_STORE": "remote",
         "VALUZ_DATA_API_KIND": "http",
-        "VALUZ_DATA_API_URL": host_callback_url.rstrip("/") + "/internal/data",
+        # ADR-013: new sandboxes get the ``/_internal/...`` path; ``/internal/...``
+        # stays mounted (see ``api/app.py::_mount_internal``) for sessions whose
+        # persisted config predates the rename.
+        "VALUZ_DATA_API_URL": host_callback_url.rstrip("/") + "/_internal/data",
         "VALUZ_DATA_API_TOKEN": mint_data_service_token(secret, user_id=owner_user_id),
     }
 

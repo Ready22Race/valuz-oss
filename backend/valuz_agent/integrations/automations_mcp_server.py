@@ -7,7 +7,9 @@ per-process shared secret), but the tool surface is rebuilt:
 Wire shape
 ==========
 
-POST /internal/mcp/automations/mcp
+POST /_internal/mcp/automations/mcp
+  (also served at the legacy ``/internal/mcp/automations/mcp`` — ADR-013
+  dual-mount, see ``api/app.py::_mount_internal``)
   headers:
     X-Valuz-Internal:    <per-process token>
     X-Valuz-Session-Id:  <kernel session id>
@@ -769,12 +771,18 @@ def automations_mcp_session_manager_run() -> Any:
 
 
 def build_automations_mcp_asgi() -> Any:
-    """Return an ASGI app to mount at ``/internal/mcp/automations``."""
+    """Return an ASGI app to mount at ``/_internal/mcp/automations`` (and,
+    dual-mounted for pre-ADR-013 session compatibility,
+    ``/internal/mcp/automations`` — see ``api/app.py::_mount_internal``)."""
     return build_internal_mcp_asgi(_mcp.streamable_http_app())
 
 
 def automations_mcp_url(*, base_url: str) -> str:
-    return f"{base_url.rstrip('/')}/internal/mcp/automations/mcp"
+    """ADR-013: newly created sessions get the ``/_internal/...`` path;
+    ``/internal/...`` stays mounted so session snapshots that persisted the
+    pre-rename URL keep working on restore (see ``api/app.py::_mount_internal``,
+    removed the next OSS major version)."""
+    return f"{base_url.rstrip('/')}/_internal/mcp/automations/mcp"
 
 
 __all__ = [

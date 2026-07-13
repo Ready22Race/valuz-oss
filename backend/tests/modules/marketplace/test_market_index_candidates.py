@@ -60,8 +60,8 @@ async def test_races_candidates_and_pins_first_2xx_healthz() -> None:
     # and the actual categories request went to it (not the bad one).
     assert f"{BAD}/healthz" in calls
     assert f"{GOOD}/healthz" in calls
-    assert f"{GOOD}/api/v1/marketplace/categories" in calls
-    assert f"{BAD}/api/v1/marketplace/categories" not in calls
+    assert f"{GOOD}/v1/marketplace/categories" in calls
+    assert f"{BAD}/v1/marketplace/categories" not in calls
 
 
 @pytest.mark.asyncio
@@ -125,7 +125,7 @@ async def test_explicit_base_url_skips_candidate_race() -> None:
 
     assert client.base_url == "https://pinned.example"
     assert "/healthz" not in calls
-    assert calls == ["/api/v1/marketplace/categories"]
+    assert calls == ["/v1/marketplace/categories"]
 
 
 @pytest.mark.asyncio

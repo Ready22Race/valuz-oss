@@ -97,10 +97,12 @@ class Settings(BaseSettings):
     # entire surface moves under that base; ``["", "/valuz-backend"]`` (env
     # ``,/valuz-backend``) → served at BOTH so native/internal callers keep
     # working while the ingress sees the prefixed surface. The internal
-    # ``/internal/mcp/*`` mounts are reached server-side via ``backend_base_url``
-    # and stay at fixed native paths — never prefixed. Override with
-    # ``VALUZ_API_PREFIX``; accepts a JSON list or a comma-separated string,
-    # each entry normalised to ``""`` or ``"/segment"``.
+    # ``/_internal/mcp/*`` mounts (ADR-013; dual-mounted at the legacy
+    # ``/internal/mcp/*`` too — see ``api/app.py::_mount_internal``) are
+    # reached server-side via ``backend_base_url`` and stay at fixed native
+    # paths — never prefixed. Override with ``VALUZ_API_PREFIX``; accepts a
+    # JSON list or a comma-separated string, each entry normalised to ``""``
+    # or ``"/segment"``.
     api_prefix: Annotated[list[str], NoDecode] = []
 
     @field_validator("api_prefix", mode="before")
@@ -214,7 +216,9 @@ class Settings(BaseSettings):
     @property
     def internal_mcp_token(self) -> str:
         """Shared secret gating the host's internal MCP endpoints
-        (``/internal/mcp/*``), sent in the ``X-Valuz-Internal`` header.
+        (``/_internal/mcp/*``; also served at the legacy ``/internal/mcp/*``
+        dual-mount, see ``api/app.py::_mount_internal``), sent in the
+        ``X-Valuz-Internal`` header.
 
         Derived deterministically from the stable local install owner id so it
         survives process restarts. Sessions bake this token into their stored
@@ -276,8 +280,8 @@ class Settings(BaseSettings):
     # VALUZ_MARKETPLACE_INDEX_CHANNEL.
     marketplace_index_base_url: str = ""
     marketplace_index_candidates: list[str] = [
-        "https://api.valuz.io",
-        "https://api.valuz.cn",
+        "https://api.valuz.io/cloud",
+        "https://api.valuz.cn/cloud",
     ]
     marketplace_index_channel: str = "oss"
 

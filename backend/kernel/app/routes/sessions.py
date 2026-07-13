@@ -1,4 +1,5 @@
-"""Session CRUD routes — /api/v1/sessions."""
+"""Session CRUD routes — ``{KERNEL_API_PREFIX}/v1/sessions`` (default
+``/api/v1/sessions`` — see ``app.routes.KERNEL_API_PREFIX``)."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from typing import Annotated, Any
 from app._validators import validate_mcp_servers, validate_registered_tools, validate_skills
 from app.dependencies import get_orchestrator, get_owner_id, get_store
 from app.event_stream import QueueEventSink
+from app.routes import KERNEL_API_PREFIX
 from app.schemas import (
     AppendEventData,
     AppendEventResponse,
@@ -68,7 +70,7 @@ from src.core.orchestrator import (
 from src.runtimes.factory import validate_api_protocol
 from sse_starlette.sse import EventSourceResponse
 
-router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
+router = APIRouter(prefix=f"{KERNEL_API_PREFIX}/v1/sessions", tags=["sessions"])
 
 StoreDep = Annotated[StorePort, Depends(get_store)]
 OwnerDep = Annotated[str, Depends(get_owner_id)]

@@ -1,7 +1,7 @@
 """Seeded tests for the kernel usage rollup (``StorePort.usage_rollup``).
 
 PR #85 review follow-up: the analytics read path moved onto
-``GET /api/v1/usage`` with only an empty-result smoke. These pin the
+``GET /kernel/v1/usage`` with only an empty-result smoke. These pin the
 aggregation semantics: ``completed``-only filtering, half-open
 ``[start_ms, end_ms)`` window boundaries, per-(UTC day, model) grouping,
 and exact request/token/cache sums.

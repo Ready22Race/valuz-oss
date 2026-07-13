@@ -236,7 +236,7 @@ async def resolve_session_capabilities(
     #      project) so the tool list stays stable across the entire
     #      product surface. The skill teaches the agent to use
     #      ``doc_search`` / ``list_doc_scope``; the MCP server (mounted
-    #      at ``/internal/mcp/docs/{session_id}/mcp``) implements those
+    #      at ``/_internal/mcp/docs/{session_id}/mcp``) implements those
     #      tools scoped to the session's project.
     #
     #      Why unconditional: the skill + MCP form a stable,

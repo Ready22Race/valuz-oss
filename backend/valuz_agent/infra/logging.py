@@ -185,8 +185,10 @@ _HANDLER_TAG = "_valuz_handler"
 # (``api.middleware.TimingMiddleware``). A handful of endpoints are polled by
 # the desktop UI every few seconds and carry no signal:
 #
-#   - ``/v1/system/status`` (~every 5s) and ``/internal/mcp`` — ``TimingMiddleware``
-#     hard-skips these (logs *nothing*), so the uvicorn line is the only noise left.
+#   - ``/v1/system/status`` (~every 5s) and ``/_internal/mcp`` /
+#     ``/internal/mcp`` (ADR-013 dual-mount, see ``api/app.py::_mount_internal``)
+#     — ``TimingMiddleware`` hard-skips these (logs *nothing*), so the uvicorn
+#     line is the only noise left.
 #   - ``/v1/runs`` (the activity overview, polled every few seconds) — demoted to
 #     DEBUG in ``TimingMiddleware``; uvicorn printing it at INFO defeats that choice.
 #   - ``/.well-known/oauth-...`` — MCP OAuth-discovery probes that 404 by design
@@ -198,7 +200,7 @@ _HANDLER_TAG = "_valuz_handler"
 _ACCESS_LOG_SILENCED_PREFIXES = (
     "/v1/runs",
     "/v1/system/status",
-    "/internal/mcp",
+    "/_internal/mcp",
     "/.well-known/oauth-authorization-server",
     "/.well-known/oauth-protected-resource",
 )

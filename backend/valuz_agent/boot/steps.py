@@ -344,7 +344,8 @@ async def init_kernel(app: FastAPI) -> None:
 
 
 async def bind_data_service(app: FastAPI) -> None:
-    """Bind the host-mounted DataService (``/internal/data``) to its backend.
+    """Bind the host-mounted DataService (``/_internal/data``, dual-mounted at
+    the legacy ``/internal/data`` — ADR-013) to its backend.
 
     The sub-app is mounted at factory time with no store (only ``/health`` +
     ``/openapi.json`` work until now). Here — once the host DB is up — we build a

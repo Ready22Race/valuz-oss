@@ -2484,8 +2484,10 @@ paths:
         conflicting decisions for the same ``pending_id`` return 409
         with the original ``accepted_at``. Expired / interrupted
         pendings return 410. Same shape as the kernel-side
-        ``POST /api/v1/sessions/{session_id}/actions``; both routes
-        reach the same orchestrator.
+        ``POST /kernel/v1/sessions/{session_id}/actions`` (ADR-013;
+        default ``/api/v1/...`` upstream — see
+        ``kernel/app/routes/__init__.py``); both routes reach the same
+        orchestrator.
       operationId: submitSessionAction
       tags: [sessions]
       parameters:
@@ -5513,7 +5515,9 @@ components:
         Body for ``POST /v1/sessions/{id}/actions``. Resolves a pending
         ``requires_action`` event with the user's decision. Mirrors the
         kernel's ``SubmitActionRequest`` shape (kernel V5+d008b53). The
-        kernel exposes the same shape under ``/api/v1/sessions/{id}/actions``;
+        kernel exposes the same shape under
+        ``/kernel/v1/sessions/{id}/actions`` (ADR-013; default
+        ``/api/v1/...`` upstream — see ``kernel/app/routes/__init__.py``);
         both routes hit the same orchestrator instance.
 
         Decision verbs (V5+d008b53):

@@ -16,25 +16,25 @@ from valuz_agent.adapters import kernel_client
 # method → (HTTP verb, path) on the kernel app. None = in-process-only by
 # design (a standalone kernel performs these itself / via the WS channel).
 EXPECTED_ROUTES: dict[str, tuple[str, str] | None] = {
-    "create_session": ("POST", "/api/v1/sessions"),
-    "get_session": ("GET", "/api/v1/sessions/{session_id}"),
-    "list_sessions": ("GET", "/api/v1/sessions"),
+    "create_session": ("POST", "/kernel/v1/sessions"),
+    "get_session": ("GET", "/kernel/v1/sessions/{session_id}"),
+    "list_sessions": ("GET", "/kernel/v1/sessions"),
     # Cross-owner sweep — no 1:1 route (the kernel HTTP API is owner-scoped);
     # in-process hits the store directly, HTTP transport rejects it.
     "list_all_sessions": None,
-    "update_session": ("PATCH", "/api/v1/sessions/{session_id}"),
-    "delete_session": ("DELETE", "/api/v1/sessions/{session_id}"),
-    "set_mode": ("POST", "/api/v1/sessions/{session_id}/mode"),
-    "finalize_session": ("POST", "/api/v1/sessions/{session_id}/finalize"),
-    "append_event": ("POST", "/api/v1/sessions/{session_id}/events"),
-    "emit_live_event": ("POST", "/api/v1/sessions/{session_id}/events"),  # ?live_only=true
-    "get_events": ("GET", "/api/v1/sessions/{session_id}/events"),
-    "get_events_window": ("GET", "/api/v1/sessions/{session_id}/events/window"),
-    "usage_rollup": ("GET", "/api/v1/usage"),
-    "list_messages": ("GET", "/api/v1/sessions/{session_id}/messages"),
-    "submit_action": ("POST", "/api/v1/sessions/{session_id}/actions"),
-    "interrupt": ("POST", "/api/v1/sessions/{session_id}/interrupt"),
-    "run_turn": None,  # WS /api/v1/sessions/{session_id}/run
+    "update_session": ("PATCH", "/kernel/v1/sessions/{session_id}"),
+    "delete_session": ("DELETE", "/kernel/v1/sessions/{session_id}"),
+    "set_mode": ("POST", "/kernel/v1/sessions/{session_id}/mode"),
+    "finalize_session": ("POST", "/kernel/v1/sessions/{session_id}/finalize"),
+    "append_event": ("POST", "/kernel/v1/sessions/{session_id}/events"),
+    "emit_live_event": ("POST", "/kernel/v1/sessions/{session_id}/events"),  # ?live_only=true
+    "get_events": ("GET", "/kernel/v1/sessions/{session_id}/events"),
+    "get_events_window": ("GET", "/kernel/v1/sessions/{session_id}/events/window"),
+    "usage_rollup": ("GET", "/kernel/v1/usage"),
+    "list_messages": ("GET", "/kernel/v1/sessions/{session_id}/messages"),
+    "submit_action": ("POST", "/kernel/v1/sessions/{session_id}/actions"),
+    "interrupt": ("POST", "/kernel/v1/sessions/{session_id}/interrupt"),
+    "run_turn": None,  # WS /kernel/v1/sessions/{session_id}/run
     "scan_orphan_pendings": None,
     "scan_orphan_runs": None,
     "cleanup_runtime": None,
@@ -43,8 +43,8 @@ EXPECTED_ROUTES: dict[str, tuple[str, str] | None] = {
 # Streaming subscriptions are async-generator functions (not coroutine
 # functions), pinned separately: each must have its SSE endpoint mounted.
 EXPECTED_STREAMS: dict[str, tuple[str, str]] = {
-    "subscribe_session_events": ("GET", "/api/v1/sessions/{session_id}/events/stream"),
-    "subscribe_all_events": ("GET", "/api/v1/events/stream"),
+    "subscribe_session_events": ("GET", "/kernel/v1/sessions/{session_id}/events/stream"),
+    "subscribe_all_events": ("GET", "/kernel/v1/events/stream"),
 }
 
 
@@ -69,7 +69,7 @@ def test_every_client_method_maps_to_a_kernel_endpoint() -> None:
 
 def test_ws_run_channel_is_mounted() -> None:
     paths = {getattr(r, "path", "") for r in kernel_app.routes}
-    assert "/api/v1/sessions/{session_id}/run" in paths
+    assert "/kernel/v1/sessions/{session_id}/run" in paths
 
 
 def test_every_stream_method_maps_to_a_kernel_sse_endpoint() -> None:

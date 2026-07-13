@@ -7,8 +7,8 @@ SQLite DB to prove three things land correctly together:
    schema from empty, including the ``messages`` table, the
    ``events.message_id`` column, and the ``sessions.todos`` column.
 2. **Kernel routes mounted** — the new
-   ``GET /api/v1/sessions/{id}/messages`` /
-   ``GET /api/v1/messages/{id}`` endpoints respond.
+   ``GET /kernel/v1/sessions/{id}/messages`` /
+   ``GET /kernel/v1/messages/{id}`` endpoints respond.
 3. **TODO event flow** — appending a synthetic ``todo_update`` event
    (what the kernel runtime does when the agent calls TodoWrite) is
    visible on:
@@ -82,11 +82,11 @@ def main() -> None:
 
     # Wait for the server to be ready (lifespan + kernel migrations finish).
     # No /health route on the host — probe a known kernel endpoint that
-    # returns 200 on an empty DB (``/api/v1/projects`` lists projects).
+    # returns 200 on an empty DB (``/kernel/v1/projects`` lists projects).
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
-            r = httpx.get(f"{base_url}/api/v1/projects", timeout=1.0)
+            r = httpx.get(f"{base_url}/kernel/v1/projects", timeout=1.0)
             if r.status_code == 200:
                 break
         except Exception:
@@ -134,9 +134,9 @@ def main() -> None:
 
     # ── 2. Kernel messages route mounted ────────────────────────────
     print("\n[2/4] Kernel routes")
-    r = httpx.get(f"{base_url}/api/v1/sessions/__nope__/messages")
+    r = httpx.get(f"{base_url}/kernel/v1/sessions/__nope__/messages")
     _check(
-        "GET /api/v1/sessions/{id}/messages mounted",
+        "GET /kernel/v1/sessions/{id}/messages mounted",
         r.status_code == 404,
         f"got {r.status_code} (expected 404 not-found from kernel)",
     )
@@ -312,9 +312,9 @@ def main() -> None:
     )
 
     # Kernel messages router round-trip.
-    r = httpx.get(f"{base_url}/api/v1/sessions/{session_id}/messages")
+    r = httpx.get(f"{base_url}/kernel/v1/sessions/{session_id}/messages")
     _check(
-        "GET /api/v1/sessions/{id}/messages returns the seeded message",
+        "GET /kernel/v1/sessions/{id}/messages returns the seeded message",
         r.status_code == 200 and len(r.json().get("data", [])) == 1,
         f"status={r.status_code}, count={len(r.json().get('data', []))}",
     )
@@ -330,9 +330,9 @@ def main() -> None:
         json.dumps(msg_data.get("todos"), ensure_ascii=False),
     )
 
-    r = httpx.get(f"{base_url}/api/v1/messages/{message_id}/events")
+    r = httpx.get(f"{base_url}/kernel/v1/messages/{message_id}/events")
     _check(
-        "GET /api/v1/messages/{id}/events scoped per-message",
+        "GET /kernel/v1/messages/{id}/events scoped per-message",
         r.status_code == 200 and len(r.json().get("data", [])) == 3,
         f"status={r.status_code}, count={len(r.json().get('data', []))}",
     )

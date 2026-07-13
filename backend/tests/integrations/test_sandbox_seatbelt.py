@@ -168,7 +168,7 @@ async def test_provision_runs_a_sandboxed_kernel_end_to_end(tmp_path) -> None:
         assert await provider.health("e2e") is True
         async with httpx.AsyncClient() as c:
             ok = await c.get(
-                f"{endpoint.base_url}/api/v1/sessions",
+                f"{endpoint.base_url}/kernel/v1/sessions",
                 headers={
                     "Authorization": f"Bearer {endpoint.token}",
                     "X-Valuz-Owner-Id": "owner-a",
@@ -176,7 +176,7 @@ async def test_provision_runs_a_sandboxed_kernel_end_to_end(tmp_path) -> None:
                 timeout=5,
             )
             assert ok.status_code == 200  # migrated DB readable in-sandbox
-            unauth = await c.get(f"{endpoint.base_url}/api/v1/sessions", timeout=5)
+            unauth = await c.get(f"{endpoint.base_url}/kernel/v1/sessions", timeout=5)
             assert unauth.status_code == 401
     finally:
         await provider.destroy("e2e")
