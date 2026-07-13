@@ -26,7 +26,7 @@ const VALUZ_OPENUUI_THEME: OpenUiTheme = {
   borderInteractiveSelected: "var(--color-brand)",
   // Neutral text → Valuz ink scale (OpenUI's near-black defaults are illegible
   // on the dark surface). Flip under ``.dark``.
-  foreground: "var(--color-ink-body)",
+  // foreground: "var(--color-ink-body)",
   textNeutralPrimary: "var(--color-ink-heading)",
   textNeutralSecondary: "var(--color-ink-meta)",
   textNeutralTertiary: "var(--color-ink-muted)",
