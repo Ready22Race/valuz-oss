@@ -2816,6 +2816,11 @@ export const ConversationPage = () => {
         beforeSeq: minSeqRef.current,
         turnLimit: TURN_PAGE_SIZE,
       });
+      // Staleness guard: a session switch may have landed while this page
+      // was in flight — prepending the OLD session's turns into the NEW
+      // session's transcript (and poisoning ``minSeqRef``, which the switch
+      // just reset) mixes histories across sessions.
+      if (selectedSessionIdRef.current !== sessionId) return;
       if (response.items.length > 0) {
         // Defensive dedup: SSE shouldn't backfill historical events but
         // a slow turn could in theory race with this fetch.
@@ -3434,6 +3439,18 @@ export const ConversationPage = () => {
       };
 
       const appendEvent = (event: SessionEventDTO) => {
+        // Drop deliveries that outlive this subscription. A session switch
+        // aborts the stream (the ``selectedSessionId`` effect) — but an
+        // in-flight poll response, a gap-fill, or a frame parsed in the same
+        // tick as the abort still resolves afterwards. Without this guard the
+        // OLD session's events land in the NEW session's transcript, and —
+        // because event seqs are store-global — the cross-session seqs pass
+        // the dedupe below and poison ``maxSeqRef`` (so the new session's own
+        // later events can get skipped). The ref check also covers the abort
+        // effect's commit lag: ``selectedSessionIdRef`` flips synchronously in
+        // bootstrap, before the abort lands.
+        if (stopped || abort.signal.aborted) return;
+        if (selectedSessionIdRef.current !== sessionId) return;
         if (event.seq > 0) {
           maxSeqRef.current = Math.max(maxSeqRef.current, event.seq);
         }
@@ -3732,11 +3749,20 @@ export const ConversationPage = () => {
       // fetch to the backend (the "153 pending requests" incident).
       let pollInFlight = false;
       pollTimer = window.setInterval(() => {
-        if (stopped || pollInFlight) return;
+        if (stopped || abort.signal.aborted || pollInFlight) return;
+        // A session switch flips ``selectedSessionIdRef`` synchronously in
+        // bootstrap and ``refreshEvents`` resets ``maxSeqRef`` — before the
+        // abort effect commits. A tick in that window would read the fresh
+        // cursor (0) against the OLD session and fetch its entire history.
+        if (selectedSessionIdRef.current !== sessionId) return;
         pollInFlight = true;
         sessionsApi
           .listEvents(sessionId, maxSeqRef.current)
           .then((response) => {
+            // Same staleness guards as ``appendEvent`` — this response may
+            // have been in flight across a session switch / abort.
+            if (stopped || abort.signal.aborted) return;
+            if (selectedSessionIdRef.current !== sessionId) return;
             if (response.items.length > 0) {
               sawTurnActivity = true;
               idleReconcileTicks = 0;
@@ -3753,7 +3779,8 @@ export const ConversationPage = () => {
             void sessionsApi
               .get(sessionId)
               .then((detail) => {
-                if (stopped) return;
+                if (stopped || abort.signal.aborted) return;
+                if (selectedSessionIdRef.current !== sessionId) return;
                 // Push the authoritative status into local state — this drives
                 // the derived loading flag and the header pill.
                 setSessions((prev) =>
