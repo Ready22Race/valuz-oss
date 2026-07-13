@@ -43,6 +43,21 @@ const _onVisible = (): void => {
   if (typeof document !== "undefined" && !document.hidden) void _poll(true);
 };
 
+/**
+ * Force an immediate refresh of the shared running-runs snapshot, outside the
+ * regular {@link POLL_MS} cadence — call this right after an action that mints
+ * a new run (sending the first message of a session) so the sidebar's
+ * runs-derived lists pick it up without waiting for the next tick.
+ *
+ * A freshly-created session may still read ``created`` (not yet ``running``,
+ * so absent from both runs views) on the instant poll, so one delayed re-poll
+ * covers the created→running flip.
+ */
+export const refreshRunningRuns = (): void => {
+  void _poll(true);
+  window.setTimeout(() => void _poll(true), 1500);
+};
+
 const _start = (): void => {
   if (_timer !== null) return;
   void _poll(true);

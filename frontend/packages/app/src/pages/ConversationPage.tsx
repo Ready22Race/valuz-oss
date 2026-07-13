@@ -37,6 +37,7 @@ import {
   getDefaultExecutionTarget,
   getEntityOrigin,
   recordEntityOrigin,
+  refreshRunningRuns,
   resolveApiBase,
   useEntityOrigin,
   useExecutionTargets,
@@ -3724,8 +3725,15 @@ export const ConversationPage = () => {
       // fresh-send path must wait through).
       let sawTurnActivity = !opts.requireUserBeforeTerminal;
       let idleReconcileTicks = 0;
+      // Single-flight: a slow backend (e.g. valuz.db write contention during a
+      // tool-heavy turn) makes each poll exceed the 500ms interval — without
+      // this guard every tick stacks another pending request, and the pile-up
+      // saturates the browser's 6-connections-per-host pool, stalling EVERY
+      // fetch to the backend (the "153 pending requests" incident).
+      let pollInFlight = false;
       pollTimer = window.setInterval(() => {
-        if (stopped) return;
+        if (stopped || pollInFlight) return;
+        pollInFlight = true;
         sessionsApi
           .listEvents(sessionId, maxSeqRef.current)
           .then((response) => {
@@ -3770,7 +3778,10 @@ export const ConversationPage = () => {
               })
               .catch(() => {});
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            pollInFlight = false;
+          });
       }, 500);
 
       // A live stream can end for reasons other than "turn finished and
@@ -4079,6 +4090,13 @@ export const ConversationPage = () => {
         selectedModelId,
       );
       if (!detail?.id) throw new Error("Failed to send message.");
+      // The desktop sidebar's per-project session lists are derived from
+      // ``/v1/runs`` (ProjectLayoutBase), NOT from the session store the
+      // optimistic updates below write to — so without a poke here a brand-new
+      // session only appears after the next 10s running poll (or a reload).
+      // Force the shared poller now; the resulting ``liveRunIds`` transition
+      // also triggers the layout's finished-runs refresh.
+      refreshRunningRuns();
       // Attachments are per-turn: the backend ships this turn's pending
       // set with the message, then stamps those rows ``consumed_at`` once
       // the turn runs. Optimistically mark them consumed so they drop out
@@ -5148,6 +5166,9 @@ export const ConversationPage = () => {
         // (c) ``handleSend`` claims the page via ``abortRef`` /
         // ``isSendInFlightRef``, or (d) the effect's cleanup runs
         // (session id change / unmount).
+        // Single-flight (same rationale as the event poll above): a slow
+        // backend must not let ticks stack pending requests.
+        let statusPollInFlight = false;
         pollTimer = window.setInterval(() => {
           if (cancelled) {
             stopPoll();
@@ -5157,6 +5178,8 @@ export const ConversationPage = () => {
             stopPoll();
             return;
           }
+          if (statusPollInFlight) return;
+          statusPollInFlight = true;
           sessionsApi
             .get(selectedSessionId)
             .then((next) => {
@@ -5176,6 +5199,9 @@ export const ConversationPage = () => {
             .catch(() => {
               // Non-fatal — keep polling; transient errors shouldn't
               // strand the page in a non-resuming state.
+            })
+            .finally(() => {
+              statusPollInFlight = false;
             });
         }, POLL_INTERVAL_MS) as unknown as number;
       })
