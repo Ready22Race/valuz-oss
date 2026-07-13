@@ -16,6 +16,9 @@ sit on a separate ``Base`` inside ``kernel/src``).
 The ``render_as_batch`` flag is required for SQLite because most DDL
 shapes (column drop, type change, constraint rename) are unsupported
 in-place; alembic emits a temp-table swap instead.
+
+Revision ids are string-typed pure numbers (for example ``"0020"``). Keep
+descriptions in migration filenames/docstrings, not in ``revision`` values.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ import valuz_agent.modules.automations.models  # noqa: F401,E402
 import valuz_agent.modules.connectors.models  # noqa: F401,E402
 import valuz_agent.modules.docs.models  # noqa: F401,E402
 import valuz_agent.modules.marketplace.install_store  # noqa: F401,E402
+import valuz_agent.modules.notifications.models  # noqa: F401,E402
 import valuz_agent.modules.parser.models  # noqa: F401,E402
 import valuz_agent.modules.projects.models  # noqa: F401,E402
 import valuz_agent.modules.providers.models  # noqa: F401,E402

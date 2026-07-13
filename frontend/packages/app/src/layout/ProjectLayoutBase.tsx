@@ -77,10 +77,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
-  DecisionDrawer,
-  DecisionInboxBadge,
-  DecisionInboxProvider,
-} from "../components/DecisionInbox";
+  NotificationBadge,
+  NotificationDrawer,
+  NotificationProvider,
+} from "../components/NotificationInbox";
 import { usePlatform } from "../platform";
 import { UpdateButton } from "../components/UpdateButton";
 import { useAgentDeployPicker } from "../components/agent-deploy-picker";
@@ -638,12 +638,13 @@ export function ProjectLayoutBase({
       </span>
     ));
   const resolvedRightPanel = controlledRightPanel ?? rightPanel;
-  // Skills / Connectors use the right-panel slot for a master-detail layout
+  // Skills / Connectors / Agents use the right-panel slot for a master-detail layout
   // (list + detail), not a collapsible side panel — so the collapse toggle
   // is meaningless there and is hidden.
   const suppressRightPanelToggle =
     location.pathname.startsWith("/skills") ||
-    location.pathname.startsWith("/connectors");
+    location.pathname.startsWith("/connectors") ||
+    location.pathname.startsWith("/agents");
   const rightPanelToggle =
     resolvedRightPanel && !suppressRightPanelToggle ? (
       <TooltipProvider delayDuration={150}>
@@ -694,7 +695,7 @@ export function ProjectLayoutBase({
   // contributes no topbarActions / rightPanelToggle.
   const topbarRightControl = (
     <div className="flex items-center gap-1">
-      <DecisionInboxBadge />
+      <NotificationBadge />
       {topbarActions}
       {rightPanelToggle}
     </div>
@@ -703,8 +704,8 @@ export function ProjectLayoutBase({
   return (
     <ErrorBoundary>
       <OfflineBanner />
-      <DecisionInboxProvider />
-      <DecisionDrawer />
+      <NotificationProvider />
+      <NotificationDrawer />
       <AppShell
         appTitle={branding.appName}
         activePath={location.pathname}

@@ -1651,7 +1651,7 @@
     "automationFailed": "Automation failed",
     "boundToProject": "· Bound to {name}",
     "builtin": "Built-in",
-    "builtinHint": "Bundled with client · Cannot disable",
+    "builtinHint": "Bundled with client",
     "cancelled": "Cancelled, not saved",
     "cannotAccessLink": "Cannot access link",
     "categoryCustom": "Custom · User",
@@ -1681,7 +1681,7 @@
     "groupAgents": "Agents",
     "groupClaude": "Claude",
     "groupCodex": "Codex",
-    "groupOfficial": "Built-in",
+    "groupOfficial": "Official",
     "importFailed": "Import failed: {error}",
     "importName": "Import name",
     "imported": "Skill \"{name}\" imported",
@@ -2300,6 +2300,7 @@
     "stopped": "Task stopped",
     "event": {
       "kickoff": "Task kicked off",
+      "kickoffFailed": "Kickoff failed",
       "subtaskSpawned": "Subtask dispatched",
       "subtaskCompleted": "Subtask completed",
       "subtaskFailed": "Subtask failed",
@@ -2324,11 +2325,17 @@
       "subtaskReviewApproveReason": "✓ Approved: {feedback}",
       "subtaskReviewRework": "⚠ Rework: {feedback}",
       "subtaskReviewReworkNoFeedback": "⚠ Needs rework",
-      "leadWorking": "Lead is working…"
+      "leadWorking": "Lead is working…",
+      "userInject": "User instruction",
+      "awaitingUser": "Waiting for you",
+      "userAnswered": "You answered"
     },
     "viewSession": "View session →",
     "needsConfirm": "Your confirmation needed",
-    "goConfirm": "Confirm now"
+    "goConfirm": "Confirm now",
+    "resumePlaceholder": "Add guidance for the lead, press Enter to resume (optional)",
+    "resumeWithInstruction": "Send & resume",
+    "awaitingUserChip": "Needs your answer"
   },
   "marketplace": {
     "title": "Marketplace",
@@ -2468,5 +2475,19 @@
     "templatesCount": "{count} templates",
     "add": "Add",
     "added": "Added"
+  },
+  "notification": {
+    "notifQuestionTitle": "{agent} needs your input",
+    "notifFailureTitle": "Task needs attention",
+    "notifFailureBody": "{task} is blocked",
+    "inboxTitle": "Notifications",
+    "emptyTitle": "No notifications need you",
+    "emptyHint": "Questions and blocked tasks show up here",
+    "badgeTooltip": "{count} need your attention",
+    "kindQuestion": "Needs answer",
+    "kindFailure": "Task blocked",
+    "resume": "Resume task",
+    "dismiss": "Dismiss",
+    "openTask": "Open task"
   }
 }

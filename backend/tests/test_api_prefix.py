@@ -21,12 +21,9 @@ from valuz_agent.infra.config import Settings, settings
 
 # A representative, parameter-free host route — the one that 404'd behind the
 # shared-host ingress when the seam was missing.
-_HOST_PATH = "/v1/decisions/pending"
-# A representative in-process kernel route. ADR-013: KERNEL_API_PREFIX is
-# overridden host-wide to "/kernel" (kernel's own upstream default is "/api",
-# unused by this host — see valuz_agent.boot.kernel.kernel_api_prefix and
-# backend/tests/conftest.py, which pins the same value before any test
-# imports a kernel route module).
+_HOST_PATH = "/v1/notifications"
+# A representative in-process kernel route (ADR-013: the kernel package's own
+# default prefix is /kernel — see kernel/app/routes/__init__.py).
 _KERNEL_PATH = "/kernel/v1/sessions"
 # A representative internal ASGI mount — now mounted under each base path too.
 _MCP_MOUNT = "/_internal/mcp/docs"

@@ -95,11 +95,15 @@ async def inject_into_task(
     + dispatch (or rework).
 
     Returns ``{delivered: bool, lead_session_id: str | None, reason: str | None}``:
-      - active/paused task + registered lead inbox → ``delivered=True``
+      - active task + registered lead inbox → ``delivered=True``
+      - paused / blocked / stopped task → the task is REVIVED
+        (``resume_task`` with the text as the resume instruction) →
+        ``delivered=True, reason=TASK_RESUMED``; a failed revive returns
+        ``delivered=False, reason=RESUME_FAILED``
       - no lead run found for the task → ``delivered=False, reason=NO_LEAD``
       - lead run exists but mailbox unregistered (already finished) →
         ``delivered=False, reason=LEAD_OFFLINE``
-      - draft / completed / stopped / abandoned task →
+      - draft / completed / abandoned task →
         ``delivered=False, reason=TASK_NOT_ACTIVE``
     """
     from valuz_agent.modules.tasks.mailbox import InboxMsg, mailbox_registry
@@ -114,7 +118,41 @@ async def inject_into_task(
             "lead_session_id": None,
             "reason": "TASK_NOT_FOUND",
         }
-    if task_row.status not in ("active", "paused"):
+    if task_row.status in ("paused", "blocked", "stopped"):
+        # Halted task: the lead loop is torn down and its mailbox is
+        # unregistered, so a plain put() can never deliver. "Talking to a
+        # halted task" IS the user's resume intent (the intervene docstring
+        # promised "chat/inject can also revive it") — route through
+        # resume_task with the text as the resume instruction: it flips the
+        # status, reconciles members, and embeds the text in the respawned
+        # lead's recovery brief. resume_task appends the ``resumed`` +
+        # ``user_inject`` events itself — don't double-append here.
+        # ``completed`` stays excluded: reopening a finished task is a
+        # deliberate act (detail-page reopen / explicit resume_task), not a
+        # side effect of a stray chat message.
+        from valuz_agent.modules.tasks.orchestrator import task_orchestrator
+
+        result = await task_orchestrator.resume_task(
+            task_id, project_id, user_id=user_id, instruction=text
+        )
+        lead_session_id = None
+        async with async_unit_of_work(commit=False) as db:
+            runs = await TaskSessionDatastore(db).list_runs(user_id, task_id)
+            lead = next((r for r in runs if r.kind == "lead"), None)
+            if lead is not None:
+                lead_session_id = lead.session_id
+        if result.get("ok"):
+            return {
+                "delivered": True,
+                "lead_session_id": lead_session_id,
+                "reason": "TASK_RESUMED",
+            }
+        return {
+            "delivered": False,
+            "lead_session_id": lead_session_id,
+            "reason": "RESUME_FAILED",
+        }
+    if task_row.status != "active":
         return {
             "delivered": False,
             "lead_session_id": None,
@@ -166,6 +204,115 @@ async def inject_into_task(
         "lead_session_id": lead_session_id,
         "reason": None if delivered else "LEAD_OFFLINE",
     }
+
+
+async def record_task_failure_notification(
+    *,
+    task_id: str,
+    project_id: str,
+    event_id: str,
+    event_type: str,
+    reason: str | None,
+    task_title: str | None = None,
+    user_id: str | None = None,
+) -> None:
+    """Failure PROJECTOR: mirror a ``task_blocked`` / ``kickoff_failed`` event
+    into the durable notification ledger (kind=``task_failed``, action=resume).
+
+    This is the "强提醒" persistence: a failure is now a durable attention item
+    that survives restart, drives the badge + OS notification, and clears when
+    the user resumes (see ``notification_service.resolve_task`` on resume).
+    Deduped by event id. Best-effort — never break the failure's own event flow.
+
+    ``task_title`` is looked up if not supplied so call sites stay terse.
+    """
+    from valuz_agent.modules.notifications.service import notification_service
+
+    title = task_title
+    if title is None:
+        try:
+            async with async_unit_of_work(commit=False) as db:
+                task = await TaskDatastore(db).get_task(user_id or "", task_id)
+            title = task.title if task is not None else task_id
+        except Exception:  # noqa: BLE001
+            title = task_id
+
+    await notification_service.ingest(
+        user_id or "",
+        dedup_key=f"f:{event_id}",
+        kind="task_failed",
+        title=title or task_id,  # frontend builds "任务受阻: {title}"
+        body=reason or "",
+        route=f"/tasks/{task_id}",
+        action="resume",
+        task_id=task_id,
+        project_id=project_id,
+        source_event_id=event_id,
+        payload={"reason": reason, "event_type": event_type},
+    )
+
+
+async def record_awaiting_user(
+    *,
+    task_id: str,
+    project_id: str,
+    session_id: str,
+    subtask_key: str | None,
+    agent_slug: str,
+    agent_name: str | None,
+    question: str,
+    pending_id: str,
+    user_id: str | None = None,
+) -> None:
+    """Append an ``awaiting_user`` task event when an agent (lead or member)
+    raises a question through the Decision Inbox.
+
+    A pending question blocks the turn but leaves NO trace on the task's own
+    timeline or status (the inbox is a cross-cutting overlay keyed by
+    ``task_id``). Without this the task page shows "Running" while the task is
+    actually blocked on the user. We do NOT add an ``awaiting_user`` task
+    *status* (the task genuinely is still active and a status would need racy
+    atomic clearing on answer) — this event is the timeline record + an SSE
+    frame the attention surfaces drive from. Deduped by ``pending_id`` at the
+    caller (the aggregator tracks emitted ids per process).
+    """
+    async with async_unit_of_work() as db:
+        await TaskEventDatastore(db).append_event(
+            user_id,  # type: ignore[arg-type]
+            project_id=project_id,
+            task_id=task_id,
+            type="awaiting_user",
+            actor=agent_slug,
+            session_id=session_id,
+            payload={
+                "agent_name": agent_name,
+                "question": question,
+                "pending_id": pending_id,
+                **({"subtask_key": subtask_key} if subtask_key else {}),
+            },
+        )
+
+
+async def record_user_answered(
+    *,
+    task_id: str,
+    project_id: str,
+    pending_id: str,
+    session_id: str | None = None,
+    user_id: str | None = None,
+) -> None:
+    """Append a ``user_answered`` task event when a pending question resolves
+    (the counterpart to :func:`record_awaiting_user`)."""
+    async with async_unit_of_work() as db:
+        await TaskEventDatastore(db).append_event(
+            user_id,  # type: ignore[arg-type]
+            project_id=project_id,
+            task_id=task_id,
+            type="user_answered",
+            actor="user",
+            session_id=session_id,
+            payload={"pending_id": pending_id},
+        )
 
 
 async def notify_lead_goal_revised(

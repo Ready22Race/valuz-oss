@@ -12,7 +12,6 @@ land in the right server.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from typing import Any
@@ -31,21 +30,9 @@ from app.schemas import (
 import valuz_agent.boot.kernel  # noqa: F401
 from valuz_agent.modules.connectors.datastore import ConnectorDatastore
 from valuz_agent.modules.connectors.service import build_overrides, merge_params_into_url
+from valuz_agent.ports.extensions import ext
 
 logger = logging.getLogger(__name__)
-
-# Single-flight guard so concurrent session builds for the same connector don't
-# fire overlapping refreshes (rotating refresh tokens are single-use). In-process
-# only — adequate for the desktop backend; a multi-instance deployment would race
-# at most one redundant refresh.
-_token_refresh_locks: dict[str, asyncio.Lock] = {}
-
-
-def _token_refresh_lock(connector_id: str) -> asyncio.Lock:
-    lock = _token_refresh_locks.get(connector_id)
-    if lock is None:
-        lock = _token_refresh_locks[connector_id] = asyncio.Lock()
-    return lock
 
 
 async def _ensure_fresh_oauth_token(
@@ -60,28 +47,15 @@ async def _ensure_fresh_oauth_token(
     original blob so the caller still attempts the old token (and the runtime's
     own 401 surfaces normally).
     """
-    from valuz_agent.infra.config import settings as _settings
-    from valuz_agent.infra.time_utils import now_ms
-    from valuz_agent.integrations.connector_oauth import (
-        oauth_token_is_expired,
-        try_refresh_connector_token,
-    )
-
-    if not oauth_token_is_expired(row, now_ms()):
-        return token_json
-    redirect_uri = f"{_settings.backend_base_url}/v1/connectors/oauth/callback"
-    async with _token_refresh_lock(row.id):
-        # Re-read under the lock: a sibling build may have refreshed + committed.
-        fresh = await connectors.get_by_id(row.user_id, row.id)
-        target = fresh if fresh is not None else row
-        if not oauth_token_is_expired(target, now_ms()):
-            return target.oauth_token_json or token_json
-        new_access = await try_refresh_connector_token(
-            target, redirect_uri=redirect_uri, now_ms=now_ms()
+    try:
+        return await ext.connector_oauth_refresh.ensure_fresh_token(
+            row=row,
+            connectors=connectors,
+            token_json=token_json,
         )
-        if new_access is not None:
-            await connectors.update(target)
-        return target.oauth_token_json or token_json
+    except Exception:  # noqa: BLE001
+        logger.exception("mcp resolver: connector oauth refresh failed")
+        return token_json
 
 
 async def resolve_mcp_servers(

@@ -74,6 +74,7 @@ class ConnectorView:
     transport: TransportType
     url: str | None
     auth_type: AuthType
+    oauth_metadata: str | None
     has_api_key: bool
     command: str | None
     args: list[str]
@@ -131,6 +132,62 @@ def _is_secret_entry(
 class _Storage:
     headers_json: str | None
     params_json: str | None
+
+
+def _secret_snapshot(row: ConnectorRow):
+    from valuz_agent.ports.connector_lifecycle import ConnectorSecretSnapshot
+
+    return ConnectorSecretSnapshot(
+        headers_json=row.headers_json,
+        params_json=row.params_json,
+        env_json=row.env_json,
+    )
+
+
+def _oauth_snapshot(row: ConnectorRow):
+    from valuz_agent.ports.connector_lifecycle import ConnectorOAuthSnapshot
+
+    return ConnectorOAuthSnapshot(
+        client_info_json=cast("str | None", row.oauth_client_info_json),
+        token_json=cast("str | None", row.oauth_token_json),
+        token_expires_at=row.oauth_token_expires_at,
+    )
+
+
+async def _after_connector_saved_hook(
+    user_id: str,
+    row: ConnectorRow,
+    origin: str,
+) -> None:
+    if origin not in {"created", "updated"}:
+        return
+    from valuz_agent.ports.extensions import ext
+
+    await ext.connector_lifecycle.after_connector_saved(
+        user_id=user_id,
+        connector=_row_to_view(row),
+        secret_snapshot=_secret_snapshot(row),
+        origin=cast("Any", origin),
+    )
+
+
+async def after_connector_oauth_authorized_hook(user_id: str, row: ConnectorRow) -> None:
+    from valuz_agent.ports.extensions import ext
+
+    await ext.connector_lifecycle.after_connector_oauth_authorized(
+        user_id=user_id,
+        connector=_row_to_view(row),
+        oauth_snapshot=_oauth_snapshot(row),
+    )
+
+
+async def _before_connector_delete_hook(user_id: str, row: ConnectorRow) -> None:
+    from valuz_agent.ports.extensions import ext
+
+    await ext.connector_lifecycle.before_connector_delete(
+        user_id=user_id,
+        connector=_row_to_view(row),
+    )
 
 
 def _compute_storage(
@@ -282,7 +339,9 @@ class ConnectorService:
                 enabled=True,
                 status="connecting",
             )
-            return _row_to_view(await self._ds.create(user_id, row))
+            created = await self._ds.create(user_id, row)
+            await _after_connector_saved_hook(user_id, created, "created")
+            return _row_to_view(created)
 
         row = ConnectorRow(
             slug=_slug,
@@ -306,7 +365,9 @@ class ConnectorService:
         )
         saved.headers_json = storage.headers_json
         saved.params_json = storage.params_json
-        return _row_to_view(await self._ds.update(saved))
+        updated = await self._ds.update(saved)
+        await _after_connector_saved_hook(user_id, updated, "created")
+        return _row_to_view(updated)
 
     async def update_connector(
         self,
@@ -369,7 +430,9 @@ class ConnectorService:
             if row.status not in ("disabled", "pending_auth"):
                 row.status = "connecting"
         row.updated_at = now_ms()
-        return _row_to_view(await self._ds.update(row))
+        updated = await self._ds.update(row)
+        await _after_connector_saved_hook(user_id, updated, "updated")
+        return _row_to_view(updated)
 
     async def delete_connector(self, user_id: str, connector_id: str) -> bool:
         row = await self._ds.get_by_id(user_id, connector_id)
@@ -379,6 +442,7 @@ class ConnectorService:
             return False
         # Secret material (creds + OAuth token) lives in this connector's own
         # columns, so deleting the row drops every credential with it.
+        await _before_connector_delete_hook(user_id, row)
         return await self._ds.delete(user_id, connector_id)
 
     async def set_enabled(
@@ -409,7 +473,9 @@ class ConnectorService:
         row.last_tested_at = now_ms()
         row.error_message = None if ok else error_message
         row.updated_at = now_ms()
-        return _row_to_view(await self._ds.update(row))
+        updated = await self._ds.update(row)
+        await _after_connector_saved_hook(user_id, updated, "updated")
+        return _row_to_view(updated)
 
 
 def _effective_status(row: ConnectorRow) -> str:
@@ -462,6 +528,7 @@ def _row_to_view(row: ConnectorRow) -> ConnectorView:
         transport=cast(TransportType, row.transport),
         url=row.url,
         auth_type=cast(AuthType, row.auth_type),
+        oauth_metadata=row.oauth_metadata,
         has_api_key=any(e["secret"] for e in h_entries.values())
         or any(e["secret"] for e in p_entries.values()),
         command=row.command,

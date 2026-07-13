@@ -210,6 +210,11 @@ Every migration must be **reversible** — always implement `downgrade()`.
 Autogenerate against the async engine, then review the diff (SQLite has limited
 `ALTER`; batch ops are often required).
 
+Alembic revision ids are string-typed but must be pure numeric strings, e.g.
+`revision: str = "0020"` and `down_revision: str | None = "0019"`. Do not use
+descriptive ids such as `"0020_some_feature"`; keep descriptions in the
+filename/docstring instead so the version tables remain numeric and consistent.
+
 ## The adapter seam
 
 `valuz_agent/adapters/*` is the only place the host and kernel meet. Each

@@ -1,0 +1,194 @@
+"""TaskHealthMonitor watchdog tests (task attention & reliability, P2).
+
+Drives ``sweep_once`` directly against a tmp-SQLite fixture. Liveness is the
+lead's mailbox registration; the monitor only acts after ``confirm_sweeps``
+consecutive dead-looking passes, flipping the task ``active → blocked`` and
+emitting ``task_blocked(reason="lead_dead")``.
+"""
+
+# ruff: noqa: I001
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+import valuz_agent.boot.kernel  # noqa: F401
+from sqlalchemy import create_engine, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import sessionmaker
+
+from valuz_agent.infra.database import Base
+from valuz_agent.modules.tasks.health_monitor import (
+    TaskHealthConfig,
+    TaskHealthMonitor,
+)
+from valuz_agent.modules.tasks.mailbox import mailbox_registry
+from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
+
+OWNER = "local-test-owner"
+
+
+@pytest.fixture
+def db_factory(tmp_path, monkeypatch):
+    import valuz_agent.infra.db as db_mod
+
+    db_file = tmp_path / "health.db"
+    sync_engine = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(
+        sync_engine,
+        tables=[TaskRow.__table__, TaskEventRow.__table__, TaskSessionRow.__table__],
+    )
+    async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
+    async_factory = async_sessionmaker(bind=async_engine, expire_on_commit=False)
+    monkeypatch.setattr(db_mod, "AsyncSessionLocal", async_factory)
+    return sessionmaker(bind=sync_engine, expire_on_commit=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_mailbox():
+    mailbox_registry._boxes.clear()
+    yield
+    mailbox_registry._boxes.clear()
+
+
+def _seed(db_factory, *, task_id="t1", status="active", lead_session_id="lead-s") -> None:
+    db = db_factory()
+    try:
+        db.add(
+            TaskRow(
+                user_id=OWNER,
+                id=task_id,
+                project_id="w1",
+                file_path="/tmp/t.md",
+                title="T",
+                goal="g",
+                status=status,
+                created_by="user",
+                lead_agent_slug="lead",
+                current_holder="lead",
+                plan={"subtasks": []},
+            )
+        )
+        if lead_session_id is not None:
+            db.add(
+                TaskSessionRow(
+                    user_id=OWNER,
+                    project_id="w1",
+                    task_id=task_id,
+                    session_id=lead_session_id,
+                    agent_slug="lead",
+                    sequence=0,
+                    kind="lead",
+                    status="active",
+                )
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _task_status(db_factory, task_id="t1") -> str:
+    db = db_factory()
+    try:
+        return db.execute(select(TaskRow.status).filter_by(id=task_id)).scalar_one()
+    finally:
+        db.close()
+
+
+def _event_types(db_factory, task_id="t1") -> list[str]:
+    db = db_factory()
+    try:
+        return [
+            e.type
+            for e in db.execute(
+                select(TaskEventRow).filter_by(task_id=task_id).order_by(TaskEventRow.sequence)
+            )
+            .scalars()
+            .all()
+        ]
+    finally:
+        db.close()
+
+
+def _monitor() -> TaskHealthMonitor:
+    # confirm_sweeps=2 default; startup_delay irrelevant (we call sweep_once).
+    return TaskHealthMonitor(TaskHealthConfig())
+
+
+def test_live_lead_loop_is_healthy(db_factory) -> None:
+    _seed(db_factory)
+    mailbox_registry.register("lead-s")  # loop alive
+    mon = _monitor()
+    acted = asyncio.run(mon.sweep_once())
+    assert acted == []
+    assert _task_status(db_factory) == "active"
+
+
+def test_dead_lead_needs_two_sweeps_before_blocking(db_factory) -> None:
+    _seed(db_factory)
+    # No mailbox registration → loop absent.
+    mon = _monitor()
+    # First sweep: suspected, not yet acted.
+    assert asyncio.run(mon.sweep_once()) == []
+    assert _task_status(db_factory) == "active"
+    # Second consecutive sweep: confirmed → blocked.
+    assert asyncio.run(mon.sweep_once()) == ["t1"]
+    assert _task_status(db_factory) == "blocked"
+    assert "task_blocked" in _event_types(db_factory)
+
+
+def test_recovered_lead_clears_suspicion(db_factory) -> None:
+    _seed(db_factory)
+    mon = _monitor()
+    assert asyncio.run(mon.sweep_once()) == []  # suspected once
+    mailbox_registry.register("lead-s")  # a resume landed — loop back
+    assert asyncio.run(mon.sweep_once()) == []  # suspicion cleared
+    assert _task_status(db_factory) == "active"
+    # A later death restarts the 2-sweep count from scratch.
+    mailbox_registry.unregister("lead-s")
+    assert asyncio.run(mon.sweep_once()) == []
+    assert asyncio.run(mon.sweep_once()) == ["t1"]
+    assert _task_status(db_factory) == "blocked"
+
+
+def test_blocked_event_payload_reason_is_lead_dead(db_factory) -> None:
+    _seed(db_factory)
+    mon = _monitor()
+    asyncio.run(mon.sweep_once())
+    asyncio.run(mon.sweep_once())
+    db = db_factory()
+    try:
+        ev = (
+            db.execute(
+                select(TaskEventRow).filter_by(task_id="t1", type="task_blocked")
+            )
+            .scalars()
+            .one()
+        )
+        assert ev.payload["reason"] == "lead_dead"
+    finally:
+        db.close()
+
+
+def test_task_with_no_lead_run_is_left_alone(db_factory) -> None:
+    _seed(db_factory, lead_session_id=None)
+    mon = _monitor()
+    assert asyncio.run(mon.sweep_once()) == []
+    assert asyncio.run(mon.sweep_once()) == []
+    assert _task_status(db_factory) == "active"
+
+
+def test_only_active_tasks_are_swept(db_factory) -> None:
+    _seed(db_factory, task_id="paused-1", status="paused")
+    mon = _monitor()
+    asyncio.run(mon.sweep_once())
+    asyncio.run(mon.sweep_once())
+    assert _task_status(db_factory, "paused-1") == "paused"
+
+
+def test_disabled_when_interval_zero() -> None:
+    from datetime import timedelta
+
+    cfg = TaskHealthConfig(interval=timedelta(seconds=0))
+    assert cfg.enabled is False

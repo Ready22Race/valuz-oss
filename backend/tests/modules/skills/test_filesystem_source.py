@@ -1,6 +1,7 @@
 """Tests for FilesystemSkillSource — frontmatter parsing and discovery."""
 
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 from valuz_agent.infra.config import settings
@@ -14,6 +15,16 @@ from valuz_agent.modules.skills.contracts import RuntimeContext
 
 def _set_user_skills_dir(monkeypatch, path) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(settings, "user_skills_dir", path)
+    home = path.parent / ".test-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+
+def _write_skill(root: Path, slug: str, name: str | None = None) -> None:
+    skill_dir = root / slug
+    skill_dir.mkdir(parents=True)
+    skill_name = name or slug
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\n---\n\nBody\n")
 
 
 class TestExtractFrontmatter:
@@ -201,6 +212,39 @@ class TestFilesystemSkillSource:
         source = FilesystemSkillSource()
         manifests = source.list_skills(RuntimeContext())
         assert manifests == []
+
+    def test_should_discover_configured_agents_claude_and_codex_roots(
+        self, tmp_path, monkeypatch
+    ):
+        custom_root = tmp_path / "configured-skills"
+        fake_home = tmp_path / "home"
+        monkeypatch.setattr(settings, "user_skills_dir", custom_root)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        _write_skill(custom_root, "configured")
+        _write_skill(fake_home / ".agents" / "skills", "agents")
+        _write_skill(fake_home / ".claude" / "skills", "claude")
+        _write_skill(fake_home / ".codex" / "skills", "codex")
+
+        manifests = FilesystemSkillSource().list_skills(RuntimeContext())
+        by_slug = {manifest.slug: manifest for manifest in manifests}
+
+        assert set(by_slug) == {"configured", "agents", "claude", "codex"}
+        assert by_slug["configured"].source == "valuz"
+        assert by_slug["agents"].source == "valuz"
+        assert by_slug["claude"].source == "claude"
+        assert by_slug["codex"].source == "codex"
+
+    def test_should_dedupe_when_configured_root_is_agents_root(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        agents_root = fake_home / ".agents" / "skills"
+        monkeypatch.setattr(settings, "user_skills_dir", agents_root)
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        _write_skill(agents_root, "shared")
+
+        manifests = FilesystemSkillSource().list_skills(RuntimeContext())
+        assert [manifest.slug for manifest in manifests] == ["shared"]
 
 
 class TestFolderBirthtime:

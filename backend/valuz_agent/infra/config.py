@@ -211,7 +211,7 @@ class Settings(BaseSettings):
 
     # Canonical user skill library directory. May contain ``{user_id}`` for
     # shared/cloud deployments.
-    user_skills_dir: Path = Path.home() / ".agent" / "skills"
+    user_skills_dir: Path = Path.home() / ".agents" / "skills"
 
     @property
     def internal_mcp_token(self) -> str:
