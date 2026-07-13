@@ -51,8 +51,6 @@ from valuz_agent.infra.config import settings
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "https://cloud.valuz.dev"
-
 _TIMEOUT_SECONDS = 15.0
 _HEALTHZ_TIMEOUT_SECONDS = 2.0
 _CATEGORIES_TTL = 600.0
@@ -272,7 +270,7 @@ class MarketIndexClient:
         if hit is not None:
             return cast(dict[str, Any], hit)
         payload = await self._get_json(
-            "/api/v1/marketplace/categories", {"kind": kind, "locale": locale}
+            "/v1/marketplace/categories", {"kind": kind, "locale": locale}
         )
         if not isinstance(payload, dict):
             raise MarketIndexUnavailableError("unexpected categories payload")
@@ -310,7 +308,7 @@ class MarketIndexClient:
         hit = self._cached(cache_key)
         if hit is not None:
             return cast(dict[str, Any], hit)
-        payload = await self._get_json("/api/v1/marketplace/items", params)
+        payload = await self._get_json("/v1/marketplace/items", params)
         if not isinstance(payload, dict):
             raise MarketIndexUnavailableError("unexpected items payload")
         self._store(cache_key, payload, _LIST_TTL)
@@ -324,7 +322,7 @@ class MarketIndexClient:
         if hit is not None:
             return cast(dict[str, Any], hit)
         payload = await self._get_json(
-            f"/api/v1/marketplace/items/{quote(item_id, safe='')}", {"locale": locale}
+            f"/v1/marketplace/items/{quote(item_id, safe='')}", {"locale": locale}
         )
         if not isinstance(payload, dict):
             raise MarketIndexUnavailableError("unexpected item detail payload")

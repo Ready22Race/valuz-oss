@@ -54,7 +54,10 @@ def test_durable_injects_owner_scoped_token(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert env["KERNEL_STORE"] == "remote"
     assert env["VALUZ_DATA_API_KIND"] == "http"
-    assert env["VALUZ_DATA_API_URL"] == "http://host:8080/internal/data"  # trailing slash trimmed
+    # ADR-013: minted URLs use the new "/_internal/..." path; the legacy
+    # "/internal/..." mount stays reachable (see api/app.py::_mount_internal)
+    # but is never generated for new sandboxes.
+    assert env["VALUZ_DATA_API_URL"] == "http://host:8080/_internal/data"  # trailing slash trimmed
     assert env["VALUZ_DATA_API_TOKEN"]  # a signed token was minted
 
 

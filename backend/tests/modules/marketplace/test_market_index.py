@@ -37,7 +37,7 @@ async def test_categories_sends_channel_and_locale() -> None:
     client = _client(handler)
     payload = await client.categories("skill", "zh-CN")
 
-    assert seen["path"] == "/api/v1/marketplace/categories"
+    assert seen["path"] == "/v1/marketplace/categories"
     assert seen["params"] == {"kind": "skill", "locale": "zh-CN", "channel": "oss"}
     assert payload == {"categories": [], "degraded": False}
 
@@ -110,7 +110,7 @@ async def test_item_detail_url_encodes_item_id() -> None:
 
     client = _client(handler)
     await client.item_detail("market:skill:foo", "en-US")
-    assert seen["target"].startswith("/api/v1/marketplace/items/market%3Askill%3Afoo")
+    assert seen["target"].startswith("/v1/marketplace/items/market%3Askill%3Afoo")
 
 
 @pytest.mark.asyncio

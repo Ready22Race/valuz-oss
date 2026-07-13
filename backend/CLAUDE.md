@@ -21,10 +21,12 @@ backend/
 ├── alembic/                      # both migration chains (moved out of the packages)
 │   ├── host/                     #   host chain — version_table = alembic_version_host
 │   └── kernel/                   #   kernel chain — version_table = alembic_version
-├── kernel/                       # Agent Harness core — see §6 for the seam
+├── kernel/                       # Agent Harness core — see §6 for the seam.
+│   │                             #   Maintained IN-TREE: copied in from Agent
+│   │                             #   Harness V5 at repo creation, evolved here
+│   │                             #   ever since (no upstream, no re-vendor)
 │   ├── src/                      #   core/ · adapters/ (SQLAlchemyStore) · runtimes/
-│   ├── app/                      #   FastAPI subrouters mounted at /api/v1/*
-│   └── KERNEL_VERSION            #   provenance: last vendored upstream commit
+│   └── app/                      #   FastAPI subrouters mounted at /kernel/v1/*
 │
 └── valuz_agent/                  # Host application
     ├── api/                      # HTTP: app.py (factory), deps.py, middleware.py, routes/
@@ -123,7 +125,9 @@ analytics-ORM bypasses are retired). The former in-process
 tool-handler registration is retired too: the harness tools (dispatch /
 orchestration / memory / submit_skill) are served by the host's toolkit
 MCP server (`integrations/toolkit_mcp_server.py`, mounted at
-`/internal/mcp/toolkit/{base,lead}`) and referenced from
+`/_internal/mcp/toolkit/{base,lead}` — ADR-013; dual-mounted at the legacy
+`/internal/mcp/toolkit/{base,lead}` too, see `api/app.py::_mount_internal`)
+and referenced from
 `session.mcp_servers` as the `harness` entry — every runtime consumes
 them through its standard MCP client path, in-process and remote alike.
 

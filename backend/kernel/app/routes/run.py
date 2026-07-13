@@ -17,6 +17,7 @@ import logging
 from typing import Annotated, Any
 
 from app.dependencies import get_orchestrator, get_owner_id, get_store
+from app.routes import KERNEL_API_PREFIX
 from app.schemas import DataResponse
 from app.ws_sink import WebSocketEventSink
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -27,7 +28,7 @@ from src.core.types import Attachment, UserMessage
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/sessions", tags=["run"])
+router = APIRouter(prefix=f"{KERNEL_API_PREFIX}/v1/sessions", tags=["run"])
 
 StoreDep = Annotated[StorePort, Depends(get_store)]
 OwnerDep = Annotated[str, Depends(get_owner_id)]

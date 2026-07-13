@@ -78,7 +78,7 @@ Go 编写的控制 CLI（`valuz`）是运行时控制平面——负责启动、
 ┌──────────────────────────────────────────────────────────────────┐
 │  Agent Harness 内核  (backend/kernel)                              │
 │                                                                    │
-│  app/      路由挂载于 /api/v1/{projects,agents,sessions,…}         │
+│  app/      路由挂载于 /kernel/v1/{projects,agents,sessions,…}      │
 │            StorePort + SessionOrchestrator 单例                    │
 │  src/core/      Project、AgentConfig、Session、Event、McpServer…   │
 │  src/adapters/  SQLAlchemyStore（异步）                            │

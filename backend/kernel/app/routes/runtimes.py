@@ -1,4 +1,5 @@
-"""Runtime availability — ``GET /api/v1/runtimes/availability``.
+"""Runtime availability — ``GET {KERNEL_API_PREFIX}/v1/runtimes/availability``
+(default ``/api/v1/runtimes/availability`` — see ``app.routes.KERNEL_API_PREFIX``).
 
 The kernel owns the runtime binaries, so it answers "can this runtime launch
 here". The host reads it via ``KernelClient`` and merges it with its static
@@ -10,10 +11,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.routes import KERNEL_API_PREFIX
 from fastapi import APIRouter
 from src.runtimes.availability import probe_runtime_availability
 
-router = APIRouter(prefix="/api/v1/runtimes", tags=["runtimes"])
+router = APIRouter(prefix=f"{KERNEL_API_PREFIX}/v1/runtimes", tags=["runtimes"])
 
 
 @router.get("/availability")

@@ -13,28 +13,33 @@ Errors surface as ``Kernel*Error`` types owned by this module; the
 in-process implementation maps the routes' ``HTTPException``s onto them
 (an HTTP implementation would map status codes identically).
 
-| method                   | kernel endpoint                                   |
-|--------------------------|---------------------------------------------------|
-| create_session           | POST   /api/v1/sessions                           |
-| get_session              | GET    /api/v1/sessions/{id}                      |
-| list_sessions            | GET    /api/v1/sessions[?status=&ids=]            |
-| update_session           | PATCH  /api/v1/sessions/{id}                      |
-| delete_session           | DELETE /api/v1/sessions/{id}                      |
-| set_mode                 | POST   /api/v1/sessions/{id}/mode                 |
-| finalize_session         | POST   /api/v1/sessions/{id}/finalize             |
-| append_event             | POST   /api/v1/sessions/{id}/events               |
-| emit_live_event          | POST   /api/v1/sessions/{id}/events?live_only=true|
-| get_events               | GET    /api/v1/sessions/{id}/events[?after_seq=]  |
-| get_events_window        | GET    /api/v1/sessions/{id}/events/window        |
-| subscribe_session_events | SSE    /api/v1/sessions/{id}/events/stream        |
-| subscribe_all_events     | SSE    /api/v1/events/stream                      |
-| usage_rollup             | GET    /api/v1/usage                              |
-| list_messages            | GET    /api/v1/sessions/{id}/messages             |
-| submit_action            | POST   /api/v1/sessions/{id}/actions              |
-| interrupt                | POST   /api/v1/sessions/{id}/interrupt            |
-| run_turn                 | WS     /api/v1/sessions/{id}/run                  |
-| scan_orphan_*            | (in-process only — no remote analog; the         |
-|                          |  kernel runs these itself at startup)             |
+Endpoints below are shown under ``{KERNEL_API_PREFIX}`` — this host overrides
+it to ``/kernel`` (ADR-013; the kernel's own upstream default is ``/api`` — see
+``valuz_agent.boot.kernel.kernel_api_prefix`` /
+``kernel/app/routes/__init__.py``).
+
+| method                   | kernel endpoint                                            |
+|--------------------------|-------------------------------------------------------------|
+| create_session           | POST   {KERNEL_API_PREFIX}/v1/sessions                      |
+| get_session              | GET    {KERNEL_API_PREFIX}/v1/sessions/{id}                 |
+| list_sessions            | GET    {KERNEL_API_PREFIX}/v1/sessions[?status=&ids=]       |
+| update_session           | PATCH  {KERNEL_API_PREFIX}/v1/sessions/{id}                 |
+| delete_session           | DELETE {KERNEL_API_PREFIX}/v1/sessions/{id}                 |
+| set_mode                 | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/mode             |
+| finalize_session         | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/finalize          |
+| append_event             | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/events            |
+| emit_live_event          | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/events?live_only=true|
+| get_events               | GET    {KERNEL_API_PREFIX}/v1/sessions/{id}/events[?after_seq=]|
+| get_events_window        | GET    {KERNEL_API_PREFIX}/v1/sessions/{id}/events/window     |
+| subscribe_session_events | SSE    {KERNEL_API_PREFIX}/v1/sessions/{id}/events/stream     |
+| subscribe_all_events     | SSE    {KERNEL_API_PREFIX}/v1/events/stream                   |
+| usage_rollup             | GET    {KERNEL_API_PREFIX}/v1/usage                            |
+| list_messages            | GET    {KERNEL_API_PREFIX}/v1/sessions/{id}/messages           |
+| submit_action            | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/actions            |
+| interrupt                | POST   {KERNEL_API_PREFIX}/v1/sessions/{id}/interrupt          |
+| run_turn                 | WS     {KERNEL_API_PREFIX}/v1/sessions/{id}/run                |
+| scan_orphan_*            | (in-process only — no remote analog; the                     |
+|                          |  kernel runs these itself at startup)                        |
 """
 
 from __future__ import annotations
@@ -436,7 +441,7 @@ class InProcessKernelClient:
         """Live tap on one session's event stream (no replay, no backfill —
         pair with ``get_events(after_seq=...)`` for catch-up reads).
 
-        Remote analog: SSE /api/v1/sessions/{id}/events/stream."""
+        Remote analog: SSE {KERNEL_API_PREFIX}/v1/sessions/{id}/events/stream (ADR-013)."""
         from app.event_stream import QueueEventSink
         from app.serializers import live_event_to_data
 
@@ -452,7 +457,7 @@ class InProcessKernelClient:
 
     async def subscribe_all_events(self) -> AsyncIterator[EventData]:
         """Live tap on EVERY session's event stream; frames carry
-        ``session_id``. Remote analog: SSE /api/v1/events/stream."""
+        ``session_id``. Remote analog: SSE {KERNEL_API_PREFIX}/v1/events/stream (ADR-013)."""
         from app.event_stream import GlobalQueueTap
         from app.serializers import live_event_to_data
 
@@ -501,9 +506,10 @@ class InProcessKernelClient:
         return data if isinstance(data, dict) else data.model_dump()
 
     async def interrupt(self, user_id: str, session_id: str) -> None:
-        # Remote analog: POST /api/v1/sessions/{id}/interrupt. Route the call
-        # through the owner-scoped interrupt route so a cross-owner session_id
-        # 404s instead of interrupting another owner's run.
+        # Remote analog: POST {KERNEL_API_PREFIX}/v1/sessions/{id}/interrupt
+        # (ADR-013). Route the call through the owner-scoped interrupt route
+        # so a cross-owner session_id 404s instead of interrupting another
+        # owner's run.
         from app.routes.run import interrupt_session
 
         try:

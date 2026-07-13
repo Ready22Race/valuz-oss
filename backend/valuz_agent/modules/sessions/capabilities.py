@@ -29,7 +29,8 @@ async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -
     Why this exists
     ---------------
     ADR-006 freezes ``session.model`` at create-time but skills + MCP are
-    *mutable* (kernel exposes ``PATCH /api/v1/sessions/{id}`` for both).
+    *mutable* (kernel exposes ``PATCH {KERNEL_API_PREFIX}/v1/sessions/{id}``
+    for both — ADR-013; default ``/kernel`` for this host).
     The docs skill + MCP are auto-injected at creation for every
     session (chat + project) unconditionally — but pre-upgrade sessions,
     or sessions whose skills were edited externally, may be missing the

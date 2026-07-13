@@ -1,9 +1,10 @@
 """Datastore for usage analytics.
 
 Sources the per-(day, model) usage rollup from the kernel's public usage
-API through the ``KernelClient`` seam (``GET /api/v1/usage``); the service
-keeps the pure-Python aggregation. This retired TD-007 — the host no
-longer imports kernel storage models or queries kernel tables directly.
+API through the ``KernelClient`` seam (``GET {KERNEL_API_PREFIX}/v1/usage``
+— ADR-013; default ``/kernel`` for this host); the service keeps the
+pure-Python aggregation. This retired TD-007 — the host no longer imports
+kernel storage models or queries kernel tables directly.
 """
 
 from __future__ import annotations

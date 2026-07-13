@@ -82,7 +82,7 @@ single adapter seam.
 ┌──────────────────────────────────────────────────────────────────┐
 │  Agent Harness Kernel  (backend/kernel)                            │
 │                                                                    │
-│  app/      routes mounted at /api/v1/{sessions,messages,…}        │
+│  app/      routes mounted at /kernel/v1/{sessions,messages,…}     │
 │            StorePort + SessionOrchestrator singletons              │
 │  src/core/      AgentConfig, Session, Event, McpServer…            │
 │  src/adapters/  SQLAlchemyStore (async)                            │

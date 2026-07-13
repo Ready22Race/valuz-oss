@@ -38,8 +38,7 @@ def _make_session(*, mcp_servers):
     )
 
 
-def _stale_trio(token: str):
-    base = "http://127.0.0.1:8000/internal/mcp"
+def _trio(token: str, *, base: str):
     trio = tuple(
         McpHttpServerConfigSchema(
             name=name,
@@ -60,6 +59,24 @@ def _stale_trio(token: str):
         headers={"X-Valuz-Internal": token, "X-Valuz-Session-Id": "sess-1"},
     )
     return (*trio, harness)
+
+
+def _stale_trio(token: str):
+    """A pre-ADR-013 session snapshot — the legacy ``/internal/mcp`` path
+    (models a session created before the rename; ``refresh_always_on_mcp_for_session``
+    must self-heal it onto the current ``/_internal/mcp`` path, not just the
+    token — see ``test_restamps_stale_token_and_preserves_external``)."""
+    return _trio(token, base="http://127.0.0.1:8000/internal/mcp")
+
+
+def _current_trio(token: str):
+    """The trio a FRESHLY-minted session carries today — same base
+    ``always_on_http_mcp_servers`` actually generates (ADR-013:
+    ``/_internal/mcp``). Used where the test's premise is "already
+    up-to-date" (see ``test_noop_when_token_already_current``); using the
+    legacy base here would make every field EXCEPT the token differ, forcing
+    a PATCH the test asserts must NOT happen."""
+    return _trio(token, base="http://127.0.0.1:8000/_internal/mcp")
 
 
 def _patch_client(monkeypatch, session):
@@ -116,7 +133,7 @@ async def test_noop_when_token_already_current(monkeypatch):
 
     monkeypatch.setattr(cr, "_mcp_token_cache", {})
     current = cr._mint_internal_mcp_token("local-test-owner")  # stable per-owner (cached)
-    session = _make_session(mcp_servers=_stale_trio(current))
+    session = _make_session(mcp_servers=_current_trio(current))
     updates = _patch_client(monkeypatch, session)
 
     changed = await capabilities.refresh_always_on_mcp_for_session(

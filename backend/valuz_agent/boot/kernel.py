@@ -39,6 +39,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── Kernel HTTP route prefix (ADR-013) ──────────────────────────────────
+
 # Triggers sys.path injection so ``from src.core...`` and ``from app.config...``
 # resolve once anyone in the host imports the kernel package.
 import kernel  # noqa: F401, E402  (side-effect import)
@@ -56,6 +58,23 @@ KERNEL_VERSION_TABLE = "alembic_version"
 # current trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
 # langgraph checkpoint tables in the same file are off-limits.
 _KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
+
+
+def kernel_api_prefix() -> str:
+    """The path prefix EVERY kernel HTTP route currently serves under.
+
+    Same value for in-process mode (baked into each ``app.routes.*`` router's
+    ``prefix=`` at import time) and http-kernel mode (baked into the SAME
+    routers in the standalone process): the kernel's own default is
+    ``/kernel`` (``kernel/app/routes/__init__.py`` — ADR-013), so no host-side
+    env override exists; an explicit ``KERNEL_API_PREFIX`` env still wins for
+    embedders that need a different mount. ``HttpKernelClient``
+    (``adapters/kernel_client_http.py``) reads this to build request paths
+    that match whatever the target kernel actually serves. Reads
+    ``os.environ`` lazily on every call (never cached) so it always reflects
+    the value in effect — matters for tests that monkeypatch the env.
+    """
+    return os.environ.get("KERNEL_API_PREFIX", "/kernel")
 
 
 def _set_kernel_env() -> None:
@@ -284,16 +303,21 @@ async def shutdown_kernel_dependencies() -> None:
 def get_kernel_routers() -> list:
     """Return the kernel's FastAPI routers in the order they should be mounted.
 
-    Note: ``GET /api/v1/models`` was removed from the kernel along with the
-    MODEL_CATALOG drop — runtime dispatch is now per-session protocol-driven,
-    so there's no curated list to expose. Valuz surfaces models through its
-    own ``/v1/channels`` API instead.
+    Each router's paths are frozen at import time under ``KERNEL_API_PREFIX``
+    (default ``/kernel`` — ``kernel/app/routes/__init__.py``, ADR-013; an
+    explicit env override must land before any ``app.routes.*`` import).
+
+    Note: ``GET {KERNEL_API_PREFIX}/v1/models`` was removed from the kernel
+    along with the MODEL_CATALOG drop — runtime dispatch is now per-session
+    protocol-driven, so there's no curated list to expose. Valuz surfaces
+    models through its own ``/v1/channels`` API instead.
 
     Kernel V5+messages adds a ``messages`` router exposing
-    ``GET /api/v1/sessions/{id}/messages`` /
-    ``GET /api/v1/messages/{id}`` /
-    ``GET /api/v1/messages/{id}/events`` so the frontend can read per-turn
-    history (one row per ``run_turn``, with usage + todo snapshots).
+    ``GET {KERNEL_API_PREFIX}/v1/sessions/{id}/messages`` /
+    ``GET {KERNEL_API_PREFIX}/v1/messages/{id}`` /
+    ``GET {KERNEL_API_PREFIX}/v1/messages/{id}/events`` so the frontend can
+    read per-turn history (one row per ``run_turn``, with usage + todo
+    snapshots).
 
     Per ADR-008 the kernel's ``app.routes.agents`` is *not* mounted here.
     Valuz keeps a private synthetic agent per project
@@ -315,7 +339,8 @@ def make_data_service_placeholder():
     """Create the host-mounted DataService sub-app. Store + verifier are bound
     later in the lifespan (once the backend DSN + secret are known); until then
     ``/health`` and ``/openapi.json`` work and ``/rpc`` returns 401. Mounted at
-    ``/internal/data`` by the host app factory."""
+    ``/_internal/data`` (and the legacy ``/internal/data`` dual-mount,
+    ADR-013) by the host app factory."""
     from app.data_service import create_data_service_app
     from src.core.token_verifier import NullTokenVerifier
 

@@ -12,7 +12,9 @@ session a ``McpServerConfig`` pointing at our own loopback address.
 
 Wire shape
 ----------
-    POST /internal/mcp/docs/mcp
+    POST /_internal/mcp/docs/mcp
+      (also served at the legacy ``/internal/mcp/docs/mcp`` — ADR-013
+      dual-mount, see ``api/app.py::_mount_internal``)
       headers:
         X-Valuz-Internal:    <per-process token>
         X-Valuz-Session-Id:  <kernel session id>
@@ -238,7 +240,9 @@ def docs_mcp_session_manager_run() -> Any:
 
 
 def build_docs_mcp_asgi() -> Any:
-    """Return an ASGI app to mount at ``/internal/mcp/docs``."""
+    """Return an ASGI app to mount at ``/_internal/mcp/docs`` (and, dual-mounted
+    for pre-ADR-013 session compatibility, ``/internal/mcp/docs`` — see
+    ``api/app.py::_mount_internal``)."""
     return build_internal_mcp_asgi(_mcp.streamable_http_app())
 
 
@@ -248,8 +252,13 @@ def docs_mcp_url(*, base_url: str) -> str:
     Session id flows through the ``X-Valuz-Session-Id`` header instead
     of the URL — see ``build_docs_mcp_asgi`` for the rationale. The
     fixed path keeps FastMCP's internal routing happy.
+
+    ADR-013: newly created sessions get the ``/_internal/...`` path;
+    ``/internal/...`` stays mounted so session snapshots that persisted the
+    pre-rename URL keep working on restore (see ``api/app.py::_mount_internal``,
+    removed the next OSS major version).
     """
-    return f"{base_url.rstrip('/')}/internal/mcp/docs/mcp"
+    return f"{base_url.rstrip('/')}/_internal/mcp/docs/mcp"
 
 
 __all__ = [
