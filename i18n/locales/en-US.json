@@ -561,6 +561,12 @@
     "medium": "Medium",
     "xhigh": "Extra high"
   },
+  "genui": {
+    "cardTitle": "Generative UI",
+    "empty": "Nothing to show yet",
+    "generating": "Generating UI…",
+    "error": "Generation failed"
+  },
   "knowledge": {
     "add": "Add",
     "addFiles": "Add files",

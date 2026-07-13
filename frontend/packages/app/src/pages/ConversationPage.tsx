@@ -96,6 +96,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
   EmptyState,
+  GenerativeUICard,
   UserAnswerSummaryCard,
   WorkflowProgressCard,
   cn,
@@ -2043,8 +2044,17 @@ export const ConversationPage = () => {
   );
 
   const renderToolCall = useCallback(
-    (tool: { id: string; title: string; input?: string; output?: string }) => {
+    (tool: { id: string; title: string; input?: string; output?: string; status?: string }) => {
       const name = tool.title || "";
+
+      // generate_ui — generative UI. The MCP tool returns OpenUI Lang as
+      // ``tool.output``; render it with OpenUI's <Renderer> via GenerativeUICard.
+      // While running, or on error, fall through (return null) to the generic
+      // ToolCallCard so the spinner / failure text stay visible.
+      if (isToolNamed(name, "generate_ui")) {
+        if (tool.status === "error" || !tool.output) return null;
+        return <GenerativeUICard openui={tool.output} status="success" />;
+      }
 
       // Claude dynamic-workflow launch → WorkflowProgressCard. The kernel
       // streams ``session.workflow_progress`` snapshots keyed by this tool's

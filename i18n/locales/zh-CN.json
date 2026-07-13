@@ -561,6 +561,12 @@
     "medium": "Medium",
     "xhigh": "Extra high"
   },
+  "genui": {
+    "cardTitle": "生成式 UI",
+    "empty": "尚无内容",
+    "generating": "正在生成界面…",
+    "error": "生成失败"
+  },
   "knowledge": {
     "add": "添加",
     "addFiles": "添加文件",
