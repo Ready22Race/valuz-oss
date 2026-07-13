@@ -19,7 +19,7 @@ from valuz_agent.infra.config import Settings, settings
 
 # A representative, parameter-free host route — the one that 404'd behind the
 # shared-host ingress when the seam was missing.
-_HOST_PATH = "/v1/decisions/pending"
+_HOST_PATH = "/v1/notifications"
 # A representative in-process kernel route (native prefix /api/v1/*).
 _KERNEL_PATH = "/api/v1/sessions"
 # A representative internal ASGI mount — now mounted under each base path too.

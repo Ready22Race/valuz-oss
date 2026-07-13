@@ -462,7 +462,9 @@ async def intervene(
     stop          — cascade-halt → ``stopped`` (soft terminal; the detail page
                     offers a resume entry, and chat/inject can also revive it)
     resume        — reconcile + respawn members + re-drive lead
-                    (paused/stopped/blocked → active)
+                    (paused/stopped/blocked → active). Optional ``text`` rides
+                    along as a user instruction embedded in the respawned
+                    lead's recovery brief ("回复并恢复" in one step).
     """
     task_ds = TaskDatastore(db)
     event_ds = TaskEventDatastore(db)
@@ -518,7 +520,9 @@ async def intervene(
                 detail=f"cannot {payload.action} task in status {task.status!r}",
             )
     elif payload.action == "resume":
-        result = await task_orchestrator.resume_task(task_id, ws, user_id=user_id)
+        result = await task_orchestrator.resume_task(
+            task_id, ws, user_id=user_id, instruction=payload.text
+        )
         # ``resume_task`` returns ``{ok: False, error}`` on an illegal source
         # state (e.g. resuming an ``active`` task). Same rationale as stop above.
         if not result.get("ok"):

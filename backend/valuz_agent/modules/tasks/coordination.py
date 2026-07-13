@@ -399,6 +399,35 @@ class CoordinationService:
                             review_feedback="member session errored (heartbeat)",
                         )
                         plan_dirty = True
+                    # Emit ``subtask_failed`` like every other member-failure
+                    # path (_finalize_actor / dispatcher). Without this a
+                    # heartbeat-detected failure archived the run + reworked the
+                    # node INVISIBLY — no timeline row, no attention signal; the
+                    # user just saw the subtask silently blink active→pending.
+                    # Stamp ``agent_name`` (established rule) so the frontend
+                    # doesn't race an async member-list join.
+                    from valuz_agent.adapters.agent_resolver import (
+                        resolve_agent_display_name,
+                    )
+
+                    agent_name = await resolve_agent_display_name(
+                        project_id, run.agent_slug or "", user_id
+                    )
+                    await event_ds.append_event(
+                        user_id,
+                        project_id=project_id,
+                        task_id=task_id,
+                        type="subtask_failed",
+                        actor=run.agent_slug or "",
+                        session_id=run.session_id,
+                        payload={
+                            "agent_name": agent_name,
+                            "subtask_key": key,
+                            "status": "failed",
+                            "summary": "member session errored",
+                            "reason": "heartbeat_detected",
+                        },
+                    )
                     out[key] = {
                         "subtask_key": key,
                         "session_id": run.session_id,

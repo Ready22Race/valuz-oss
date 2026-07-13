@@ -1,16 +1,15 @@
 /**
- * Topbar badge for the Decision Inbox (ADR-022). Renders nothing when
- * there are zero pendings — no "0" chip. Clicking opens the drawer and
- * marks everything read (clears the unread accent).
+ * Topbar notification badge (docs/design/notifications.md). Renders nothing at
+ * zero — no "0" chip. Click opens the drawer.
  */
 
 import { type ReactElement } from "react";
+import { Bell } from "lucide-react";
 
 import {
-  useDecisionPending,
-  useDecisionStore,
-  useDecisionTotalCount,
-  useDecisionUnreadCount,
+  useNotificationStore,
+  useNotificationTotalCount,
+  useNotificationUnreadCount,
   useTranslation,
 } from "@valuz/core";
 import {
@@ -21,24 +20,18 @@ import {
 } from "@valuz/ui";
 import type { I18nKey } from "@valuz/shared";
 
-export function DecisionInboxBadge(): ReactElement | null {
+export function NotificationBadge(): ReactElement | null {
   const { t } = useTranslation();
-  const total = useDecisionTotalCount();
-  const unread = useDecisionUnreadCount();
-  const pending = useDecisionPending();
-  const setOpen = useDecisionStore((s) => s.setOpen);
-  const markAllRead = useDecisionStore((s) => s.markAllRead);
+  const total = useNotificationTotalCount();
+  const unread = useNotificationUnreadCount();
+  const setOpen = useNotificationStore((s) => s.setOpen);
+  const clearFresh = useNotificationStore((s) => s.clearFresh);
 
   if (total === 0) return null;
 
-  const agentPreview = pending
-    .slice(0, 3)
-    .map((e) => e.agent_slug)
-    .join("、");
-
   const handleClick = () => {
     setOpen(true);
-    markAllRead();
+    clearFresh();
   };
 
   return (
@@ -48,10 +41,10 @@ export function DecisionInboxBadge(): ReactElement | null {
           <button
             type="button"
             onClick={handleClick}
-            aria-label={t("decisionInbox.title" as I18nKey)}
+            aria-label={t("notification.inboxTitle" as I18nKey)}
             className="relative flex h-[22px] items-center gap-1 rounded-[5px] px-1.5 text-ink-body transition-colors hover:bg-surface-muted"
           >
-            <span className="text-sm leading-none">📥</span>
+            <Bell className="h-3.5 w-3.5" />
             <span
               className={`min-w-[16px] rounded-full px-1 text-center text-2xs font-semibold leading-[16px] ${
                 unread > 0
@@ -67,11 +60,10 @@ export function DecisionInboxBadge(): ReactElement | null {
           </button>
         </TooltipTrigger>
         <TooltipContent side="bottom">
-          {t("decisionInbox.badgeTooltip" as I18nKey).replace(
+          {t("notification.badgeTooltip" as I18nKey).replace(
             "{count}",
             String(total),
           )}
-          {agentPreview ? ` · ${agentPreview}` : ""}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>

@@ -51,12 +51,11 @@ import {
   projectsApi,
   filesApi,
   buildFileRef,
-  useDecisionPending,
+  useNotifications,
   useTaskEvents,
   useTranslation,
   type ArtifactContent,
   type ArtifactDescriptor,
-  type DecisionEntry,
   type IntervenePayload,
   type MemberWithAgent,
   type TaskDetail,
@@ -73,6 +72,7 @@ import {
 import { toFileTree } from "../lib/file-tree";
 import { resolvedToArtifactFile } from "../lib/resolve-artifact";
 import { TaskStatusLabel } from "../components/TaskStatusLabel";
+import { NotificationCard } from "../components/NotificationInbox";
 import { useLeadFollowUpChat, useAskUserQuestionCards } from "../hooks";
 import { deriveDeliverable } from "./task-detail/deliverable";
 
@@ -121,6 +121,25 @@ const EVENT_META: Record<string, EventMeta> = {
     icon: MessageSquare,
     node: "bg-ink-meta/10 text-ink-body",
     labelKey: "task.event.userNote",
+  },
+  // A user instruction pushed into the lead — either a chat inject (S4) or
+  // the text riding along with a resume (":intervene action=resume text=…").
+  user_inject: {
+    icon: MessageSquare,
+    node: "bg-brand/10 text-brand",
+    labelKey: "task.event.userInject",
+  },
+  // An agent (lead or member) is blocked on a user question (Decision Inbox).
+  // Amber = needs your attention, not a failure.
+  awaiting_user: {
+    icon: MessageCircleQuestion,
+    node: "bg-amber-500/10 text-amber-500",
+    labelKey: "task.event.awaitingUser",
+  },
+  user_answered: {
+    icon: CheckCircle2,
+    node: "bg-emerald-500/10 text-emerald-500",
+    labelKey: "task.event.userAnswered",
   },
   goal_revised: {
     icon: Target,
@@ -339,14 +358,6 @@ function eventDetail(evt: TaskEvent, t: Translator): string {
   return "";
 }
 
-/** First question text from a pending decision's AskUserQuestion payload —
- *  used as the confirm card's one-line summary. */
-const pendingQuestionText = (entry: DecisionEntry): string => {
-  const qs = (entry.question_payload as { questions?: { question?: string }[] })
-    ?.questions;
-  return Array.isArray(qs) && qs[0]?.question ? String(qs[0].question) : "";
-};
-
 export const TaskDetailPage = () => {
   const { taskId = "" } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
@@ -357,7 +368,11 @@ export const TaskDetailPage = () => {
   // Pending confirmations (AskUserQuestion) raised by this task's agents —
   // surfaced prominently in the timeline so the user isn't left thinking the
   // task is just "working" when it's actually blocked on their answer.
-  const taskPending = useDecisionPending().filter((e) => e.task_id === taskId);
+  // Open question notifications for THIS task — surfaced inline so the user
+  // isn't left thinking the task is just "working" when it's blocked on them.
+  const taskPending = useNotifications().filter(
+    (e) => e.kind === "question" && e.task_id === taskId,
+  );
 
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   const [members, setMembers] = useState<MemberWithAgent[]>([]);
@@ -758,6 +773,9 @@ export const TaskDetailPage = () => {
   );
 
   const [followUpDraft, setFollowUpDraft] = useState("");
+  // Draft for the halted-task (paused/blocked/stopped) resume composer —
+  // optional guidance that rides along with the resume intervene call.
+  const [resumeDraft, setResumeDraft] = useState("");
   const followUpScrollRef = useRef<HTMLDivElement>(null);
   const followUpTurnsLenRef = useRef(0);
   // Anchor for the "open at the latest content" jump — see the scroll effect
@@ -843,9 +861,14 @@ export const TaskDetailPage = () => {
     const events = detail?.events ?? [];
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const e = events[i];
+      // ``task_blocked`` is what the backend actually emits when the lead
+      // turn errors (task-level failure folds into ``blocked``, never
+      // ``task_failed`` — that type only survives for legacy rows). Without
+      // it a lead-crash showed a bare "retry" button with no reason at all.
       if (
         e.type === "kickoff_failed" ||
         e.type === "task_failed" ||
+        e.type === "task_blocked" ||
         e.type === "stopped"
       ) {
         const p = (e.payload ?? {}) as { error?: unknown; reason?: unknown };
@@ -912,13 +935,19 @@ export const TaskDetailPage = () => {
     // the clock runs to ``nowTick`` (frozen while paused since the ticker
     // is gated on ``active``).
     let end = nowTick;
-    if (status === "completed" || status === "failed" || status === "stopped") {
+    if (
+      status === "completed" ||
+      status === "failed" ||
+      status === "blocked" ||
+      status === "stopped"
+    ) {
       for (let i = events.length - 1; i >= 0; i -= 1) {
         const e = events[i];
         if (
           e.type === "task_completed" ||
           e.type === "kickoff_failed" ||
           e.type === "task_failed" ||
+          e.type === "task_blocked" ||
           e.type === "stopped"
         ) {
           const t = new Date(e.created_at).getTime();
@@ -1077,6 +1106,14 @@ export const TaskDetailPage = () => {
   // re-drive the lead), so the page offers a resume entry — a stopped task
   // with no way forward strands the user ("任务停了啥也干不了").
   const isStopped = task.status === "stopped";
+  // ``failed`` is a LEGACY status (pre-dates folding task failure into
+  // ``blocked``). Old rows still carry it; the backend now resumes them like
+  // blocked, so they get the same halted bar instead of a dead read-only page.
+  const isFailedLegacy = task.status === "failed";
+  // Every halted state shares one interaction surface: an optional
+  // instruction composer + resume. "回复并恢复" is one intervene call —
+  // the text lands in the respawned lead's recovery brief.
+  const isHalted = isPaused || isBlocked || isStopped || isFailedLegacy;
   // A task created straight from a prompt has title === goal; showing both is
   // pure repetition. Only surface the goal card when it adds something — a goal
   // distinct from the title, or staged attachments.
@@ -1203,17 +1240,16 @@ export const TaskDetailPage = () => {
                 </span>
                 <span className="mt-1 -mb-3.5 w-px flex-1 bg-[#f7f8fa]" />
               </div>
-              <button
-                type="button"
-                onClick={() =>
-                  navigate(
-                    `/conversation/${encodeURIComponent(taskPending[0].session_id)}`,
-                  )
-                }
-                className="-mt-1 flex min-w-0 flex-1 flex-col gap-1 rounded-lg border border-amber-300/70 bg-amber-50/70 px-3.5 py-2.5 text-left transition-colors hover:bg-amber-50"
-              >
+              {/* Answer INLINE on the task page — reusing the same
+                  ``DecisionEntryCard`` the inbox drawer uses (submit POSTs to
+                  ``/actions``; the SSE ``resolved`` frame clears it). Previously
+                  this card only navigated into the lead conversation, which is
+                  exactly the "只能在 Lead 对话才能看到/回答" gap. The card keeps
+                  its own "在会话中查看" secondary link for users who want the
+                  full context. */}
+              <div className="-mt-1 flex min-w-0 flex-1 flex-col gap-2">
                 <span className="flex items-center gap-1.5">
-                  <span className="text-sm font-semibold text-amber-900">
+                  <span className="text-sm font-semibold text-amber-900 dark:text-amber-400">
                     {t("task.needsConfirm" as Parameters<typeof t>[0])}
                   </span>
                   {taskPending.length > 1 && (
@@ -1225,16 +1261,10 @@ export const TaskDetailPage = () => {
                     </Badge>
                   )}
                 </span>
-                {pendingQuestionText(taskPending[0]) && (
-                  <span className="line-clamp-2 text-xs leading-5 text-amber-800">
-                    {pendingQuestionText(taskPending[0])}
-                  </span>
-                )}
-                <span className="mt-0.5 inline-flex items-center gap-0.5 text-xs font-medium text-amber-700">
-                  {t("task.goConfirm" as Parameters<typeof t>[0])}
-                  <ChevronRight className="h-3 w-3" />
-                </span>
-              </button>
+                {taskPending.map((entry) => (
+                  <NotificationCard key={entry.id} entry={entry} />
+                ))}
+              </div>
             </li>
           )}
           {taskPending.length === 0 && showLeadTail && (
@@ -1349,6 +1379,17 @@ export const TaskDetailPage = () => {
                   </>
                 )}
               </span>
+              {/* "等待你确认" chip — the task is nominally still active/running
+                  but is actually blocked on the user's answer. Without this the
+                  header just says "Running" and the user has no signal the task
+                  needs them. Amber, tappable to the inline card below. */}
+              {taskPending.length > 0 && (
+                <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+                  <MessageCircleQuestion className="h-3 w-3" />
+                  {t("task.awaitingUserChip" as Parameters<typeof t>[0])}
+                  {taskPending.length > 1 && ` · ${taskPending.length}`}
+                </span>
+              )}
               <span className="mx-3 h-3 w-px bg-[#f3f4f6]" />
               <span className="inline-flex items-center gap-1.5 text-[#898f9c]">
                 <span className="inline-flex h-4 shrink-0 items-center rounded-[4px] bg-brand-light px-1 text-[10px] font-normal leading-none text-brand-700">
@@ -1633,9 +1674,13 @@ export const TaskDetailPage = () => {
           </section>
         )}
 
-        {/* Failed / stopped → failure card (red). Pulls the most recent
-          failure event's error or reason. */}
-        {(task.status === "failed" || task.status === "stopped") &&
+        {/* Failed / blocked / stopped → failure card (red). Pulls the most
+          recent failure event's error or reason. ``blocked`` is the status a
+          lead crash actually lands in — omitting it left those pages with a
+          bare retry button and no explanation. */}
+        {(task.status === "failed" ||
+          task.status === "blocked" ||
+          task.status === "stopped") &&
           failureInfo && (
             <section className="mt-3 w-full rounded-xl border border-red-500/30 bg-red-50 p-4 dark:bg-red-500/10">
               <div className="mb-2 flex items-center gap-2">
@@ -1693,7 +1738,7 @@ export const TaskDetailPage = () => {
           pending placeholder, and "继续对话" routed into the lead's
           internal session which is the wrong abstraction for the
           user. See PR discussion for the full reasoning. */}
-      {(isActive || isPaused) && (
+      {isActive && (
         <div className="sticky bottom-0 -mx-5 mt-auto overflow-hidden px-5 py-3">
           <div className="absolute inset-0 bg-card/94 backdrop-blur-3xl" />
           <div className="relative z-10 mx-auto flex w-full max-w-[760px] flex-wrap items-center justify-center gap-2 px-6">
@@ -1709,36 +1754,19 @@ export const TaskDetailPage = () => {
             >
               {t("task.reviseGoal")}
             </Button>
-            {/* Status-driven middle slot: active → pause, paused →
-                resume (primary, the natural next step after a pause). */}
-            {isActive && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="text-[12px]"
-                onClick={() =>
-                  void runIntervene({ action: "pause" }, "task.paused")
-                }
-                disabled={busy}
-              >
-                {t("task.pause")}
-              </Button>
-            )}
-            {isPaused && (
-              <Button
-                size="sm"
-                className="text-[12px]"
-                onClick={() =>
-                  void runIntervene({ action: "resume" }, "task.resumed")
-                }
-                disabled={busy}
-              >
-                {t("task.resume")}
-              </Button>
-            )}
-            {/* Stop is destructive in both states; while active it's
-                also the primary intent (the user is interrupting an
-                in-flight task), so we keep it on the right edge. */}
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-[12px]"
+              onClick={() =>
+                void runIntervene({ action: "pause" }, "task.paused")
+              }
+              disabled={busy}
+            >
+              {t("task.pause")}
+            </Button>
+            {/* Stop is destructive AND the primary intent while active (the
+                user is interrupting an in-flight task) — right edge. */}
             <Button
               size="sm"
               variant="destructive"
@@ -1754,25 +1782,104 @@ export const TaskDetailPage = () => {
         </div>
       )}
 
-      {/* Blocked (failed-but-resumable): the lead turn errored — e.g. an API /
-          socket drop — or left unresolved subtasks. Stopped: a user-halted
-          soft terminal. Both re-launch the lead via ``resume_task`` (the
-          :intervene resume path accepts blocked AND stopped) — blocked reads
-          as "retry", stopped as "resume". */}
-      {(isBlocked || isStopped) && (
+      {/* Halted (paused / blocked / stopped / legacy failed) → one unified
+          "talk to resume" surface. The composer text (optional) rides along
+          with the resume intervene call and lands in the respawned lead's
+          recovery brief — so "回复并恢复" is one step, not resume-then-race-
+          the-mailbox. Blocked reads as "retry", the rest as "resume". */}
+      {isHalted && (
         <div className="sticky bottom-0 -mx-5 mt-auto overflow-hidden px-5 py-3">
           <div className="absolute inset-0 bg-card/94 backdrop-blur-3xl" />
-          <div className="relative z-10 mx-auto flex w-full max-w-[760px] flex-wrap items-center justify-center gap-2 px-6">
-            <Button
-              size="sm"
-              className="text-[12px]"
-              onClick={() =>
-                void runIntervene({ action: "resume" }, "task.resumed")
-              }
-              disabled={busy}
-            >
-              {t(isBlocked ? "task.retry" : "task.resume")}
-            </Button>
+          <div className="relative z-10 mx-auto w-full max-w-[760px] px-6">
+            <div className="rounded-md border border-surface-border bg-surface">
+              <Textarea
+                value={resumeDraft}
+                onChange={(e) => setResumeDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (
+                    e.key === "Enter" &&
+                    !e.shiftKey &&
+                    !e.nativeEvent.isComposing
+                  ) {
+                    e.preventDefault();
+                    void runIntervene(
+                      {
+                        action: "resume",
+                        ...(resumeDraft.trim()
+                          ? { text: resumeDraft.trim() }
+                          : {}),
+                      },
+                      "task.resumed",
+                    ).then((ok) => {
+                      if (ok) setResumeDraft("");
+                    });
+                  }
+                }}
+                placeholder={t(
+                  "task.resumePlaceholder" as Parameters<typeof t>[0],
+                )}
+                aria-label={t(
+                  "task.resumePlaceholder" as Parameters<typeof t>[0],
+                )}
+                rows={2}
+                disabled={busy}
+                className="resize-none border-0 bg-transparent focus-visible:ring-0 focus-visible:border-transparent disabled:bg-transparent"
+              />
+              <div className="flex items-center justify-between gap-2 px-2 pb-2">
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="text-[12px]"
+                    onClick={() => {
+                      setReviseGoal(task.goal);
+                      setReviseOpen(true);
+                    }}
+                    disabled={busy}
+                  >
+                    {t("task.reviseGoal")}
+                  </Button>
+                  {/* stopped→stopped and legacy-failed→stopped are illegal
+                      transitions — only paused/blocked can still be stopped. */}
+                  {(isPaused || isBlocked) && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="text-[12px] text-red-600 hover:text-red-600"
+                      onClick={() =>
+                        void runIntervene({ action: "stop" }, "task.stopped")
+                      }
+                      disabled={busy}
+                    >
+                      {t("task.stop")}
+                    </Button>
+                  )}
+                </div>
+                <Button
+                  size="sm"
+                  className="text-[12px]"
+                  onClick={() =>
+                    void runIntervene(
+                      {
+                        action: "resume",
+                        ...(resumeDraft.trim()
+                          ? { text: resumeDraft.trim() }
+                          : {}),
+                      },
+                      "task.resumed",
+                    ).then((ok) => {
+                      if (ok) setResumeDraft("");
+                    })
+                  }
+                  disabled={busy}
+                  loading={busy}
+                >
+                  {resumeDraft.trim()
+                    ? t("task.resumeWithInstruction" as Parameters<typeof t>[0])
+                    : t(isBlocked || isFailedLegacy ? "task.retry" : "task.resume")}
+                </Button>
+              </div>
+            </div>
           </div>
         </div>
       )}

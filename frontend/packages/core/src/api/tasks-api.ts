@@ -83,6 +83,7 @@ export interface TaskDetail {
   events: TaskEvent[];
 }
 
+
 export interface KickoffTaskPayload {
   goal: string;
   lead_agent_slug: string;

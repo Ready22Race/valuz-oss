@@ -1381,6 +1381,82 @@ def test_resume_task_accepts_completed(db_factory, tmp_path, monkeypatch) -> Non
     assert ("lead-s", "lead") in spawned
 
 
+def test_resume_task_with_instruction_embeds_brief_and_logs_event(
+    db_factory, tmp_path, monkeypatch
+) -> None:
+    """resume(text=…) — the instruction must (a) land in the respawned lead's
+    recovery brief inside a <user-instruction source="resume"> envelope and
+    (b) leave a ``user_inject`` timeline event, so "回复并恢复" is one atomic
+    step (":intervene action=resume text=…" / chat inject on a halted task)."""
+    from types import SimpleNamespace
+
+    from valuz_agent.modules.tasks import orchestrator as orch_mod
+    from valuz_agent.modules.tasks.mailbox import mailbox_registry
+
+    _seed_lead_and_members(
+        db_factory, tmp_path, members=[], task_status="stopped", run_status="completed"
+    )
+    monkeypatch.setattr(
+        orch_mod.kernel_client,
+        "get_session",
+        _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason=None)),
+    )
+    orch = TaskOrchestrator()
+    prompts: dict[str, str] = {}
+
+    async def _fake_loop(*, session_id, role, initial_prompt, **_kw) -> None:
+        prompts[role] = initial_prompt
+
+    orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
+    try:
+        result = asyncio.run(
+            orch.resume_task("t1", "w1", user_id=OWNER, instruction="先核对数据再继续")
+        )
+        assert result["ok"] is True
+        assert '<user-instruction source="resume">' in prompts["lead"]
+        assert "先核对数据再继续" in prompts["lead"]
+        assert "user_inject" in _events(db_factory)
+        payload = _event_payload(db_factory, "user_inject")
+        assert payload == {"text": "先核对数据再继续", "via": "resume"}
+    finally:
+        mailbox_registry.unregister("lead-s")
+
+
+def test_resume_task_accepts_legacy_failed(db_factory, tmp_path, monkeypatch) -> None:
+    """Legacy rows written before task-failure folded into ``blocked`` still
+    carry status='failed' (outside the enum). They used to be stranded —
+    resume rejected them and the detail page showed no action bar. They now
+    resume exactly like blocked (datastore tolerates the unknown source)."""
+    from types import SimpleNamespace
+
+    from valuz_agent.modules.tasks import orchestrator as orch_mod
+    from valuz_agent.modules.tasks.mailbox import mailbox_registry
+
+    _seed_lead_and_members(
+        db_factory, tmp_path, members=[], task_status="failed", run_status="archived"
+    )
+    monkeypatch.setattr(
+        orch_mod.kernel_client,
+        "get_session",
+        _as_async(lambda _uid, sid: SimpleNamespace(status="idle", stop_reason=None)),
+    )
+    orch = TaskOrchestrator()
+    spawned: list[tuple[str, str]] = []
+
+    async def _fake_loop(*, session_id, role, **_kw) -> None:
+        spawned.append((session_id, role))
+
+    orch._actor.run_actor_loop = _fake_loop  # type: ignore[method-assign]
+    try:
+        result = asyncio.run(orch.resume_task("t1", "w1", user_id=OWNER))
+        assert result["ok"] is True
+        assert result["prior_status"] == "failed"
+        assert _task_row(db_factory).status == "active"
+        assert ("lead-s", "lead") in spawned
+    finally:
+        mailbox_registry.unregister("lead-s")
+
+
 def test_resume_task_rejects_abandoned(db_factory, tmp_path) -> None:
     """abandoned stays hard-terminal — a discarded draft has no plan to
     revive; the user must draft afresh."""

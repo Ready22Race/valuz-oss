@@ -77,10 +77,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
-  DecisionDrawer,
-  DecisionInboxBadge,
-  DecisionInboxProvider,
-} from "../components/DecisionInbox";
+  NotificationBadge,
+  NotificationDrawer,
+  NotificationProvider,
+} from "../components/NotificationInbox";
 import { usePlatform } from "../platform";
 import { UpdateButton } from "../components/UpdateButton";
 import { useAgentDeployPicker } from "../components/agent-deploy-picker";
@@ -694,7 +694,7 @@ export function ProjectLayoutBase({
   // contributes no topbarActions / rightPanelToggle.
   const topbarRightControl = (
     <div className="flex items-center gap-1">
-      <DecisionInboxBadge />
+      <NotificationBadge />
       {topbarActions}
       {rightPanelToggle}
     </div>
@@ -703,8 +703,8 @@ export function ProjectLayoutBase({
   return (
     <ErrorBoundary>
       <OfflineBanner />
-      <DecisionInboxProvider />
-      <DecisionDrawer />
+      <NotificationProvider />
+      <NotificationDrawer />
       <AppShell
         appTitle={branding.appName}
         activePath={location.pathname}

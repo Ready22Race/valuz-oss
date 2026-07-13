@@ -112,14 +112,7 @@ class DecisionStreamEvent(BaseModel):
     """Shape depends on ``kind``. Pydantic discriminates per-kind."""
 
 
-class DecisionPendingResponse(BaseModel):
-    """REST ``GET /v1/decisions/pending`` response."""
-
-    entries: list[DecisionEntry]
-
-
 __all__ = [
     "DecisionEntry",
-    "DecisionPendingResponse",
     "DecisionStreamEvent",
 ]
