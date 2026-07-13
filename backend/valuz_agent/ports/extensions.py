@@ -21,8 +21,17 @@ from typing import Any
 
 from valuz_agent.api.middleware import AuthMiddleware
 from valuz_agent.infra.fs_registry import fs_registry
+from valuz_agent.ports.agent_lifecycle import AgentLifecycleHook, NoopAgentLifecycleHook
 from valuz_agent.ports.billing import BillingPort, NoopBillingProvider
 from valuz_agent.ports.cache import CachePort, FileCache
+from valuz_agent.ports.connector_lifecycle import (
+    ConnectorLifecycleHook,
+    NoopConnectorLifecycleHook,
+)
+from valuz_agent.ports.connector_oauth_refresh import (
+    ConnectorOAuthRefreshPort,
+    LocalConnectorOAuthRefreshProvider,
+)
 from valuz_agent.ports.file_address import FileAddressResolverPort, LocalFileAddressResolver
 from valuz_agent.ports.llm_provider import LLMProvider, NoopLLMProvider
 from valuz_agent.ports.provider_policy import AllowAllProviderPolicy, ProviderPolicyPort
@@ -55,6 +64,11 @@ class Extensions:
         self.sandbox_allocator: SandboxAllocatorPort = BootSingletonAllocator()
         self.resource_list_hook: ResourceListHook = NoopResourceListHook()
         self.skill_lifecycle: SkillLifecycleHook = NoopSkillLifecycleHook()
+        self.agent_lifecycle: AgentLifecycleHook = NoopAgentLifecycleHook()
+        self.connector_lifecycle: ConnectorLifecycleHook = NoopConnectorLifecycleHook()
+        self.connector_oauth_refresh: ConnectorOAuthRefreshPort = (
+            LocalConnectorOAuthRefreshProvider()
+        )
         # Resolve a file's absolute path into a client-usable access address
         # (see docs/design/file-address-resolution.md). OSS default returns the
         # local absolute path (bundled desktop reads it directly); the commercial

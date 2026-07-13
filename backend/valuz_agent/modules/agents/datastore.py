@@ -70,8 +70,9 @@ class AgentDatastore:
 
     async def upsert(self, user_id: str, row: AgentRow) -> AgentRow:
         """Insert-or-update by slug. Merges by primary key if the id is already
-        present; otherwise performs an INSERT. Used exclusively by the official
-        agent seeder — never call from user-facing code paths."""
+        present; otherwise performs an INSERT. Used by idempotent system-owned
+        paths such as official seeding and runtime resource sync — not by
+        user-facing create/update routes that need conflict semantics."""
         existing = await self.get_agent(user_id, row.slug)
         if existing is not None:
             # Keep existing id; update all mutable fields
@@ -85,6 +86,9 @@ class AgentDatastore:
             existing.provider_id = row.provider_id
             existing.effort = row.effort
             existing.source = row.source
+            existing.readonly = row.readonly
+            existing.deletable = row.deletable
+            existing.avatar = row.avatar
             await self._db.commit()
             return existing
         row.user_id = user_id

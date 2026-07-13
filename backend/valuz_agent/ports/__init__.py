@@ -16,6 +16,13 @@ Removed in Slice 4c (replaced by V5 kernel internals):
   directly where needed.
 """
 
+from valuz_agent.ports.agent_lifecycle import (
+    AgentLifecycleHook,
+    AgentSaveOrigin,
+    NoopAgentLifecycleHook,
+    get_agent_lifecycle_hook,
+    set_agent_lifecycle_hook,
+)
 from valuz_agent.ports.billing import (
     Balance,
     BillingPort,
@@ -24,6 +31,22 @@ from valuz_agent.ports.billing import (
     NoopBillingProvider,
     get_billing_port,
     set_billing_port,
+)
+from valuz_agent.ports.connector_lifecycle import (
+    ConnectorLifecycleHook,
+    ConnectorOAuthSnapshot,
+    ConnectorSaveOrigin,
+    ConnectorSecretSnapshot,
+    NoopConnectorLifecycleHook,
+    get_connector_lifecycle_hook,
+    set_connector_lifecycle_hook,
+)
+from valuz_agent.ports.connector_oauth_refresh import (
+    ConnectorOAuthRefreshPort,
+    LocalConnectorOAuthRefreshProvider,
+    NoopConnectorOAuthRefreshProvider,
+    get_connector_oauth_refresh_port,
+    set_connector_oauth_refresh_port,
 )
 from valuz_agent.ports.docs_runtime import DocsRuntimePort
 from valuz_agent.ports.file_address import (
@@ -82,17 +105,28 @@ from valuz_agent.ports.skill_registry import SkillRegistryPort
 from valuz_agent.ports.tool_provider import ToolProvider
 
 __all__ = [
+    "AgentLifecycleHook",
+    "AgentSaveOrigin",
     "Balance",
     "BillingPort",
     "BudgetStatus",
     "CapabilityStatus",
     "ConfigField",
+    "ConnectorLifecycleHook",
+    "ConnectorOAuthRefreshPort",
+    "ConnectorOAuthSnapshot",
+    "ConnectorSaveOrigin",
+    "ConnectorSecretSnapshot",
     "DocsRuntimePort",
     "FileAddressResolverPort",
     "LocalFileAddressResolver",
+    "LocalConnectorOAuthRefreshProvider",
     "McpCatalogPort",
     "MeterEvent",
     "NoopBillingProvider",
+    "NoopAgentLifecycleHook",
+    "NoopConnectorLifecycleHook",
+    "NoopConnectorOAuthRefreshProvider",
     "NoopLLMProvider",
     "NoopSkillLifecycleHook",
     "ParserBackend",
@@ -122,12 +156,18 @@ __all__ = [
     "SystemProviderImmutable",
     "ToolProvider",
     "authorize_sandbox_provision",
+    "get_agent_lifecycle_hook",
     "get_billing_port",
+    "get_connector_lifecycle_hook",
+    "get_connector_oauth_refresh_port",
     "get_file_address_resolver",
     "get_provider_policy",
     "get_sandbox_policy",
     "get_skill_lifecycle_hook",
+    "set_agent_lifecycle_hook",
     "set_billing_port",
+    "set_connector_lifecycle_hook",
+    "set_connector_oauth_refresh_port",
     "set_file_address_resolver",
     "set_provider_policy",
     "set_sandbox_policy",
