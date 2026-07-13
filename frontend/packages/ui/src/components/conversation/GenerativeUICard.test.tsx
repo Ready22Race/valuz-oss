@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 
@@ -5,6 +6,11 @@ vi.mock("@openuidev/react-lang", () => ({
   Renderer: (props: { response: string }) => (
     <div data-testid="renderer">{props.response}</div>
   ),
+}));
+vi.mock("@openuidev/react-ui", () => ({
+  // ThemeProvider just renders its children in the test — we don't need the
+  // real style-injection/context machinery here.
+  ThemeProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
 }));
 vi.mock("@openuidev/react-ui/genui-lib", () => ({
   openuiLibrary: {},

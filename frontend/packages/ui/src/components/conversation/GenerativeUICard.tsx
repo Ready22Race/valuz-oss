@@ -1,8 +1,36 @@
+import type { ComponentProps } from "react";
 import { Renderer } from "@openuidev/react-lang";
+import { ThemeProvider } from "@openuidev/react-ui";
 import { openuiLibrary } from "@openuidev/react-ui/genui-lib";
 
 import { useI18n } from "../../hooks/use-i18n";
 import { Spinner } from "../ui/spinner";
+
+/**
+ * OpenUI theme override — brand/primary colour + the neutral text scale, both
+ * pointed at Valuz tokens. Derived off the ``ThemeProvider`` prop type since
+ * ``ColorTheme`` isn't exported. Everything else (surfaces, status colours,
+ * borders) keeps OpenUI's defaults. ``--color-brand`` / ``--color-ink-*`` flip
+ * under ``.dark``, so the override tracks both modes.
+ */
+type OpenUiTheme = NonNullable<ComponentProps<typeof ThemeProvider>["lightTheme"]>;
+
+const VALUZ_OPENUUI_THEME: OpenUiTheme = {
+  interactiveAccentDefault: "var(--color-brand)",
+  interactiveAccentHover: "var(--color-brand-hover)",
+  interactiveAccentPressed: "var(--color-brand-700)",
+  interactiveAccentDisabled: "color-mix(in oklab, var(--color-brand) 40%, transparent)",
+  textBrand: "var(--color-brand)",
+  textAccentPrimary: "var(--color-brand)",
+  textNeutralLink: "var(--color-brand)",
+  borderInteractiveSelected: "var(--color-brand)",
+  // Neutral text → Valuz ink scale (OpenUI's near-black defaults are illegible
+  // on the dark surface). Flip under ``.dark``.
+  foreground: "var(--color-ink-body)",
+  textNeutralPrimary: "var(--color-ink-heading)",
+  textNeutralSecondary: "var(--color-ink-meta)",
+  textNeutralTertiary: "var(--color-ink-muted)",
+};
 
 /**
  * Extract the raw text payload from a kernel tool-output string.
@@ -91,7 +119,12 @@ export function GenerativeUICard({ openui, status }: GenerativeUICardProps) {
       </div>
       <div className="p-3">
         {body ? (
-          <Renderer library={openuiLibrary} response={body} isStreaming={false} />
+          <ThemeProvider
+            lightTheme={VALUZ_OPENUUI_THEME}
+            cssSelector="[data-slot='generative-ui-card']"
+          >
+            <Renderer library={openuiLibrary} response={body} isStreaming={false} />
+          </ThemeProvider>
         ) : (
           <div
             data-testid="genui-empty"
