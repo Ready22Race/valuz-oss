@@ -249,3 +249,54 @@ def test_broken_symlink_is_cleaned_up(tmp_path: Path) -> None:
     sm.prepare_deepagents_skills(str(cwd), [])
     assert not os.path.islink(root / "alpha")
     assert not (root / "alpha").exists()
+
+
+def test_materialize_uses_frontmatter_name_over_versioned_dirname(tmp_path: Path) -> None:
+    """Versioned source dirs (slug-collision suffixes) materialize under the
+    Agent Skills spec name from SKILL.md, so directory name == name and the
+    deepagents middleware stops warning on every session assembly."""
+    src = tmp_path / "sources" / "weekly-report-v4"
+    src.mkdir(parents=True)
+    (src / "SKILL.md").write_text(
+        "---\nname: weekly-report\ndescription: demo\n---\n# Weekly\n",
+        encoding="utf-8",
+    )
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+
+    root = Path(sm.prepare_deepagents_skills(str(cwd), [str(src)]))
+
+    assert (root / "weekly-report" / "SKILL.md").exists()
+    assert not (root / "weekly-report-v4").exists()
+
+
+def test_materialize_same_name_versions_last_wins(tmp_path: Path) -> None:
+    """Two versioned copies of one skill collapse to a single spec-named
+    entry (the later source wins) instead of two mismatched dirs."""
+    entries = []
+    for version in ("v4", "v5"):
+        src = tmp_path / "sources" / f"weekly-report-{version}"
+        src.mkdir(parents=True)
+        (src / "SKILL.md").write_text(
+            f"---\nname: weekly-report\n---\n# {version}\n",
+            encoding="utf-8",
+        )
+        entries.append(str(src))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+
+    root = Path(sm.prepare_deepagents_skills(str(cwd), entries))
+
+    assert (root / "weekly-report" / "SKILL.md").read_text(encoding="utf-8").endswith("# v5\n")
+    assert not (root / "weekly-report-v4").exists()
+    assert not (root / "weekly-report-v5").exists()
+
+
+def test_materialize_falls_back_to_basename_without_frontmatter(tmp_path: Path) -> None:
+    src = _make_skill(tmp_path, "plain-skill")  # SKILL.md without frontmatter
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+
+    root = Path(sm.prepare_deepagents_skills(str(cwd), [src]))
+
+    assert (root / "plain-skill" / "SKILL.md").exists()

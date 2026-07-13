@@ -114,6 +114,43 @@ def prepare_codex_skills(cwd: str, skills: list[str] | tuple[str, ...]) -> str:
     return _materialize(_agents_plan(cwd), list(skills))
 
 
+def _spec_entry_name(src: str) -> str | None:
+    """The Agent Skills spec name for a source dir, from SKILL.md frontmatter.
+
+    Sources are often stored under versioned directory names
+    (``weekly-report-v4``, ``foo-1.0.1`` — slug-collision suffixes from the
+    skill creator / marketplace installs) while the manifest ``name:`` stays
+    the bare skill name. The spec requires directory name == name, and the
+    deepagents middleware warns on every mismatch at each session assembly —
+    so the materialized entry uses the manifest name when one is present.
+    Returns ``None`` when SKILL.md is missing/unreadable or the name is not a
+    safe single path segment.
+    """
+    manifest = os.path.join(src, "SKILL.md")
+    try:
+        with open(manifest, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(8192)
+    except OSError:
+        return None
+    if not head.startswith("---"):
+        return None
+    body = head[3:]
+    end = body.find("\n---")
+    if end != -1:
+        body = body[:end]
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("name:"):
+            continue
+        name = stripped[len("name:"):].strip().strip("\"'")
+        if not name or name in {".", ".."}:
+            return None
+        if "/" in name or "\\" in name or os.sep in name:
+            return None
+        return name
+    return None
+
+
 def _materialize(plan: _Plan, skills: list[str]) -> str:
     os.makedirs(plan.skills_root, exist_ok=True)
 
@@ -126,7 +163,7 @@ def _materialize(plan: _Plan, skills: list[str]) -> str:
     for src in skills:
         if not os.path.isdir(src):
             raise SkillSourceMissingError(f"Skill source path not found or not a directory: {src}")
-        name = os.path.basename(os.path.normpath(src))
+        name = _spec_entry_name(src) or os.path.basename(os.path.normpath(src))
         if not name:
             raise SkillSourceMissingError(f"Skill source path has no basename: {src}")
         dst = os.path.join(plan.skills_root, name)
