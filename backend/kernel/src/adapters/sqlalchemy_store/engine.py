@@ -39,6 +39,14 @@ def create_engine(url: str, **kwargs: Any) -> AsyncEngine:
             cursor = dbapi_conn.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA foreign_keys=ON")
+            # The store is the highest-frequency writer during a turn (one write
+            # per persisted event). SQLite's default busy_timeout=0 raises
+            # "database is locked" the instant another engine holds the write
+            # lock on a shared file (the durable engine shares valuz.db with the
+            # host engine, which waits 15s) — so every engine built here must
+            # wait, not fail, under contention.
+            cursor.execute("PRAGMA busy_timeout=15000")
+            cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.close()
 
     return engine
