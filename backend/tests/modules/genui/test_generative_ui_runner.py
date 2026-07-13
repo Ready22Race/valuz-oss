@@ -41,6 +41,7 @@ def patched(tmp_path, monkeypatch):
 
     async def _create(user_id, req):
         captured["req"] = req
+        captured.setdefault("create_reqs", []).append(req)
 
     async def _run_turn(user_id, sid, prompt):
         captured["prompt"] = prompt
@@ -70,3 +71,20 @@ async def test_completer_builds_ephemeral_session_and_returns_text(patched):
     assert "OpenUI Lang" in req.instructions
     assert patched["prompt"] == "PROMPT"
     assert patched["deleted"] == [req.id]  # cleanup ran
+
+
+async def test_generative_ui_sessions_share_one_fixed_cwd(patched):
+    """Runtimes key per-project artifacts on the session cwd (claude-agent-sdk
+    keeps transcripts under ~/.claude/projects/<encoded-cwd>/). A per-call cwd
+    would leak one such directory per generation — every generative-UI session
+    must share ONE fixed cwd, identical across calls and free of the session id."""
+    completer = r._make_completer(
+        user_id="u1", runtime_provider="claude_agent", model="claude-sonnet-4-6", mp=None
+    )
+    await completer("PROMPT-1")
+    await completer("PROMPT-2")
+    reqs = patched["create_reqs"]
+    assert len(reqs) == 2
+    assert reqs[0].cwd == reqs[1].cwd
+    assert reqs[0].cwd.endswith("generative-ui")
+    assert reqs[0].id not in reqs[0].cwd and reqs[1].id not in reqs[1].cwd

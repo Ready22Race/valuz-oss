@@ -10,7 +10,6 @@ error result without affecting the originating turn.
 from __future__ import annotations
 
 import logging
-import shutil
 from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import uuid4
@@ -43,7 +42,12 @@ def _make_completer(
     *, user_id: str, runtime_provider: Any, model: str, mp: Any
 ) -> Completer:
     """Build the ``complete`` seam backed by a throwaway no-tools kernel session
-    cloning the source's runtime/provider/model."""
+    cloning the source's runtime/provider/model. Each call is a fresh ephemeral
+    session (deleted after), but all of them share ONE fixed scratch cwd
+    (``FsRegistry.generative_ui_cwd``): runtimes key per-project artifacts on
+    the session cwd (claude-agent-sdk keeps transcripts under
+    ``~/.claude/projects/<encoded-cwd>/``), so a per-call cwd leaked one such
+    directory per generation."""
 
     async def _complete(prompt: str) -> str:
         from app.schemas import AgentConfigSchema, CreateSessionRequest, ModelProviderInputSchema
@@ -59,8 +63,7 @@ def _make_completer(
             else None
         )
         ephem_id = uuid4().hex
-        gen_cwd = fs_registry.data_dir(user_id) / "generative-ui" / ephem_id
-        gen_cwd.mkdir(parents=True, exist_ok=True)
+        gen_cwd = fs_registry.generative_ui_cwd(user_id)
         marker = {"valuz": {"ephemeral_generative_ui": True}}
         req = CreateSessionRequest(
             id=ephem_id,
@@ -88,6 +91,5 @@ def _make_completer(
                 await kernel_client.delete_session(user_id, ephem_id)
             except Exception:  # noqa: BLE001
                 logger.debug("generative-ui: ephemeral session cleanup failed")
-            shutil.rmtree(gen_cwd, ignore_errors=True)
 
     return _complete

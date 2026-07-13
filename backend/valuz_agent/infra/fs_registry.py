@@ -623,6 +623,19 @@ class FsRegistry:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    # ---- FS-14 — generative-UI scratch cwd (openui-generative-ui §5) ----
+    #
+    # ONE fixed cwd shared by every ephemeral generate_ui session. Runtimes key
+    # per-project artifacts on the session cwd (claude-agent-sdk keeps
+    # transcripts under ``~/.claude/projects/<encoded-cwd>/``), so a fresh cwd
+    # per call leaked one such directory per generation. The generative-UI
+    # session is no-tools and never writes here — sharing is safe.
+
+    def generative_ui_cwd(self, user_id: str) -> Path:
+        path = self.data_dir(user_id) / "generative-ui"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
 
 fs_registry = FsRegistry()
 
