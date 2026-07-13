@@ -72,6 +72,19 @@ const STATUS_RUNNING = new Set([
   "rework",
 ]);
 
+// Task statuses with nothing left to stream. Finished cards accumulate in a
+// long conversation, and every open SSE stream pins one of the browser's 6
+// per-host HTTP/1.1 connections — enough finished cards starve every other
+// request to the backend (all pages hang Pending). The snapshot fetched on
+// mount is enough for these; ``stopped`` trades a possibly-stale card (if
+// the task is revived from another surface) for the freed connection.
+const STREAM_DONE_STATUSES = new Set([
+  "completed",
+  "failed",
+  "stopped",
+  "abandoned",
+]);
+
 interface Meta {
   title: string;
   status: string;
@@ -252,7 +265,13 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
     if (sessionOrigin) recordEntityOrigin(taskId, sessionOrigin);
   }, [taskId, callerSessionId]);
 
-  useTaskEvents(taskId, handleEvent);
+  // Subscribe only while the task can still change (or before the snapshot
+  // resolves — a not-yet-visible draft arrives as ``task_drafted`` over SSE).
+  // Once a terminal event flips ``meta.status`` the stream closes itself.
+  useTaskEvents(
+    meta && STREAM_DONE_STATUSES.has(meta.status) ? null : taskId,
+    handleEvent,
+  );
 
   const counts = useMemo(() => {
     let done = 0;

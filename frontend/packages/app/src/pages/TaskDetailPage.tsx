@@ -755,6 +755,9 @@ export const TaskDetailPage = () => {
         return { ...prev, events: [...prev.events, ev] };
       });
     }, []),
+    // The server terminal-closes streams of finished tasks; this subscriber
+    // exists precisely to follow a completed task, so opt out.
+    { keepAlive: true },
   );
 
   const [followUpDraft, setFollowUpDraft] = useState("");
