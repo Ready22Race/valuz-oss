@@ -1,6 +1,7 @@
 import { createFetchJson } from "./fetch-json";
 import { resolveApiBase } from "./base-resolver";
 import { fanOutTargets, getListFanOutTargets } from "../edition/list-fanout";
+import { getExecutionTargets } from "../edition/execution-targets";
 import { recordEntityOrigins } from "../edition/entity-origin";
 import { invalidateRequestCache, requestBlob } from "./request";
 
@@ -267,11 +268,27 @@ export const projectsApi = {
     return { projects: merged };
   },
 
-  get(projectId: string): Promise<ProjectDetail> {
-    return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}`, {
-      cache: projectDetailCache(projectId),
-      baseUrl: projectBase(projectId),
-    });
+  async get(projectId: string): Promise<ProjectDetail> {
+    const base = projectBase(projectId);
+    const project = await fetchJson<ProjectDetail>(
+      `/v1/projects/${encodeURIComponent(projectId)}`,
+      {
+        cache: projectDetailCache(projectId),
+        baseUrl: base,
+      },
+    );
+    // Multi-target editions: tag the row like ``list()`` does — the resolved
+    // base identifies the answering target, so detail pages can show the
+    // project's execution location (本地/云端) too. Single-target builds have
+    // no registered targets and the row stays untagged (= module default).
+    if (!project.exec_origin) {
+      const normalized = base.replace(/\/+$/, "");
+      const target = getExecutionTargets().find(
+        (t) => t.baseUrl.replace(/\/+$/, "") === normalized,
+      );
+      if (target) project.exec_origin = target.id;
+    }
+    return project;
   },
 
   /**
