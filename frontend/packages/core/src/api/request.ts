@@ -256,27 +256,36 @@ async function fetchWithHandling(prepared: {
   let timedOut = false;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const callerSignal = prepared.init.signal;
-  const controller =
-    prepared.timeoutMs || callerSignal ? new AbortController() : undefined;
-
-  const abortFromCaller = (): void => controller?.abort(callerSignal?.reason);
-  if (callerSignal) {
-    if (callerSignal.aborted) abortFromCaller();
-    else callerSignal.addEventListener("abort", abortFromCaller, { once: true });
-  }
-  if (controller && prepared.timeoutMs) {
+  // Without a timeout, the caller's signal goes STRAIGHT to fetch. It must
+  // stay wired for the whole response, not just until the headers arrive:
+  // ``fetch()`` resolves before a streaming body (SSE) is read, and an
+  // abort issued later — an SSE subscriber's close() on unmount — has to
+  // still kill the connection. A bridging controller unhooked when fetch()
+  // settles goes dead at that point; every closed stream then lingered as a
+  // live zombie connection until the browser's 6-per-host pool starved.
+  let signal = callerSignal;
+  let unhookCallerAbort: (() => void) | undefined;
+  if (prepared.timeoutMs) {
+    const controller = new AbortController();
+    if (callerSignal) {
+      const abortFromCaller = (): void => controller.abort(callerSignal.reason);
+      if (callerSignal.aborted) abortFromCaller();
+      else {
+        callerSignal.addEventListener("abort", abortFromCaller, { once: true });
+        unhookCallerAbort = (): void =>
+          callerSignal.removeEventListener("abort", abortFromCaller);
+      }
+    }
     timeoutId = setTimeout(() => {
       timedOut = true;
       controller.abort();
     }, prepared.timeoutMs);
+    signal = controller.signal;
   }
 
   let response: Response;
   try {
-    response = await fetch(prepared.url, {
-      ...prepared.init,
-      signal: controller?.signal ?? callerSignal,
-    });
+    response = await fetch(prepared.url, { ...prepared.init, signal });
   } catch (err) {
     if (timedOut) {
       throw new Error("请求超时，请稍后重试");
@@ -290,7 +299,10 @@ async function fetchWithHandling(prepared: {
     );
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
-    callerSignal?.removeEventListener("abort", abortFromCaller);
+    // ``timeoutMs`` guards time-to-headers only, so its caller-abort bridge
+    // may end when fetch() settles. Do not combine ``timeoutMs`` with a
+    // streaming read that must stay abortable — pass just ``signal``.
+    unhookCallerAbort?.();
   }
 
   if (!response.ok) {
