@@ -37,6 +37,7 @@ import {
   getDefaultExecutionTarget,
   getEntityOrigin,
   recordEntityOrigin,
+  refreshRunningRuns,
   resolveApiBase,
   useEntityOrigin,
   useExecutionTargets,
@@ -2815,6 +2816,11 @@ export const ConversationPage = () => {
         beforeSeq: minSeqRef.current,
         turnLimit: TURN_PAGE_SIZE,
       });
+      // Staleness guard: a session switch may have landed while this page
+      // was in flight — prepending the OLD session's turns into the NEW
+      // session's transcript (and poisoning ``minSeqRef``, which the switch
+      // just reset) mixes histories across sessions.
+      if (selectedSessionIdRef.current !== sessionId) return;
       if (response.items.length > 0) {
         // Defensive dedup: SSE shouldn't backfill historical events but
         // a slow turn could in theory race with this fetch.
@@ -3433,6 +3439,18 @@ export const ConversationPage = () => {
       };
 
       const appendEvent = (event: SessionEventDTO) => {
+        // Drop deliveries that outlive this subscription. A session switch
+        // aborts the stream (the ``selectedSessionId`` effect) — but an
+        // in-flight poll response, a gap-fill, or a frame parsed in the same
+        // tick as the abort still resolves afterwards. Without this guard the
+        // OLD session's events land in the NEW session's transcript, and —
+        // because event seqs are store-global — the cross-session seqs pass
+        // the dedupe below and poison ``maxSeqRef`` (so the new session's own
+        // later events can get skipped). The ref check also covers the abort
+        // effect's commit lag: ``selectedSessionIdRef`` flips synchronously in
+        // bootstrap, before the abort lands.
+        if (stopped || abort.signal.aborted) return;
+        if (selectedSessionIdRef.current !== sessionId) return;
         if (event.seq > 0) {
           maxSeqRef.current = Math.max(maxSeqRef.current, event.seq);
         }
@@ -3724,11 +3742,27 @@ export const ConversationPage = () => {
       // fresh-send path must wait through).
       let sawTurnActivity = !opts.requireUserBeforeTerminal;
       let idleReconcileTicks = 0;
+      // Single-flight: a slow backend (e.g. valuz.db write contention during a
+      // tool-heavy turn) makes each poll exceed the 500ms interval — without
+      // this guard every tick stacks another pending request, and the pile-up
+      // saturates the browser's 6-connections-per-host pool, stalling EVERY
+      // fetch to the backend (the "153 pending requests" incident).
+      let pollInFlight = false;
       pollTimer = window.setInterval(() => {
-        if (stopped) return;
+        if (stopped || abort.signal.aborted || pollInFlight) return;
+        // A session switch flips ``selectedSessionIdRef`` synchronously in
+        // bootstrap and ``refreshEvents`` resets ``maxSeqRef`` — before the
+        // abort effect commits. A tick in that window would read the fresh
+        // cursor (0) against the OLD session and fetch its entire history.
+        if (selectedSessionIdRef.current !== sessionId) return;
+        pollInFlight = true;
         sessionsApi
           .listEvents(sessionId, maxSeqRef.current)
           .then((response) => {
+            // Same staleness guards as ``appendEvent`` — this response may
+            // have been in flight across a session switch / abort.
+            if (stopped || abort.signal.aborted) return;
+            if (selectedSessionIdRef.current !== sessionId) return;
             if (response.items.length > 0) {
               sawTurnActivity = true;
               idleReconcileTicks = 0;
@@ -3745,7 +3779,8 @@ export const ConversationPage = () => {
             void sessionsApi
               .get(sessionId)
               .then((detail) => {
-                if (stopped) return;
+                if (stopped || abort.signal.aborted) return;
+                if (selectedSessionIdRef.current !== sessionId) return;
                 // Push the authoritative status into local state — this drives
                 // the derived loading flag and the header pill.
                 setSessions((prev) =>
@@ -3770,7 +3805,10 @@ export const ConversationPage = () => {
               })
               .catch(() => {});
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => {
+            pollInFlight = false;
+          });
       }, 500);
 
       // A live stream can end for reasons other than "turn finished and
@@ -4079,6 +4117,13 @@ export const ConversationPage = () => {
         selectedModelId,
       );
       if (!detail?.id) throw new Error("Failed to send message.");
+      // The desktop sidebar's per-project session lists are derived from
+      // ``/v1/runs`` (ProjectLayoutBase), NOT from the session store the
+      // optimistic updates below write to — so without a poke here a brand-new
+      // session only appears after the next 10s running poll (or a reload).
+      // Force the shared poller now; the resulting ``liveRunIds`` transition
+      // also triggers the layout's finished-runs refresh.
+      refreshRunningRuns();
       // Attachments are per-turn: the backend ships this turn's pending
       // set with the message, then stamps those rows ``consumed_at`` once
       // the turn runs. Optimistically mark them consumed so they drop out
@@ -4925,6 +4970,13 @@ export const ConversationPage = () => {
     const jump = () => {
       const node = scrollContainerRef.current;
       if (cancelled || !node) return;
+      // The burst exists to survive the multi-frame settle of the initial
+      // transcript paint — not to fight the user. Once a real scroll gesture
+      // has landed (wheel/keydown/touchmove; the ref resets on session
+      // switch), the user owns the viewport: a late timer (up to 1s) yanking
+      // them back to the bottom reads as the page "snapping away" from the
+      // history they just scrolled up to.
+      if (userScrolledRef.current) return;
       node.scrollTop = node.scrollHeight;
       setShowScrollBottom(false);
     };
@@ -5148,6 +5200,9 @@ export const ConversationPage = () => {
         // (c) ``handleSend`` claims the page via ``abortRef`` /
         // ``isSendInFlightRef``, or (d) the effect's cleanup runs
         // (session id change / unmount).
+        // Single-flight (same rationale as the event poll above): a slow
+        // backend must not let ticks stack pending requests.
+        let statusPollInFlight = false;
         pollTimer = window.setInterval(() => {
           if (cancelled) {
             stopPoll();
@@ -5157,6 +5212,8 @@ export const ConversationPage = () => {
             stopPoll();
             return;
           }
+          if (statusPollInFlight) return;
+          statusPollInFlight = true;
           sessionsApi
             .get(selectedSessionId)
             .then((next) => {
@@ -5176,6 +5233,9 @@ export const ConversationPage = () => {
             .catch(() => {
               // Non-fatal — keep polling; transient errors shouldn't
               // strand the page in a non-resuming state.
+            })
+            .finally(() => {
+              statusPollInFlight = false;
             });
         }, POLL_INTERVAL_MS) as unknown as number;
       })

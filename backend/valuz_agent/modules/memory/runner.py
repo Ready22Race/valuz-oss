@@ -13,7 +13,6 @@ affect the originating turn. Wired to the idle scheduler at boot.
 from __future__ import annotations
 
 import logging
-import shutil
 from typing import Any
 from uuid import uuid4
 
@@ -75,8 +74,11 @@ def _format_project_context(name: str, instructions: str | None) -> str:
 
 def _make_completer(*, user_id: str, runtime_provider: Any, model: str, mp: Any) -> Completer:
     """Build the ``complete`` seam backed by a throwaway no-tools kernel session
-    cloning the source's runtime/provider/model. A fresh ephemeral session per
-    call keeps state isolated; it is deleted (and its scratch cwd removed) after."""
+    cloning the source's runtime/provider/model. Each call is a fresh ephemeral
+    session (deleted after), but all of them share ONE fixed scratch cwd:
+    runtimes key per-project artifacts on the session cwd (claude-agent-sdk
+    keeps transcripts under ``~/.claude/projects/<encoded-cwd>/``), so a
+    per-call cwd leaked one such directory per extraction."""
 
     async def _complete(prompt: str) -> str:
         from app.schemas import AgentConfigSchema, CreateSessionRequest, ModelProviderInputSchema
@@ -93,8 +95,7 @@ def _make_completer(*, user_id: str, runtime_provider: Any, model: str, mp: Any)
             else None
         )
         ephem_id = uuid4().hex
-        review_cwd = fs_registry.data_dir(user_id) / "memory-review" / ephem_id
-        review_cwd.mkdir(parents=True, exist_ok=True)
+        review_cwd = fs_registry.memory_review_cwd(user_id)
         # Marker so the runner's recursion guard skips this session if it is ever
         # finalized through the normal path (it isn't — run_turn bypasses it).
         marker = {"valuz": {"ephemeral_memory_review": True}}
@@ -124,7 +125,6 @@ def _make_completer(*, user_id: str, runtime_provider: Any, model: str, mp: Any)
                 await kernel_client.delete_session(user_id, ephem_id)
             except Exception:  # noqa: BLE001
                 logger.debug("memory review: ephemeral session cleanup failed")
-            shutil.rmtree(review_cwd, ignore_errors=True)
 
     return _complete
 

@@ -177,6 +177,7 @@ Valuz 已有**四个其它持久层**,memory 必须靠"不和它们重复"来定
 - **LLM 调用 = 临时 kernel 会话**:host 经 `kernel_client.create_session` + `run_turn` 跑一个**无工具、一次性**的回顾会话(克隆源会话已解析的 runtime/provider/model,换上 curator 指令、清空 tools/skills/mcp),读 `assistant_message` 拿 JSON。
   - 选它而非 host 直连单发:**复用既有 provider/model 解析**,对所有渠道类型(自带 Key / OAuth 订阅 / 系统渠道)开箱即用、零重复、真正 runtime 中立;代价是每次抽取多一个一次性会话(可接受 —— 受 idle 去抖节流)。
   - **OAuth/订阅渠道**(Codex/Claude 登录)无静态 api_key:`resolve_model_provider` 返回 None 是**正常**的,此时以 `model_provider=None` 建会话、由 runtime 自鉴权(与源会话一致);仅自带 Key 渠道带具体 key。
+  - **固定 scratch cwd**:所有回顾会话共用一个固定 cwd `data_dir/memory-review/`(`FsRegistry.memory_review_cwd`)。runtime 会按 cwd 归档产物(claude-agent-sdk 在 `~/.claude/projects/<encoded-cwd>/` 存 transcript),若每次抽取用新 cwd,就会每跑一次泄漏一个目录;回顾会话无工具、从不写 cwd,共享是安全的。
 - **核心是纯函数**:prompt 构建 / JSON 解析 / 脱敏 / scope 路由 / 应用都在 `extraction.py`(可独立单测),临时会话只是注入的 `complete` 实现(`MemoryExtractor(complete=…)`)。
 - **应用**:host 把每个 op 过 §5 的同一条写入流水线,`source="auto"`。回顾会话无工具 → **无需 sandbox**;且标记 ephemeral/不抽取以**防递归**(回顾会话经 `run_turn` 直跑、不走 idle 落点,本就不会自触发)。
 - **scope 路由**:`project` 仅对**真实项目(`kind="project"`)**开放;quick-chat 临时项目(`kind="chat"`)只写 user/global。对真实项目,把**项目名 + instructions** 作为 `<project>` 块注入 review prompt,并给出三向路由指引(user=跨项目偏好;global=跨项目教训;project=本项目专属事实/决策/进展),让 reviewer 能正确产出 project 记忆。
