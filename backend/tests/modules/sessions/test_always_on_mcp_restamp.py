@@ -142,3 +142,81 @@ async def test_noop_when_token_already_current(monkeypatch):
 
     assert changed is False
     assert updates == []
+
+
+async def test_external_oauth_connector_headers_refresh_on_restamp(monkeypatch):
+    """A user-attached connector entry gets re-resolved with CURRENT
+    credentials each turn — a re-auth (or expiry refresh) must reach existing
+    sessions, not only brand-new ones (Reportify tokens live ~1h)."""
+    stale_external = McpHttpServerConfigSchema(
+        name="valuz-search",
+        url="https://mcp.reportify.cn/search/mcp",
+        transport="http",
+        headers={"Authorization": "Bearer STALE-JWT"},
+    )
+    session = _make_session(mcp_servers=(stale_external, *_current_trio("CURRENT")))
+
+    fresh_external = McpHttpServerConfigSchema(
+        name="valuz-search",
+        url="https://mcp.reportify.cn/search/mcp",
+        transport="http",
+        headers={"Authorization": "Bearer FRESH-JWT"},
+    )
+
+    async def fake_resolve(*, enabled_slugs, connectors=None, user_id=None):
+        assert enabled_slugs == ["valuz-search"]
+        return [fresh_external]
+
+    import valuz_agent.adapters.mcp_resolver as mcp_resolver
+
+    monkeypatch.setattr(mcp_resolver, "resolve_mcp_servers", fake_resolve)
+
+    saved = {}
+
+    async def fake_get_session(user_id, session_id):
+        return session
+
+    async def fake_update_session(user_id, session_id, req):
+        saved["mcp"] = list(req.mcp_servers)
+
+    monkeypatch.setattr(capabilities.kernel_client, "get_session", fake_get_session)
+    monkeypatch.setattr(capabilities.kernel_client, "update_session", fake_update_session)
+
+    changed = await capabilities.refresh_always_on_mcp_for_session("sess-1", "local-test-owner")
+    assert changed is True
+    external = [m for m in saved["mcp"] if m.name == "valuz-search"]
+    assert external and external[0].headers["Authorization"] == "Bearer FRESH-JWT"
+
+
+async def test_external_entry_kept_when_reresolve_yields_nothing(monkeypatch):
+    """A connector that no longer resolves (deleted / disabled / credentials
+    gone) keeps its existing snapshot — same failure surface as before."""
+    stale_external = McpHttpServerConfigSchema(
+        name="gone-connector",
+        url="https://example.com/mcp",
+        transport="http",
+        headers={"Authorization": "Bearer OLD"},
+    )
+    session = _make_session(mcp_servers=(stale_external, *_current_trio("CURRENT")))
+
+    async def fake_resolve(*, enabled_slugs, connectors=None, user_id=None):
+        return []
+
+    import valuz_agent.adapters.mcp_resolver as mcp_resolver
+
+    monkeypatch.setattr(mcp_resolver, "resolve_mcp_servers", fake_resolve)
+
+    async def fake_get_session(user_id, session_id):
+        return session
+
+    saved = {}
+
+    async def fake_update_session(user_id, session_id, req):
+        saved["mcp"] = list(req.mcp_servers)
+
+    monkeypatch.setattr(capabilities.kernel_client, "get_session", fake_get_session)
+    monkeypatch.setattr(capabilities.kernel_client, "update_session", fake_update_session)
+
+    await capabilities.refresh_always_on_mcp_for_session("sess-1", "local-test-owner")
+    kept = [m for m in (saved.get("mcp") or session.mcp_servers) if m.name == "gone-connector"]
+    assert kept and kept[0].headers["Authorization"] == "Bearer OLD"
