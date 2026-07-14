@@ -1047,6 +1047,46 @@ async def test_await_members_any_running_pending_gets_keep_waiting_hint(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_await_members_clamps_window_to_max(monkeypatch) -> None:
+    """A model-supplied timeout_s above _MAX_AWAIT_WINDOW_S is clamped — await
+    parks for the window unit, not the requested value. This keeps a single call
+    under the codex tool-call ceiling so a healthy wait is never aborted as a
+    transport failure. Proven by shrinking the window and passing a huge
+    timeout_s: the call must return in ~the window, not in ~9999s."""
+    from valuz_agent.modules.tasks import coordination as coord_mod
+
+    _patch_await_deps(monkeypatch, {"sA": "A"})
+    monkeypatch.setattr(coord_mod, "_MAX_AWAIT_WINDOW_S", 0.2)  # tiny cap for the test
+
+    async def _get_session(_uid, _sid):
+        return SimpleNamespace(status="running")
+
+    monkeypatch.setattr(
+        coord_mod, "data_reader", lambda: SimpleNamespace(get_session=_get_session)
+    )
+    orch = TaskOrchestrator()
+    lead = "lead-await-clamp"
+    mailbox_registry.register(lead)
+    try:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        res = await orch.await_member_results(
+            lead_session_id=lead,
+            project_id="w1",
+            task_id="t1",
+            keys=["A"],
+            mode="any",
+            timeout_s=9999,  # would block ~forever if honored verbatim
+            user_id=LOCAL_USER_ID,
+        )
+        elapsed = loop.time() - start
+        assert elapsed < 1.0  # clamped to the 0.2s window, NOT 9999s
+        assert res["pending"] == ["A"]
+    finally:
+        mailbox_registry.unregister(lead)
+
+
+@pytest.mark.asyncio
 async def test_inbox_notice_wrapper_surfaces_queued_member_done() -> None:
     """Pull-gap fix (Plan B): a lead tool called while a member_done sits in the
     mailbox gets an ``inbox_pending`` notice appended (non-consuming peek), so a

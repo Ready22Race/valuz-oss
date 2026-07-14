@@ -76,11 +76,11 @@ def test_tool_timeout_sec_emitted_as_bare_float_when_set() -> None:
         McpHttpServerConfig(
             name="harness",
             url="http://127.0.0.1:8000/_internal/mcp/toolkit/lead/mcp",
-            tool_timeout_sec=3600.0,
+            tool_timeout_sec=480.0,  # arbitrary — this asserts the EMIT, not the policy value
         )
     )
     ov = _build_config_overrides(session, None, "gpt-5.5")
-    assert "mcp_servers.harness.tool_timeout_sec=3600.0" in ov, ov
+    assert "mcp_servers.harness.tool_timeout_sec=480.0" in ov, ov
     assert not any('tool_timeout_sec="' in o for o in ov), ov
 
 

@@ -374,12 +374,14 @@ def _mint_internal_mcp_token(owner_user_id: str) -> str:
     return token
 
 
-# Tool-call timeout for the first-party harness MCP servers. Their tools can
-# block far longer than a runtime client's default cap (codex aborts at 120s):
-# the ``harness`` toolkit's ``await_members`` parks up to its own ``timeout_s``,
-# and cloud doc parsing can also run long. 1h matches codex's own approval
-# timeout and is a pure safety net — each tool still owns its real wait.
-_INTERNAL_MCP_TOOL_TIMEOUT_SEC = 3600.0
+# Tool-call timeout (ceiling) for the first-party harness MCP servers. Their
+# tools can block longer than a runtime client's default cap (codex aborts at
+# 120s): the ``harness`` toolkit's ``await_members`` parks up to one window unit.
+# Derive the ceiling from that window + a margin so a healthy long wait is never
+# mis-reported as a transport failure, while a genuinely hung tool still fails in
+# minutes (not the arbitrary 1h it used to be). Kept in sync with
+# ``coordination._MAX_AWAIT_WINDOW_S`` (600) — 600 + 120 margin = 720.
+_INTERNAL_MCP_TOOL_TIMEOUT_SEC = 720.0
 
 
 def always_on_http_mcp_servers(

@@ -125,10 +125,11 @@ CODEX_TOOLKIT_BASE_URL_DEFAULT = "http://127.0.0.1:8000"
 _HARNESS_TOOLKIT_MCP_NAME = "harness_toolkit"
 
 # codex caps every MCP tool call at 120s by default; the harness toolkit hosts
-# ``await_members``, which parks up to its own ``timeout_s``. Raise the ceiling
-# for the kernel-exposed toolkit so a healthy long await isn't aborted with
-# "timed out awaiting tools/call after 120s". 1h matches ``APPROVAL_TIMEOUT``.
-_HARNESS_TOOLKIT_TOOL_TIMEOUT_SEC = 3600.0
+# ``await_members``, which parks up to one window unit. Raise the ceiling for the
+# kernel-exposed toolkit so a healthy await isn't aborted with "timed out
+# awaiting tools/call after 120s". = the host's await window (600) + a 120s
+# margin (mirrors capability_resolver._INTERNAL_MCP_TOOL_TIMEOUT_SEC).
+_HARNESS_TOOLKIT_TOOL_TIMEOUT_SEC = 720.0
 
 
 class CodexRuntime:
