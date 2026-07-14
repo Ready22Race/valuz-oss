@@ -127,6 +127,7 @@ import {
   deriveBackgroundTasks,
   runningBackgroundTasks,
   useStableTurns,
+  subscribeUserStream,
   type PlanSubtask,
 } from "@valuz/core";
 import { BackgroundTaskStrip, ConversationTurnList } from "@valuz/ui";
@@ -5153,17 +5154,19 @@ export const ConversationPage = () => {
   useEffect(() => {
     if (!selectedSessionId) return;
     let cancelled = false;
-    let pollTimer: number | null = null;
-    const POLL_INTERVAL_MS = 2000;
+    let unsubStream: (() => void) | null = null;
 
-    // The resume poll exists for one race: a session sits in
+    // The created→running bridge exists for one race: a session sits in
     // ``created`` for a hair before the kernel flips it to ``running``
     // (schedule-driven sessions and the moment between create + first
-    // turn are the practical windows). Once the session is in any
+    // turn are the practical windows). We used to poll ``GET /sessions/{id}``
+    // every 2s to catch that flip; now we ride the always-on user
+    // control-plane stream (``run.started`` / ``run.status`` / ``run.finished``
+    // for the caller's sessions, each stamped with ``session_id``) and react
+    // to the pushed transition instead of polling. Once the session is in any
     // terminal state — ``idle`` (turn finished, awaiting user input),
     // ``failed`` / ``cancelled`` / ``archived`` (will not transition
-    // again without a fresh send) — there is nothing to wait for and
-    // we'd just spin GETs every 2s forever.
+    // again without a fresh send) — there is nothing to wait for.
     const TERMINAL_STATUSES = new Set([
       "idle",
       "failed",
@@ -5172,11 +5175,9 @@ export const ConversationPage = () => {
     ]);
     const isTerminalStatus = (status: string) => TERMINAL_STATUSES.has(status);
 
-    const stopPoll = () => {
-      if (pollTimer !== null) {
-        window.clearInterval(pollTimer);
-        pollTimer = null;
-      }
+    const stopStream = () => {
+      unsubStream?.();
+      unsubStream = null;
     };
 
     const tryResume = (detail: { id: string; status: string }) => {
@@ -5244,50 +5245,45 @@ export const ConversationPage = () => {
         // Status race window: a schedule-driven session (or any caller
         // that creates a session a hair before its first turn flips to
         // ``running``) may briefly read non-running on the initial GET.
-        // Long-poll the status while the page is open so we still pick
-        // up the turn whenever the kernel flips. The loop self-stops
-        // when (a) we resume, (b) the status reaches a terminal state,
-        // (c) ``handleSend`` claims the page via ``abortRef`` /
-        // ``isSendInFlightRef``, or (d) the effect's cleanup runs
-        // (session id change / unmount).
-        // Single-flight (same rationale as the event poll above): a slow
-        // backend must not let ticks stack pending requests.
-        let statusPollInFlight = false;
-        pollTimer = window.setInterval(() => {
-          if (cancelled) {
-            stopPoll();
-            return;
-          }
+        // Follow the always-on control-plane stream while the page is open
+        // so we pick up the turn whenever the kernel flips it — push, not
+        // poll. The subscription self-stops when (a) we resume, (b) a
+        // terminal frame lands, (c) ``handleSend`` claims the page via
+        // ``abortRef`` / ``isSendInFlightRef``, or (d) the effect's cleanup
+        // runs (session id change / unmount).
+        //
+        // Discipline: control frames only TRIGGER a subscribe/reconcile —
+        // they NEVER write session status directly (``setSessions``). The
+        // data-plane subscription owns status derivation under its
+        // ``sawTurnStart`` guard, so a stale lifecycle frame can't flip
+        // ``isBusy`` and break the timer / queue / turn-boundary (the
+        // regression that a blind ``setSessions`` on control frames caused).
+        unsubStream = subscribeUserStream((frame) => {
+          if (cancelled) return;
+          if (frame.sessionId !== selectedSessionId) return;
+          // ``handleSend`` has claimed the page — it subscribes itself; a
+          // competing subscribe here would double-deliver ``message.user``.
           if (abortRef.current || isSendInFlightRef.current) {
-            stopPoll();
+            stopStream();
             return;
           }
-          if (statusPollInFlight) return;
-          statusPollInFlight = true;
-          sessionsApi
-            .get(selectedSessionId)
-            .then((next) => {
-              if (cancelled) return;
-              if (tryResume(next)) {
-                stopPoll();
-                return;
-              }
-              if (isTerminalStatus(next.status)) {
-                stopPoll();
-                // The turn ran to completion between ticks (created →
-                // running → idle inside one interval) — fetch what it
-                // produced instead of abandoning it unrendered.
-                reconcileFinishedTurn();
-              }
-            })
-            .catch(() => {
-              // Non-fatal — keep polling; transient errors shouldn't
-              // strand the page in a non-resuming state.
-            })
-            .finally(() => {
-              statusPollInFlight = false;
-            });
-        }, POLL_INTERVAL_MS) as unknown as number;
+          const status = frame.payload.status;
+          const becameRunning =
+            frame.eventType === "run.started" ||
+            (frame.eventType === "run.status" && status === "running");
+          if (becameRunning) {
+            stopStream();
+            subscribeToSession(selectedSessionId, maxSeqRef.current);
+            return;
+          }
+          if (frame.eventType === "run.finished") {
+            // The turn ran to completion before we subscribed (created →
+            // running → idle in one gap) — replay what it produced instead
+            // of abandoning it unrendered. Same path the old poll took.
+            stopStream();
+            reconcileFinishedTurn();
+          }
+        });
       })
       .catch(() => {
         // Non-fatal — refreshEvents already hydrated todos from the
@@ -5295,7 +5291,7 @@ export const ConversationPage = () => {
       });
     return () => {
       cancelled = true;
-      stopPoll();
+      stopStream();
     };
   }, [selectedSessionId, subscribeToSession]);
 
