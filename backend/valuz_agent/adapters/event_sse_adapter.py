@@ -45,6 +45,7 @@ POLL_INTERVAL_SECONDS = 0.3
 DB_BACKFILL_INTERVAL_SECONDS = 2.0
 IDLE_HEARTBEAT_SECONDS = 15.0
 
+
 # History read-routing. Reads are UNIFIED through the DataService: whenever a
 # durable DataService is configured (any non-local mode), the host reads event
 # HISTORY straight from it (in-process), independent of whether the sandbox
@@ -472,6 +473,35 @@ def _translate_kernel_event(
                 "id": _stringify(data.get("id") or ""),
                 "run_id": _stringify(data.get("run_id") or ""),
                 "state": _stringify(data.get("state") or {}),
+            },
+            data,
+        )
+
+    if kernel_type in (
+        "bg_task_started",
+        "bg_task_progress",
+        "bg_task_updated",
+        "bg_task_finished",
+    ):
+        # Background-task lifecycle (``run_in_background`` Bash & friends).
+        # The runtime maps the CLI's task_started / task_progress /
+        # task_updated / task_notification pushes 1:1; these arrive DURING a
+        # turn and — via the runtime's idle drainer — BETWEEN turns, which is
+        # the whole point: a finished background job reaches the waiting
+        # session live. Payload keys vary per subtype (started: description /
+        # task_type; progress: usage; updated: patch; finished: status /
+        # summary / output_file / usage) so the whole payload is forwarded,
+        # JSON-stringified per the legacy ``Record<string, string>`` SSE
+        # contract; the frontend re-parses what it renders.
+        suffix = kernel_type.removeprefix("bg_task_")
+        return f"session.bg_task.{suffix}", _with_message_id(
+            {
+                "task_id": _stringify(data.get("task_id") or ""),
+                **{
+                    key: _stringify(value)
+                    for key, value in data.items()
+                    if key not in ("task_id", "message_id") and value is not None
+                },
             },
             data,
         )

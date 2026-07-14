@@ -212,3 +212,67 @@ def test_should_translate_workflow_progress_with_empty_state_default():
     legacy_type, payload = result
     assert legacy_type == "session.workflow_progress"
     assert json.loads(payload["state"]) == {}
+
+
+def test_should_translate_bg_task_started_with_full_payload():
+    result = _translate_kernel_event(
+        "bg_task_started",
+        {
+            "task_id": "bh6oql7si",
+            "tool_use_id": "toolu_1",
+            "description": "run the full test suite",
+            "task_type": "local_bash",
+            "message_id": "msg-bg",
+        },
+    )
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "session.bg_task.started"
+    assert payload["task_id"] == "bh6oql7si"
+    assert payload["description"] == "run the full test suite"
+    assert payload["task_type"] == "local_bash"
+    assert payload["message_id"] == "msg-bg"
+
+
+def test_should_translate_bg_task_finished_and_stringify_nested_usage():
+    usage = {"total_tokens": 120, "tool_uses": 3, "duration_ms": 4500}
+    result = _translate_kernel_event(
+        "bg_task_finished",
+        {
+            "task_id": "bh6oql7si",
+            "status": "completed",
+            "summary": "Background command completed (exit code 0)",
+            "output_file": "/tmp/tasks/bh6oql7si.output",
+            "usage": usage,
+        },
+    )
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "session.bg_task.finished"
+    assert payload["status"] == "completed"
+    assert payload["output_file"] == "/tmp/tasks/bh6oql7si.output"
+    # Nested dicts round-trip through JSON per the Record<string,string> contract.
+    assert json.loads(payload["usage"]) == usage
+
+
+def test_should_translate_bg_task_updated_patch():
+    result = _translate_kernel_event(
+        "bg_task_updated",
+        {"task_id": "bh6oql7si", "patch": {"status": "completed", "end_time": 1783939052053}},
+    )
+    assert result is not None
+    legacy_type, payload = result
+    assert legacy_type == "session.bg_task.updated"
+    assert json.loads(payload["patch"])["status"] == "completed"
+
+
+def test_should_drop_none_values_from_bg_task_payload():
+    # ``usage`` is None on most notifications; the legacy contract has no
+    # null — the key is simply omitted.
+    result = _translate_kernel_event(
+        "bg_task_finished",
+        {"task_id": "t1", "status": "stopped", "summary": "", "output_file": "", "usage": None},
+    )
+    assert result is not None
+    _legacy_type, payload = result
+    assert "usage" not in payload
