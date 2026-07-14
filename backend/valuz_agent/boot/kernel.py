@@ -97,6 +97,16 @@ def _set_kernel_env() -> None:
     kernel_db_path = sqlite_path_from_url(kernel_db_url())
     if kernel_db_path is not None:
         os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(kernel_db_path))
+        # Local resident process uses the sqlite checkpointer above. The
+        # ephemeral cloud SANDBOX instead uses FileCheckpointSaver (write-once
+        # files on a per-owner COS mount — sqlite-on-COS corrupts), gated by
+        # IS_SANDBOX/KERNEL_STORE=remote in DeepAgentsRuntime. This is only the
+        # LOCAL default dir (next to kernel.db); the sandbox injects
+        # DEEPAGENTS_CHECKPOINT_ROOT = the COS mount path, which wins here.
+        os.environ.setdefault(
+            "DEEPAGENTS_CHECKPOINT_ROOT",
+            str(os.path.join(os.path.dirname(str(kernel_db_path)), "deepagents-checkpoints")),
+        )
     # OSS default (KERNEL_STORE local/unset): the DataService backend is the host
     # sqlite (valuz.db). Inject it as the durable so the kernel dual-writes
     # kernel.db -> valuz.db and reads are served from the DataService.

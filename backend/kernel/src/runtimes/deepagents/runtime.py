@@ -82,6 +82,25 @@ apply_deepagents_patches()
 DEFAULT_CHECKPOINT_DB = "./deepagents_checkpoints.db"
 CHECKPOINT_DB_ENV = "DEEPAGENTS_CHECKPOINT_DB"
 
+# In an ephemeral cloud sandbox the checkpoint must be EXTERNALIZED (per-owner
+# COS mount) so it survives sandbox recreation ("resume in a fresh sandbox").
+# sqlite CANNOT live on COS — sqlite-on-COS-FUSE corrupts (WAL -shm mmap, no
+# fcntl locking, whole-object PUT → SIGBUS / "database disk image is malformed").
+# So IN-SANDBOX we use FileCheckpointSaver (write-once JSON files, corruption-free
+# on COS). The LOCAL resident process keeps the sqlite store above (durable local
+# disk, single host — no reason to change it). Gate: _in_sandbox().
+DEFAULT_CHECKPOINT_ROOT = "./deepagents_checkpoints"
+CHECKPOINT_ROOT_ENV = "DEEPAGENTS_CHECKPOINT_ROOT"
+
+
+def _in_sandbox() -> bool:
+    """True inside the ephemeral cloud sandbox (→ file+COS checkpointer), false
+    for the local resident process (→ sqlite checkpointer). ``IS_SANDBOX`` is set
+    by the kernel sandbox image; ``KERNEL_STORE=remote`` is the SaaS store tier."""
+    return os.getenv("IS_SANDBOX", "").strip().lower() in ("1", "true", "yes") or (
+        os.getenv("KERNEL_STORE", "local").strip().lower() == "remote"
+    )
+
 # langchain TodoListMiddleware tool name (auto-included by deepagents). Treated
 # as a planning channel: emit `todo_update` and suppress the generic tool_use /
 # tool_result pair so the UI trace doesn't double-render it.
@@ -99,6 +118,7 @@ class DeepAgentsRuntime:
         toolkit: ToolKit | None = None,
         workspace_root: str = "",
         checkpoint_db: str | None = None,
+        checkpoint_root: str | None = None,
         model_provider: ModelProvider | None = None,
         model_settings: ModelSettings | None = None,
     ) -> None:
@@ -108,6 +128,9 @@ class DeepAgentsRuntime:
         self.toolkit = toolkit or ToolKit()
         self.workspace_root = workspace_root
         self.checkpoint_db = checkpoint_db or os.getenv(CHECKPOINT_DB_ENV) or DEFAULT_CHECKPOINT_DB
+        self.checkpoint_root = (
+            checkpoint_root or os.getenv(CHECKPOINT_ROOT_ENV) or DEFAULT_CHECKPOINT_ROOT
+        )
         self.model_provider = model_provider
         self.model_settings = model_settings
         self._graph: Any | None = None
@@ -1072,14 +1095,25 @@ class DeepAgentsRuntime:
         return ChatOpenAI(**openai_kwargs)
 
     async def _open_checkpointer(self) -> Any:
-        """Open the SQLite-backed checkpointer once per runtime instance.
+        """Open the checkpointer once per runtime instance (cached until close()).
 
-        Survives a process restart: thread-id (= session.id) plus this on-disk
-        store let langgraph rehydrate the conversation state on the next turn.
-        The CM is held until ``close()`` so the cached graph keeps a live
-        connection.
+        Thread-id (= session.id) lets langgraph rehydrate conversation state on
+        the next turn. Two backends by deployment (see ``_in_sandbox``):
+
+        - **Sandbox (ephemeral cloud):** ``FileCheckpointSaver`` over a per-owner
+          COS mount — write-once JSON files survive sandbox recreation and, unlike
+          sqlite, never corrupt on COS FUSE. No CM / no ``setup()``.
+        - **Local resident process:** the SQLite store on durable local disk. The
+          CM is held until ``close()`` so the cached graph keeps a live connection.
         """
         if self._checkpointer is not None:
+            return self._checkpointer
+        if _in_sandbox():
+            from src.adapters.file_checkpoint_saver import FileCheckpointSaver
+
+            os.makedirs(self.checkpoint_root, exist_ok=True)
+            self._checkpointer = FileCheckpointSaver(self.checkpoint_root)
+            self._checkpointer_cm = None  # file saver has no context manager
             return self._checkpointer
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
