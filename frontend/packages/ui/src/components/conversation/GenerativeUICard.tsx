@@ -21,7 +21,6 @@ const VALUZ_OPENUUI_THEME: OpenUiTheme = {
   interactiveAccentPressed: "var(--color-brand-700)",
   interactiveAccentDisabled: "color-mix(in oklab, var(--color-brand) 40%, transparent)",
   textBrand: "var(--color-brand)",
-  textAccentPrimary: "var(--color-brand)",
   textNeutralLink: "var(--color-brand)",
   borderInteractiveSelected: "var(--color-brand)",
   // Neutral text → Valuz ink scale (OpenUI's near-black defaults are illegible
