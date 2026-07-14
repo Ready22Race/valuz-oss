@@ -124,6 +124,7 @@ import { useProjectOutlet } from "@valuz/app/layout";
 import {
   awaitingBackgroundWakeup,
   buildTurns,
+  mergeEventWindow,
   deriveBackgroundTasks,
   runningBackgroundTasks,
   useStableTurns,
@@ -2753,7 +2754,18 @@ export const ConversationPage = () => {
   // legacy linear endpoint at 500 rows ASC.
   const TURN_PAGE_SIZE = 20;
 
-  const refreshEvents = useCallback(async (sessionId: string | null) => {
+  // Settles when the CURRENT history-window load has finished (success or
+  // failure). ``refreshEvents`` resets the seq cursors synchronously and only
+  // hydrates them (and ``events``) when its fetch lands — any subscription
+  // opened in that gap would capture ``afterSeq = 0`` and make the SSE replay
+  // the session's whole history, including a PRIOR turn's ``session.idle``,
+  // which the resume path (``sawTurnStart`` true from birth) misreads as "this
+  // turn ended": sending flips false mid-run, the elapsed timer freezes, and
+  // the Stop button reverts while the header still says running.
+  // ``subscribeToSession`` awaits this before opening the stream.
+  const historyHydrationRef = useRef<Promise<void>>(Promise.resolve());
+
+  const refreshEventsInner = useCallback(async (sessionId: string | null) => {
     // Switching sessions invalidates any optimistic pending message —
     // it belongs to whatever session was active before, not this one.
     setPendingUserMessage(null);
@@ -2801,13 +2813,22 @@ export const ConversationPage = () => {
       // can resolve out of order and the slower fetch would overwrite
       // the faster one with mismatched events.
       if (selectedSessionIdRef.current !== sessionId) return;
-      setEvents(response.items);
+      // Merge, don't clobber: a resume subscription may already be streaming
+      // this session (its live deltas + replayed rows landed in ``events``
+      // between our synchronous clear above and this resolve). Replacing with
+      // the window snapshot wiped that streamed content — the refresh-mid-turn
+      // blank/inconsistent transcript. ``mergeEventWindow`` only inserts the
+      // persisted rows we don't have yet, in order.
+      setEvents((prev) => mergeEventWindow(prev, response.items));
       if (response.items.length > 0) {
-        maxSeqRef.current = response.items[response.items.length - 1].seq;
-        minSeqRef.current = response.items[0].seq;
-      } else {
-        maxSeqRef.current = 0;
-        minSeqRef.current = Number.POSITIVE_INFINITY;
+        // Forward-only: a concurrent subscription may have advanced the max
+        // cursor past this snapshot — never rewind it (a rewound cursor makes
+        // the next gap-fill refetch rows we already rendered).
+        maxSeqRef.current = Math.max(
+          maxSeqRef.current,
+          response.items[response.items.length - 1].seq,
+        );
+        minSeqRef.current = Math.min(minSeqRef.current, response.items[0].seq);
       }
       hasMoreOlderRef.current = response.has_more;
       setHasMoreOlder(response.has_more);
@@ -2881,6 +2902,18 @@ export const ConversationPage = () => {
       setError(_t("conversation.historyLoadFailed" as I18nKey));
     }
   }, []);
+
+  // Public wrapper: registers the in-flight load as the hydration gate
+  // SYNCHRONOUSLY (so a subscription started in the same tick already waits on
+  // it), then runs the load. Same signature and identity stability as before.
+  const refreshEvents = useCallback(
+    async (sessionId: string | null) => {
+      const load = refreshEventsInner(sessionId);
+      historyHydrationRef.current = load.catch(() => {});
+      await load;
+    },
+    [refreshEventsInner],
+  );
 
   // Upward pagination: triggered by the top sentinel's IntersectionObserver
   // (and safe to call manually). Captures the scroll anchor BEFORE the
@@ -3856,21 +3889,14 @@ export const ConversationPage = () => {
             if (stopped || abort.signal.aborted) return;
             if (selectedSessionIdRef.current !== sessionId) return;
             if (resp.items.length === 0) return;
-            // Order-safe merge, NOT ``appendEvent`` (which appends to the tail):
-            // if the live stream already delivered newer events, tail-appending
-            // the older window would misorder the array and ``buildTurns``
-            // consumes events in array order. Add only genuinely-missing
-            // persisted rows (dedup by seq) and keep the whole thing seq-sorted.
-            setEvents((prev) => {
-              const seen = new Set(
-                prev.map((e) => e.seq).filter((s) => s > 0),
-              );
-              const missing = resp.items.filter(
-                (e) => e.seq > 0 && !seen.has(e.seq),
-              );
-              if (missing.length === 0) return prev;
-              return [...prev, ...missing].sort((a, b) => a.seq - b.seq);
-            });
+            // Order-safe merge, NOT ``appendEvent`` (tail-append would render
+            // history after the current turn) and NOT a global seq sort (live
+            // deltas are ``seq 0`` — a sort throws them to the FRONT of the
+            // transcript, which rendered refreshed-mid-turn content into the
+            // previous turn's area). ``mergeEventWindow`` inserts only the
+            // genuinely-missing persisted rows at their seq position and keeps
+            // live entries glued where they arrived.
+            setEvents((prev) => mergeEventWindow(prev, resp.items));
             const top = resp.items[resp.items.length - 1].seq;
             if (top > maxSeqRef.current) maxSeqRef.current = top;
           })
@@ -4000,7 +4026,35 @@ export const ConversationPage = () => {
       // already try/caught; this is the belt-and-braces wrapper.
       const safeReconcileStreamEnd = () => reconcileStreamEnd().catch(() => {});
 
-      sessionsApi
+      // Gate the stream open on the history-window hydration. A resume-class
+      // caller samples ``maxSeqRef`` at call time — but ``refreshEvents``
+      // resets that cursor synchronously and only hydrates it when its fetch
+      // lands, so an ungated open could start at ``afterSeq = 0`` and replay
+      // the whole session, tripping the terminal check on a PRIOR turn's
+      // ``session.idle`` (resume subs have ``sawTurnStart`` true from birth):
+      // sending flipped false mid-run — frozen elapsed timer, Stop button
+      // reverted, header pill still "running". Await hydration, then re-sample
+      // the cursor. Time-capped so a hung history fetch degrades to the old
+      // ungated behavior instead of never opening the stream. The send path
+      // (``requireUserBeforeTerminal``) keeps its caller-supplied cursor: its
+      // turn-start detection needs the SSE to replay its own ``message.user``
+      // (seq > afterSeq), which a bump could skip past.
+      const openLiveStream = () => {
+        if (stopped || abort.signal.aborted) {
+          // Mirror the chain's ``finally`` for a subscription that dies while
+          // gate-waiting (superseded send / session switch): drop any pending
+          // burst shots and release the loading flag if we still own it.
+          reconcileBurstTimers.forEach((t) => window.clearTimeout(t));
+          if (abortRef.current === abort) {
+            abortRef.current = null;
+            setSending(false);
+          }
+          return;
+        }
+        if (!opts.requireUserBeforeTerminal && maxSeqRef.current > afterSeq) {
+          afterSeq = maxSeqRef.current;
+        }
+        sessionsApi
         .subscribeEvents(
           sessionId,
           (event) => {
@@ -4038,6 +4092,11 @@ export const ConversationPage = () => {
             }
           }
         });
+      };
+      void Promise.race([
+        historyHydrationRef.current,
+        new Promise<void>((resolve) => window.setTimeout(resolve, 3000)),
+      ]).then(openLiveStream);
     },
     [fetchSidebarSessions, refreshActiveSession],
   );

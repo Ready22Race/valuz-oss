@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SessionEventDTO } from "../api/sessions-api";
-import { buildTurns } from "./conversation-utils";
+import { buildTurns, mergeEventWindow } from "./conversation-utils";
 
 const evt = (
   seq: number,
@@ -659,5 +659,63 @@ describe("buildTurns — tool input/output streaming", () => {
     const tool = toolBlock(turns[0]!);
     expect(tool?.tool.status).toBe("success");
     expect(tool?.tool.output).toBe("full output");
+  });
+});
+
+describe("mergeEventWindow — resume window merge", () => {
+  it("returns prev unchanged when the window brings nothing new", () => {
+    const prev = [evt(1, "message.user", { text: "hi" })];
+    const out = mergeEventWindow(prev, [evt(1, "message.user", { text: "hi" })]);
+    expect(out).toBe(prev); // identity — no re-render
+  });
+
+  it("fills an empty prev with the whole window (the blank-resume case)", () => {
+    const win = [
+      evt(1, "message.user", { text: "hi" }),
+      evt(2, "message.assistant.delta", { text: "past", message_id: "a1" }),
+    ];
+    expect(mergeEventWindow([], win).map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  it("inserts missing history BEFORE live seq-0 deltas, never sorting deltas to the front", () => {
+    // prev: only the in-flight message's live deltas (what a mid-turn resume has)
+    const prev = [
+      evt(0, "message.assistant.text_delta", { text: "now", message_id: "a2" }),
+      evt(0, "message.assistant.text_delta", { text: "…", message_id: "a2" }),
+    ];
+    const win = [
+      evt(1, "message.user", { text: "hi" }),
+      evt(2, "message.assistant.delta", { text: "past", message_id: "a1" }),
+    ];
+    const out = mergeEventWindow(prev, win);
+    // history first, live tail last — and the two deltas keep their order
+    expect(out.map((e) => e.seq)).toEqual([1, 2, 0, 0]);
+    expect(out[2]).toBe(prev[0]);
+    expect(out[3]).toBe(prev[1]);
+  });
+
+  it("keeps seq-0 deltas glued in place when older persisted rows are backfilled", () => {
+    const delta = evt(0, "message.assistant.text_delta", {
+      text: "live",
+      message_id: "a2",
+    });
+    const prev = [evt(3, "message.user", { text: "again" }), delta];
+    const win = [
+      evt(1, "message.user", { text: "hi" }),
+      evt(2, "message.assistant.delta", { text: "past", message_id: "a1" }),
+      evt(3, "message.user", { text: "again" }),
+    ];
+    const out = mergeEventWindow(prev, win);
+    expect(out.map((e) => e.seq)).toEqual([1, 2, 3, 0]);
+    expect(out[3]).toBe(delta); // still right after its seq-3 anchor
+  });
+
+  it("tail-appends window rows newer than everything in prev (gap-fill)", () => {
+    const prev = [
+      evt(1, "message.user", { text: "hi" }),
+      evt(0, "message.assistant.text_delta", { text: "live", message_id: "a1" }),
+    ];
+    const win = [evt(2, "tool.call.started", { name: "shell" })];
+    expect(mergeEventWindow(prev, win).map((e) => e.seq)).toEqual([1, 0, 2]);
   });
 });
