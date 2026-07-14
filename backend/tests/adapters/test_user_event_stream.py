@@ -142,11 +142,11 @@ class TestIterUserEventsSse:
         bind_reader([])  # nothing to backfill
         live_tap(
             [
-                _live_ev(0, "s1", "user_message", message="secret"),  # seq 0 ≤ cursor → deduped
+                _live_ev(3, "s1", "user_message", message="secret"),  # seq 3 ≤ cursor → deduped
                 _live_ev(7, "s1", "session_idle", stop_reason="end_turn"),
             ]
         )
-        gen = adapter.iter_user_events_sse("user-A", after_seq=0)
+        gen = adapter.iter_user_events_sse("user-A", after_seq=3)  # cursor already at 3
         try:
             frame = await anext(gen)
         finally:
@@ -171,6 +171,27 @@ class TestIterUserEventsSse:
             await gen.aclose()
         assert frame["event"] == "run.finished"
         assert json.loads(frame["data"])["seq"] == 4
+
+    async def test_non_lifecycle_live_event_does_not_advance_cursor(self, bind_reader, live_tap):
+        # A non-lifecycle persisted event (tool_use, seq>0) must NOT advance the
+        # cursor — otherwise a lifecycle event with a lower seq (e.g. one the
+        # drop-tolerant tap re-ordered/recovered) would be wrongly deduped and
+        # dropped. Here session_idle(seq=5) must still be delivered even though a
+        # tool_use(seq=10) arrived first.
+        bind_reader([])
+        live_tap(
+            [
+                _live_ev(10, "s1", "tool_use", name="Bash"),
+                _live_ev(5, "s1", "session_idle", stop_reason="end"),
+            ]
+        )
+        gen = adapter.iter_user_events_sse("user-A", after_seq=0)
+        try:
+            frame = await anext(gen)
+        finally:
+            await gen.aclose()
+        assert frame["event"] == "run.finished"
+        assert json.loads(frame["data"])["seq"] == 5
 
     async def test_disconnect_predicate_stops_the_loop(self, bind_reader, live_tap):
         # The in-loop cooperative break: an async is_disconnected → True ends the
