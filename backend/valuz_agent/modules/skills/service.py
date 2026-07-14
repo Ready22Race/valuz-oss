@@ -195,7 +195,12 @@ async def _upsert_skill_row(user_id: str, ds: SkillDatastore, manifest) -> None:
     from valuz_agent.modules.skills.models import SkillIndexRow
 
     slug = manifest.slug or manifest.id
-    existing = await ds.get_by_slug(user_id, slug)
+    # Identity is the on-disk directory, NOT the slug: a bundled ``official``
+    # copy and a ``user`` copy of the same slug live in different roots and must
+    # each own a row. Keying the upsert on ``source_path`` is what lets them
+    # coexist — keying on slug (the old behavior) made whichever source scanned
+    # first win the single row and silently drop the other.
+    existing = await ds.get_by_source_path(user_id, manifest.path)
     if existing is None:
         await ds.create(
             user_id,
@@ -483,18 +488,23 @@ class SkillLibraryService:
             except Exception:
                 pass
 
-        # Deduplicate by slug: official / built-in skills take precedence over
-        # user-installed skills with the same slug.
+        # Deduplicate by ON-DISK PATH only — never by slug. A same-slug copy that
+        # lives in a different root (a bundled ``official`` skill vs a ``user``
+        # copy under ~/.agents/skills) is a DISTINCT entry and must stay in the
+        # list: the UI groups by source (Built-in / Agents / .claude / …), so
+        # both are shown side by side under their own group rather than one
+        # shadowing the other. Path-dedup only collapses a literal duplicate of
+        # the same directory (e.g. surfaced by two sources), preferring the
+        # official / built-in view when that rare collision happens.
         seen: dict[str, int] = {}
         for idx, s in enumerate(skills):
-            slug = s.slug
-            if not slug:
+            key = s.path
+            if not key:
                 continue
-            prev = seen.get(slug)
+            prev = seen.get(key)
             if prev is None:
-                seen[slug] = idx
+                seen[key] = idx
                 continue
-            # Prefer official over user, built-in over everything.
             prev_s = skills[prev]
             prev_rank = (
                 0 if prev_s.origin_label == "Built-in" else 1 if prev_s.scope == "official" else 2
@@ -502,7 +512,7 @@ class SkillLibraryService:
             cur_rank = 0 if s.origin_label == "Built-in" else 1 if s.scope == "official" else 2
             if cur_rank < prev_rank:
                 skills[prev] = None  # type: ignore[assignment]
-                seen[slug] = idx
+                seen[key] = idx
             else:
                 skills[idx] = None  # type: ignore[assignment]
         skills = [s for s in skills if s is not None]
@@ -521,13 +531,16 @@ class SkillLibraryService:
 
         skills.sort(key=_sort_key)
 
-        # Overlay the global library switch (per index row, user-scoped). Default
-        # is on, so we only flip the rows explicitly turned off. This is the field
-        # the new-conversation ``/`` picker filters on.
-        disabled_slugs = await self._ds.list_library_disabled_slugs(user_id)
-        if disabled_slugs:
+        # Overlay the global library switch per index row, keyed on the row's
+        # ``source_path`` (NOT slug). Same-slug rows can coexist with different
+        # switch states (an ``official`` copy default ON, a ``discovered`` user
+        # copy default OFF); a slug-keyed overlay would let the disabled user
+        # copy wrongly turn off the enabled official view. Default is on, so we
+        # only flip the paths explicitly turned off.
+        disabled_paths = await self._ds.list_library_disabled_paths(user_id)
+        if disabled_paths:
             for s in skills:
-                if s.slug in disabled_slugs:
+                if s.path in disabled_paths:
                     s.library_enabled = False
 
         return SkillsCatalog(project_id=project_id, skills=skills)
@@ -563,20 +576,25 @@ class SkillLibraryService:
                 )
                 all_manifests.extend(self._source.list_skills(project_ctx))
 
-        seen_slugs: set[str] = set()
+        # Dedup by ON-DISK PATH, not slug. Same-slug copies in different roots
+        # (official-skills dir vs ~/.agents/skills) are distinct skills and both
+        # get indexed; only a literal re-scan of the same directory is skipped.
+        # Keying on slug here was the shadowing bug: the user source is scanned
+        # before the official source, so a same-slug user copy claimed the slug
+        # and the official manifest was dropped by ``continue``.
+        seen_paths: set[str] = set()
         for manifest in all_manifests:
-            slug = manifest.slug or manifest.id
-            if slug in seen_slugs:
+            if manifest.path in seen_paths:
                 continue
-            seen_slugs.add(slug)
+            seen_paths.add(manifest.path)
             await self._upsert_manifest(user_id, manifest)
 
         for row in await self._ds.list_skills(user_id):
-            if row.slug not in seen_slugs:
+            if row.source_path not in seen_paths:
                 row.status = "unavailable"
                 await self._ds.update(row)
 
-        return len(seen_slugs)
+        return len(seen_paths)
 
     async def _upsert_manifest(self, user_id: str, manifest) -> None:  # type: ignore[no-untyped-def]
         """Create or refresh the index row for one manifest (see
@@ -684,8 +702,8 @@ class SkillLibraryService:
                 )
             except KeyError:
                 continue
-            await self._ds.set_creation_origin_by_slug(user_id, written.slug, "created")
-            await self._ds.set_library_enabled_by_slug(user_id, written.slug, True)
+            await self._ds.set_creation_origin_by_path(user_id, written.path, "created")
+            await self._ds.set_library_enabled_by_path(user_id, written.path, True)
             await _after_skill_saved_hook(user_id, written, "created")
 
         return results
@@ -871,7 +889,9 @@ class SkillLibraryService:
         skill_dir = Path(skill.path)
         if skill_dir.exists():
             shutil.rmtree(skill_dir)
-        await self._ds.mark_unavailable_by_slug(user_id, skill.slug)
+        # Key on the deleted folder's path, not slug: if a same-slug official
+        # copy coexists, deleting the user copy must not mark the official absent.
+        await self._ds.mark_unavailable_by_path(user_id, skill.path)
         for project in await self._projects.list_projects(user_id):
             if project.kind == "project":
                 self._ds.remove_skill_path_from_project(project, skill.path)
@@ -1159,9 +1179,10 @@ class SkillLibraryService:
 
         # Overlay the global library switch for every skill, including bundled
         # built-ins. Built-ins still default enabled, but users can hide them from
-        # new conversations.
-        disabled_slugs = await self._ds.list_library_disabled_slugs(user_id)
-        skill.library_enabled = skill.slug not in disabled_slugs
+        # new conversations. Keyed on the resolved row's ``path`` (not slug) so a
+        # disabled same-slug copy in another scope doesn't flip this one.
+        disabled_paths = await self._ds.list_library_disabled_paths(user_id)
+        skill.library_enabled = skill.path not in disabled_paths
 
         return SkillDetail(
             **skill.model_dump(),
@@ -1170,7 +1191,7 @@ class SkillLibraryService:
             root_path=str(skill_dir),
             manifest_filename=manifest_filename,
             metadata=metadata,
-            origin=await self._load_origin(user_id, skill.slug),
+            origin=await self._load_origin(user_id, skill.path),
         )
 
     async def set_library_enabled(self, user_id: str, skill_id: str, enabled: bool) -> SkillDetail:
@@ -1184,15 +1205,20 @@ class SkillLibraryService:
         from valuz_agent.modules.skills.errors import SkillNotFound
 
         skill = await self._resolve_skill(user_id, skill_id=skill_id)
-        row = await self._ds.get_by_slug(user_id, skill.slug)
+        # Flip the switch on the exact row the user is looking at (its path), so
+        # a toggle never leaks onto a same-slug copy in another scope.
+        row = await self._ds.get_by_source_path(user_id, skill.path)
         if row is None:
             raise SkillNotFound(skill_id)
-        await self._ds.set_library_enabled_by_slug(user_id, skill.slug, enabled)
+        await self._ds.set_library_enabled_by_path(user_id, skill.path, enabled)
         return await self.get_skill_detail(user_id, skill_id)
 
-    async def _load_origin(self, user_id: str, slug: str) -> SkillOrigin | None:
-        """Read import provenance off the ``valuz_skill_index`` row, if any."""
-        row = await self._ds.get_by_slug(user_id, slug)
+    async def _load_origin(self, user_id: str, source_path: str) -> SkillOrigin | None:
+        """Read import provenance off the ``valuz_skill_index`` row, if any.
+
+        Keyed on ``source_path`` so provenance is read from the exact skill
+        folder being detailed, not a same-slug copy in another scope."""
+        row = await self._ds.get_by_source_path(user_id, source_path)
         if row is None or not row.origin_json:
             return None
         try:
@@ -1513,8 +1539,8 @@ class SkillLibraryService:
         # imports — host bookkeeping in valuz_skill_index, never SKILL.md.
         skill = await self._finalize_origin(user_id, target_dir, "imported", payload.project_id)
         if origin is not None:
-            await self._ds.set_origin_metadata_by_slug(
-                user_id, skill.slug, origin.model_dump_json()
+            await self._ds.set_origin_metadata_by_path(
+                user_id, skill.path, origin.model_dump_json()
             )
         return skill
 
@@ -1851,8 +1877,10 @@ class SkillLibraryService:
         # The skill-creator AI flow landing a skill is a "created" act.
         # creation_origin is host bookkeeping in valuz_skill_index — the
         # startup_scan above created the row as "discovered"; overwrite it.
-        await self._ds.set_creation_origin_by_slug(user_id, skill.slug, "created")
-        await self._ds.set_library_enabled_by_slug(user_id, skill.slug, True)
+        # Keyed on the written folder's path so we stamp exactly this new copy,
+        # never a same-slug built-in that coexists.
+        await self._ds.set_creation_origin_by_path(user_id, skill.path, "created")
+        await self._ds.set_library_enabled_by_path(user_id, skill.path, True)
         skill.creation_origin = "created"
         skill.library_enabled = True
         await _after_skill_saved_hook(user_id, skill, "created")
@@ -1948,8 +1976,8 @@ class SkillLibraryService:
         except Exception:  # noqa: BLE001
             pass
         skill = await self._resolve_created_skill(user_id, skill_dir, project_id=project_id)
-        await self._ds.set_creation_origin_by_slug(user_id, skill.slug, origin)
-        await self._ds.set_library_enabled_by_slug(user_id, skill.slug, True)
+        await self._ds.set_creation_origin_by_path(user_id, skill.path, origin)
+        await self._ds.set_library_enabled_by_path(user_id, skill.path, True)
         skill.creation_origin = origin
         skill.library_enabled = True
         await _after_skill_saved_hook(user_id, skill, origin)

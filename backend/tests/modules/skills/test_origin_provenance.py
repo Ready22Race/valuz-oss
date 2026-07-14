@@ -26,6 +26,9 @@ class _FakeDatastore:
     async def get_by_slug(self, user_id: str, slug: str) -> object | None:
         return self._row
 
+    async def get_by_source_path(self, user_id: str, source_path: str) -> object | None:
+        return self._row
+
 
 def _svc(row: object | None) -> SkillLibraryService:
     svc = SkillLibraryService.__new__(SkillLibraryService)

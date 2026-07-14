@@ -14,7 +14,15 @@ from valuz_agent.infra.time_utils import now_ms
 
 class SkillIndexRow(Base, PrimaryKeyMixin, TimestampMixin, UserMixin):
     __tablename__ = "valuz_skill_index"
-    __table_args__ = (Index("ux_valuz_skill_index_user_slug", "user_id", "slug", unique=True),)
+    # Business identity is the on-disk skill directory, not the slug. Two copies
+    # of the same slug in different roots (e.g. a bundled ``official`` skill under
+    # the official-skills dir AND a user copy under ``~/.agents/skills``) are
+    # distinct rows and must coexist — the catalog shows each in its own source
+    # group, and the scan must not let one shadow the other. Keying on
+    # ``(user_id, source_path)`` is the true per-owner identity of a skill folder.
+    __table_args__ = (
+        Index("ux_valuz_skill_index_user_source_path", "user_id", "source_path", unique=True),
+    )
 
     slug: Mapped[str] = mapped_column(String(256))
     name: Mapped[str] = mapped_column(String(256))
