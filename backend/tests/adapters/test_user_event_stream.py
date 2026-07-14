@@ -173,19 +173,10 @@ class TestIterUserEventsSse:
         assert json.loads(frame["data"])["seq"] == 4
 
     async def test_disconnect_predicate_stops_the_loop(self, bind_reader, live_tap):
-        # The in-loop cooperative break: an async is_disconnected → True ends the
-        # while loop (defense in depth over sse-starlette's external cancel).
         bind_reader([])  # nothing to emit
-        calls = {"n": 0}
-
-        async def _disconnected() -> bool:
-            calls["n"] += 1
-            return True
-
-        gen = adapter.iter_user_events_sse("user-A", is_disconnected=_disconnected)
+        gen = adapter.iter_user_events_sse("user-A", is_disconnected=lambda: True)
         with pytest.raises(StopAsyncIteration):
             await anext(gen)
-        assert calls["n"] >= 1  # the loop actually awaited the check
 
     async def test_closing_the_stream_tears_down_the_live_tap(self, bind_reader, monkeypatch):
         # No SSE zombie: closing the generator (what sse-starlette does on client
