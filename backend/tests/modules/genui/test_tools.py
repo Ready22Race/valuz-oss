@@ -39,6 +39,11 @@ def patched(monkeypatch):
 
     monkeypatch.setattr(t, "_make_completer", lambda **kw: _fake_completer)
 
+    async def _no_tool_use_id(**kw):
+        return None
+
+    monkeypatch.setattr(t, "resolve_tool_use_id", _no_tool_use_id)
+
 
 async def test_handler_returns_openui_lang(patched):
     defs = build_generative_ui_tool_defs()
@@ -94,3 +99,53 @@ def test_tool_def_shape():
     assert defs[0].name == "generate_ui"
     assert defs[0].handler is not None
     assert defs[0].parameters["required"] == ["request"]
+
+
+async def test_handler_resolves_tool_use_id_and_streams(monkeypatch, patched):
+    """handler 解析 R 并把 calling_session_id + tool_use_id 透给 completer。"""
+    captured: dict = {}
+
+    async def _resolve(**kw):
+        captured["resolve_args"] = kw
+        return "R-FOUND"
+
+    completer_calls: dict = {}
+
+    async def _comp(prompt):
+        completer_calls["prompt"] = prompt
+        return "Chart"
+
+    def _make(**kw):
+        completer_calls["kw"] = kw
+        return _comp
+
+    monkeypatch.setattr(t, "resolve_tool_use_id", _resolve)
+    monkeypatch.setattr(t, "_make_completer", _make)
+    handler = build_generative_ui_tool_defs()[0].handler
+    res = await handler({"request": "chart"}, _ctx())
+    assert res.content == "Chart" and res.is_error is False
+    assert completer_calls["kw"]["calling_session_id"] == "s1"
+    assert completer_calls["kw"]["tool_use_id"] == "R-FOUND"
+    assert captured["resolve_args"]["session_id"] == "s1"
+
+
+async def test_handler_falls_back_to_sync_when_no_R(monkeypatch, patched):
+    async def _none(**kw):
+        return None
+
+    completer_calls: dict = {}
+
+    def _make(**kw):
+        completer_calls["kw"] = kw
+
+        async def _comp(prompt):
+            return "Chart"
+
+        return _comp
+
+    monkeypatch.setattr(t, "resolve_tool_use_id", _none)
+    monkeypatch.setattr(t, "_make_completer", _make)
+    handler = build_generative_ui_tool_defs()[0].handler
+    await handler({"request": "chart"}, _ctx())
+    assert completer_calls["kw"]["tool_use_id"] is None
+    assert completer_calls["kw"]["calling_session_id"] is None

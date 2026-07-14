@@ -123,7 +123,11 @@ export function GenerativeUICard({ openui, status }: GenerativeUICardProps) {
             lightTheme={VALUZ_OPENUUI_THEME}
             cssSelector="[data-slot='generative-ui-card']"
           >
-            <Renderer library={openuiLibrary} response={body} isStreaming={false} />
+            <Renderer
+              library={openuiLibrary}
+              response={body}
+              isStreaming={status === "running"}
+            />
           </ThemeProvider>
         ) : (
           <div
