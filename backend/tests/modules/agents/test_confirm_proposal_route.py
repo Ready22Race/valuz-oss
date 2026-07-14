@@ -102,15 +102,20 @@ async def test_chat_kind_project_resolves_to_none(db_session, monkeypatch) -> No
     )
     await db_session.commit()
 
-    class _Sess:
-        metadata = {"valuz": {"project_id": "chatp"}}
+    # ``_resolve_session_project_id`` reads session→project from the HOST
+    # mapping table via the global db entry (``project_index.project_of``),
+    # not from the fixture's in-memory engine. Mock the lookup: unmocked, the
+    # query used to fall through to whatever DB the environment pointed at —
+    # under the pre-sandbox conftest that was the developer's REAL
+    # ``~/.valuz-oss/valuz.db``, which is exactly the leak the home sandbox
+    # now blocks. The kind=="chat" gate under test runs against the fixture
+    # DB as before.
+    from valuz_agent.modules.sessions import project_index
 
-    async def _get_session(_uid, _sid):
-        return _Sess()
+    async def _project_of(_sid):
+        return "chatp"
 
-    import valuz_agent.adapters.kernel_client as kc
-
-    monkeypatch.setattr(kc, "get_session", _get_session)
+    monkeypatch.setattr(project_index, "project_of", _project_of)
     resolved = await agents_route._resolve_session_project_id(
         USER_ID, "sess-1", db_session
     )
