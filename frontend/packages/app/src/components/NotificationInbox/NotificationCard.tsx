@@ -139,6 +139,10 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
+  // A ``task_failed`` entry has a task_id and offers Resume / Open task; a
+  // ``run_failed`` (plain conversation) entry has none — it can only be opened
+  // in its session and dismissed.
+  const isTaskFailure = Boolean(entry.task_id);
 
   const handleResume = useCallback(async () => {
     if (!entry.task_id) return;
@@ -164,8 +168,19 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
   return (
     <CardShell
       icon={<AlertTriangle className="h-3 w-3 text-red-500" />}
-      label={t("notification.kindFailure" as I18nKey)}
-      title={entry.title}
+      label={t(
+        (isTaskFailure
+          ? "notification.kindFailure"
+          : "notification.kindRunFailed") as I18nKey,
+      )}
+      title={
+        isTaskFailure
+          ? entry.title
+          : t("notification.notifRunFailedTitle" as I18nKey).replace(
+              "{agent}",
+              entry.title || "",
+            )
+      }
     >
       <div className="flex flex-col gap-3 px-4 py-3">
         {entry.body && (
@@ -183,29 +198,50 @@ function FailureCard({ entry, onNavigateAway }: NotificationCardProps): ReactEle
           >
             {t("notification.dismiss" as I18nKey)}
           </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            className="text-[12px]"
-            onClick={() => {
-              onNavigateAway?.();
-              if (entry.task_id) {
-                navigate(`/tasks/${encodeURIComponent(entry.task_id)}`);
-              }
-            }}
-            disabled={busy}
-          >
-            {t("notification.openTask" as I18nKey)}
-          </Button>
-          <Button
-            size="sm"
-            className="text-[12px]"
-            onClick={() => void handleResume()}
-            disabled={busy}
-            loading={busy}
-          >
-            {t("notification.resume" as I18nKey)}
-          </Button>
+          {isTaskFailure ? (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-[12px]"
+                onClick={() => {
+                  onNavigateAway?.();
+                  if (entry.task_id) {
+                    navigate(`/tasks/${encodeURIComponent(entry.task_id)}`);
+                  }
+                }}
+                disabled={busy}
+              >
+                {t("notification.openTask" as I18nKey)}
+              </Button>
+              <Button
+                size="sm"
+                className="text-[12px]"
+                onClick={() => void handleResume()}
+                disabled={busy}
+                loading={busy}
+              >
+                {t("notification.resume" as I18nKey)}
+              </Button>
+            </>
+          ) : (
+            entry.session_id && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="text-xs"
+                onClick={() => {
+                  onNavigateAway?.();
+                  navigate(
+                    `/conversation/${encodeURIComponent(entry.session_id ?? "")}`,
+                  );
+                }}
+                disabled={busy}
+              >
+                {t("decisionInbox.openInSession" as I18nKey)}
+              </Button>
+            )
+          )}
         </div>
       </div>
     </CardShell>

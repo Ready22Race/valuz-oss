@@ -90,6 +90,46 @@ def test_mark_read_drops_unread_but_keeps_open(db_factory) -> None:
     assert unread == 0
 
 
+def test_resolve_pending_clears_without_owner(db_factory) -> None:
+    """``resolve_pending`` finds the row by the globally-unique ``pending_id``
+    alone — no owner needed. Used for conversation questions, whose owner isn't
+    held in memory at resolve time."""
+    svc = NotificationService()
+
+    async def run():
+        await svc.ingest(OWNER, **_q(route="/conversation/sess-1", task_id=None))
+        await svc.resolve_pending("p1")  # no owner supplied
+        return await svc.snapshot(OWNER)
+
+    entries, unread = asyncio.run(run())
+    assert entries == []
+    assert unread == 0
+
+
+def test_resolve_pending_broadcasts_to_owner(db_factory) -> None:
+    """The resolve frame reaches the row's owner even though the caller never
+    passed an owner in (the datastore row carries ``user_id``)."""
+    svc = NotificationService()
+
+    async def run():
+        await svc.ingest(OWNER, **_q(route="/conversation/sess-1", task_id=None))
+        q = await svc.subscribe(OWNER)
+        await q.get()  # snapshot (has the entry)
+        await svc.resolve_pending("p1")
+        frame = await asyncio.wait_for(q.get(), timeout=1.0)
+        await svc.unsubscribe(q)
+        return frame
+
+    frame = asyncio.run(run())
+    assert frame.kind == "resolved"
+
+
+def test_resolve_pending_missing_is_noop(db_factory) -> None:
+    svc = NotificationService()
+    # No matching row → best-effort no-op, no raise.
+    asyncio.run(svc.resolve_pending("does-not-exist"))
+
+
 def test_owner_scoped(db_factory) -> None:
     svc = NotificationService()
 

@@ -587,8 +587,15 @@ class DecisionAggregator:
             if session is None:
                 continue
             if not is_task_driven(session):
-                # By design: plain conversations render their question inline
-                # on the page the user is already viewing — never a retry case.
+                # Conversation (non-task) question. It renders inline on the
+                # page, but we STILL project it into the notification ledger so
+                # the user gets an OS notification when the window is
+                # backgrounded (the frontend gates the OS popup on window focus,
+                # so a user sitting on the page is never disturbed). It is NOT
+                # added to the in-memory pending map / Decision Inbox — that
+                # surface is task-scoped and renders task-shaped rows. The
+                # answer clears it via ``resolve_pending`` in _on_action_resolved.
+                await self._project_conversation_question(session, pending_id, payload)
                 return
             entry = await enrich_pending(
                 session,
@@ -628,24 +635,33 @@ class DecisionAggregator:
             return
         async with self._lock:
             existing = self._pending.get(pending_id)
-            if existing is None:
-                return
-            owner_user_id = existing.owner_user_id  # capture before delete
-            del self._pending[pending_id]
-            siblings = self._by_session.get(session_id)
-            if siblings is not None:
-                siblings.discard(pending_id)
-                if not siblings:
-                    self._by_session.pop(session_id, None)
-            await self._fan_out(
-                DecisionStreamEvent(
-                    kind="resolved",
-                    payload=_resolved_payload(pending_id),
-                ),
-                owner_user_id,
-            )
-        await self._record_answered_task_event(existing, pending_id)
-        await self._project_question_resolved(existing.owner_user_id, pending_id)
+            if existing is not None:
+                owner_user_id = existing.owner_user_id  # capture before delete
+                del self._pending[pending_id]
+                siblings = self._by_session.get(session_id)
+                if siblings is not None:
+                    siblings.discard(pending_id)
+                    if not siblings:
+                        self._by_session.pop(session_id, None)
+                await self._fan_out(
+                    DecisionStreamEvent(
+                        kind="resolved",
+                        payload=_resolved_payload(pending_id),
+                    ),
+                    owner_user_id,
+                )
+        if existing is not None:
+            # Task-driven question: fan out the inbox resolve + task event, then
+            # clear its ledger notification via the owner we already hold.
+            await self._record_answered_task_event(existing, pending_id)
+            await self._project_question_resolved(existing.owner_user_id, pending_id)
+            return
+        # Conversation question: never tracked in ``_pending`` (nor after a
+        # restart wiped the map). Clear its ledger notification by the globally
+        # unique ``pending_id`` — owner-agnostic, so no lookup is needed.
+        from valuz_agent.modules.notifications.service import notification_service
+
+        await notification_service.resolve_pending(pending_id)
 
     async def _record_awaiting_task_event(self, entry: DecisionEntry) -> None:
         """Mirror a newly-added task-driven question onto the task's own event
@@ -712,6 +728,49 @@ class DecisionAggregator:
     # is safe). Snapshots stay data-only (agent_slug / question text) — the
     # frontend localizes the display copy per kind, so the backend stores no UI
     # chrome. Best-effort: a ledger failure never breaks inbox fan-out.
+
+    async def _project_conversation_question(
+        self, session: Session, pending_id: str, payload: dict[str, Any]
+    ) -> None:
+        """Project a NON-task (conversation) question into the notification
+        ledger only — no Decision Inbox fan-out (that surface is task-scoped).
+
+        Built straight from the session's ``valuz`` metadata (no ``valuz_task``
+        join): title is the agent slug (the frontend renders "{agent} 需要你确认",
+        matching the task path), the deep link is the flat ``/conversation/{id}``
+        route. Idempotent via ``q:{pending_id}`` + best-effort inside ``ingest``."""
+        from valuz_agent.modules.notifications.service import notification_service
+
+        owner = getattr(session, "user_id", None)
+        if not owner:
+            return
+        meta = getattr(session, "metadata", None) or {}
+        v = meta.get("valuz") if isinstance(meta, dict) else None
+        v = v if isinstance(v, dict) else {}
+        agent_slug = str(v.get("agent_slug") or "")
+        project_id = v.get("project_id")
+        project_id = project_id if isinstance(project_id, str) and project_id else None
+        question = ""
+        qs = payload.get("questions") if isinstance(payload, dict) else None
+        if isinstance(qs, list) and qs and isinstance(qs[0], dict):
+            question = str(qs[0].get("question") or "")
+        await notification_service.ingest(
+            owner,
+            dedup_key=f"q:{pending_id}",
+            kind="question",
+            title=agent_slug or str(v.get("name") or ""),
+            body=question,
+            route=f"/conversation/{session.id}",
+            action="answer",
+            task_id=None,
+            project_id=project_id,
+            session_id=session.id,
+            pending_id=pending_id,
+            payload={
+                "question_payload": payload,
+                "agent_slug": agent_slug,
+            },
+        )
 
     async def _project_question_added(self, entry: DecisionEntry) -> None:
         from valuz_agent.modules.notifications.service import notification_service

@@ -2486,6 +2486,8 @@
     "notifQuestionTitle": "{agent} needs your input",
     "notifFailureTitle": "Task needs attention",
     "notifFailureBody": "{task} is blocked",
+    "notifRunFailedTitle": "{agent} run failed",
+    "kindRunFailed": "Run failed",
     "inboxTitle": "Notifications",
     "emptyTitle": "No notifications need you",
     "emptyHint": "Questions and blocked tasks show up here",
