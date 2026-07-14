@@ -121,8 +121,15 @@ import { modelLabel } from "@valuz/shared";
 import { t as _t } from "@valuz/shared/i18n";
 import type { I18nKey } from "@valuz/shared";
 import { useProjectOutlet } from "@valuz/app/layout";
-import { buildTurns, useStableTurns, type PlanSubtask } from "@valuz/core";
-import { ConversationTurnList } from "@valuz/ui";
+import {
+  awaitingBackgroundWakeup,
+  buildTurns,
+  deriveBackgroundTasks,
+  runningBackgroundTasks,
+  useStableTurns,
+  type PlanSubtask,
+} from "@valuz/core";
+import { BackgroundTaskStrip, ConversationTurnList } from "@valuz/ui";
 import { usePlatform } from "@valuz/app/platform";
 import { useHasUsableChannel, useTranslation } from "@valuz/core";
 import {
@@ -1490,6 +1497,80 @@ export const ConversationPage = () => {
   }, [openConversationProjectId, setStoreActiveProjectId]);
   const rawTurns = useMemo(() => buildTurns(events), [events]);
   const turns = useStableTurns(rawTurns);
+  // Background tasks (run_in_background shell commands) — derived from the
+  // same persisted event list, so the "still running" strip is correct on
+  // live streams and after re-entering the page mid-run.
+  const runningBgTasks = useMemo(
+    () => runningBackgroundTasks(deriveBackgroundTasks(events)),
+    [events],
+  );
+  const awaitingBgWakeup = useMemo(() => awaitingBackgroundWakeup(events), [events]);
+  const bgWatchActive = runningBgTasks.length > 0 || awaitingBgWakeup;
+  const runningBgCountRef = useRef(0);
+  useEffect(() => {
+    runningBgCountRef.current = runningBgTasks.length;
+  }, [runningBgTasks.length]);
+
+  // Live delivery of background-task progress while the session sits IDLE.
+  // The per-turn subscription deliberately closes at the turn's terminal
+  // event (connection budget), so once the launching turn ends nobody would
+  // receive the idle-time pushes — the bg_task terminal frames and the CLI's
+  // spontaneous wake-up reply would only show up after a reload. While any
+  // bg task is running, or its wake-up reply hasn't landed yet
+  // (``awaitingBackgroundWakeup``), slow-poll the persisted events into the
+  // same ``events`` array the transcript renders from. The watcher yields to
+  // an active turn (``isBusy`` — that subscription covers the stream) and
+  // stops on its own: when the wake-up turn's ``session.idle`` lands, or
+  // after a ~60s quiet tail with nothing running (a synthetic ``stopped``
+  // terminal from a closed runtime has no wake-up turn behind it).
+  useEffect(() => {
+    if (!selectedSessionId || isBusy || !bgWatchActive) return;
+    const sessionId = selectedSessionId;
+    let cancelled = false;
+    let inFlight = false;
+    let quietTailTicks = 0;
+    const timer = window.setInterval(() => {
+      if (cancelled || inFlight) return;
+      if (selectedSessionIdRef.current !== sessionId) return;
+      if (runningBgCountRef.current === 0) {
+        quietTailTicks += 1;
+        if (quietTailTicks > 20) {
+          window.clearInterval(timer);
+          return;
+        }
+      } else {
+        quietTailTicks = 0;
+      }
+      inFlight = true;
+      sessionsApi
+        .listEvents(sessionId, maxSeqRef.current)
+        .then((response) => {
+          if (cancelled || selectedSessionIdRef.current !== sessionId) return;
+          if (response.items.length === 0) return;
+          quietTailTicks = 0;
+          for (const event of response.items) {
+            if (event.seq > 0) {
+              maxSeqRef.current = Math.max(maxSeqRef.current, event.seq);
+            }
+          }
+          setEvents((prev) => {
+            const seen = new Set(prev.map((e) => e.seq));
+            const fresh = response.items.filter(
+              (e) => !(e.seq > 0 && seen.has(e.seq)),
+            );
+            return fresh.length > 0 ? [...prev, ...fresh] : prev;
+          });
+        })
+        .catch(() => {})
+        .finally(() => {
+          inFlight = false;
+        });
+    }, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [selectedSessionId, isBusy, bgWatchActive]);
 
   // VALUZ-CHATPLAN — track the LATEST ``plan_task`` / ``modify_plan`` tool
   // result per task_id. That position in the conversation gets the rich
@@ -5989,6 +6070,15 @@ export const ConversationPage = () => {
             ))}
           </div>
         )}
+
+        {/* Background-task strip — the turn that LAUNCHES a run_in_background
+            command ends normally while the process keeps running for minutes;
+            without this the conversation reads as "finished" with no cue that
+            work is still in flight. Derived from persisted session.bg_task.*
+            events (deriveBackgroundTasks), so it also survives re-entering the
+            page mid-run; hides itself once every task reaches a terminal
+            state (finished / stopped-on-runtime-close). */}
+        <BackgroundTaskStrip tasks={runningBgTasks} />
 
         {/* Scroll-to-bottom button + Composer share a relative wrapper so the
             button anchors to the Composer's top edge (``bottom-full``) instead
