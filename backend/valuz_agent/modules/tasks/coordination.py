@@ -294,13 +294,25 @@ class CoordinationService:
                     "or end your turn: you will be woken with a member_done once "
                     "the member gets its answer and finishes."
                 )
-            elif out["timed_out"] and any(p.get("state") == "running" for p in pending_probe):
+            elif any(p.get("state") == "running" for p in pending_probe):
+                # Members still running is the COMMON early-return case: mode
+                # "any" returns the instant nothing is collected, so ``timed_out``
+                # stays False (it requires mode "all"). The old guard gated this
+                # hint on ``timed_out`` and therefore NEVER fired for the default
+                # mode — which is exactly how a lead, told only a bare
+                # ``pending:[k] state:running``, went silent for minutes instead
+                # of re-awaiting (the queued member_done then sat unread until the
+                # next await). Fire whenever a pending member is alive, regardless
+                # of mode / timed_out.
+                out["still_running"] = True
                 out["hint"] = (
                     "Pending members with state 'running' are ALIVE and still "
-                    "working — a long tool call (build, tests, deploy) can easily "
-                    "exceed this wait. Do NOT treat them as dead and do NOT stop "
-                    "the task: await_members again (a longer timeout_s is fine), "
-                    "or work on other ready subtasks meanwhile."
+                    "working — a long tool call (research, build, tests) easily "
+                    "exceeds this wait. Do NOT treat them as dead and do NOT stop "
+                    "the task. Call await_members again right away (a longer "
+                    "timeout_s is fine): any member that finishes meanwhile is "
+                    "already queued in your inbox and returns to you instantly. "
+                    "Do not pause to reason in between."
                 )
         if user_inject is not None:
             # Surface the inject to the lead so it can decide how to respond
