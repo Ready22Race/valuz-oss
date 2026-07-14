@@ -263,7 +263,15 @@ export const buildTurns = (events: SessionEventDTO[]): ConversationTurn[] => {
       last &&
       last.kind === kind &&
       last.sealed &&
-      (messageId === undefined || last.messageId === messageId)
+      (messageId === undefined || last.messageId === messageId) &&
+      // Drop only a genuine re-delivery — a chunk the sealed canonical text
+      // already contains. A chunk with NEW content is a CONTINUATION segment:
+      // runtimes that seal mid-turn (canonical per segment, e.g. around
+      // provider-native search with no tool block in between) keep streaming
+      // the next segment under the same turn-scoped message_id. The old
+      // blanket drop rendered that whole segment blank until its canonical
+      // landed ("no streaming, everything pops at once").
+      last.text.includes(text)
     ) {
       return;
     }

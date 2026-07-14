@@ -719,3 +719,54 @@ describe("mergeEventWindow — resume window merge", () => {
     expect(mergeEventWindow(prev, win).map((e) => e.seq)).toEqual([1, 0, 2]);
   });
 });
+
+describe("buildTurns — segmented assistant message (mid-turn canonical seal)", () => {
+  // GPT-5.5-style provider-native search turns: the runtime seals segment 1
+  // with a canonical ``message.assistant.delta`` MID-TURN, then keeps
+  // streaming segment 2 deltas under the SAME turn-scoped message_id with no
+  // tool/thinking block in between. The old blanket "delta after sealed
+  // same-id block" drop rendered the whole second segment blank until its
+  // canonical landed.
+  it("keeps streaming a continuation segment after a mid-turn seal (same id, nothing between)", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(0, "message.assistant.text_delta", { text: "seg1", message_id: "a1" }),
+      evt(2, "message.assistant.delta", { text: "seg1-full", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", { text: "seg2-part1 ", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", { text: "seg2-part2", message_id: "a1" }),
+    ]);
+    expect(turns[0]!.blocks).toEqual([
+      { kind: "assistant", text: "seg1-full", messageId: "a1", sealed: true },
+      {
+        kind: "assistant",
+        text: "seg2-part1 seg2-part2",
+        messageId: "a1",
+        sealed: false,
+      },
+    ]);
+  });
+
+  it("the continuation block seals in place when segment 2's canonical arrives", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(2, "message.assistant.delta", { text: "seg1-full", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", { text: "seg2 draft", message_id: "a1" }),
+      evt(3, "message.assistant.delta", { text: "seg2-full", message_id: "a1" }),
+    ]);
+    expect(turns[0]!.blocks).toEqual([
+      { kind: "assistant", text: "seg1-full", messageId: "a1", sealed: true },
+      { kind: "assistant", text: "seg2-full", messageId: "a1", sealed: true },
+    ]);
+  });
+
+  it("still drops a re-delivered chunk already contained in the sealed text", () => {
+    const turns = buildTurns([
+      evt(1, "message.user", { text: "q", message_id: "u1" }),
+      evt(2, "message.assistant.delta", { text: "Hello world", message_id: "a1" }),
+      evt(0, "message.assistant.text_delta", { text: "world", message_id: "a1" }),
+    ]);
+    expect(turns[0]!.blocks).toEqual([
+      { kind: "assistant", text: "Hello world", messageId: "a1", sealed: true },
+    ]);
+  });
+});
