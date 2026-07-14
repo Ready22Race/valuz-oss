@@ -757,11 +757,16 @@ async def iter_events_sse(
 # Carries ONLY low-frequency lifecycle events across ALL of one owner's
 # sessions — never token deltas — so a user with a task lead + N members
 # streaming at once does not multiplex M token firehoses onto one connection.
-# Because lifecycle is low-frequency there is NO live tap: a server-side
-# backfill poll over the (user_id, id)-indexed durable read is the delivery
-# path (each poll is a discrete open→read→close, holding no pooled DB session
-# between reads — see docs/design/event-delivery-unification.md §9.2). The
-# client still polls nothing: one SSE, all reconciliation server-side.
+#
+# Delivery mirrors the per-session ``iter_events_sse``: the owner's live
+# cross-session tap (``subscribe_all_events_for`` — routed to that owner's
+# kernel, already user-scoped) is the PRIMARY path, so an idle stream parks on
+# the queue and costs ~0 DB queries. A throttled durable backfill is the
+# correctness FLOOR (initial catch-up + covering the drop-tolerant tap's rare
+# overflow), NOT a per-second poll — the earlier pure-1s-poll made every
+# always-on connection issue 1 query/sec/user even when idle (a real SaaS
+# query-rate cost). Each backfill is a discrete open→read→close (no pooled DB
+# session held — §9.2). The client still polls nothing.
 # ---------------------------------------------------------------------------
 
 # The lifecycle set the control plane reads. ``user_message`` brackets a run's
@@ -775,10 +780,12 @@ CONTROL_LIFECYCLE_TYPES: tuple[str, ...] = (
     "session_update",
 )
 
-# Backfill cadence for the control plane. Lifecycle latency of ~1s is fine for
-# badges/lists (the actively-viewed conversation streams live on its own
-# per-session data-plane stream); the query is a cheap indexed cursor read.
-CONTROL_POLL_INTERVAL_SECONDS = 1.0
+# Backfill FLOOR cadence for the control plane. The live tap is the primary
+# path; this throttled durable re-read only covers the connect race + the rare
+# tap overflow, so it can be generous (idle ⇒ ~0.2 queries/sec/user, vs the
+# per-second poll it replaced). Lifecycle latency on the floor-only path (dead
+# kernel) is a few seconds — fine for badges/lists.
+CONTROL_BACKFILL_INTERVAL_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -881,6 +888,26 @@ async def list_user_events_after(
     return frames
 
 
+def _control_frame_from_live(event: Any) -> UserEventFrame | None:
+    """Translate a live ``EventData`` (from the owner's cross-session tap) into
+    a lean control-plane frame, or ``None`` to drop (non-lifecycle types)."""
+    if str(event.type) not in CONTROL_LIFECYCLE_TYPES:
+        return None
+    translated = _translate_control_event(
+        str(event.type), dict(event.data) if event.data is not None else {}
+    )
+    if translated is None:
+        return None
+    event_type, payload = translated
+    return UserEventFrame(
+        seq=int(event.seq) if event.seq is not None else 0,
+        event_type=event_type,
+        session_id=str(getattr(event, "session_id", "") or ""),
+        payload=payload,
+        timestamp=event.timestamp,
+    )
+
+
 async def iter_user_events_sse(
     user_id: str,
     *,
@@ -890,30 +917,83 @@ async def iter_user_events_sse(
     """Yield ``EventSourceResponse``-shaped control-plane frames forever.
 
     One always-on connection carrying ALL of ``user_id``'s lifecycle events
-    (across every session), multiplexed and projected text-free. No live tap:
-    a server-side backfill poll (~1s) over the ``(user_id, id)``-indexed
-    durable read is the delivery path. Each poll is a discrete read that holds
-    no pooled DB session between ticks; ``shielded`` keeps a client disconnect
-    from tearing a connection down mid-read. The caller wraps this with
-    ``EventSourceResponse``.
+    (across every session), multiplexed and projected text-free. Mirrors
+    ``iter_events_sse``: backfill the durable log first (replay on reconnect),
+    then follow the owner's live cross-session tap
+    (``kernel_client.subscribe_all_events_for``) as the primary path, with a
+    throttled durable backfill as the correctness floor. ``shielded`` keeps a
+    client disconnect from tearing a pooled connection down mid-read. The caller
+    wraps this with ``EventSourceResponse``.
     """
     cursor = after_seq
     last_emit = asyncio.get_event_loop().time()
-    while True:
-        if is_disconnected is not None and is_disconnected():
-            break
 
-        frames = await shielded(list_user_events_after(user_id, after_seq=cursor))
-        for frame in frames:
-            yield {"event": frame.event_type, "data": frame.to_sse_data()}
-            cursor = frame.seq
-            last_emit = asyncio.get_event_loop().time()
+    # Replay anything the client missed before the tap attaches.
+    for frame in await shielded(list_user_events_after(user_id, after_seq=cursor)):
+        yield {"event": frame.event_type, "data": frame.to_sse_data()}
+        cursor = frame.seq
+        last_emit = asyncio.get_event_loop().time()
 
-        if asyncio.get_event_loop().time() - last_emit >= IDLE_HEARTBEAT_SECONDS:
-            yield {"event": "heartbeat", "data": json.dumps({"seq": cursor})}
-            last_emit = asyncio.get_event_loop().time()
+    # Live cross-session tap for this owner. A pump task moves frames into a
+    # local queue so the merge loop can use timeouts without cancelling (and
+    # thereby closing) the subscription iterator.
+    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=4096)
 
-        await asyncio.sleep(CONTROL_POLL_INTERVAL_SECONDS)
+    async def _pump() -> None:
+        # In remote mode the owner's sandbox kernel may be GONE — the tap then
+        # yields nothing / fails and we degrade to the durable backfill floor.
+        try:
+            async for item in kernel_client.subscribe_all_events_for(user_id):
+                await queue.put(item)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — unreachable kernel → floor-only
+            logger.debug("user live tap unavailable; serving backfill floor only", exc_info=True)
+
+    pump_task = asyncio.create_task(_pump(), name=f"user-sse-pump-{user_id}")
+    last_backfill = asyncio.get_event_loop().time()
+    try:
+        while True:
+            if is_disconnected is not None and is_disconnected():
+                break
+
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=POLL_INTERVAL_SECONDS)
+            except TimeoutError:
+                event = None
+
+            if event is None:
+                now = asyncio.get_event_loop().time()
+                if now - last_backfill >= CONTROL_BACKFILL_INTERVAL_SECONDS:
+                    last_backfill = now
+                    for frame in await shielded(
+                        list_user_events_after(user_id, after_seq=cursor)
+                    ):
+                        yield {"event": frame.event_type, "data": frame.to_sse_data()}
+                        cursor = frame.seq
+                        last_emit = asyncio.get_event_loop().time()
+                if asyncio.get_event_loop().time() - last_emit >= IDLE_HEARTBEAT_SECONDS:
+                    yield {"event": "heartbeat", "data": json.dumps({"seq": cursor})}
+                    last_emit = asyncio.get_event_loop().time()
+                continue
+
+            # Live frame. Persisted lifecycle events carry the durable seq (see
+            # PersistThenBroadcastSink); skip anything the cursor already covers
+            # and advance it so the floor backfill never re-emits.
+            if event.seq is not None:
+                if event.seq <= cursor:
+                    continue
+                cursor = event.seq
+            live_frame = _control_frame_from_live(event)
+            if live_frame is not None:
+                yield {"event": live_frame.event_type, "data": live_frame.to_sse_data()}
+                last_emit = asyncio.get_event_loop().time()
+    finally:
+        pump_task.cancel()
+        try:
+            await pump_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
 
 
 __all__ = [
@@ -927,6 +1007,6 @@ __all__ = [
     "iter_user_events_sse",
     "POLL_INTERVAL_SECONDS",
     "IDLE_HEARTBEAT_SECONDS",
-    "CONTROL_POLL_INTERVAL_SECONDS",
+    "CONTROL_BACKFILL_INTERVAL_SECONDS",
     "CONTROL_LIFECYCLE_TYPES",
 ]

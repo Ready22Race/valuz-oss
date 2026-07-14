@@ -24,6 +24,11 @@ def _ev(seq: int, session_id: str, type_: str, **data):
     return SimpleNamespace(seq=seq, session_id=session_id, type=type_, data=data, timestamp=seq)
 
 
+def _live_ev(seq: int, session_id: str, type_: str, **data):
+    """An ``EventData``-shaped live frame from the owner cross-session tap."""
+    return SimpleNamespace(seq=seq, session_id=session_id, type=type_, data=data, timestamp=seq)
+
+
 class FakeReader:
     """Minimal DataReader honouring ``after_seq`` + ``types``; counts calls."""
 
@@ -51,6 +56,28 @@ def bind_reader():
 
     yield _bind
     bind_data_reader(None)
+
+
+@pytest.fixture
+def live_tap(monkeypatch):
+    """Patch the owner cross-session live tap; returns a setter for live events.
+
+    Defaults to an empty tap (the stream then relies on the durable backfill),
+    so ``iter_user_events_sse`` never touches a real kernel in tests.
+    """
+    events: list = []
+
+    async def _fake(user_id):
+        for e in events:
+            yield e
+
+    monkeypatch.setattr(adapter.kernel_client, "subscribe_all_events_for", _fake)
+
+    def _set(evs):
+        events.clear()
+        events.extend(evs)
+
+    return _set
 
 
 class TestListUserEventsAfter:
@@ -92,7 +119,7 @@ class TestListUserEventsAfter:
 
 
 class TestIterUserEventsSse:
-    async def test_backfill_frames_then_advance_cursor(self, bind_reader):
+    async def test_backfill_frames_then_advance_cursor(self, bind_reader, live_tap):
         bind_reader([_ev(1, "s", "user_message"), _ev(2, "s", "session_idle")])
         gen = adapter.iter_user_events_sse("user-A", after_seq=0)
         try:
@@ -107,23 +134,60 @@ class TestIterUserEventsSse:
         assert payload["seq"] == 2
         assert payload["session_id"] == "s"
 
-    async def test_disconnect_predicate_stops_the_loop(self, bind_reader):
+    async def test_live_tap_emits_lifecycle_and_dedups(self, bind_reader, live_tap):
+        # The live cross-session tap is the primary path; a lifecycle frame it
+        # delivers is emitted, text-free, and a frame at/under the cursor is
+        # deduped against the backfill.
+        bind_reader([])  # nothing to backfill
+        live_tap(
+            [
+                _live_ev(0, "s1", "user_message", message="secret"),  # seq 0 ≤ cursor → deduped
+                _live_ev(7, "s1", "session_idle", stop_reason="end_turn"),
+            ]
+        )
+        gen = adapter.iter_user_events_sse("user-A", after_seq=0)
+        try:
+            frame = await anext(gen)
+        finally:
+            await gen.aclose()
+        assert frame["event"] == "run.finished"
+        payload = json.loads(frame["data"])
+        assert payload["seq"] == 7
+        assert payload["session_id"] == "s1"
+
+    async def test_live_tap_drops_non_lifecycle(self, bind_reader, live_tap):
+        bind_reader([])
+        live_tap(
+            [
+                _live_ev(3, "s1", "text_delta", text="tok"),  # not lifecycle → dropped
+                _live_ev(4, "s1", "session_error", message="boom"),
+            ]
+        )
+        gen = adapter.iter_user_events_sse("user-A", after_seq=0)
+        try:
+            frame = await anext(gen)
+        finally:
+            await gen.aclose()
+        assert frame["event"] == "run.finished"
+        assert json.loads(frame["data"])["seq"] == 4
+
+    async def test_disconnect_predicate_stops_the_loop(self, bind_reader, live_tap):
         bind_reader([])  # nothing to emit
         gen = adapter.iter_user_events_sse("user-A", is_disconnected=lambda: True)
         with pytest.raises(StopAsyncIteration):
             await anext(gen)
 
-    async def test_no_db_session_held_between_polls(self, bind_reader):
-        # §9.2: each poll is a DISCRETE read. Proven by the reader being
-        # invoked fresh per tick (never a long-lived handle). One backfill
-        # read happens before the first yield.
+    async def test_no_db_session_held_between_reads(self, bind_reader, live_tap):
+        # §9.2: reads are DISCRETE. Idle no longer polls per-second — the
+        # initial backfill is one read; the floor is throttled and the live tap
+        # (empty here) carries the rest. Exactly one read produced the frame.
         reader = bind_reader([_ev(1, "s", "user_message")])
         gen = adapter.iter_user_events_sse("user-A", after_seq=0)
         try:
             await anext(gen)
         finally:
             await gen.aclose()
-        assert reader.calls == 1  # exactly one discrete read produced the frame
+        assert reader.calls == 1  # the initial backfill; no per-second polling
 
 
 class TestUserStreamSeqIsDurableId:
