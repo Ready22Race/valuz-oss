@@ -3515,17 +3515,17 @@ export const ConversationPage = () => {
       const abort = new AbortController();
       let sawTurnStart = !opts.requireUserBeforeTerminal;
       let stopped = false;
-      let pollTimer: number | null = null;
+      // Unsubscribe from the control-plane stream (replaces the old 500ms
+      // status-reconcile poll — see the reconcile block below).
+      let controlUnsub: (() => void) | null = null;
       abortRef.current = abort;
       setSending(true);
 
       const stopSubscription = () => {
         if (stopped) return;
         stopped = true;
-        if (pollTimer !== null) {
-          window.clearInterval(pollTimer);
-          pollTimer = null;
-        }
+        controlUnsub?.();
+        controlUnsub = null;
         void refreshActiveSession(sessionId);
         void fetchSidebarSessions();
         abort.abort();
@@ -3819,90 +3819,65 @@ export const ConversationPage = () => {
         }
       };
 
-      // Reconcile the authoritative session status. The composer's loading state
-      // is DERIVED from ``sessions[].status`` (see ``deriveTurnActive``), so
-      // keeping that status fresh here is what un-sticks the Stop button / loading
-      // logo / "已处理 X 秒" timer when the terminal SSE frame is missed — a
-      // re-subscribe whose ``afterSeq`` is already past the turn's terminal event,
-      // a dropped/deduped frame, or a non-idle ending. It also fixes a stale
-      // "运行中" header pill. Once the turn is genuinely over we also
-      // ``stopSubscription`` so this poll stops spinning.
+      // Reconcile the authoritative session status off the control-plane
+      // stream (replaces the old 500ms poll). The composer's loading state is
+      // DERIVED from ``sessions[].status`` (see ``deriveTurnActive``), so
+      // keeping that status fresh is what un-sticks the Stop button / loading
+      // logo / "已处理 X 秒" timer / stale "运行中" pill when the live stream's
+      // terminal frame is missed — a re-subscribe whose ``afterSeq`` is already
+      // past the terminal event, a dropped/deduped frame, or a non-idle ending.
       //
-      // ``sawTurnActivity`` seeds ``true`` for non-``requireUserBeforeTerminal``
-      // subscriptions (auto-resume / queue-drain), which are only ever created
-      // for an already-running session — so an ``idle`` reading means the turn
-      // finished, not that it hasn't started (the pre-run window that the
-      // fresh-send path must wait through).
-      let sawTurnActivity = !opts.requireUserBeforeTerminal;
-      let idleReconcileTicks = 0;
-      // Single-flight: a slow backend (e.g. valuz.db write contention during a
-      // tool-heavy turn) makes each poll exceed the 500ms interval — without
-      // this guard every tick stacks another pending request, and the pile-up
-      // saturates the browser's 6-connections-per-host pool, stalling EVERY
-      // fetch to the backend (the "153 pending requests" incident).
-      let pollInFlight = false;
-      pollTimer = window.setInterval(() => {
-        if (stopped || abort.signal.aborted || pollInFlight) return;
+      // The control-plane stream delivers a ``run.finished`` / ``run.status``
+      // frame for THIS session even when the per-session SSE dropped its
+      // terminal (a different transport). We NEVER trust the frame's own status
+      // (a historical frame replayed on stream (re)connect would be stale) —
+      // instead we confirm the current status with ONE GET and push it into
+      // local state. Gap-fill is handled server-side by the backfill inside
+      // ``iter_events_sse``; the client no longer polls for it. Single-flight
+      // so a slow status GET can't stack (the old "153 pending requests"
+      // pool-saturation guard, preserved).
+      let reconcileInFlight = false;
+      controlUnsub = subscribeUserStream((frame: ControlFrame) => {
+        if (stopped || abort.signal.aborted || reconcileInFlight) return;
+        if (frame.sessionId !== sessionId) return;
+        if (frame.eventType !== "run.finished" && frame.eventType !== "run.status") {
+          return;
+        }
         // A session switch flips ``selectedSessionIdRef`` synchronously in
-        // bootstrap and ``refreshEvents`` resets ``maxSeqRef`` — before the
-        // abort effect commits. A tick in that window would read the fresh
-        // cursor (0) against the OLD session and fetch its entire history.
+        // bootstrap and resets ``maxSeqRef`` before the abort effect commits.
         if (selectedSessionIdRef.current !== sessionId) return;
-        pollInFlight = true;
-        sessionsApi
-          .listEvents(sessionId, maxSeqRef.current)
-          .then((response) => {
-            // Same staleness guards as ``appendEvent`` — this response may
-            // have been in flight across a session switch / abort.
+        reconcileInFlight = true;
+        void sessionsApi
+          .get(sessionId)
+          .then((detail) => {
             if (stopped || abort.signal.aborted) return;
             if (selectedSessionIdRef.current !== sessionId) return;
-            if (response.items.length > 0) {
-              sawTurnActivity = true;
-              idleReconcileTicks = 0;
-              for (const event of response.items) {
-                appendEvent(event);
-              }
+            // Push the authoritative status into local state — this drives the
+            // derived loading flag and the header pill.
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.id === sessionId
+                  ? { ...s, status: detail.status as SessionListItem["status"] }
+                  : s,
+              ),
+            );
+            if (detail.status === "running" || detail.status === "created") {
               return;
             }
-            // No new persisted events this tick. After ~2s of silence,
-            // reconcile against the authoritative session status.
-            idleReconcileTicks += 1;
-            if (idleReconcileTicks < 4) return;
-            idleReconcileTicks = 0;
-            void sessionsApi
-              .get(sessionId)
-              .then((detail) => {
-                if (stopped || abort.signal.aborted) return;
-                if (selectedSessionIdRef.current !== sessionId) return;
-                // Push the authoritative status into local state — this drives
-                // the derived loading flag and the header pill.
-                setSessions((prev) =>
-                  prev.map((s) =>
-                    s.id === sessionId ? { ...s, status: detail.status } : s,
-                  ),
-                );
-                if (
-                  detail.status === "running" ||
-                  detail.status === "created"
-                ) {
-                  sawTurnActivity = true;
-                  return;
-                }
-                // Terminal status. If the turn actually ran (events streamed, or
-                // this subscription was born for a running session), it's done —
-                // stop the poll/stream. The loading UI has already cleared via
-                // the reconciled status regardless of this.
-                if (sawTurnActivity || maxSeqRef.current > afterSeq) {
-                  stopSubscription();
-                }
-              })
-              .catch(() => {});
+            // Terminal status. If the turn actually ran (events streamed past
+            // our start cursor, or this subscription was born for an
+            // already-running session — auto-resume / queue-drain), it's done —
+            // stop the stream. The loading UI has already cleared via the
+            // reconciled status regardless.
+            if (!opts.requireUserBeforeTerminal || maxSeqRef.current > afterSeq) {
+              stopSubscription();
+            }
           })
           .catch(() => {})
           .finally(() => {
-            pollInFlight = false;
+            reconcileInFlight = false;
           });
-      }, 500);
+      });
 
       // A live stream can end for reasons other than "turn finished and
       // fully delivered" — a proxy cutting the localhost connection, a
@@ -4032,10 +4007,8 @@ export const ConversationPage = () => {
         .then(safeReconcileStreamEnd)
         .catch(safeReconcileStreamEnd)
         .finally(() => {
-          if (pollTimer !== null) {
-            window.clearInterval(pollTimer);
-            pollTimer = null;
-          }
+          controlUnsub?.();
+          controlUnsub = null;
           // Only the CURRENT subscription may release the loading flag. A
           // superseded one (a hung stream aborted by the next send's
           // ``subscribeToSession``) finalises late — an unconditional
@@ -4428,8 +4401,12 @@ export const ConversationPage = () => {
     if (!queueDraining && !queue.some((i) => i.status === "queued")) return;
     const sid = selectedSessionId;
     let cancelled = false;
+    let inFlight = false;
     const tick = async () => {
-      if (cancelled || abortRef.current || isSendInFlightRef.current) return;
+      if (cancelled || inFlight || abortRef.current || isSendInFlightRef.current) {
+        return;
+      }
+      inFlight = true;
       try {
         const detail = await sessionsApi.get(sid);
         if (cancelled || abortRef.current || isSendInFlightRef.current) return;
@@ -4443,14 +4420,26 @@ export const ConversationPage = () => {
           subscribeToSession(sid, maxSeqRef.current);
         }
       } catch {
-        // best-effort — a transient poll failure retries on the next tick.
+        // best-effort — the next lifecycle frame retries.
+      } finally {
+        inFlight = false;
       }
     };
-    const timer = window.setInterval(() => void tick(), 500);
+    // The next queued item runs as its OWN kernel turn; the control-plane
+    // stream announces its start (``run.started``) and completion
+    // (``run.finished``). React to those instead of polling every 500ms. One
+    // initial tick covers a transition that already landed before we
+    // subscribed (a fast turn that finished inside the old poll interval).
     void tick();
+    const unsub = subscribeUserStream((frame) => {
+      if (frame.sessionId !== sid) return;
+      if (frame.eventType === "run.started" || frame.eventType === "run.finished") {
+        void tick();
+      }
+    });
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      unsub();
     };
   }, [
     selectedSessionId,
