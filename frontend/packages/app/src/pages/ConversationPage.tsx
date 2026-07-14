@@ -3832,13 +3832,26 @@ export const ConversationPage = () => {
       //   1. gap-fill whatever the stream missed from the DB;
       //   2. if the turn is still live (status running/created),
       //      re-subscribe from the advanced cursor with exponential
-      //      backoff (capped attempts, reset on healthy delivery);
+      //      backoff — for as long as the authoritative status stays
+      //      live. There is deliberately NO give-up cap: capping at N
+      //      attempts turned a flaky stream into a silent fake
+      //      completion (verified incident: a long quiet tool call kept
+      //      the stream frame-free, five closes exhausted the cap
+      //      mid-turn, and the page showed copy/retry while the kernel
+      //      was still working). The delay is capped at 15s, and each
+      //      cycle's gap-fill keeps delivering content, so the steady
+      //      state degrades to cheap polling — never to a lie.
       //   3. otherwise run the normal end-of-turn bookkeeping.
       // A close we initiated ourselves (terminal event seen →
       // ``stopSubscription``; session switch / unmount / superseding
       // subscribe / interrupt → ``abort``) is fully handled by its
       // closer and skips all of this.
       let reconciled = false;
+      // True from "re-subscribe scheduled" until the timeout fires: the
+      // stream promise has already settled, so ``.finally`` runs during
+      // the backoff gap — without this flag it would release ``sending``
+      // and the footer would flash "turn ended" between attempts.
+      let reconnectPending = false;
       const reconcileStreamEnd = async () => {
         // Idempotent: wired to both ``.then`` and ``.catch`` of the
         // stream promise, so a handler-side rejection can't run it twice.
@@ -3853,6 +3866,12 @@ export const ConversationPage = () => {
           for (const event of resp.items) {
             // May deliver the turn's terminal event → ``stopSubscription``.
             appendEvent(event);
+          }
+          // Content flowed — the server is alive and producing; keep the
+          // backoff snappy. (The live-frame reset can't cover this: a
+          // stream that dies between frames never delivers one.)
+          if (resp.items.length > 0) {
+            streamReconnectAttemptsRef.current = 0;
           }
         } catch {
           // Gap-fill is best-effort — the status check below still
@@ -3881,13 +3900,17 @@ export const ConversationPage = () => {
         if (stopped || abort.signal.aborted) return;
         if (status === null || status === "running" || status === "created") {
           const attempt = streamReconnectAttemptsRef.current;
-          if (attempt >= 5) {
-            stopSubscription();
-            return;
-          }
           streamReconnectAttemptsRef.current = attempt + 1;
-          const delay = Math.min(1000 * 2 ** attempt, 15000);
+          const delay = Math.min(1000 * 2 ** Math.min(attempt, 4), 15000);
+          // Diagnosability: unexpected closes are invisible otherwise —
+          // the last verified incident could only be reconstructed from
+          // the DB. One line per close, throttle-free (≤1 per delay).
+          console.warn(
+            `[Conversation] events stream closed unexpectedly (attempt ${attempt + 1}, status=${status ?? "unknown"}) — reconnecting in ${delay}ms`,
+          );
+          reconnectPending = true;
           window.setTimeout(() => {
+            reconnectPending = false;
             if (stopped || abort.signal.aborted) return;
             // A newer subscription (fresh send / session switch) owns
             // the page now — it covers this turn's tail itself.
@@ -3937,8 +3960,17 @@ export const ConversationPage = () => {
           // Paths that abort AND clear ``abortRef`` themselves (interrupt,
           // session switch) also reset ``sending`` themselves.
           if (abortRef.current === abort) {
+            // ``abortRef`` must clear either way — the scheduled reconnect
+            // bails on a non-null ref (it reads it as "a newer subscription
+            // owns the page").
             abortRef.current = null;
-            setSending(false);
+            // With a reconnect pending the turn is still live (status said
+            // running) — keep ``sending`` so the footer doesn't flash
+            // "turn ended" during every backoff gap. The re-subscribe (or
+            // whichever owner preempts it) takes over the flag from here.
+            if (!reconnectPending) {
+              setSending(false);
+            }
           }
         });
     },
