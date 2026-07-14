@@ -2129,12 +2129,19 @@ export const ConversationPage = () => {
       const name = tool.title || "";
 
       // generate_ui — generative UI. The MCP tool returns OpenUI Lang as
-      // ``tool.output``; render it with OpenUI's <Renderer> via GenerativeUICard.
-      // While running, or on error, fall through (return null) to the generic
-      // ToolCallCard so the spinner / failure text stay visible.
+      // ``tool.output`` (growing token-by-token while running, as the host
+      // forwards ephemeral text_deltas as tool_output_delta). Render it with
+      // OpenUI's <Renderer> via GenerativeUICard, including while running so the
+      // UI paints progressively; only error falls through (return null) to the
+      // generic ToolCallCard so the failure text stays visible.
       if (isToolNamed(name, "generate_ui")) {
-        if (tool.status === "error" || !tool.output) return null;
-        return <GenerativeUICard openui={tool.output} status="success" />;
+        if (tool.status === "error") return null;
+        return (
+          <GenerativeUICard
+            openui={tool.output}
+            status={tool.status === "running" ? "running" : "success"}
+          />
+        );
       }
 
       // Claude dynamic-workflow launch → WorkflowProgressCard. The kernel

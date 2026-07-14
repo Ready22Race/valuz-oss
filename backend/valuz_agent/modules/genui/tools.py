@@ -18,6 +18,7 @@ from src.core.tools import ExecContext
 
 import valuz_agent.boot.kernel  # noqa: F401  (sets kernel import path)
 from valuz_agent.adapters import kernel_client
+from valuz_agent.modules.genui.ids import resolve_tool_use_id
 from valuz_agent.modules.genui.prompts import TOOL_DESCRIPTION, build_openui_prompt
 from valuz_agent.modules.genui.runner import _make_completer, _resolve_provider_id
 from valuz_agent.modules.providers.service import (
@@ -86,8 +87,16 @@ async def _generate_ui_handler(args: dict[str, Any], ctx: ExecContext) -> ToolRe
             content=f"generate_ui: model channel unavailable ({exc})", is_error=True
         )
 
+    tool_use_id = await resolve_tool_use_id(
+        user_id=user_id, session_id=ctx.session_id, arguments=args
+    )
     completer = _make_completer(
-        user_id=user_id, runtime_provider=runtime_provider, model=model, mp=mp
+        user_id=user_id,
+        runtime_provider=runtime_provider,
+        model=model,
+        mp=mp,
+        calling_session_id=ctx.session_id if tool_use_id else None,
+        tool_use_id=tool_use_id,
     )
     try:
         openui = await completer(build_openui_prompt(str(request), data))
