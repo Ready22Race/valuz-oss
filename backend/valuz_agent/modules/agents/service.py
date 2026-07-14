@@ -104,6 +104,22 @@ class AgentNotDeletableError(Exception):
         super().__init__(f"agent '{slug}' is protected and cannot be deleted")
 
 
+async def _after_agent_saved_hook(user_id: str, row: AgentRow, origin: str) -> None:
+    from valuz_agent.ports.extensions import ext
+
+    await ext.agent_lifecycle.after_agent_saved(
+        user_id=user_id,
+        agent=row,
+        origin=origin,  # type: ignore[arg-type]
+    )
+
+
+async def _before_agent_delete_hook(user_id: str, row: AgentRow) -> None:
+    from valuz_agent.ports.extensions import ext
+
+    await ext.agent_lifecycle.before_agent_delete(user_id=user_id, agent=row)
+
+
 class AgentService:
     def __init__(
         self,
@@ -202,9 +218,7 @@ class AgentService:
             runtime_provider=row.runtime,
             instructions=row.instructions,
             skills=tuple(row.skills or []),
-            mcp_servers=await self._resolve_mcp_servers(
-                connector_bindings, user_id=owner_user_id
-            ),
+            mcp_servers=await self._resolve_mcp_servers(connector_bindings, user_id=owner_user_id),
             permission_mode="full_access",
             effort=row.effort or None,
             metadata=metadata,
@@ -256,7 +270,9 @@ class AgentService:
         )
         # Live-reference: sessions snapshot the row at creation time, so a
         # fresh agent needs no extra materialization step.
-        return await self._agents.create(user_id, row)
+        created = await self._agents.create(user_id, row)
+        await _after_agent_saved_hook(user_id, created, "created")
+        return created
 
     async def update_agent(self, user_id: str, slug: str, patch: dict[str, Any]) -> AgentRow:
         """Patch an agent's editable fields. Official agents are editable too —
@@ -295,6 +311,7 @@ class AgentService:
         # Live-reference semantics need no kernel cascade anymore: sessions
         # snapshot the row's fields at creation, so every NEW session (in any
         # project the agent is deployed to) picks the edit up automatically.
+        await _after_agent_saved_hook(user_id, row, "updated")
         return row
 
     async def delete_agent(self, user_id: str, slug: str, *, cascade: bool = False) -> None:
@@ -319,8 +336,23 @@ class AgentService:
                 raise AgentStillDeployedError(slug, len(deployments))
             for m in deployments:
                 await self._members.delete(user_id, m.project_id, m.agent_slug)
+        await _before_agent_delete_hook(user_id, existing)
         if not await self._agents.delete(user_id, slug):
             raise AgentNotFoundError(slug)
+        await self._cleanup_marketplace_install(user_id, slug)
+
+    async def _cleanup_marketplace_install(self, user_id: str, slug: str) -> None:
+        """Best-effort marketplace provenance cleanup for a deleted agent —
+        see the identical hook in ``modules/skills/service.py`` for the
+        rationale. Never blocks the delete itself (a narrow-schema test
+        engine without the ``marketplace_install`` table, or any storage
+        hiccup, is swallowed)."""
+        try:
+            from valuz_agent.modules.marketplace.install_store import MarketplaceInstallStore
+
+            await MarketplaceInstallStore(self._db).remove_by_ref(user_id, slug)
+        except Exception:  # noqa: BLE001 — best-effort; missing provenance is harmless
+            logger.warning("marketplace install cleanup failed for agent %s", slug, exc_info=True)
 
     # ------------------------------------------------------------------
     # Member list
@@ -470,7 +502,7 @@ class AgentService:
                 "connector_types": connector_types,
                 "provider_id": provider_id,
                 "effort": effort,
-            }
+            },
         )
         return await self.deploy_agent(
             user_id,

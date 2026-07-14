@@ -55,22 +55,27 @@ async def test_orphan_scans_skipped_in_http_mode(monkeypatch) -> None:
 
 
 def test_kernel_routers_not_mounted_in_http_mode(monkeypatch) -> None:
-    """The host app must NOT mount /api/v1/* in http mode — the standalone
-    kernel serves it; mounting a ghost would bind the host's own DB."""
+    """The host app must NOT mount {KERNEL_API_PREFIX}/v1/* (ADR-013:
+    "/kernel/v1/*" on this host) in http mode — the standalone kernel serves
+    it; mounting a ghost would bind the host's own DB."""
     monkeypatch.setattr(settings, "kernel_mode", "http")
     from valuz_agent.api.app import create_app
+    from valuz_agent.boot.kernel import kernel_api_prefix
 
     app = create_app()
-    kernel_paths = [r.path for r in app.routes if r.path.startswith("/api/v1/")]
+    prefix = kernel_api_prefix()
+    kernel_paths = [r.path for r in app.routes if r.path.startswith(f"{prefix}/v1/")]
     assert kernel_paths == []
 
 
 def test_kernel_routers_mounted_in_inprocess_mode(monkeypatch) -> None:
     monkeypatch.setattr(settings, "kernel_mode", "inprocess")
     from valuz_agent.api.app import create_app
+    from valuz_agent.boot.kernel import kernel_api_prefix
 
     app = create_app()
-    kernel_paths = [r.path for r in app.routes if r.path.startswith("/api/v1/")]
+    prefix = kernel_api_prefix()
+    kernel_paths = [r.path for r in app.routes if r.path.startswith(f"{prefix}/v1/")]
     assert any("/sessions" in p for p in kernel_paths)
 
 

@@ -238,7 +238,7 @@ async def test_tokenless_requests_are_rejected(kernel_proc) -> None:
 async def test_tokenless_ws_run_channel_is_rejected(kernel_proc) -> None:
     import websockets
 
-    ws_url = kernel_proc.replace("http://", "ws://", 1) + f"/api/v1/sessions/{uuid.uuid4()}/run"
+    ws_url = kernel_proc.replace("http://", "ws://", 1) + f"/kernel/v1/sessions/{uuid.uuid4()}/run"
     async with websockets.connect(ws_url, max_size=None) as ws:
         with pytest.raises(websockets.exceptions.ConnectionClosed) as excinfo:
             await ws.recv()
@@ -454,7 +454,7 @@ def test_unauthenticated_optin_on_loopback_starts_open(tmp_path):
         # The owner header is still required (auth-off ≠ owner-less reads).
         with httpx.Client() as client:
             resp = client.get(
-                f"http://127.0.0.1:{port}/api/v1/sessions",
+                f"http://127.0.0.1:{port}/kernel/v1/sessions",
                 headers={"X-Valuz-Owner-Id": "owner-a"},
                 timeout=5.0,
             )
@@ -474,7 +474,7 @@ async def test_wrong_bearer_is_rejected_on_mutation_route(kernel_proc) -> None:
     session-mutation route before any handler runs."""
     with httpx.Client() as client:
         resp = client.post(
-            f"{kernel_proc}/api/v1/sessions",
+            f"{kernel_proc}/kernel/v1/sessions",
             json={"id": "x", "agent_config": {"name": "a"}, "cwd": "/tmp/x"},
             headers={"Authorization": "Bearer WRONG"},
             timeout=5.0,

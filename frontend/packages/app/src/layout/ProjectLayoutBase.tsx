@@ -29,6 +29,8 @@ import {
   useUpdaterStore,
   projectsApi,
   type RunSummary,
+  useDegradedListTargets,
+  getExecutionTargets,
 } from "@valuz/core";
 import {
   AppShell,
@@ -75,16 +77,22 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import {
-  DecisionDrawer,
-  DecisionInboxBadge,
-  DecisionInboxProvider,
-} from "../components/DecisionInbox";
+  NotificationBadge,
+  NotificationDrawer,
+  NotificationProvider,
+} from "../components/NotificationInbox";
 import { usePlatform } from "../platform";
 import { UpdateButton } from "../components/UpdateButton";
 import { useAgentDeployPicker } from "../components/agent-deploy-picker";
 import { AgentCheckboxList } from "../components/AgentDeployField";
 import { ExportProjectDialog } from "../components/ExportProjectDialog";
 import { ImportProjectDialog } from "../components/ImportProjectDialog";
+import {
+  ProjectLocationFields,
+  useProjectExecutionLocation,
+} from "../components/ProjectLocationFields";
+import { OriginIcon } from "../components/ExecutionLocationPicker";
+import { outletTransitionKey } from "./outlet-key";
 import type { ProjectOutletContext } from "./types";
 
 export type DirectoryFieldMode = "input" | "picker" | "managed";
@@ -213,6 +221,9 @@ export function ProjectLayoutBase({
   const [createError, setCreateError] = useState("");
   // Initial members for the create dialog (shared with the projects-page entry).
   const memberPicker = useAgentDeployPicker();
+  // Execution location for the create dialog (multi-target editions; inert
+  // no-target state on single-backend builds).
+  const execLocation = useProjectExecutionLocation();
   const [historyIdx, setHistoryIdx] = useState<number>(
     () => (window.history.state as { idx?: number } | null)?.idx ?? 0,
   );
@@ -452,6 +463,11 @@ export function ProjectLayoutBase({
           : `/conversation/${encodeURIComponent(r.session_id)}`,
       kind: r.source_kind === "task" ? "task" : "chat",
       isRunning: liveSet.has(r.session_id),
+      // Execution origin (multi-target editions; fan-out tags rows) — a
+      // leading icon, not a pill, so the title keeps its width.
+      leadingIcon: r.exec_origin ? (
+        <OriginIcon origin={r.exec_origin} />
+      ) : undefined,
     });
     const sorted = [...byId.values()].sort(
       (a, b) => b.updated_at - a.updated_at,
@@ -484,6 +500,11 @@ export function ProjectLayoutBase({
           label: project.name,
           href: `/projects/${project.id}`,
           items: projectRunItems.get(project.id) ?? [],
+          // Execution origin (multi-target editions; fan-out tags rows) —
+          // replaces the folder glyph instead of appending a pill.
+          icon: project.exec_origin ? (
+            <OriginIcon origin={project.exec_origin} className="h-3.5 w-3.5" />
+          ) : undefined,
         })),
     [allProjects, projectRunItems],
   );
@@ -518,28 +539,42 @@ export function ProjectLayoutBase({
   const handleCreateProject = async () => {
     const trimmedName = newName.trim();
     const trimmedPath = newRootPath.trim();
-    const managed = directoryFieldMode === "managed";
+    // A remote execution target has no access to this machine's paths — the
+    // backend allocates a managed cwd and the picked folder uploads after.
+    const managed =
+      directoryFieldMode === "managed" || execLocation.isRemoteTarget;
     if (!trimmedName || (!managed && !trimmedPath)) return;
     setCreateError("");
     try {
       const payload = managed
         ? { name: trimmedName }
         : { name: trimmedName, root_path: trimmedPath };
-      const ws = await projectsApi.create(payload);
+      // Routes to the chosen execution target and records the project's
+      // origin BEFORE the deploys below, so they hit the same backend.
+      const ws = await execLocation.createProjectAt(payload);
       const failed = await memberPicker.deploy(ws.id);
       if (failed > 0) {
         toast.warning(t("project.deployPartialFail", { count: failed }));
       }
       toast.success(t("project.created", { name: trimmedName }));
+      if (execLocation.isRemoteTarget && execLocation.initialFiles.length > 0) {
+        toast.info(t("project.initialFilesUploading"));
+        void execLocation
+          .uploadInitialFiles(ws.id)
+          .then((count) =>
+            toast.success(t("project.initialFilesUploaded", { count })),
+          )
+          .catch(() => toast.error(t("project.initialFilesFailed")));
+      } else if (managed && onUploadInitialContent) {
+        void onUploadInitialContent(ws.id);
+      }
       setNewName("");
       setNewRootPath("");
       memberPicker.reset();
+      execLocation.reset();
       setCreateOpen(false);
       await fetchProjects();
       navigate(`/projects/${ws.id}`);
-      if (managed && onUploadInitialContent) {
-        void onUploadInitialContent(ws.id);
-      }
     } catch (err) {
       const message =
         err instanceof Error ? err.message : t("project.createFailed");
@@ -556,6 +591,22 @@ export function ProjectLayoutBase({
       setCreateError("");
     }
   };
+
+  // Multi-target degraded mode: one side of the list fan-out failing means
+  // the lists render but may be incomplete — surface a slim hint bar.
+  const degradedTargets = useDegradedListTargets();
+  const degradedLabels = useMemo(() => {
+    if (degradedTargets.length === 0) return "";
+    const registered = getExecutionTargets();
+    return degradedTargets
+      .map((id) => {
+        const target = registered.find((candidate) => candidate.id === id);
+        return target
+          ? t(target.labelKey as Parameters<typeof t>[0])
+          : id;
+      })
+      .join(" / ");
+  }, [degradedTargets, t]);
 
   const pageLabel = useMemo(() => {
     const match = desktopRoutes.find(
@@ -587,12 +638,13 @@ export function ProjectLayoutBase({
       </span>
     ));
   const resolvedRightPanel = controlledRightPanel ?? rightPanel;
-  // Skills / Connectors use the right-panel slot for a master-detail layout
+  // Skills / Connectors / Agents use the right-panel slot for a master-detail layout
   // (list + detail), not a collapsible side panel — so the collapse toggle
   // is meaningless there and is hidden.
   const suppressRightPanelToggle =
     location.pathname.startsWith("/skills") ||
-    location.pathname.startsWith("/connectors");
+    location.pathname.startsWith("/connectors") ||
+    location.pathname.startsWith("/agents");
   const rightPanelToggle =
     resolvedRightPanel && !suppressRightPanelToggle ? (
       <TooltipProvider delayDuration={150}>
@@ -643,7 +695,7 @@ export function ProjectLayoutBase({
   // contributes no topbarActions / rightPanelToggle.
   const topbarRightControl = (
     <div className="flex items-center gap-1">
-      <DecisionInboxBadge />
+      <NotificationBadge />
       {topbarActions}
       {rightPanelToggle}
     </div>
@@ -652,8 +704,8 @@ export function ProjectLayoutBase({
   return (
     <ErrorBoundary>
       <OfflineBanner />
-      <DecisionInboxProvider />
-      <DecisionDrawer />
+      <NotificationProvider />
+      <NotificationDrawer />
       <AppShell
         appTitle={branding.appName}
         activePath={location.pathname}
@@ -915,11 +967,21 @@ export function ProjectLayoutBase({
             : null
         }
       >
-        <div
-          key={location.pathname}
-          className="h-full min-h-0 animate-page-enter"
-        >
-          <Outlet context={outletContext} />
+        <div className="flex h-full min-h-0 flex-col">
+          {degradedLabels ? (
+            <div className="shrink-0 border-b border-warning-border bg-warning-light px-4 py-1.5 text-xs text-warning-text">
+              {t("system.execTargetUnreachable", { targets: degradedLabels })}
+            </div>
+          ) : null}
+          <div
+            // Keyed so a page change replays the enter animation — except
+            // within the conversation family, which transitions in place
+            // (see ``outletTransitionKey``).
+            key={outletTransitionKey(location.pathname)}
+            className="min-h-0 flex-1 animate-page-enter"
+          >
+            <Outlet context={outletContext} />
+          </div>
         </div>
       </AppShell>
       <AppToaster />
@@ -931,6 +993,7 @@ export function ProjectLayoutBase({
           if (!open) {
             setCreateError("");
             memberPicker.reset();
+            execLocation.reset();
           }
         }}
       >
@@ -952,7 +1015,14 @@ export function ProjectLayoutBase({
                 onChange={(event) => setNewName(event.target.value)}
               />
             </div>
-            {directoryFieldMode === "managed" ? (
+            <ProjectLocationFields state={execLocation} />
+            {execLocation.isRemoteTarget ? (
+              // Remote target: managed cwd + the optional initial-folder
+              // upload above replace the local directory binding entirely.
+              createError ? (
+                <p className="text-xs text-destructive">{createError}</p>
+              ) : null
+            ) : directoryFieldMode === "managed" ? (
               <div className="flex flex-col">
                 <label className="mb-[5px] text-xs font-medium text-foreground">
                   {t("project.projectDir")}
@@ -1038,7 +1108,9 @@ export function ProjectLayoutBase({
               onClick={() => void handleCreateProject()}
               disabled={
                 !newName.trim() ||
-                (directoryFieldMode !== "managed" && !newRootPath.trim())
+                (directoryFieldMode !== "managed" &&
+                  !execLocation.isRemoteTarget &&
+                  !newRootPath.trim())
               }
             >
               {t("project.create")}

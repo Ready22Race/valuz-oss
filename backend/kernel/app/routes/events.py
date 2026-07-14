@@ -1,4 +1,5 @@
-"""Cross-session event routes — /api/v1/events.
+"""Cross-session event routes — ``{KERNEL_API_PREFIX}/v1/events`` (default
+``/api/v1/events`` — see ``app.routes.KERNEL_API_PREFIX``).
 
 The global stream is the remote analog of the in-process
 ``SessionOrchestrator.attach_global_tap``: one SSE connection carries
@@ -15,11 +16,12 @@ from typing import Annotated, Any
 
 from app.dependencies import get_orchestrator
 from app.event_stream import GlobalQueueTap
+from app.routes import KERNEL_API_PREFIX
 from app.serializers import live_event_to_data
 from fastapi import APIRouter, Depends, Request
 from sse_starlette.sse import EventSourceResponse
 
-router = APIRouter(prefix="/api/v1/events", tags=["events"])
+router = APIRouter(prefix=f"{KERNEL_API_PREFIX}/v1/events", tags=["events"])
 
 STREAM_HEARTBEAT_SECONDS = 15.0
 

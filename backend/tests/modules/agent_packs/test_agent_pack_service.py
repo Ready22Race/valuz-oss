@@ -83,17 +83,26 @@ async def test_list_packs(svc: AgentPackService) -> None:
     packs = await svc.list_packs(USER)
     assert [p["id"] for p in packs] == [
         "product-strategy",
+        "design-prototype",
         "development-engineering",
+        "qa-testing",
         "investment",
         "supply-chain-tracking",
         "competitive-intelligence",
+        "content-growth",
+        "campaign-event",
         "content",
+        "short-video-growth",
         "contract-review",
+        "compliance-review",
         "academic-research",
+        "training-program",
         "recruiting-evaluation",
         "chinese-metaphysics",
+        "health-report",
+        "tarot-astrology",
     ]
-    assert sum(len(p["roles"]) for p in packs) == 40
+    assert sum(len(p["roles"]) for p in packs) == 76
     assert all(
         {skill for role in p["roles"] for skill in (role.get("skills") or [])} for p in packs
     )
@@ -101,14 +110,24 @@ async def test_list_packs(svc: AgentPackService) -> None:
     by_id = {p["id"]: p for p in packs}
     assert all(s["source"] == "bundled" for s in by_id["investment"]["skills"])
     assert all(s["source"] == "bundled" for s in by_id["supply-chain-tracking"]["skills"])
+    assert all(s["source"] == "bundled" for s in by_id["content"]["skills"])
     for pack_id in (
         "product-strategy",
+        "design-prototype",
         "development-engineering",
+        "qa-testing",
         "competitive-intelligence",
+        "content-growth",
+        "campaign-event",
+        "short-video-growth",
         "contract-review",
+        "compliance-review",
         "academic-research",
+        "training-program",
         "recruiting-evaluation",
         "chinese-metaphysics",
+        "health-report",
+        "tarot-astrology",
     ):
         assert by_id[pack_id]["skills"]
         assert all(s["source"] == "skillhub" for s in by_id[pack_id]["skills"])

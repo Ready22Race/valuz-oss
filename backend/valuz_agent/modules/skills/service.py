@@ -79,6 +79,32 @@ def _creation_origin_from_index_row(row: Any) -> CreationOrigin:
     return "discovered"
 
 
+def _manifest_defaults_to_library_enabled(manifest: Any) -> bool:
+    # Official/bundled skills stay visible out of the box. User/project skills
+    # merely discovered on disk start disabled until the user turns them on.
+    return getattr(manifest, "scope", None) == "official" or getattr(
+        manifest, "origin_label", None
+    ) == "Built-in"
+
+
+async def _after_skill_saved_hook(user_id: str, skill: SkillView, origin: str) -> None:
+    if origin not in {"created", "imported"}:
+        return
+    from valuz_agent.ports.extensions import ext
+
+    await ext.skill_lifecycle.after_skill_saved(
+        user_id=user_id,
+        skill=skill,
+        creation_origin=origin,
+    )
+
+
+async def _before_skill_delete_hook(user_id: str, skill: SkillView) -> None:
+    from valuz_agent.ports.extensions import ext
+
+    await ext.skill_lifecycle.before_skill_delete(user_id=user_id, skill=skill)
+
+
 def _official_skill_view_from_index_row(
     row: Any,
     *,
@@ -191,6 +217,7 @@ async def _upsert_skill_row(user_id: str, ds: SkillDatastore, manifest) -> None:
                 content_hash=manifest.content_hash,
                 manifest_hash=manifest.manifest_hash,
                 folder_created_at=manifest.folder_created_at,
+                library_enabled=_manifest_defaults_to_library_enabled(manifest),
                 # New rows default to "discovered"; the create / import flows
                 # overwrite this via set_creation_origin right after.
                 creation_origin="discovered",
@@ -383,7 +410,12 @@ class SkillLibraryService:
                 compute_content_hash=False,
             )
             skills = [
-                SkillView(**item.model_dump(), creation_origin=_origin(item.slug)) for item in items
+                SkillView(
+                    **item.model_dump(),
+                    creation_origin=_origin(item.slug),
+                    library_enabled=_manifest_defaults_to_library_enabled(item),
+                )
+                for item in items
             ]
 
         from valuz_agent.modules.skills.contracts import ProjectRef, RuntimeContext
@@ -421,7 +453,11 @@ class SkillLibraryService:
 
             manifests = await asyncio.to_thread(source.list_skills, ctx, compute_content_hash=False)
             for manifest in manifests:
-                view = SkillView(**manifest.model_dump(), creation_origin=_origin(manifest.slug))
+                view = SkillView(
+                    **manifest.model_dump(),
+                    creation_origin=_origin(manifest.slug),
+                    library_enabled=_manifest_defaults_to_library_enabled(manifest),
+                )
                 # Bundled skills (origin_label="Built-in") ship with the
                 # client and are always free; never gate them behind the
                 # entitlement. Only externally-installed official skills
@@ -487,13 +523,11 @@ class SkillLibraryService:
 
         # Overlay the global library switch (per index row, user-scoped). Default
         # is on, so we only flip the rows explicitly turned off. This is the field
-        # the new-conversation ``/`` picker filters on. Built-in skills (bundled
-        # with the client) are always-on and can't be disabled — guard here too so
-        # a forced row value can never hide one, mirroring the disabled UI toggle.
+        # the new-conversation ``/`` picker filters on.
         disabled_slugs = await self._ds.list_library_disabled_slugs(user_id)
         if disabled_slugs:
             for s in skills:
-                if s.slug in disabled_slugs and s.origin_label != "Built-in":
+                if s.slug in disabled_slugs:
                     s.library_enabled = False
 
         return SkillsCatalog(project_id=project_id, skills=skills)
@@ -651,6 +685,8 @@ class SkillLibraryService:
             except KeyError:
                 continue
             await self._ds.set_creation_origin_by_slug(user_id, written.slug, "created")
+            await self._ds.set_library_enabled_by_slug(user_id, written.slug, True)
+            await _after_skill_saved_hook(user_id, written, "created")
 
         return results
 
@@ -831,6 +867,7 @@ class SkillLibraryService:
         if mode == "dry_run":
             return preview
 
+        await _before_skill_delete_hook(user_id, skill)
         skill_dir = Path(skill.path)
         if skill_dir.exists():
             shutil.rmtree(skill_dir)
@@ -838,7 +875,22 @@ class SkillLibraryService:
         for project in await self._projects.list_projects(user_id):
             if project.kind == "project":
                 self._ds.remove_skill_path_from_project(project, skill.path)
+        await self._cleanup_marketplace_install(user_id, skill.slug)
         return None
+
+    async def _cleanup_marketplace_install(self, user_id: str, slug: str) -> None:
+        """Best-effort marketplace provenance cleanup for a deleted skill —
+        a market-installed skill loses its ``marketplace_install`` row so a
+        later reinstall re-establishes fresh provenance instead of looking
+        "already tracked" against stale state. Never blocks the delete
+        itself: a test double datastore without a real session, or any
+        storage hiccup, is swallowed."""
+        try:
+            from valuz_agent.modules.marketplace.install_store import MarketplaceInstallStore
+
+            await MarketplaceInstallStore(self._ds.session).remove_by_ref(user_id, slug)
+        except Exception:  # noqa: BLE001 — best-effort; missing provenance is harmless
+            logger.warning("marketplace install cleanup failed for skill %s", slug, exc_info=True)
 
     async def import_from_session_confirm(
         self,
@@ -1105,11 +1157,11 @@ class SkillLibraryService:
             sum(1 for _ in skill_dir.rglob("*") if _.is_file()) if skill_dir.exists() else 0
         )
 
-        # Overlay the global library switch (default on; off only when stored).
-        # Built-in skills are always-on (can't be disabled), so never flip them.
-        if skill.origin_label != "Built-in":
-            disabled_slugs = await self._ds.list_library_disabled_slugs(user_id)
-            skill.library_enabled = skill.slug not in disabled_slugs
+        # Overlay the global library switch for every skill, including bundled
+        # built-ins. Built-ins still default enabled, but users can hide them from
+        # new conversations.
+        disabled_slugs = await self._ds.list_library_disabled_slugs(user_id)
+        skill.library_enabled = skill.slug not in disabled_slugs
 
         return SkillDetail(
             **skill.model_dump(),
@@ -1800,7 +1852,10 @@ class SkillLibraryService:
         # creation_origin is host bookkeeping in valuz_skill_index — the
         # startup_scan above created the row as "discovered"; overwrite it.
         await self._ds.set_creation_origin_by_slug(user_id, skill.slug, "created")
+        await self._ds.set_library_enabled_by_slug(user_id, skill.slug, True)
         skill.creation_origin = "created"
+        skill.library_enabled = True
+        await _after_skill_saved_hook(user_id, skill, "created")
 
         return skill, creation_context, bound_project_id
 
@@ -1894,7 +1949,10 @@ class SkillLibraryService:
             pass
         skill = await self._resolve_created_skill(user_id, skill_dir, project_id=project_id)
         await self._ds.set_creation_origin_by_slug(user_id, skill.slug, origin)
+        await self._ds.set_library_enabled_by_slug(user_id, skill.slug, True)
         skill.creation_origin = origin
+        skill.library_enabled = True
+        await _after_skill_saved_hook(user_id, skill, origin)
         return skill
 
     async def _allocate_skill_dir(

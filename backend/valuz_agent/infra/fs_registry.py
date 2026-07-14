@@ -327,7 +327,7 @@ class FsRegistry:
         """Return the canonical write-target for promoted user skills.
 
         ``settings.user_skills_dir`` is the single source of truth. It defaults
-        to ``~/.agent/skills/`` and may contain ``{user_id}``, matching the
+        to ``~/.agents/skills/`` and may contain ``{user_id}``, matching the
         ``VALUZ_DATA_DIR`` template convention.
 
         ``source`` is kept for API compatibility but ignored: the host
@@ -362,7 +362,7 @@ class FsRegistry:
         Used by ``providers.skills_filesystem`` to surface skills the
         user authored in their Claude Code / Codex CLI before adopting
         Valuz. New promotions never write here — the canonical target
-        is ``user_skill_root()`` (``~/.agent/skills/`` by default).
+        is ``user_skill_root()`` (``~/.agents/skills/`` by default).
         """
         roots: list[Path] = []
         for sub in (".claude/skills", ".codex/skills"):
@@ -607,6 +607,32 @@ class FsRegistry:
             path = self.data_dir(user_id) / "memories" / "projects" / project_id
         else:  # pragma: no cover - guarded by Literal
             raise ValueError(f"unknown memory scope: {scope!r}")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # ---- FS-13 — memory review scratch cwd (memory-system-design §7.2) ----
+    #
+    # ONE fixed cwd shared by every ephemeral extraction session. Runtimes key
+    # per-project artifacts on the session cwd (claude-agent-sdk keeps
+    # transcripts under ``~/.claude/projects/<encoded-cwd>/``), so a fresh cwd
+    # per review leaked one such directory per extraction. The review session
+    # is no-tools and never writes here — sharing is safe.
+
+    def memory_review_cwd(self, user_id: str) -> Path:
+        path = self.data_dir(user_id) / "memory-review"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # ---- FS-14 — generative-UI scratch cwd (openui-generative-ui §5) ----
+    #
+    # ONE fixed cwd shared by every ephemeral generate_ui session. Runtimes key
+    # per-project artifacts on the session cwd (claude-agent-sdk keeps
+    # transcripts under ``~/.claude/projects/<encoded-cwd>/``), so a fresh cwd
+    # per call leaked one such directory per generation. The generative-UI
+    # session is no-tools and never writes here — sharing is safe.
+
+    def generative_ui_cwd(self, user_id: str) -> Path:
+        path = self.data_dir(user_id) / "generative-ui"
         path.mkdir(parents=True, exist_ok=True)
         return path
 

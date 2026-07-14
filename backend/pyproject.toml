@@ -133,13 +133,6 @@ dependencies = [
     # every platform so ``_resolve_codex_bin`` prefers it over a stray PATH
     # ``codex``.
     "openai-codex>=0.1.0b3",
-    # Declared directly (though ``openai-codex`` pins it transitively at
-    # ``==0.137.0a4``) for two reasons: (1) that pin is a PRERELEASE, and uv
-    # refuses a transitive prerelease unless the package carries a DIRECT
-    # prerelease specifier — this floor is what makes ``uv lock`` accept it; and
-    # (2) it documents the glibc ``manylinux`` floor the cloud Linux kernel image
-    # depends on (0.137.0a4 is the first codex binary with a manylinux wheel).
-    "openai-codex-cli-bin>=0.137.0a4",
 ]
 
 # Note: built-in parser plugins live in ``backend/parser_plugins/`` and
@@ -197,6 +190,16 @@ postgres = [
 # override is therefore gone: codex ships in the locked closure on all platforms,
 # matching upstream, and ``_resolve_codex_bin`` gets the pinned binary everywhere
 # (the cloud Linux kernel image no longer needs a hand-extracted musl binary).
+#
+# The constraint below is NOT a dependency — ``openai-codex`` alone owns which
+# ``openai-codex-cli-bin`` ships (its transitive ``==`` pin). It exists because
+# that pin is a PRERELEASE and uv only accepts a transitive prerelease when the
+# package appears with a prerelease specifier in direct dependencies or
+# constraints. A constraint keeps the resolver hint without a second dependency
+# to hand-maintain: the floor never needs bumping when ``openai-codex`` advances
+# (it also documents the first codex binary with a ``manylinux`` wheel, which
+# the glibc Linux cloud image depends on).
+constraint-dependencies = ["openai-codex-cli-bin>=0.137.0a4"]
 
 # The lockfile MUST stay installable on Intel macOS (x86_64 darwin) — our
 # lowest-common-denominator dev box (a 2019 Intel MBP on Ventura). Without this,

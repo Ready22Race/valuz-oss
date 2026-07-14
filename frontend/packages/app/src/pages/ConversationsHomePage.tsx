@@ -11,17 +11,22 @@ import {
   type SkillSearchItem,
 } from "@valuz/ui";
 import {
+  getDefaultExecutionTarget,
   providersApi,
   mcpProvidersApi,
+  recordEntityOrigin,
   sessionsApi,
+  useEntityOrigin,
   skillsApi,
   useComposerProviders,
+  useExecutionTargets,
   useModelDefaults,
   useRuntimes,
   usePanelStore,
   useSessionAttachments,
   projectsApi,
   type LLMChannelDetail,
+  type ProjectListItem,
   type RuntimeId,
   type SessionListItem,
   type SkillView,
@@ -29,6 +34,8 @@ import {
 import { homeSuggestions } from "@valuz/app/lib/prototype-data";
 import { useTranslation } from "@valuz/core";
 import { AttachmentParsingDialog } from "../components/AttachmentParsingDialog";
+import { OriginBadge } from "../components/ExecutionLocationPicker";
+import { ExecutionLocationBar } from "../components/ExecutionLocationBar";
 
 export const ConversationsHomePage = () => {
   const { t } = useTranslation();
@@ -36,6 +43,9 @@ export const ConversationsHomePage = () => {
   const panelSetCollapsed = usePanelStore((s) => s.setCollapsed);
   const [input, setInput] = useState("");
   const [recentSessions, setRecentSessions] = useState<SessionListItem[]>([]);
+  // Merged project list (multi-target fan-out tags rows with exec_origin) —
+  // feeds the execution-location bar's location-scoped project dropdown.
+  const [allProjects, setAllProjects] = useState<ProjectListItem[]>([]);
   const [dataSources, setDataSources] = useState<DataSourceOption[]>([]);
   const [enabledSlugs, setEnabledSlugs] = useState<string[]>([]);
   const [providers, setProviders] = useState<LLMChannelDetail[]>([]);
@@ -62,6 +72,19 @@ export const ConversationsHomePage = () => {
   const [selectedPermissionMode, setSelectedPermissionMode] = useState<
     "default" | "auto_review" | "full_access"
   >("full_access");
+  // Multi-target editions: where the quick chat runs. ``null`` follows the
+  // registered default; single-target builds have no targets and the picker
+  // renders nothing. Locked once the session is minted (same lifecycle as
+  // model/runtime per ADR-006).
+  const executionTargets = useExecutionTargets();
+  const [execTargetId, setExecTargetId] = useState<string | null>(null);
+  const resolveExecTarget = () => {
+    if (executionTargets.length === 0) return undefined;
+    return (
+      executionTargets.find((target) => target.id === execTargetId) ??
+      getDefaultExecutionTarget()
+    );
+  };
   const { defaults: modelDefaults, loading: defaultsLoading } =
     useModelDefaults();
 
@@ -99,6 +122,9 @@ export const ConversationsHomePage = () => {
     markPendingConsumed,
   } = useSessionAttachments(sessionId);
   const [parsingConfirmOpen, setParsingConfirmOpen] = useState(false);
+  // Observed origin of the minted quick-chat session — drives the locked
+  // bar's location chip (multi-target editions).
+  const mintedSessionOrigin = useEntityOrigin(sessionId, "session");
 
   const { runtimes: runtimeList } = useRuntimes();
   useEffect(() => {
@@ -181,6 +207,7 @@ export const ConversationsHomePage = () => {
         projectsApi.list(),
         sessionsApi.list(),
       ]);
+      setAllProjects(wsResponse.projects);
       const chatWsIds = new Set(
         wsResponse.projects.filter((w) => w.kind === "chat").map((w) => w.id),
       );
@@ -245,9 +272,36 @@ export const ConversationsHomePage = () => {
     permission_mode: selectedPermissionMode,
   });
 
+  // Create the quick-chat session on the chosen execution target (multi-target
+  // editions) and record the observation so every follow-up call for this
+  // session (messages / SSE / attachments / queue) routes to the same backend.
+  const createSession = async () => {
+    const target = resolveExecTarget();
+    let payload = sessionPayload();
+    if (target?.remote) {
+      // provider_id / model / runtime / connector picks reference THIS
+      // backend's rows — meaningless (400) on a remote target. Drop them so
+      // the owning backend resolves its own defaults; symbolic fields
+      // (permission_mode) stay.
+      payload = {
+        ...payload,
+        mcp_provider_slugs: undefined,
+        provider_id: undefined,
+        model_id: undefined,
+        runtime_id: undefined,
+      };
+    }
+    const session = await sessionsApi.create(
+      payload,
+      target ? { baseUrl: target.baseUrl } : undefined,
+    );
+    if (target) recordEntityOrigin(session.id, target.id);
+    return session;
+  };
+
   const handleNewChat = async () => {
     try {
-      const session = await sessionsApi.create(sessionPayload());
+      const session = await createSession();
       navigate(`/conversation/${session.id}`);
     } catch {
       navigate("/conversation/new");
@@ -258,7 +312,7 @@ export const ConversationsHomePage = () => {
   // ``sessionId`` so subsequent attaches + the send reuse the same session.
   const ensureSession = async (): Promise<{ id: string }> => {
     if (sessionId) return { id: sessionId };
-    const session = await sessionsApi.create(sessionPayload());
+    const session = await createSession();
     setSessionId(session.id);
     return { id: session.id };
   };
@@ -389,9 +443,13 @@ export const ConversationsHomePage = () => {
                       onClick={() => navigate(`/conversation/${session.id}`)}
                     >
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm text-ink-heading">
-                          {session.name ||
-                            t("cron.untitled" as Parameters<typeof t>[0])}
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate text-sm text-ink-heading">
+                            {session.name ||
+                              t("cron.untitled" as Parameters<typeof t>[0])}
+                          </span>
+                          {/* Execution origin (multi-target editions). */}
+                          <OriginBadge origin={session.exec_origin} />
                         </div>
                         {session.last_user_message_text ? (
                           <div className="mt-0.5 truncate text-xs text-ink-meta">
@@ -449,6 +507,12 @@ export const ConversationsHomePage = () => {
                 onConnect={handleConnectDataSource}
               />
             ) : null}
+            {/* Once the first attach mints the session the location is
+                locked (ADR-006) — show it as a badge; before that the
+                attached bar under the composer owns the choice. */}
+            {sessionId != null ? (
+              <OriginBadge entityId={sessionId} kind="session" />
+            ) : null}
             <Composer
               value={input}
               onChange={setInput}
@@ -488,18 +552,44 @@ export const ConversationsHomePage = () => {
                   id: a.id,
                   name: a.filename,
                   parseStatus: a.parse_status as
-                    | "parsing"
-                    | "ready"
-                    | "failed"
-                    | "native"
-                    | undefined,
+                    "parsing" | "ready" | "failed" | "native" | undefined,
                   sourceKind: a.source_kind,
                 }))}
               onRemovePinnedAttachment={(attId) => void removeAttachment(attId)}
-              onLocalUpload={(files) => void attachLocalFiles(files, ensureSession)}
-              onFileDrop={(files) => void attachLocalFiles(files, ensureSession)}
+              onLocalUpload={(files) =>
+                void attachLocalFiles(files, ensureSession)
+              }
+              onFileDrop={(files) =>
+                void attachLocalFiles(files, ensureSession)
+              }
               sending={sending}
               autoFocus
+              footerBar={
+                <ExecutionLocationBar
+                  locked={sessionId != null}
+                  lockedOriginId={mintedSessionOrigin}
+                  targetId={execTargetId}
+                  onTargetChange={setExecTargetId}
+                  projects={allProjects
+                    .filter((w) => w.kind === "project")
+                    .map((w) => ({
+                      id: w.id,
+                      name: w.name,
+                      execOrigin: w.exec_origin,
+                    }))}
+                  selectedProjectId={null}
+                  onProjectChange={(projectId) => {
+                    // The home composer is quick-chat only — a project
+                    // conversation needs the full agent-binding UX, so hand
+                    // off to /conversation/new with the project preset.
+                    if (projectId) {
+                      navigate(
+                        `/conversation/new?project=${encodeURIComponent(projectId)}`,
+                      );
+                    }
+                  }}
+                />
+              }
             />
             <AttachmentParsingDialog
               open={parsingConfirmOpen}

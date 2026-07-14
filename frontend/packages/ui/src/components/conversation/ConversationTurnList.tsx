@@ -1255,6 +1255,20 @@ export function ConversationTurnList({
           </div>
         </div>
       ) : null}
+
+      {/* Transcript still loading with nothing on screen yet: show the
+          shimmer instead of literally nothing. Every history load used to
+          render an empty body for its whole duration (the welcome state is
+          gated to new chats), which read as a blank white page whenever the
+          bootstrap fetch chain was slow. Mutually exclusive with the
+          ``sending`` shimmer above. */}
+      {!sending && loading && turns.length === 0 ? (
+        <div className="mt-[26px] flex items-start gap-3">
+          <div className="flex items-center py-2.5">
+            <LogoShimmer />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

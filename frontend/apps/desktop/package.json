@@ -16,7 +16,7 @@
     "build": "pnpm typecheck && vite build --config vite.renderer.config.ts && vite build --config vite.main.config.ts && vite build --config vite.preload.config.ts && electron-builder --config build/electron-builder.yml",
     "build:signed": "set -a && . ./.env.local && set +a && pnpm run build",
     "preview": "vite preview --config vite.renderer.config.ts",
-    "test": "vitest run --passWithNoTests --config ../../vitest.config.ts",
+    "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.preload.json",
     "lint": "eslint --config ../../eslint.config.js src",
     "clean": "rm -rf dist dist-electron release"

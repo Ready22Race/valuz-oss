@@ -3,8 +3,8 @@
   "kind": "agent-pack",
   "collection": {
     "id": "training-program",
-    "name": { "zh-CN": "培训课程 Team", "en-US": "Training Program Team" },
-    "description": { "zh-CN": "培训目标、课程大纲、工作坊设计、材料转化，适合企业培训和内部赋能", "en-US": "Training goals, curriculum outline, workshop design, and material conversion for enablement" },
+    "name": { "zh-CN": "课程设计", "en-US": "Course Design" },
+    "description": { "zh-CN": "把主题、对象和时长转成课程大纲、课时安排、练习任务和讲师备注", "en-US": "Turns a topic, audience, and duration into a course outline, session plan, exercises, and facilitator notes" },
     "scenario": { "zh-CN": "教育学术", "en-US": "Education & Academia" },
     "icon": "graduation"
   },

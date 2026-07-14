@@ -82,7 +82,9 @@ describe("ProjectsPage", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Create" }).at(-1)!);
 
     await waitFor(() => {
-      expect(create).toHaveBeenCalledWith({ name: "Cloud" });
+      // Second arg is the execution-target opts — undefined on
+      // single-target builds (no targets registered in this test).
+      expect(create).toHaveBeenCalledWith({ name: "Cloud" }, undefined);
     });
   });
 });

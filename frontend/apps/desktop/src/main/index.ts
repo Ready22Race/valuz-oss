@@ -4,6 +4,15 @@ import { Menu, app, ipcMain, nativeImage, protocol } from "electron";
 // Override the default "Electron" app name shown in macOS menu bar and tray
 app.setName("Valuz");
 
+// Lift Chromium's 6-connections-per-host HTTP/1.1 cap for the loopback backend.
+// The renderer holds several long-lived SSE streams to valuz-server (decision
+// inbox, per-conversation event stream, Activity per-run streams) — with only
+// 6 sockets, those streams plus a burst of polls starve the pool and every
+// other fetch to 127.0.0.1 queues browser-side as (pending) with 0 bytes.
+// Loopback only: connections to remote/LAN backends keep Chromium defaults.
+// Must run before app "ready".
+app.commandLine.appendSwitch("ignore-connections-limit", "127.0.0.1,localhost");
+
 // The custom scheme that serves local files to our own renderer must be
 // declared privileged BEFORE the app is ready (module-eval time).
 import {

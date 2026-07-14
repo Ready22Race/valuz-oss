@@ -3,7 +3,7 @@
   "kind": "agent-pack",
   "collection": {
     "id": "health-report",
-    "name": { "zh-CN": "健康报告解读 Team", "en-US": "Health Report Interpreter Team" },
+    "name": { "zh-CN": "健康报告解读", "en-US": "Health Report Reading" },
     "description": { "zh-CN": "体检报告整理、指标解释、健康记录和复查问题清单，定位为信息解释而非诊断", "en-US": "Checkup organization, metric explanation, health journaling, and follow-up questions, for information only" },
     "scenario": { "zh-CN": "特色分类", "en-US": "Specialty" },
     "icon": "heart-pulse"

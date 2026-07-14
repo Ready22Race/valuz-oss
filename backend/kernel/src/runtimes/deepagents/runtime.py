@@ -82,6 +82,25 @@ apply_deepagents_patches()
 DEFAULT_CHECKPOINT_DB = "./deepagents_checkpoints.db"
 CHECKPOINT_DB_ENV = "DEEPAGENTS_CHECKPOINT_DB"
 
+# In an ephemeral cloud sandbox the checkpoint must be EXTERNALIZED (per-owner
+# COS mount) so it survives sandbox recreation ("resume in a fresh sandbox").
+# sqlite CANNOT live on COS — sqlite-on-COS-FUSE corrupts (WAL -shm mmap, no
+# fcntl locking, whole-object PUT → SIGBUS / "database disk image is malformed").
+# So IN-SANDBOX we use FileCheckpointSaver (write-once JSON files, corruption-free
+# on COS). The LOCAL resident process keeps the sqlite store above (durable local
+# disk, single host — no reason to change it). Gate: _in_sandbox().
+DEFAULT_CHECKPOINT_ROOT = "./deepagents_checkpoints"
+CHECKPOINT_ROOT_ENV = "DEEPAGENTS_CHECKPOINT_ROOT"
+
+
+def _in_sandbox() -> bool:
+    """True inside the ephemeral cloud sandbox (→ file+COS checkpointer), false
+    for the local resident process (→ sqlite checkpointer). ``IS_SANDBOX`` is set
+    by the kernel sandbox image; ``KERNEL_STORE=remote`` is the SaaS store tier."""
+    return os.getenv("IS_SANDBOX", "").strip().lower() in ("1", "true", "yes") or (
+        os.getenv("KERNEL_STORE", "local").strip().lower() == "remote"
+    )
+
 # langchain TodoListMiddleware tool name (auto-included by deepagents). Treated
 # as a planning channel: emit `todo_update` and suppress the generic tool_use /
 # tool_result pair so the UI trace doesn't double-render it.
@@ -99,6 +118,7 @@ class DeepAgentsRuntime:
         toolkit: ToolKit | None = None,
         workspace_root: str = "",
         checkpoint_db: str | None = None,
+        checkpoint_root: str | None = None,
         model_provider: ModelProvider | None = None,
         model_settings: ModelSettings | None = None,
     ) -> None:
@@ -108,6 +128,9 @@ class DeepAgentsRuntime:
         self.toolkit = toolkit or ToolKit()
         self.workspace_root = workspace_root
         self.checkpoint_db = checkpoint_db or os.getenv(CHECKPOINT_DB_ENV) or DEFAULT_CHECKPOINT_DB
+        self.checkpoint_root = (
+            checkpoint_root or os.getenv(CHECKPOINT_ROOT_ENV) or DEFAULT_CHECKPOINT_ROOT
+        )
         self.model_provider = model_provider
         self.model_settings = model_settings
         self._graph: Any | None = None
@@ -1005,6 +1028,13 @@ class DeepAgentsRuntime:
                 kwargs["base_url"] = self.model_provider.base_url
             if effort is not None:
                 kwargs["effort"] = effort
+            # Unset max_tokens lets ChatAnthropic default from its profile
+            # registry, which bottoms out at 4096 for model names it doesn't
+            # know (gateway aliases, compatible third-party models) — pass an
+            # explicit cap for those so long answers don't truncate.
+            max_tokens = _resolve_anthropic_max_tokens(self.model)
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
             return ChatAnthropic(**kwargs)
 
         if protocol == "gemini":
@@ -1065,14 +1095,25 @@ class DeepAgentsRuntime:
         return ChatOpenAI(**openai_kwargs)
 
     async def _open_checkpointer(self) -> Any:
-        """Open the SQLite-backed checkpointer once per runtime instance.
+        """Open the checkpointer once per runtime instance (cached until close()).
 
-        Survives a process restart: thread-id (= session.id) plus this on-disk
-        store let langgraph rehydrate the conversation state on the next turn.
-        The CM is held until ``close()`` so the cached graph keeps a live
-        connection.
+        Thread-id (= session.id) lets langgraph rehydrate conversation state on
+        the next turn. Two backends by deployment (see ``_in_sandbox``):
+
+        - **Sandbox (ephemeral cloud):** ``FileCheckpointSaver`` over a per-owner
+          COS mount — write-once JSON files survive sandbox recreation and, unlike
+          sqlite, never corrupt on COS FUSE. No CM / no ``setup()``.
+        - **Local resident process:** the SQLite store on durable local disk. The
+          CM is held until ``close()`` so the cached graph keeps a live connection.
         """
         if self._checkpointer is not None:
+            return self._checkpointer
+        if _in_sandbox():
+            from src.adapters.file_checkpoint_saver import FileCheckpointSaver
+
+            os.makedirs(self.checkpoint_root, exist_ok=True)
+            self._checkpointer = FileCheckpointSaver(self.checkpoint_root)
+            self._checkpointer_cm = None  # file saver has no context manager
             return self._checkpointer
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -1248,6 +1289,47 @@ def _map_effort_for_gemini(effort: str) -> str:
     if effort in {"low", "medium", "high"}:
         return effort
     return "medium"
+
+
+# Explicit ``max_tokens`` for anthropic-protocol models langchain's profile
+# registry doesn't know. 32k is Claude Code's own default output cap: valid
+# for every current Claude model and battle-tested against the
+# anthropic-compatible gateways where unknown names actually occur.
+_ANTHROPIC_UNKNOWN_MODEL_MAX_TOKENS = 32_000
+
+
+def _resolve_anthropic_max_tokens(model: str) -> int | None:
+    """Resolve an explicit ``max_tokens`` for ``ChatAnthropic``, or ``None``.
+
+    ``ChatAnthropic`` fills an unset ``max_tokens`` from a bundled per-model
+    profile registry keyed by EXACT model name; any name it doesn't know —
+    gateway aliases like ``openrouter/claude-sonnet-4-5`` or
+    anthropic-compatible third-party models — silently falls back to 4096,
+    which truncates long answers with ``stop_reason: max_tokens``.
+
+    Returns ``None`` on a registry hit (ChatAnthropic's own per-model default
+    is correct — e.g. 64k for sonnet-4-x, 128k for opus-4-6+). On a miss,
+    retries with a leading ``vendor/`` gateway prefix stripped and forwards
+    that profile's cap; otherwise returns the safe fallback above.
+    """
+    try:
+        from langchain_anthropic.chat_models import _get_default_model_profile
+    except ImportError:
+        # Private helper moved in a langchain-anthropic upgrade: we can no
+        # longer tell known names from unknown, so degrade to pre-workaround
+        # behavior (knowns stay correct, unknowns fall back to langchain's
+        # 4096). test_deepagents_max_tokens pins the import so the upgrade
+        # PR revisits this instead of shipping the regression silently.
+        return None
+
+    if _get_default_model_profile(model).get("max_output_tokens") is not None:
+        return None
+    tail = model.rsplit("/", 1)[-1]
+    if tail != model:
+        cap = _get_default_model_profile(tail).get("max_output_tokens")
+        if cap is not None:
+            return int(cap)
+    return _ANTHROPIC_UNKNOWN_MODEL_MAX_TOKENS
 
 
 def _extract_full_text(output: Any) -> str:

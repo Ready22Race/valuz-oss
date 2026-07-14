@@ -6,13 +6,14 @@
 
 ## Product Positioning
 
-Valuz should ship one unified **Marketplace** entry, but the marketplace is not
-a clone of SkillHub. It is a Valuz-owned discovery and import surface for the
-objects in our own product model:
+Valuz should ship marketplace-backed import flows, but not as a standalone
+top-level sidebar module. The marketplace is a Valuz-owned discovery and import
+surface for the objects in our own product model:
 
 - **Skills** are agent equipment.
 - **Agents** are official or curated expert workers.
 - **Agent Teams** are curated scenario packages made of multiple Agents.
+- **Connectors** are MCP services that give Agents access to external tools.
 
 The new product decision is:
 
@@ -21,6 +22,7 @@ The new product decision is:
 | `Skills` | SkillHub skills + Valuz official skills | Can be supplied at scale. SkillHub is the main external source. |
 | `Agents` | Valuz official curated templates | Valuz defines the Agent identity, prompt, runtime, skills, and install behavior. |
 | `Agent Teams` | Valuz official curated templates | Valuz defines the team roles, lead/member relationship, and workflow. |
+| `Connectors` | Valuz built-ins + ModelScope MCP | ModelScope supplies discovery metadata; Valuz owns safety checks, configuration, connection, and runtime state. |
 | SkillHub `skillsets` / "expert packs" | Candidate material only | Use as source material for Valuz curation; do not expose them directly as final Agents or Teams. |
 
 In short:
@@ -35,28 +37,46 @@ The marketplace should avoid these concepts in the primary UI:
 - No top-level `Recommended` tab.
 - No top-level `Agent Team` tab.
 - No top-level `Suite` concept.
-- No MCP marketplace in this phase.
 - Do not bulk mirror all SkillHub expert packs as Agent Teams.
 
 If curation is needed later, it should be shown as ordering, pinned rows, or
-small sections inside `Agents` or `Skills`, not as a third marketplace module.
+small sections inside the relevant resource tab, not as a separate recommendation module.
 
 ## Core IA
 
-The market has only two primary tabs:
+The shared market surface has three resource-scoped tabs:
 
 | Tab | Contains | Notes |
 |---|---|---|
 | `Agents` | Valuz official/curated Agent Teams | Current phase leads with Teams only; single Agents stay out of the browse UI until the Team model is stable. |
 | `Skills` | SkillHub skills and Valuz official skills | Uses SkillHub categories/subcategories where available. |
+| `Connectors` | ModelScope MCP services | Shows common popular services by category and connects them through the existing Connector Library. |
+
+Search state is isolated per tab. A keyword entered in `Skills` must not filter
+the `Agents` or `Connectors` catalog after switching tabs, and vice versa. Returning to a tab may
+restore that tab's own keyword.
 
 Entry points:
 
 | Entry | Opens |
 |---|---|
-| Agent Library "Import from Marketplace" | `Marketplace > Agents` |
-| Skill Library "Import from Marketplace" | `Marketplace > Skills` |
+| Agent Library visible header CTA | `Marketplace > Agents` |
+| Skill Library visible header CTA | `Marketplace > Skills` |
+| Connector Library visible header CTA | `Marketplace > Connectors` |
 | Onboarding / first-run scenario suggestion | `Marketplace > Agents`, optionally highlighting a relevant Agent Team |
+
+The `/marketplace` route remains an internal shared browse surface, but it must
+not be shown as an independent primary sidebar tab. Users should encounter
+marketplace supply in the resource module where they already are: Agent Teams in
+the Agent Library, and SkillHub skills in the Skill Library. The CTA should be a
+visible lightweight `Marketplace` text action in the page header, not an option
+hidden under a `+` menu. When entered from a resource library, the marketplace
+must carry the source in the URL and show a clear return link back to that
+library. The Connector Library keeps `+` for custom HTTP/stdio configuration;
+its visible Market action opens ModelScope discovery. When the Agent Library has three or fewer Agents, it may also show a
+contextual list-end action to install an Agent Team from the marketplace. The
+`+` menu is reserved for direct creation and local import actions; it must not
+repeat marketplace or template-browsing entries.
 
 ## Asset Definitions
 
@@ -65,6 +85,35 @@ Entry points:
 | Skill | Reusable method, script, guide, or tool playbook that equips an Agent | Added to Skill Library; can be attached to Agents | SkillHub + Valuz official skills |
 | Agent | One expert worker with name, role, instructions, runtime/model, skills, and connectors | Added to Agent Library | Valuz official curated templates |
 | Agent Team | A scenario package made of multiple Agents with defined responsibilities | Adds multiple Agents into the library; optionally deploys them to a Project | Valuz official curated templates |
+| Connector | A reusable MCP tool service | Added to Connector Library and probed by the existing connector runtime | ModelScope + Valuz built-ins |
+
+## ModelScope Connector Supply
+
+The Connectors tab reads ModelScope's public MCP list in real time. It does not
+maintain a durable mirror or a large hand-curated ID list.
+
+- Category changes call `PUT /openapi/v1/mcp/servers` with
+  `filter.category`; keyword searches use the upstream `search` field.
+- Browse preserves ModelScope's default order and requests only
+  `is_hosted=true` entries, using 20-item pages with Load More up to the
+  documented first 100 results. Valuz does not impose a separate popularity
+  order or a fixed card count.
+- The list response is for discovery only. Opening a card fetches its detail
+  and reads `server_config` before the Connect action is enabled.
+- Direct connection accepts only portable `npx` / `uvx` stdio packages or
+  public HTTPS Streamable HTTP / SSE configurations.
+- Local paths, arbitrary shell commands, and ModelScope-deployment-only entries
+  remain visible but are marked unavailable for direct connection.
+- Required `env_schema` values become explicit setup fields. Secret-looking
+  API key/token/password fields are treated as secrets and are never copied
+  from upstream sample values.
+
+ModelScope's MCP OpenAPI currently exposes `view_count` in list results and
+`github_stars` / `is_verified` in details. These values are displayed as
+context, but ordering remains ModelScope-owned. Hosted filtering intentionally
+trades a small amount of catalog breadth for configurations that have passed
+ModelScope's deployment check; Valuz still validates the selected detail before
+connection.
 
 Current UI rule: the Agents tab shows Agent Teams only. Curated single Agents
 can remain as an internal template resource/API capability, but they should not
@@ -210,7 +259,7 @@ expert-pack scenes, not raw API scene names. The marketplace architecture uses:
 | 营销增长 | 竞品情报团队、内容增长团队、活动策划团队 |
 | 内容创作 | 视频制作团队、短视频增长团队 |
 | 法务安全 | 合同审查团队、合规审查团队 |
-| 教育学术 | 学术研究团队、统计分析团队、培训课程团队、教学材料团队 |
+| 教育学术 | 学术研究团队、课程设计团队 |
 | 运营人力 | 招聘评估团队 |
 | 特色分类 | 健康报告解读、国学玄学、塔罗星座 |
 
@@ -236,7 +285,7 @@ First visible seed catalog:
 | 营销增长 | 竞品情报 | Broadly useful, low setup, clear business outcome. |
 | 内容创作 | 小红书内容创作 | Keep the bundled Xiaohongshu note workflow as the first content-creation seed; postpone generic video production until the workflow is clearer. |
 | 法务安全 | 合同审核 | Concrete workflow and easier to understand than broad compliance. |
-| 教育学术 | 学术研究 | Broadest academic use case; search/review/write workflow is clear. |
+| 教育学术 | 学术研究、课程设计 | Keep 学术研究 for papers/literature work, and add 课程设计 for turning a topic into syllabus, sessions, exercises, and facilitator notes. |
 | 运营人力 | 招聘评估 | Single clear HR workflow with obvious multi-agent handoff. |
 | 特色分类 | 国学解读 | Most distinctive category signal; position as culture/entertainment. |
 
@@ -256,6 +305,12 @@ Naming and instruction polish:
   invalidation conditions. Any mention of Serenity's claimed track record must
   be treated as method background only (`作者自述 / 未经独立审计`) and should not
   appear as card copy or proof of expected performance.
+- Education/academic Team names should map to user tasks. Keep `课程设计`
+  instead of `培训课程`; it is clearer because the Team turns a topic, audience,
+  and duration into a course outline, session plan, exercises, and facilitator
+  notes. Do not show `统计分析` in this category for now; users perceive it as a
+  data-analysis Team. Do not show `教学材料` until the product explicitly targets
+  teachers with a separate teaching-material workflow.
 - The first Agent in each Team is the Lead. The Lead instruction owns intake,
   task decomposition, member handoff, synthesis, and final delivery.
 - Member Agent instructions should not be one-line role blurbs. Each member

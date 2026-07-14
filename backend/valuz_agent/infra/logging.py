@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
+import sys
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 
@@ -184,8 +185,10 @@ _HANDLER_TAG = "_valuz_handler"
 # (``api.middleware.TimingMiddleware``). A handful of endpoints are polled by
 # the desktop UI every few seconds and carry no signal:
 #
-#   - ``/v1/system/status`` (~every 5s) and ``/internal/mcp`` — ``TimingMiddleware``
-#     hard-skips these (logs *nothing*), so the uvicorn line is the only noise left.
+#   - ``/v1/system/status`` (~every 5s) and ``/_internal/mcp`` /
+#     ``/internal/mcp`` (ADR-013 dual-mount, see ``api/app.py::_mount_internal``)
+#     — ``TimingMiddleware`` hard-skips these (logs *nothing*), so the uvicorn
+#     line is the only noise left.
 #   - ``/v1/runs`` (the activity overview, polled every few seconds) — demoted to
 #     DEBUG in ``TimingMiddleware``; uvicorn printing it at INFO defeats that choice.
 #   - ``/.well-known/oauth-...`` — MCP OAuth-discovery probes that 404 by design
@@ -197,7 +200,7 @@ _HANDLER_TAG = "_valuz_handler"
 _ACCESS_LOG_SILENCED_PREFIXES = (
     "/v1/runs",
     "/v1/system/status",
-    "/internal/mcp",
+    "/_internal/mcp",
     "/.well-known/oauth-authorization-server",
     "/.well-known/oauth-protected-resource",
 )
@@ -241,9 +244,21 @@ def configure_logging(level: int = logging.INFO) -> None:
     """
     root = logging.getLogger()
 
-    # Strip any handlers we previously added; leave foreign ones alone.
+    # Strip any handlers we previously added; foreign FILE handlers are left
+    # alone, but the console belongs to us alone: alembic's ``fileConfig``
+    # (run for the host/kernel/overlay migration chains at boot) plants a
+    # root StreamHandler with its generic formatter, and FastMCP's
+    # constructor (``mcp.server.fastmcp``) plants a ``RichHandler`` via
+    # ``logging.basicConfig`` — each would render every line a second time
+    # next to our tagged console handler.
     for handler in list(root.handlers):
         if getattr(handler, _HANDLER_TAG, False):
+            root.removeHandler(handler)
+        elif type(handler).__name__ == "RichHandler":
+            root.removeHandler(handler)
+        elif type(handler) is logging.StreamHandler and getattr(
+            handler, "stream", None
+        ) in (sys.stderr, sys.stdout):
             root.removeHandler(handler)
 
     # 1) Console handler — preserves the existing dev experience. Format

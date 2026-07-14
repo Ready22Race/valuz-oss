@@ -21,10 +21,12 @@ backend/
 ├── alembic/                      # both migration chains (moved out of the packages)
 │   ├── host/                     #   host chain — version_table = alembic_version_host
 │   └── kernel/                   #   kernel chain — version_table = alembic_version
-├── kernel/                       # Agent Harness core — see §6 for the seam
+├── kernel/                       # Agent Harness core — see §6 for the seam.
+│   │                             #   Maintained IN-TREE: copied in from Agent
+│   │                             #   Harness V5 at repo creation, evolved here
+│   │                             #   ever since (no upstream, no re-vendor)
 │   ├── src/                      #   core/ · adapters/ (SQLAlchemyStore) · runtimes/
-│   ├── app/                      #   FastAPI subrouters mounted at /api/v1/*
-│   └── KERNEL_VERSION            #   provenance: last vendored upstream commit
+│   └── app/                      #   FastAPI subrouters mounted at /kernel/v1/*
 │
 └── valuz_agent/                  # Host application
     ├── api/                      # HTTP: app.py (factory), deps.py, middleware.py, routes/
@@ -123,7 +125,9 @@ analytics-ORM bypasses are retired). The former in-process
 tool-handler registration is retired too: the harness tools (dispatch /
 orchestration / memory / submit_skill) are served by the host's toolkit
 MCP server (`integrations/toolkit_mcp_server.py`, mounted at
-`/internal/mcp/toolkit/{base,lead}`) and referenced from
+`/_internal/mcp/toolkit/{base,lead}` — ADR-013; dual-mounted at the legacy
+`/internal/mcp/toolkit/{base,lead}` too, see `api/app.py::_mount_internal`)
+and referenced from
 `session.mcp_servers` as the `harness` entry — every runtime consumes
 them through its standard MCP client path, in-process and remote alike.
 
@@ -206,6 +210,11 @@ Every migration must be **reversible** — always implement `downgrade()`.
 Autogenerate against the async engine, then review the diff (SQLite has limited
 `ALTER`; batch ops are often required).
 
+Alembic revision ids are string-typed but must be pure numeric strings, e.g.
+`revision: str = "0020"` and `down_revision: str | None = "0019"`. Do not use
+descriptive ids such as `"0020_some_feature"`; keep descriptions in the
+filename/docstring instead so the version tables remain numeric and consistent.
+
 ## The adapter seam
 
 `valuz_agent/adapters/*` is the only place the host and kernel meet. Each
@@ -278,7 +287,10 @@ cd backend
 uv sync                          # create .venv, install deps
 uv sync --extra dev              # + pytest, mypy, ruff
 
+VALUZ_DATA_DIR=~/.valuz-oss-dev VALUZ_LOG_DIR=~/.valuz-oss-dev/logs \
 uv run python -m valuz_agent --port 8000 --reload   # what dev.sh spawns
+# Direct invocation defaults to the PRODUCTION ~/.valuz-oss — always pin
+# VALUZ_DATA_DIR (dev.sh does this for you; see scripts/dev.sh header).
 uv run python -m valuz_agent.cli serve --port 8000  # Typer CLI
 uv run python -m valuz_agent.cli reset-providers
 

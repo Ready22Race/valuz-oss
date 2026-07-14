@@ -70,6 +70,7 @@ router = APIRouter(tags=["skills"])
 @router.get("/v1/skills")
 async def list_skills(
     project_id: str | None = Query(default=None),
+    library_enabled: bool | None = Query(default=None),
     svc: SkillLibraryService = Depends(get_skill_service),
     user_id: str = Depends(get_current_user_id),
 ) -> dict:
@@ -87,6 +88,12 @@ async def list_skills(
     data["skills"] = await ext.resource_list_hook.apply(
         "skill", data.get("skills", []), user_id=user_id
     )
+    if library_enabled is not None:
+        data["skills"] = [
+            skill
+            for skill in data.get("skills", [])
+            if (skill.get("library_enabled", True) is not False) == library_enabled
+        ]
     return data
 
 

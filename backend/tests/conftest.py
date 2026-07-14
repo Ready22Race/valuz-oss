@@ -8,7 +8,6 @@ from functools import wraps
 # regression test (``test_parse_pool_offload``) re-enables the pool explicitly.
 os.environ.setdefault("VALUZ_PARSE_POOL_DISABLED", "1")
 
-
 # ---------------------------------------------------------------------------
 # Owner context — explicit-identity semantics (no implicit fallback).
 #
@@ -153,3 +152,19 @@ def _apply_default_user_id_patches():
 
 def pytest_sessionstart(session):
     _apply_default_user_id_patches()
+
+@pytest.fixture(autouse=True)
+def _isolate_user_skills_dir(tmp_path, monkeypatch):
+    """Hard fence: NEVER let a test write the real ``~/.agents/skills``.
+
+    ``settings.user_skills_dir`` defaults to the REAL home skill library
+    (shared by the packaged app and every dev instance). A test that
+    exercises skill create/import without its own isolation used to leak
+    fixture skills (``created``, ``empty-session-2``, ...) into the user's
+    actual library, which every instance then indexed and materialized into
+    every project. Tests that need a specific root still win: their own
+    monkeypatch runs after this autouse fixture.
+    """
+    from valuz_agent.infra.config import settings as _settings
+
+    monkeypatch.setattr(_settings, "user_skills_dir", tmp_path / "_isolated-user-skills")

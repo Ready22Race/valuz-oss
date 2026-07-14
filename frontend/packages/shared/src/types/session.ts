@@ -33,6 +33,10 @@ export interface SessionListItem {
   name: string | null;
   status: "created" | "running" | "idle" | "failed" | "cancelled" | "archived";
   origin: "user" | "schedule" | "automation";
+  /** CLIENT-side tag on multi-target editions: which execution target
+   * answered the list row (e.g. "local"/"cloud"). Distinct from ``origin``
+   * (the server-side initiator). Never sent by the server. */
+  exec_origin?: string;
   last_user_message_text: string | null;
   locked_model_id: string | null;
   /**

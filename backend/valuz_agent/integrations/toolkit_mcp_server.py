@@ -37,7 +37,9 @@ enforcement point.
 
 Wire shape
 ----------
-    POST /internal/mcp/toolkit/{base|lead}
+    POST /_internal/mcp/toolkit/{base|lead}
+      (also served at the legacy ``/internal/mcp/toolkit/{base|lead}`` —
+      ADR-013 dual-mount, see ``api/app.py::_mount_internal``)
       headers:
         X-Valuz-Internal:    <per-process token>
         X-Valuz-Session-Id:  <kernel session id>
@@ -185,7 +187,9 @@ async def toolkit_mcp_session_managers_run() -> AsyncIterator[None]:
 
 
 def build_toolkit_mcp_asgi(toolset: str) -> Any:
-    """Return an ASGI app to mount at ``/internal/mcp/toolkit/{toolset}``.
+    """Return an ASGI app to mount at ``/_internal/mcp/toolkit/{toolset}``
+    (and, dual-mounted for pre-ADR-013 session compatibility,
+    ``/internal/mcp/toolkit/{toolset}`` — see ``api/app.py::_mount_internal``).
 
     Each request: verify ``X-Valuz-Internal``, record
     ``X-Valuz-Session-Id`` into the ContextVar, delegate to the toolset's
@@ -215,10 +219,15 @@ def toolkit_mcp_url(*, base_url: str, toolset: str) -> str:
     mount — a bare mount-root URL would draw a 307 redirect, which MCP
     clients don't reliably follow on POST. The stateless session manager
     itself is path-agnostic.
+
+    ADR-013: newly created sessions get the ``/_internal/...`` path;
+    ``/internal/...`` stays mounted so session snapshots that persisted the
+    pre-rename URL keep working on restore (see ``api/app.py::_mount_internal``,
+    removed the next OSS major version).
     """
     if toolset not in TOOLSET_NAMES:
         raise ValueError(f"unknown toolkit toolset: {toolset}")
-    return f"{base_url.rstrip('/')}/internal/mcp/toolkit/{toolset}/mcp"
+    return f"{base_url.rstrip('/')}/_internal/mcp/toolkit/{toolset}/mcp"
 
 
 __all__ = [

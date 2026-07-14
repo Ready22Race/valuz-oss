@@ -438,6 +438,11 @@ export interface ComposerProps {
   /** Read-only display once a session exists (project frozen at creation,
    *  ADR-006). */
   projectLocked?: boolean;
+  /** Rendered as an attached strip directly under the input card (above the
+   * task-mode hint). Multi-target editions mount the execution-location bar
+   * here; the input card paints above it, so the strip's top edge tucks
+   * under the card's rounded corners. */
+  footerBar?: React.ReactNode;
   /** Entry point to create/add an agent to the project. */
   onAddAgent?: () => void;
   /** Disable the send button regardless of content (e.g. no agent picked). */
@@ -567,6 +572,7 @@ export const Composer = ({
   selectedProjectId,
   onProjectChange,
   projectLocked = false,
+  footerBar,
   onAddAgent,
   sendDisabled = false,
   mode = "chat",
@@ -3058,6 +3064,13 @@ export const Composer = ({
           </div>
         </div>
       </div>
+
+      {/* Attached footer strip (execution location / project pick). The
+          input card above is ``relative`` so it paints over the strip's
+          negative-margin top edge — the strip looks glued to the card. */}
+      {footerBar ? (
+        <div className="mx-auto -mt-2 max-w-[760px]">{footerBar}</div>
+      ) : null}
 
       {/* PRD-PAAT §3.2 task-mode hint card — sits below the composer
           and explains the lead-Agent ownership model in one line so

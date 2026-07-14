@@ -53,6 +53,7 @@ from valuz_agent.adapters.kernel_client import (  # noqa: E402
     KernelSessionNotFoundError,
     KernelUnavailableError,
 )
+from valuz_agent.boot.kernel import kernel_api_prefix  # noqa: E402
 
 # Events that end a turn on the WS run channel. ``session_update`` with a
 # terminal status also closes turns for some runtimes, but every runtime
@@ -94,6 +95,13 @@ class HttpKernelClient:
             headers=headers,
             timeout=httpx.Timeout(timeout, read=None),
         )
+        # ADR-013: the kernel's HTTP surface is namespaced under
+        # ``KERNEL_API_PREFIX`` (this host sets it to ``/kernel``; the
+        # kernel's own upstream default is ``/api`` — see
+        # ``valuz_agent.boot.kernel.kernel_api_prefix``). Resolved once per
+        # client instance — every request this client makes targets the SAME
+        # kernel process, which serves one fixed prefix for its lifetime.
+        self._prefix = kernel_api_prefix()
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -138,7 +146,7 @@ class HttpKernelClient:
         # Host-scoped probe — asks the remote kernel (cloud sandbox) which
         # runtimes it can launch, so the answer reflects the sandbox image, not
         # the API pod. See design §3.3.
-        result = await self._request("GET", "/api/v1/runtimes/availability")
+        result = await self._request("GET", f"{self._prefix}/v1/runtimes/availability")
         return result["data"]
 
     async def create_session(self, user_id: str, req: CreateSessionRequest) -> SessionData:
@@ -157,13 +165,18 @@ class HttpKernelClient:
             if kernel_cwd != req.cwd:
                 req = req.model_copy(update={"cwd": kernel_cwd})
         result = await self._request(
-            "POST", "/api/v1/sessions", json_body=req.model_dump(mode="json"), owner=user_id
+            "POST",
+            f"{self._prefix}/v1/sessions",
+            json_body=req.model_dump(mode="json"),
+            owner=user_id,
         )
         return SessionData(**result["data"])
 
     async def get_session(self, user_id: str, session_id: str) -> SessionData | None:
         try:
-            result = await self._request("GET", f"/api/v1/sessions/{session_id}", owner=user_id)
+            result = await self._request(
+                "GET", f"{self._prefix}/v1/sessions/{session_id}", owner=user_id
+            )
         except KernelSessionNotFoundError:
             return None
         return SessionData(**result["data"])
@@ -182,7 +195,9 @@ class HttpKernelClient:
             params["status"] = status
         if ids is not None:
             params["ids"] = ",".join(ids)
-        result = await self._request("GET", "/api/v1/sessions", params=params, owner=user_id)
+        result = await self._request(
+            "GET", f"{self._prefix}/v1/sessions", params=params, owner=user_id
+        )
         return [SessionData(**item) for item in result["data"]]
 
     async def list_all_sessions(
@@ -211,7 +226,7 @@ class HttpKernelClient:
     ) -> SessionData:
         result = await self._request(
             "PATCH",
-            f"/api/v1/sessions/{session_id}",
+            f"{self._prefix}/v1/sessions/{session_id}",
             json_body=req.model_dump(mode="json", exclude_unset=True),
             owner=user_id,
         )
@@ -219,7 +234,9 @@ class HttpKernelClient:
 
     async def delete_session(self, user_id: str, session_id: str) -> bool:
         try:
-            await self._request("DELETE", f"/api/v1/sessions/{session_id}", owner=user_id)
+            await self._request(
+                "DELETE", f"{self._prefix}/v1/sessions/{session_id}", owner=user_id
+            )
         except KernelSessionNotFoundError:
             return False
         return True
@@ -227,7 +244,7 @@ class HttpKernelClient:
     async def set_mode(self, user_id: str, session_id: str, mode: str) -> SessionData:
         result = await self._request(
             "POST",
-            f"/api/v1/sessions/{session_id}/mode",
+            f"{self._prefix}/v1/sessions/{session_id}/mode",
             json_body={"mode": mode},
             owner=user_id,
         )
@@ -238,7 +255,7 @@ class HttpKernelClient:
     ) -> SessionData:
         result = await self._request(
             "POST",
-            f"/api/v1/sessions/{session_id}/finalize",
+            f"{self._prefix}/v1/sessions/{session_id}/finalize",
             json_body=req.model_dump(mode="json", exclude_unset=True),
             owner=user_id,
         )
@@ -249,7 +266,7 @@ class HttpKernelClient:
     async def append_event(self, user_id: str, session_id: str, event: EventPayload) -> bool:
         result = await self._request(
             "POST",
-            f"/api/v1/sessions/{session_id}/events",
+            f"{self._prefix}/v1/sessions/{session_id}/events",
             json_body=event.model_dump(mode="json"),
             owner=user_id,
         )
@@ -260,7 +277,7 @@ class HttpKernelClient:
     ) -> None:
         await self._request(
             "POST",
-            f"/api/v1/sessions/{session_id}/events",
+            f"{self._prefix}/v1/sessions/{session_id}/events",
             json_body={"type": type, "data": data},
             params={"live_only": "true"},
             owner=user_id,
@@ -279,7 +296,7 @@ class HttpKernelClient:
         if after_seq is not None:
             params["after_seq"] = after_seq
         result = await self._request(
-            "GET", f"/api/v1/sessions/{session_id}/events", params=params, owner=user_id
+            "GET", f"{self._prefix}/v1/sessions/{session_id}/events", params=params, owner=user_id
         )
         return [EventData(**item) for item in result["data"]]
 
@@ -290,7 +307,10 @@ class HttpKernelClient:
         if before_seq is not None:
             params["before_seq"] = before_seq
         result = await self._request(
-            "GET", f"/api/v1/sessions/{session_id}/events/window", params=params, owner=user_id
+            "GET",
+            f"{self._prefix}/v1/sessions/{session_id}/events/window",
+            params=params,
+            owner=user_id,
         )
         return EventWindowData(**result["data"])
 
@@ -298,12 +318,12 @@ class HttpKernelClient:
         self, user_id: str, session_id: str
     ) -> AsyncIterator[EventData]:
         async for item in self._stream_sse(
-            f"/api/v1/sessions/{session_id}/events/stream", owner=user_id
+            f"{self._prefix}/v1/sessions/{session_id}/events/stream", owner=user_id
         ):
             yield item
 
     async def subscribe_all_events(self) -> AsyncIterator[EventData]:
-        async for item in self._stream_sse("/api/v1/events/stream", owner=None):
+        async for item in self._stream_sse(f"{self._prefix}/v1/events/stream", owner=None):
             yield item
 
     async def _stream_sse(self, path: str, *, owner: str | None) -> AsyncIterator[EventData]:
@@ -329,7 +349,7 @@ class HttpKernelClient:
     async def usage_rollup(self, user_id: str, start_ms: int, end_ms: int) -> list[UsageRollupData]:
         result = await self._request(
             "GET",
-            "/api/v1/usage",
+            f"{self._prefix}/v1/usage",
             params={"start_ms": start_ms, "end_ms": end_ms},
             owner=user_id,
         )
@@ -342,7 +362,7 @@ class HttpKernelClient:
     ) -> list[MessageData]:
         result = await self._request(
             "GET",
-            f"/api/v1/sessions/{session_id}/messages",
+            f"{self._prefix}/v1/sessions/{session_id}/messages",
             params={"limit": limit, "offset": offset},
             owner=user_id,
         )
@@ -353,7 +373,7 @@ class HttpKernelClient:
     ) -> dict[str, Any]:
         result = await self._request(
             "POST",
-            f"/api/v1/sessions/{session_id}/actions",
+            f"{self._prefix}/v1/sessions/{session_id}/actions",
             json_body=req.model_dump(mode="json"),
             owner=user_id,
         )
@@ -364,7 +384,9 @@ class HttpKernelClient:
         # In-process parity: ``orchestrator.interrupt`` is a silent no-op
         # for unknown / not-running sessions, so a 404 here is swallowed.
         try:
-            await self._request("POST", f"/api/v1/sessions/{session_id}/interrupt", owner=user_id)
+            await self._request(
+                "POST", f"{self._prefix}/v1/sessions/{session_id}/interrupt", owner=user_id
+            )
         except KernelSessionNotFoundError:
             return
 
@@ -394,7 +416,7 @@ class HttpKernelClient:
                 await sandbox_runtime.ensure_workspace_granted(session.cwd, owner_user_id=user_id)
 
         ws_base = self._base_url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
-        url = f"{ws_base}/api/v1/sessions/{session_id}/run"
+        url = f"{ws_base}{self._prefix}/v1/sessions/{session_id}/run"
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
         headers["X-Valuz-Owner-Id"] = user_id
         payload = {

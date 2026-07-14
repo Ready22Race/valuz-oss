@@ -107,8 +107,9 @@ class TimingMiddleware(BaseHTTPMiddleware):
 
       - ``/v1/system/status``: the desktop panel polls this every 5s
         (would dwarf everything else even at DEBUG).
-      - ``/internal/mcp/...``: kernel-internal MCP traffic; chatty and
-        not actionable from the UI.
+      - ``/_internal/mcp/...`` (and the legacy ``/internal/mcp/...``
+        dual-mount, ADR-013 — see ``api/app.py::_mount_internal``):
+        kernel-internal MCP traffic; chatty and not actionable from the UI.
       - ``/.well-known/oauth-...``: OAuth-discovery probes. The MCP
         streamable-HTTP client handshake checks for OAuth metadata before
         every connection to the in-process MCP mounts; our local servers
@@ -122,7 +123,7 @@ class TimingMiddleware(BaseHTTPMiddleware):
 
     _SKIP_PREFIXES = (
         "/v1/system/status",
-        "/internal/mcp",
+        "/_internal/mcp",
         "/.well-known/oauth-authorization-server",
         "/.well-known/oauth-protected-resource",
     )

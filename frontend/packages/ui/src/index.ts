@@ -1,4 +1,9 @@
 import "./styles/project.css";
+// OpenUI component styles (namespaced: ``:root`` ``--openui-*`` tokens +
+// ``.openui-*`` classes only — no global resets, so it doesn't touch Valuz's
+// design system). Required by ``<Renderer>``; without it the generated UI mounts
+// as bare DOM with undefined CSS vars and renders invisible.
+import "@openuidev/react-ui/styles/index.css";
 
 export * from "./components/CommandPalette";
 export * from "./components/Composer";
@@ -38,6 +43,7 @@ export * from "./components/conversation/DataSourcePicker";
 export * from "./components/conversation/DragUploadOverlay";
 export * from "./components/conversation/ErrorMessageCard";
 export * from "./components/conversation/FileUploadMessage";
+export * from "./components/conversation/GenerativeUICard";
 export * from "./components/conversation/MarkdownContent";
 export * from "./components/conversation/AskUserQuestionCard";
 export * from "./components/conversation/RequiresActionCard";

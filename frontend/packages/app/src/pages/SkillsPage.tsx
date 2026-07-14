@@ -175,7 +175,13 @@ function badgeForCategory(
   | { label: string; tone: "default" | "valuz" | "claude" | "codex" }
   | undefined {
   if (categoryId === "official") {
-    return { label: t("skill.originBuiltin"), tone: "default" };
+    return {
+      label:
+        skill.origin_label === "Built-in"
+          ? t("skill.originBuiltin")
+          : t("skill.official"),
+      tone: "default",
+    };
   }
   if (categoryId === "agents") {
     if (skill.creation_origin === "created") {
@@ -590,6 +596,14 @@ export const SkillsPage = () => {
           {t("sidebar.skills" as Parameters<typeof t>[0])}
         </span>
         <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
+          <button
+            type="button"
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md px-1.5 text-xs font-medium text-brand transition-colors hover:bg-brand-light/60 hover:text-brand"
+            onClick={() => navigate("/marketplace?tab=skills&from=skills")}
+          >
+            <Store className="h-3.5 w-3.5" />
+            {t("marketplace.title" as Parameters<typeof t>[0])}
+          </button>
           {searchOpen ? (
             <input
               type="text"
@@ -654,10 +668,6 @@ export const SkillsPage = () => {
                 <Upload className="h-4 w-4" />
                 {t("skill.upload" as Parameters<typeof t>[0])}
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => navigate("/marketplace?tab=skills")}>
-                <Store className="h-4 w-4" />
-                {t("marketplace.importFromMarketplace" as Parameters<typeof t>[0])}
-              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -698,32 +708,20 @@ export const SkillsPage = () => {
                         // propagation so toggling never opens the detail panel.
                         onClick={(e) => e.stopPropagation()}
                       >
-                        {(() => {
-                          // Built-in skills ship with the client: always on and
-                          // not toggleable (the switch is checked + disabled).
-                          const isBuiltin = skill.origin_label === "Built-in";
-                          return (
-                            <Switch
-                              size="sm"
-                              checked={
-                                isBuiltin || skill.library_enabled !== false
-                              }
-                              disabled={isBuiltin}
-                              onCheckedChange={(v) =>
-                                void handleToggleLibrary(skill, v)
-                              }
-                              aria-label={t(
-                                (isBuiltin
-                                  ? "skill.builtinHint"
-                                  : skill.library_enabled !== false
-                                    ? "skill.libraryEnabledTip"
-                                    : "skill.libraryDisabledTip") as Parameters<
-                                  typeof t
-                                >[0],
-                              )}
-                            />
-                          );
-                        })()}
+                        <Switch
+                          size="sm"
+                          checked={skill.library_enabled !== false}
+                          onCheckedChange={(v) =>
+                            void handleToggleLibrary(skill, v)
+                          }
+                          aria-label={t(
+                            (skill.library_enabled !== false
+                              ? "skill.libraryEnabledTip"
+                              : "skill.libraryDisabledTip") as Parameters<
+                              typeof t
+                            >[0],
+                          )}
+                        />
                         <ResourceActionSlot
                           resourceType="skill"
                           resource={

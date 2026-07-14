@@ -284,6 +284,7 @@ async def init_kernel(app: FastAPI) -> None:
     from valuz_agent.integrations.tools_skill_creator import build_submit_skill_tool_defs
     from valuz_agent.modules.browser import service as browser_service
     from valuz_agent.modules.browser.tools import build_browser_tool_defs
+    from valuz_agent.modules.genui.tools import build_generative_ui_tool_defs
     from valuz_agent.modules.memory.tools import build_memory_tool_defs
     from valuz_agent.modules.projects.tools import build_project_instructions_tool_defs
     from valuz_agent.modules.sessions.artifacts_tool import build_deliver_artifacts_tool_defs
@@ -304,6 +305,7 @@ async def init_kernel(app: FastAPI) -> None:
         + build_submit_skill_tool_defs()
         + build_agent_proposal_tool_defs()
         + build_deliver_artifacts_tool_defs()
+        + build_generative_ui_tool_defs()
     )
     # browser_start/browser_stop only work when the engine (Node +
     # chrome-devtools-mcp) is available; don't expose dead tools otherwise
@@ -315,8 +317,7 @@ async def init_kernel(app: FastAPI) -> None:
         # spawn time). Lets the agent run a clean ``chrome-devtools <tool>``.
         if not _startup_user_content_enabled():
             logger.info(
-                "startup user-content initialization disabled; "
-                "browser CLI bootstrap skipped"
+                "startup user-content initialization disabled; browser CLI bootstrap skipped"
             )
         elif browser_service.ensure_cli_on_path():
             logger.info("browser CLI installed on PATH (chrome-devtools)")
@@ -343,7 +344,8 @@ async def init_kernel(app: FastAPI) -> None:
 
 
 async def bind_data_service(app: FastAPI) -> None:
-    """Bind the host-mounted DataService (``/internal/data``) to its backend.
+    """Bind the host-mounted DataService (``/_internal/data``, dual-mounted at
+    the legacy ``/internal/data`` — ADR-013) to its backend.
 
     The sub-app is mounted at factory time with no store (only ``/health`` +
     ``/openapi.json`` work until now). Here — once the host DB is up — we build a
@@ -597,6 +599,12 @@ async def start_automation_runner(app: FastAPI) -> None:
     # (ADR-011) keeps DB access safe.
     await automation_failure_monitor.startup()
 
+    # Task watchdog: detect a lead that died without finalizing (the hole boot
+    # recovery can't see mid-process) → mark blocked so it surfaces + resumes.
+    from valuz_agent.modules.tasks.health_monitor import task_health_monitor
+
+    await task_health_monitor.startup()
+
     if not _startup_user_content_enabled():
         logger.info("startup user-content initialization disabled; docs/skills scanners skipped")
         return
@@ -646,6 +654,21 @@ def warm_token_estimator() -> None:
 
     try:
         prewarm_token_estimator()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def resolve_marketplace_index() -> None:
+    """Kick off the once-per-process market index candidate race in the
+    background so the endpoint is settled by the time the marketplace UI
+    makes its first request. The outcome (winner or nothing-reachable) is
+    final for the process lifetime — requests never re-probe. No-op when an
+    explicit ``marketplace_index_base_url`` is configured. Best-effort,
+    never fatal."""
+    from valuz_agent.modules.marketplace.market_index import resolve_index_in_background
+
+    try:
+        resolve_index_in_background()
     except Exception:  # noqa: BLE001
         pass
 
@@ -751,7 +774,9 @@ async def stop_automation_runner(app: FastAPI) -> None:
     from valuz_agent.modules.automations.in_process_runner import (
         automation_runner,
     )
+    from valuz_agent.modules.tasks.health_monitor import task_health_monitor
 
+    await task_health_monitor.shutdown()
     await automation_failure_monitor.shutdown()
     await automation_runner.shutdown()
 
@@ -788,6 +813,11 @@ async def stop_decision_aggregator(app: FastAPI) -> None:
     agg = getattr(app.state, "decision_aggregator", None)
     if agg is not None:
         await agg.stop()
+    # Close any open notification SSE streams cleanly (the ledger itself is
+    # durable — nothing to flush, just release subscribers).
+    from valuz_agent.modules.notifications.service import notification_service
+
+    await notification_service.stop()
 
 
 def mark_boot_complete() -> None:

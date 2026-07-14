@@ -102,9 +102,10 @@ class SessionPermissionModeRequest(BaseModel):
 class SessionActionRequest(BaseModel):
     """Body for ``POST /v1/sessions/{id}/actions``.
 
-    Wire shape mirrors the kernel route under ``/api/v1/...`` 1:1 so
-    the host never has to translate between the two. See the kernel's
-    ``SubmitActionRequest`` schema for the field-level invariants.
+    Wire shape mirrors the kernel route under ``{KERNEL_API_PREFIX}/v1/...``
+    1:1 (ADR-013; default ``/kernel`` for this host) so the host never has to
+    translate between the two. See the kernel's ``SubmitActionRequest``
+    schema for the field-level invariants.
 
     Decision verbs (V5+d008b53):
       - ``approve`` / ``reject`` — universal verbs (v1).
@@ -550,7 +551,9 @@ async def submit_session_action(
     """Resolve a pending ``requires_action`` with a user decision.
 
     Thin façade over the kernel orchestrator's ``submit_action``. The
-    kernel also exposes this under ``POST /api/v1/sessions/{id}/actions``
+    kernel also exposes this under ``POST {KERNEL_API_PREFIX}/v1/sessions/{id}/actions``
+    (ADR-013; default ``/kernel`` for this host, kernel's own upstream
+    default ``/api`` — see ``valuz_agent.boot.kernel.kernel_api_prefix``)
     — both routes reach the same orchestrator instance and same
     persistence path. Keeping the ``/v1/...`` shape means the frontend
     can talk to one prefix for everything session-related.

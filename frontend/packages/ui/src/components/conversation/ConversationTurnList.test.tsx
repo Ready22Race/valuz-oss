@@ -46,7 +46,11 @@ function buildTurn(i: number): ConversationTurn {
 
 function renderList(
   turns: ConversationTurn[],
-  opts: { onRetry?: (turnId: string) => void } = {},
+  opts: {
+    onRetry?: (turnId: string) => void;
+    loading?: boolean;
+    sending?: boolean;
+  } = {},
 ) {
   const scrollContainerRef = createRef<HTMLDivElement>();
   let api: { scrollToTurnTop: (index: number) => void } | null = null;
@@ -56,8 +60,8 @@ function renderList(
       <ConversationTurnList
         turns={turns}
         scrollContainerRef={scrollContainerRef}
-        sending={false}
-        loading={false}
+        sending={opts.sending ?? false}
+        loading={opts.loading ?? false}
         error={null}
         onRetry={opts.onRetry}
         onVirtualApiReady={(nextApi) => {
@@ -264,6 +268,34 @@ describe("ConversationTurnList virtualization", () => {
     });
     expect(indicators).toHaveLength(1);
     expect(indicators[0].textContent).toContain("已处理 2 分");
+  });
+});
+
+describe("ConversationTurnList loading placeholder", () => {
+  const shimmer = (container: HTMLElement) =>
+    container.querySelector('img[src="./logo.png"]');
+
+  it("shows the shimmer while an existing session's transcript loads", () => {
+    // Regression: this state used to render literally nothing — a slow
+    // history fetch read as a blank white page.
+    const { container } = renderList([], { loading: true });
+    expect(shimmer(container)).not.toBeNull();
+  });
+
+  it("does not double-render with the sending shimmer", () => {
+    const { container } = renderList([], { loading: true, sending: true });
+    expect(container.querySelectorAll('img[src="./logo.png"]').length).toBe(1);
+  });
+
+  it("hides the shimmer once turns are rendered", () => {
+    virtualState.start = 0;
+    const { container } = renderList([buildTurn(0)], { loading: true });
+    expect(shimmer(container)).toBeNull();
+  });
+
+  it("renders nothing for a loaded empty session without error", () => {
+    const { container } = renderList([], { loading: false });
+    expect(shimmer(container)).toBeNull();
   });
 });
 

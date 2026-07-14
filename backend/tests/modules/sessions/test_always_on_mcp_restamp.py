@@ -38,8 +38,7 @@ def _make_session(*, mcp_servers):
     )
 
 
-def _stale_trio(token: str):
-    base = "http://127.0.0.1:8000/internal/mcp"
+def _trio(token: str, *, base: str):
     trio = tuple(
         McpHttpServerConfigSchema(
             name=name,
@@ -60,6 +59,24 @@ def _stale_trio(token: str):
         headers={"X-Valuz-Internal": token, "X-Valuz-Session-Id": "sess-1"},
     )
     return (*trio, harness)
+
+
+def _stale_trio(token: str):
+    """A pre-ADR-013 session snapshot — the legacy ``/internal/mcp`` path
+    (models a session created before the rename; ``refresh_always_on_mcp_for_session``
+    must self-heal it onto the current ``/_internal/mcp`` path, not just the
+    token — see ``test_restamps_stale_token_and_preserves_external``)."""
+    return _trio(token, base="http://127.0.0.1:8000/internal/mcp")
+
+
+def _current_trio(token: str):
+    """The trio a FRESHLY-minted session carries today — same base
+    ``always_on_http_mcp_servers`` actually generates (ADR-013:
+    ``/_internal/mcp``). Used where the test's premise is "already
+    up-to-date" (see ``test_noop_when_token_already_current``); using the
+    legacy base here would make every field EXCEPT the token differ, forcing
+    a PATCH the test asserts must NOT happen."""
+    return _trio(token, base="http://127.0.0.1:8000/_internal/mcp")
 
 
 def _patch_client(monkeypatch, session):
@@ -116,7 +133,7 @@ async def test_noop_when_token_already_current(monkeypatch):
 
     monkeypatch.setattr(cr, "_mcp_token_cache", {})
     current = cr._mint_internal_mcp_token("local-test-owner")  # stable per-owner (cached)
-    session = _make_session(mcp_servers=_stale_trio(current))
+    session = _make_session(mcp_servers=_current_trio(current))
     updates = _patch_client(monkeypatch, session)
 
     changed = await capabilities.refresh_always_on_mcp_for_session(
@@ -125,3 +142,81 @@ async def test_noop_when_token_already_current(monkeypatch):
 
     assert changed is False
     assert updates == []
+
+
+async def test_external_oauth_connector_headers_refresh_on_restamp(monkeypatch):
+    """A user-attached connector entry gets re-resolved with CURRENT
+    credentials each turn — a re-auth (or expiry refresh) must reach existing
+    sessions, not only brand-new ones (Reportify tokens live ~1h)."""
+    stale_external = McpHttpServerConfigSchema(
+        name="valuz-search",
+        url="https://mcp.reportify.cn/search/mcp",
+        transport="http",
+        headers={"Authorization": "Bearer STALE-JWT"},
+    )
+    session = _make_session(mcp_servers=(stale_external, *_current_trio("CURRENT")))
+
+    fresh_external = McpHttpServerConfigSchema(
+        name="valuz-search",
+        url="https://mcp.reportify.cn/search/mcp",
+        transport="http",
+        headers={"Authorization": "Bearer FRESH-JWT"},
+    )
+
+    async def fake_resolve(*, enabled_slugs, connectors=None, user_id=None):
+        assert enabled_slugs == ["valuz-search"]
+        return [fresh_external]
+
+    import valuz_agent.adapters.mcp_resolver as mcp_resolver
+
+    monkeypatch.setattr(mcp_resolver, "resolve_mcp_servers", fake_resolve)
+
+    saved = {}
+
+    async def fake_get_session(user_id, session_id):
+        return session
+
+    async def fake_update_session(user_id, session_id, req):
+        saved["mcp"] = list(req.mcp_servers)
+
+    monkeypatch.setattr(capabilities.kernel_client, "get_session", fake_get_session)
+    monkeypatch.setattr(capabilities.kernel_client, "update_session", fake_update_session)
+
+    changed = await capabilities.refresh_always_on_mcp_for_session("sess-1", "local-test-owner")
+    assert changed is True
+    external = [m for m in saved["mcp"] if m.name == "valuz-search"]
+    assert external and external[0].headers["Authorization"] == "Bearer FRESH-JWT"
+
+
+async def test_external_entry_kept_when_reresolve_yields_nothing(monkeypatch):
+    """A connector that no longer resolves (deleted / disabled / credentials
+    gone) keeps its existing snapshot — same failure surface as before."""
+    stale_external = McpHttpServerConfigSchema(
+        name="gone-connector",
+        url="https://example.com/mcp",
+        transport="http",
+        headers={"Authorization": "Bearer OLD"},
+    )
+    session = _make_session(mcp_servers=(stale_external, *_current_trio("CURRENT")))
+
+    async def fake_resolve(*, enabled_slugs, connectors=None, user_id=None):
+        return []
+
+    import valuz_agent.adapters.mcp_resolver as mcp_resolver
+
+    monkeypatch.setattr(mcp_resolver, "resolve_mcp_servers", fake_resolve)
+
+    async def fake_get_session(user_id, session_id):
+        return session
+
+    saved = {}
+
+    async def fake_update_session(user_id, session_id, req):
+        saved["mcp"] = list(req.mcp_servers)
+
+    monkeypatch.setattr(capabilities.kernel_client, "get_session", fake_get_session)
+    monkeypatch.setattr(capabilities.kernel_client, "update_session", fake_update_session)
+
+    await capabilities.refresh_always_on_mcp_for_session("sess-1", "local-test-owner")
+    kept = [m for m in (saved.get("mcp") or session.mcp_servers) if m.name == "gone-connector"]
+    assert kept and kept[0].headers["Authorization"] == "Bearer OLD"

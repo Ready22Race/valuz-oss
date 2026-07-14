@@ -13,6 +13,7 @@
  */
 
 import { createFetchJson } from "./fetch-json";
+import { resolveApiBase } from "./base-resolver";
 
 let _apiBase =
   (import.meta as unknown as Record<string, Record<string, string> | undefined>)
@@ -276,7 +277,13 @@ export const automationsApi = {
     const qs = new URLSearchParams();
     if (projectId) qs.set("project_id", projectId);
     const suffix = qs.toString() ? `?${qs}` : "";
-    return fetchJson(`/v1/automations${suffix}`);
+    // Project-scoped list follows the project's execution origin
+    // (multi-target editions); global list stays on the module default.
+    return fetchJson(`/v1/automations${suffix}`, {
+      baseUrl: projectId
+        ? resolveApiBase({ projectId }, "") || undefined
+        : undefined,
+    });
   },
 
   listProjectTargets(): Promise<{ targets: AutomationProjectTarget[] }> {

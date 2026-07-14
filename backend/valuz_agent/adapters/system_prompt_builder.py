@@ -74,6 +74,27 @@ def assemble_session_instructions(sections: list[tuple[str, str]]) -> str:
     return "\n\n".join(out)
 
 
+async def prepend_global_instructions(instructions: str) -> str:
+    """Prepend the deployment-wide preamble ahead of a bare prompt string.
+
+    The raw/no-agent ``create_session`` branch (quick chat, skill-creator,
+    agent-less scheduled runs) builds its prompt as a bare project string
+    instead of running the full ``assemble_session_instructions`` section
+    list — this helper gives that path the same ``<global-instructions>``
+    first section the agent-bound and task paths get. No-op (returns
+    *instructions* unchanged, byte-identical) when no override is bound or
+    the provider returns nothing.
+    """
+    from valuz_agent.ports.instructions import global_instructions_preamble
+
+    block = assemble_session_instructions(
+        [("global-instructions", await global_instructions_preamble())]
+    )
+    if not block:
+        return instructions
+    return f"{block}\n\n{instructions}" if instructions else block
+
+
 def build_worktree_notice(
     *,
     name: str,

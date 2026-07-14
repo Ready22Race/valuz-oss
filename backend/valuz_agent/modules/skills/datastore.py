@@ -22,6 +22,14 @@ class SkillDatastore:
         self._db = db
         self._config_name = "project-config.json"
 
+    @property
+    def session(self) -> AsyncSession:
+        """The bound DB session — a narrow, intentional escape hatch for
+        cross-module hooks that need this datastore's session (e.g. the
+        marketplace-install-provenance cleanup on skill delete) without
+        reaching into a sibling module's own datastore."""
+        return self._db
+
     # ------------------------------------------------------------------
     # DB-backed SkillIndexRow CRUD (retained for future startup_scan)
     # ------------------------------------------------------------------
@@ -133,9 +141,7 @@ class SkillDatastore:
         if row is None:
             return
         row.status = "unavailable"
-        await async_commit_with_retry(
-            self._db, where="SkillDatastore.mark_unavailable_by_slug"
-        )
+        await async_commit_with_retry(self._db, where="SkillDatastore.mark_unavailable_by_slug")
 
     async def list_project_skills(
         self, user_id: str, project_id: str
@@ -172,9 +178,7 @@ class SkillDatastore:
     # ------------------------------------------------------------------
 
     async def list_library_disabled_ids(self, user_id: str) -> set[str]:
-        """Index-row ids the user has turned OFF in the library. Default is on,
-        so this returns only the explicitly-disabled rows — the set the catalog
-        overlay reads to flip ``SkillView.library_enabled`` by id."""
+        """Index-row ids currently OFF in the library."""
         rows = (
             await self._db.execute(
                 select(SkillIndexRow.id).where(
@@ -186,7 +190,7 @@ class SkillDatastore:
         return set(rows)
 
     async def list_library_disabled_slugs(self, user_id: str) -> set[str]:
-        """Skill slugs the user has turned OFF in the library."""
+        """Skill slugs currently OFF in the library."""
         rows = (
             await self._db.execute(
                 select(SkillIndexRow.slug).where(

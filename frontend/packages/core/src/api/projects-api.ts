@@ -1,4 +1,8 @@
 import { createFetchJson } from "./fetch-json";
+import { resolveApiBase } from "./base-resolver";
+import { fanOutTargets, getListFanOutTargets } from "../edition/list-fanout";
+import { getExecutionTargets } from "../edition/execution-targets";
+import { recordEntityOrigins } from "../edition/entity-origin";
 import { invalidateRequestCache, requestBlob } from "./request";
 
 let _apiBase =
@@ -19,6 +23,10 @@ export interface ProjectListItem {
    * Project projects: equals ``root_path``.
    * Chat projects: managed dir under ``data_dir/projects/{id}/``. */
   cwd: string | null;
+  /** CLIENT-side tag on multi-target editions: which execution target
+   * answered the list row (e.g. "local"/"cloud"). Never sent by the server;
+   * absent on single-backend builds. */
+  exec_origin?: string;
 }
 
 export interface ProjectDetail extends ProjectListItem {
@@ -207,6 +215,8 @@ export interface ProjectCreateRequest {
 }
 
 const fetchJson = createFetchJson(() => _apiBase);
+const projectBase = (projectId: string): string =>
+  resolveApiBase({ projectId }, _apiBase);
 const PROJECTS_TAG = "projects";
 const PROJECTS_CACHE_TTL_MS = 30_000;
 const PROJECTS_LIST_CACHE = {
@@ -231,14 +241,54 @@ function filenameFromDisposition(header: string | null): string {
 }
 
 export const projectsApi = {
-  list(): Promise<{ projects: ProjectListItem[] }> {
-    return fetchJson("/v1/projects", { cache: PROJECTS_LIST_CACHE });
+  async list(): Promise<{ projects: ProjectListItem[] }> {
+    // Multi-target editions: fan out to every registered target, tag each
+    // row's ``exec_origin`` with the answering target, and feed the origin
+    // index so entity-scoped calls route to the owning backend. Zero targets
+    // (OSS) keeps the single-backend path byte-identical.
+    if (getListFanOutTargets().length === 0) {
+      return fetchJson("/v1/projects", { cache: PROJECTS_LIST_CACHE });
+    }
+    const outcome = await fanOutTargets((target) =>
+      fetchJson<{ projects: ProjectListItem[] }>("/v1/projects", {
+        cache: PROJECTS_LIST_CACHE,
+        baseUrl: target.baseUrl,
+      }),
+    );
+    const seen = new Set<string>();
+    const merged: ProjectListItem[] = [];
+    for (const { target, value } of outcome.values) {
+      recordEntityOrigins(value.projects.map((w) => [w.id, target.id]));
+      for (const project of value.projects) {
+        if (seen.has(project.id)) continue;
+        seen.add(project.id);
+        merged.push({ ...project, exec_origin: target.id });
+      }
+    }
+    return { projects: merged };
   },
 
-  get(projectId: string): Promise<ProjectDetail> {
-    return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}`, {
-      cache: projectDetailCache(projectId),
-    });
+  async get(projectId: string): Promise<ProjectDetail> {
+    const base = projectBase(projectId);
+    const project = await fetchJson<ProjectDetail>(
+      `/v1/projects/${encodeURIComponent(projectId)}`,
+      {
+        cache: projectDetailCache(projectId),
+        baseUrl: base,
+      },
+    );
+    // Multi-target editions: tag the row like ``list()`` does — the resolved
+    // base identifies the answering target, so detail pages can show the
+    // project's execution location (本地/云端) too. Single-target builds have
+    // no registered targets and the row stays untagged (= module default).
+    if (!project.exec_origin) {
+      const normalized = base.replace(/\/+$/, "");
+      const target = getExecutionTargets().find(
+        (t) => t.baseUrl.replace(/\/+$/, "") === normalized,
+      );
+      if (target) project.exec_origin = target.id;
+    }
+    return project;
   },
 
   /**
@@ -250,14 +300,19 @@ export const projectsApi = {
   getLastSessionPick(projectId: string): Promise<LastSessionPick> {
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/last-session-pick`,
+      { baseUrl: projectBase(projectId) },
     );
   },
 
-  async create(payload: ProjectCreateRequest): Promise<ProjectDetail> {
+  async create(
+    payload: ProjectCreateRequest,
+    opts?: { baseUrl?: string },
+  ): Promise<ProjectDetail> {
     const result = await fetchJson<ProjectDetail>("/v1/projects", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      baseUrl: opts?.baseUrl,
     });
     invalidateProjects();
     return result;
@@ -269,6 +324,7 @@ export const projectsApi = {
       `/v1/projects/${encodeURIComponent(projectId)}?${qs}`,
       {
         method: "PATCH",
+        baseUrl: projectBase(projectId),
       },
     );
     invalidateProjects();
@@ -284,6 +340,7 @@ export const projectsApi = {
       `/v1/projects/${encodeURIComponent(projectId)}/instructions?${qs}`,
       {
         method: "PUT",
+        baseUrl: projectBase(projectId),
       },
     );
     invalidateProjects();
@@ -303,6 +360,7 @@ export const projectsApi = {
     const suffix = qs.toString() ? `?${qs}` : "";
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/files${suffix}`,
+      { baseUrl: projectBase(projectId) },
     );
   },
 
@@ -322,18 +380,21 @@ export const projectsApi = {
     return fetchJson(`/v1/projects/${encodeURIComponent(projectId)}/files`, {
       method: "POST",
       body: form,
+      baseUrl: projectBase(projectId),
     });
   },
 
   deletePreview(projectId: string): Promise<ProjectDeletePreview> {
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/delete-preview`,
+      { baseUrl: projectBase(projectId) },
     );
   },
 
   async delete(projectId: string): Promise<void> {
     await fetchJson(`/v1/projects/${encodeURIComponent(projectId)}`, {
       method: "DELETE",
+      baseUrl: projectBase(projectId),
     });
     invalidateProjects();
   },
@@ -341,6 +402,7 @@ export const projectsApi = {
   getMcpServers(projectId: string): Promise<{ slugs: string[] }> {
     return fetchJson(
       `/v1/projects/${encodeURIComponent(projectId)}/connectors`,
+      { baseUrl: projectBase(projectId) },
     );
   },
 
@@ -351,6 +413,7 @@ export const projectsApi = {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ slugs }),
+        baseUrl: projectBase(projectId),
       },
     );
   },
@@ -360,7 +423,7 @@ export const projectsApi = {
   async exportProject(projectId: string): Promise<ExportedProject> {
     const { blob, headers } = await requestBlob(
       `/v1/projects/${encodeURIComponent(projectId)}/export`,
-      { baseUrl: _apiBase },
+      { baseUrl: projectBase(projectId) },
     );
     return {
       blob,

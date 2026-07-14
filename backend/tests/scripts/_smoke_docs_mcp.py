@@ -45,9 +45,10 @@ async def main() -> None:
         except Exception:
             time.sleep(0.1)
 
-    # 403 without the secret header — sanity check.
+    # 403 without the secret header — sanity check. Uses the ADR-013 canonical
+    # "/_internal/..." path (what newly-minted sessions get).
     try:
-        urllib.request.urlopen(f"http://127.0.0.1:{port}/internal/mcp/docs/mcp", timeout=2.0)
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/_internal/mcp/docs/mcp", timeout=2.0)
         print("FAIL: expected 403 without header")
         return
     except urllib.error.HTTPError as e:
@@ -58,7 +59,7 @@ async def main() -> None:
     from mcp.client.session import ClientSession
     from mcp.client.streamable_http import streamablehttp_client
 
-    url = f"http://127.0.0.1:{port}/internal/mcp/docs/mcp"
+    url = f"http://127.0.0.1:{port}/_internal/mcp/docs/mcp"
     headers = {
         "X-Valuz-Internal": "test-secret-123",
         "X-Valuz-Session-Id": f"sess-{uuid.uuid4().hex}",

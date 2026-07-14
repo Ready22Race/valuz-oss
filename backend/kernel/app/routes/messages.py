@@ -1,4 +1,6 @@
-"""Message routes — /api/v1/sessions/{id}/messages and /api/v1/messages/{id}."""
+"""Message routes — ``{KERNEL_API_PREFIX}/v1/sessions/{id}/messages`` and
+``{KERNEL_API_PREFIX}/v1/messages/{id}`` (default ``/api/v1/...`` — see
+``app.routes.KERNEL_API_PREFIX``)."""
 
 from __future__ import annotations
 
@@ -6,6 +8,7 @@ import dataclasses
 from typing import Annotated, Any
 
 from app.dependencies import get_owner_id, get_store
+from app.routes import KERNEL_API_PREFIX
 from app.schemas import (
     AttachmentSchema,
     EventData,
@@ -62,7 +65,7 @@ def _event_to_data(event: Event) -> EventData:
 
 
 @router.get(
-    "/api/v1/sessions/{session_id}/messages",
+    f"{KERNEL_API_PREFIX}/v1/sessions/{{session_id}}/messages",
     response_model=MessageListResponse,
 )
 async def list_session_messages(
@@ -79,7 +82,7 @@ async def list_session_messages(
     return {"data": [_message_to_data(m) for m in messages]}
 
 
-@router.get("/api/v1/messages/{message_id}", response_model=MessageResponse)
+@router.get(f"{KERNEL_API_PREFIX}/v1/messages/{{message_id}}", response_model=MessageResponse)
 async def get_message(message_id: str, store: StoreDep, owner: OwnerDep) -> dict[str, Any]:
     message = await store.load_message(owner, message_id)
     if message is None:
@@ -87,7 +90,9 @@ async def get_message(message_id: str, store: StoreDep, owner: OwnerDep) -> dict
     return {"data": _message_to_data(message)}
 
 
-@router.get("/api/v1/messages/{message_id}/events", response_model=EventListResponse)
+@router.get(
+    f"{KERNEL_API_PREFIX}/v1/messages/{{message_id}}/events", response_model=EventListResponse
+)
 async def get_message_events(
     message_id: str,
     store: StoreDep,

@@ -1,5 +1,5 @@
 export * from "./use-agent";
-export * from "./use-decision-inbox";
+export * from "./use-notifications";
 export * from "./use-file-resolver";
 export * from "./use-chat-session";
 export * from "./use-composer-providers";

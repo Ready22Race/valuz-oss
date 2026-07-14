@@ -29,7 +29,8 @@ async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -
     Why this exists
     ---------------
     ADR-006 freezes ``session.model`` at create-time but skills + MCP are
-    *mutable* (kernel exposes ``PATCH /api/v1/sessions/{id}`` for both).
+    *mutable* (kernel exposes ``PATCH {KERNEL_API_PREFIX}/v1/sessions/{id}``
+    for both — ADR-013; default ``/kernel`` for this host).
     The docs skill + MCP are auto-injected at creation for every
     session (chat + project) unconditionally — but pre-upgrade sessions,
     or sessions whose skills were edited externally, may be missing the
@@ -123,6 +124,39 @@ async def refresh_docs_capabilities_for_session(session_id: str, user_id: str) -
     return True
 
 
+async def _refresh_external_connector_entries(user_id: str, entries: list) -> list:
+    """Re-resolve user-attached connector entries with CURRENT credentials.
+
+    Each entry's ``name`` is the connector slug (``mcp_resolver`` names configs
+    that way), so resolving the same slugs again yields configs with fresh
+    headers. Entries that no longer resolve (connector deleted / disabled /
+    credentials gone) keep their existing snapshot — same failure surface as
+    before this refresh existed. Best-effort: any resolver error keeps the
+    originals so the turn proceeds on the old token.
+    """
+    slugs = [n for n in (getattr(m, "name", None) for m in entries) if n]
+    if not slugs:
+        return entries
+    try:
+        from valuz_agent.adapters.mcp_resolver import resolve_mcp_servers
+        from valuz_agent.infra.db import async_unit_of_work
+        from valuz_agent.modules.connectors.datastore import ConnectorDatastore
+
+        async with async_unit_of_work() as db:
+            fresh = await resolve_mcp_servers(
+                enabled_slugs=slugs,
+                connectors=ConnectorDatastore(db),
+                user_id=user_id,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("re-stamp: external connector re-resolve failed")
+        return entries
+    by_name: dict = {}
+    for cfg in fresh:
+        by_name.setdefault(cfg.name, cfg)
+    return [by_name.get(getattr(m, "name", None), m) for m in entries]
+
+
 async def refresh_always_on_mcp_for_session(session_id: str, user_id: str) -> bool:
     """Re-stamp the always-on in-process MCP servers (docs / automations /
     connectors) on an existing session row with the CURRENT process values.
@@ -171,6 +205,13 @@ async def refresh_always_on_mcp_for_session(session_id: str, user_id: str) -> bo
     # freshly-stamped trio. Order mirrors capability_resolver (external first,
     # always-on last) so an unchanged token yields an identical tuple → no save.
     preserved = [m for m in current if getattr(m, "name", None) not in fresh_names]
+    # External catalog connectors carry credentials baked at resolve time —
+    # an OAuth bearer header with ~1h expiry for Reportify-backed connectors.
+    # Re-resolve them here too, or an EXISTING conversation keeps the stale
+    # token forever: a re-auth (or the resolver's own expiry refresh) would
+    # otherwise only reach brand-new sessions, 401-ing every call in old ones
+    # while the connectors page truthfully shows "connected".
+    preserved = await _refresh_external_connector_entries(user_id, preserved)
     new_mcp = (*preserved, *fresh)
 
     if new_mcp == tuple(current):

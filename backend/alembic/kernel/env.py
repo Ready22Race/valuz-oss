@@ -1,4 +1,8 @@
-"""Alembic async environment — supports SQLite, PostgreSQL, MySQL."""
+"""Alembic async environment — supports SQLite, PostgreSQL, MySQL.
+
+Revision ids are string-typed pure numbers (for example ``"0003"``). Keep
+descriptions in migration filenames/docstrings, not in ``revision`` values.
+"""
 
 from __future__ import annotations
 

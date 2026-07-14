@@ -110,6 +110,12 @@ class DecisionAggregator:
         # sweep (we delete by session, not by pending_id).
         self._by_session: dict[str, set[str]] = {}
 
+        # pending_ids for which we've already appended an ``awaiting_user`` task
+        # event, so a kernel re-emit (it doesn't dedupe) doesn't spam the task
+        # timeline. Per-process — questions raised before a restart keep their
+        # prior-process timeline state; we don't re-emit for them.
+        self._awaiting_task_events: set[str] = set()
+
         # (owner_user_id, queue): fan-out is filtered by owner so a shared
         # multi-tenant host never delivers one owner's inbox to another.
         self._subscribers: list[tuple[str, asyncio.Queue[DecisionStreamEvent]]] = []
@@ -454,11 +460,14 @@ class DecisionAggregator:
                     DecisionStreamEvent(kind="added", payload=_added_payload(fresh[pid])),
                     owner_user_id,
                 )
+                await self._project_question_added(fresh[pid])
             for pid in removed_ids:
                 await self._fan_out(
                     DecisionStreamEvent(kind="resolved", payload=_resolved_payload(pid)),
                     owner_user_id,
                 )
+                if owner_user_id:
+                    await self._project_question_resolved(owner_user_id, pid)
 
     async def _collect_pending(
         self, session: Session, events: list[Event]
@@ -610,6 +619,8 @@ class DecisionAggregator:
                 ),
                 entry.owner_user_id,
             )
+        await self._record_awaiting_task_event(entry)
+        await self._project_question_added(entry)
 
     async def _on_action_resolved(self, session_id: str, event: Event) -> None:
         pending_id = (event.data or {}).get("pending_id")
@@ -633,6 +644,111 @@ class DecisionAggregator:
                 ),
                 owner_user_id,
             )
+        await self._record_answered_task_event(existing, pending_id)
+        await self._project_question_resolved(existing.owner_user_id, pending_id)
+
+    async def _record_awaiting_task_event(self, entry: DecisionEntry) -> None:
+        """Mirror a newly-added task-driven question onto the task's own event
+        timeline (``awaiting_user``). Best-effort + deduped by pending_id —
+        never let a task-event write failure break inbox fan-out."""
+        if entry.pending_id in self._awaiting_task_events:
+            return
+        self._awaiting_task_events.add(entry.pending_id)
+        question = ""
+        qs = (entry.question_payload or {}).get("questions")
+        if isinstance(qs, list) and qs and isinstance(qs[0], dict):
+            question = str(qs[0].get("question") or "")
+        try:
+            from valuz_agent.modules.tasks import messaging as task_messaging
+
+            await task_messaging.record_awaiting_user(
+                task_id=entry.task_id,
+                project_id=entry.project_id or "",
+                session_id=entry.session_id,
+                subtask_key=entry.subtask_key,
+                agent_slug=entry.agent_slug,
+                agent_name=None,
+                question=question,
+                pending_id=entry.pending_id,
+                user_id=entry.owner_user_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "decisions: failed to record awaiting_user task event for %s",
+                entry.pending_id,
+                exc_info=True,
+            )
+
+    async def _record_answered_task_event(
+        self, entry: DecisionEntry, pending_id: str
+    ) -> None:
+        """Counterpart to ``_record_awaiting_task_event`` — emit ``user_answered``
+        only if we emitted the awaiting event this process (bounds it to a
+        matched pair; a resolve for a pre-restart question is a silent no-op)."""
+        if pending_id not in self._awaiting_task_events:
+            return
+        self._awaiting_task_events.discard(pending_id)
+        try:
+            from valuz_agent.modules.tasks import messaging as task_messaging
+
+            await task_messaging.record_user_answered(
+                task_id=entry.task_id,
+                project_id=entry.project_id or "",
+                pending_id=pending_id,
+                session_id=entry.session_id,
+                user_id=entry.owner_user_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "decisions: failed to record user_answered task event for %s",
+                pending_id,
+                exc_info=True,
+            )
+
+    # -- Notification projection (docs/design/notifications.md) --------
+    # A question is a notification of kind ``question``. The aggregator is the
+    # question PROJECTOR: it feeds the durable ledger via ``notification_service``
+    # (idempotent by ``q:{pending_id}``, so calling from live + reconcile paths
+    # is safe). Snapshots stay data-only (agent_slug / question text) — the
+    # frontend localizes the display copy per kind, so the backend stores no UI
+    # chrome. Best-effort: a ledger failure never breaks inbox fan-out.
+
+    async def _project_question_added(self, entry: DecisionEntry) -> None:
+        from valuz_agent.modules.notifications.service import notification_service
+
+        question = ""
+        qs = (entry.question_payload or {}).get("questions")
+        if isinstance(qs, list) and qs and isinstance(qs[0], dict):
+            question = str(qs[0].get("question") or "")
+        route = (
+            f"/tasks/{entry.task_id}"
+            if entry.task_id
+            else f"/conversation/{entry.session_id}"
+        )
+        await notification_service.ingest(
+            entry.owner_user_id,
+            dedup_key=f"q:{entry.pending_id}",
+            kind="question",
+            title=entry.agent_slug,  # frontend builds "{agent} 需要你确认"
+            body=question or entry.task_title,
+            route=route,
+            action="answer",
+            task_id=entry.task_id or None,
+            project_id=entry.project_id,
+            session_id=entry.session_id,
+            pending_id=entry.pending_id,
+            payload={
+                "question_payload": entry.question_payload,
+                "agent_slug": entry.agent_slug,
+                "task_title": entry.task_title,
+                "subtask_label": entry.subtask_label,
+            },
+        )
+
+    async def _project_question_resolved(self, user_id: str, pending_id: str) -> None:
+        from valuz_agent.modules.notifications.service import notification_service
+
+        await notification_service.resolve(user_id, f"q:{pending_id}")
 
     async def _fan_out(self, ev: DecisionStreamEvent, owner_user_id: str) -> None:
         """Push to ``owner_user_id``'s subscribers only. Caller holds ``self._lock``."""

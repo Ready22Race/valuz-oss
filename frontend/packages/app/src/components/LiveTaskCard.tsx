@@ -28,6 +28,8 @@ import {
   useTranslation,
   type PlanSubtask,
   type TaskEvent,
+  getEntityOrigin,
+  recordEntityOrigin,
 } from "@valuz/core";
 import { Badge } from "@valuz/ui";
 
@@ -68,6 +70,19 @@ const STATUS_RUNNING = new Set([
   "in_progress",
   "in_review",
   "rework",
+]);
+
+// Task statuses with nothing left to stream. Finished cards accumulate in a
+// long conversation, and every open SSE stream pins one of the browser's 6
+// per-host HTTP/1.1 connections — enough finished cards starve every other
+// request to the backend (all pages hang Pending). The snapshot fetched on
+// mount is enough for these; ``stopped`` trades a possibly-stale card (if
+// the task is revived from another surface) for the freed connection.
+const STREAM_DONE_STATUSES = new Set([
+  "completed",
+  "failed",
+  "stopped",
+  "abandoned",
 ]);
 
 interface Meta {
@@ -243,7 +258,20 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
     [scheduleRefetchPlan],
   );
 
-  useTaskEvents(taskId, handleEvent);
+  // Seed the draft task's origin from its caller session BEFORE the event
+  // subscription below resolves its stream URL (multi-target editions).
+  useEffect(() => {
+    const sessionOrigin = getEntityOrigin(callerSessionId, "session");
+    if (sessionOrigin) recordEntityOrigin(taskId, sessionOrigin);
+  }, [taskId, callerSessionId]);
+
+  // Subscribe only while the task can still change (or before the snapshot
+  // resolves — a not-yet-visible draft arrives as ``task_drafted`` over SSE).
+  // Once a terminal event flips ``meta.status`` the stream closes itself.
+  useTaskEvents(
+    meta && STREAM_DONE_STATUSES.has(meta.status) ? null : taskId,
+    handleEvent,
+  );
 
   const counts = useMemo(() => {
     let done = 0;
@@ -261,6 +289,10 @@ export function LiveTaskCard(props: LiveTaskCardProps): ReactElement | null {
     if (busy) return;
     setBusy("commit");
     try {
+      // A draft task minted inside a routed session lives on that session's
+      // backend — seed its origin before the first task-scoped call.
+      const sessionOrigin = getEntityOrigin(callerSessionId, "session");
+      if (sessionOrigin) recordEntityOrigin(taskId, sessionOrigin);
       await tasksApi.commit(taskId, { caller_session_id: callerSessionId });
     } catch (err) {
       console.warn("commit_task from LiveTaskCard failed", err);

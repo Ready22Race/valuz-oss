@@ -1,4 +1,5 @@
 import { createFetchJson } from "./fetch-json";
+import { resolveApiBase } from "./base-resolver";
 import { invalidateRequestCache } from "./request";
 
 let _apiBase =
@@ -35,8 +36,8 @@ export interface SkillView {
   path: string;
   enabled: boolean;
   /** Global library switch (user-scoped, slug-keyed), independent of any
-   *  project. Defaults to true; off hides the skill from a new (non-project)
-   *  conversation's inline `/` picker. */
+   *  project. Scanned user skills default off; enabling makes the skill
+   *  available to new conversations and agent skill pickers. */
   library_enabled?: boolean;
   tags: string[];
   slug?: string;
@@ -103,6 +104,10 @@ export interface SkillScanResponse {
 
 export interface SkillRescanResponse {
   indexed: number;
+}
+
+export interface SkillListOptions {
+  libraryEnabled?: boolean;
 }
 
 export interface SkillCreateRequest {
@@ -189,10 +194,13 @@ const fetchJson = createFetchJson(() => _apiBase);
 const SKILLS_TAG = "skills";
 const SKILLS_CACHE_TTL_MS = 30_000;
 
-function skillsCatalogCache(projectId?: string) {
+function skillsCatalogCache(projectId?: string, options: SkillListOptions = {}) {
+  const state = options.libraryEnabled === undefined
+    ? "all"
+    : `library:${String(options.libraryEnabled)}`;
   return {
     ttlMs: SKILLS_CACHE_TTL_MS,
-    tags: [SKILLS_TAG, `skills:${projectId ?? "global"}`],
+    tags: [SKILLS_TAG, `skills:${projectId ?? "global"}:${state}`],
   };
 }
 
@@ -201,12 +209,23 @@ function invalidateSkills(): void {
 }
 
 export const skillsApi = {
-  list(projectId?: string): Promise<SkillsCatalog> {
-    const qs = projectId
-      ? `?project_id=${encodeURIComponent(projectId)}`
-      : "";
-    return fetchJson(`/v1/skills${qs}`, {
-      cache: skillsCatalogCache(projectId),
+  list(
+    projectId?: string,
+    options: SkillListOptions = {},
+  ): Promise<SkillsCatalog> {
+    const qs = new URLSearchParams();
+    if (projectId) qs.set("project_id", projectId);
+    if (options.libraryEnabled !== undefined) {
+      qs.set("library_enabled", String(options.libraryEnabled));
+    }
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    // Project-scoped catalog follows the project's execution origin
+    // (multi-target editions); the global catalog stays on the default.
+    return fetchJson(`/v1/skills${suffix}`, {
+      cache: skillsCatalogCache(projectId, options),
+      baseUrl: projectId
+        ? resolveApiBase({ projectId }, "") || undefined
+        : undefined,
     });
   },
 
@@ -214,7 +233,11 @@ export const skillsApi = {
     const qs = projectId
       ? `?project_id=${encodeURIComponent(projectId)}`
       : "";
-    return fetchJson(`/v1/skills/${encodeURIComponent(skillId)}${qs}`);
+    return fetchJson(`/v1/skills/${encodeURIComponent(skillId)}${qs}`, {
+      baseUrl: projectId
+        ? resolveApiBase({ projectId }, "") || undefined
+        : undefined,
+    });
   },
 
   async create(payload: SkillCreateRequest): Promise<SkillView> {

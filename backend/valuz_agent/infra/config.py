@@ -97,10 +97,12 @@ class Settings(BaseSettings):
     # entire surface moves under that base; ``["", "/valuz-backend"]`` (env
     # ``,/valuz-backend``) → served at BOTH so native/internal callers keep
     # working while the ingress sees the prefixed surface. The internal
-    # ``/internal/mcp/*`` mounts are reached server-side via ``backend_base_url``
-    # and stay at fixed native paths — never prefixed. Override with
-    # ``VALUZ_API_PREFIX``; accepts a JSON list or a comma-separated string,
-    # each entry normalised to ``""`` or ``"/segment"``.
+    # ``/_internal/mcp/*`` mounts (ADR-013; dual-mounted at the legacy
+    # ``/internal/mcp/*`` too — see ``api/app.py::_mount_internal``) are
+    # reached server-side via ``backend_base_url`` and stay at fixed native
+    # paths — never prefixed. Override with ``VALUZ_API_PREFIX``; accepts a
+    # JSON list or a comma-separated string, each entry normalised to ``""``
+    # or ``"/segment"``.
     api_prefix: Annotated[list[str], NoDecode] = []
 
     @field_validator("api_prefix", mode="before")
@@ -209,12 +211,14 @@ class Settings(BaseSettings):
 
     # Canonical user skill library directory. May contain ``{user_id}`` for
     # shared/cloud deployments.
-    user_skills_dir: Path = Path.home() / ".agent" / "skills"
+    user_skills_dir: Path = Path.home() / ".agents" / "skills"
 
     @property
     def internal_mcp_token(self) -> str:
         """Shared secret gating the host's internal MCP endpoints
-        (``/internal/mcp/*``), sent in the ``X-Valuz-Internal`` header.
+        (``/_internal/mcp/*``; also served at the legacy ``/internal/mcp/*``
+        dual-mount, see ``api/app.py::_mount_internal``), sent in the
+        ``X-Valuz-Internal`` header.
 
         Derived deterministically from the stable local install owner id so it
         survives process restarts. Sessions bake this token into their stored
@@ -258,6 +262,41 @@ class Settings(BaseSettings):
     # the bundled skill's command vocabulary in sync. GA vendors the bin
     # and sets VALUZ_CDT_PATH instead of npx.
     chrome_devtools_version: str = "1.2.0"
+
+    # ── Marketplace ──────────────────────────────────────────────────
+    # The market index is the PRIMARY marketplace data source (skill /
+    # connector / agent template / team template discovery).
+    #
+    # Empty (default) means: race the ``marketplace_index_candidates`` at
+    # startup — concurrent ``GET {candidate}/healthz`` — and pin the first
+    # candidate to answer 2xx as the resolved base url for the life of the
+    # process (re-raced after repeated request failures). Set this explicitly
+    # (env ``VALUZ_MARKETPLACE_INDEX_BASE_URL``) to skip the race entirely and
+    # always use that base url — this is how a commercial/self-hosted build
+    # pins a specific index without candidate racing.
+    #
+    # ``marketplace_index_channel`` tags every request so the index can scope
+    # results/entitlements per edition/build. Override with
+    # VALUZ_MARKETPLACE_INDEX_CHANNEL.
+    marketplace_index_base_url: str = ""
+    marketplace_index_candidates: list[str] = [
+        "https://api.valuz.io/cloud",
+        "https://api.valuz.cn/cloud",
+    ]
+    marketplace_index_channel: str = "oss"
+
+    # Whether an unreachable market index may fall back to querying the
+    # legacy direct sources (SkillHub / ModelScope) for the ``skill`` /
+    # ``connector`` tabs — never for ``agent`` categories/items, which have no
+    # direct-source equivalent and simply degrade to empty. Results served
+    # this way are marked ``degraded: true`` regardless of whether the direct
+    # source itself succeeded, since it isn't channel-managed content.
+    #
+    # OSS defaults this on so the marketplace stays usable when the index is
+    # down. Commercial/vertical builds that must not let clients bypass the
+    # index's channel controls set this False at their startup path (env
+    # ``VALUZ_MARKETPLACE_DIRECT_FALLBACK=0``).
+    marketplace_direct_fallback: bool = True
 
     model_config = {"env_prefix": "VALUZ_"}
 

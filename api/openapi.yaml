@@ -597,6 +597,11 @@ paths:
   /v1/tasks/{task_id}:intervene:
     post:
       summary: User intervention on a task (note/revise_goal/pause/resume/stop)
+      description: >-
+        For action=resume, the optional `text` field carries a user
+        instruction that rides along with the resume — it is recorded as a
+        `user_inject` task event and embedded in the respawned lead's
+        recovery brief.
       operationId: interveneTask
       tags: [tasks]
       parameters:
@@ -2479,8 +2484,10 @@ paths:
         conflicting decisions for the same ``pending_id`` return 409
         with the original ``accepted_at``. Expired / interrupted
         pendings return 410. Same shape as the kernel-side
-        ``POST /api/v1/sessions/{session_id}/actions``; both routes
-        reach the same orchestrator.
+        ``POST /kernel/v1/sessions/{session_id}/actions`` (ADR-013;
+        default ``/api/v1/...`` upstream — see
+        ``kernel/app/routes/__init__.py``); both routes reach the same
+        orchestrator.
       operationId: submitSessionAction
       tags: [sessions]
       parameters:
@@ -2882,8 +2889,8 @@ paths:
                 $ref: "#/components/schemas/ApiError"
 
   # ------------------------------------------------------------------
-  # Marketplace — normalized discovery/import catalog over SkillHub +
-  # Valuz official skills + curated agent / agent-team templates.
+  # Marketplace — normalized discovery/import catalog over SkillHub,
+  # ModelScope MCP, and Valuz-curated agent / agent-team templates.
   # The client never talks to SkillHub directly; this layer normalizes
   # every source into one item shape (see MarketplaceItem).
   # ------------------------------------------------------------------
@@ -2896,14 +2903,15 @@ paths:
       description: |
         Category rail data for one marketplace tab. `kind=skill` returns the
         curated SkillHub category allowlist with per-category counts;
-        `kind=agent` returns the curated agent/team scenario categories. When
-        the SkillHub upstream is unreachable the response degrades to an
+        `kind=agent` returns the curated agent/team scenario categories;
+        `kind=connector` returns common ModelScope MCP categories. When an
+        upstream is unreachable the response degrades to an
         empty list with `degraded: true` instead of failing.
       parameters:
         - in: query
           name: kind
           required: true
-          schema: {type: string, enum: [skill, agent]}
+          schema: {type: string, enum: [skill, agent, connector]}
       responses:
         "200":
           description: Categories listed
@@ -2921,13 +2929,15 @@ paths:
         Paged catalog browse for one item type. Skill queries push category /
         search filters down to SkillHub (curated category allowlist only —
         Valuz-official skills ship with the client and are never market
-        items); agent / team queries serve Valuz-curated templates.
-        `degraded: true` marks a SkillHub outage.
+        items); agent / team queries serve Valuz-curated templates; connector
+        queries read ModelScope in real time, preserve its default order, and
+        request hosted entries in pages through the first 100 results.
+        `degraded: true` marks an upstream outage.
       parameters:
         - in: query
           name: type
           required: true
-          schema: {type: string, enum: [skill, agent_template, agent_team_template]}
+          schema: {type: string, enum: [skill, agent_template, agent_team_template, connector]}
         - in: query
           name: category
           required: false
@@ -2939,7 +2949,7 @@ paths:
         - in: query
           name: source
           required: false
-          schema: {type: string, enum: [skillhub, valuz_official]}
+          schema: {type: string, enum: [skillhub, valuz_official, modelscope]}
         - in: query
           name: q
           required: false
@@ -3037,6 +3047,65 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+
+  /v1/notifications:
+    get:
+      summary: Open notifications + unread count (the unified attention ledger)
+      description: |
+        The single, backend-reconciled account of "things needing the user" —
+        questions (kind=question) and task failures (kind=task_failed) alike.
+        Supersedes /v1/decisions/* and the interim /v1/tasks/attention.
+      operationId: listNotifications
+      tags: [notifications]
+      responses:
+        "200":
+          description: Open notifications
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationListResponse"
+  /v1/notifications/stream:
+    get:
+      summary: SSE stream of notification changes (snapshot/added/updated/resolved)
+      operationId: streamNotifications
+      tags: [notifications]
+      responses:
+        "200":
+          description: SSE stream
+  /v1/notifications:read-all:
+    post:
+      summary: Mark all of the caller's notifications read
+      operationId: markAllNotificationsRead
+      tags: [notifications]
+      responses:
+        "200":
+          description: OK
+  /v1/notifications/{notification_id}:read:
+    post:
+      summary: Mark one notification read
+      operationId: markNotificationRead
+      tags: [notifications]
+      parameters:
+        - name: notification_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: OK
+  /v1/notifications/{notification_id}:dismiss:
+    post:
+      summary: Dismiss (resolve) one notification
+      operationId: dismissNotification
+      tags: [notifications]
+      parameters:
+        - name: notification_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: OK
 
 components:
   schemas:
@@ -3325,6 +3394,7 @@ components:
         downloads: {type: integer, nullable: true}
         stars: {type: integer, nullable: true}
         installs: {type: integer, nullable: true}
+        views: {type: integer, nullable: true}
     MarketplaceTeamMember:
       type: object
       required: [name, role, lead]
@@ -3342,6 +3412,44 @@ components:
         requirement:
           type: string
           enum: [required, optional, api_key, cost]
+    MarketplaceConnectorConfigField:
+      type: object
+      required: [key, name, target, label, required, secret]
+      properties:
+        key: {type: string}
+        name: {type: string, description: "Actual environment/header/query parameter name."}
+        target: {type: string, enum: [env, header, param]}
+        label: {type: string}
+        required: {type: boolean}
+        secret: {type: boolean}
+        placeholder: {type: string, nullable: true}
+        prefix: {type: string, nullable: true}
+    MarketplaceConnectorConfig:
+      type: object
+      required: [slug, transport, args, env, headers, params, auth_type, fields, supported]
+      properties:
+        slug: {type: string}
+        transport: {type: string, enum: [stdio, http, sse]}
+        url: {type: string, nullable: true}
+        command: {type: string, nullable: true}
+        args:
+          type: array
+          items: {type: string}
+        env:
+          type: object
+          additionalProperties: {type: string}
+        headers:
+          type: object
+          additionalProperties: {type: string}
+        params:
+          type: object
+          additionalProperties: {type: string}
+        auth_type: {type: string, enum: [none, bearer, oauth]}
+        fields:
+          type: array
+          items: {$ref: "#/components/schemas/MarketplaceConnectorConfigField"}
+        supported: {type: boolean}
+        unsupported_reason: {type: string, nullable: true}
     MarketplaceFileEntry:
       type: object
       required: [path]
@@ -3403,10 +3511,10 @@ components:
         id: {type: string}
         type:
           type: string
-          enum: [skill, agent_template, agent_team_template]
+          enum: [skill, agent_template, agent_team_template, connector]
         source:
           type: string
-          enum: [skillhub, valuz_official]
+          enum: [skillhub, valuz_official, modelscope]
         source_ref: {type: string, description: "SkillHub slug / template id / pack id."}
         title: {type: string}
         subtitle: {type: string, nullable: true, description: "Agent role line; null for skills."}
@@ -3432,7 +3540,7 @@ components:
           items: {$ref: "#/components/schemas/MarketplaceTeamMember"}
         install_target:
           type: string
-          enum: [skill_library, agent_library, agent_library_project]
+          enum: [skill_library, agent_library, agent_library_project, connector_library]
         installed: {type: boolean}
         locked: {type: boolean, default: false, description: "Present but not installable (e.g. official skill requires Reportify)."}
     MarketplaceItemDetail:
@@ -3480,6 +3588,20 @@ components:
               nullable: true
               allOf:
                 - $ref: "#/components/schemas/MarketplaceEvaluationReport"
+            connector_config:
+              nullable: true
+              allOf:
+                - $ref: "#/components/schemas/MarketplaceConnectorConfig"
+            install_manifest:
+              type: object
+              nullable: true
+              description: |
+                Opaque, type-varies-by-`type` install payload from the market
+                index: skill -> {download_url, sha256?, size_bytes?};
+                agent_template -> an AgentTemplateDef-shaped object;
+                agent_team_template -> a pack manifest object (skill deps
+                rewritten to {slug, source: "url", download_url}). Only the
+                market index sets this field.
     MarketplaceItemList:
       type: object
       required: [items, total, page, page_size, degraded]
@@ -4026,6 +4148,34 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TaskEvent"
+    NotificationEntry:
+      type: object
+      required: [id, kind, title, body, action, urgency, payload, created_at]
+      properties:
+        id: {type: string}
+        kind: {type: string, description: "question | task_failed | …"}
+        title: {type: string}
+        body: {type: string}
+        route: {type: string, nullable: true}
+        action: {type: string, description: "answer | resume | none"}
+        urgency: {type: string, description: "actionable | info"}
+        task_id: {type: string, nullable: true}
+        project_id: {type: string, nullable: true}
+        session_id: {type: string, nullable: true}
+        pending_id: {type: string, nullable: true}
+        payload: {type: object, additionalProperties: true}
+        created_at: {type: integer, format: int64}
+        read_at: {type: integer, format: int64, nullable: true}
+        resolved_at: {type: integer, format: int64, nullable: true}
+    NotificationListResponse:
+      type: object
+      required: [entries, unread]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/NotificationEntry"
+        unread: {type: integer}
     InterveneRequest:
       type: object
       required: [action]
@@ -5365,7 +5515,9 @@ components:
         Body for ``POST /v1/sessions/{id}/actions``. Resolves a pending
         ``requires_action`` event with the user's decision. Mirrors the
         kernel's ``SubmitActionRequest`` shape (kernel V5+d008b53). The
-        kernel exposes the same shape under ``/api/v1/sessions/{id}/actions``;
+        kernel exposes the same shape under
+        ``/kernel/v1/sessions/{id}/actions`` (ADR-013; default
+        ``/api/v1/...`` upstream — see ``kernel/app/routes/__init__.py``);
         both routes hit the same orchestrator instance.
 
         Decision verbs (V5+d008b53):

@@ -1,4 +1,5 @@
-"""Usage aggregate routes — /api/v1/usage.
+"""Usage aggregate routes — ``{KERNEL_API_PREFIX}/v1/usage`` (default
+``/api/v1/usage`` — see ``app.routes.KERNEL_API_PREFIX``).
 
 Public read API over the kernel's ``messages`` + ``sessions`` tables so
 hosts never query kernel storage directly (the TD-007 boundary debt this
@@ -10,12 +11,13 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from app.dependencies import get_owner_id, get_store
+from app.routes import KERNEL_API_PREFIX
 from app.schemas import UsageRollupResponse
 from app.serializers import usage_row_to_data
 from fastapi import APIRouter, Depends, Query
 from src.core import StorePort
 
-router = APIRouter(prefix="/api/v1/usage", tags=["usage"])
+router = APIRouter(prefix=f"{KERNEL_API_PREFIX}/v1/usage", tags=["usage"])
 
 StoreDep = Annotated[StorePort, Depends(get_store)]
 OwnerDep = Annotated[str, Depends(get_owner_id)]

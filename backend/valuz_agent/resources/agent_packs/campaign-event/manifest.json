@@ -3,7 +3,7 @@
   "kind": "agent-pack",
   "collection": {
     "id": "campaign-event",
-    "name": { "zh-CN": "活动策划 Team", "en-US": "Campaign Event Team" },
+    "name": { "zh-CN": "活动策划", "en-US": "Campaign Planning" },
     "description": { "zh-CN": "活动方案、传播节奏、视觉物料、执行复盘，适合营销活动从策划到落地", "en-US": "Event planning, campaign cadence, visual assets, execution, and post-event review" },
     "scenario": { "zh-CN": "营销增长", "en-US": "Marketing Growth" },
     "icon": "calendar"

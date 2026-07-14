@@ -173,6 +173,7 @@ export const AgentDetailView = ({
 
   // Skill + connector catalogs for the 技能 / 装备 browse sub-tabs.
   const [skillCatalog, setSkillCatalog] = useState<SkillView[]>([]);
+  const [skillPickerCatalog, setSkillPickerCatalog] = useState<SkillView[]>([]);
   const [connectorCatalog, setConnectorCatalog] = useState<ConnectorItem[]>([]);
   // Full connector list (every status), so the connectors tab can show each
   // bound connector's status pill — not just the connected ones.
@@ -303,9 +304,12 @@ export const AgentDetailView = ({
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [skillRes, connRes, dirRes] = await Promise.all([
+      const [skillRes, enabledSkillRes, connRes, dirRes] = await Promise.all([
         skillsApi
           .list()
+          .catch(() => ({ project_id: "", skills: [] as SkillView[] })),
+        skillsApi
+          .list(undefined, { libraryEnabled: true })
           .catch(() => ({ project_id: "", skills: [] as SkillView[] })),
         connectorsApi
           .list()
@@ -316,6 +320,7 @@ export const AgentDetailView = ({
       ]);
       if (cancelled) return;
       setSkillCatalog(skillRes.skills);
+      setSkillPickerCatalog(enabledSkillRes.skills);
       setConnectorCatalog(
         connRes.connectors.filter((c) => c.enabled && c.status === "connected"),
       );
@@ -1187,7 +1192,7 @@ export const AgentDetailView = ({
         description={t("agent.skillsSectionHint" as Parameters<typeof t>[0])}
         searchPlaceholder={t("agent.skillsSearch" as Parameters<typeof t>[0])}
         emptyCatalogText={t("agent.noSkillsLib" as Parameters<typeof t>[0])}
-        items={skillCatalog.map((s) => ({
+        items={skillPickerCatalog.map((s) => ({
           id: s.path,
           name: s.name,
           description: s.description,

@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING
 
 from valuz_agent.infra.db_urls import (
     db_url_async,
-    is_sqlite_runtime,
     kernel_db_url,
     kernel_db_url_async,
     sqlite_path_from_url,
@@ -39,6 +38,8 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
 logger = logging.getLogger(__name__)
+
+# ── Kernel HTTP route prefix (ADR-013) ──────────────────────────────────
 
 # Triggers sys.path injection so ``from src.core...`` and ``from app.config...``
 # resolve once anyone in the host imports the kernel package.
@@ -57,6 +58,23 @@ KERNEL_VERSION_TABLE = "alembic_version"
 # current trio plus pre-cutover fossils. Host ``valuz_*`` tables and the DeepAgents
 # langgraph checkpoint tables in the same file are off-limits.
 _KERNEL_OWNED_TABLES = ("sessions", "messages", "events", "projects", "agents", "environments")
+
+
+def kernel_api_prefix() -> str:
+    """The path prefix EVERY kernel HTTP route currently serves under.
+
+    Same value for in-process mode (baked into each ``app.routes.*`` router's
+    ``prefix=`` at import time) and http-kernel mode (baked into the SAME
+    routers in the standalone process): the kernel's own default is
+    ``/kernel`` (``kernel/app/routes/__init__.py`` — ADR-013), so no host-side
+    env override exists; an explicit ``KERNEL_API_PREFIX`` env still wins for
+    embedders that need a different mount. ``HttpKernelClient``
+    (``adapters/kernel_client_http.py``) reads this to build request paths
+    that match whatever the target kernel actually serves. Reads
+    ``os.environ`` lazily on every call (never cached) so it always reflects
+    the value in effect — matters for tests that monkeypatch the env.
+    """
+    return os.environ.get("KERNEL_API_PREFIX", "/kernel")
 
 
 def _set_kernel_env() -> None:
@@ -79,6 +97,16 @@ def _set_kernel_env() -> None:
     kernel_db_path = sqlite_path_from_url(kernel_db_url())
     if kernel_db_path is not None:
         os.environ.setdefault("DEEPAGENTS_CHECKPOINT_DB", str(kernel_db_path))
+        # Local resident process uses the sqlite checkpointer above. The
+        # ephemeral cloud SANDBOX instead uses FileCheckpointSaver (write-once
+        # files on a per-owner COS mount — sqlite-on-COS corrupts), gated by
+        # IS_SANDBOX/KERNEL_STORE=remote in DeepAgentsRuntime. This is only the
+        # LOCAL default dir (next to kernel.db); the sandbox injects
+        # DEEPAGENTS_CHECKPOINT_ROOT = the COS mount path, which wins here.
+        os.environ.setdefault(
+            "DEEPAGENTS_CHECKPOINT_ROOT",
+            str(os.path.join(os.path.dirname(str(kernel_db_path)), "deepagents-checkpoints")),
+        )
     # OSS default (KERNEL_STORE local/unset): the DataService backend is the host
     # sqlite (valuz.db). Inject it as the durable so the kernel dual-writes
     # kernel.db -> valuz.db and reads are served from the DataService.
@@ -258,7 +286,6 @@ async def init_kernel_dependencies() -> None:
     configures the data service purely via env vars, loaded at boot.
     """
     _set_kernel_env()
-    import app.dependencies as kernel_deps
     from app.config import AppConfig
     from app.dependencies import init_dependencies
 
@@ -268,30 +295,13 @@ async def init_kernel_dependencies() -> None:
     # explicitly (host → kernel_client → route → store), so there is nothing to
     # fall back to. Reads/writes that reach the kernel always carry an owner.
 
-    # The kernel's engine factory (kernel/src/adapters/sqlalchemy_store/engine.py)
-    # sets journal_mode=WAL but NOT busy_timeout, so kernel connections run with
-    # SQLite's default busy_timeout=0. The kernel is the highest-frequency writer
-    # during a turn (every coalesced event delta), so with timeout 0 it raises
-    # "database is locked" *instantly* the moment the host's sync engine holds the
-    # write lock — no wait, no retry. The host engine was hardened to 15s
-    # (infra/database) but this kernel half of the SAME file was not, which is the
-    # real source of the dispatch/scheduler lock storms. Attach the missing PRAGMA
-    # to the kernel engine here (at the host seam), then dispose the pool so live
-    # connections reconnect with it. The tidier home is the kernel's engine
-    # factory — fold busy_timeout in there when next touching it.
-    if is_sqlite_runtime() and getattr(kernel_deps, "_engine", None) is not None:
-        from sqlalchemy import event as _sa_event
-
-        kernel_engine = kernel_deps._engine
-
-        @_sa_event.listens_for(kernel_engine.sync_engine, "connect")
-        def _kernel_busy_timeout(dbapi_conn, _connection_record):  # type: ignore[no-untyped-def]
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA busy_timeout=15000")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.close()
-
-        await kernel_engine.dispose()
+    # busy_timeout=15000 + synchronous=NORMAL now live in the kernel's engine
+    # factory (kernel/src/adapters/sqlalchemy_store/engine.py), so BOTH kernel
+    # engines — the local kernel.db engine AND the durable engine on the host's
+    # valuz.db — connect hardened. The former host-seam patch here only covered
+    # the local engine, leaving the durable engine (the highest-frequency
+    # valuz.db writer during a turn) at busy_timeout=0 — the source of the
+    # turn-time lock storms that starved every read endpoint.
 
 
 async def shutdown_kernel_dependencies() -> None:
@@ -303,16 +313,21 @@ async def shutdown_kernel_dependencies() -> None:
 def get_kernel_routers() -> list:
     """Return the kernel's FastAPI routers in the order they should be mounted.
 
-    Note: ``GET /api/v1/models`` was removed from the kernel along with the
-    MODEL_CATALOG drop — runtime dispatch is now per-session protocol-driven,
-    so there's no curated list to expose. Valuz surfaces models through its
-    own ``/v1/channels`` API instead.
+    Each router's paths are frozen at import time under ``KERNEL_API_PREFIX``
+    (default ``/kernel`` — ``kernel/app/routes/__init__.py``, ADR-013; an
+    explicit env override must land before any ``app.routes.*`` import).
+
+    Note: ``GET {KERNEL_API_PREFIX}/v1/models`` was removed from the kernel
+    along with the MODEL_CATALOG drop — runtime dispatch is now per-session
+    protocol-driven, so there's no curated list to expose. Valuz surfaces
+    models through its own ``/v1/channels`` API instead.
 
     Kernel V5+messages adds a ``messages`` router exposing
-    ``GET /api/v1/sessions/{id}/messages`` /
-    ``GET /api/v1/messages/{id}`` /
-    ``GET /api/v1/messages/{id}/events`` so the frontend can read per-turn
-    history (one row per ``run_turn``, with usage + todo snapshots).
+    ``GET {KERNEL_API_PREFIX}/v1/sessions/{id}/messages`` /
+    ``GET {KERNEL_API_PREFIX}/v1/messages/{id}`` /
+    ``GET {KERNEL_API_PREFIX}/v1/messages/{id}/events`` so the frontend can
+    read per-turn history (one row per ``run_turn``, with usage + todo
+    snapshots).
 
     Per ADR-008 the kernel's ``app.routes.agents`` is *not* mounted here.
     Valuz keeps a private synthetic agent per project
@@ -334,7 +349,8 @@ def make_data_service_placeholder():
     """Create the host-mounted DataService sub-app. Store + verifier are bound
     later in the lifespan (once the backend DSN + secret are known); until then
     ``/health`` and ``/openapi.json`` work and ``/rpc`` returns 401. Mounted at
-    ``/internal/data`` by the host app factory."""
+    ``/_internal/data`` (and the legacy ``/internal/data`` dual-mount,
+    ADR-013) by the host app factory."""
     from app.data_service import create_data_service_app
     from src.core.token_verifier import NullTokenVerifier
 

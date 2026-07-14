@@ -726,7 +726,7 @@ class SeatbeltDriver:
         # Model A: the sandbox ALWAYS keeps a local kernel.db (grant its write
         # files in every mode). When the user has configured a durable
         # (Postgres-backed) data service, the sandbox must NOT hold the DSN — it
-        # write-throughs to the HOST-mounted DataService (/internal/data) over
+        # write-throughs to the HOST-mounted DataService (/_internal/data) over
         # HTTP, carrying only a freshly minted JWT. "Who holds the credential" is
         # resolved here: in-process holds the DSN; the sandbox holds a token.
         rw_files: tuple[str, ...] = (

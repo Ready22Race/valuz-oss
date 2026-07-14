@@ -6,7 +6,8 @@ Endpoints:
   GET    /v1/projects/{id}/tasks            — list project tasks
   GET    /v1/tasks/{task_id}                  — task header + runs + events
   GET    /v1/tasks/{task_id}/events           — full event log (ACTIVITY)
-  GET    /v1/tasks/{task_id}/events/stream    — SSE: live task events (cursor: ?after_seq=N)
+  GET    /v1/tasks/{task_id}/events/stream    — SSE: live task events (cursor: ?after_seq=N;
+                                                terminal → ``stream_end`` unless ?keep_alive=1)
   POST   /v1/tasks/{task_id}:intervene        — note / revise_goal / pause / resume / stop
   POST   /v1/tasks/{task_id}:commit           — draft → active (VALUZ-CHATPLAN S3)
   POST   /v1/tasks/{task_id}:abandon          — draft → abandoned (VALUZ-CHATPLAN S3)
@@ -20,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -347,13 +348,30 @@ _TASK_EVENTS_POLL_INTERVAL_S = 0.5
 # an idle connection. 15s matches the kernel session SSE.
 _TASK_EVENTS_HEARTBEAT_S = 15.0
 
+# Task statuses whose stream is allowed to end: no further events can
+# arrive without a revival event first. ``stopped`` is deliberately NOT
+# here — a stopped task can be revived by chat/inject with no action from
+# the subscriber, so its stream must stay open to deliver ``resumed``.
+_TASK_TERMINAL_STATUSES = frozenset({"completed", "failed", "abandoned"})
+
+# Event types that flip an open stream into / out of the terminal state
+# (mirrors the status transitions above without extra status queries).
+_TASK_TERMINAL_EVENT_TYPES = frozenset({"task_completed", "abandoned"})
+_TASK_REVIVAL_EVENT_TYPES = frozenset({"resumed", "committed"})
+
+# Once terminal, keep polling this long for trailing events before
+# emitting ``stream_end`` and closing the connection.
+_TASK_EVENTS_TERMINAL_LINGER_S = 5.0
+
 
 async def _iter_task_events_sse(
     task_id: str,
     project_id: str,
     after_seq: int,
     user_id: str,
-    is_disconnected: callable | None = None,
+    is_disconnected: Callable[[], bool] | None = None,
+    initial_status: str | None = None,
+    keep_alive: bool = False,
 ) -> AsyncIterator[dict[str, str]]:
     """Polling iterator for task-event SSE.
 
@@ -369,12 +387,24 @@ async def _iter_task_events_sse(
     seconds of silence so intermediaries (nginx, browsers) don't close the
     connection.
 
+    Terminal close: once the task is terminal (``initial_status`` at connect,
+    or a terminal event observed mid-stream) and the log has stayed silent for
+    ``_TASK_EVENTS_TERMINAL_LINGER_S``, a final ``{event: 'stream_end'}`` is
+    emitted and the generator returns. Browsers cap HTTP/1.1 connections at 6
+    per host, so an immortal stream per finished task starves every other
+    request the client makes. Closing is never lossy — a reconnecting client
+    resumes from its ``after_seq`` cursor. ``keep_alive=True`` opts out for
+    subscribers that need a finished task's stream (the completed-task
+    follow-up chat listens for ``deliverable_updated``).
+
     Task events don't have an in-memory broadcast subscriber (unlike kernel
     events). DB polling at 500ms is cheap (single indexed query per tick)
     and exact (sequence is monotonic per task — no gaps possible).
     """
     cursor = after_seq
     silent_for = 0.0
+    terminal = not keep_alive and initial_status in _TASK_TERMINAL_STATUSES
+    terminal_silent = 0.0
     while True:
         if is_disconnected is not None and is_disconnected():
             return
@@ -398,9 +428,20 @@ async def _iter_task_events_sse(
                     "data": json.dumps(event_payload, ensure_ascii=False),
                 }
                 cursor = row.sequence
+                if not keep_alive:
+                    if row.type in _TASK_TERMINAL_EVENT_TYPES:
+                        terminal = True
+                    elif row.type in _TASK_REVIVAL_EVENT_TYPES:
+                        terminal = False
             silent_for = 0.0
+            terminal_silent = 0.0
         else:
             silent_for += _TASK_EVENTS_POLL_INTERVAL_S
+            if terminal:
+                terminal_silent += _TASK_EVENTS_POLL_INTERVAL_S
+                if terminal_silent >= _TASK_EVENTS_TERMINAL_LINGER_S:
+                    yield {"event": "stream_end", "data": ""}
+                    return
             if silent_for >= _TASK_EVENTS_HEARTBEAT_S:
                 yield {"event": "heartbeat", "data": ""}
                 silent_for = 0.0
@@ -412,6 +453,7 @@ async def stream_task_events(
     task_id: str,
     request: Request,
     after_seq: int = 0,
+    keep_alive: bool = False,
     user_id: str = Depends(get_current_user_id),
 ) -> EventSourceResponse:
     """SSE subscription for a task's event timeline.
@@ -421,6 +463,11 @@ async def stream_task_events(
     (no gaps possible — sequence is strictly monotonic). The
     ``id:`` field on each emitted event is the sequence number the
     client should remember for the next reconnect.
+
+    Terminal tasks close the stream (final ``stream_end`` event) after a
+    short linger, so finished tasks don't pin one of the browser's 6
+    per-host connections forever. ``?keep_alive=1`` opts out — see
+    ``_iter_task_events_sse``.
 
     Polling cadence: 500ms (see ``_TASK_EVENTS_POLL_INTERVAL_S``). The
     DB write side (``_emit_plan_update`` and friends) doesn't currently
@@ -442,6 +489,8 @@ async def stream_task_events(
             after_seq=after_seq,
             user_id=user_id,
             is_disconnected=None,
+            initial_status=task.status,
+            keep_alive=keep_alive,
         )
     )
 
@@ -462,7 +511,9 @@ async def intervene(
     stop          — cascade-halt → ``stopped`` (soft terminal; the detail page
                     offers a resume entry, and chat/inject can also revive it)
     resume        — reconcile + respawn members + re-drive lead
-                    (paused/stopped/blocked → active)
+                    (paused/stopped/blocked → active). Optional ``text`` rides
+                    along as a user instruction embedded in the respawned
+                    lead's recovery brief ("回复并恢复" in one step).
     """
     task_ds = TaskDatastore(db)
     event_ds = TaskEventDatastore(db)
@@ -518,7 +569,9 @@ async def intervene(
                 detail=f"cannot {payload.action} task in status {task.status!r}",
             )
     elif payload.action == "resume":
-        result = await task_orchestrator.resume_task(task_id, ws, user_id=user_id)
+        result = await task_orchestrator.resume_task(
+            task_id, ws, user_id=user_id, instruction=payload.text
+        )
         # ``resume_task`` returns ``{ok: False, error}`` on an illegal source
         # state (e.g. resuming an ``active`` task). Same rationale as stop above.
         if not result.get("ok"):

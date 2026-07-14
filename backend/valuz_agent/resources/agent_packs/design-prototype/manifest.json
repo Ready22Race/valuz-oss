@@ -4,8 +4,8 @@
   "collection": {
     "id": "design-prototype",
     "name": {
-      "zh-CN": "设计原型 Team",
-      "en-US": "Design Prototype Team"
+      "zh-CN": "设计原型",
+      "en-US": "Design Prototype"
     },
     "description": {
       "zh-CN": "信息架构、交互流程、视觉原型、设计走查，适合把 PRD 变成可评审的高保真方案",
