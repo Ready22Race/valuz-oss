@@ -230,14 +230,22 @@ def _real_home_snapshot() -> dict[str, set[str] | None]:
     }
 
 
+# Baseline captured at conftest IMPORT time — this runs before
+# ``pytest_sessionstart`` and its collection-time ``valuz_agent`` imports (which
+# pull in dozens of modules). A session-scoped fixture would only snapshot at
+# the first test's setup, i.e. AFTER those imports, folding any import- or
+# session-start-time ``Path.home()`` write into the baseline as "pre-existing"
+# and letting it leak silently — the exact class of bug this tripwire guards.
+_REAL_HOME_BASELINE = _real_home_snapshot()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _real_home_leak_tripwire():
-    before = _real_home_snapshot()
     yield
     after = _real_home_snapshot()
     leaks: list[str] = []
     for root, entries_after in after.items():
-        entries_before = before.get(root)
+        entries_before = _REAL_HOME_BASELINE.get(root)
         added = sorted((entries_after or set()) - (entries_before or set()))
         if added:
             leaks.append(f"{root} gained: {added}")
