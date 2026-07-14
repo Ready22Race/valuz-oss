@@ -27,26 +27,56 @@ os.environ.setdefault("VALUZ_PARSE_POOL_DISABLED", "1")
 # ``scripts/dev.sh`` pins ``~/.valuz-oss-dev``) must not bleed into tests
 # either.
 _HOME_SANDBOX = Path(tempfile.mkdtemp(prefix="valuz-test-home-"))
+
+# (1) Positive pins — every real-home path a test could write lands INSIDE the
+# sandbox. Each of these fields defaults to a location under the user's actual
+# home; pinning them makes the resolved path sandbox-relative instead.
 os.environ["VALUZ_DATA_DIR"] = str(_HOME_SANDBOX / "valuz-data")
 os.environ["VALUZ_LOG_DIR"] = str(_HOME_SANDBOX / "logs")
 os.environ["VALUZ_USER_SKILLS_DIR"] = str(_HOME_SANDBOX / "user-skills")
-# NOT pinned: ``user_skill_staging_dir`` / ``user_temp_dir`` default to None,
-# which already resolves under the (sandboxed) data dir / the OS temp root —
-# setting them would flip the legacy-staging branch and change behavior.
-#
-# Drop ambient DB-URL overrides: ``fs_registry.db_url()`` / ``kernel_db_url()``
-# return ``settings.database_url`` / ``kernel_database_url`` VERBATIM when set,
-# bypassing the data-dir-derived SQLite path above. A dev shell or CI env that
-# exports VALUZ_DATABASE_URL / VALUZ_KERNEL_DATABASE_URL (Postgres DSN, shared
-# server file) would therefore route test writes to an EXTERNAL database the
-# filesystem tripwire below cannot see — re-leaking ``local-test-owner`` rows
-# exactly as this sandbox is meant to prevent. Clear them so DB access falls
-# back to the sandboxed data dir. Case-insensitive: pydantic-settings matches
-# env vars without regard to case, so any spelling must go.
-for _db_url_key in [
-    k for k in os.environ if k.upper() in ("VALUZ_DATABASE_URL", "VALUZ_KERNEL_DATABASE_URL")
+# ``user_project_root`` defaults to ``~/Valuz`` — a REAL directory the user
+# keeps data in (backups live under ``~/Valuz/backups``). Tests that create a
+# managed project (``ProjectService.create_project`` / import-confirm without a
+# ``root_path``) write a project marker there via ``fs_registry.project_root()``.
+os.environ["VALUZ_USER_PROJECT_ROOT"] = str(_HOME_SANDBOX / "projects")
+
+# (2) Kernel durable-store tier — force the in-process/local backend so a test
+# that boots the kernel dual-writes to the SANDBOXED host db (boot injects the
+# sandbox ``db_url`` as the durable URL only when ``KERNEL_STORE == "local"``),
+# never to an ambient pg/remote backend. Read exact-case via ``os.getenv``.
+os.environ["KERNEL_STORE"] = "local"
+
+# (3) Clear ambient overrides that would REDIRECT a write OUTSIDE the sandbox,
+# so each falls back to its sandboxed default:
+#   * VALUZ_DATABASE_URL / VALUZ_KERNEL_DATABASE_URL — ``fs_registry.db_url()`` /
+#     ``kernel_db_url()`` return these VERBATIM when set, bypassing the
+#     data-dir-derived SQLite path pinned above.
+#   * VALUZ_DURABLE_DATABASE_URL / VALUZ_DATA_API_* — the kernel ``AppConfig``
+#     reads these directly; left set they would dual-write to a real pg/remote
+#     durable store even with the host db sandboxed.
+#   * VALUZ_USER_SKILL_STAGING_DIR / VALUZ_USER_TEMP_DIR — optional dir
+#     overrides whose ``None`` default already resolves under the sandboxed
+#     data dir / OS temp; deleting an ambient value restores that safe default
+#     (unlike PINNING them, which would flip the legacy-staging branch).
+# A dev shell or CI env exporting any of these would re-leak into a real DB or
+# real home that the filesystem tripwire below cannot see. Case-insensitive:
+# pydantic-settings matches env vars without regard to case, so any spelling
+# must go; VALUZ_DATA_API_* is matched by prefix (URL / TOKEN / KIND).
+_SANDBOX_ESCAPE_HATCHES = frozenset(
+    {
+        "VALUZ_DATABASE_URL",
+        "VALUZ_KERNEL_DATABASE_URL",
+        "VALUZ_DURABLE_DATABASE_URL",
+        "VALUZ_USER_SKILL_STAGING_DIR",
+        "VALUZ_USER_TEMP_DIR",
+    }
+)
+for _escape_key in [
+    k
+    for k in os.environ
+    if k.upper() in _SANDBOX_ESCAPE_HATCHES or k.upper().startswith("VALUZ_DATA_API_")
 ]:
-    del os.environ[_db_url_key]
+    del os.environ[_escape_key]
 
 # ---------------------------------------------------------------------------
 # Owner context — explicit-identity semantics (no implicit fallback).
@@ -232,6 +262,7 @@ _REAL_HOME_WATCHED = (
     Path.home() / ".agents" / "skills",
     Path.home() / ".agent" / "skills",
     Path.home() / ".valuz-oss",
+    Path.home() / "Valuz",  # user_project_root default — real user data lives here
     Path.home() / ".claude" / "skills",
     Path.home() / ".codex" / "skills",
 )
