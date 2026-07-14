@@ -44,6 +44,9 @@ import { SkillAddDialog, SkillEditDialog } from "@valuz/app/components";
 import { useTranslation } from "@valuz/core";
 
 type AddSkillDialogMode = "link" | "upload";
+type ResourceRefreshEvent = CustomEvent<{ resourceType?: string }>;
+
+const RESOURCE_REFRESH_EVENT = "valuz:resource-refresh";
 
 /* ── Map backend SkillView → UI component props ─────────────── */
 
@@ -186,9 +189,6 @@ function badgeForCategory(
   if (categoryId === "agents") {
     if (skill.creation_origin === "created") {
       return { label: t("skill.originCreated"), tone: "valuz" };
-    }
-    if (skill.creation_origin === "imported") {
-      return { label: t("skill.originSynced"), tone: "valuz" };
     }
     return undefined;
   }
@@ -375,10 +375,16 @@ export const SkillsPage = () => {
     const revalidate = () => {
       if (document.visibilityState === "visible") void loadSkills();
     };
+    const refreshResource = (event: Event) => {
+      const detail = (event as ResourceRefreshEvent).detail;
+      if (detail?.resourceType === "skill") void loadSkills();
+    };
     window.addEventListener("focus", revalidate);
+    window.addEventListener(RESOURCE_REFRESH_EVENT, refreshResource);
     document.addEventListener("visibilitychange", revalidate);
     return () => {
       window.removeEventListener("focus", revalidate);
+      window.removeEventListener(RESOURCE_REFRESH_EVENT, refreshResource);
       document.removeEventListener("visibilitychange", revalidate);
     };
   }, [loadSkills]);
