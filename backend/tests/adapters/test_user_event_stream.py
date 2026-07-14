@@ -9,6 +9,7 @@ invariant (each poll is a discrete read, nothing held between ticks).
 # ruff: noqa: I001 — boot.kernel side-effect import MUST precede src.* (sys.path)
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -176,6 +177,29 @@ class TestIterUserEventsSse:
         gen = adapter.iter_user_events_sse("user-A", is_disconnected=lambda: True)
         with pytest.raises(StopAsyncIteration):
             await anext(gen)
+
+    async def test_closing_the_stream_tears_down_the_live_tap(self, bind_reader, monkeypatch):
+        # No SSE zombie: closing the generator (what sse-starlette does on client
+        # disconnect / page refresh) must cancel the pump AND run the underlying
+        # tap's finally (detach). Proven by a tap whose finally flips a flag.
+        bind_reader([])
+        torn_down = {"v": False}
+
+        async def _fake(user_id):
+            try:
+                yield _live_ev(1, "s", "session_idle")  # one frame, then park
+                await asyncio.Event().wait()
+            finally:
+                torn_down["v"] = True
+
+        monkeypatch.setattr(adapter.kernel_client, "subscribe_all_events_for", _fake)
+
+        gen = adapter.iter_user_events_sse("user-A", after_seq=0)
+        await anext(gen)  # attaches the pump/tap and delivers the live frame
+        assert torn_down["v"] is False  # still open
+        await gen.aclose()  # simulate the client disconnect
+        await asyncio.sleep(0)  # let the cancellation unwind through the tap
+        assert torn_down["v"] is True  # tap's finally ran — no zombie
 
     async def test_no_db_session_held_between_reads(self, bind_reader, live_tap):
         # §9.2: reads are DISCRETE. Idle no longer polls per-second — the
