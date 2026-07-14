@@ -3546,6 +3546,14 @@ export const ConversationPage = () => {
       afterSeq: number,
       opts: {
         requireUserBeforeTerminal?: boolean;
+        /**
+         * Set by the unexpected-close reconnect path: ``reconcileStreamEnd``
+         * has JUST gap-filled from the DB, so the resume-reconcile burst would
+         * only duplicate those reads. Without this, a flaky stream (e.g. a
+         * local proxy cutting long-lived SSE) re-fires the 3-shot window burst
+         * on every reconnect — which reads as ``events/window`` polling.
+         */
+        skipReconcileBurst?: boolean;
       } = {},
     ) => {
       if (abortRef.current) {
@@ -3907,7 +3915,7 @@ export const ConversationPage = () => {
       // nothing pre-loaded to lose, so it skips the burst. These are exactly the
       // ``!requireUserBeforeTerminal`` subscriptions (born for an already-running
       // session).
-      if (!opts.requireUserBeforeTerminal) {
+      if (!opts.requireUserBeforeTerminal && !opts.skipReconcileBurst) {
         for (const ms of [400, 1200, 2500]) {
           reconcileBurstTimers.push(window.setTimeout(reconcileTranscript, ms));
         }
@@ -4012,7 +4020,9 @@ export const ConversationPage = () => {
             subscribeToSession(
               sessionId,
               maxSeqRef.current,
-              sawTurnStart ? {} : opts,
+              sawTurnStart
+                ? { skipReconcileBurst: true }
+                : { ...opts, skipReconcileBurst: true },
             );
           }, delay);
           return;
