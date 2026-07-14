@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -912,7 +912,7 @@ async def iter_user_events_sse(
     user_id: str,
     *,
     after_seq: int = 0,
-    is_disconnected: Callable[[], bool] | None = None,
+    is_disconnected: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[dict[str, str]]:
     """Yield ``EventSourceResponse``-shaped control-plane frames forever.
 
@@ -922,8 +922,14 @@ async def iter_user_events_sse(
     then follow the owner's live cross-session tap
     (``kernel_client.subscribe_all_events_for``) as the primary path, with a
     throttled durable backfill as the correctness floor. ``shielded`` keeps a
-    client disconnect from tearing a pooled connection down mid-read. The caller
-    wraps this with ``EventSourceResponse``.
+    client disconnect from tearing a pooled connection down mid-read.
+
+    ``is_disconnected`` (the route passes ``request.is_disconnected``, an async
+    non-blocking check) is awaited each iteration so the ``while`` loop breaks
+    cooperatively on client disconnect — defense in depth ON TOP of
+    sse-starlette's own ``_listen_for_disconnect`` cancel, so a zombie generator
+    can't loop forever holding the live tap even if the external cancel misses.
+    The caller wraps this with ``EventSourceResponse``.
     """
     cursor = after_seq
     last_emit = asyncio.get_event_loop().time()
@@ -954,7 +960,7 @@ async def iter_user_events_sse(
     last_backfill = asyncio.get_event_loop().time()
     try:
         while True:
-            if is_disconnected is not None and is_disconnected():
+            if is_disconnected is not None and await is_disconnected():
                 break
 
             try:

@@ -30,9 +30,14 @@ async def subscribe_user_stream(
     then follows new ones on a ~1s server-side poll, multiplexed across every
     session the user owns. The client resumes with ``?after_seq=<last_seen>``.
 
-    Disconnect handling mirrors the session stream: ``sse-starlette`` cancels
-    the generator on client drop, firing its cleanup — so ``request`` is not
-    threaded into the (synchronous) disconnect predicate.
+    Disconnect handling is belt-and-suspenders: ``sse-starlette`` cancels the
+    generator on client drop (its ``_listen_for_disconnect``), AND the generator
+    itself awaits ``request.is_disconnected`` (a non-blocking check) each
+    iteration so the ``while`` loop breaks cooperatively even if the external
+    cancel is missed — no zombie generator can loop forever holding the tap.
     """
-    del request  # disconnect handled by EventSourceResponse cancel scope
-    return EventSourceResponse(iter_user_events_sse(user_id, after_seq=after_seq))
+    return EventSourceResponse(
+        iter_user_events_sse(
+            user_id, after_seq=after_seq, is_disconnected=request.is_disconnected
+        )
+    )
