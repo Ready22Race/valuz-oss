@@ -34,6 +34,22 @@ function getBridge(): DesktopBridge | null {
   );
 }
 
+/**
+ * True when the user is currently looking at the page a notification deep-links
+ * to. Desktop uses a HashRouter, so the active path lives in ``location.hash``
+ * (e.g. ``#/conversation/abc``); webui uses the pathname. We check both so this
+ * works in either host. Lenient exact-match after stripping query/trailing
+ * slash — enough to tell "on this conversation" from "somewhere else".
+ */
+function isCurrentRoute(route: string | null | undefined): boolean {
+  if (!route) return false;
+  const norm = (p: string) => p.split(/[?#]/)[0].replace(/\/+$/, "") || "/";
+  const target = norm(route);
+  const hash = window.location.hash || "";
+  const fromHash = hash.startsWith("#") ? hash.slice(1) : "";
+  return norm(fromHash) === target || norm(window.location.pathname) === target;
+}
+
 export function NotificationProvider(): ReactElement | null {
   const navigate = useNavigate();
   // Singleton subscription (idempotent).
@@ -67,11 +83,24 @@ export function NotificationProvider(): ReactElement | null {
         // Mark first so a re-entrant subscribe (from markAlerted's own set())
         // doesn't double-fire.
         state.markAlerted(id);
-        // In-app toast (seen when the window is focused).
-        toast.info(d.title, { description: d.body || undefined });
-        // OS notification + dock bounce (seen when it isn't). ``info`` urgency
-        // (e.g. a future completion notice) stays in-app only.
-        if (bridge && entry.urgency !== "info") {
+        // Presence is a CLIENT fact the backend can't know, so the delivery
+        // CHANNEL is decided here, by where the user actually is:
+        //   - focused AND already on this item's page → fully silent (the
+        //     inline card is right there);
+        //   - focused but elsewhere in the app → in-app toast only;
+        //   - blurred / tray-resident / another app → OS notification + dock
+        //     bounce (the "强提醒").
+        // This gates ONLY the alert channels. Read/unread, the badge, and the
+        // drawer are driven by the ledger entry and are deliberately untouched.
+        const focused = document.hasFocus();
+        const onScene = focused && isCurrentRoute(d.route);
+        // In-app toast — skipped only when the user is already on the page.
+        if (!onScene) {
+          toast.info(d.title, { description: d.body || undefined });
+        }
+        // OS notification + dock bounce — only when the window isn't focused.
+        // ``info`` urgency (e.g. a future completion notice) stays in-app only.
+        if (bridge && entry.urgency !== "info" && !focused) {
           void bridge.invoke("desktop_notify", {
             title: d.title,
             body: d.body,

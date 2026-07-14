@@ -25,6 +25,8 @@ from sqlalchemy.orm import sessionmaker
 from valuz_agent.infra.database import Base
 from valuz_agent.modules.decisions.aggregator import DecisionAggregator
 from valuz_agent.modules.decisions.service import enrich_pending
+from valuz_agent.modules.notifications.models import NotificationRow
+from valuz_agent.modules.notifications.service import notification_service
 from valuz_agent.modules.projects.models import ProjectRow
 from valuz_agent.modules.tasks.models import TaskEventRow, TaskRow, TaskSessionRow
 
@@ -43,6 +45,7 @@ def db_factory(tmp_path, monkeypatch):
             TaskSessionRow.__table__,
             TaskEventRow.__table__,
             ProjectRow.__table__,
+            NotificationRow.__table__,
         ],
     )
     async_engine = create_async_engine(f"sqlite+aiosqlite:///{db_file}")
@@ -247,6 +250,48 @@ def test_ignore_non_task_driven_session(db_factory) -> None:
     _prep(agg, SimpleNamespace(id="sub-sess", status="running", metadata={"valuz": {}}))
     _handle(agg, "local-test-owner", "sub-sess", _requires_action_event())
     assert _snap(agg, "local-test-owner") == []
+
+
+def _conversation_session(session_id="chat-sess") -> SimpleNamespace:
+    """A NON-task conversation session: valuz metadata carries agent_slug +
+    project_id but no run_kind (so ``is_task_driven`` is False)."""
+    return SimpleNamespace(
+        id=session_id,
+        user_id="local-test-owner",
+        status="running",
+        metadata={"valuz": {"agent_slug": "researcher", "project_id": "w1", "name": "调研对话"}},
+    )
+
+
+def test_conversation_question_projects_notification_only(db_factory) -> None:
+    """A non-task (conversation) question is NOT added to the Decision Inbox
+    snapshot, but IS projected into the notification ledger (badge/OS-notify),
+    routed to the flat ``/conversation/{id}`` deep link. Answering it clears the
+    ledger entry via the owner-agnostic resolve-by-pending path."""
+    agg = DecisionAggregator()
+    _prep(agg, _conversation_session())
+
+    _handle(agg, "local-test-owner", "chat-sess", _requires_action_event())
+
+    # Decision Inbox stays empty — that surface is task-scoped.
+    assert _snap(agg, "local-test-owner") == []
+
+    # …but the notification ledger has the question.
+    entries, unread = asyncio.run(notification_service.snapshot("local-test-owner"))
+    assert len(entries) == 1
+    assert unread == 1
+    n = entries[0]
+    assert n.kind == "question"
+    assert n.pending_id == "p1"
+    assert n.task_id is None
+    assert n.route == "/conversation/chat-sess"
+    assert n.title == "researcher"  # frontend renders "{agent} 需要你确认"
+
+    # Answering resolves the ledger entry (no owner tracked in _pending).
+    _handle(agg, "local-test-owner", "chat-sess", _resolved_event())
+    entries_after, unread_after = asyncio.run(notification_service.snapshot("local-test-owner"))
+    assert entries_after == []
+    assert unread_after == 0
 
 
 def test_ignore_non_clarifying_subject(db_factory) -> None:

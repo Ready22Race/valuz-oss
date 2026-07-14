@@ -100,6 +100,27 @@ class NotificationService:
                 user_id, NotificationStreamEvent(kind="resolved", payload={"id": rid})
             )
 
+    async def resolve_pending(self, pending_id: str) -> None:
+        """Resolve a question notification by its (globally-unique) ``pending_id``
+        without the owner up front — the decisions aggregator calls this on
+        ``action_resolved`` for conversation questions, which it never tracks in
+        memory (so no owner is known). The datastore row carries ``user_id`` for
+        the fan-out. Idempotent + best-effort (a store failure is logged)."""
+        try:
+            async with async_unit_of_work() as db:
+                row = await NotificationDatastore(db).resolve_by_pending_id(pending_id)
+                target = (row.id, row.user_id) if row is not None else None
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "notifications: resolve_pending failed for %s", pending_id, exc_info=True
+            )
+            return
+        if target is not None:
+            rid, uid = target
+            await self._broadcast(
+                uid, NotificationStreamEvent(kind="resolved", payload={"id": rid})
+            )
+
     async def resolve_task(
         self, user_id: str, task_id: str, kinds: tuple[str, ...] = ("task_failed",)
     ) -> None:
@@ -111,6 +132,27 @@ class NotificationService:
                 ids = await NotificationDatastore(db).resolve_open_by_task(user_id, task_id, kinds)
         except Exception:  # noqa: BLE001
             logger.warning("notifications: resolve_task failed for %s", task_id, exc_info=True)
+            return
+        for rid in ids:
+            await self._broadcast(
+                user_id, NotificationStreamEvent(kind="resolved", payload={"id": rid})
+            )
+
+    async def resolve_session_failures(
+        self, user_id: str, session_id: str, kinds: tuple[str, ...] = ("run_failed",)
+    ) -> None:
+        """Resolve every open ``kinds`` notification for a conversation session —
+        called on a clean turn so a recovered conversation doesn't keep the badge
+        lit with a stale failure. Best-effort."""
+        try:
+            async with async_unit_of_work() as db:
+                ids = await NotificationDatastore(db).resolve_open_by_session(
+                    user_id, session_id, kinds
+                )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "notifications: resolve_session_failures failed for %s", session_id, exc_info=True
+            )
             return
         for rid in ids:
             await self._broadcast(

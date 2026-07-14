@@ -49,6 +49,18 @@ export function notificationDisplay(entry: NotificationEntry): NotificationDispl
       tag: `failure:${entry.task_id ?? entry.id}`,
     };
   }
+  if (entry.kind === "run_failed") {
+    return {
+      title: _t("notification.notifRunFailedTitle" as I18nKey).replace(
+        "{agent}",
+        entry.title || "",
+      ),
+      body: entry.body,
+      route,
+      // Per-session tag so repeat failures of one conversation collapse in the OS.
+      tag: `run_failed:${entry.session_id ?? entry.id}`,
+    };
+  }
   // Unknown kind — render whatever the backend snapshotted.
   return { title: entry.title, body: entry.body, route, tag: `notif:${entry.id}` };
 }
