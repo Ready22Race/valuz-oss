@@ -68,6 +68,7 @@ async def init_dependencies(config: AppConfig) -> None:
         store,
         max_warm_runtimes=_env_int("VALUZ_MAX_WARM_RUNTIMES"),
         runtime_idle_ttl_s=_env_float("VALUZ_RUNTIME_IDLE_TTL_S"),
+        bg_busy_runtime_ttl_s=_env_float("VALUZ_BG_BUSY_RUNTIME_TTL_S"),
     )
     # Start the warm-runtime idle sweeper (bounds leaked claude/codex
     # subprocesses; see SessionOrchestrator). Safe before the orphan scan's

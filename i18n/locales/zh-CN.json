@@ -322,6 +322,9 @@
       "summary": "摘要",
       "viewDetails": "查看完整结果"
     },
+    "bgTask": {
+      "running": "后台任务运行中 ({count})"
+    },
     "brainOverride": "仅本次对话覆盖",
     "pillDrafted": "已起草任务",
     "pillPlanned": "已制定计划 v{version}（{count} 个子任务）",
@@ -726,6 +729,7 @@
     "taskStarting": "任务启动中…",
     "workingOn": "正在处理：{input}",
     "statusRunning": "运行中",
+    "statusBackground": "后台任务运行中",
     "statusPaused": "已暂停",
     "statusIdle": "已结束",
     "statusCompleted": "已完成",

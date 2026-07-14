@@ -33,6 +33,9 @@ class FakeRuntime:
         self.closed = False
         self.interrupted = False
         self.sink = None
+        # Mirrors ClaudeAgentRuntime.has_live_background_tasks (duck-typed by
+        # the orchestrator's eviction policies). Plain attribute on the fake.
+        self.has_live_background_tasks = False
 
     @property
     def approval_rule_matcher(self) -> object:
@@ -113,6 +116,85 @@ async def test_active_session_is_never_evicted(monkeypatch) -> None:
     r2 = await _ensure(orch, "s2")  # cap=1 exceeded AND s1 stale, but s1 active
 
     assert r1.closed is False  # active turn protected
+    assert set(orch._runtimes) == {"s1", "s2"}  # cap briefly exceeded by design
+    assert r2.closed is False
+
+
+async def test_bg_busy_runtime_survives_normal_idle_ttl(monkeypatch) -> None:
+    """A runtime with a live run_in_background process must not be closed by
+    the normal idle TTL — the background process is a child of the CLI
+    subprocess and would die with it, losing the user's work mid-task."""
+    _patch_factory(monkeypatch)
+    orch = SessionOrchestrator(
+        object(),
+        max_warm_runtimes=100,
+        runtime_idle_ttl_s=1000.0,
+        bg_busy_runtime_ttl_s=1_000_000.0,
+    )
+
+    r1 = await _ensure(orch, "s1")
+    r1.has_live_background_tasks = True
+    orch._runtime_last_used["s1"] = time.monotonic() - 5000.0  # past normal TTL
+
+    r2 = await _ensure(orch, "s2")  # lazy sweep runs
+
+    assert r1.closed is False  # protected by the extended TTL
+    assert r2.closed is False
+    assert set(orch._runtimes) == {"s1", "s2"}
+
+
+async def test_bg_busy_runtime_still_evicted_past_extended_ttl(monkeypatch) -> None:
+    """The busy signal EXTENDS the TTL, it doesn't exempt forever — a crashed
+    CLI can leave the flag stuck, and the extended TTL is the backstop."""
+    _patch_factory(monkeypatch)
+    orch = SessionOrchestrator(
+        object(),
+        max_warm_runtimes=100,
+        runtime_idle_ttl_s=1000.0,
+        bg_busy_runtime_ttl_s=2000.0,
+    )
+
+    r1 = await _ensure(orch, "s1")
+    r1.has_live_background_tasks = True
+    orch._runtime_last_used["s1"] = time.monotonic() - 5000.0  # past BOTH TTLs
+
+    await _ensure(orch, "s2")
+
+    assert r1.closed is True
+
+
+async def test_bg_busy_ttl_zero_means_full_exemption(monkeypatch) -> None:
+    _patch_factory(monkeypatch)
+    orch = SessionOrchestrator(
+        object(),
+        max_warm_runtimes=100,
+        runtime_idle_ttl_s=1000.0,
+        bg_busy_runtime_ttl_s=0,
+    )
+
+    r1 = await _ensure(orch, "s1")
+    r1.has_live_background_tasks = True
+    orch._runtime_last_used["s1"] = time.monotonic() - 10_000_000.0
+
+    await _ensure(orch, "s2")
+
+    assert r1.closed is False
+
+
+async def test_lru_cap_skips_bg_busy_runtime(monkeypatch) -> None:
+    """The LRU cap prefers truly idle runtimes; a bg-busy one is skipped even
+    as the LRU candidate, briefly exceeding the cap (same principle as active
+    turns)."""
+    _patch_factory(monkeypatch)
+    orch = SessionOrchestrator(object(), max_warm_runtimes=1, runtime_idle_ttl_s=0)
+
+    r1 = await _ensure(orch, "s1")
+    r1.has_live_background_tasks = True
+    orch._runtime_last_used["s1"] = 1.0  # the LRU candidate
+
+    r2 = await _ensure(orch, "s2")  # over cap, but s1 is protected
+
+    assert r1.closed is False
     assert set(orch._runtimes) == {"s1", "s2"}  # cap briefly exceeded by design
     assert r2.closed is False
 

@@ -28,6 +28,9 @@ from claude_agent_sdk import (
     ResultMessage,
     SdkMcpTool,
     SystemMessage,
+    TaskNotificationMessage,
+    TaskProgressMessage,
+    TaskStartedMessage,
     TextBlock,
     ThinkingBlock,
     ToolAnnotations,
@@ -268,6 +271,15 @@ _WORKFLOW_SCRIPT_RE = re.compile(r"Script file:\s*(?P<spath>\S+/workflows/script
 _WORKFLOW_SUMMARY_RE = re.compile(r"Summary:\s*(?P<summary>.+)")
 _WORKFLOW_POLL_INTERVAL_S = 2.0
 
+# How long the turn loop waits for the CLI to open the NEXT turn bracket after
+# it skipped a ResultMessage attributed to a background wake-up turn. Probe-
+# measured: the wake-up ``init`` follows its ``task_notification`` within
+# ~0.1s, so 5s is generous. If nothing arrives, the skipped result was in
+# fact the user turn's own (the CLI folded the notification into it instead
+# of spawning a wake-up) and the turn closes with it — the loop must degrade
+# to a late turn end, never a hang.
+_WAKEUP_BRACKET_GRACE_S = 5.0
+
 # ``_to_thinking_config`` was removed on 2026-05-12 along with the
 # explicit ``thinking=`` kwarg to ``ClaudeAgentOptions`` — runtimes now
 # let the SDK use its own thinking default. ``AgentConfig.thinking``
@@ -336,6 +348,28 @@ class ClaudeAgentRuntime:
         # iterator unblocks even when ``receive_response().__anext__`` is
         # waiting on the SDK subprocess for the next chunk.
         self._active_task: asyncio.Task[Any] | None = None
+        # Idle-stream drainer: consumes SDK messages BETWEEN turns so
+        # background-task lifecycle pushes (task_updated / task_notification)
+        # and the CLI's spontaneous wake-up turns are processed live instead
+        # of rotting in the SDK queue — where a buffered stale ResultMessage
+        # would terminate the NEXT user turn prematurely. Started after each
+        # clean turn, cancelled at turn start / interrupt / client destroy.
+        self._idle_drainer: asyncio.Task[None] | None = None
+        # init→ResultMessage turn-bracket tracking, shared by the drainer and
+        # the in-turn loop (see ``_note_stream_message``). ``_pending_wakeups``
+        # counts task_notifications seen outside a bracket whose wake-up turn
+        # has not opened yet; a bracket that opens while it is non-zero (or
+        # while the session is idle) is attributed to a wake-up, and its
+        # ResultMessage must not close the user turn.
+        self._bracket_open: bool = False
+        self._open_bracket_is_wakeup: bool = False
+        self._pending_wakeups: int = 0
+        # Live background tasks (task_id → description), tracked from
+        # bg_task_started/finished. Background processes are children of the
+        # CLI subprocess, so destroying the client kills them — a synthetic
+        # ``stopped`` terminal event is flushed then, or the event stream
+        # would say "running" forever and the UI would spin on a corpse.
+        self._live_bg_tasks: dict[str, str] = {}
 
         # Slice 3 — approval contract.
         # ``_pending_futures`` maps pending_id → asyncio.Future that
@@ -480,6 +514,9 @@ class ClaudeAgentRuntime:
         self._stderr_buffer.clear()
 
         try:
+            # Take back the SDK stream from the between-turns drainer before
+            # anything else touches the client (reconcile may destroy it).
+            await self._stop_idle_drainer()
             # Reconcile live session-driven levers BEFORE the client-
             # spawn check so an effort change can trigger a cold reload
             # (destroy + rebuild) cleanly. Reads ``session`` live each
@@ -507,14 +544,7 @@ class ClaudeAgentRuntime:
             self._active_client = self._client
             self._active_task = asyncio.current_task()
             await self._client.query(prompt)
-            async for msg in self._client.receive_response():
-                if self._cancelled:
-                    # interrupt() was called — the SDK's internal queue
-                    # may still hold many buffered StreamEvents (especially
-                    # with partial messages on); drop them so the user sees
-                    # the agent stop immediately.
-                    break
-                await self._handle_message(session, msg)
+            await self._consume_turn_stream(session)
             # Slice 5 of session-modes: after the goal-mode turn's
             # ResultMessage lands, Claude doesn't surface a "goal
             # cleared" notification (spike-confirmed). Probe bare
@@ -651,6 +681,179 @@ class ClaudeAgentRuntime:
             await self._stop_workflow_pollers()
             self._active_client = None
             self._active_task = None
+            # Hand the stream back to the between-turns drainer so
+            # background-task pushes and CLI wake-up turns keep being
+            # processed while the session sits idle. Error/cancel paths
+            # destroyed the client above, so this only arms after a
+            # clean turn.
+            if not self._cancelled and self._client is not None:
+                self._start_idle_drainer(session)
+
+    # -- Background tasks: turn brackets, wake-up turns, idle drainer --
+    #
+    # A ``run_in_background`` Bash command keeps running after its turn ends.
+    # When it finishes while the session is idle, the CLI pushes
+    # ``task_updated`` + ``task_notification`` on the SDK stream and then runs
+    # a SPONTANEOUS wake-up turn (probe-verified: every turn — user or
+    # wake-up — is bracketed ``init`` → … → ``ResultMessage``, and a wake-up
+    # bracket is always announced by a ``task_notification`` arriving outside
+    # any bracket). Two consequences the code below deals with:
+    #
+    # 1. Someone must consume the stream BETWEEN turns, or those pushes rot in
+    #    the SDK queue and the wake-up turn's buffered ``ResultMessage``
+    #    terminates the next user turn's loop before the assistant ever
+    #    answers (the "stale ResultMessage" bug).
+    # 2. During a user turn, a wake-up turn already in flight when the user
+    #    message was queued can interleave BEFORE ours; its ``ResultMessage``
+    #    must be skipped, not treated as our turn's end.
+
+    def _note_stream_message(self, message: Any, *, idle: bool) -> bool:
+        """Advance the init→ResultMessage bracket state machine.
+
+        ``idle`` marks drainer context, where EVERY bracket is a wake-up by
+        definition (no user turn is active). Returns True when ``message`` is
+        a ResultMessage that closed a wake-up bracket — i.e. one the in-turn
+        loop must not treat as the user turn's terminator.
+        """
+        if isinstance(message, ResultMessage):
+            closed_wakeup = self._open_bracket_is_wakeup
+            self._bracket_open = False
+            self._open_bracket_is_wakeup = False
+            return closed_wakeup
+        if isinstance(message, TaskNotificationMessage):
+            if not self._bracket_open:
+                self._pending_wakeups += 1
+            return False
+        if isinstance(message, SystemMessage) and message.subtype == "init":
+            self._bracket_open = True
+            self._open_bracket_is_wakeup = idle or self._pending_wakeups > 0
+            if self._pending_wakeups > 0:
+                self._pending_wakeups -= 1
+            return False
+        return False
+
+    async def _consume_turn_stream(self, session: Session) -> None:
+        """Consume SDK messages for one user turn, ending at OUR ResultMessage.
+
+        ``receive_response()`` stops at the FIRST ResultMessage, which is
+        wrong once wake-up turns exist (see the section comment). This loop
+        instead skips ResultMessages that close a wake-up bracket — their
+        content still flows through ``_handle_message`` as live session
+        activity — and closes the turn on the bracket that answers the user.
+
+        Degradation guard: if the CLI folded a pending notification into the
+        user turn instead of spawning a wake-up, the skip was a
+        misattribution and no further bracket will open. After
+        ``_WAKEUP_BRACKET_GRACE_S`` of silence the skipped result is adopted
+        as the turn's own — a late turn end, never a hang.
+        """
+        assert self._client is not None
+        stream = aiter(self._client.receive_messages())
+        skipped_result: ResultMessage | None = None
+        while True:
+            try:
+                if skipped_result is not None and not self._bracket_open:
+                    msg = await asyncio.wait_for(anext(stream), timeout=_WAKEUP_BRACKET_GRACE_S)
+                else:
+                    msg = await anext(stream)
+            except StopAsyncIteration:
+                break
+            except TimeoutError:
+                await self._handle_message(session, skipped_result)
+                break
+            if self._cancelled:
+                # interrupt() was called — the SDK's internal queue
+                # may still hold many buffered StreamEvents (especially
+                # with partial messages on); drop them so the user sees
+                # the agent stop immediately.
+                break
+            closed_wakeup = self._note_stream_message(msg, idle=False)
+            if isinstance(msg, ResultMessage):
+                if closed_wakeup:
+                    # A wake-up turn interleaved before ours: surface its
+                    # usage, keep waiting for our own bracket to close.
+                    skipped_result = msg
+                    await self.event_sink.emit(
+                        Event(
+                            type="usage_update",
+                            data=_build_usage_payload(self.model, msg),
+                        )
+                    )
+                    continue
+                await self._handle_message(session, msg)
+                break
+            await self._handle_message(session, msg)
+
+    @property
+    def has_live_background_tasks(self) -> bool:
+        """True while any ``run_in_background`` process this runtime spawned
+        is still running. Background processes are children of the CLI
+        subprocess, so the orchestrator's eviction policies read this signal
+        (duck-typed) to avoid closing the runtime — and killing the user's
+        work — mid-task."""
+        return bool(self._live_bg_tasks)
+
+    def _start_idle_drainer(self, session: Session) -> None:
+        if self._idle_drainer is not None and not self._idle_drainer.done():
+            return
+        if self._client is None:
+            return
+        self._idle_drainer = asyncio.create_task(self._drain_idle_stream(session))
+
+    async def _stop_idle_drainer(self) -> None:
+        task, self._idle_drainer = self._idle_drainer, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # Re-raise ONLY if it is *this* coroutine being cancelled;
+            # the drainer's own cancellation lands here as a plain result.
+            if (cur := asyncio.current_task()) is not None and cur.cancelling():
+                raise
+        except Exception:
+            logger.debug("claude_agent: idle drainer teardown failed", exc_info=True)
+
+    async def _drain_idle_stream(self, session: Session) -> None:
+        """Between-turns consumer: background-task pushes + wake-up turns.
+
+        Emits through the last turn's sink — persisted events attach to the
+        previous message id, an accepted trade-off that keeps wake-up
+        activity durable and live without a kernel schema change. A wake-up
+        ResultMessage is surfaced as ``usage_update`` + ``session_idle`` but
+        never mutates the session's turn state (no user turn is active).
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            async for msg in client.receive_messages():
+                self._note_stream_message(msg, idle=True)
+                if isinstance(msg, ResultMessage):
+                    await self.event_sink.emit(
+                        Event(
+                            type="usage_update",
+                            data=_build_usage_payload(self.model, msg),
+                        )
+                    )
+                    await self.event_sink.emit(
+                        Event(
+                            type="session_idle",
+                            data={
+                                "stop_reason": _stop_reason_to_dict(EndTurn()),
+                                "num_turns": msg.num_turns or 1,
+                            },
+                        )
+                    )
+                    continue
+                await self._handle_message(session, msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Best-effort by design: a dying CLI subprocess ends the stream;
+            # the next run_turn rebuilds the client and reports properly.
+            logger.debug("claude_agent: idle drainer exited", exc_info=True)
 
     # -- Dynamic-workflow progress --
 
@@ -969,6 +1172,10 @@ class ClaudeAgentRuntime:
 
     async def interrupt(self) -> None:
         self._cancelled = True
+        # Stop the between-turns drainer first: an interrupt may land while a
+        # background wake-up turn (not a user turn) is streaming, and the
+        # drainer must not keep consuming what the SDK interrupt aborts.
+        await self._stop_idle_drainer()
         # Slice 3 — seal pending approvals: cheap ``set_result`` first
         # so the SDK callback unblocks immediately even if the sink
         # chain hangs (e.g. DB locked); the ``action_resolved`` event
@@ -984,9 +1191,13 @@ class ClaudeAgentRuntime:
             future.set_result(("reject", "session interrupted", None, None))
             await self._emit_synthetic_resolved(pending_id, "interrupted")
         self._pending_futures.clear()
-        if self._active_client is not None:
+        # Between turns ``_active_client`` is None but the persistent client
+        # may be running a wake-up turn — fall back to it so an idle-time
+        # interrupt still reaches the CLI.
+        client = self._active_client or self._client
+        if client is not None:
             try:
-                await self._active_client.interrupt()
+                await client.interrupt()
             except Exception:
                 logger.debug("SDK interrupt failed", exc_info=True)
         # Forcefully unblock the receive_response iterator. The SDK's own
@@ -1001,6 +1212,35 @@ class ClaudeAgentRuntime:
         await self._destroy_client()
 
     async def _destroy_client(self) -> None:
+        await self._stop_idle_drainer()
+        # Bracket state is per-client: a rebuilt CLI starts with a fresh
+        # stream, so stale wake-up attribution must not leak across.
+        self._bracket_open = False
+        self._open_bracket_is_wakeup = False
+        self._pending_wakeups = 0
+        # Background processes die with the CLI subprocess — flush a terminal
+        # event for each so the persisted stream never claims a task is
+        # running on a dead runtime. Best-effort: destroy may run during
+        # shutdown when the sink's DB is already closing.
+        for task_id, description in list(self._live_bg_tasks.items()):
+            try:
+                await self.event_sink.emit(
+                    Event(
+                        type="bg_task_finished",
+                        data={
+                            "task_id": task_id,
+                            "status": "stopped",
+                            "summary": (
+                                f"Runtime closed; background task terminated: {description}"
+                            ),
+                            "output_file": "",
+                            "usage": None,
+                        },
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("claude_agent: bg-task terminal flush failed", exc_info=True)
+        self._live_bg_tasks.clear()
         if self._client is not None:
             try:
                 await self._client.__aexit__(None, None, None)
@@ -2142,11 +2382,65 @@ class ClaudeAgentRuntime:
                                 )
                             )
 
+        # Background-task lifecycle — typed SystemMessage SUBCLASSES, so they
+        # must be matched before the generic SystemMessage branch. Mapped 1:1
+        # to runtime-neutral kernel events (see events.py).
+        elif isinstance(message, TaskStartedMessage):
+            self._live_bg_tasks[message.task_id] = message.description
+            await self.event_sink.emit(
+                Event(
+                    type="bg_task_started",
+                    data={
+                        "task_id": message.task_id,
+                        "tool_use_id": message.tool_use_id,
+                        "description": message.description,
+                        "task_type": message.task_type,
+                    },
+                )
+            )
+        elif isinstance(message, TaskProgressMessage):
+            await self.event_sink.emit(
+                Event(
+                    type="bg_task_progress",
+                    data={
+                        "task_id": message.task_id,
+                        "description": message.description,
+                        "usage": dict(message.usage or {}),
+                        "last_tool_name": message.last_tool_name,
+                    },
+                )
+            )
+        elif isinstance(message, TaskNotificationMessage):
+            self._live_bg_tasks.pop(message.task_id, None)
+            await self.event_sink.emit(
+                Event(
+                    type="bg_task_finished",
+                    data={
+                        "task_id": message.task_id,
+                        "status": message.status,
+                        "summary": message.summary,
+                        "output_file": message.output_file,
+                        "usage": dict(message.usage) if message.usage else None,
+                    },
+                )
+            )
         elif isinstance(message, SystemMessage):
             if message.subtype == "init":
                 sdk_session_id = message.data.get("session_id")
                 if sdk_session_id:
                     session.runtime_session_id = str(sdk_session_id)
+            elif message.subtype == "task_updated":
+                # Not modeled by the SDK (generic SystemMessage); the raw
+                # payload carries {task_id, patch: {status, ...}}.
+                await self.event_sink.emit(
+                    Event(
+                        type="bg_task_updated",
+                        data={
+                            "task_id": message.data.get("task_id"),
+                            "patch": message.data.get("patch") or {},
+                        },
+                    )
+                )
             elif message.subtype == "compact_boundary":
                 # Forward the SDK's ``compact_metadata`` verbatim (e.g.
                 # ``{trigger, pre_tokens}``) — no reshaping. The upper layer

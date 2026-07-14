@@ -110,6 +110,11 @@ class RunSummary:
     last_event: dict[str, Any] | None = None
     model: str | None = None
     runtime: str | None = None
+    # True when the session carries a live background task (run_in_background
+    # shell command). Such sessions surface in the running view even while no
+    # turn is streaming — the sidebar/Activity keep signalling in-flight work
+    # after the user navigates away from the conversation.
+    background: bool = False
 
 
 def _map_status(kernel_status: str) -> str:
@@ -184,6 +189,18 @@ class RunsService:
         # "automation-triggered" signal for both chats and task leads.
         automation_session_ids = await self._automations.list_run_session_ids(user_id)
 
+        # Sessions whose warm runtime carries a live background task
+        # (run_in_background shell command). They surface in the running view
+        # even while no turn is streaming, so the sidebar/Activity keep
+        # signalling in-flight work after the user leaves the conversation.
+        # Best-effort: the overview must not break if the kernel seam hiccups.
+        bg_busy_ids: set[str] = set()
+        if status == "running":
+            try:
+                bg_busy_ids = set(await kernel_client.bg_busy_session_ids())
+            except Exception:  # noqa: BLE001
+                logger.debug("runs overview: bg-busy probe failed", exc_info=True)
+
         candidates = []
         for sess in sessions:
             task_session = ts_map.get(sess.id)
@@ -191,19 +208,24 @@ class RunsService:
             if task_session is not None and task_session.kind == "subtask":
                 continue
             effective = self._effective_status(_map_status(sess.status), task_session, task_map)
+            background = sess.id in bg_busy_ids
             if status == "running":
                 if effective not in _RUNNING_RUN_STATUS:
-                    continue
+                    if not background:
+                        continue
+                    # Idle session, but background work in flight — surface it
+                    # as running so every runs-derived indicator lights up.
+                    effective = "running"
             elif effective not in _FINISHED_RUN_STATUS:
                 continue
-            candidates.append((sess, task_session, effective))
+            candidates.append((sess, task_session, effective, background))
 
         # Per-run enrichment (`_build` fetches the latest message/event) is
         # independent per session — run it concurrently instead of one awaited
         # round-trip per run (the finished view can carry ~100 runs, which
         # made this loop the dominant cost of the polled overview).
         async def _build_one(
-            sess: Any, task_session: Any, effective: str
+            sess: Any, task_session: Any, effective: str, background: bool
         ) -> RunSummary | None:
             # Isolate per-session enrichment: a single malformed session must
             # not blank the entire overview. Skip the offender, keep the rest.
@@ -218,6 +240,7 @@ class RunsService:
                     project_id=proj_by_session.get(sess.id, ""),
                     last_activity=activity_by_session.get(sess.id, sess.created_at),
                     automation_session_ids=automation_session_ids,
+                    background=background,
                 )
             except Exception:
                 logger.exception(
@@ -227,7 +250,10 @@ class RunsService:
                 return None
 
         built = await asyncio.gather(
-            *(_build_one(sess, task_session, effective) for sess, task_session, effective in candidates)
+            *(
+                _build_one(sess, task_session, effective, background)
+                for sess, task_session, effective, background in candidates
+            )
         )
         out: list[RunSummary] = [summary for summary in built if summary is not None]
 
@@ -268,6 +294,7 @@ class RunsService:
         project_id: str,
         last_activity: int,
         automation_session_ids: set[str],
+        background: bool = False,
     ) -> RunSummary:
         meta: dict[str, Any] = (sess.metadata or {}).get("valuz") or {}
         project = ws_map.get(project_id)
@@ -323,6 +350,7 @@ class RunsService:
             last_event=last_event,
             model=sess.model or None,
             runtime=getattr(sess, "runtime_provider", None) or None,
+            background=background,
         )
 
     @staticmethod

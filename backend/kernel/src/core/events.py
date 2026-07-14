@@ -49,6 +49,18 @@ OutboundEventType = Literal[
     # (non-persisted — see ``DatabaseEventSink._NON_PERSISTED_TYPES``); the
     # ``/workflows`` TUI it mirrors is unreachable through the SDK.
     "workflow_progress",
+    # Background-task lifecycle (Claude ``run_in_background`` Bash & friends).
+    # The CLI tracks such processes as session tasks and pushes lifecycle
+    # system messages on the SDK stream — including BETWEEN turns, when it
+    # also runs a spontaneous "wake-up" turn so the agent can react. The
+    # runtime maps them 1:1: ``bg_task_started`` {task_id, tool_use_id,
+    # description, task_type}; ``bg_task_progress`` {task_id, usage, ...};
+    # ``bg_task_updated`` {task_id, patch}; ``bg_task_finished`` {task_id,
+    # status: completed|failed|stopped, summary, output_file, usage}.
+    "bg_task_started",
+    "bg_task_progress",
+    "bg_task_updated",
+    "bg_task_finished",
 ]
 
 InboundEventType = Literal[

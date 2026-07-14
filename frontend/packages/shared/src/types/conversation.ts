@@ -15,6 +15,32 @@ export interface PrototypeToolCall {
   output?: string;
 }
 
+/* ── Background tasks (run_in_background shell commands) ──── */
+
+export type BackgroundTaskStatus = "running" | "completed" | "failed" | "stopped";
+
+/**
+ * One background task the agent launched (``run_in_background`` Bash).
+ * Derived by folding the persisted ``session.bg_task.*`` events, so it is
+ * correct on live streams AND on history replay: a task that started in an
+ * earlier page visit and is still running shows as ``running`` after
+ * re-entering the conversation.
+ */
+export interface BackgroundTaskState {
+  taskId: string;
+  /** tool_use_id of the Bash call that spawned it — lets a card attach to
+   *  the matching tool block if needed. */
+  toolUseId?: string;
+  description: string;
+  status: BackgroundTaskStatus;
+  /** Human summary from the terminal event (e.g. exit-code line). */
+  summary?: string;
+  /** Path of the file the task's stdout/stderr is streamed to. */
+  outputFile?: string;
+  /** Unix epoch ms of the started event, when the wire carried one. */
+  startedAtMs?: number;
+}
+
 /* ── Conversation turn types ─────────────────────────────── */
 
 export type ConversationBlock =

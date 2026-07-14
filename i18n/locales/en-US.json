@@ -322,6 +322,9 @@
       "summary": "Summary",
       "viewDetails": "View full result"
     },
+    "bgTask": {
+      "running": "Background tasks running ({count})"
+    },
     "brainOverride": "This chat only",
     "pillDrafted": "Task drafted",
     "pillPlanned": "Plan v{version} ({count} subtasks)",
@@ -726,6 +729,7 @@
     "taskStarting": "Starting the task…",
     "workingOn": "Working on: {input}",
     "statusRunning": "Running",
+    "statusBackground": "Background task running",
     "statusPaused": "Paused",
     "statusIdle": "Ended",
     "statusCompleted": "Completed",
