@@ -977,17 +977,24 @@ async def iter_user_events_sse(
                     last_emit = asyncio.get_event_loop().time()
                 continue
 
-            # Live frame. Persisted lifecycle events carry the durable seq (see
-            # PersistThenBroadcastSink); skip anything the cursor already covers
-            # and advance it so the floor backfill never re-emits.
-            if event.seq is not None:
-                if event.seq <= cursor:
-                    continue
-                cursor = event.seq
+            # Live frame. ONLY lifecycle events matter to the control plane, and
+            # ONLY they may advance the cursor. The backfill floor reads
+            # lifecycle events *after the cursor*, so if a non-lifecycle
+            # persisted event (tool_use, assistant_message) advanced it, the
+            # floor could skip a lifecycle event whose seq sits just below it
+            # (e.g. one the drop-tolerant tap dropped). So translate first — a
+            # ``None`` (non-lifecycle) is ignored WITHOUT touching the cursor —
+            # then dedup + advance on the lifecycle seq only. (Persisted
+            # lifecycle events carry the durable seq via PersistThenBroadcastSink.)
             live_frame = _control_frame_from_live(event)
-            if live_frame is not None:
-                yield {"event": live_frame.event_type, "data": live_frame.to_sse_data()}
-                last_emit = asyncio.get_event_loop().time()
+            if live_frame is None:
+                continue
+            if live_frame.seq and live_frame.seq <= cursor:
+                continue  # already delivered by backfill or an earlier live frame
+            if live_frame.seq:
+                cursor = live_frame.seq
+            yield {"event": live_frame.event_type, "data": live_frame.to_sse_data()}
+            last_emit = asyncio.get_event_loop().time()
     finally:
         pump_task.cancel()
         try:
