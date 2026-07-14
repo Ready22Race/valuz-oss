@@ -1,5 +1,7 @@
 import os
+import tempfile
 from functools import wraps
+from pathlib import Path
 
 # The document parser offloads to a ``ProcessPoolExecutor`` in production
 # (see ``valuz_agent.infra.parse_pool``). For the unit suite we force the
@@ -7,6 +9,30 @@ from functools import wraps
 # subprocesses (which re-import modules and slow CI). The dedicated offload
 # regression test (``test_parse_pool_offload``) re-enables the pool explicitly.
 os.environ.setdefault("VALUZ_PARSE_POOL_DISABLED", "1")
+
+# ---------------------------------------------------------------------------
+# Home sandbox — env-level isolation that survives config-module reloads.
+#
+# History: the suite repeatedly leaked fixture skills (``created``,
+# ``empty-session-N``, ``weekly-report-vN``, …) and ``local-test-owner`` DB
+# rows into the REAL user home (``~/.agent[s]/skills``, ``~/.valuz-oss``).
+# Attribute-level monkeypatches on the ``settings`` singleton (including the
+# ``_isolate_user_skills_dir`` fence below) cannot fully stop that: any test
+# that reloads ``valuz_agent.infra.config`` builds a NEW ``Settings`` from the
+# environment, and code holding the fresh singleton writes to the real
+# defaults again. Pinning the environment itself — before ANY valuz_agent
+# import — makes every (re)constructed ``Settings`` land in the sandbox.
+#
+# Force-set (not ``setdefault``): a dev shell exporting VALUZ_DATA_DIR (e.g.
+# ``scripts/dev.sh`` pins ``~/.valuz-oss-dev``) must not bleed into tests
+# either.
+_HOME_SANDBOX = Path(tempfile.mkdtemp(prefix="valuz-test-home-"))
+os.environ["VALUZ_DATA_DIR"] = str(_HOME_SANDBOX / "valuz-data")
+os.environ["VALUZ_LOG_DIR"] = str(_HOME_SANDBOX / "logs")
+os.environ["VALUZ_USER_SKILLS_DIR"] = str(_HOME_SANDBOX / "user-skills")
+# NOT pinned: ``user_skill_staging_dir`` / ``user_temp_dir`` default to None,
+# which already resolves under the (sandboxed) data dir / the OS temp root —
+# setting them would flip the legacy-staging branch and change behavior.
 
 # ---------------------------------------------------------------------------
 # Owner context — explicit-identity semantics (no implicit fallback).
@@ -168,3 +194,56 @@ def _isolate_user_skills_dir(tmp_path, monkeypatch):
     from valuz_agent.infra.config import settings as _settings
 
     monkeypatch.setattr(_settings, "user_skills_dir", tmp_path / "_isolated-user-skills")
+
+
+# ---------------------------------------------------------------------------
+# Real-home leak tripwire — no leak may ever land silently again.
+#
+# The env sandbox above closes every KNOWN write path, but the next
+# ``Path.home()`` shortcut someone adds would leak silently for weeks (as the
+# ``~/.agent/skills`` fixture pollution did — three cleanup rounds between
+# 2026-07-10 and 2026-07-14). This session fixture snapshots the real home
+# targets before the first test and fails the run loudly if the suite added
+# anything to them. Watched: both skill library spellings (the pre-26a3e1e8
+# default was ``~/.agent/skills``), the production data dir, and the legacy
+# CLI skill roots (read-only by contract — a write there is always a bug).
+#
+# Note: entries are compared by top-level NAME, so a concurrently running
+# desktop app quietly rewriting file contents under ``~/.valuz-oss`` does not
+# false-positive; only something NEW appearing does. If this fires for you
+# locally, a test wrote outside the sandbox — fix the test, don't widen the
+# watchlist.
+# ---------------------------------------------------------------------------
+_REAL_HOME_WATCHED = (
+    Path.home() / ".agents" / "skills",
+    Path.home() / ".agent" / "skills",
+    Path.home() / ".valuz-oss",
+    Path.home() / ".claude" / "skills",
+    Path.home() / ".codex" / "skills",
+)
+
+
+def _real_home_snapshot() -> dict[str, set[str] | None]:
+    return {
+        str(root): (set(os.listdir(root)) if root.is_dir() else None)
+        for root in _REAL_HOME_WATCHED
+    }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _real_home_leak_tripwire():
+    before = _real_home_snapshot()
+    yield
+    after = _real_home_snapshot()
+    leaks: list[str] = []
+    for root, entries_after in after.items():
+        entries_before = before.get(root)
+        added = sorted((entries_after or set()) - (entries_before or set()))
+        if added:
+            leaks.append(f"{root} gained: {added}")
+    assert not leaks, (
+        "Test suite leaked into the REAL home directory — a write path "
+        "escaped the conftest home sandbox (check for a reloaded "
+        "valuz_agent.infra.config, a hardcoded Path.home(), or a missing "
+        f"env knob): {'; '.join(leaks)}"
+    )
