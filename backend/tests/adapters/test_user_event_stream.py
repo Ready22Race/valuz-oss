@@ -124,3 +124,64 @@ class TestIterUserEventsSse:
         finally:
             await gen.aclose()
         assert reader.calls == 1  # exactly one discrete read produced the frame
+
+
+class TestUserStreamSeqIsDurableId:
+    """F3 contract (design §5.1.6 / §9.2): the wire ``seq`` a client resumes
+    from IS the durable ``events`` row id — end-to-end through a real store."""
+
+    async def test_frame_seq_equals_durable_row_id(self, tmp_path):
+        import uuid
+
+        from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+        from src.adapters.sqlalchemy_store.models import Base
+        from src.adapters.sqlalchemy_store.store import SQLAlchemyStore
+        from src.core.agent_config import AgentConfig
+        from src.core.events import Event
+        from src.core.types import Message, Session, UserMessage
+        from valuz_agent.adapters.data_service_local import LocalDataServiceReader
+
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'k.db'}")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        store = SQLAlchemyStore(async_sessionmaker(engine, expire_on_commit=False))
+
+        owner = "user-A"
+        sess = Session(
+            id=uuid.uuid4().hex,
+            user_id=owner,
+            agent_config=AgentConfig(id="a", name="a", model="claude-sonnet-4-6"),
+            cwd=str(tmp_path),
+        )
+        await store.save_session(sess)
+        msg = Message(
+            id=uuid.uuid4().hex,
+            session_id=sess.id,
+            user_message=UserMessage(text="hi"),
+            started_at=0,
+            status="running",
+        )
+        await store.save_message(owner, msg)
+        # ``append_event`` returns the durable autoincrement row id (the seq).
+        seq_started = await store.append_event(
+            owner, sess.id, msg.id, Event(type="user_message", data={})
+        )
+        await store.append_event(owner, sess.id, msg.id, Event(type="text_delta", data={}))
+        seq_finished = await store.append_event(
+            owner, sess.id, msg.id, Event(type="session_idle", data={})
+        )
+
+        bind_data_reader(LocalDataServiceReader(store))
+        try:
+            frames = await adapter.list_user_events_after(owner)
+        finally:
+            bind_data_reader(None)
+            await engine.dispose()
+
+        by_type = {f.event_type: f for f in frames}
+        # The control-plane frame seq == the durable row id append_event returned.
+        assert by_type["run.started"].seq == seq_started
+        assert by_type["run.finished"].seq == seq_finished
+        # And the non-lifecycle delta never reached the control plane at all.
+        assert set(by_type) == {"run.started", "run.finished"}
