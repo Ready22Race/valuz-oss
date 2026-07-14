@@ -67,12 +67,39 @@ class TestSkillOwnerScoping:
             assert row_b is not None and row_b.user_id == "user-B"
             assert row_a.slug == row_b.slug == "skill-creator"
 
-    async def test_same_slug_is_unique_per_owner(self, sessionmaker_) -> None:
+    async def test_same_slug_different_path_coexist_for_one_owner(self, sessionmaker_) -> None:
+        # Business identity is the on-disk folder, not the slug: a bundled
+        # official copy and a user copy of the same slug live in different roots
+        # and must both be indexed (each shows in its own source group).
         async with sessionmaker_() as db:
             ds = SkillDatastore(db)
-            await ds.create("user-A", _row("skill-a", slug="shared"))
+            official = _row("official-copy", slug="shared")
+            official.scope = "official"
+            official.source_path = "/official-skills/shared"
+            user_copy = _row("user-copy", slug="shared")
+            user_copy.source_path = "/home/.agents/skills/shared"
+            await ds.create("user-A", official)
+            await ds.create("user-A", user_copy)
+
+        async with sessionmaker_() as db:
+            ds = SkillDatastore(db)
+            rows = await ds.list_skills("user-A")
+            assert {r.id for r in rows} == {"official-copy", "user-copy"}
+            assert all(r.slug == "shared" for r in rows)
+            # get_by_slug resolves to the higher-priority (official) copy.
+            effective = await ds.get_by_slug("user-A", "shared")
+            assert effective is not None and effective.scope == "official"
+
+    async def test_same_source_path_is_unique_per_owner(self, sessionmaker_) -> None:
+        async with sessionmaker_() as db:
+            ds = SkillDatastore(db)
+            first = _row("skill-a", slug="a")
+            first.source_path = "/same/dir"
+            second = _row("skill-b", slug="b")
+            second.source_path = "/same/dir"
+            await ds.create("user-A", first)
             with pytest.raises(IntegrityError):
-                await ds.create("user-A", _row("skill-b", slug="shared"))
+                await ds.create("user-A", second)
 
     async def test_upsert_does_not_copy_manifest_id_into_row_primary_key(
         self, sessionmaker_
