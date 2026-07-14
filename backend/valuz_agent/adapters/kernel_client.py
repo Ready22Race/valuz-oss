@@ -232,6 +232,8 @@ class KernelClient(Protocol):
 
     async def runtime_availability(self) -> dict[str, RuntimeAvailability]: ...
 
+    async def bg_busy_session_ids(self) -> list[str]: ...
+
 
 # ---------------------------------------------------------------------------
 # In-process implementation — calls the kernel's route functions directly.
@@ -570,6 +572,12 @@ class InProcessKernelClient:
         result = await get_runtime_availability()
         return result["data"]
 
+    async def bg_busy_session_ids(self) -> list[str]:
+        """Sessions whose warm runtime carries a live background task.
+        Process-scoped, id-only — callers intersect with their own
+        owner-scoped session set (see the kernel route's docstring)."""
+        return _orchestrator().bg_busy_session_ids()
+
 
 def _make_client() -> KernelClient:
     """Bind the transport for this process from settings.
@@ -682,6 +690,12 @@ async def runtime_availability() -> dict[str, RuntimeAvailability]:
     in-process for the bundled desktop (local-host probe), the boot sandbox when
     one is attached. A per-user execution kernel is an overlay concern (§8)."""
     return await client.runtime_availability()
+
+
+async def bg_busy_session_ids() -> list[str]:
+    """Sessions whose warm runtime carries a live background task (process-
+    scoped, id-only — intersect with an owner-scoped session set)."""
+    return await client.bg_busy_session_ids()
 
 
 async def get_session(user_id: str, session_id: str) -> SessionData | None:

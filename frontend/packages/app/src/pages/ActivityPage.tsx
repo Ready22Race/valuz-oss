@@ -348,7 +348,12 @@ export const ActivityPage = () => {
   };
 
   const renderStatusChip = (run: RunSummary) => {
-    const key = STATUS_LABEL_KEY[run.status];
+    // A background-busy session surfaces as "running" but nothing is
+    // streaming — label it distinctly so the user knows a shell task (not a
+    // turn) is what's in flight.
+    const key = run.background
+      ? "activity.statusBackground"
+      : STATUS_LABEL_KEY[run.status];
     if (!key) return null;
     return (
       <Badge

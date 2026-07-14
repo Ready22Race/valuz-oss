@@ -3313,6 +3313,15 @@ components:
         model: {type: string, nullable: true}
         runtime: {type: string, nullable: true}
         updated_at: {type: integer, format: int64, description: "Unix epoch milliseconds (UTC). Format via new Date(ms)."}
+        background:
+          type: boolean
+          default: false
+          description: >-
+            True when the session carries a live background task
+            (run_in_background shell command). Such sessions surface in the
+            status=running view even while no turn is streaming, so the
+            sidebar/Activity keep signalling in-flight work after the user
+            navigates away.
     AgentTemplateRole:
       type: object
       required: [slug, name, description, instructions, avatar, skills, connector_types, runtime, in_library]

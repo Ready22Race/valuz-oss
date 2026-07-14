@@ -149,6 +149,12 @@ class HttpKernelClient:
         result = await self._request("GET", f"{self._prefix}/v1/runtimes/availability")
         return result["data"]
 
+    async def bg_busy_session_ids(self) -> list[str]:
+        # Process-scoped, id-only (see the kernel route's docstring) — the
+        # host intersects with its own owner-scoped session set.
+        result = await self._request("GET", f"{self._prefix}/v1/runtimes/bg-busy-sessions")
+        return list(result["data"])
+
     async def create_session(self, user_id: str, req: CreateSessionRequest) -> SessionData:
         # Dynamic mount: the kernel runs in a sandbox, so its cwd must be
         # reachable there. For a project under the static mounts this is a

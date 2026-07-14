@@ -38,6 +38,8 @@ EXPECTED_ROUTES: dict[str, tuple[str, str] | None] = {
     "scan_orphan_pendings": None,
     "scan_orphan_runs": None,
     "cleanup_runtime": None,
+    "runtime_availability": ("GET", "/kernel/v1/runtimes/availability"),
+    "bg_busy_session_ids": ("GET", "/kernel/v1/runtimes/bg-busy-sessions"),
 }
 
 # Streaming subscriptions are async-generator functions (not coroutine
