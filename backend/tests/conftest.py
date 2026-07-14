@@ -33,6 +33,20 @@ os.environ["VALUZ_USER_SKILLS_DIR"] = str(_HOME_SANDBOX / "user-skills")
 # NOT pinned: ``user_skill_staging_dir`` / ``user_temp_dir`` default to None,
 # which already resolves under the (sandboxed) data dir / the OS temp root —
 # setting them would flip the legacy-staging branch and change behavior.
+#
+# Drop ambient DB-URL overrides: ``fs_registry.db_url()`` / ``kernel_db_url()``
+# return ``settings.database_url`` / ``kernel_database_url`` VERBATIM when set,
+# bypassing the data-dir-derived SQLite path above. A dev shell or CI env that
+# exports VALUZ_DATABASE_URL / VALUZ_KERNEL_DATABASE_URL (Postgres DSN, shared
+# server file) would therefore route test writes to an EXTERNAL database the
+# filesystem tripwire below cannot see — re-leaking ``local-test-owner`` rows
+# exactly as this sandbox is meant to prevent. Clear them so DB access falls
+# back to the sandboxed data dir. Case-insensitive: pydantic-settings matches
+# env vars without regard to case, so any spelling must go.
+for _db_url_key in [
+    k for k in os.environ if k.upper() in ("VALUZ_DATABASE_URL", "VALUZ_KERNEL_DATABASE_URL")
+]:
+    del os.environ[_db_url_key]
 
 # ---------------------------------------------------------------------------
 # Owner context — explicit-identity semantics (no implicit fallback).
