@@ -29,6 +29,8 @@ import {
 import {
   ApiError,
   sessionsApi,
+  subscribeUserStream,
+  type ControlFrame,
   queueApi,
   type QueuedInput,
   agentsApi,
@@ -5226,17 +5228,15 @@ export const ConversationPage = () => {
   useEffect(() => {
     if (!selectedSessionId) return;
     let cancelled = false;
-    let pollTimer: number | null = null;
-    const POLL_INTERVAL_MS = 2000;
+    let unsubStream: (() => void) | null = null;
 
-    // The resume poll exists for one race: a session sits in
+    // The resume path exists for one race: a session sits in
     // ``created`` for a hair before the kernel flips it to ``running``
     // (schedule-driven sessions and the moment between create + first
     // turn are the practical windows). Once the session is in any
     // terminal state — ``idle`` (turn finished, awaiting user input),
     // ``failed`` / ``cancelled`` / ``archived`` (will not transition
-    // again without a fresh send) — there is nothing to wait for and
-    // we'd just spin GETs every 2s forever.
+    // again without a fresh send) — there is nothing to wait for.
     const TERMINAL_STATUSES = new Set([
       "idle",
       "failed",
@@ -5245,11 +5245,9 @@ export const ConversationPage = () => {
     ]);
     const isTerminalStatus = (status: string) => TERMINAL_STATUSES.has(status);
 
-    const stopPoll = () => {
-      if (pollTimer !== null) {
-        window.clearInterval(pollTimer);
-        pollTimer = null;
-      }
+    const stopStream = () => {
+      unsubStream?.();
+      unsubStream = null;
     };
 
     const tryResume = (detail: { id: string; status: string }) => {
@@ -5314,53 +5312,49 @@ export const ConversationPage = () => {
           return;
         }
 
-        // Status race window: a schedule-driven session (or any caller
-        // that creates a session a hair before its first turn flips to
-        // ``running``) may briefly read non-running on the initial GET.
-        // Long-poll the status while the page is open so we still pick
-        // up the turn whenever the kernel flips. The loop self-stops
-        // when (a) we resume, (b) the status reaches a terminal state,
-        // (c) ``handleSend`` claims the page via ``abortRef`` /
-        // ``isSendInFlightRef``, or (d) the effect's cleanup runs
-        // (session id change / unmount).
-        // Single-flight (same rationale as the event poll above): a slow
-        // backend must not let ticks stack pending requests.
-        let statusPollInFlight = false;
-        pollTimer = window.setInterval(() => {
-          if (cancelled) {
-            stopPoll();
-            return;
-          }
+        // Status race window: a schedule-driven session (or the gap
+        // between create and the first turn) reads non-running on the
+        // initial GET. Instead of polling status every 2s, follow the
+        // control-plane stream: when a lifecycle frame lands for THIS
+        // session, confirm the current status with ONE GET and
+        // resume/reconcile. Event-triggered, not periodic — a ``created``
+        // session that never starts costs zero further requests. The
+        // confirming GET reflects live truth, so a historical frame
+        // replayed on stream (re)connect can't trigger a spurious resume.
+        // Self-stops on resume, terminal, ``handleSend`` claiming the page
+        // (``abortRef`` / ``isSendInFlightRef``), or effect cleanup.
+        let confirmInFlight = false;
+        unsubStream = subscribeUserStream((frame: ControlFrame) => {
+          if (cancelled || frame.sessionId !== selectedSessionId) return;
           if (abortRef.current || isSendInFlightRef.current) {
-            stopPoll();
+            stopStream();
             return;
           }
-          if (statusPollInFlight) return;
-          statusPollInFlight = true;
+          if (confirmInFlight) return;
+          confirmInFlight = true;
           sessionsApi
             .get(selectedSessionId)
             .then((next) => {
               if (cancelled) return;
               if (tryResume(next)) {
-                stopPoll();
+                stopStream();
                 return;
               }
               if (isTerminalStatus(next.status)) {
-                stopPoll();
-                // The turn ran to completion between ticks (created →
-                // running → idle inside one interval) — fetch what it
-                // produced instead of abandoning it unrendered.
+                stopStream();
+                // Created → running → idle all landed between frames —
+                // fetch what the turn produced instead of abandoning it.
                 reconcileFinishedTurn();
               }
             })
             .catch(() => {
-              // Non-fatal — keep polling; transient errors shouldn't
-              // strand the page in a non-resuming state.
+              // Non-fatal — a transient error shouldn't strand the page;
+              // the next lifecycle frame retries.
             })
             .finally(() => {
-              statusPollInFlight = false;
+              confirmInFlight = false;
             });
-        }, POLL_INTERVAL_MS) as unknown as number;
+        });
       })
       .catch(() => {
         // Non-fatal — refreshEvents already hydrated todos from the
@@ -5368,7 +5362,7 @@ export const ConversationPage = () => {
       });
     return () => {
       cancelled = true;
-      stopPoll();
+      stopStream();
     };
   }, [selectedSessionId, subscribeToSession]);
 
