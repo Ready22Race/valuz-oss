@@ -38,6 +38,7 @@ from valuz_agent.api.routes.runtimes import router as runtimes_router
 from valuz_agent.api.routes.sessions import router as sessions_router
 from valuz_agent.api.routes.settings import router as settings_router
 from valuz_agent.api.routes.skills import router as skills_router
+from valuz_agent.api.routes.stream import router as stream_router
 from valuz_agent.api.routes.system import router as system_router
 from valuz_agent.api.routes.tasks import router as tasks_router
 from valuz_agent.api.routes.worktrees import router as worktrees_router
@@ -155,6 +156,7 @@ def create_app(
     api.include_router(files_router)
     api.include_router(worktrees_router)
     api.include_router(sessions_router)
+    api.include_router(stream_router)
     api.include_router(skills_router)
     api.include_router(docs_router)
     api.include_router(automations_router)

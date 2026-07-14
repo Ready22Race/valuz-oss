@@ -305,14 +305,21 @@ async def subscribe_events(
     them out, so the live broadcast is the only path they reach the
     client).
     """
-    # ``request.is_disconnected`` is async and ``iter_events_sse`` calls
-    # the predicate synchronously — passing it would always-truthy the
-    # coroutine object and abort the loop on the first iteration. We
-    # rely on ``sse-starlette`` cancelling the generator when the
-    # client drops, which fires the ``finally`` block in
-    # ``iter_events_sse`` and unsubscribes cleanly.
-    del request  # disconnect handled by EventSourceResponse cancel scope
-    return EventSourceResponse(iter_events_sse(session_id, user_id=user_id, after_seq=after_seq))
+    # Disconnect handling is belt-and-suspenders: ``sse-starlette`` cancels the
+    # generator on client drop (its ``_listen_for_disconnect``), AND
+    # ``iter_events_sse`` awaits ``request.is_disconnected`` each iteration so
+    # the ``while`` loop breaks cooperatively even if the external cancel is
+    # missed — no zombie generator loops forever holding the live subscription.
+    # (``is_disconnected`` is now awaited, not sync-called, so the old
+    # coroutine-always-truthy footgun does not apply.)
+    return EventSourceResponse(
+        iter_events_sse(
+            session_id,
+            user_id=user_id,
+            after_seq=after_seq,
+            is_disconnected=request.is_disconnected,
+        )
+    )
 
 
 @router.post("/{session_id}/messages")

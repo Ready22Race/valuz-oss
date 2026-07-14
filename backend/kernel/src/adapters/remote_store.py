@@ -238,6 +238,21 @@ class RemoteStore(abc.ABC):
             ),
         )
 
+    async def get_events_after_for_user(
+        self,
+        user_id: str,
+        *,
+        after_seq: int = 0,
+        types: tuple[str, ...] | None = None,
+        limit: int = 200,
+    ) -> list[StoredEvent]:
+        return await self._retry(
+            "get_events_after_for_user",
+            lambda: self._get_events_after_for_user_once(
+                user_id, after_seq=after_seq, types=types, limit=limit
+            ),
+        )
+
     async def get_events_window(
         self, user_id: str, session_id: str, *, before_seq: int | None = None, turn_limit: int = 20
     ) -> tuple[list[StoredEvent], bool]:
@@ -324,6 +339,11 @@ class RemoteStore(abc.ABC):
     @abc.abstractmethod
     async def _get_events_after_once(
         self, user_id: str, session_id: str, *, after_seq: int, limit: int
+    ) -> list[StoredEvent]: ...
+
+    @abc.abstractmethod
+    async def _get_events_after_for_user_once(
+        self, user_id: str, *, after_seq: int, types: tuple[str, ...] | None, limit: int
     ) -> list[StoredEvent]: ...
 
     @abc.abstractmethod

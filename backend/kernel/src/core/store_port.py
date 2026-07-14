@@ -161,6 +161,27 @@ class StorePort(Protocol):
         The row id doubles as the client paging cursor (``seq``)."""
         ...
 
+    async def get_events_after_for_user(
+        self,
+        user_id: str,
+        *,
+        after_seq: int = 0,
+        types: tuple[str, ...] | None = None,
+        limit: int = 200,
+    ) -> list[StoredEvent]:
+        """Cross-session cursor read: ALL of one owner's events (across every
+        session) with row id strictly greater than ``after_seq``, ordered by
+        row id ascending.
+
+        ``types`` restricts the read to those event types at the store — the
+        user-level control-plane stream passes the lifecycle set
+        (``user_message`` / ``session_idle`` / ``session_error`` /
+        ``session_update``) so it never scans per-token rows.
+
+        Powers the always-on user event stream; the row id is the single global
+        cursor (see docs/design/event-delivery-unification.md §1)."""
+        ...
+
     async def get_events_window(
         self, user_id: str, session_id: str, *, before_seq: int | None = None, turn_limit: int = 20
     ) -> tuple[list[StoredEvent], bool]:
