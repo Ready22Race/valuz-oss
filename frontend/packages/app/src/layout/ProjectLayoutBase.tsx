@@ -14,6 +14,7 @@ import {
   hydrateTheme,
   runsApi,
   sessionsApi,
+  subscribeUserStream,
   useBranding,
   useGlobalShortcuts,
   usePanelStore,
@@ -365,12 +366,12 @@ export function ProjectLayoutBase({
   // by ``updated_at`` desc, hand the top-8 to the sidebar (it slices to 3
   // when folded). The fetch + refetch logic is intentionally lean:
   //
-  // 1. ``liveRuns`` is the array returned by the global 2.5s
-  //    ``useRunningRuns`` poller — its REFERENCE changes every tick
+  // 1. ``liveRuns`` is the array returned by the global stream-driven
+  //    ``useRunningRuns`` hook — its REFERENCE changes on every refresh
   //    even when the ids haven't, which would re-run any effect keyed
   //    on it. We collapse it to a stable comma-joined ``liveRunIds``
   //    string so downstream effects only fire on a real transition
-  //    (someone started / finished), not on every poll tick.
+  //    (someone started / finished), not on every refresh.
   // 2. One effect handles both initial fetch and transitions; the
   //    1.5s delayed retry covers the window where the DB hasn't yet
   //    flipped the status by the time the running pool drops the row.
@@ -411,33 +412,25 @@ export function ProjectLayoutBase({
     return () => window.clearTimeout(retry);
   }, [liveRunIds, refreshFinishedRuns]);
 
-  // Safety net for transitions both the change-detect missed (sub-2.5s
-  // turns that never appeared in the running pool). Paused while the
-  // tab is hidden so a backgrounded window doesn't keep hammering
-  // ``/v1/runs`` for nothing.
+  // Refresh the finished list the instant a run completes. The control-plane
+  // stream delivers a ``run.finished`` frame for EVERY run that ends —
+  // including the sub-2.5s turns that never appeared in the running pool, which
+  // the ``liveRunIds`` change-detect above misses. This replaces the old 60s
+  // ``/v1/runs?status=finished`` safety-net poll with precise, event-driven
+  // refreshes (no periodic polling). Debounced so a burst collapses to one.
   useEffect(() => {
-    let handle: number | undefined;
-    const start = () => {
-      handle = window.setInterval(refreshFinishedRuns, 60000);
-    };
-    const stop = () => {
-      if (handle !== undefined) {
-        window.clearInterval(handle);
-        handle = undefined;
-      }
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "visible") {
-        if (handle === undefined) start();
-      } else {
-        stop();
-      }
-    };
-    if (document.visibilityState === "visible") start();
-    document.addEventListener("visibilitychange", onVisibility);
+    let debounce: number | null = null;
+    const unsub = subscribeUserStream((frame) => {
+      if (frame.eventType !== "run.finished") return;
+      if (debounce !== null) return;
+      debounce = window.setTimeout(() => {
+        debounce = null;
+        refreshFinishedRuns();
+      }, 250);
+    });
     return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      stop();
+      unsub();
+      if (debounce !== null) window.clearTimeout(debounce);
     };
   }, [refreshFinishedRuns]);
 
